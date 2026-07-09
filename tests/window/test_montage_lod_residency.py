@@ -9,7 +9,7 @@ from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.kernel import Lane, Priority
-from arrayscope.presentation import ClaimOwner, LevelPhase
+from arrayscope.presentation import ClaimOwner, LevelPhase, Presentation
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
 from arrayscope.window import montage_commit
@@ -207,6 +207,40 @@ def test_native_only_mode_is_unchanged_by_default():
     for payload in delta.upserts.values():
         assert payload.lod.level == 0
         assert payload.texture_data.shape[:2] == (TILE, TILE)
+
+
+def test_visible_replacement_retains_presented_payload_until_acknowledged():
+    session = _session(count=1)
+    source_ids = {0: session.tile_semantic_source_id(0)}
+    state, delta = session.build_tile_presentation(source_ids)
+    old_payload = delta.upserts[0]
+    report = TileCommitReport(
+        presented_tiles=frozenset({0}),
+        committed_upserts=frozenset({0}),
+        delta_key=(delta.base_revision, delta.target_revision),
+        presented_identities={0: old_payload.source_id},
+    )
+    session.acknowledge_tile_presentation(delta, report)
+    assert session.lifecycle.record(0).presentation is Presentation.PRESENTED
+
+    tile = session.plan.tiles[0]
+    replacement = RenderedTile(
+        tile=tile,
+        image=np.ones((TILE, TILE), dtype=np.float32) * 7,
+        histogram_data=np.ones((TILE, TILE), dtype=np.float32) * 7,
+        eval_ms=0.0,
+        slab_shape=(TILE, TILE),
+        slab_nbytes=TILE * TILE * 4,
+    )
+    session.mark_materialized(replacement)
+    assert session.lifecycle.record(0).presentation is Presentation.PRESENTED
+
+    state2, delta2 = session.build_tile_presentation(source_ids, max_upserts=0)
+
+    assert 0 not in delta2.removals
+    assert 0 in delta2.active_tiles
+    assert state2.payloads[0].source_id == old_payload.source_id
+    assert session.lifecycle.record(0).presentation is Presentation.PRESENTED
 
 
 def test_preview_level_tracks_coarser_viewport_demand():
@@ -755,6 +789,32 @@ def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
     assert set(delta.upserts) == {deferred}
     assert state.payloads[deferred].lod.level == 2
     assert state.payloads[swapped].lod.level == 2
+
+
+def test_previous_payloads_keep_visible_tiles_active_when_replacement_not_ready():
+    """Retained visible pixels are active presentation, not a blank gap."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
+    _present_native(session)
+    retained_payloads = dict(session.tile_presentation_state.payloads)
+
+    # Model a retarget/reload moment where lifecycle/presentation state still
+    # owns compatible visible pixels, but the new target payload map is not
+    # ready yet. The visible layer must keep presenting those pixels instead
+    # of shrinking active scope to black.
+    session.display_tile_payloads.clear()
+    session.rendered_tiles.clear()
+    session.dirty_payloads.update({0: None, 1: None})
+
+    state, delta = session.build_tile_presentation({}, max_upserts=0)
+
+    assert delta.removals == ()
+    assert delta.upserts == {}
+    assert delta.active_tiles == (0, 1)
+    assert dict(state.payloads) == retained_payloads
+    assert str(session.ensure_tile_states()[0].value) == "loaded"
+    assert str(session.ensure_tile_states()[1].value) == "loaded"
 
 
 def test_seeding_new_session_keeps_stale_level_payload_ready_for_identity_ack():

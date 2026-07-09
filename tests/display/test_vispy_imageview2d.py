@@ -2484,6 +2484,37 @@ def test_vispy_warm_residency_schedule_queues_payloads_in_order_without_copying(
         view.close()
 
 
+def test_vispy_warm_residency_schedule_caps_one_speculative_batch(qt_app):
+    from arrayscope.display.vispy_imageview2d import VISPY_WARM_RESIDENCY_MAX_PAYLOADS, VisPyImageView2D
+    from arrayscope.display.model.frame import TilePresentationDelta
+
+    payloads = {index: object() for index in range(VISPY_WARM_RESIDENCY_MAX_PAYLOADS + 10)}
+    delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=0,
+        visibility_revision=0,
+        level_revision=0,
+        histogram_revision=0,
+        viewport_revision=1,
+        near_tiles=tuple(reversed(tuple(payloads))),
+    )
+    view = VisPyImageView2D()
+    try:
+        view._schedule_vispy_warm_tile_residency(
+            payloads,
+            geometry=_montage_geometry(),
+            rgb_already_windowed=False,
+            tile_delta=delta,
+            tile_residency_budget_bytes=0,
+        )
+
+        remaining = view._vispy_pending_warm_tile_payloads.remaining_payloads()
+        assert len(remaining) == VISPY_WARM_RESIDENCY_MAX_PAYLOADS
+        assert tuple(remaining) == tuple(reversed(range(10, VISPY_WARM_RESIDENCY_MAX_PAYLOADS + 10)))
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, monkeypatch):
     from types import SimpleNamespace
 

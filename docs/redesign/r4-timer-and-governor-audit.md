@@ -90,7 +90,13 @@ admission boundary:
 to the current visible tile numbers, while coverage/near tiles stay out of
 visible lanes. Preview/materialization/evaluation claims are lifecycle-backed,
 and VisPy warm-residency uploads are admitted through the kernel
-`SPECULATIVE_RESIDENCY` lane instead of a backend timer.
+`SPECULATIVE_RESIDENCY` lane instead of a backend timer. Presentation
+replacement is now atomic at the lifecycle boundary: a visible tile keeps its
+best compatible acknowledged payload while a replacement is dirty/in flight,
+and removals mean physical eviction or true descope rather than an intermediate
+black state. Refined level/histogram work and warm residency are admitted as
+bounded, viewport-generation speculative batches after visible presentation
+settles.
 
 - **Backlog-driven preview choice.** Showing coarser-than-target pixels is a
   data-availability + latency decision, never "the viewport demanded reduced":

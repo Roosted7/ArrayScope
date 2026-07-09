@@ -94,6 +94,11 @@ class TileRecord:
     emitted_source_id: object = None
     #: payload identity the backend acknowledged as shown.
     presented_source_id: object = None
+    #: Last backend-acknowledged payload quality/LOD level.  These are
+    #: presentation facts, not LOD-planning inputs; they let presentation
+    #: choose a safe fallback without re-deriving ownership from renderer maps.
+    presented_quality: str = ""
+    presented_level: int | None = None
     #: payload identity the backend most recently reported for this slot.
     backend_source_id: object = None
     parked_reason: str = ""
@@ -124,6 +129,10 @@ class TileRecord:
     #: Opaque metadata for the current kernel evaluation claim. The lifecycle
     #: owns the presence of the claim; effects own the metadata shape.
     evaluation_claim: object = None
+    #: Payload objects known to be safe first-pixel fallbacks for this slot,
+    #: keyed by their source identity.  The lifecycle owns the ordering
+    #: decision; the display/session layer still owns the payload contents.
+    presentable_payloads: dict[object, object] = field(default_factory=dict)
 
 
 class TileLifecycle:
@@ -241,7 +250,13 @@ class TileLifecycle:
         self._skipped.discard(rec.tile_number)
 
     def evaluation_completed(self, tile_number: int) -> None:
-        """A fresh semantic result exists; any prior presentation identity is stale."""
+        """A fresh semantic result exists; any prior presentation stays visible.
+
+        Replacement is a payload/pending-upsert fact.  Presentation changes
+        only when the backend acknowledges a new identity or physically evicts
+        a slot; otherwise a ready exact result can briefly turn an already
+        visible tile black before the replacement commit lands.
+        """
 
         rec = self.record(tile_number)
         rec.semantic = Semantic.EVALUATED
@@ -249,15 +264,87 @@ class TileLifecycle:
         self._skipped.discard(rec.tile_number)
         self._request_cleared(rec)
         self._stage_unbound(rec)
-        # Fresh identity: the previous emit/park no longer refers to what the
-        # next commit will carry, and the backend has not seen the new one.
-        # Resignations are per stale pair — a new result gets fresh chances.
+        # Fresh identity: the previous emit no longer refers to what the next
+        # commit will carry, but the old presented slot remains valid first
+        # pixels until a backend acknowledgement replaces or removes it.
         self._unpark(rec)
-        self._presented.discard(rec.tile_number)
-        rec.presentation = Presentation.UNPRESENTED
-        rec.presented_source_id = None
+        if rec.presentation is not Presentation.PRESENTED:
+            rec.presentation = Presentation.UNPRESENTED
+            rec.presented_source_id = None
+            rec.presented_quality = ""
+            rec.presented_level = None
         rec.emitted_source_id = None
         rec.resigned.clear()
+
+    def remember_presentable(self, tile_number: int, payload: object) -> None:
+        """Remember a payload that may be reused as an atomic fallback."""
+
+        source_id = getattr(payload, "source_id", None)
+        if source_id is None:
+            return
+        self.record(tile_number).presentable_payloads[source_id] = payload
+
+    def best_presentable(self, tile_number: int, semantic_source=None, target_level: int | None = None):
+        """Return the best safe fallback payload for this tile, or ``None``.
+
+        Ordering is exact before preview, then finer/equal LOD before coarser
+        for the same semantic source.  The method is intentionally payload-
+        shape agnostic so lifecycle owns the policy without importing display
+        model types.
+        """
+
+        rec = self._records.get(int(tile_number))
+        if rec is None or not rec.presentable_payloads:
+            return None
+        target_level = 0 if target_level is None else int(target_level)
+        candidates = []
+        for payload in rec.presentable_payloads.values():
+            source_id = getattr(payload, "source_id", None)
+            if semantic_source is not None and _payload_base_source_id(source_id) != semantic_source:
+                continue
+            quality = str(getattr(payload, "quality", "exact") or "exact")
+            lod = getattr(payload, "lod", None)
+            level = int(getattr(lod, "level", 0) or 0)
+            # exact/finer current source, target/equal, preview current source,
+            # coarser fallback.  Negative level distance means finer than
+            # requested and is preferred over coarser.
+            exact_rank = 0 if quality == "exact" else 1
+            level_rank = 0 if level <= target_level else 1
+            candidates.append((exact_rank, level_rank, abs(level - target_level), level, payload))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[:4])
+        return candidates[0][4]
+
+    def acknowledge_presented(
+        self,
+        tile_number: int,
+        payload_identity: object,
+        quality: str = "exact",
+        level: int | None = None,
+    ) -> None:
+        """Record backend-acknowledged presentation metadata for one tile."""
+
+        rec = self.record(tile_number)
+        self._unpark(rec)
+        rec.presentation = Presentation.PRESENTED
+        rec.presented_source_id = payload_identity
+        rec.backend_source_id = payload_identity
+        rec.presented_quality = str(quality or "exact")
+        rec.presented_level = None if level is None else int(level)
+        self._presented.add(rec.tile_number)
+        if rec.semantic is Semantic.EVALUATED:
+            self._load_cleared(rec)
+
+    def may_remove_visible(self, tile_number: int, *, memory_pressure: bool = False) -> bool:
+        """Whether a visible tile may be physically removed right now."""
+
+        if memory_pressure:
+            return True
+        rec = self._records.get(int(tile_number))
+        if rec is None:
+            return True
+        return rec.presentation is not Presentation.PRESENTED
 
     def evaluation_declined(self, tile_number: int) -> tuple[ReleaseClaim, ...]:
         """Admission declined or work dropped: back to planned, claims released."""
@@ -675,18 +762,13 @@ class TileLifecycle:
                     self._identity_rejection_counts[pair] = count
                     accept = False
             if accept:
-                self._unpark(rec)
-                rec.presentation = Presentation.PRESENTED
-                rec.presented_source_id = presented_identity
-                rec.backend_source_id = presented_identity
-                self._presented.add(index)
+                self.acknowledge_presented(
+                    index,
+                    presented_identity,
+                    rec.presented_quality or "exact",
+                    rec.presented_level,
+                )
                 confirmed.add(index)
-                if rec.semantic is Semantic.EVALUATED:
-                    # Sets-as-views: a confirmed EVALUATED tile owes the
-                    # screen nothing — it is not "loading", whatever the
-                    # backend report's presented set says (the 2026-07-05
-                    # auto-levels wedge was this flag surviving here).
-                    self._load_cleared(rec)
             elif index not in active:
                 # Rule 3: never blind-retry an upsert a viewport-scoped
                 # backend will keep declining. Park only if a semantic result
@@ -709,6 +791,8 @@ class TileLifecycle:
             self._presented.discard(index)
             rec.presentation = Presentation.UNPRESENTED
             rec.presented_source_id = None
+            rec.presented_quality = ""
+            rec.presented_level = None
             rec.emitted_source_id = None
             rec.backend_source_id = None
         return frozenset(confirmed)
@@ -742,6 +826,8 @@ class TileLifecycle:
         if rec.presentation is Presentation.PRESENTED:
             rec.presentation = Presentation.UNPRESENTED
         rec.presented_source_id = None
+        rec.presented_quality = ""
+        rec.presented_level = None
 
     def rearm_for_scope(self, active_scope: Iterable[int]) -> tuple[int, ...]:
         """Rule 3 re-arm: parked tiles entering the active scope want an upsert.
@@ -865,6 +951,24 @@ class TileLifecycle:
                     continue
                 entries.append((rec, level_key, entry))
         return tuple(sorted(entries, key=lambda item: int(item[2].order)))
+
+
+def _payload_base_source_id(source_id) -> object:
+    if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
+        return source_id[0]
+    if isinstance(source_id, tuple) and "floor" in source_id:
+        marker = source_id.index("floor")
+        prefix = source_id[:marker]
+        if not prefix:
+            return None
+        return prefix[0] if len(prefix) == 1 else prefix
+    if isinstance(source_id, tuple) and "texture_kind" in source_id:
+        marker = source_id.index("texture_kind")
+        prefix = source_id[:marker]
+        if not prefix:
+            return None
+        return prefix[0] if len(prefix) == 1 else prefix
+    return source_id
 
 
 def _request_level_keys(request: object) -> tuple[object, ...]:

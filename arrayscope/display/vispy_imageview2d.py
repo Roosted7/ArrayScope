@@ -51,6 +51,9 @@ if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
 
+VISPY_WARM_RESIDENCY_MAX_PAYLOADS = 64
+
+
 class VisPyImageView2D(ImageViewShell):
     """ImageView2D variant that renders pixels with VisPy.
 
@@ -817,6 +820,12 @@ class VisPyImageView2D(ImageViewShell):
             return
         if getattr(self, "_vispy_pending_warm_tile_payloads", None):
             return
+        payloads = dict(payloads or {})
+        if len(payloads) > VISPY_WARM_RESIDENCY_MAX_PAYLOADS:
+            near_order = tuple(int(tile) for tile in tuple(getattr(tile_delta, "near_tiles", ()) or ()))
+            ordered = [tile for tile in near_order if tile in payloads]
+            ordered.extend(tile for tile in payloads if int(tile) not in set(ordered))
+            payloads = {int(tile): payloads[int(tile)] for tile in ordered[:VISPY_WARM_RESIDENCY_MAX_PAYLOADS]}
         from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
 
         self._vispy_pending_warm_tile_payloads = PayloadBatchQueue(payloads)

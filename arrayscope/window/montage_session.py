@@ -828,6 +828,8 @@ class MontageRenderSession:
             rendered = cached_tiles.get(index)
             if rendered is not None:
                 self.mark_materialized(rendered)
+                if new_source != old_source_ids.get(index):
+                    self.lifecycle.presentation_discarded(index)
                 hits += 1
             else:
                 # Demote: the semantic slot is active for a new source, while
@@ -996,6 +998,13 @@ class MontageRenderSession:
                 self.presented_order.append(index)
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
                 level_scope_additions.append(index)
+                self.lifecycle.remember_presentable(index, self.display_tile_payloads[index])
+                self.lifecycle.acknowledge_presented(
+                    index,
+                    self.display_tile_payloads[index].source_id,
+                    str(getattr(self.display_tile_payloads[index], "quality", "exact") or "exact"),
+                    int(getattr(getattr(self.display_tile_payloads[index], "lod", None), "level", 0) or 0),
+                )
             self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
@@ -1074,6 +1083,7 @@ class MontageRenderSession:
             and previous.level_stats is level_stats
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
+            self.lifecycle.remember_presentable(tile_number, previous)
             return previous
         if (
             previous is not None
@@ -1108,6 +1118,7 @@ class MontageRenderSession:
             level_stats=level_stats,
         )
         self.display_tile_payloads[tile_number] = payload
+        self.lifecycle.remember_presentable(tile_number, payload)
         return payload
 
     def seed_display_tile_payloads(
@@ -1200,6 +1211,7 @@ class MontageRenderSession:
                 # in the slot, and the forced upsert keeps the remap visible
                 # to the ordinary identity-checked commit path.
                 self.pending_payload_upserts[tile_number] = None
+            self.lifecycle.remember_presentable(tile_number, payload)
         if changed_state:
             self.tile_presentation_state = TilePresentationState(
                 seeded_state,
@@ -1423,18 +1435,57 @@ class MontageRenderSession:
             for tile in tuple(self.visible_tiles)
             if int(tile.montage_index) not in self.skipped_tiles
         }
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        fallback_payloads = None
+        target_level = int(
+            getattr(getattr(getattr(self, "lod_policy_decision", None), "demand", None), "desired_level", 0)
+            or 0
+        )
+        for tile_number in sorted(planned_numbers):
+            if int(tile_number) in previous_payloads:
+                continue
+            tile = plan_tiles_by_number.get(int(tile_number))
+            if tile is None:
+                continue
+            fallback = self.lifecycle.best_presentable(
+                int(tile_number),
+                self.tile_semantic_source_id(int(tile.source_index)),
+                target_level,
+            )
+            if fallback is None:
+                continue
+            if fallback_payloads is None:
+                fallback_payloads = dict(previous_payloads)
+            fallback_payloads[int(tile_number)] = fallback
+            previous_payloads[int(tile_number)] = fallback
+        if fallback_payloads is not None:
+            previous_state = TilePresentationState(
+                fallback_payloads,
+                revision=int(getattr(previous_state, "revision", 0)),
+            )
+            self.tile_presentation_state = previous_state
         for stale in tuple(self.display_tile_payloads):
             if int(stale) not in loaded:
                 payload = self.display_tile_payloads.get(int(stale))
                 if (
                     payload is not None
-                    and str(getattr(payload, "quality", "exact")) == "preview"
                     and int(stale) in planned_numbers
+                    and (
+                        _payload_matches_current_tile(self, int(stale), payload, plan_tiles_by_number)
+                        or (
+                            int(stale) in self.pending_payload_upserts
+                            and str(getattr(payload, "quality", "exact") or "exact") == "preview"
+                        )
+                    )
                 ):
-                    # Presentation floor (ADR 0050): a planned tile presenting
-                    # a resident coarser level keeps it until its exact
-                    # replacement is acknowledged; only leaving the plan
-                    # removes it.
+                    # Atomic presentation: a planned tile with compatible
+                    # preview/exact pixels keeps them until a replacement is
+                    # acknowledged; dirty means "prepare replacement", not
+                    # "remove the visible slot".
+                    self.lifecycle.remember_presentable(int(stale), payload)
                     continue
                 self.display_tile_payloads.pop(int(stale), None)
                 self.pending_removals.add(int(stale))
@@ -1443,12 +1494,14 @@ class MontageRenderSession:
                 self.level_generation.forget_tile(int(stale))
         lod_factor = self._selected_lod_factor()
         current_loaded = set(self.rendered_tiles)
-        planned = tuple(
-            int(tile.montage_index)
-            for tile in tuple(self.visible_tiles)
-            if int(tile.montage_index) not in self.skipped_tiles
-        )
-        payload_backed = set(int(tile) for tile in self.display_tile_payloads)
+        planned = tuple(sorted(planned_numbers))
+        fallback_backed = {
+            int(tile)
+            for tile, payload in previous_payloads.items()
+            if int(tile) in planned_numbers
+            and _payload_matches_current_tile(self, int(tile), payload, plan_tiles_by_number)
+        }
+        payload_backed = set(int(tile) for tile in self.display_tile_payloads) | fallback_backed
         active = tuple(
             int(tile)
             for tile in planned
@@ -1590,8 +1643,9 @@ class MontageRenderSession:
                 if attempts >= 3:
                     continue
                 self._reconcile_attempts[int(tile_number)] = (pair, attempts + 1)
-                self.lifecycle.presentation_discarded(int(tile_number))
-                stale_identity_removals.add(int(tile_number))
+                if int(tile_number) not in planned_numbers or self.lifecycle.may_remove_visible(int(tile_number)):
+                    self.lifecycle.presentation_discarded(int(tile_number))
+                    stale_identity_removals.add(int(tile_number))
                 stale_drawn.append(int(tile_number))
         else:
             for tile_number, acknowledged in previous_payloads.items():
@@ -1599,8 +1653,9 @@ class MontageRenderSession:
                 if current is None or current is acknowledged:
                     continue
                 if current.source_id != acknowledged.source_id:
-                    self.lifecycle.presentation_discarded(int(tile_number))
-                    stale_identity_removals.add(int(tile_number))
+                    if int(tile_number) not in planned_numbers or self.lifecycle.may_remove_visible(int(tile_number)):
+                        self.lifecycle.presentation_discarded(int(tile_number))
+                        stale_identity_removals.add(int(tile_number))
                     stale_drawn.append(int(tile_number))
         if stale_drawn:
             for tile_number in sorted(stale_drawn):
@@ -1776,6 +1831,17 @@ class MontageRenderSession:
                 self.dirty_payloads.pop(int(tile_number), None)
         current_payloads = self.display_tile_payloads
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
+        physical_pending_removals = {
+            int(tile)
+            for tile in self.pending_removals
+            if int(tile) not in planned_numbers or self.lifecycle.may_remove_visible(int(tile))
+        }
+        self.pending_removals.intersection_update(physical_pending_removals)
+        physical_stale_removals = {
+            int(tile)
+            for tile in stale_identity_removals
+            if int(tile) not in planned_numbers or self.lifecycle.may_remove_visible(int(tile))
+        }
         removals = tuple(
             sorted(
                 {
@@ -1783,8 +1849,8 @@ class MontageRenderSession:
                     for tile in previous_payloads
                     if int(tile) < 0 or int(tile) >= valid_tile_count or int(tile) in self.skipped_tiles
                 }
-                .union(int(tile) for tile in self.pending_removals)
-                .union(int(tile) for tile in stale_identity_removals)
+                .union(physical_pending_removals)
+                .union(physical_stale_removals)
             )
         )
         upserts: dict[int, DisplayTilePayload] = {}
@@ -2024,6 +2090,13 @@ class MontageRenderSession:
             payload = acknowledged.payloads.get(int(tile_number))
             if payload is not None:
                 self.acknowledged_source_ids.add(payload.source_id)
+                self.lifecycle.remember_presentable(int(tile_number), payload)
+                self.lifecycle.acknowledge_presented(
+                    int(tile_number),
+                    payload.source_id,
+                    str(getattr(payload, "quality", "exact") or "exact"),
+                    int(getattr(getattr(payload, "lod", None), "level", 0) or 0),
+                )
         committed_levels = None if levels is None else (float(levels[0]), float(levels[1]))
         if committed_levels is not None:
             ProgressiveTileLevelConvergence().acknowledge(
@@ -2661,6 +2734,12 @@ class MontageRenderSession:
 def _base_source_id(source_id) -> object:
     if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
         return source_id[0]
+    if isinstance(source_id, tuple) and "floor" in source_id:
+        marker = source_id.index("floor")
+        prefix = source_id[:marker]
+        if not prefix:
+            return None
+        return prefix[0] if len(prefix) == 1 else prefix
     if isinstance(source_id, tuple) and "texture_kind" in source_id:
         marker = source_id.index("texture_kind")
         prefix = source_id[:marker]
@@ -2668,6 +2747,24 @@ def _base_source_id(source_id) -> object:
             return None
         return prefix[0] if len(prefix) == 1 else prefix
     return source_id
+
+
+def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles_by_number) -> bool:
+    tile = dict(plan_tiles_by_number or {}).get(int(tile_number))
+    if tile is None or payload is None:
+        return False
+    if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+        return False
+    base_source_id = _base_source_id(getattr(payload, "source_id", None))
+    if base_source_id == session.tile_semantic_source_id(int(tile.source_index)):
+        return True
+    return (
+        isinstance(base_source_id, tuple)
+        and len(base_source_id) >= 2
+        and base_source_id[0] == "rendered_tile"
+        and int(base_source_id[1]) == int(tile_number)
+        and getattr(payload, "source_id", None) in getattr(session, "acknowledged_source_ids", set())
+    )
 
 
 def _force_unpresented_upsert(session, tile_number: int, *, previous_payloads, backend_identities) -> bool:

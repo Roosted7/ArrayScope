@@ -215,6 +215,76 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
     assert win._tracker.summary_for(session.level_key).source_indices == frozenset(range(4))
 
 
+def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
+    from arrayscope.core.gui_callback_budget import GuiCallbackBudget
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.render.level_stats import LevelStatsService
+
+    class Window(LevelStatsService):
+        def __init__(self, session):
+            self.win = self
+            self.kernel = SimpleNamespace(visible_backlog=0)
+            self._montage_session = session
+            self._tracker = MontageLevelTracker()
+            self.applied = 0
+            self.scheduled = 0
+
+        def _montage_session_is_current(self, session):
+            return session is self._montage_session
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+        def _montage_callback_budget(self, *_args, **_kwargs):
+            return GuiCallbackBudget("test", item_cap=8)
+
+        def _record_gui_budget(self, _budget):
+            return None
+
+        def apply_montage_presentation(self, _session):
+            self.applied += 1
+
+        def _schedule_montage_cached_level_stats(self, _session):
+            self.scheduled += 1
+
+    rendered = SimpleNamespace(
+        tile=SimpleNamespace(source_index=0),
+        level_stats=None,
+        level_data=np.asarray([0.0, 1.0], dtype=np.float32),
+        histogram_data=np.asarray([0.0, 1.0], dtype=np.float32),
+        image=np.asarray([0.0, 1.0], dtype=np.float32),
+        slab_nbytes=8,
+    )
+    session = SimpleNamespace(
+        key=("session",),
+        session_id=1,
+        level_key=("levels", "pending-upsert"),
+        level_revision=0,
+        level_expected_indices=(0,),
+        rendered_tiles={0: rendered},
+        display_tile_payloads={},
+        plan=SimpleNamespace(tiles=(SimpleNamespace(source_index=0),)),
+        pending_level_tiles=deque([rendered]),
+        pending_level_sources={0},
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+        dirty_payloads={},
+        pending_payload_upserts={0: None},
+        pending_removals=set(),
+        flush_pending=False,
+        final_commit_pending=False,
+        visible_plan_complete=lambda: True,
+    )
+    win = Window(session)
+
+    win._process_montage_cached_level_stats()
+
+    assert win.applied == 0
+    assert win.scheduled == 1
+
+
 def test_preview_payload_level_data_updates_provisional_level_tracker(monkeypatch):
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker

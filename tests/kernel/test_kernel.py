@@ -93,6 +93,37 @@ def test_inline_backend_runs_and_delivers_on_drain():
     assert outcomes == [("a", TaskOutcome.COMPLETED)]
 
 
+def test_submit_speculative_batch_uses_latest_only_scope():
+    kernel, backend = make_manual()
+    results = []
+    stale = []
+
+    kernel.submit_speculative_batch(
+        kind="warm",
+        scope="montage:s:warm",
+        generation=("vp", 1),
+        fn=lambda: "old",
+        on_done=results.append,
+        on_stale=lambda: stale.append("old"),
+    )
+    kernel.submit_speculative_batch(
+        kind="warm",
+        scope="montage:s:warm",
+        generation=("vp", 2),
+        fn=lambda: "new",
+        on_done=results.append,
+        on_stale=lambda: stale.append("new"),
+    )
+
+    backend.run_all()
+    drain(kernel)
+
+    assert results == ["new"]
+    assert stale == ["old"]
+    lanes = kernel.diagnostics().lanes
+    assert lanes[Lane.SPECULATIVE_RESIDENCY.value]["dropped"] == 1
+
+
 def test_priority_orders_real_execution():
     kernel, backend = make_manual()
     ran = []

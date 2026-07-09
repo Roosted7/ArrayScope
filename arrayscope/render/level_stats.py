@@ -8,8 +8,9 @@ from time import perf_counter
 import numpy as np
 import pyqtgraph.Qt as Qt
 
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
-from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
+from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
@@ -22,7 +23,6 @@ from arrayscope.display.montage import RenderedTile
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
-from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window import montage_commit
 
 
@@ -522,11 +522,16 @@ class LevelStatsService:
         # or when nothing is parked (metadata refresh for a settled session).
         evidence_remaining = bool(pending) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
         flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
+        can_resume_parked_flush = bool(flush_parked and not evidence_remaining)
+        can_refresh_settled_metadata = bool(
+            not flush_parked and _montage_side_work_visible_settled(self, session)
+        )
         if (
             processed
-            and not (evidence_remaining and flush_parked)
             and not getattr(session, "dirty_payloads", ())
+            and not getattr(session, "pending_payload_upserts", ())
             and not getattr(session, "pending_removals", ())
+            and (can_resume_parked_flush or can_refresh_settled_metadata)
         ):
             self.apply_montage_presentation(session)
         self._schedule_montage_cached_level_stats(session)
@@ -537,11 +542,10 @@ class LevelStatsService:
         pending = getattr(session, "pending_refined_level_tiles", None)
         if not pending:
             return
-        controller = getattr(self.win, "histogram_evaluation_controller", None)
-        if controller is None:
+        if not _montage_side_work_visible_settled(self, session):
             return
-        scheduled = 0
-        while pending and scheduled < 4:
+        batch = []
+        while pending and len(batch) < 4:
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
             if self._montage_level_tracker().has_source(session.level_key, source_index, refined=True):
@@ -550,34 +554,79 @@ class LevelStatsService:
                     pending_sources.discard(source_index)
                 continue
             source = render_effects.montage_refined_level_values(rendered)
-            key = ("montage_refined_level_stats", session.level_key, source_index)
+            batch.append((source_index, source, rendered))
 
-            def evaluate(source=source, source_index=source_index):
-                return sample_tile_level_stats(source, int(source_index), refined=True)
+        if not batch:
+            return
 
-            def done(
-                stats,
-                session_id=session.session_id,
-                session_key=session.key,
-                level_key=session.level_key,
-                source_index=source_index,
-            ):
-                self._on_montage_refined_level_stats_done(session_id, session_key, level_key, source_index, stats)
+        generation = (
+            session.key,
+            int(session.session_id),
+            int(getattr(session, "viewport_revision", 0) or 0),
+            session.level_key,
+        )
+        sources = tuple(int(source_index) for source_index, _source, _rendered in batch)
 
-            started = controller.start_latest(
-                evaluate,
-                on_done=done,
-                key=key,
-                priority=EvalPriority.HISTOGRAM,
-                replace_group=f"montage_level_refinement:{source_index}",
-                memory_budget_bytes=self._memory_policy().display_cache_budget_bytes,
+        def evaluate(batch=batch):
+            return tuple(
+                (int(source_index), sample_tile_level_stats(source, int(source_index), refined=True))
+                for source_index, source, _rendered in batch
             )
-            if started is None:
-                pending.appendleft(rendered)
-                break
-            scheduled += 1
 
-    def _on_montage_refined_level_stats_done(self, session_id, session_key, level_key, source_index, stats) -> None:
+        def done(
+            rows,
+            session_id=session.session_id,
+            session_key=session.key,
+            level_key=session.level_key,
+            generation=generation,
+        ):
+            current = getattr(self, "_montage_session", None)
+            current_generation = None if current is None else (
+                current.key,
+                int(current.session_id),
+                int(getattr(current, "viewport_revision", 0) or 0),
+                current.level_key,
+            )
+            if current_generation != generation:
+                return
+            for source_index, stats in tuple(rows or ()):
+                self._on_montage_refined_level_stats_done(
+                    session_id,
+                    session_key,
+                    level_key,
+                    int(source_index),
+                    stats,
+                    schedule_next=False,
+                )
+            self._schedule_montage_refined_level_stats(current)
+
+        handle = self.win.kernel.submit_speculative_batch(
+            kind="montage-refined-level-stats",
+            scope=f"montage:{session.key!r}:histogram",
+            generation=generation,
+            key=("montage_refined_level_stats", session.key, int(session.session_id), sources),
+            fn=evaluate,
+            on_done=done,
+            on_stale=lambda: None,
+            on_error=lambda exc: handle_ui_exception("montage refined level stats", exc),
+            priority=Priority.HISTOGRAM,
+            lane=WorkLane.HISTOGRAM_REFINEMENT,
+            max_items=len(batch),
+        )
+        if handle is None:
+            for _source_index, _source, rendered in reversed(batch):
+                pending.appendleft(rendered)
+
+    def _on_montage_refined_level_stats_done(
+        self,
+        session_id,
+        session_key,
+        level_key,
+        source_index,
+        stats,
+        *,
+        schedule_next: bool = True,
+    ) -> None:
         session = getattr(self, "_montage_session", None)
         if session is None or not self._is_current_montage_session(session_id, session_key):
             return
@@ -590,13 +639,27 @@ class LevelStatsService:
             if (
                 summary is not None
                 and session.display_committed
-                and not getattr(session, "dirty_payloads", ())
-                and not getattr(session, "pending_removals", ())
+                and _montage_side_work_visible_settled(self, session)
                 and getattr(session, "user_levels_override", None) is None
                 and self._should_publish_montage_level_metadata(session, summary)
             ):
                 self.apply_montage_presentation(session)
-        self._schedule_montage_refined_level_stats(session)
+        if schedule_next:
+            self._schedule_montage_refined_level_stats(session)
+
+
+def _montage_side_work_visible_settled(renderer, session) -> bool:
+    kernel = getattr(getattr(renderer, "win", None), "kernel", None)
+    return bool(
+        kernel is not None
+        and int(getattr(kernel, "visible_backlog", 0) or 0) <= 0
+        and getattr(session, "visible_plan_complete", lambda: False)()
+        and not getattr(session, "dirty_payloads", None)
+        and not getattr(session, "pending_payload_upserts", None)
+        and not getattr(session, "pending_removals", None)
+        and not bool(getattr(session, "flush_pending", False))
+        and not bool(getattr(session, "final_commit_pending", False))
+    )
 
 
 

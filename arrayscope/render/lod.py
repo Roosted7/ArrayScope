@@ -902,6 +902,9 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             level_stats=getattr(metadata, "level_stats", None),
         )
         session.display_tile_payloads[tile_number] = payload
+        lifecycle = getattr(session, "lifecycle", None)
+        if lifecycle is not None and hasattr(lifecycle, "remember_presentable"):
+            lifecycle.remember_presentable(tile_number, payload)
         session.pending_payload_upserts[tile_number] = None
         session.lod_floor_presentations = int(getattr(session, "lod_floor_presentations", 0) or 0) + 1
         built += 1

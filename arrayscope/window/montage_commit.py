@@ -845,8 +845,13 @@ class MontagePipelineEffects:
                 renderer._schedule_montage_cached_level_stats(session)
                 return
             prepare_metadata_start = perf_counter()
-            level_metadata_improved = renderer._should_publish_montage_level_metadata(session, level_stats)
-            publish_auto_metadata = bool(explicit_auto and (first_display_commit or level_metadata_improved))
+            metadata_can_advance = bool(first_display_commit or self._side_work_visible_settled())
+            level_metadata_improved = bool(
+                metadata_can_advance and renderer._should_publish_montage_level_metadata(session, level_stats)
+            )
+            publish_auto_metadata = bool(
+                explicit_auto and metadata_can_advance and (first_display_commit or level_metadata_improved)
+            )
             # The aggregate histogram plot is derived from the level stats, so
             # it must (re)publish whenever those stats first arrive or improve
             # — not only on the first display commit. On startup the first
@@ -1229,13 +1234,11 @@ class MontagePipelineEffects:
                 view._vispy_pending_warm_tile_payloads = {}
                 view._vispy_pending_warm_tile_context = {}
 
-            if not self._session_is_current():
+            if not self._side_work_visible_settled():
                 cancel_pending()
                 return
-            if int(getattr(renderer.win.kernel, "visible_backlog", 0) or 0) > 0:
-                cancel_pending()
-                return
-            if not session.visible_plan_complete():
+            submitted_key = getattr(renderer, "_vispy_warm_residency_submitted_key", None)
+            if submitted_key == viewport_value:
                 cancel_pending()
                 return
 
@@ -1243,34 +1246,40 @@ class MontagePipelineEffects:
                 return True
 
             def done(_value=None):
-                if not self._session_is_current():
+                if not self._side_work_visible_settled():
                     cancel_pending()
                     return
-                if int(getattr(renderer.win.kernel, "visible_backlog", 0) or 0) > 0:
-                    cancel_pending()
-                    return
-                if not session.visible_plan_complete():
-                    cancel_pending()
-                    return
+                renderer._vispy_warm_residency_submitted_key = viewport_value
                 process()
 
-            renderer.win.kernel.submit(
-                TaskSpec(
-                    key=("vispy-warm-residency", session.key, viewport_value),
-                    fn=admit,
-                    lane=WorkLane.SPECULATIVE_RESIDENCY,
-                    priority=Priority.PREFETCH,
-                    scope=f"montage:{session.key!r}:warm-residency",
-                    supersession=Supersession(("vispy-warm-residency", session.key), viewport_value),
-                    reusable=False,
-                    pass_token=False,
-                ),
+            renderer.win.kernel.submit_speculative_batch(
+                kind="vispy-warm-residency",
+                scope=f"montage:{session.key!r}:warm-residency",
+                generation=viewport_value,
+                key=("vispy-warm-residency", session.key, viewport_value),
+                fn=admit,
+                priority=Priority.PREFETCH,
+                lane=WorkLane.SPECULATIVE_RESIDENCY,
+                max_items=len(getattr(view, "_vispy_pending_warm_tile_payloads", {}) or ()),
                 on_done=done,
                 on_stale=lambda: None,
                 on_error=lambda exc: handle_ui_exception("vispy warm residency", exc),
             )
 
         view._vispy_warm_tile_scheduler = schedule
+
+    def _side_work_visible_settled(self) -> bool:
+        session = self.session
+        return bool(
+            self._session_is_current()
+            and int(getattr(self.renderer.win.kernel, "visible_backlog", 0) or 0) <= 0
+            and session.visible_plan_complete()
+            and not getattr(session, "dirty_payloads", None)
+            and not getattr(session, "pending_payload_upserts", None)
+            and not getattr(session, "pending_removals", None)
+            and not bool(getattr(session, "flush_pending", False))
+            and not bool(getattr(session, "final_commit_pending", False))
+        )
 
     def _empty_first_commit_can_wait(self, first_display_commit, explicit_auto, active_payloads, tile_delta) -> bool:
         session = self.session

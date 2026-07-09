@@ -97,10 +97,31 @@ def test_stale_report_confirms_nothing(lc):
 def test_fresh_evaluation_invalidates_stale_emit_identity(lc):
     _evaluated(lc, 5)
     lc.upsert_emitted(5, source_id="old")
+    lc.commit_acknowledged(emitted_tiles=[5], accepted_tiles=[5], active_scope=[5])
     lc.evaluation_completed(5)  # replacement result
     rec = lc.record(5)
-    assert rec.presentation is Presentation.UNPRESENTED
+    assert rec.presentation is Presentation.PRESENTED
+    assert rec.presented_source_id == "old"
     assert rec.emitted_source_id is None
+
+
+def test_best_presentable_prefers_exact_current_source(lc):
+    Payload = namedtuple("Payload", "source_id quality lod")
+    Lod = namedtuple("Lod", "level")
+    semantic = ("montage-tile", "doc", 3)
+    preview = Payload((*semantic, "floor", "scalar", (4, 4)), "preview", Lod(4))
+    exact = Payload((*semantic, "texture_kind", "scalar", "lod", 0, 0), "exact", Lod(0))
+    other = Payload(("montage-tile", "other", 3, "texture_kind", "scalar"), "exact", Lod(0))
+
+    lc.remember_presentable(3, preview)
+    lc.remember_presentable(3, other)
+    lc.remember_presentable(3, exact)
+
+    assert lc.best_presentable(3, semantic, 0) is exact
+    assert lc.best_presentable(3, ("missing",), 0) is None
+    assert lc.may_remove_visible(3)
+    lc.acknowledge_presented(3, exact.source_id, exact.quality, exact.lod.level)
+    assert not lc.may_remove_visible(3)
 
 
 def test_feedback_signature_tracks_lifecycle_owned_work_class(lc):

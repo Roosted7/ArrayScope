@@ -33,6 +33,7 @@ from arrayscope.kernel.task import (
     CancellationToken,
     Lane,
     LaneCounters,
+    Priority,
     Supersession,
     TaskOutcome,
     TaskSpec,
@@ -195,6 +196,46 @@ class Kernel:
         if wake:
             self._backend.wake()
         return handle
+
+    def submit_speculative_batch(
+        self,
+        *,
+        kind: str,
+        scope: str,
+        generation: object,
+        fn: Callable[..., Any],
+        on_done: Callable[[Any], None] | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_stale: Callable[[], None] | None = None,
+        priority: Priority = Priority.PREFETCH,
+        lane: Lane = Lane.SPECULATIVE_RESIDENCY,
+        key: object | None = None,
+        max_items: int = 0,
+        pass_token: bool = False,
+    ) -> TaskHandle | None:
+        """Submit one supersedable speculative batch.
+
+        Callers own the side-effect mechanics; the kernel owns batch identity,
+        latest-only staleness, and lane admission.
+        """
+
+        batch_key = key if key is not None else (str(kind), str(scope), generation)
+        value = (generation, max(0, int(max_items or 0)))
+        return self.submit(
+            TaskSpec(
+                key=batch_key,
+                fn=fn,
+                lane=lane,
+                priority=priority,
+                scope=scope,
+                supersession=Supersession((str(kind), str(scope)), value),
+                reusable=False,
+                pass_token=pass_token,
+            ),
+            on_done=on_done,
+            on_error=on_error,
+            on_stale=on_stale,
+        )
 
     def supersede(self, family: object, value: object) -> None:
         """Advance a supersession family without submitting a replacement."""
