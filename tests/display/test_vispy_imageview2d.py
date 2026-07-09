@@ -1896,6 +1896,76 @@ def test_vispy_first_class_tiled_shifted_window_reuses_resident_sources(qt_app):
         view.close()
 
 
+def test_vispy_tile_layer_rejects_retained_slot_when_source_changes_without_payload(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=1, indices=(0,), text="0"),
+        display_shape=(2, 2),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+    view = VisPyImageView2D()
+    source0 = ("source", 0)
+    source1 = ("source", 1)
+    payload0 = DisplayTilePayload(
+        0,
+        0,
+        np.full((2, 2), 7.0, dtype=np.float32),
+        None,
+        source0,
+    )
+
+    def delta(revision: int, *, upserts, active_source):
+        return TilePresentationDelta(
+            structure_revision=revision,
+            payload_revision=revision,
+            visibility_revision=revision,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=revision,
+            upserts=upserts,
+            active_tiles=(0,),
+            planned_tiles=(0,),
+            near_tiles=(0,),
+            near_tile_source_ids={0: active_source},
+        )
+
+    kwargs = dict(
+        geometry=geometry,
+        histogramPlotData=None,
+        levels=(0.0, 8.0),
+        histogramRange=(0.0, 8.0),
+        rgb_already_windowed=False,
+        tile_residency_budget_bytes=64 * 1024 * 1024,
+    )
+    try:
+        first_report = view.setTiledPresentation(
+            tile_state=TilePresentationState({0: payload0}),
+            tile_delta=delta(1, upserts={0: payload0}, active_source=source0),
+            **kwargs,
+        )
+        assert first_report.presented_tiles == frozenset({0})
+
+        stale_report = view.setTiledPresentation(
+            tile_state=TilePresentationState({}),
+            tile_delta=delta(2, upserts={}, active_source=source1),
+            **kwargs,
+        )
+        stats = view._vispy_gpu_montage_layer.last_stats
+
+        assert stale_report.presented_tiles == frozenset()
+        assert stats.presented_tiles == ()
+        assert stats.visible_items == 0
+        assert not any(visual.visible for visual in view._vispy_gpu_montage_layer._visuals_by_page)
+    finally:
+        view.close()
+
+
 def test_vispy_tiled_reuses_resident_texture_after_layer_clear(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState

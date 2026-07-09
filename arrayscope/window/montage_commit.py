@@ -38,7 +38,7 @@ from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches,
-    previous_tiled_payloads,
+    previous_tiled_payloads_by_base_source,
 )
 
 
@@ -772,15 +772,17 @@ class MontagePipelineEffects:
             reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
             if not session.lifecycle.presented_tiles:
                 previous_payloads = {
-                    int(tile): payload
-                    for tile, payload in previous_tiled_payloads(getattr(renderer.win, "_committed_display_frame", None)).items()
+                    key: payload
+                    for key, payload in previous_tiled_payloads_by_base_source(
+                        getattr(renderer.win, "_committed_display_frame", None)
+                    ).items()
                     if reuse_any_lod or payload_lod_matches(payload, selected_lod_factor)
                 }
                 retained_payloads = renderer._retained_tiled_payload_store().payloads_by_base_source(
                     lod_factor=None if reuse_any_lod else selected_lod_factor
                 )
                 if retained_payloads:
-                    previous_payloads.update({int(tile): payload for tile, payload in enumerate(retained_payloads.values())})
+                    previous_payloads.update(retained_payloads)
                 if previous_payloads:
                     session.seed_display_tile_payloads(previous_payloads, tile_source_ids, tile_numbers=tuple(session.dirty_payloads))
                     if reuse_any_lod:

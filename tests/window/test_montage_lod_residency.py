@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
@@ -854,6 +856,41 @@ def test_seeding_new_session_keeps_stale_level_payload_ready_for_identity_ack():
     # down-swap churn to native while the demanded level rematerializes.
     assert replacement.mark_ladder_swaps_for_viewport() is False
     assert not replacement.dirty_payloads or set(replacement.dirty_payloads) == {0, 1}
+
+
+def test_seed_display_payloads_resolves_retained_sources_by_semantic_key():
+    """Retained payload caches are source-keyed, never iteration-slot keyed."""
+
+    retained = _session(count=4)
+    source_ids = {index: ("src", index) for index in range(4)}
+    _state, delta = retained.build_tile_presentation(source_ids)
+    _acknowledge(retained, delta)
+    retained.mark_presented(tuple(delta.upserts))
+    retained_payloads = {
+        ("src", 2): retained.tile_presentation_state.payloads[2],
+        ("src", 3): retained.tile_presentation_state.payloads[3],
+    }
+
+    partial = _session(count=2)
+    partial.plan = _shifted_plan(count=2, offset=2)
+    partial.visible_tiles = tuple(partial.plan.tiles)
+    partial.rendered_tiles = {
+        int(tile.montage_index): replace(retained.rendered_tiles[int(tile.source_index)], tile=tile)
+        for tile in partial.plan.tiles
+    }
+    partial.dirty_payloads.update({0: None, 1: None})
+
+    partial.seed_display_tile_payloads(
+        retained_payloads,
+        {0: ("src", 2), 1: ("src", 3)},
+    )
+
+    assert set(partial.display_tile_payloads) == {0, 1}
+    assert partial.display_tile_payloads[0].source_index == 2
+    assert partial.display_tile_payloads[1].source_index == 3
+    assert partial.display_tile_payloads[0].source_id == retained.tile_presentation_state.payloads[2].source_id
+    assert partial.display_tile_payloads[1].source_id == retained.tile_presentation_state.payloads[3].source_id
+    assert set(partial.pending_payload_upserts) == {0, 1}
 
 # --- Zero redundant histogram/level work across LOD levels (ADR 0050) ---
 
@@ -2225,6 +2262,43 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     assert session.lifecycle.backend_presented_identities == backend_truth
 
 
+def test_partial_index_window_reuses_sources_that_move_to_new_slots():
+    """A partial montage filters/remaps sources; it must not reload them by slot."""
+
+    session = _session(count=4)
+    old_source_ids = {index: ("src", index) for index in range(4)}
+    _state, delta = session.build_tile_presentation(old_source_ids)
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    session.tile_source_ids = dict(old_source_ids)
+    session.dirty_payloads.clear()
+    assert set(session.lifecycle.presented_tiles) == {0, 1, 2, 3}
+
+    partial = _shifted_plan(count=2, offset=2)
+    stats = _retarget(
+        session,
+        partial,
+        new_source_ids={0: ("src", 2), 1: ("src", 3)},
+        cached_tiles={},
+    )
+
+    assert stats["misses"] == 0
+    assert stats["remapped"] == 2
+    assert set(session.rendered_tiles) == {0, 1}
+    assert set(session.display_tile_payloads) == set()
+    assert set(session.lifecycle.presented_tiles).isdisjoint({2, 3})
+    assert session.pending_removals == set()
+
+    state, delta = session.build_tile_presentation({0: ("src", 2), 1: ("src", 3)})
+
+    assert delta.removals == ()
+    assert set(delta.active_tiles) == {0, 1}
+    assert set(delta.upserts) == {0, 1}
+    assert state.payloads[0].source_index == 2
+    assert state.payloads[1].source_index == 3
+    assert session.tile_source_ids == {0: ("src", 2), 1: ("src", 3)}
+
+
 def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
     """A miss must remove stale pixels; only current-source payloads may show."""
 
@@ -2269,7 +2343,7 @@ def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
     assert not session.visible_plan_complete()
 
 
-def test_stale_backend_identity_removes_when_correct_upsert_is_budgeted_out():
+def test_stale_backend_identity_is_not_acknowledged_when_correct_upsert_is_budgeted_out():
     session = _session(count=2)
     old_sources = {0: ("src", 0), 1: ("src", 1)}
     old_state, old_delta = session.build_tile_presentation(old_sources)
@@ -2312,7 +2386,11 @@ def test_stale_backend_identity_removes_when_correct_upsert_is_budgeted_out():
 
     assert len(delta.upserts) == 1
     assert set(delta.upserts).isdisjoint(delta.removals)
-    assert set(delta.upserts).union(delta.removals) == {0, 1}
+    deferred = ({0, 1} - set(delta.upserts)).pop()
+    assert delta.removals == ()
+    assert deferred in delta.active_tiles
+    assert deferred in session.dirty_payloads
+    assert deferred not in _state.payloads
 
 
 def test_retarget_index_window_clears_active_work_without_completion_queue():

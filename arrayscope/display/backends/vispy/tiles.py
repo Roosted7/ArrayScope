@@ -593,6 +593,10 @@ class TextureAtlasPool:
         )
         active_set = set(active_tiles)
         removed_tiles = {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())}
+        expected_source_ids = {
+            int(tile): source_id
+            for tile, source_id in dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}).items()
+        }
         retained_active_keys: dict[int, object] = {}
         raw_payload_items = tuple(
             (int(tile), payload_map[int(tile)])
@@ -620,6 +624,10 @@ class TextureAtlasPool:
                 and int(tile) in self.tile_resident_keys
                 and self.tile_resident_keys[int(tile)] in self.source_ids
                 and int(tile) in self.tile_slots
+                and _resident_source_matches_expected(
+                    self.source_ids[self.tile_resident_keys[int(tile)]],
+                    expected_source_ids.get(int(tile)),
+                )
             }
         )
         base_class_items = sum(
@@ -2511,6 +2519,12 @@ def _lod_invariant_source_id(source_id: object) -> object:
     if isinstance(base, tuple) and "lod" in base:
         return base[: base.index("lod")]
     return base
+
+
+def _resident_source_matches_expected(source_id: object, expected_source_id: object | None) -> bool:
+    if expected_source_id is None:
+        return False
+    return _lod_invariant_source_id(source_id) == _lod_invariant_source_id(expected_source_id)
 
 
 def _source_resident_key(source_id: object) -> object:

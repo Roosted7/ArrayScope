@@ -790,6 +790,14 @@ class MontageRenderSession:
         """
 
         old_source_ids = dict(self.tile_source_ids)
+        old_rendered_tiles = dict(self.rendered_tiles)
+        old_display_payloads = dict(self.display_tile_payloads)
+        old_state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        old_indices_by_source = {
+            source_id: int(index)
+            for index, source_id in old_source_ids.items()
+            if source_id is not None
+        }
         self.session_id = int(session_id)
         self.key = key
         self.semantic_key = semantic_key
@@ -814,7 +822,13 @@ class MontageRenderSession:
         self.level_scan_cursor = 0
         self.level_scan_remaining_tiles = 0
         self.pending_tiles.prune(frozenset())
-        hits = misses = unchanged = 0
+        hits = misses = unchanged = remapped = 0
+        changed_slots: set[int] = set()
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(plan, "tiles", ()) or ())
+        }
+        planned_numbers = set(plan_tiles_by_number)
         for tile in tuple(getattr(plan, "tiles", ()) or ()):
             index = int(tile.montage_index)
             new_source = new_source_ids.get(index)
@@ -826,9 +840,16 @@ class MontageRenderSession:
                 unchanged += 1
                 continue
             rendered = cached_tiles.get(index)
+            old_index = old_indices_by_source.get(new_source)
+            if rendered is None and old_index is not None and old_index in old_rendered_tiles:
+                rendered = replace(old_rendered_tiles[int(old_index)], tile=tile)
+                remapped += 1
             if rendered is not None:
                 self.mark_materialized(rendered)
+                if new_source is not None:
+                    self.tile_source_ids[index] = new_source
                 if new_source != old_source_ids.get(index):
+                    changed_slots.add(index)
                     self.lifecycle.presentation_discarded(index)
                 hits += 1
             else:
@@ -840,6 +861,7 @@ class MontageRenderSession:
                 self.tile_source_ids.pop(index, None)
                 self.display_tile_payloads.pop(index, None)
                 self.level_generation.forget_tile(index)
+                changed_slots.add(index)
                 self.lifecycle.presentation_discarded(index)
                 self.skipped_tiles.discard(index)
                 self.dirty_payloads[index] = None
@@ -847,6 +869,36 @@ class MontageRenderSession:
                 if 0 <= index < len(plan.tiles):
                     self.mark_tile_state(plan.tiles[index], MontageTileState.UNLOADED)
                 misses += 1
+        obsolete_slots = (
+            set(int(index) for index in old_rendered_tiles)
+            | set(int(index) for index in old_display_payloads)
+            | set(int(index) for index in old_state_payloads)
+            | set(int(index) for index in old_source_ids)
+        ) - planned_numbers
+        for index in sorted(obsolete_slots):
+            self.rendered_tiles.pop(int(index), None)
+            self.tile_source_ids.pop(int(index), None)
+            self.display_tile_payloads.pop(int(index), None)
+            self.level_generation.forget_tile(int(index))
+            self.lifecycle.presentation_discarded(int(index))
+            self.skipped_tiles.discard(int(index))
+            self.dirty_payloads.pop(int(index), None)
+            self.pending_payload_upserts.pop(int(index), None)
+            self.pending_removals.discard(int(index))
+        if obsolete_slots or changed_slots:
+            retained_state = {
+                int(tile): payload
+                for tile, payload in old_state_payloads.items()
+                if int(tile) in planned_numbers
+                and int(tile) not in changed_slots
+                and int(getattr(payload, "source_index", -1))
+                == int(getattr(plan_tiles_by_number[int(tile)], "source_index", -2))
+            }
+            if retained_state != old_state_payloads:
+                self.tile_presentation_state = TilePresentationState(
+                    retained_state,
+                    revision=int(getattr(self.tile_presentation_state, "revision", 0)),
+                )
         self.visible_tiles = tuple(visible_tiles)
         self.visible_tile_numbers = frozenset(
             int(tile.montage_index) for tile in self.visible_tiles
@@ -860,6 +912,7 @@ class MontageRenderSession:
             "hits": int(hits),
             "misses": int(misses),
             "unchanged": int(unchanged),
+            "remapped": int(remapped),
         }
 
     def update_level_presentation_scope(self) -> None:
