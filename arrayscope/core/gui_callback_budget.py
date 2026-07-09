@@ -19,6 +19,19 @@ IDLE_BYTE_CAP = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
+class GuiCallbackBudgetDecision:
+    channel: str
+    batch_limit: int
+    budget_ms: float
+    interval_ms: int
+    reason: str
+    byte_cap: int = 0
+    control_budget_ms: float = 0.0
+    model: str = ""
+    details: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class GuiCallbackObservation:
     channel: str
     work_class: str
@@ -139,3 +152,19 @@ def should_yield_after_item(
 ) -> bool:
     budget.record_item(byte_count=byte_count, item_count=item_count)
     return budget.should_yield()
+
+
+def default_gui_callback_budget_decision(channel: str, *, interactive: bool = False) -> GuiCallbackBudgetDecision:
+    """Return the static GUI drain-budget vocabulary outside governor knobs."""
+
+    budget_ms = INTERACTIVE_TARGET_MS if interactive else IDLE_TARGET_MS
+    return GuiCallbackBudgetDecision(
+        channel=str(channel),
+        batch_limit=1,
+        budget_ms=budget_ms,
+        interval_ms=0,
+        reason="static GUI callback budget",
+        byte_cap=INTERACTIVE_BYTE_CAP if interactive else IDLE_BYTE_CAP,
+        control_budget_ms=budget_ms,
+        model="static",
+    )

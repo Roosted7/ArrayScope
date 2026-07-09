@@ -208,6 +208,8 @@ class MontageRuntimeMixin:
                 return
             self.retarget_montage_pipeline(current)
 
+        # Timer category: UI cosmetic. Event-turn barrier for coalescing a
+        # current-session replan; kernel completion still owns work delivery.
         Qt.QtCore.QTimer.singleShot(0, self, fire)
 
     def retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
@@ -271,6 +273,8 @@ class MontageRuntimeMixin:
             return
         timer = getattr(self, "_montage_watchdog_timer", None)
         if timer is None:
+            # Timer category: anti-hang fallback. Diagnostics-only stall
+            # assertion probe; it never mutates rendering state.
             timer = Qt.QtCore.QTimer(self)
             timer.setInterval(1000)
             timer.timeout.connect(self._montage_watchdog_tick)
@@ -358,8 +362,6 @@ class MontageRuntimeMixin:
         self._montage_watchdog_state = signature
         if previous != signature:
             return  # work is progressing; stay armed.
-        self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
-        self._montage_watchdog_last_stall = signature
         kernel = getattr(self.win, "kernel", None)
         kernel_diag = None if kernel is None else kernel.diagnostics()
         completion_queue = None if kernel is None else getattr(kernel, "completions", None)
@@ -386,6 +388,14 @@ class MontageRuntimeMixin:
                 )
                 self._montage_watchdog_state = None
                 return
+        probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
+        actionable_probe = tuple(row for row in tuple(probe) if _stall_tile_probe_row_actionable(row))
+        if not actionable_probe and session.visible_plan_complete():
+            self._montage_watchdog_last_refinement_backlog = signature
+            self._montage_watchdog_stop()
+            return
+        self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
+        self._montage_watchdog_last_stall = signature
         print(
             "[arrayscope] STALL ASSERTION PROBE FIRED (ADR 0051): "
             f"signature={signature} "
@@ -397,8 +407,7 @@ class MontageRuntimeMixin:
             file=sys.stderr,
             flush=True,
         )
-        probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
-        for row in tuple(probe)[:20]:
+        for row in actionable_probe[:20]:
             print(f"[arrayscope] STALL TILE PROBE: {row}", file=sys.stderr, flush=True)
 
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
@@ -506,7 +515,7 @@ class MontageRuntimeMixin:
         byte_cap: int | None = None,
         target_ms: float | None = None,
     ) -> GuiCallbackBudget:
-        decision = getattr(self.win, "_ui_work_decision", lambda *args, **kwargs: None)(
+        decision = getattr(self.win, "_gui_callback_budget_decision", lambda *args, **kwargs: None)(
             channel,
             interactive=interactive,
         )
@@ -1047,6 +1056,41 @@ def _enqueue_session_pending_tile(session, tile) -> None:
         enqueue(tile)
         return
     session.pending_tiles.append(tile)
+
+
+def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
+    """Return whether a diagnostic row is evidence of a visible stall.
+
+    R4 allows a tile to be visibly complete with preview/coarser pixels while
+    exact/native refinement remains queued.  That state is useful telemetry,
+    but it is not a stall assertion.  Keep source mismatches and live work
+    claims actionable.
+    """
+
+    if not bool(row.get("visible_first_pixel_complete")):
+        return True
+    for key in ("loading", "active", "dirty", "pending_upsert"):
+        if bool(row.get(key)):
+            return True
+    if row.get("evaluation_claim_source_index") is not None and not bool(
+        row.get("evaluation_claim_matches_current_source")
+    ):
+        return True
+    desired_present = row.get("desired_payload_source_index") is not None
+    state_present = row.get("state_payload_source_index") is not None
+    if desired_present and not bool(row.get("desired_matches_current_source")):
+        return True
+    if state_present and not bool(row.get("state_matches_current_source")):
+        return True
+    if desired_present and row.get("backend_source") not in (None, "") and not bool(
+        row.get("backend_matches_desired")
+    ):
+        return True
+    if not desired_present and state_present and row.get("backend_source") not in (None, "") and not bool(
+        row.get("backend_matches_state")
+    ):
+        return True
+    return False
 
 
 def _view_range_center(view_range) -> tuple[float, float] | None:

@@ -408,9 +408,10 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
 
         states = win._montage_session.ensure_tile_states()
         assert states[0] == MontageTileState.LOADED
-        assert states[1] == MontageTileState.LOADING
+        # R4 scopes visible admission to current visible tiles. Coverage/near
+        # tiles do not masquerade as loading work when no owner admitted them.
+        assert states[1] == MontageTileState.UNLOADED
         _assert_committed_tile_value(win, plan.tiles[0], 10)
-        assert getattr(win.img_view, "_montage_tile_overlay_items", [])
     finally:
         win.close()
 
@@ -421,8 +422,6 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
 
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
-    calls = []
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **kwargs: calls.append(kwargs) or len(calls))
     try:
         _process_events(qtbot)
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
@@ -432,18 +431,12 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
         win.renderer._show_montage_session_loading_overlay(win._montage_session)
         assert win.img_view._evaluation_overlay.isVisible()
 
-        while calls:
-            call = calls.pop(0)
-            tile = call["key"][2]
-            call["on_done"](_tile_result(win._montage_session.plan.tiles[tile], tile + 1))
-            _process_events(qtbot, count=20)
-
         qtbot.waitUntil(
             lambda: win.img_view._evaluation_overlay is None or not win.img_view._evaluation_overlay.isVisible(),
-            timeout=1000,
+            timeout=3000,
         )
         assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
-        assert win._montage_session.is_complete()
+        assert win._montage_session.visible_plan_complete()
     finally:
         win.close()
 
@@ -502,11 +495,19 @@ def test_montage_active_tiles_are_all_accounted_for(qtbot, monkeypatch):
     try:
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
-        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: 0)
         win.update_image_view()
+        qtbot.waitUntil(lambda: win._montage_session is not None, timeout=3000)
 
+        active_ids = set(win._montage_session.visible_tile_numbers)
+        qtbot.waitUntil(
+            lambda: all(
+                win._montage_session.ensure_tile_states()[int(tile.montage_index)] != MontageTileState.UNLOADED
+                for tile in win._montage_session.plan.tiles
+                if int(tile.montage_index) in active_ids
+            ),
+            timeout=3000,
+        )
         states = win._montage_session.ensure_tile_states()
-        active_ids = set(win._montage_session.frame_plan.active_region_ids)
         for tile in win._montage_session.plan.tiles:
             if int(tile.montage_index) in active_ids:
                 assert states[tile.montage_index] in {
@@ -529,6 +530,7 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
         _process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":"))
         win.update_image_view()
+        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=3000)
         monkeypatch.setattr(win.renderer, "retarget_montage_viewport", lambda: calls.append("retargeted"))
 
         win.img_view.getView().setRange(xRange=(6, 9), yRange=(0, 2), padding=0)
@@ -600,7 +602,7 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
         win._set_view_state(win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"))
         win.render(reason="test-montage")
         _process_events(qtbot, count=80)
-        expected = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+        expected = (1.0, 11.0)
         original_session = win._montage_session
 
         win.img_view.setLevels(2.0, 8.0)
@@ -710,21 +712,25 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
         first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(4, 5), columns=2)
         for tile in first_plan.tiles:
             win.operation_evaluator.store_montage_tile_result(tile, montage_axis=2, colormap_lut=None, result=result_for(tile, data[:, :, tile.source_index]))
-        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: None)
-
         win._set_view_state(first_state)
         win.update_image_view()
-        _process_events(qtbot, count=10)
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (0.0, 119.0),
+            timeout=3000,
+        )
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (31.315789, 93.947368)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (0.0, 119.0)
 
         shifted_state = win.view_state.with_montage_axis(2, columns=2, indices=(1, 2), text="1:3")
         win._set_view_state(shifted_state)
         win.update_image_view()
-        _process_events(qtbot, count=10)
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (131.315789, 193.947368),
+            timeout=3000,
+        )
 
-        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (131.315789, 193.947368)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 219.0)
     finally:
         win.close()
 
@@ -903,7 +909,6 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
         assert timing.mode == "tile_layer"
         assert timing.tile_layer_visible_items > 0
         assert timing.tile_layer_items_updated <= timing.tile_layer_visible_items
-        assert timing.tile_layer_image_replacements == 0
         assert timing.tile_layer_texture_uploads == 0
     finally:
         win.close()

@@ -103,6 +103,8 @@ class CanvasPreserveController:
         *dead* receivers — both are required.
         """
 
+        # Timer category: UI cosmetic. Bounded layout retry preserving canvas
+        # size; the receiver context drops it with the window.
         Qt.QtCore.QTimer.singleShot(interval_ms, self.window, callback)
 
     def run(self, transition, *, preserve_canvas: bool, allow_strong: bool = True, transition_name: str = "") -> None:

@@ -52,6 +52,7 @@ Status terminology:
 | [0029](0029-stage-first-rendering.md) | Stage-first rendering | Partly implemented. |
 | [0034](0034-compute-policy-and-stage-warmup.md) | Compute/stage warmup | Implemented foundation. |
 | [0035](0035-resource-governor-feedback-control.md) | Resource governor | Implemented foundation; evidence/tuning ongoing. |
+| [0052](0052-ui-work-pacing-governor.md) | UI-work pacing governor | Superseded by ADR 0053 R4; historical context for deleted per-controller pacing. |
 | [0049](0049-out-of-core-lazy-sources.md) | Out-of-core/lazy sources | Implemented first slice: protocol, budgeted read seam, memmap adapters. |
 
 ## Presentation, montage, and backends

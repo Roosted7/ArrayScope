@@ -165,7 +165,7 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_main_texture_kind = None
         self._pending_vispy_histogram_update = None
         self._vispy_histogram_update_pending = False
-        # Lower-priority metadata continuation. Pixel commits are synchronous;
+        # Timer category: UI cosmetic. Lower-priority metadata continuation. Pixel commits are synchronous;
         # PyQtGraph histogram/LUT painting is latest-only secondary work and is
         # admitted only when no interactive render is pending.
         self._vispy_histogram_timer = QtCore.QTimer(self)
@@ -1610,7 +1610,7 @@ class VisPyImageView2D(ImageViewShell):
 
     def _vispy_histogram_retry_interval_ms(self) -> int:
         window = self.window()
-        decision_provider = getattr(window, "_ui_work_decision", None)
+        decision_provider = getattr(window, "_gui_callback_budget_decision", None)
         if callable(decision_provider):
             decision = decision_provider("histogram_refresh", interactive=True)
             if decision is not None:
@@ -1817,7 +1817,7 @@ class VisPyImageView2D(ImageViewShell):
             self._vispy_camera_sync_pending = False
             self._sync_vispy_camera_to_view()
 
-        # Qt event-turn barrier. Multiple range changes collapse to one camera
+        # Timer category: UI cosmetic. Qt event-turn barrier. Multiple range changes collapse to one camera
         # sync; remove if VisPy exposes a direct safe same-turn camera update.
         QtCore.QTimer.singleShot(0, self, apply_sync)
 

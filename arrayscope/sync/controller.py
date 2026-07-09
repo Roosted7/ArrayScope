@@ -134,6 +134,8 @@ class WindowSyncController(Qt.QtCore.QObject):
             return
         timer = self._publish_timers.get(facet)
         if timer is None:
+            # Timer category: UI cosmetic. Coalesces sync publications so UI
+            # toggles do not emit redundant local-bus messages.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(lambda facet=facet: self._publish_now(facet))

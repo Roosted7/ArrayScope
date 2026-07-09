@@ -12,7 +12,7 @@ from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, WorkItem
+from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
@@ -52,14 +52,10 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             preview_walk_only = True
         else:
             return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
-    governor = getattr(window.win, "resource_governor", None)
-    if governor is not None:
-        decision = governor.decide_montage_prefetch(stage_ready_or_in_flight=True, visible_busy=False)
-        if not decision.allowed:
-            return _record(window, (MontagePrefetchDecision(None, None, "blocked_governor", decision.reason),))
-        max_tiles = decision.max_items
     if max_tiles is None:
-        max_tiles = 2
+        max_tiles = _owner_prefetch_batch_limit(window)
+    if _owner_memory_pressure_blocks_prefetch(window):
+        return _record(window, (MontagePrefetchDecision(None, None, "blocked_memory_pressure", "memory pressure"),))
 
     decisions = []
     scheduled = 0
@@ -286,6 +282,25 @@ def _busy(window, session=None) -> bool:
     )
 
 
+def _owner_prefetch_batch_limit(window) -> int:
+    governor = getattr(window.win, "resource_governor", None)
+    profile = getattr(governor, "profile", "balanced")
+    profile_name = str(getattr(profile, "value", profile)).lower()
+    if profile_name == "aggressive":
+        return 4
+    if profile_name == "conservative":
+        return 1
+    return 2
+
+
+def _owner_memory_pressure_blocks_prefetch(window) -> bool:
+    governor = getattr(window.win, "resource_governor", None)
+    diagnostics = None if governor is None else governor.diagnostics()
+    pressure = getattr(getattr(diagnostics, "pressure", None), "memory_pressure", None)
+    pressure_name = str(getattr(pressure, "value", pressure)).lower()
+    return pressure_name in {"elevated", "high"}
+
+
 def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -> None:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if not (
@@ -335,34 +350,60 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
         return
 
 
-def _invite_walk_continuation(window, *, delay_ms: int = 80) -> None:
-    """Defer-and-coalesce the next walk batch off the completion callback.
+def _invite_walk_continuation(window) -> None:
+    """Ask the kernel to admit the next speculative walk batch.
 
-    One pending invitation at a time; it re-resolves the current session at
-    fire time so a scrub that replaced the session never revives a stale
-    walk.  The delay yields the GUI thread to any queued input events first.
+    One pending invitation at a time; it re-resolves the current session when
+    the speculative lane grants the callback, so a scrub that replaced the
+    session never revives stale side work.
     """
 
     if getattr(window, "_montage_walk_invite_pending", False):
         return
     window._montage_walk_invite_pending = True
+    session = getattr(window, "_montage_session", None)
+    if session is None:
+        window._montage_walk_invite_pending = False
+        return
+    generation = (
+        getattr(session, "key", None),
+        int(getattr(session, "session_id", 0) or 0),
+        int(getattr(session, "viewport_revision", 0) or 0),
+    )
 
-    def fire():
+    def fire(_value=None, generation=generation):
         window._montage_walk_invite_pending = False
         if _interaction_active(window):
             return
         current = getattr(window, "_montage_session", None)
         if current is None or not window._montage_session_is_current(current):
             return
+        current_generation = (
+            getattr(current, "key", None),
+            int(getattr(current, "session_id", 0) or 0),
+            int(getattr(current, "viewport_revision", 0) or 0),
+        )
+        if current_generation != generation:
+            return
         schedule_near_viewport_montage_prefetch(window, current)
 
-    try:
-        from pyqtgraph.Qt import QtCore
-
-        # Receiver-scoped: the invitation dies with the window instead of
-        # firing into a torn-down renderer (architecture guard).
-        QtCore.QTimer.singleShot(int(delay_ms), window.win, fire)
-    except Exception:
+    kernel = getattr(window.win, "kernel", None)
+    if kernel is None:
+        window._montage_walk_invite_pending = False
+        return
+    handle = kernel.submit_speculative_batch(
+        kind="montage-prefetch-walk",
+        scope=f"montage:{getattr(session, 'key', None)!r}:prefetch",
+        generation=generation,
+        key=("montage-prefetch-walk", generation),
+        fn=lambda: True,
+        on_done=fire,
+        on_stale=lambda: setattr(window, "_montage_walk_invite_pending", False),
+        lane=WorkLane.SPECULATIVE_RESIDENCY,
+        priority=Priority.PREFETCH,
+        max_items=1,
+    )
+    if handle is None:
         window._montage_walk_invite_pending = False
 
 

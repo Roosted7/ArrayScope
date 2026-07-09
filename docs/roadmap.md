@@ -24,7 +24,7 @@ canonicalization, and the first hygiene deletions are landed on the
 |---|---|
 | R2 | MontagePipeline live; frame_renderer clusters B/C/E dissolved |
 | R3 | LOD ladder adoption; montage_lod deleted; ops once per rung; PyQtGraph parity decision |
-| R4 | timer/governor audit: no scheduling timers, governor = telemetry + 2 knobs |
+| R4 | timer/governor audit implementation landed; idle/scrub/benchmark evidence pending |
 | R5 | test pruning + docs truth pass; known-red ledger emptied |
 
 Do not start items below this line while a redesign plan is open — they all

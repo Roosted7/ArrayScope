@@ -54,6 +54,8 @@ class QtKernelBridge(Qt.QtCore.QObject):
         self._fallback_interval_ms = self._fallback_min_ms
         self.fallback_event_polls = 0
         self.fallback_idle_polls = 0
+        # Timer category: anti-hang fallback. Adaptive poll for missed queued
+        # completion signals; event/idle poll counters make activity visible.
         self._fallback_timer = Qt.QtCore.QTimer(self)
         self._fallback_timer.setSingleShot(True)
         self._fallback_timer.setInterval(self._fallback_interval_ms)

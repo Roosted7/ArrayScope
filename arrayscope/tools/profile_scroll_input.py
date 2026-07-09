@@ -122,6 +122,8 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         before = _coordinator_snapshot(win)
         tick_records: list[dict[str, object]] = []
         profiler = cProfile.Profile()
+        # Timer category: UI cosmetic. Probe heartbeat drives synthetic input
+        # and measures latency; it is outside production scheduling.
         timer = QtCore.QTimer()
         timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
         interval_ms = max(1, int(round(1000.0 / max(1.0, float(args.hz)))))
@@ -156,6 +158,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
             )
             if state_box["tick"] >= int(args.ticks):
                 timer.stop()
+                # Timer category: UI cosmetic. Probe shutdown grace period.
                 QtCore.QTimer.singleShot(500, app, app.quit)
 
         timer.timeout.connect(on_tick)

@@ -274,7 +274,7 @@ class DimensionStrip(QtWidgets.QWidget):
         if self._relayout_pending:
             return
         self._relayout_pending = True
-        # Qt event-turn barrier. Resize events can arrive before the final
+        # Timer category: UI cosmetic. Qt event-turn barrier. Resize events can arrive before the final
         # contents rect is stable; `_relayout_pending` guards the latest pass.
         QtCore.QTimer.singleShot(0, self, self._run_scheduled_relayout)
 

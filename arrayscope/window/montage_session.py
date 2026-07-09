@@ -1547,7 +1547,13 @@ class MontageRenderSession:
                 self.level_generation.forget_tile(int(stale))
         lod_factor = self._selected_lod_factor()
         current_loaded = set(self.rendered_tiles)
-        planned = tuple(sorted(planned_numbers))
+        planned = tuple(
+            dict.fromkeys(
+                int(tile.montage_index)
+                for tile in tuple(self.visible_tiles)
+                if int(tile.montage_index) in planned_numbers
+            )
+        )
         fallback_backed = {
             int(tile)
             for tile, payload in previous_payloads.items()
@@ -2289,10 +2295,13 @@ class MontageRenderSession:
             semantic_source = None if tile is None else self.tile_semantic_source_id(source_index)
             desired_source_index = None if desired is None else int(getattr(desired, "source_index", -1))
             state_source_index = None if state_payload is None else int(getattr(state_payload, "source_index", -1))
+            desired_lod = getattr(desired, "lod", None)
+            state_lod = getattr(state_payload, "lod", None)
             evaluation_claim = None if rec is None else getattr(rec, "evaluation_claim", None)
             evaluation_claim_source_index = (
                 None if evaluation_claim is None else int(getattr(evaluation_claim, "source_index", -1))
             )
+            visible_first_pixel_complete = self._tile_presentation_matches_current_plan(tile_number)
             resident_levels: list[int] = []
             if rec is not None and tile is not None:
                 for key, entry in dict(getattr(rec, "levels", {}) or {}).items():
@@ -2313,8 +2322,12 @@ class MontageRenderSession:
                     "base_source": _diag_identity(self.tile_source_ids.get(tile_number)),
                     "desired_payload_source": _diag_identity(getattr(desired, "source_id", None)),
                     "desired_payload_source_index": desired_source_index,
+                    "desired_payload_quality": "" if desired is None else str(getattr(desired, "quality", "")),
+                    "desired_payload_lod": None if desired_lod is None else int(getattr(desired_lod, "level", 0) or 0),
                     "state_payload_source": _diag_identity(getattr(state_payload, "source_id", None)),
                     "state_payload_source_index": state_source_index,
+                    "state_payload_quality": "" if state_payload is None else str(getattr(state_payload, "quality", "")),
+                    "state_payload_lod": None if state_lod is None else int(getattr(state_lod, "level", 0) or 0),
                     "backend_source": _diag_identity(backend_identity),
                     "desired_matches_current_source": bool(
                         desired is not None and source_index is not None and desired_source_index == source_index
@@ -2338,6 +2351,9 @@ class MontageRenderSession:
                     ),
                     "semantic_state": "" if rec is None else str(rec.semantic.value),
                     "presentation_state": "" if rec is None else str(rec.presentation.value),
+                    "presented_quality": "" if rec is None else str(getattr(rec, "presented_quality", "")),
+                    "presented_lod": None if rec is None else getattr(rec, "presented_level", None),
+                    "visible_first_pixel_complete": bool(visible_first_pixel_complete),
                     "rendered": tile_number in self.rendered_tiles,
                     "presented": tile_number in presented,
                     "pending": tile_number in pending,
@@ -2494,8 +2510,7 @@ class MontageRenderSession:
                 continue
             payload = payloads.get(int(tile))
             if (
-                int(tile) in self.rendered_tiles
-                and payload is not None
+                payload is not None
                 and str(getattr(payload, "quality", "exact")) == "preview"
             ):
                 tiles.append(int(tile))

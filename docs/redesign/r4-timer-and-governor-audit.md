@@ -156,6 +156,12 @@ late GPU uniform.
 
 ## Exit gate
 
+- **Implementation note (2026-07-09):** the code pass deletes scheduling
+  timers in montage/slice prefetch and level-stat refinement, admits those
+  continuations through kernel lanes, adds timer-category comments plus an
+  allowlist architecture guard, and shrinks the governor to bridge drain and
+  commit batch bounds. The remaining gate is evidence: settled-idle CPU,
+  scrub heartbeat, and backend benchmark comparison.
 - Timer allowlist test green; grep shows no scheduling-category timers.
 - Governor file count of decisions ≤ 2 knobs; ADR 0052 status updated to
   "superseded by ADR 0053 R4" with the rescope recorded.

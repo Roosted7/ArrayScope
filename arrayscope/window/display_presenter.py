@@ -431,7 +431,7 @@ class DisplayPresentationMixin:
         if timer is None:
             from pyqtgraph.Qt import QtCore
 
-            # Qt event-turn barrier. Restarting the single timer coalesces
+            # Timer category: UI cosmetic. Qt event-turn barrier. Restarting the single timer coalesces
             # bursts to one retarget, and the callback re-derives everything
             # from the committed frame, so this is pure rescheduling — not an
             # ordering source for frame semantics.

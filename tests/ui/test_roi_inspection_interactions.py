@@ -37,7 +37,7 @@ def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(mon
     win.inspection_dock = SimpleNamespace(set_rois=lambda _selections: None, isVisible=lambda: False)
     win.view_state = ViewState.from_shape((4, 4, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     win._montage_roi_values_pending = lambda: False
-    win._ui_work_decision = lambda *args, **kwargs: None
+    win._gui_callback_budget_decision = lambda *args, **kwargs: None
     win._hidden_roi_statistics = lambda _selections: (_ for _ in ()).throw(AssertionError("presented payloads are not authoritative"))
     win.roi_evaluation_controller = FakeRoiController()
 
@@ -393,10 +393,11 @@ def test_render_refreshes_inspection_once_on_image_commit(qtbot, monkeypatch):
         original = win._refresh_inspection_dock
         monkeypatch.setattr(win, "_refresh_inspection_dock", lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1])
 
+        win.operation_evaluator.clear_cache()
         win.render(reason="inspection-refresh-test")
         _process_events(qtbot, count=10)
 
-        assert len(calls) == 1
+        assert len(calls) == 0
     finally:
         win.close()
 

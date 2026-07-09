@@ -1,4 +1,5 @@
 import ast
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -263,6 +264,89 @@ def test_lod_admission_has_no_effects_side_pending_maps_or_shared_floor_markers(
                     assert f"{prefix}{token}" not in text, f"{token} found in {path.relative_to(ROOT)}"
 
 
+def test_qtimers_are_explicitly_allowlisted_by_category():
+    """R4 guard: new timers must be justified as UI cosmetic or anti-hang."""
+
+    allowed = Counter(
+        {
+            ("arrayscope/display/histogram_controller.py", "HistogramLevelPreviewController.__init__", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/display/histogram_controller.py", "HistogramDisplayController.__init__", "QTimer", "UI cosmetic"): 2,
+            ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action.PaintProbe.eventFilter", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D.setupUI", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D._request_vispy_camera_sync", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/kernel/eval_adapter.py", "KernelEvaluationController._submit", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/kernel/qt_bridge.py", "QtKernelBridge.__init__", "QTimer", "anti-hang fallback"): 1,
+            ("arrayscope/sync/bus.py", "SyncBus._schedule_retry", "QTimer", "anti-hang fallback"): 1,
+            ("arrayscope/sync/controller.py", "WindowSyncController.schedule_publish", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/tools/profile_montage_workflow.py", "_EventLoopProbe.__init__", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/tools/profile_scroll_input.py", "main", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/tools/profile_scroll_input.py", "main.on_tick", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/ui/diagnostics.py", "DiagnosticsDialog.__init__", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/ui/dimension_strip.py", "DimensionStrip._schedule_relayout", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/ui/display_controls.py", "DisplayControlBuildMixin._create_button_groups_and_profile_timer", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/ui/menus.py", "WindowMenuMixin.closeEvent", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/ui/toasts.py", "show_status_message", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/ui/toasts.py", "show_status_action", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/window/canvas_preserve.py", "CanvasPreserveController._single_shot", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/display_presenter.py", "DisplayPresentationMixin._schedule_frame_viewport_update", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_shape_restore", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._restore_viewport_continuity_shape_step", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_when_ready", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_retarget", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.restore_window_settings", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.reset_layout", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.schedule_view_geometry_refresh", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.set_dock_visible_later", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.set_managed_dock_visible", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/main.py", "ArrayScopeWindow.__init__", "singleShot", "UI cosmetic"): 2,
+            ("arrayscope/window/main.py", "ArrayScopeWindow._note_viewport_interaction", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/window/montage_commit.py", "MontagePipelineEffects.request_presentation", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/montage_runtime.py", "MontageRuntimeMixin.request_montage_replan", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/montage_runtime.py", "MontageRuntimeMixin._ensure_montage_watchdog", "QTimer", "anti-hang fallback"): 1,
+            ("arrayscope/window/render_coordinator.py", "RenderCoordinator.__init__", "QTimer", "UI cosmetic"): 2,
+        }
+    )
+    found = Counter()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self, rel: str):
+            self.rel = rel
+            self.stack: list[str] = []
+
+        def visit_ClassDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            kind = None
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                if func.attr == "QTimer":
+                    kind = "QTimer"
+                elif func.attr == "singleShot":
+                    kind = "singleShot"
+            elif isinstance(func, ast.Name) and func.id == "QTimer":
+                kind = "QTimer"
+            if kind is not None:
+                found[(self.rel, ".".join(self.stack) or "<module>", kind)] += 1
+            self.generic_visit(node)
+
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        Visitor(str(path.relative_to(ROOT))).visit(ast.parse(path.read_text()))
+
+    allowed_without_category = Counter(
+        (rel, qualname, kind) for (rel, qualname, kind, _category), count in allowed.items() for _ in range(count)
+    )
+    assert found == allowed_without_category
 def test_vispy_warm_residency_has_no_backend_scheduling_timer():
     text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
     assert "_vispy_warm_tile_timer" not in text

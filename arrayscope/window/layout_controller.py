@@ -56,6 +56,7 @@ class WindowLayoutManager:
                 if viewport is not None:
                     self._restore_viewport_continuity_shape()
 
+            # Timer category: UI cosmetic. Layout restoration waits for dock state.
             Qt.QtCore.QTimer.singleShot(0, self.window, settle_docks_and_viewport)
 
     def save_window_settings(self):
@@ -99,7 +100,7 @@ class WindowLayoutManager:
         else:
             self.set_managed_dock_visible(win.operation_dock, False, reason="reset-operations", preserve_canvas=False)
         self._add_dock_to_panel_area(win.profile_dock)
-        # Qt event-turn barrier. Default dock resize depends on the redocked
+        # Timer category: UI cosmetic. Qt event-turn barrier. Default dock resize depends on the redocked
         # widgets being present in the main window layout.
         Qt.QtCore.QTimer.singleShot(0, self.window, self.resize_default_docks)
 
@@ -150,7 +151,7 @@ class WindowLayoutManager:
             self.schedule_view_geometry_refresh()
 
     def schedule_view_geometry_refresh(self):
-        # Qt event-turn barrier. View geometry is sampled after pending dock
+        # Timer category: UI cosmetic. Qt event-turn barrier. View geometry is sampled after pending dock
         # visibility changes settle.
         Qt.QtCore.QTimer.singleShot(0, self.window, self.refresh_view_geometry)
 
@@ -158,7 +159,7 @@ class WindowLayoutManager:
         self._state_for(dock).auto_visible = bool(visible)
         generation = int(self._dock_visibility_generations.get(dock, 0)) + 1
         self._dock_visibility_generations[dock] = generation
-        # Qt event-turn barrier guarded by a per-dock generation so superseded
+        # Timer category: UI cosmetic. Qt event-turn barrier guarded by a per-dock generation so superseded
         # visibility requests cannot apply later.
         Qt.QtCore.QTimer.singleShot(
             0,
@@ -251,7 +252,7 @@ class WindowLayoutManager:
         restore_viewport_shape = getattr(win, "_restore_viewport_continuity_shape_after_layout", None)
         restore_shape = getattr(win, "_viewport_continuity_shape_target", lambda: None)
         if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
-            # Qt event-turn barrier. A restored file viewport shape follows the
+            # Timer category: UI cosmetic. Qt event-turn barrier. A restored file viewport shape follows the
             # dock visibility transition that changed the central viewport.
             Qt.QtCore.QTimer.singleShot(0, self.window, restore_viewport_shape)
 

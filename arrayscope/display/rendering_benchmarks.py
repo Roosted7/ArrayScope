@@ -1002,6 +1002,8 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
         class PaintProbe(QtCore.QObject):
             def eventFilter(self, obj, event):
                 if obj is paint_target and event.type() == QtCore.QEvent.Type.Paint:
+                    # Timer category: UI cosmetic. Benchmark paint probe
+                    # defers frame accounting until the current paint returns.
                     QtCore.QTimer.singleShot(0, self, note_frame)
                 return False
 
@@ -1009,6 +1011,8 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
         paint_target.installEventFilter(paint_probe)
 
     loop = QtCore.QEventLoop()
+    # Timer category: UI cosmetic. Benchmark heartbeat measures event-loop
+    # gaps and does not participate in application data flow.
     heartbeat = QtCore.QTimer()
     heartbeat.setInterval(2)
     timeout_ms = max(50, int(os.environ.get("ARRAYSCOPE_BENCH_FRAME_TIMEOUT_MS", "1000")))

@@ -472,6 +472,8 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None) -> bool:
 
 class _EventLoopProbe:
     def __init__(self, QtCore):
+        # Timer category: UI cosmetic. Benchmark heartbeat samples event-loop
+        # gaps and never gates render work.
         self._timer = QtCore.QTimer()
         self._timer.setInterval(1)
         self._timer.timeout.connect(self._tick)
@@ -709,7 +711,6 @@ def _run_phase(
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
-    phase_ui_work_decision_start = _recent_ui_work_decisions(win)
     phase_session = getattr(win, "_montage_session", None)
     preview_floor_session_id = None if phase_session is None else int(getattr(phase_session, "session_id", -1) or -1)
     preview_floor_count_start = 0 if phase_session is None else int(
@@ -743,7 +744,6 @@ def _run_phase(
         event_loop_p99_gap_ms=probe.percentile_ms(99),
         event_loop_max_gap_ms=probe.max_gap_ms,
         phase_ui_work_start=phase_ui_work_start,
-        phase_ui_work_decision_start=phase_ui_work_decision_start,
     )
     if isinstance(action_result, dict):
         record.update(action_result)
@@ -1044,7 +1044,6 @@ def _phase_record(
     event_loop_p99_gap_ms: float | None,
     event_loop_max_gap_ms: float,
     phase_ui_work_start: tuple[object, ...] = (),
-    phase_ui_work_decision_start: tuple[object, ...] = (),
 ) -> dict[str, object]:
     snapshot = win.collect_runtime_diagnostics()
     timing = snapshot.montage_timing
@@ -1052,17 +1051,11 @@ def _phase_record(
     resource = snapshot.resource_governor
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     recent_ui_work = () if resource is None else tuple(resource.recent_ui_work_observations)
-    recent_ui_work_decisions = () if resource is None else tuple(getattr(resource, "recent_ui_work_decisions", ()))
     phase_recent_ui_work, phase_recent_ui_work_truncated = _ui_work_observation_delta(
         recent_ui_work,
         phase_ui_work_start,
     )
-    phase_recent_ui_work_decisions, phase_recent_ui_work_decisions_truncated = _ui_work_observation_delta(
-        recent_ui_work_decisions,
-        phase_ui_work_decision_start,
-    )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
-    ui_decisions = () if resource is None else tuple(resource.ui_decisions)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
     vispy = _vispy_presentation_diagnostics(win)
     level_state = _montage_level_presentation_state(win)
@@ -1195,10 +1188,6 @@ def _phase_record(
             }
             for decision in lane_decisions
         ],
-        "resource_ui_decisions": [asdict(decision) for decision in ui_decisions],
-        "recent_ui_work_decisions": [asdict(decision) for decision in recent_ui_work_decisions],
-        "phase_recent_ui_work_decisions": [asdict(decision) for decision in phase_recent_ui_work_decisions],
-        "phase_recent_ui_work_decisions_truncated": bool(phase_recent_ui_work_decisions_truncated),
         "recent_ui_work_observations": [asdict(observation) for observation in recent_ui_work],
         "phase_recent_ui_work_observations": [asdict(observation) for observation in phase_recent_ui_work],
         "phase_recent_ui_work_observations_truncated": bool(phase_recent_ui_work_truncated),
@@ -1255,15 +1244,6 @@ def _recent_ui_work_observations(win) -> tuple[object, ...]:
         return ()
     resource = snapshot.resource_governor
     return () if resource is None else tuple(resource.recent_ui_work_observations)
-
-
-def _recent_ui_work_decisions(win) -> tuple[object, ...]:
-    try:
-        snapshot = win.collect_runtime_diagnostics()
-    except Exception:
-        return ()
-    resource = snapshot.resource_governor
-    return () if resource is None else tuple(getattr(resource, "recent_ui_work_decisions", ()))
 
 
 def _ui_work_observation_delta(current: tuple[object, ...], start: tuple[object, ...]) -> tuple[tuple[object, ...], bool]:

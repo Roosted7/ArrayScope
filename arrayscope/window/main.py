@@ -11,6 +11,7 @@ from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
+from arrayscope.core.gui_callback_budget import default_gui_callback_budget_decision
 from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
@@ -174,7 +175,6 @@ class ArrayScopeWindow(
             apply_lane_quota=False,
         )
         self._apply_resource_governor_decisions(refresh_telemetry=False)
-        self._ensure_resource_governor_timer()
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
@@ -265,10 +265,10 @@ class ArrayScopeWindow(
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
 
-            # Qt event-turn barrier. The callback rechecks restore readiness
+            # Timer category: UI cosmetic. Qt event-turn barrier. The callback rechecks restore readiness
             # after the first show/layout pass.
             Qt.QtCore.QTimer.singleShot(0, self, finish_restored_file_session_viewport)
-        # Qt event-turn barrier. Progressive dock preservation starts after
+        # Timer category: UI cosmetic. Qt event-turn barrier. Progressive dock preservation starts after
         # startup layout has settled.
         Qt.QtCore.QTimer.singleShot(0, self, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
@@ -330,27 +330,6 @@ class ArrayScopeWindow(
             ComputeLane.ROI: Lane.PROFILE_ROI_HOVER,
             ComputeLane.PIXEL: Lane.PROFILE_ROI_HOVER,
         }[ComputeLane(lane)]
-
-    def _ensure_resource_governor_timer(self):
-        timer = getattr(self, "_resource_governor_timer", None)
-        if timer is None:
-            # Feedback sampling timer. It only adjusts policy from observed
-            # scheduler/resource state; it does not order rendering semantics.
-            timer = Qt.QtCore.QTimer(self)
-            timer.timeout.connect(self._on_resource_governor_timer)
-            self._resource_governor_timer = timer
-        if not timer.isActive():
-            timer.start(250)
-        return timer
-
-    def _on_resource_governor_timer(self) -> None:
-        if getattr(self, "_closing", False):
-            return
-        active = self._resource_governor_work_active()
-        self._apply_resource_governor_decisions()
-        timer = getattr(self, "_resource_governor_timer", None)
-        if timer is not None:
-            timer.start(250 if active else 1000)
 
     def _resource_governor_work_active(self) -> bool:
         for controller in self._evaluation_controllers_by_lane().values():
@@ -414,13 +393,11 @@ class ArrayScopeWindow(
         )
 
     def _note_interaction_state_changed(self) -> None:
-        """Reapply governor decisions on interaction edges instead of waiting.
+        """Track interaction edges without pacing governor decisions.
 
-        The sampling timer runs at 250 ms (1 s when idle), so worker counts,
-        batch limits, and budgets decided for the previous regime could stay
-        applied for up to a second after the user starts or stops interacting.
-        Edges are rare, so an immediate lightweight reapplication (no fresh
-        telemetry sample) is cheap; the timer remains the periodic backstop.
+        Kernel completions provide the governor wakeup. Interaction stop still
+        wakes deferred native-quality replans, because those are render intent,
+        not pacing-budget updates.
         """
         if getattr(self, "_closing", False):
             return
@@ -432,12 +409,6 @@ class ArrayScopeWindow(
             replan = getattr(renderer, "replan_deferred_interactive_native_quality", None)
             if callable(replan):
                 replan()
-        if active == bool(getattr(self, "_governor_interactive_applied", None)):
-            return
-        self._apply_resource_governor_decisions(refresh_telemetry=False)
-        timer = getattr(self, "_resource_governor_timer", None)
-        if timer is not None and active:
-            timer.start(250)
 
     def _note_kernel_completion_drain(self) -> None:
         if getattr(self, "_closing", False):
@@ -467,22 +438,13 @@ class ArrayScopeWindow(
             )
         for lane, workers in quota_by_lane.items():
             self.kernel.set_lane_quota(lane, workers)
-        # R1: completions now drain through one QtKernelBridge. The old
-        # per-controller drain channels are gone; R4 will shrink the governor
-        # further to telemetry plus the remaining two knobs.
+        # R4: completions drain through one QtKernelBridge; the governor owns
+        # only this drain knob plus commit batch bounds and kernel lane quotas.
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
-            decision = governor.decide_ui_work("kernel_bridge_drain", interactive=interactive)
+            decision = governor.decide_bridge_drain(interactive=interactive)
             bridge.set_max_items_per_drain(decision.batch_limit)
             bridge.set_budget_ms(decision.budget_ms)
-        histogram_decision = governor.decide_ui_work("histogram_preview", interactive=interactive)
-        img_view = getattr(self, "img_view", None)
-        if img_view is not None and hasattr(img_view, "setHistogramPreviewInterval"):
-            img_view.setHistogramPreviewInterval(histogram_decision.interval_ms)
-        profile_decision = governor.decide_ui_work("profile_update", interactive=interactive)
-        profile_timer = getattr(self, "_profile_timer", None)
-        if profile_timer is not None:
-            profile_timer.setInterval(max(1, int(profile_decision.interval_ms)))
         # Montage prefetch asks the governor for a per-run tile budget in
         # `window.montage_prefetch`. Do not project that local decision onto
         # the shared prefetch controller: slice/profile prefetch have their
@@ -515,23 +477,8 @@ class ArrayScopeWindow(
         if feedback is not None:
             feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
 
-    def _ui_work_decision(
-        self,
-        channel: str,
-        *,
-        interactive: bool = False,
-        work_signature: object | None = None,
-        conservative_start: bool = False,
-    ):
-        governor = getattr(self, "resource_governor", None)
-        if governor is not None:
-            return governor.decide_ui_work(
-                channel,
-                interactive=interactive,
-                work_signature=work_signature,
-                conservative_start=conservative_start,
-            )
-        return None
+    def _gui_callback_budget_decision(self, channel: str, *, interactive: bool = False):
+        return default_gui_callback_budget_decision(channel, interactive=interactive)
 
     def _note_viewport_interaction(self, reason: str = "viewport") -> None:
         if str(reason) == "range-programmatic":
@@ -541,7 +488,7 @@ class ArrayScopeWindow(
         self._viewport_interaction_active = True
         timer = getattr(self, "_viewport_interaction_quiet_timer", None)
         if timer is None:
-            # User-interaction quiet detector for side-panel refresh and
+            # Timer category: UI cosmetic. User-interaction quiet detector for side-panel refresh and
             # in-progress viewport continuations. Montage tile correctness is
             # submitted through the kernel by the active retarget path.
             timer = Qt.QtCore.QTimer(self)

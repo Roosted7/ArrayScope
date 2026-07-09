@@ -247,7 +247,7 @@ class FileViewSessionMixin:
         if getattr(self, "_viewport_continuity_shape_generation", None) == tx.generation:
             return
         self._viewport_continuity_shape_generation = tx.generation
-        # Qt event-turn barrier. Viewport sizing must wait until the current
+        # Timer category: UI cosmetic. Qt event-turn barrier. Viewport sizing must wait until the current
         # show/dock/layout pass has produced the real graphics viewport.
         Qt.QtCore.QTimer.singleShot(
             0,
@@ -289,7 +289,7 @@ class FileViewSessionMixin:
                 else:
                     self._reapply_viewport_continuity_range_after_layout()
             return
-        # Qt layout retry. Bounded by FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS and
+        # Timer category: UI cosmetic. Qt layout retry. Bounded by FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS and
         # removable when viewport restore has a reliable post-layout signal.
         Qt.QtCore.QTimer.singleShot(
             FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
@@ -508,7 +508,7 @@ class FileViewSessionMixin:
         tx = self._viewport_continuity_transaction()
         if tx is None or tx.viewport is None or (tx.range_applied and tx.released):
             return
-        # Qt event-turn barrier. The callback rechecks committed frame/session
+        # Timer category: UI cosmetic. Qt event-turn barrier. The callback rechecks committed frame/session
         # readiness before applying the saved view range.
         Qt.QtCore.QTimer.singleShot(0, self, self._apply_viewport_continuity_when_ready)
 
@@ -523,7 +523,7 @@ class FileViewSessionMixin:
             scheduler()
 
         try:
-            # Qt event-turn barrier. Retargeting follows the restored view range
+            # Timer category: UI cosmetic. Qt event-turn barrier. Retargeting follows the restored view range
             # after the ViewBox has accepted it.
             Qt.QtCore.QTimer.singleShot(0, self, schedule_once)
         except Exception:

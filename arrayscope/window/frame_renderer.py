@@ -517,26 +517,18 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             viewport_shape,
             plan.tile_shape,
         )
-        # Interaction fast path (ADR 0051 rule 4 at the architecture level):
-        # during a scrub/pan burst, stage planning is *deferred, superseded
-        # work* — mid-burst steps present pyramid floors and cached tiles
-        # only, and the full plan (plan_slab per tile + stage materializer
-        # claims, ~30 ms synchronous) runs once, for the step the user lands
-        # on.  Superseded steps never touch the stage materializer at all,
-        # so there are no claims to repair.  Native policy has no floors to
-        # carry the screen, and the first session of a document has a user
-        # actively waiting: both plan inline.
+        # Interaction fast path: during a scrub/pan burst, supersedable stage
+        # planning runs only for the step the user lands on. Native policy and
+        # first-ever montage builds still plan inline because they have no
+        # retained screen to carry.
         previous_session = getattr(self, "_montage_session", None)
         defer_stage_planning = bool(
             missing_tiles
             and _viewport_interaction_active(self)
             and self._montage_quality_policy_mode() == LOD_POLICY_RESIDENT
             and previous_session is not None
-            # Only a predecessor that actually committed montage content can
-            # carry the screen through the burst (floors/retained payloads).
-            # A first-ever montage build has a user staring at nothing —
-            # plan inline.  Same axis: an axis change is a new montage, not a
-            # scrub step.
+            # Only a committed predecessor on the same axis can carry the
+            # screen; a first fill or axis change is not a scrub step.
             and bool(getattr(previous_session, "display_committed", False))
             and getattr(previous_session, "montage_axis", None) == axis
         )
@@ -805,15 +797,9 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
             return _reject("dtype")
         if bool(session.rgb) != bool(view_state.channel == ChannelMode.COMPLEX):
             return _reject("rgb")
-        # Level convergence no longer forces a rebirth (ADR 0051 P2, landed
-        # 2026-07-05): upserts are machine-gated (emit-once + identity-aware
-        # acknowledgement with bounded resignation), stale-level tiles drain
-        # through prioritized budgeted commits, and the dispatch derivation +
-        # watchdog signature track level evidence and stale-count progress —
-        # the blind re-upsert loop the old "level-pending" reject guarded
-        # against cannot form.  retarget_index_window resets the per-window
-        # evidence queues and forgets demoted tiles; kept tiles keep their
-        # applied values and keep converging through the standing machinery.
+        # Level convergence no longer forces rebirth: level upserts are
+        # machine-gated, and retarget_index_window resets per-window evidence
+        # while kept tiles continue converging.
         previous_geometry = getattr(session.plan, "geometry", None)
         geometry = getattr(plan, "geometry", None)
         if previous_geometry is None or geometry is None:
@@ -841,15 +827,8 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
                 return True
             return _reject("viewport-retarget")
         if session_key == session.key:
-            # Same montage identity with every presentation input equal: the
-            # live session already represents this render request.  A rebirth
-            # here re-resolves caches, re-seeds payloads, and force-commits
-            # the whole scene for nothing — this same-key rebirth on every
-            # re-render of a converged montage was the dominant share of the
-            # "cached scrub ~50 ms/step" cost (session-rebirth class, ADR
-            # 0051 P2).  Refresh the generation stamp so in-flight
-            # completions stay current, commit anything dirty, and let the
-            # standing machinery converge.
+            # Same identity: refresh the generation stamp, commit genuine
+            # dirt, and let the standing machinery converge without rebirth.
             self._montage_session_reuses = (
                 int(getattr(self, "_montage_session_reuses", 0) or 0) + 1
             )
@@ -1450,13 +1429,8 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         if not session.is_complete():
             return False
         self._settle_montage_visible_plan_if_complete(session)
-        # Montage level phasing: rough → hold → refined. Rough sampled stats are
-        # captured and applied during the first render pass (commit + cached
-        # scan); the per-source `has_source` guard then HOLDS them across the
-        # target pass so level work never competes with target-tile rendering.
-        # Only here, once the montage has settled, is the refined pass scheduled
-        # — so final/target tiles appear first and accurate levels/histogram
-        # follow. (R4 moves this scheduling into kernel admission.)
+        # Montage level phasing: rough -> hold -> refined. Refined evidence is
+        # queued after visible settlement and admitted through the kernel.
         self._queue_montage_current_level_evidence(session)
         self._queue_montage_final_level_refinements(session)
         self._schedule_montage_refined_level_stats(session)

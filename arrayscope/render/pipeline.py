@@ -164,6 +164,11 @@ class MontagePipeline:
             for step in steps
             if step.rung in (Rung.FLOOR, Rung.PREVIEW)
         }
+        presented_preview_tiles = {
+            int(state.tile_number)
+            for state in states
+            if str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
+        }
         # Cross-rung/cross-tile ordering comes from priorities plus this
         # submission order (the kernel heap is FIFO within equal priority).
         # NEVER express ordering through `deps`: dependencies fail-propagate,
@@ -174,7 +179,7 @@ class MontagePipeline:
                 self.counters.first_pixel_quality_deferred += 1
                 continue
             if (
-                self._defer_native_quality_during_interaction(intent, step)
+                self._defer_native_quality_during_interaction(intent, step, presented_preview_tiles)
                 and not self.effects.retained_native_source_available(intent, step)
             ):
                 self.counters.interactive_native_deferred += 1
@@ -205,6 +210,7 @@ class MontagePipeline:
         self,
         intent: RenderIntent,
         step: RungStep,
+        presented_preview_tiles: set[int],
     ) -> bool:
         """Keep active gestures on correctness rungs; admit native with proof.
 
@@ -220,6 +226,8 @@ class MontagePipeline:
         """
 
         if not bool(getattr(intent, "interactive", False)):
+            return False
+        if int(step.tile_number) in presented_preview_tiles:
             return False
         if step.rung == Rung.EXACT:
             return True

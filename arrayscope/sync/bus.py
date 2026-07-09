@@ -248,6 +248,8 @@ class SyncBus(Qt.QtCore.QObject):
 
     def _schedule_retry(self) -> None:
         if self._retry_timer is None:
+            # Timer category: anti-hang fallback. Bounded reconnect backoff for
+            # IPC startup races; it never orders document/render work.
             timer = Qt.QtCore.QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._retry_start)

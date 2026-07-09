@@ -101,7 +101,7 @@ def test_display_builder_routes_backend_notify_to_right_status_lane(qtbot, monke
             self.app_settings = None
             self.resource_governor = None
 
-        def _ui_work_decision(self, *_args, **_kwargs):
+        def _gui_callback_budget_decision(self, *_args, **_kwargs):
             return None
 
         def _submit_histogram_background_task(self, *_args, **_kwargs):

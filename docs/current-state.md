@@ -11,9 +11,11 @@ montage data path runs through the render pipeline with an
 admission/presentation split (bounded commit per event-loop turn behind a
 coalescing gate). R2b work items and the red-test ledger live in
 [known-red.md](redesign/known-red.md); plans R3–R5
-([docs/redesign/](redesign/README.md)) dissolve the remaining LOD,
-timer/governor, and docs/test debt. `main` (6fa5c758) holds the
-pre-redesign state described in this file's git history.
+([docs/redesign/](redesign/README.md)) dissolve the remaining LOD and
+docs/test debt. R4's timer/governor implementation pass has landed, with
+manual idle/scrub/benchmark evidence still owed before the gate closes.
+`main` (6fa5c758) holds the pre-redesign state described in this file's git
+history.
 
 ## Why the redesign (one paragraph)
 
@@ -35,10 +37,10 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 | Modular pipeline | **Driving montage** | `arrayscope/render/`: typed stage contracts, kernel-backed MontagePipeline, Qt-free evaluation effects, tile-state snapshots, stage deps, and commit effects route the live montage render path. |
 | Unified LOD ladder | **Adopted in montage** | `render/ladder.py`: FLOOR→PREVIEW→DESIRED→EXACT pure planner now feeds montage through the pipeline; demanded-level convergence wakes via lifecycle/pipeline completions instead of a side request list. |
 | Tile lifecycle | Unchanged owner | ADR 0051 machine stays; the pipeline feeds it rung and backend-ack events instead of frame_renderer result pumps. |
-| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate (1,888 lines) with clusters B/C/E moved out or deleted; `window/montage_lod.py` is deleted, and level-stat maintenance now lives under `render/level_stats.py` while timer removal remains an R4 target. |
+| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate with clusters B/C/E moved out or deleted; `window/montage_lod.py` is deleted, and level-stat maintenance now lives under `render/level_stats.py` with refinement admitted through the kernel. |
 | Vocabulary | Canonical in kernel | `WorkLane`/`EvalPriority` are compat aliases of kernel `Lane`/`Priority`. |
 | Hygiene | Done (first pass) | Kill switches, P3 fallbacks, tmp_probes deleted; 3 probes live in `tools/probes/`. |
-| Baseline health | 8 ledgered red tests; benchmarks await re-measure | Full suite 1642 passed / 8 red (all in [known-red.md](redesign/known-red.md) with R2b owners); GPU harness 7/7 incl. FFT-preview. The pre-fix workflow JSONLs (multi-second event-loop gaps, 42.8 s VisPy resident FFT) predate 4464a6e4 — re-measure before quoting them. |
+| Baseline health | Focused R4/core green; broad offscreen reds resolved | Core/operations, R4-focused architecture/governor/kernel/render/window tests, and the formerly red offscreen display/window/UI sentinels are green after the preview-to-target wakeup fix. Benchmark/manual/GPU evidence still needs re-measure before closing the redesign gate. |
 
 ## What is working well
 

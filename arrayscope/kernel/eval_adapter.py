@@ -458,6 +458,8 @@ class KernelEvaluationController(Qt.QtCore.QObject):
             reusable=reusable or bool(getattr(work_item, "reusable_output", False)),
         )
         if on_slow is not None:
+            # Timer category: UI cosmetic. Slow-work notification delay only;
+            # task completion and cancellation are kernel-owned.
             Qt.QtCore.QTimer.singleShot(
                 int(slow_ms),
                 self.bridge,

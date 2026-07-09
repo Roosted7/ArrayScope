@@ -388,6 +388,8 @@ class MontagePipelineEffects:
         if bool(getattr(self.renderer, "_montage_presentation_gate_armed", False)):
             return
         self.renderer._montage_presentation_gate_armed = True
+        # Timer category: UI cosmetic. Event-turn commit gate that coalesces
+        # backend presentation updates; kernel/lifecycle own data readiness.
         Qt.QtCore.QTimer.singleShot(0, self.renderer, self._on_presentation_gate)
 
     def _on_presentation_gate(self) -> None:
@@ -1151,6 +1153,7 @@ class MontagePipelineEffects:
             getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_removals", None)
             or getattr(session, "pending_payload_upserts", None)
+            or session.unrefined_preview_tiles(include_already_dirty=True)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
             or rearmed_parked
         )
@@ -1931,7 +1934,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     ):
         return {}
     interactive = interactive_active(window)
-    decision = _tile_presentation_ui_work_decision(window, session, "tile_layer_commit", interactive=interactive)
+    decision = _commit_batch_decision(window, interactive=interactive)
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
@@ -2074,8 +2077,8 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     if not persistent_gpu_tile_residency_backend(window, session):
         return {}
     interactive = interactive_active(window)
-    decision = _tile_presentation_ui_work_decision(window, session, "montage_present_total", interactive=interactive)
-    upload_decision = _tile_presentation_ui_work_decision(window, session, "montage_cold_commit", interactive=interactive)
+    decision = _commit_batch_decision(window, interactive=interactive)
+    upload_decision = decision
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     upload_batch_limit = int(getattr(upload_decision, "batch_limit", 0) or 0)
     if not bool(getattr(session, "display_committed", False)) and upload_batch_limit > 0:
@@ -2119,56 +2122,15 @@ def vispy_preview_payload_item_free(payload) -> bool:
     return str(getattr(payload, "quality", "exact") or "exact") == "preview"
 
 
-def _tile_presentation_ui_work_decision(window, session, channel: str, *, interactive: bool):
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    backend = str(getattr(capabilities, "name", "")).lower()
-    from arrayscope.display.model.tile_feedback import (
-        tile_presentation_feedback_conservative_start,
-        tile_presentation_feedback_signature,
-    )
-
-    signature = tile_presentation_feedback_signature(session, backend=backend)
-    conservative_start = (
-        tile_presentation_feedback_conservative_start(signature)
-        and _tile_presentation_has_cold_payload_candidates(session)
-    )
-    return getattr(window.win, "_ui_work_decision", lambda *args, **kwargs: None)(
-        channel,
-        interactive=interactive,
-        work_signature=signature,
-        conservative_start=conservative_start,
-    )
-
-
-def _tile_presentation_has_cold_payload_candidates(session) -> bool:
-    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
-    dirty = tuple(int(tile) for tile in getattr(session, "dirty_payloads", ()) or ())
-    pending = tuple(int(tile) for tile in getattr(session, "pending_payload_upserts", ()) or ())
-    candidates = tuple(dict.fromkeys((*dirty, *pending)))
-    if not candidates:
-        return False
-    acknowledged = set(getattr(session, "acknowledged_source_ids", set()) or set())
-    state_payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
-    backend_identities = dict(getattr(getattr(session, "lifecycle", None), "backend_presented_identities", {}) or {})
-    rendered_tiles = dict(getattr(session, "rendered_tiles", {}) or {})
-    for tile in candidates:
-        payload = payloads.get(int(tile))
-        if payload is None:
-            if int(tile) in rendered_tiles:
-                return True
-            continue
-        source_id = getattr(payload, "source_id", None)
-        previous = state_payloads.get(int(tile))
-        if previous is payload:
-            continue
-        if previous is not None and getattr(previous, "source_id", None) == source_id:
-            continue
-        if backend_identities.get(int(tile)) == source_id:
-            continue
-        if source_id in acknowledged:
-            continue
-        return True
-    return False
+def _commit_batch_decision(window, *, interactive: bool):
+    governor = getattr(window.win, "resource_governor", None)
+    decide = getattr(governor, "decide_commit_batch", None)
+    if callable(decide):
+        return decide(interactive=interactive)
+    provider = getattr(window.win, "_gui_callback_budget_decision", None)
+    if callable(provider):
+        return provider("presentation_commit", interactive=interactive)
+    return None
 
 
 def _reset_commit_timings(renderer) -> None:

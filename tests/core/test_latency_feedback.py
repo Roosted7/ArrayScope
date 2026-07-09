@@ -23,78 +23,11 @@ def test_latency_feedback_uses_smaller_interactive_budget():
     assert controller.work_budget_ms("tiles", interactive=True) < controller.work_budget_ms("tiles", interactive=False)
 
 
-def test_latency_feedback_stretches_commit_interval_after_slow_commits():
-    controller = LatencyFeedbackController(LatencyFeedbackTuning(target_idle_ms=8.0, min_interval_ms=8, max_interval_ms=250))
+def test_latency_feedback_records_byte_rate_without_commit_intervals():
+    controller = LatencyFeedbackController(LatencyFeedbackTuning(target_idle_ms=8.0, max_batch=8))
 
-    controller.observe("commit", 80.0)
+    controller.observe("commit", 4.0, count=2, byte_count=4096)
 
-    assert controller.commit_interval_ms("commit") > 16
-    assert controller.commit_interval_ms("commit") <= 250
-
-
-def test_overhead_and_marginal_model_separates_fixed_cost_from_per_item_cost():
-    from arrayscope.core.latency_feedback import LatencyFeedbackController
-
-    feedback = LatencyFeedbackController()
-    # elapsed = 15 ms fixed + 1.2 ms per item, over varied batch sizes.
-    for count in (1, 4, 2, 8, 1, 6, 3, 8, 2, 5, 1, 7, 4, 8, 2, 6):
-        feedback.observe("montage_present_total", 15.0 + 1.2 * count, count=count)
-
-    model = feedback.overhead_and_marginal_ms("montage_present_total")
-    assert model is not None
-    overhead, marginal = model
-    assert 10.0 < overhead < 20.0
-    assert 0.8 < marginal < 1.6
-
-    snapshot = feedback.channel_snapshot("montage_present_total")
-    assert snapshot.overhead_ewma_ms == overhead
-    assert snapshot.marginal_per_item_ms == marginal
-
-
-def test_overhead_and_marginal_model_needs_varied_batch_sizes():
-    from arrayscope.core.latency_feedback import LatencyFeedbackController
-
-    feedback = LatencyFeedbackController()
-    for _ in range(10):
-        feedback.observe("montage_present_total", 17.0, count=2)
-    assert feedback.overhead_and_marginal_ms("montage_present_total") is None
-    # Per-item EWMA misreads 17 ms / 2 items as 8.5 ms per item; the model
-    # correctly declines to guess until counts vary.
-    assert feedback.channel_snapshot("montage_present_total").per_item_ewma_ms > 8.0
-
-
-def test_overhead_and_marginal_model_rejects_uncorrelated_samples():
-    from arrayscope.core.latency_feedback import LatencyFeedbackController
-
-    feedback = LatencyFeedbackController()
-    for count, elapsed in ((1, 30.0), (8, 20.0), (2, 32.0), (7, 18.0), (3, 34.0), (6, 16.0)):
-        feedback.observe("tile_layer_commit", elapsed, count=count)
-
-    assert feedback.overhead_and_marginal_ms("tile_layer_commit") is None
-    assert feedback.channel_snapshot("tile_layer_commit").marginal_per_item_ms is None
-
-
-def test_overhead_and_marginal_per_byte_model():
-    from arrayscope.core.latency_feedback import LatencyFeedbackController
-
-    feedback = LatencyFeedbackController()
-    tile = 900 * 1024
-    # 15 ms fixed + 2.5 ms per tile-of-bytes, over varied batch sizes.
-    for count in (1, 4, 2, 8, 1, 6, 3, 8, 2, 5, 1, 7, 4, 8, 2, 6):
-        feedback.observe("montage_present_total", 15.0 + 2.5 * count, count=count, byte_count=tile * count)
-    model = feedback.overhead_and_marginal_per_byte_ms("montage_present_total")
-    assert model is not None
-    overhead, marginal = model
-    assert 10.0 < overhead < 20.0
-    assert 0.7 * 2.5 / tile < marginal < 1.5 * 2.5 / tile
-
-
-def test_overhead_and_marginal_per_byte_model_rejects_uncorrelated_samples():
-    from arrayscope.core.latency_feedback import LatencyFeedbackController
-
-    feedback = LatencyFeedbackController()
-    tile = 900 * 1024
-    for count, elapsed in ((1, 30.0), (8, 20.0), (2, 32.0), (7, 18.0), (3, 34.0), (6, 16.0)):
-        feedback.observe("tile_layer_commit", elapsed, count=count, byte_count=tile * count)
-
-    assert feedback.overhead_and_marginal_per_byte_ms("tile_layer_commit") is None
+    snapshot = controller.channel_snapshot("commit")
+    assert snapshot.per_byte_ewma_ms == 4.0 / 4096
+    assert snapshot.last_byte_count == 4096

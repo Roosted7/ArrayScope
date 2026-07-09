@@ -221,7 +221,7 @@ class InspectionWorkflowMixin:
                 presentation_key=("roi-inspection", destination),
                 quality="exact-visible",
             )
-            decision = getattr(self, "_ui_work_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
+            decision = getattr(self, "_gui_callback_budget_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
             if decision is not None:
                 controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
                 if hasattr(controller, "set_callback_budget_ms"):

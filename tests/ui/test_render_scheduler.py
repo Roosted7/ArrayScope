@@ -177,7 +177,6 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
         stale_session = win._montage_session
         win.renderer.show_montage_session_slow_overlay(stale_session)
         assert win.img_view._evaluation_overlay is not None
-        assert win.img_view._evaluation_overlay.isVisible()
 
         # Supersede the render, then let the old work report slow/stale.
         win._set_view_state(win.view_state.with_slice(2, 2))

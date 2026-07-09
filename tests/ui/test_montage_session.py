@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from arrayscope.core.view_state import ViewState
+from arrayscope.display.lod import LodInfo
 from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
@@ -96,6 +97,62 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
 
     assert int(tile.montage_index) not in session.loading_tiles
     assert int(tile.montage_index) in session.lifecycle.presented_tiles
+
+
+def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_backlog():
+    from arrayscope.window.montage_runtime import _stall_tile_probe_row_actionable
+
+    session = _session()
+    image = np.ones((2, 2), dtype=np.float32)
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=0,
+        image=image,
+        histogram_data=image,
+        source_id=("src", 0, "preview"),
+        lod=LodInfo(level=2, factor=4, source_shape=(2, 2), texture_shape=(1, 1)),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = payload
+    session.tile_presentation_state = TilePresentationState({0: payload}, revision=1)
+    session.lifecycle.backend_presented_snapshot({0: payload.source_id})
+    session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, payload.lod.level)
+
+    row = next(row for row in session.diagnostic_tile_identity_rows() if row["tile"] == 0)
+
+    assert row["pending"] is True
+    assert row["rendered"] is False
+    assert row["presented"] is True
+    assert row["visible_first_pixel_complete"] is True
+    assert row["desired_payload_quality"] == "preview"
+    assert row["desired_payload_lod"] == 2
+    assert row["presented_quality"] == "preview"
+    assert row["presented_lod"] == 2
+    assert not _stall_tile_probe_row_actionable(row)
+
+
+def test_stall_probe_row_keeps_stale_presented_identity_actionable():
+    from arrayscope.window.montage_runtime import _stall_tile_probe_row_actionable
+
+    session = _session()
+    image = np.ones((2, 2), dtype=np.float32)
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=1,
+        image=image,
+        histogram_data=image,
+        source_id=("src", 1, "preview"),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = payload
+    session.tile_presentation_state = TilePresentationState({0: payload}, revision=1)
+    session.lifecycle.backend_presented_snapshot({0: payload.source_id})
+    session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, 0)
+
+    row = next(row for row in session.diagnostic_tile_identity_rows() if row["tile"] == 0)
+
+    assert row["visible_first_pixel_complete"] is False
+    assert _stall_tile_probe_row_actionable(row)
 
 
 def test_stale_committed_state_payload_is_not_complete_after_retarget():
@@ -462,8 +519,12 @@ def test_montage_render_session_replacement_materialization_reopens_visible_plan
         )
     )
 
-    assert 0 not in session.lifecycle.presented_tiles
-    assert not session.visible_plan_complete()
+    # Atomic replacement keeps the last acknowledged pixels visible while the
+    # replacement payload is dirty/in flight. Full completion remains open,
+    # but first-pixel visible completion does not regress to black.
+    assert 0 in session.lifecycle.presented_tiles
+    assert session.visible_plan_complete()
+    assert not session.is_complete()
 
 
 def test_montage_render_session_delta_carries_near_sources_without_payloads():

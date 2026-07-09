@@ -527,23 +527,6 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
         if inactive:
             lines.append("  Inactive:")
             lines.extend(f"    - {name}" for name in inactive)
-    if diagnostics.ui_decisions:
-        lines.append("UI decisions:")
-        for decision in diagnostics.ui_decisions:
-            reason = _compact_reason(decision.reason)
-            suffix = "" if not reason else f" ({reason})"
-            lines.append(
-                f"  {decision.channel}: "
-                f"batch={decision.batch_limit} "
-                f"budget={decision.budget_ms:.1f} ms "
-                f"interval={decision.interval_ms} ms "
-                f"byte-cap={format_bytes(decision.byte_cap)}"
-                f" control={getattr(decision, 'control_budget_ms', 0.0):.1f} ms"
-                f" model={getattr(decision, 'model', '') or 'n/a'}"
-                f"{suffix}"
-            )
-            for detail in tuple(getattr(decision, "details", ()) or ())[:4]:
-                lines.append(f"    - {_short_debug_text(detail, limit=92)}")
     if diagnostics.recent_over_warning_callbacks:
         lines.append("Callbacks over warning:")
         for callback in diagnostics.recent_over_warning_callbacks[-8:]:

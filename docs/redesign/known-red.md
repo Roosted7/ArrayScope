@@ -16,7 +16,7 @@ binding).
 
 | test | cause | resolved by |
 |---|---|---|
-| _none in the focused R2b ledger_ | The former 8-test ledger is resolved by R2b stabilization. | Keep R3 scroll-scrub/lost-wakeup work below; do not mark R2 closed until benchmark/manual/GPU gates pass. |
+| _none in the focused R2b/R4 ledger_ | The R4 broad-verification reds found on 2026-07-09 are resolved by the preview-to-target wakeup fix, VisPy retained-presentation stats fix, and test modernization onto lifecycle/pipeline observables. | Keep R4 open until benchmark/manual/GPU gates pass. |
 
 Resolved by R2b stabilization:
 
@@ -90,7 +90,7 @@ Resolved on this branch (for the record):
   clamps, dtype sniffing, harness event-processing edit).
 - `test_tile_layer_level_change_uses_governed_presentation_batches`,
   `test_scalar_tile_layer_level_change_uses_governed_batches_without_image_replacement`
-  — red on main since 6fa5c758 (stubs missing `work_signature`); fixed.
+  — red on main since 6fa5c758 (legacy cost-signature stubs); fixed.
 - `test_vispy_montage_view_range_change_expands_visible_tile_set` — red on
   main; bisected to 2995d039; fixed by plan-time content extent (a3992c8f).
 - The R1 vispy/resident FFT transform-preview wedge no longer sticks after

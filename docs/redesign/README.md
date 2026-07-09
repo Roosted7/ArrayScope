@@ -37,7 +37,7 @@ defers to it while the redesign is in flight.
 |---|---|---|---|
 | [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | Done | R1 |
 | [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | Landed; evidence gates pending | R2 |
-| [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | M | R2 |
+| [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | Implementation pass landed; evidence gates pending | R2 |
 | [R5](r5-test-and-docs-truth-pass.md) | Delete wrong-path tests; docs/current-state truth pass; known-red ledger emptied | M | R3–R4 |
 
 A plan is done only when its exit gate passes and the source code it
@@ -91,7 +91,6 @@ guide us back to the wrong path.
   `cd ~/projects/ArrayScope/.worktrees/redesign && ~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
   Known parallel-only flakes (pass alone; ignore unless newly consistent):
   `test_selecting_fft_workers_updates_settings`,
-  `test_resource_governor_applies_worker_and_callback_limits`,
   `test_compute_policy_configures_stage_and_montage_lanes`,
   teardown of `test_montage_ready_display_payloads_commit_immediately`.
 - **Kernel/render suites only** (fast TDD loop, no Qt):

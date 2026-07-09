@@ -43,13 +43,13 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self.presentation_backpressure_skips = 0
         self._connected_presentation_view = None
 
-        # Qt event-turn barrier / bounded coalescer. This coalesces bursts of
+        # Timer category: UI cosmetic. Qt event-turn barrier / bounded coalescer. This coalesces bursts of
         # non-cached interactive work without making cache hits wait.
         self._render_timer = Qt.QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_timer)
 
-        # User-interaction quiet detector. It only gates side-panel refreshes;
+        # Timer category: UI cosmetic. User-interaction quiet detector. It only gates side-panel refreshes;
         # render semantics are guarded by the latest pending request and the
         # render-generation checks in the window.
         self._quiet_timer = Qt.QtCore.QTimer(self)

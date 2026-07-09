@@ -47,7 +47,7 @@ def test_histogram_preview_interval_is_governor_controlled(qtbot):
         win.close()
 
 
-def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
+def test_kernel_completion_applies_interactive_budget_without_edge_reapply(qtbot):
     clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -63,9 +63,12 @@ def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
         idle_budget = win.kernel_bridge._budget_ms
         assert idle_budget is not None
 
-        # The sampling timer runs at 250 ms (1 s idle); an interactive
-        # request must not run against idle budgets until the next tick.
+        # Interaction edges only update render intent. The governor budget is
+        # reapplied by the next kernel-completion wakeup.
         win.render_coordinator.request(reason="interaction-edge-test", interactive=True)
+        assert win.kernel_bridge._budget_ms == idle_budget
+
+        win._note_kernel_completion_drain()
 
         interactive_budget = win.kernel_bridge._budget_ms
         assert win._governor_interactive_applied is True
@@ -74,7 +77,7 @@ def test_interaction_edge_applies_interactive_budgets_immediately(qtbot):
         win.close()
 
 
-def test_interaction_stop_edge_restores_idle_budgets_immediately(qtbot):
+def test_kernel_completion_restores_idle_budget_after_interaction_stop(qtbot):
     clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -89,11 +92,17 @@ def test_interaction_stop_edge_restores_idle_budgets_immediately(qtbot):
         idle_budget = win.kernel_bridge._budget_ms
 
         win.render_coordinator.request(reason="interaction-stop-edge-test", interactive=True)
+        assert win.kernel_bridge._budget_ms == idle_budget
+
+        win._note_kernel_completion_drain()
         interactive_budget = win.kernel_bridge._budget_ms
         assert interactive_budget < idle_budget
 
         win.render_coordinator._quiet_timer_elapsed()
+        assert win._governor_interactive_applied is True
+        assert win.kernel_bridge._budget_ms == interactive_budget
 
+        win._note_kernel_completion_drain()
         assert win._governor_interactive_applied is False
         assert win.kernel_bridge._budget_ms == idle_budget
     finally:

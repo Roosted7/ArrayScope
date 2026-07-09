@@ -155,12 +155,9 @@ class DisplayControlBuildMixin:
         self.window_button_group.addButton(self.widgets['buttons']['display']['window_absolute'])
         self._pending_profile_pos = None
         self._pending_profile_point = None
-        # Bounded profile preview coalescer. Mouse motion stores the latest
-        # point; final profile work is guarded by request ids and scheduler
-        # supersession in `window.render`. The initial interval matches the
-        # governor's healthy-channel commit interval (16 ms); the governor
-        # retunes it from measured profile-update latency once feedback
-        # exists, so the first mouse moves are not gated at 25 Hz.
+        # Timer category: UI cosmetic. Bounded profile preview coalescer. Mouse
+        # motion stores the latest point; final profile work is guarded by
+        # request ids and scheduler supersession in `window.render`.
         self._profile_timer = Qt.QtCore.QTimer(self)
         self._profile_timer.setSingleShot(True)
         self._profile_timer.setInterval(16)
@@ -428,7 +425,7 @@ class DisplayControlBuildMixin:
         if hasattr(self.img_view, "setGuiCallbackObserver") and callable(observer):
             self.img_view.setGuiCallbackObserver(observer)
         if hasattr(self.img_view, "setGuiCallbackBudgetProvider"):
-            self.img_view.setGuiCallbackBudgetProvider(self._ui_work_decision)
+            self.img_view.setGuiCallbackBudgetProvider(self._gui_callback_budget_decision)
         if hasattr(self.img_view, "setBackgroundTaskSubmitter"):
             self.img_view.setBackgroundTaskSubmitter(self._submit_histogram_background_task)
         if hasattr(self.img_view, "setLevelPresentationChangeHandler"):
@@ -466,7 +463,7 @@ class DisplayControlBuildMixin:
         controller = getattr(self, "histogram_evaluation_controller", None)
         if controller is None:
             return None
-        decision = self._ui_work_decision("histogram_refresh", interactive=False)
+        decision = self._gui_callback_budget_decision("histogram_refresh", interactive=False)
         byte_cap = int(getattr(decision, "byte_cap", 0) or 0) if decision is not None else 0
         frame_target = FrameTarget(
             semantic_key=key,

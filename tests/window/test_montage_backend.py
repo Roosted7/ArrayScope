@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+from arrayscope.core.memory_policy import MemoryProfileChoice
+from arrayscope.core.resource_governor import ResourcePressure, ResourcePressureState
 from arrayscope.window.montage_backend import choose_montage_backend
+from arrayscope.window.montage_prefetch import _owner_memory_pressure_blocks_prefetch, _owner_prefetch_batch_limit
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
     payload_lod_matches as _payload_lod_matches,
@@ -27,6 +30,33 @@ def _window_ns(**kwargs):
 
 def _geometry():
     return SimpleNamespace(montage=object())
+
+
+def _prefetch_window(*, profile=MemoryProfileChoice.BALANCED, memory_pressure=ResourcePressure.NORMAL):
+    pressure = ResourcePressureState(
+        ResourcePressure.NORMAL,
+        0.5,
+        memory_pressure,
+        ResourcePressure.NORMAL,
+        "test",
+    )
+    governor = SimpleNamespace(profile=profile, diagnostics=lambda: SimpleNamespace(pressure=pressure))
+    return SimpleNamespace(win=SimpleNamespace(resource_governor=governor))
+
+
+def test_montage_prefetch_owner_uses_profile_batch_without_governor_decision():
+    assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.CONSERVATIVE)) == 1
+    assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.BALANCED)) == 2
+    assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.AGGRESSIVE)) == 4
+
+
+def test_montage_prefetch_owner_blocks_memory_pressure_from_telemetry():
+    assert _owner_memory_pressure_blocks_prefetch(
+        _prefetch_window(memory_pressure=ResourcePressure.ELEVATED)
+    )
+    assert not _owner_memory_pressure_blocks_prefetch(
+        _prefetch_window(memory_pressure=ResourcePressure.NORMAL)
+    )
 
 
 def _committed_tiled_frame(geometry, *, key):
@@ -220,10 +250,17 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import LevelStatsService
 
+    class InlineKernel:
+        visible_backlog = 0
+
+        def submit_speculative_batch(self, *, fn, on_done, **_kwargs):
+            on_done(fn())
+            return object()
+
     class Window(LevelStatsService):
         def __init__(self, session):
             self.win = self
-            self.kernel = SimpleNamespace(visible_backlog=0)
+            self.kernel = InlineKernel()
             self._montage_session = session
             self._tracker = MontageLevelTracker()
             self.applied = 0
@@ -966,7 +1003,9 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0),
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0)
+        ),
     )
     window.win = window
 
@@ -976,17 +1015,10 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
 
 
-def test_vispy_first_persistent_upsert_limits_use_cold_upload_batch():
+def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
     from arrayscope.window import montage_commit
 
     session = SimpleNamespace(display_committed=False)
-
-    def decide(channel, **_kwargs):
-        if channel == "montage_present_total":
-            return SimpleNamespace(batch_limit=32, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
-        if channel == "montage_cold_commit":
-            return SimpleNamespace(batch_limit=4, byte_cap=1024 * 1024, budget_ms=2.0)
-        return SimpleNamespace(batch_limit=0, byte_cap=0, budget_ms=0.0)
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -997,14 +1029,16 @@ def test_vispy_first_persistent_upsert_limits_use_cold_upload_batch():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=decide,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=4, byte_cap=1024 * 1024, budget_ms=2.0)
+        ),
     )
     window.win = window
 
     limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
     assert limits["max_upserts"] == 4
-    assert limits["max_upsert_bytes"] == 8 * 1024 * 1024
+    assert limits["max_upsert_bytes"] == 1024 * 1024
 
 
 def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
@@ -1034,7 +1068,9 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0),
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0)
+        ),
     )
     window.win = window
 
@@ -1070,7 +1106,9 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0),
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0)
+        ),
     )
     window.win = window
 
@@ -1101,7 +1139,9 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=lambda *_args, **_kwargs: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0),
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
+        ),
     )
     window.win = window
 
@@ -1213,14 +1253,8 @@ def test_vispy_persistent_tile_layer_can_direct_delta_first_session_commit():
     assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
 
 
-def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
+def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
     from arrayscope.window import montage_commit
-
-    decisions = []
-
-    def decide(channel, **kwargs):
-        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
-        return SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -1231,7 +1265,9 @@ def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=decide,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
+        ),
     )
     window.win = window
     session = SimpleNamespace(
@@ -1246,26 +1282,14 @@ def test_pyqtgraph_tile_layer_feedback_passes_cost_class_signature():
 
     montage_commit.tile_layer_upsert_limits(window, session)
     session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
-    montage_commit.tile_layer_upsert_limits(window, session)
+    limits = montage_commit.tile_layer_upsert_limits(window, session)
 
-    assert [channel for channel, _signature, _conservative in decisions] == [
-        "tile_layer_commit",
-        "tile_layer_commit",
-    ]
-    assert decisions[0][1].cost_class == "scalar"
-    assert decisions[0][2] is False
-    assert decisions[1][1].cost_class == "rgb_or_complex"
-    assert decisions[1][2] is True
+    assert limits["max_upserts"] == 2
+    assert limits["max_upsert_bytes"] == 4096
 
 
-def test_vispy_persistent_feedback_passes_cost_class_signature():
+def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature():
     from arrayscope.window import montage_commit
-
-    decisions = []
-
-    def decide(channel, **kwargs):
-        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
-        return SimpleNamespace(batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -1276,7 +1300,9 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=decide,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
+        ),
     )
     window.win = window
     session = SimpleNamespace(
@@ -1292,37 +1318,15 @@ def test_vispy_persistent_feedback_passes_cost_class_signature():
     montage_commit._persistent_tile_upsert_limits(window, session)
     session.output_dtype = np.dtype("complex64")
     session.rendered_tiles = {0: SimpleNamespace(image=np.zeros((8, 8), dtype=np.complex64))}
-    montage_commit._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert [channel for channel, _signature, _conservative in decisions] == [
-        "montage_present_total",
-        "montage_cold_commit",
-        "montage_present_total",
-        "montage_cold_commit",
-    ]
-    assert [signature.cost_class for _channel, signature, _conservative in decisions] == [
-        "scalar",
-        "scalar",
-        "rgb_or_complex",
-        "rgb_or_complex",
-    ]
-    assert [conservative for _channel, _signature, conservative in decisions] == [
-        False,
-        False,
-        True,
-        True,
-    ]
+    assert limits["max_upserts"] == 8
+    assert limits["max_upsert_bytes"] == 8 * 1024 * 1024
 
 
-def test_vispy_persistent_feedback_does_not_cold_start_resident_remap():
+def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationState
     from arrayscope.window import montage_commit
-
-    decisions = []
-
-    def decide(channel, **kwargs):
-        decisions.append((str(channel), kwargs.get("work_signature"), bool(kwargs.get("conservative_start"))))
-        return SimpleNamespace(batch_limit=1, byte_cap=1024, budget_ms=4.0)
 
     payload = DisplayTilePayload(
         tile_number=0,
@@ -1340,7 +1344,9 @@ def test_vispy_persistent_feedback_does_not_cold_start_resident_remap():
             )
         ),
         _viewport_interaction_active=False,
-        _ui_work_decision=decide,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=1, byte_cap=1024, budget_ms=4.0)
+        ),
     )
     window.win = window
     session = SimpleNamespace(
@@ -1359,20 +1365,10 @@ def test_vispy_persistent_feedback_does_not_cold_start_resident_remap():
         rendered_tiles={0: SimpleNamespace(image=payload.image)},
     )
 
-    montage_commit._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert [channel for channel, _signature, _conservative in decisions] == [
-        "montage_present_total",
-        "montage_cold_commit",
-    ]
-    assert [signature.cost_class for _channel, signature, _conservative in decisions] == [
-        "rgb_or_complex",
-        "rgb_or_complex",
-    ]
-    assert [conservative for _channel, _signature, conservative in decisions] == [
-        False,
-        False,
-    ]
+    assert limits["max_upserts"] == 1
+    assert limits["max_upsert_bytes"] == 1024
 
 
 def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):

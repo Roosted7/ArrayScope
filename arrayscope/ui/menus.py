@@ -544,7 +544,7 @@ class WindowMenuMixin:
         if hasattr(self, "layout_manager"):
             self.layout_manager.close_managed_docks_for_shutdown()
         super().closeEvent(event)
-        # Qt event-turn barrier. Quitting is checked after close handlers and
+        # Timer category: UI cosmetic. Qt event-turn barrier. Quitting is checked after close handlers and
         # deleteLater work finish, avoiding shutdown reentrancy.
         Qt.QtCore.QTimer.singleShot(0, self, self._quit_if_last_arrayscope_window)
 

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from time import monotonic
 
-import pyqtgraph.Qt as Qt
-
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.prefetch_policy import SliceScrubMomentum
 from arrayscope.core.scheduler import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, WorkItem
+from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.slabs import plan_slab, request_for_image
@@ -24,11 +22,27 @@ class RenderPrefetchMixin:
         if bool(getattr(self, "_prefetch_dispatch_queued", False)):
             return
         self._prefetch_dispatch_queued = True
-        # Qt event-turn barrier with the orchestrator as receiver context. The
-        # queued callback reads the latest pending request, so rapid slice
-        # changes collapse without a revision counter; kernel/resource gates
-        # below decide whether speculation is actually allowed.
-        Qt.QtCore.QTimer.singleShot(0, self, self._run_pending_prefetch)
+        # Speculative kernel admission replaces the old event-turn timer. The
+        # callback reads the latest pending request, so rapid slice changes
+        # still collapse while visible work and quotas decide when it may run.
+        kernel = getattr(self.win, "kernel", None)
+        if kernel is None:
+            self._run_pending_prefetch()
+            return
+        handle = kernel.submit_speculative_batch(
+            kind="slice-prefetch-dispatch",
+            scope="slice-prefetch",
+            generation=id(self),
+            key=("slice-prefetch-dispatch", id(self)),
+            fn=lambda: True,
+            on_done=lambda _value=None: self._run_pending_prefetch(),
+            on_stale=lambda: setattr(self, "_prefetch_dispatch_queued", False),
+            lane=WorkLane.SPECULATIVE_RESIDENCY,
+            priority=Priority.PREFETCH,
+            max_items=1,
+        )
+        if handle is None:
+            self._prefetch_dispatch_queued = False
 
     def _run_pending_prefetch(self):
         self._prefetch_dispatch_queued = False

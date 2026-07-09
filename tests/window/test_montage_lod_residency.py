@@ -590,7 +590,10 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
 def _acknowledge(session, delta):
     session.acknowledge_tile_presentation(
         delta,
-        TileCommitReport(presented_tiles=frozenset(int(tile) for tile in delta.upserts)),
+        TileCommitReport(
+            presented_tiles=frozenset(int(tile) for tile in delta.upserts),
+            committed_upserts=frozenset(int(tile) for tile in delta.upserts),
+        ),
     )
 
 

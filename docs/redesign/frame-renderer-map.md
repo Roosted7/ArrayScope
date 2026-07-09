@@ -65,7 +65,7 @@ structurally.
 
 | methods | destination |
 |---|---|
-| `_montage_callback_budget`, `_record_gui_budget`, `_montage_tile_result_batch_limit`, `_montage_viewport_addition_batch_limit`, `_montage_viewport_chunk_delay_ms`, `_presentation_upload_control_budget_ms`, `_tile_presentation_ui_work_decision`, `_montage_commit_budget_ms` | mostly DELETED — kernel (bridge budget + lane quotas). The governor shrinks to telemetry + two knobs: bridge drain budget and commit batch bounds (R4; ADR 0052 G1/G2 re-scoped to those channels) |
+| `_montage_callback_budget`, `_record_gui_budget`, `_montage_tile_result_batch_limit`, `_montage_viewport_addition_batch_limit`, `_montage_viewport_chunk_delay_ms`, `_presentation_upload_control_budget_ms`, `_montage_commit_budget_ms` | mostly DELETED — kernel (bridge budget + lane quotas). The governor shrank to telemetry + two knobs: bridge drain budget and commit batch bounds (R4; ADR 0052 superseded) |
 
 ## Cluster G — session identity and misc
 

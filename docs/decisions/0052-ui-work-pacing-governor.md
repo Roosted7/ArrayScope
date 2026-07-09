@@ -1,7 +1,25 @@
-# 0052 — UI-work pacing governor (proposed)
+# 0052 — UI-work pacing governor (superseded)
 
-**Status:** Proposed (2026-07-06). Design pass for the presentation pacing control loop before
-it accretes further. No behavior change is decided here yet; the phases below gate on evidence.
+**Status:** Superseded by [ADR 0053](0053-execution-kernel-and-modular-pipeline.md) R4
+(2026-07-09). This record remains as historical context for the removed UI-work
+governor design.
+
+## Supersession
+
+R4 chose the smaller owner model instead of implementing the proposed channel
+registry and decision pipeline below:
+
+- `ResourceGovernor` keeps telemetry/observation records and publishes only the
+  live knobs still owned outside static policy: bridge drain budget and commit
+  batch bounds.
+- Kernel lane quotas are the execution throttle; compute policy supplies the
+  initial lane quota values and the kernel owns stale-work pruning/admission.
+- GUI callback vocabulary remains in `core/gui_callback_budget.py`.
+- `core/latency_feedback.py` is the EWMA/outlier-suppression model used by the
+  bridge/commit budgets, not a per-controller regression controller.
+- Per-controller worker clamps, `decide_ui_work`, work signatures,
+  conservative cold starts, benchmark decision rings, and interaction-edge
+  reapplication timers are deleted.
 
 ## Context
 

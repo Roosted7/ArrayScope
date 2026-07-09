@@ -52,6 +52,8 @@ def show_status_message(window, message, timeout=4000):
         timer.stop()
     window._arrayscope_status_message_timer = None
     if int(timeout) > 0:
+        # Timer category: UI cosmetic. Status messages disappear after their
+        # user-visible timeout and never gate data flow.
         timer = Qt.QtCore.QTimer(label)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda: _clear_status_message(window, label))
@@ -79,7 +81,7 @@ def show_status_action(window, message, action_text, on_action, timeout=5000):
     _set_status_action_text(widget)
     widget.show()
 
-    # User-visible timeout. The widget owns the timer, and clicking or replacing
+    # Timer category: UI cosmetic. User-visible timeout. The widget owns the timer, and clicking or replacing
     # the status action clears it explicitly.
     timer = Qt.QtCore.QTimer(widget)
     timer.setSingleShot(True)

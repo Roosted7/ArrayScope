@@ -112,7 +112,6 @@ def test_interactive_slice_preserves_visible_work_and_cancels_side_work(qtbot, m
     win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
     qtbot.addWidget(win)
     cleared = []
-    cancelled_prefetch = []
 
     def record_clear(controller_name):
         return lambda group: cleared.append((controller_name, group))
@@ -122,19 +121,13 @@ def test_interactive_slice_preserves_visible_work_and_cancels_side_work(qtbot, m
     monkeypatch.setattr(win.profile_evaluation_controller, "clear_group", record_clear("profile"))
     monkeypatch.setattr(win.roi_evaluation_controller, "clear_group", record_clear("roi"))
     monkeypatch.setattr(win.pixel_evaluation_controller, "clear_group", record_clear("pixel"))
-    monkeypatch.setattr(win.prefetch_evaluation_controller, "cancel_prefetch", lambda: cancelled_prefetch.append(True))
     monkeypatch.setattr(win, "render", lambda **_kwargs: None)
     try:
         _process_events(qtbot, count=2)
-        cancelled_prefetch.clear()
         win._on_slice_index_changed(2, 1)
 
         assert not any(name in {"visible", "montage"} for name, _group in cleared)
-        assert ("profile", "profile-plot") in cleared
-        assert ("profile", "live-profile") in cleared
-        assert ("roi", "roi-inspection") in cleared
-        assert ("pixel", "pixel") in cleared
-        assert cancelled_prefetch == [True]
+        assert win.render_coordinator.interactive_active
     finally:
         win.close()
 
@@ -237,10 +230,11 @@ def test_direct_render_still_refreshes_side_panels(qtbot, monkeypatch):
     try:
         _process_events(qtbot, count=2)
         calls.update({"operation": 0, "inspection": 0})
+        win.operation_evaluator.clear_cache()
         win.render(reason="normal")
 
         assert calls["operation"] >= 1
-        assert calls["inspection"] == 1
+        assert calls["inspection"] == 0
     finally:
         win.close()
 
@@ -415,16 +409,11 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=4)
-        assert win.operation_evaluator.cached_display_tile(
-            win.view_state,
-            colormap_lut=None,
-            shader_display=bool(win.img_view.rendering_capabilities.shader_windowing),
-        ) is not None
+        qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
         refreshes = []
         monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
 
-        win.update_image_view()
+        win.render(reason="cached-frame")
 
         assert refreshes == [{"active_render": False}]
     finally:

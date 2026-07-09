@@ -2523,7 +2523,7 @@ def _lod_invariant_source_id(source_id: object) -> object:
 
 def _resident_source_matches_expected(source_id: object, expected_source_id: object | None) -> bool:
     if expected_source_id is None:
-        return False
+        return True
     return _lod_invariant_source_id(source_id) == _lod_invariant_source_id(expected_source_id)
 
 

@@ -3,9 +3,9 @@
 > **Redesign banner (2026-07-07):** execution now belongs to
 > `arrayscope/kernel` — real priorities, dependencies, lane quotas, one
 > staleness arbiter, one GUI fan-in ([ADR 0053](../decisions/0053-execution-kernel-and-modular-pipeline.md)).
-> WorkGraph and per-controller drains are gone after R1. Remaining pacing
-> timers and governor complexity are R4 cleanup targets; do not add new
-> scheduling systems beside the kernel.
+> WorkGraph and per-controller drains are gone after R1. R4 deleted the
+> remaining scheduling timers and shrank the governor to telemetry plus bridge
+> and commit-budget knobs; do not add new scheduling systems beside the kernel.
 
 ArrayScope must remain responsive when the requested work is larger than one event-loop turn or one safe allocation.
 
@@ -37,7 +37,7 @@ A persistent `MontageSession` tracks target, requested/materialized/presented se
 
 ### Stage and prefetch
 
-Reusable stages use singleflight. Nearby slice/tile work and warm residency are lower priority, gated by memory, scheduler busy state, feedback, and resource-governor decisions.
+Reusable stages use singleflight. Nearby slice/tile work and warm residency are lower priority, gated by memory, scheduler busy state, feedback, and kernel lane quotas.
 
 ## Kernel execution
 
@@ -132,31 +132,25 @@ visible materialization, visible GPU residency, or admitted visible commit fan-i
 
 ## Feedback and resource governance
 
-Latency feedback records callback duration and work count. Resource telemetry samples CPU/memory without blocking the UI. The resource governor combines those signals with policy and scheduler state to adjust:
+Latency feedback records callback duration and work count with EWMA plus
+one-sample outlier suppression. Resource telemetry samples CPU/memory without
+blocking the UI. The resource governor combines those signals with policy and
+kernel state to set only:
 
-- lane worker counts;
-- callback/result fan-in;
-- upload byte/item batches;
-- commit interval;
-- prefetch/speculation admission.
+- `QtKernelBridge` drain budget (`set_budget_ms` and `set_max_items_per_drain`);
+- presentation commit batch bounds (`CommitBatch.max_items` / `max_bytes`).
 
-Overload backoff should be immediate; recovery gradual. Metrics must be path/backend/payload aware, or a cheap warm rebind can incorrectly justify a larger cold-upload batch.
+Kernel lane quotas are the worker/admission throttle. Compute policy supplies
+the initial lane quota values; the kernel owns stale-work pruning and
+speculative admission. There is no governor sampling timer, per-controller
+worker clamp, per-channel `ui_work_decision`, or interaction-edge reapply loop.
 
 Feedback loops must be closed on the channel that is actually measured. The
 single kernel completion drain observes and is governed as
-`kernel_bridge_drain`; non-kernel GUI fan-in paths such as
-`montage_tile_result`, `histogram_refresh`, `roi_refresh`, and
-`profile_update` keep their own measured channels. Isolated latency outliers
-(GC pauses, one-off relayouts, event-loop stalls) are suppressed for a single
-sample on every channel — a repeat is accepted as a real cost change — and
-drains that finish under budget while hitting their batch cap regrow the cap
-from the measured rate rather than waiting for the EWMA to decay.
-
-Governor decisions are applied on two paths: a periodic sampling timer
-(250 ms active, 1 s idle) that also refreshes telemetry, and an immediate
-lightweight reapplication on interaction start/stop edges so interactive
-budgets and worker clamps take effect with the first drag event rather than
-up to a sampling period late.
+`kernel_bridge_drain`; presentation commit observations govern commit batch
+bounds. Non-kernel GUI callbacks such as `histogram_refresh`, `roi_refresh`,
+and `profile_update` may use the shared callback-budget vocabulary, but they
+do not create separate scheduling controllers.
 
 The bridge fallback timer is a safety net for missed cross-thread signals,
 not a scheduling mechanism: it backs off exponentially (10 -> 100 ms) while
