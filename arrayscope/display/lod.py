@@ -214,19 +214,19 @@ def factor_xy_for_level(demand: LodDemand, level: int) -> tuple[int, int]:
 
 
 def choose_resident_level(demand: LodDemand, resident_levels) -> int:
-    """Return the resident level closest to the demand, never over-reducing.
+    """Return the finest resident level that is no coarser than acceptable.
 
-    Level 0 (native) is implicitly resident.  Candidates are resident levels
-    no coarser than the coarsest acceptable level; among them the level
-    closest to the desired level wins, preferring finer on ties.
+    Candidates are explicit resident display levels no coarser than the
+    demanded level.  A finer resident level is already valid display data;
+    demotion to a coarser demanded level is a memory-residency decision, not
+    an LOD correctness requirement.  Level 0 is the fallback when no explicit
+    display LOD is resident.
     """
 
-    resident = {0}
-    resident.update(int(level) for level in tuple(resident_levels or ()) if int(level) >= 0)
-    coarsest_acceptable = max(demand.acceptable_levels)
-    candidates = [level for level in resident if level <= coarsest_acceptable]
-    desired = int(demand.desired_level)
-    return min(candidates, key=lambda level: (abs(level - desired), level))
+    resident = {int(level) for level in tuple(resident_levels or ()) if int(level) > 0}
+    desired = max(0, int(demand.desired_level))
+    candidates = [level for level in resident if level <= desired]
+    return min(candidates) if candidates else 0
 
 
 def resident_lod_policy(

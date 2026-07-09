@@ -222,6 +222,7 @@ class MontageRuntimeMixin:
         submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             return submitted
+        montage_commit.rearm_ready_stage_dependents(session)
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
@@ -235,6 +236,7 @@ class MontageRuntimeMixin:
             or getattr(session, "loading_tiles", None)
             or getattr(session.stage_fan_in, "active_requests", None)
             or getattr(session.stage_fan_in, "attached_requests", None)
+            or getattr(session.stage_fan_in, "tile_stage_keys", None)
             or getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_payload_upserts", None)
         )

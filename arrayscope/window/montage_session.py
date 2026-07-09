@@ -1058,14 +1058,20 @@ class MontageRenderSession:
                     str(getattr(self.display_tile_payloads[index], "quality", "exact") or "exact"),
                     int(getattr(getattr(self.display_tile_payloads[index], "lod", None), "level", 0) or 0),
                 )
-            self.loading_tiles.discard(index)
+            if not (preview_presented and index in self.lifecycle.evaluating_tiles):
+                self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
             if preview_presented and index in self.rendered_tiles:
                 self.dirty_payloads[index] = None
             self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
-                self.mark_tile_state(self.plan.tiles[index], MontageTileState.LOADED)
+                state = (
+                    MontageTileState.LOADING
+                    if preview_presented and index in self.lifecycle.evaluating_tiles
+                    else MontageTileState.LOADED
+                )
+                self.mark_tile_state(self.plan.tiles[index], state)
         if confirmed:
             # ADR 0051 rule 1: the report's presented set is backend
             # acknowledgement, so resident-retarget commits (no upserts)
@@ -2486,11 +2492,12 @@ class MontageRenderSession:
             if 0 <= index < len(states):
                 states[index] = MontageTileState.SKIPPED
         presented_tiles = set(self.lifecycle.presented_tiles)
-        for index in set(self.loading_tiles) | (set(self.rendered_tiles) - presented_tiles):
+        loading_numbers = set(self.loading_tiles) | (set(self.rendered_tiles) - presented_tiles)
+        for index in loading_numbers:
             index = int(index)
             if 0 <= index < len(states) and states[index] != MontageTileState.SKIPPED:
                 states[index] = MontageTileState.LOADING
-        for index in presented_tiles:
+        for index in presented_tiles - loading_numbers:
             index = int(index)
             if 0 <= index < len(states):
                 states[index] = MontageTileState.LOADED
@@ -2506,6 +2513,7 @@ class MontageRenderSession:
             or self.active_tile_requests
             or self.stage_fan_in.active_requests
             or self.stage_fan_in.attached_requests
+            or self.stage_fan_in.has_waiting()
             or self.final_commit_pending
             or self.flush_pending
             or self.dirty_payloads

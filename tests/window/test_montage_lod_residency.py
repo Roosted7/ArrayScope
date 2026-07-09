@@ -406,16 +406,16 @@ def test_admitted_level_streams_in_with_distinct_identity_and_shape():
     session.dirty_payloads.update({0: None, 1: None})
     state, delta = session.build_tile_presentation({})
 
-    assert session.lod_policy_decision.applied_level == 2
+    assert session.lod_policy_decision.applied_level == 1
     assert set(delta.upserts) == {0, 1}
     for tile, payload in delta.upserts.items():
-        assert payload.lod.level == 2
-        assert payload.lod.factor == 4
-        assert payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
+        assert payload.lod.level == 1
+        assert payload.lod.factor == 2
+        assert payload.texture_data.shape[:2] == (TILE // 2, TILE // 2)
         # Presentation identity separates levels: a reduced payload can never
         # share a residency key with the native payload it replaces.
         assert payload.source_id != native_ids[tile]
-        assert payload.image.shape[:2] == (TILE // 4, TILE // 4)
+        assert payload.image.shape[:2] == (TILE // 2, TILE // 2)
         assert payload.semantic_data.shape[:2] == (TILE, TILE)
         # Exact semantic sources are untouched by display LOD.
         assert payload.semantic_histogram_data.shape[:2] == (TILE, TILE)
@@ -440,9 +440,9 @@ def test_mixed_residency_applies_per_tile_and_reports_common_level():
 
     # Tile 0 presents the reduced level; tile 1 retains native until its
     # replacement is resident.
-    assert delta.upserts[0].lod.level == 2
+    assert delta.upserts[0].lod.level == 1
     assert delta.upserts[1].lod.level == 0
-    assert delta.upserts[0].texture_data.shape[:2] == (TILE // 4, TILE // 4)
+    assert delta.upserts[0].texture_data.shape[:2] == (TILE // 2, TILE // 2)
     assert delta.upserts[1].texture_data.shape[:2] == (TILE, TILE)
     assert delta.upserts[0].source_id != delta.upserts[1].source_id
     # The session-wide decision only claims what every tile can present.
@@ -459,7 +459,7 @@ def test_threshold_recrossing_hits_the_pyramid_cache_without_new_requests():
         _materialize(session, request)
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
-    assert session.lod_policy_decision.applied_level == 2
+    assert session.lod_policy_decision.applied_level == 1
 
     # Zoom in to native...
     session.view_range = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
@@ -473,7 +473,7 @@ def test_threshold_recrossing_hits_the_pyramid_cache_without_new_requests():
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
 
-    assert session.lod_policy_decision.applied_level == 2
+    assert session.lod_policy_decision.applied_level == 1
     assert session.pending_rung_materializations == []
     assert pyramid.hits > hits_before
     assert pyramid.pending_count == 0
@@ -618,11 +618,11 @@ def test_presented_lod_summary_reports_plurality_of_presented_payloads():
     _state, delta = session.build_tile_presentation({})
     _acknowledge(session, delta)
 
-    # Two of three tiles present level 2; the session-wide decision still
+    # Two of three tiles present the finest resident display level; the session-wide decision still
     # reads native because tile 2 is not resident yet.  Diagnostics must
     # describe the screen, not the consensus.
     assert session.lod_policy_decision.applied_level == 0
-    assert session.presented_lod_summary() == (2, 4, (4, 4))
+    assert session.presented_lod_summary() == (1, 2, (2, 2))
 
 
 def test_presented_lod_summary_tie_prefers_the_finer_level():
@@ -1855,6 +1855,36 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     assert {payload.lod.level for payload in exact_delta.upserts.values()} == {2}
 
 
+def test_presented_preview_keeps_active_exact_work_loading():
+    """A first-pixel preview ack must not clear the exact work owed state."""
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[0]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+    pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+    _claim_preview_resident(session, 0, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=1)
+    assert preview_delta.upserts[0].quality == "preview"
+
+    session.rendered_tiles.clear()
+    session.lifecycle.evaluation_started(0)
+    session.lifecycle.evaluation_claimed(0, object())
+    session.loading_tiles.add(0)
+    _acknowledge(session, preview_delta)
+    session.mark_presented((0,))
+
+    assert 0 in session.lifecycle.presented_tiles
+    assert 0 in session.lifecycle.evaluating_tiles
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert not session.is_complete()
+    assert session.ensure_tile_states()[0].name == "LOADING"
+
+
 def test_preview_floor_does_not_complete_full_refinement():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=2)
@@ -2552,8 +2582,8 @@ def test_stale_commit_batch_releases_prepared_active_claim_after_key_retarget():
     assert session._test_replan_requested is True
 
 
-def test_non_native_desired_without_retained_source_does_not_create_native_claim():
-    """DESIRED display targets must not fall back to per-tile native ops."""
+def test_commuting_desired_reduced_input_uses_preview_claim_not_native():
+    """Commuting DESIRED display targets run as reduced-display work."""
 
     session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
     session.lod_preview_level = 6
@@ -2564,7 +2594,7 @@ def test_non_native_desired_without_retained_source_does_not_create_native_claim
         tile_number=0,
         rung=Rung.DESIRED,
         level=2,
-        reduce_from_native=True,
+        reduce_from_native=False,
         lane=Lane.DISPLAY_PREPARATION,
         priority=Priority.VISIBLE_IMAGE,
         reason="desired display level",
@@ -2580,7 +2610,8 @@ def test_non_native_desired_without_retained_source_does_not_create_native_claim
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
-    assert not effects.prepare_rung(intent, step)
+    assert effects.prepare_rung(intent, step)
+    assert session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
     assert session.pending_rung_materializations
@@ -2588,12 +2619,13 @@ def test_non_native_desired_without_retained_source_does_not_create_native_claim
     effects.rung_dropped(intent, step)
 
     assert not session.pending_rung_materializations
+    assert not session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
     assert session.lifecycle.evaluating_tiles == frozenset()
 
 
-def test_non_native_desired_with_retained_source_stays_shared_only_for_cold_tile():
+def test_non_commuting_desired_with_retained_source_uses_evaluation_claim():
     session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
     stage_key = ("stage", "retained")
     session.stage_fan_in.tile_stage_keys[0] = stage_key
@@ -2613,11 +2645,29 @@ def test_non_native_desired_with_retained_source_stays_shared_only_for_cold_tile
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
-    assert not effects.prepare_rung(intent, step)
+    assert effects.prepare_rung(intent, step)
 
-    assert not getattr(session.lifecycle.record(0), "preview_claims", {})
-    assert 0 not in session.active_tile_requests
-    assert 0 not in session.loading_tiles
+    assert not session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+
+
+def test_non_commuting_cold_desired_is_not_reduced_display_payload():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    tile = session.plan.tiles[0]
+    del session.rendered_tiles[0]
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects._step_evaluates_reduced_display_payload(step, tile)
 
 
 def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
@@ -2643,7 +2693,7 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
         tile_number=0,
         rung=Rung.DESIRED,
         level=2,
-        reduce_from_native=True,
+        reduce_from_native=False,
         lane=Lane.DISPLAY_PREPARATION,
         priority=Priority.VISIBLE_IMAGE,
         reason="desired display level",
@@ -2654,6 +2704,64 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
     assert session.lifecycle.preview_claim_matches(0, int(Rung.PREVIEW), 2)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
+
+
+def test_ready_stage_dependent_rearms_pending_tile_until_materialized():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    stage_key = ("stage", "retained")
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+    session.stage_fan_in.merge_plan(
+        {
+            "tile_stage_keys": {0: stage_key},
+            "stage_values": {stage_key: object()},
+        }
+    )
+
+    assert not session.is_complete()
+
+    assert montage_commit.rearm_ready_stage_dependents(session) == 1
+
+    assert session.pending_tile_numbers() == (0,)
+    assert session.stage_fan_in.tile_stage_keys == {0: stage_key}
+    assert not session.is_complete()
+
+
+def test_stage_activation_batch_rearms_tiles_after_wait_binding_clears():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    stage_key = ("stage", "retained")
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+    session.stage_fan_in.merge_plan(
+        {
+            "tile_stage_keys": {0: stage_key},
+            "attached_stage_keys": {stage_key},
+        }
+    )
+
+    batch = session.stage_fan_in.activate_value(stage_key, object())
+
+    assert batch.tiles == (0,)
+    assert session.stage_fan_in.tile_stage_keys == {}
+    assert montage_commit.enqueue_stage_dependent_tiles(session, batch.tiles) == 1
+    assert session.pending_tile_numbers() == (0,)
+    assert not session.is_complete()
+
+
+def test_orphaned_stage_dependent_releases_to_direct_tile_work():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    stage_key = ("stage", "orphaned")
+    del session.rendered_tiles[0]
+    session.dirty_payloads.pop(0, None)
+    session.stage_fan_in.merge_plan({"tile_stage_keys": {0: stage_key}})
+
+    assert not session.is_complete()
+
+    assert montage_commit.rearm_ready_stage_dependents(session) == 1
+
+    assert session.stage_fan_in.tile_stage_keys == {}
+    assert session.pending_tile_numbers() == (0,)
+    assert not session.is_complete()
 
 
 def test_shared_target_marker_is_source_identity_aware():
@@ -3028,7 +3136,7 @@ def test_stale_materialized_desired_admission_does_not_invent_native_claim():
         tile_number=0,
         rung=Rung.DESIRED,
         level=2,
-        reduce_from_native=True,
+        reduce_from_native=False,
         lane=Lane.DISPLAY_PREPARATION,
         priority=Priority.VISIBLE_IMAGE,
         reason="desired display level",
@@ -3044,13 +3152,14 @@ def test_stale_materialized_desired_admission_does_not_invent_native_claim():
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
-    assert not effects.prepare_rung(intent, step)
+    assert effects.prepare_rung(intent, step)
     assert 0 not in session.active_tile_requests
 
     effects._admit_ready_payloads(((step, ("materialized", request)),))
 
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
+    assert not session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
     assert session.lifecycle.evaluating_tiles == frozenset()
     assert session._test_replan_requested is True
 

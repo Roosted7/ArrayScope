@@ -692,6 +692,142 @@ def test_clean_gpu_layer_update_reuses_page_bindings():
     assert [visual.geometry_calls for visual in layer._visuals_by_page] == geometry_calls
 
 
+def test_clean_gpu_layer_update_skips_atlas_and_visual_walk(monkeypatch):
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    payloads = {index: payload(index, float(index)) for index in range(5)}
+    initial_delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=tuple(range(5)),
+        planned_tiles=tuple(range(5)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+
+    layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=initial_delta,
+    )
+    texture_calls = [visual.texture_calls for visual in layer._visuals_by_page]
+    mipmap_calls = [visual.mipmap_calls for visual in layer._visuals_by_page]
+    geometry_calls = [visual.geometry_calls for visual in layer._visuals_by_page]
+    mapping_calls = [visual.mapping_calls for visual in layer._visuals_by_page]
+
+    def fail_update_payloads(*_args, **_kwargs):
+        raise AssertionError("clean repeat commit must not enter atlas residency update")
+
+    monkeypatch.setattr(layer._pool, "update_payloads", fail_update_payloads)
+    clean_delta = SimpleNamespace(
+        upserts={},
+        removals=(),
+        active_tiles=tuple(range(5)),
+        planned_tiles=tuple(range(5)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+
+    clean = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        tile_delta=clean_delta,
+    )
+
+    assert clean.texture_uploads == 0
+    assert clean.vertex_uploads == 0
+    assert clean.items_skipped == 5
+    assert layer.changed_page_indices() == ()
+    assert [visual.texture_calls for visual in layer._visuals_by_page] == texture_calls
+    assert [visual.mipmap_calls for visual in layer._visuals_by_page] == mipmap_calls
+    assert [visual.geometry_calls for visual in layer._visuals_by_page] == geometry_calls
+    assert [visual.mapping_calls for visual in layer._visuals_by_page] == mapping_calls
+
+
+def test_gpu_layer_reports_only_changed_pages_for_small_upsert():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    payloads = {index: payload(index, float(index)) for index in range(5)}
+    layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=SimpleNamespace(
+            upserts=payloads,
+            removals=(),
+            active_tiles=tuple(range(5)),
+            planned_tiles=tuple(range(5)),
+            near_tiles=(),
+            near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+            force_refresh=False,
+        ),
+    )
+
+    changed = dict(payloads)
+    changed[4] = payload(4, 99.0, source_id=("changed", 4))
+    update_delta = SimpleNamespace(
+        upserts={4: changed[4]},
+        removals=(),
+        active_tiles=tuple(range(5)),
+        planned_tiles=tuple(range(5)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in changed.items()},
+        force_refresh=False,
+    )
+
+    update = layer.update(
+        payloads=changed,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=(4,),
+        rgb_already_windowed=False,
+        tile_delta=update_delta,
+    )
+
+    assert update.texture_uploads == 1
+    assert layer.changed_page_indices() == (1,)
+
+
 def test_atlas_reuses_matching_source_identity_even_when_dirty_is_unknown():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     values = {0: payload(0, 1.0), 1: payload(1, 2.0)}

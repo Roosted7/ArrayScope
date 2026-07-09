@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 import numpy as np
@@ -1220,12 +1220,14 @@ class GpuMontageLayer:
         self._page_mipmap_pages: list[object | None] = []
         self._page_visibility: list[bool] = []
         self._page_payloads_by_index: list[dict[int, DisplayTilePayload]] = []
-        self._montage_geometry_key: tuple[int, int, int, int, int] | None = None
+        self._montage_geometry_key: tuple[object, ...] | None = None
+        self._active_mapping_key: tuple[object, ...] | None = None
         self._atlas_serial: int = -1
         self._levels: tuple[float, float] = (0.0, 1.0)
         self._shader_mapping = None
         self._shader_mapping_key = None
         self._visible_items = 0
+        self._changed_pages: tuple[int, ...] = ()
         self._last_stats = TileLayerUpdateStats()
         self._ensure_visual_count(1)
 
@@ -1238,6 +1240,9 @@ class GpuMontageLayer:
     def last_stats(self) -> TileLayerUpdateStats:
         return self._last_stats
 
+    def changed_page_indices(self) -> tuple[int, ...]:
+        return tuple(int(index) for index in self._changed_pages)
+
     def reset_residency(self) -> None:
         for visual in self._visuals_by_page:
             visual.visible = False
@@ -1248,8 +1253,10 @@ class GpuMontageLayer:
         self._page_visibility = [False for _visual in self._visuals_by_page]
         self._page_payloads_by_index.clear()
         self._montage_geometry_key = None
+        self._active_mapping_key = None
         self._atlas_serial = -1
         self._visible_items = 0
+        self._changed_pages = ()
         self._last_stats = TileLayerUpdateStats()
 
     def clear(self) -> None:
@@ -1263,8 +1270,10 @@ class GpuMontageLayer:
         self._page_visibility = [False for _visual in self._visuals_by_page]
         self._page_payloads_by_index.clear()
         self._montage_geometry_key = None
+        self._active_mapping_key = None
         self._atlas_serial = -1
         self._visible_items = 0
+        self._changed_pages = ()
 
     def set_levels(self, levels) -> TileLayerUpdateStats:
         return self.set_presentation_uniforms(levels=levels)
@@ -1289,6 +1298,16 @@ class GpuMontageLayer:
                 for visual in self._visuals_by_page:
                     mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
         previous = self._last_stats
+        changed_pages = (
+            tuple(
+                int(index)
+                for index, visual in enumerate(self._visuals_by_page)
+                if bool(getattr(visual, "visible", False))
+            )
+            if level_updates or mapping_updates
+            else ()
+        )
+        self._changed_pages = changed_pages
         self._last_stats = TileLayerUpdateStats(
             visible_items=self._visible_items,
             presented_tiles=tuple(int(tile) for tile in sorted(self._pool.tile_slots)),
@@ -1357,6 +1376,46 @@ class GpuMontageLayer:
             self.clear()
             return TileLayerUpdateStats()
         payloads = {int(key): value for key, value in dict(payloads or {}).items()}
+        levels = _normalize_levels(levels, self._levels)
+        mapping_key = _mapping_identity_key(shader_mapping)
+        layout_key = _layout_geometry_key(layout)
+        explicit_upserts = tuple(sorted(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})))
+        removals = tuple(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
+        raw_active_tiles = getattr(tile_delta, "active_tiles", None) if tile_delta is not None else None
+        active_tiles = (
+            tuple(int(tile) for tile in tuple(raw_active_tiles))
+            if raw_active_tiles is not None
+            else tuple(sorted(payloads))
+        )
+        active_mapping_key = _active_mapping_key(
+            payloads,
+            active_tiles=active_tiles,
+            pool=self._pool,
+            rgb_already_windowed=rgb_already_windowed,
+        )
+        if (
+            dirty_tiles is not None
+            and not tuple(dirty_tiles)
+            and not removals
+            and not bool(getattr(tile_delta, "force_refresh", False))
+            and self._pool.pages
+            and int(self._atlas_serial) == int(self._pool.serial)
+            and layout_key == self._montage_geometry_key
+            and active_mapping_key is not None
+            and active_mapping_key == self._active_mapping_key
+            and levels == self._levels
+            and mapping_key == self._shader_mapping_key
+        ):
+            self._last_stats = _clean_layer_stats(
+                self._last_stats,
+                visible_items=self._visible_items,
+                presented_tiles=tuple(tile for tile in active_tiles if int(tile) in self._pool.tile_slots),
+                committed_upserts=explicit_upserts,
+                pool=self._pool,
+                page_visibility=self._page_visibility,
+            )
+            self._changed_pages = ()
+            return self._last_stats
         reserve_count = max(
             _atlas_reserve_count(geometry, minimum=len(payloads), frame_plan=frame_plan),
             len(tuple(getattr(tile_delta, "planned_tiles", ()) or ())),
@@ -1377,20 +1436,40 @@ class GpuMontageLayer:
             budget_bytes=tile_residency_budget_bytes,
             tile_delta=tile_delta,
         )
+        active_mapping_key = _active_mapping_key(
+            payloads,
+            active_tiles=tuple(texture_stats.presented_tiles or active_tiles),
+            pool=self._pool,
+            rgb_already_windowed=rgb_already_windowed,
+        )
         self._ensure_visual_count(len(self._pool.pages))
         vertex_uploads = 0
-        active_pages = set()
-        page_payloads_by_index, dirty_pages = self._sync_page_payloads(
+        atlas_serial_before_sync = int(self._atlas_serial)
+        previous_active_pages = {
+            int(page_index)
+            for page_index, page_payloads in enumerate(tuple(self._page_payloads_by_index or ()))
+            if page_payloads
+        }
+        page_payloads_by_index, dirty_pages, active_pages = self._sync_page_payloads(
             payloads,
             presented_tiles=tuple(texture_stats.presented_tiles or ()),
             layout=layout,
+            layout_key=layout_key,
+            active_mapping_key=active_mapping_key,
             rgb_already_windowed=rgb_already_windowed,
         )
-        for page_index, page in enumerate(self._pool.pages):
+        page_indices = set(dirty_pages) | set(active_pages) | previous_active_pages
+        if atlas_serial_before_sync != int(self._pool.serial):
+            page_indices = set(range(len(self._pool.pages)))
+        changed_pages: set[int] = set()
+        for tile_number in explicit_upserts:
+            slot_ref = self._pool.tile_slots.get(int(tile_number))
+            if slot_ref is not None:
+                changed_pages.add(int(slot_ref[0]))
+        for page_index in sorted(index for index in page_indices if 0 <= int(index) < len(self._pool.pages)):
+            page = self._pool.pages[page_index]
             page_payloads = page_payloads_by_index[page_index]
             visual = self._visuals_by_page[page_index]
-            if page_payloads:
-                active_pages.add(page_index)
             if page_index in dirty_pages or page_index not in self._geometry_keys:
                 geometry_key = _page_geometry_key(
                     page_payloads,
@@ -1411,44 +1490,61 @@ class GpuMontageLayer:
                 visual.set_geometry(vertices, texcoords, modes)
                 self._geometry_keys[page_index] = geometry_key
                 vertex_uploads += 1
-        levels = _normalize_levels(levels, self._levels)
+                changed_pages.add(int(page_index))
         level_updates = 0
         if levels != self._levels:
             self._levels = levels
             for visual in self._visuals_by_page:
                 level_updates += int(bool(visual.set_levels(levels)))
-        mapping_key = _mapping_identity_key(shader_mapping)
         mapping_changed = mapping_key != self._shader_mapping_key
         if mapping_changed:
             self._shader_mapping = shader_mapping
             self._shader_mapping_key = mapping_key
         mapping_updates = 0
-        for page_index, page in enumerate(self._pool.pages):
+        if mapping_changed:
+            visual_indices = set(range(len(self._pool.pages)))
+        else:
+            visual_indices = set(page_indices)
+        for page_index in sorted(index for index in visual_indices if 0 <= int(index) < len(self._pool.pages)):
+            page = self._pool.pages[page_index]
             visual = self._visuals_by_page[page_index]
             texture_key = (page.scalar_texture, page.color_texture)
             if texture_key != self._page_texture_keys[page_index]:
                 visual.set_textures(page.scalar_texture, page.color_texture)
                 self._page_texture_keys[page_index] = texture_key
+                changed_pages.add(int(page_index))
             set_mipmap_page = getattr(visual, "set_mipmap_page", None)
             if set_mipmap_page is not None and page is not self._page_mipmap_pages[page_index]:
                 set_mipmap_page(page)
                 self._page_mipmap_pages[page_index] = page
+                changed_pages.add(int(page_index))
             if mapping_changed:
-                mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
+                if bool(visual.set_shader_mapping(shader_mapping)):
+                    mapping_updates += 1
+                    changed_pages.add(int(page_index))
             visible = page_index in active_pages
             if visible != self._page_visibility[page_index] or bool(getattr(visual, "visible", False)) != visible:
                 visual.visible = visible
                 self._page_visibility[page_index] = visible
+                changed_pages.add(int(page_index))
         for page_index, visual in enumerate(self._visuals_by_page[len(self._pool.pages):], start=len(self._pool.pages)):
             if page_index >= len(self._page_visibility) or not self._page_visibility[page_index]:
                 continue
             visual.visible = False
             self._page_visibility[page_index] = False
+            changed_pages.add(int(page_index))
         effective_presented_tiles = tuple(
             int(tile)
             for tile in tuple(texture_stats.presented_tiles or ())
         )
         self._visible_items = len(effective_presented_tiles)
+        if level_updates:
+            changed_pages.update(
+                int(index)
+                for index, visual in enumerate(self._visuals_by_page)
+                if bool(getattr(visual, "visible", False))
+            )
+        self._changed_pages = tuple(sorted(changed_pages))
         self._last_stats = TileLayerUpdateStats(
             visible_items=len(effective_presented_tiles),
             presented_tiles=effective_presented_tiles,
@@ -1491,14 +1587,17 @@ class GpuMontageLayer:
         )
         return self._last_stats
 
-    def _sync_page_payloads(self, payloads, *, presented_tiles, layout, rgb_already_windowed: bool):
+    def _sync_page_payloads(
+        self,
+        payloads,
+        *,
+        presented_tiles,
+        layout,
+        layout_key,
+        active_mapping_key,
+        rgb_already_windowed: bool,
+    ):
         page_count = len(self._pool.pages)
-        layout_key = (
-            tuple(
-                (int(region.tile_number), int(region.x), int(region.y), int(region.width), int(region.height))
-                for region in sorted(layout.values(), key=lambda item: int(item.tile_number))
-            ),
-        )
         page_payloads_by_index: list[dict[int, DisplayTilePayload]] = [{} for _page in self._pool.pages]
         active = {int(tile) for tile in tuple(presented_tiles or ())}
         payload_map = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
@@ -1517,12 +1616,19 @@ class GpuMontageLayer:
             if 0 <= int(page_index) < page_count:
                 page_payloads_by_index[int(page_index)][int(tile)] = payload
         dirty_pages: set[int] = set()
+        active_pages = {int(index) for index, page_payloads in enumerate(page_payloads_by_index) if page_payloads}
+        previous_active_pages = {
+            int(index)
+            for index, page_payloads in enumerate(tuple(self._page_payloads_by_index or ()))
+            if page_payloads
+        }
         full_refresh = (
             len(self._page_payloads_by_index) != page_count
             or self._montage_geometry_key != layout_key
             or int(self._atlas_serial) != int(self._pool.serial)
         )
-        for page_index in range(page_count):
+        candidates = set(range(page_count)) if full_refresh else active_pages | previous_active_pages
+        for page_index in candidates:
             if full_refresh or _page_geometry_key(
                 page_payloads_by_index[int(page_index)],
                 self._pool,
@@ -1533,8 +1639,9 @@ class GpuMontageLayer:
                 dirty_pages.add(int(page_index))
         self._page_payloads_by_index = page_payloads_by_index
         self._montage_geometry_key = layout_key
+        self._active_mapping_key = active_mapping_key
         self._atlas_serial = int(self._pool.serial)
-        return self._page_payloads_by_index, dirty_pages
+        return self._page_payloads_by_index, dirty_pages, active_pages
 
     def warm_residency(
         self,
@@ -2154,6 +2261,87 @@ def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bo
         ),
         id(page),
         tuple(int(value) for value in page.atlas_shape),
+    )
+
+
+def _layout_geometry_key(layout) -> tuple[object, ...]:
+    return (
+        tuple(
+            (int(region.tile_number), int(region.x), int(region.y), int(region.width), int(region.height))
+            for region in sorted(dict(layout or {}).values(), key=lambda item: int(item.tile_number))
+        ),
+    )
+
+
+def _active_mapping_key(payloads, *, active_tiles, pool, rgb_already_windowed: bool) -> tuple[object, ...] | None:
+    payload_map = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
+    items = []
+    for tile in tuple(active_tiles or ()):
+        tile = int(tile)
+        payload = payload_map.get(tile)
+        if payload is None:
+            return None
+        resident_key = _resident_key(payload)
+        if pool.tile_resident_keys.get(tile) != resident_key:
+            return None
+        if pool.source_ids.get(resident_key) != payload.source_id:
+            return None
+        slot = pool.tile_slots.get(tile)
+        if slot is None:
+            return None
+        items.append(
+            (
+                tile,
+                resident_key,
+                int(slot[0]),
+                int(slot[1]),
+                payload.source_id,
+                _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
+                _payload_gutter(payload),
+            )
+        )
+    return tuple(items)
+
+
+def _clean_layer_stats(
+    previous: TileLayerUpdateStats,
+    *,
+    visible_items: int,
+    presented_tiles,
+    committed_upserts,
+    pool,
+    page_visibility,
+) -> TileLayerUpdateStats:
+    return replace(
+        previous,
+        visible_items=int(visible_items),
+        presented_tiles=tuple(int(tile) for tile in tuple(presented_tiles or ())),
+        committed_upserts=tuple(int(tile) for tile in tuple(committed_upserts or ())),
+        presented_identities=pool.presented_identities(),
+        items_updated=0,
+        items_skipped=int(visible_items),
+        texture_uploads=0,
+        texture_upload_bytes=0,
+        texture_prepare_ms=0.0,
+        texture_submit_ms=0.0,
+        vertex_uploads=0,
+        level_updates=0,
+        shader_uniform_updates=0,
+        upload_ms=0.0,
+        resident_items=pool.resident_count,
+        storage_capacity=pool.capacity,
+        estimated_gpu_bytes=pool.estimated_gpu_bytes,
+        cpu_shadow_bytes=pool.cpu_shadow_bytes,
+        page_count=len(pool.pages),
+        active_pages=sum(1 for visible in tuple(page_visibility or ()) if bool(visible)),
+        device_max_texture_size=pool.max_texture_size,
+        budget_bytes=pool.budget_bytes,
+        warm_resident_items=max(0, pool.resident_count - len(pool.active_resident_keys)),
+        mipmap_updates=0,
+        complex_texture_uploads=0,
+        lod_level_swaps_zero_upload=0,
+        lod_level_swaps_with_upload=0,
+        superseded_reclaimed_under_pressure=0,
     )
 
 

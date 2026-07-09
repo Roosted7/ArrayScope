@@ -178,20 +178,14 @@ class MontagePipelineEffects:
         if tile is None or not self._session_is_current(intent):
             return False
         tile_number = int(tile.montage_index)
-        if (
-            step.rung in (Rung.FLOOR, Rung.PREVIEW, Rung.DESIRED)
-            and tile_number not in self.session.rendered_tiles
-            and self.session.lifecycle.preview_claim_matches(tile_number, int(Rung.PREVIEW), int(step.level))
-        ):
-            return False
-        if (
-            step.rung == Rung.DESIRED
-            and int(step.level) > 0
-            and bool(getattr(step, "reduce_from_native", True))
-            and tile_number not in self.session.rendered_tiles
-        ):
-            return False
         if self._step_evaluates_reduced_display_payload(step, tile):
+            if self.session.lifecycle.preview_claim_matches(tile_number, int(step.rung), int(step.level)):
+                return False
+            if (
+                step.rung == Rung.DESIRED
+                and self.session.lifecycle.preview_claim_matches(tile_number, int(Rung.PREVIEW), int(step.level))
+            ):
+                return False
             return self.session.lifecycle.preview_claimed(tile_number, int(step.rung), int(step.level))
         if step.rung == Rung.DESIRED and int(step.level) > 0 and tile_number in self.session.rendered_tiles:
             materialization_key = (tile_number, int(step.rung), int(step.level))
@@ -238,7 +232,11 @@ class MontagePipelineEffects:
         tile_number = int(getattr(tile, "montage_index", getattr(step, "tile_number", -1)))
         if tile_number in getattr(self.session, "rendered_tiles", {}):
             return False
-        return bool(step.rung == Rung.DESIRED and int(step.level) > 0)
+        return bool(
+            step.rung == Rung.DESIRED
+            and int(step.level) > 0
+            and not bool(getattr(step, "reduce_from_native", True))
+        )
 
     def _shared_preview_claim_covers_cold_tile(self, tile_number: int) -> bool:
         if int(tile_number) in self.session.rendered_tiles:
@@ -265,6 +263,8 @@ class MontagePipelineEffects:
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
             self.session.lifecycle.preview_released(tile_number, int(step.rung), int(step.level))
             return
+        if step.rung == Rung.DESIRED and int(step.level) > 0:
+            self.session.lifecycle.preview_released(tile_number, int(step.rung), int(step.level))
         if step.rung == Rung.DESIRED:
             request = self.session.lifecycle.materialization_request_for(tile_number, self._level_key_for_step(tile, step))
             if request is not None:
@@ -667,6 +667,7 @@ class MontagePipelineEffects:
 
     def _admit_materialized_rung(self, step, request) -> None:
         tile_number = int(step.tile_number)
+        self.session.lifecycle.preview_released(tile_number, int(step.rung), int(step.level))
         self.session.pending_rung_materializations.mark_resident(request)
         self.session.lod_materializations_completed = (
             int(getattr(self.session, "lod_materializations_completed", 0) or 0) + 1
@@ -1801,7 +1802,8 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
                 return
             if not renderer._is_current_render_generation(current.render_generation):
                 return
-            current.stage_fan_in.activate_value(key, value)
+            batch = current.stage_fan_in.activate_value(key, value)
+            enqueue_stage_dependent_tiles(current, batch.tiles)
             # Per-completion: coalesced replan, never a direct O(tiles) one.
             renderer.request_montage_replan(current)
 
@@ -1857,7 +1859,51 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             renderer.request_montage_replan(session)
 
 
-def release_stage_dependents_to_direct(session, key) -> None:
+def enqueue_stage_dependent_tiles(session, tile_numbers) -> int:
+    """Requeue stage-backed tiles whose retained source is now usable."""
+
+    queued = set(session.pending_tile_numbers())
+    busy = (
+        set(int(tile) for tile in getattr(session, "loading_tiles", ()) or ())
+        | set(int(tile) for tile in getattr(session, "active_tile_requests", ()) or ())
+    )
+    added = 0
+    for tile_number in tuple(tile_numbers or ()):
+        tile_number = int(tile_number)
+        if tile_number in queued or tile_number in busy:
+            continue
+        if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
+            continue
+        if 0 <= tile_number < len(session.plan.tiles):
+            if session.enqueue_pending_tile(session.plan.tiles[tile_number]):
+                queued.add(tile_number)
+                added += 1
+    return int(added)
+
+
+def rearm_ready_stage_dependents(session) -> int:
+    """Keep stage-backed retained pixels from idling after their source is ready."""
+
+    values = dict(getattr(session.stage_fan_in, "values", {}) or {})
+    ready_tiles = tuple(
+        int(tile_number)
+        for tile_number, key in tuple(getattr(session.stage_fan_in, "tile_stage_keys", {}).items())
+        if key in values
+    )
+    rearmed = enqueue_stage_dependent_tiles(session, ready_tiles)
+
+    bound_keys = set(getattr(session.stage_fan_in, "tile_stage_keys", {}).values())
+    owned_keys = (
+        set(getattr(session.stage_fan_in, "active_requests", set()) or set())
+        | set(getattr(session.stage_fan_in, "attached_requests", set()) or set())
+        | set(values)
+    )
+    for key in tuple(bound_keys - owned_keys):
+        rearmed += release_stage_dependents_to_direct(session, key)
+    return int(rearmed)
+
+
+def release_stage_dependents_to_direct(session, key) -> int:
     queued = set(session.pending_tile_numbers())
     released = 0
     for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
@@ -1876,6 +1922,7 @@ def release_stage_dependents_to_direct(session, key) -> None:
     if released:
         session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - released)
         session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - released)
+    return int(released)
 
 
 def montage_tile_layer_placeholder(session) -> np.ndarray:

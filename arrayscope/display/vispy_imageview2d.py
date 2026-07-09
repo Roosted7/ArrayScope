@@ -1764,7 +1764,17 @@ class VisPyImageView2D(ImageViewShell):
             getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
         ) + 1
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
-        for visual in tuple(getattr(layer, "_visuals_by_page", ()) or ()):
+        visuals = tuple(getattr(layer, "_visuals_by_page", ()) or ())
+        changed_pages = tuple(getattr(layer, "changed_page_indices", lambda: ())() or ())
+        if changed_pages:
+            candidates = (
+                visuals[int(index)]
+                for index in changed_pages
+                if 0 <= int(index) < len(visuals)
+            )
+        else:
+            candidates = tuple()
+        for visual in candidates:
             if bool(getattr(visual, "visible", False)) and callable(getattr(visual, "update", None)):
                 try:
                     visual.update()

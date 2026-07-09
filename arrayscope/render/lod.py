@@ -260,12 +260,22 @@ def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[in
     hit = memo.get(memo_key)
     if hit is not None and hit[0] == guard:
         return hit[1]
-    levels = tuple(
+    levels = set(
         int(level)
         for level in demand.acceptable_levels
         if int(level) > 0
         and pyramid.peek(pyramid_key_for(session, rendered, demand=demand, level=int(level))) is not None
     )
+    semantic_id = session.tile_semantic_source_id(int(rendered.tile.source_index))
+    component = component_for_rendered(rendered, shader_display=bool(getattr(session, "shader_display", True)))
+    coarsest = max(0, int(getattr(demand, "desired_level", 0) or 0))
+    for key in pyramid.resident_keys_for(semantic_id, int(rendered.tile.source_index), component):
+        if not _floor_key_presentable(session, key, pyramid):
+            continue
+        level = max(int(value) for value in tuple(getattr(key, "level_xy", ()) or (0,)))
+        if 0 < level <= coarsest:
+            levels.add(int(level))
+    levels = tuple(sorted(levels))
     memo[memo_key] = (guard, levels)
     return levels
 
@@ -755,7 +765,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                 if not _floor_key_presentable(session, key, cache):
                     continue
                 level = max(int(key.level_xy[0]), int(key.level_xy[1]))
-                rank = (abs(level - desired), level)
+                rank = _resident_floor_rank(level, desired)
                 if best_preview is None or rank < best_preview[0]:
                     best_preview = (rank, key, level, cache)
             if best_preview is not None:
@@ -767,7 +777,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                 if not _floor_key_presentable(session, key, pyramid):
                     continue
                 level = max(int(key.level_xy[0]), int(key.level_xy[1]))
-                rank = (abs(level - desired), level)
+                rank = _resident_floor_rank(level, desired)
                 if best is None or rank < best[0]:
                     best = (rank, key, level)
             if best is not None:
@@ -788,6 +798,14 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
         if preview.peek(key) is not None:
             return (key, level, preview)
     return None
+
+
+def _resident_floor_rank(level: int, desired: int) -> tuple[int, int]:
+    level = int(level)
+    desired = int(desired)
+    if level <= desired:
+        return (0, level)
+    return (1, level - desired)
 
 
 def floor_can_progress(session, tile_number: int, tile=None) -> bool:
