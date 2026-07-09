@@ -22,7 +22,7 @@ from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder
 from arrayscope.render.pipeline import MontagePipeline
-from arrayscope.render.stages import RenderIntent
+from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 from arrayscope.ui.toasts import show_revert_action
 from arrayscope.render import lod as render_lod
 from arrayscope.window import montage_commit
@@ -118,6 +118,33 @@ class MontageRuntimeMixin:
             interactive=_interactive_active(self),
         )
 
+    def _lod_admission_scope(self, session, intent: RenderIntent) -> LodAdmissionScope:
+        visible = frozenset(int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ()))
+        coverage = set(visible)
+        coverage.update(int(tile) for tile in tuple(getattr(session, "loading_tiles", ()) or ()))
+        coverage.update(int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ()))
+        near = (
+            tuple(getattr(session, "_near_tile_numbers", lambda **_kwargs: ())(margin_tiles=2))
+            if hasattr(session, "_near_tile_numbers")
+            else ()
+        )
+        skipped = set(int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ()))
+        missing = 0
+        for tile_number in visible:
+            if int(tile_number) in skipped:
+                continue
+            matches = getattr(session, "_tile_presentation_matches_current_plan", None)
+            if not callable(matches) or not bool(matches(int(tile_number))):
+                missing += 1
+        return LodAdmissionScope(
+            visible_tile_numbers=visible,
+            coverage_tile_numbers=frozenset(coverage),
+            near_tile_numbers=frozenset(int(tile) for tile in tuple(near or ())),
+            viewport_key=intent.viewport_key,
+            interactive=bool(intent.interactive),
+            visible_missing_count=missing,
+        )
+
     def _montage_pipeline_for_session(self, session) -> MontagePipeline:
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
@@ -188,11 +215,12 @@ class MontageRuntimeMixin:
             return 0
         render_lod.selected_lod_factor(session)
         intent = self._montage_render_intent(session)
+        scope = self._lod_admission_scope(session, intent)
         pipeline = self._montage_pipeline_for_session(session)
-        submitted = pipeline.effects.submit_shared_transform_floor()
+        submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             return submitted
-        submitted += pipeline.retarget(intent, session.lod_policy_decision.demand)
+        submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
         if force_commit or session.flush_pending or session.final_commit_pending:

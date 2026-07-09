@@ -2403,6 +2403,7 @@ def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(
             near_tiles=(0, 1, 2),
             near_tile_source_ids={index: payload.source_id for index, payload in payloads.items()},
         )
+        view._vispy_warm_tile_scheduler = lambda process: process()
         view.setTiledPresentation(
             geometry=geometry,
             tile_state=TilePresentationState(payloads),

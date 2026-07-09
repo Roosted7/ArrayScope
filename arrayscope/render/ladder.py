@@ -67,6 +67,9 @@ class TileLodState:
     presented_level: int | None = None
     floor_available: bool = False
     presented_quality: str = "exact"
+    current_presentation_quality: str = "exact"
+    allow_preview: bool = True
+    target_quality_available: bool = False
     exact_requested: bool = False  # inspection or user demanded native
 
 
@@ -142,11 +145,15 @@ class LodLadder:
             candidates.extend(float(step.level) for step in steps)
             return min(candidates) if candidates else float("inf")
 
-        # Pre-native rungs are planned only when they are actually cheap.
+        # Pre-native rungs are planned only when admission says they are useful
+        # for first pixels.  Target-ready, caught-up tiles skip the preview
+        # detour and go straight to DESIRED/EXACT.
         # Per-tile reduced input is valid only for display-LOD-commuting
         # pipelines; non-commuting but reduced-input-suitable transforms use
         # the shared transform-preview path outside this ladder.
-        cheap_pre_native = policy.reduced_input_available or state.floor_available
+        cheap_pre_native = bool(state.allow_preview) and (
+            policy.reduced_input_available or state.floor_available
+        )
 
         # 1) FLOOR — only while the tile has nothing committable at all.
         if presented is None and not resident and cheap_pre_native:

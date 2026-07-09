@@ -45,6 +45,41 @@ class RenderIntent:
 
 
 @dataclass(frozen=True)
+class LodAdmissionScope:
+    """Current viewport-owned scope for LOD admission.
+
+    Visible tile numbers are the only tiles allowed onto visible LOD lanes.
+    Coverage/near tiles are carried for later speculative residency and
+    prefetch decisions, after the kernel has no visible backlog.
+    """
+
+    visible_tile_numbers: frozenset[int] = field(default_factory=frozenset)
+    coverage_tile_numbers: frozenset[int] = field(default_factory=frozenset)
+    near_tile_numbers: frozenset[int] = field(default_factory=frozenset)
+    viewport_key: object = None
+    interactive: bool = False
+    visible_missing_count: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "visible_tile_numbers",
+            frozenset(int(tile) for tile in tuple(self.visible_tile_numbers or ())),
+        )
+        object.__setattr__(
+            self,
+            "coverage_tile_numbers",
+            frozenset(int(tile) for tile in tuple(self.coverage_tile_numbers or ())),
+        )
+        object.__setattr__(
+            self,
+            "near_tile_numbers",
+            frozenset(int(tile) for tile in tuple(self.near_tile_numbers or ())),
+        )
+        object.__setattr__(self, "visible_missing_count", max(0, int(self.visible_missing_count or 0)))
+
+
+@dataclass(frozen=True)
 class TileWork:
     """One schedulable unit of tile work, ready for kernel submission."""
 
@@ -115,6 +150,7 @@ class PipelineCounters:
 __all__ = [
     "AckExpectation",
     "CommitBatch",
+    "LodAdmissionScope",
     "PipelineCounters",
     "RenderIntent",
     "TileWork",

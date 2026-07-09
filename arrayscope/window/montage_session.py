@@ -2131,8 +2131,6 @@ class MontageRenderSession:
         backend = dict(self.lifecycle.backend_presented_identities)
         desired_payloads = dict(self.display_tile_payloads)
         state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
-        effects = getattr(getattr(self, "pipeline", None), "effects", None)
-        evaluation_claims = dict(getattr(effects, "_pending_evaluations", {}) or {})
         suspect = set(visible - presented)
         suspect.update(pending | loading | active | dirty | upserts)
         for tile_number, payload in desired_payloads.items():
@@ -2165,7 +2163,7 @@ class MontageRenderSession:
             semantic_source = None if tile is None else self.tile_semantic_source_id(source_index)
             desired_source_index = None if desired is None else int(getattr(desired, "source_index", -1))
             state_source_index = None if state_payload is None else int(getattr(state_payload, "source_index", -1))
-            evaluation_claim = evaluation_claims.get(tile_number)
+            evaluation_claim = None if rec is None else getattr(rec, "evaluation_claim", None)
             evaluation_claim_source_index = (
                 None if evaluation_claim is None else int(getattr(evaluation_claim, "source_index", -1))
             )

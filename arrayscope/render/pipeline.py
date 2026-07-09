@@ -26,7 +26,7 @@ from typing import Any, Callable, Protocol
 
 from arrayscope.kernel import Kernel, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
-from arrayscope.render.stages import CommitBatch, PipelineCounters, RenderIntent
+from arrayscope.render.stages import CommitBatch, LodAdmissionScope, PipelineCounters, RenderIntent
 
 
 class PipelineEffects(Protocol):
@@ -55,7 +55,12 @@ class PipelineEffects(Protocol):
         """
         ...
 
-    def tile_states(self, intent: RenderIntent, demand) -> tuple[TileLodState, ...]:
+    def tile_states(
+        self,
+        intent: RenderIntent,
+        demand,
+        scope: LodAdmissionScope,
+    ) -> tuple[TileLodState, ...]:
         """Snapshot per-tile lod state from TileLifecycle claims.
 
         Implementations read ``TileLifecycle`` records and pyramid residency
@@ -131,7 +136,7 @@ class MontagePipeline:
 
     # ----------------------------------------------------------- lifecycle
 
-    def retarget(self, intent: RenderIntent, demand) -> int:
+    def retarget(self, intent: RenderIntent, demand, scope: LodAdmissionScope) -> int:
         """Adopt a new intent; schedule exactly the missing rung steps.
 
         Returns the number of submitted kernel tasks. Safe to call on every
@@ -150,7 +155,7 @@ class MontagePipeline:
                     self.effects.rung_dropped(queued_intent, step)
             self._ready_upserts.clear()
 
-        states = self.effects.tile_states(intent, demand)
+        states = self.effects.tile_states(intent, demand, scope)
         steps = self.ladder.plan(states, demand)
         self.counters.ladder_plans += 1
         submitted = 0

@@ -136,9 +136,9 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_canvas_update_pending = False
         self._vispy_profile_visuals: dict[str, object] = {}
         self._vispy_last_levels: tuple[float, float] = (0.0, 1.0)
-        self._vispy_warm_tile_timer: QtCore.QTimer | None = None
         self._vispy_pending_warm_tile_payloads: dict[int, object] = {}
         self._vispy_pending_warm_tile_context: dict[str, object] = {}
+        self._vispy_warm_tile_scheduler = None
         self._last_vispy_warm_tile_stats = None
         self._last_vispy_tiled_levels_key = None
         self._last_vispy_tiled_mapping_key = None
@@ -211,9 +211,6 @@ class VisPyImageView2D(ImageViewShell):
 
 
     def _cancel_vispy_speculative_work(self) -> None:
-        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
-        if warm_timer is not None:
-            warm_timer.stop()
         self._vispy_pending_warm_tile_payloads = {}
         self._vispy_pending_warm_tile_context = {}
 
@@ -829,17 +826,12 @@ class VisPyImageView2D(ImageViewShell):
             "tile_delta": tile_delta,
             "tile_residency_budget_bytes": int(tile_residency_budget_bytes),
         }
-        timer = self._vispy_warm_tile_timer
-        if timer is None:
-            # Bounded speculative continuation. Visible commits finish before
-            # warm residency starts, and camera sync cancels stale warm work.
-            timer = QtCore.QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._process_vispy_warm_tile_residency)
-            self._vispy_warm_tile_timer = timer
-        # Warm uploads are speculative and are queued after the visible commit
-        # returns, so they cannot delay the first useful tiled presentation.
-        timer.start(0)
+        self._submit_vispy_warm_tile_residency_continuation()
+
+    def _submit_vispy_warm_tile_residency_continuation(self) -> None:
+        scheduler = getattr(self, "_vispy_warm_tile_scheduler", None)
+        if callable(scheduler):
+            scheduler(self._process_vispy_warm_tile_residency)
 
     def _process_vispy_warm_tile_residency(self) -> None:
         pending = getattr(self, "_vispy_pending_warm_tile_payloads", None)
@@ -870,9 +862,7 @@ class VisPyImageView2D(ImageViewShell):
             self._vispy_pending_warm_tile_context = {}
             return
         if queue:
-            timer = self._vispy_warm_tile_timer
-            if timer is not None:
-                timer.start(8)
+            self._submit_vispy_warm_tile_residency_continuation()
 
     _level_preview_timing_channel = "vispy_level_preview"
 
@@ -1804,9 +1794,6 @@ class VisPyImageView2D(ImageViewShell):
         # A camera gesture has priority over speculative residency uploads.
         # The next settled tiled presentation will enqueue the relevant near
         # ring again, so discarding stale warm work is both safe and cheaper.
-        warm_timer = getattr(self, "_vispy_warm_tile_timer", None)
-        if warm_timer is not None and warm_timer.isActive():
-            warm_timer.stop()
         self._vispy_pending_warm_tile_payloads = {}
         self._vispy_pending_warm_tile_context = {}
         if immediate:

@@ -119,6 +119,11 @@ class TileRecord:
     #: Recorded by ``stage_attached`` so "loading without an evaluation
     #: request" is a queryable machine fact instead of set correlation.
     stage_key: object = None
+    #: Pipeline-owned reduced preview/floor claims keyed by rung integer.
+    preview_claims: dict[int, int] = field(default_factory=dict)
+    #: Opaque metadata for the current kernel evaluation claim. The lifecycle
+    #: owns the presence of the claim; effects own the metadata shape.
+    evaluation_claim: object = None
 
 
 class TileLifecycle:
@@ -315,6 +320,16 @@ class TileLifecycle:
         rec.request_active = True
         self._active_requests.add(rec.tile_number)
 
+    def evaluation_claimed(self, tile_number: int, claim: object) -> None:
+        rec = self.record(tile_number)
+        rec.evaluation_claim = claim
+        rec.request_active = True
+        self._active_requests.add(rec.tile_number)
+
+    def evaluation_claim_for(self, tile_number: int) -> object:
+        rec = self._records.get(int(tile_number))
+        return None if rec is None else rec.evaluation_claim
+
     def evaluation_request_cleared(self, tile_number: int) -> None:
         rec = self._records.get(int(tile_number))
         if rec is not None:
@@ -325,6 +340,42 @@ class TileLifecycle:
 
         for index in tuple(self._active_requests):
             self._request_cleared(self._records[index])
+
+    def preview_claimed(self, tile_number: int, rung: int, level: int) -> bool:
+        rec = self.record(tile_number)
+        rung = int(rung)
+        level = int(level)
+        if rec.preview_claims.get(rung) == level:
+            return False
+        rec.preview_claims[rung] = level
+        return True
+
+    def preview_claim_matches(self, tile_number: int, rung: int, level: int) -> bool:
+        rec = self._records.get(int(tile_number))
+        return bool(rec is not None and rec.preview_claims.get(int(rung)) == int(level))
+
+    def preview_released(self, tile_number: int, rung: int, level: int | None = None) -> bool:
+        rec = self._records.get(int(tile_number))
+        if rec is None:
+            return False
+        rung = int(rung)
+        if rung not in rec.preview_claims:
+            return False
+        if level is not None and rec.preview_claims.get(rung) != int(level):
+            return False
+        rec.preview_claims.pop(rung, None)
+        return True
+
+    def materialization_request_for(self, tile_number: int, level_key=None):
+        rec = self._records.get(int(tile_number))
+        if rec is None:
+            return None
+        for key, entry in rec.levels.items():
+            if level_key is not None and key != level_key:
+                continue
+            if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING):
+                return entry.request
+        return None
 
     # -- stage fan-in (P2: stages report through events) ---------------------
 
@@ -483,6 +534,23 @@ class TileLifecycle:
                 seen.add(identity)
                 pending.append((int(entry.order), request))
         return tuple(request for _order, request in sorted(pending, key=lambda item: item[0]))
+
+    def active_materializations(self) -> tuple[object, ...]:
+        """Claimed or materializing requests currently owned by lifecycle."""
+
+        seen: set[int] = set()
+        requests: list[tuple[int, object]] = []
+        for rec in self._records.values():
+            for entry in rec.levels.values():
+                request = entry.request
+                if entry.phase not in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING) or request is None:
+                    continue
+                identity = id(request)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                requests.append((int(entry.order), request))
+        return tuple(request for _order, request in sorted(requests, key=lambda item: item[0]))
 
     def session_replaced(self) -> tuple[ReleaseClaim, ...]:
         """Release every non-resident claim; the session's records are done."""
@@ -753,6 +821,7 @@ class TileLifecycle:
 
     def _request_cleared(self, rec: TileRecord) -> None:
         rec.request_active = False
+        rec.evaluation_claim = None
         self._active_requests.discard(rec.tile_number)
 
     def _stage_unbound(self, rec: TileRecord) -> None:

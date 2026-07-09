@@ -440,7 +440,7 @@ def evaluate_shared_preview(
     return tuple(previews)
 
 
-def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLodState, ...]:
+def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> tuple[TileLodState, ...]:
     """Snapshot ladder inputs from lifecycle records and pyramid residency.
 
     The lifecycle machine owns acknowledged presentation/residency events; the
@@ -448,6 +448,8 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
     rendered tile.  This helper reads both without mutating either.
     """
 
+    if tile_numbers is None and scope is not None:
+        tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
     allowed = None if tile_numbers is None else {int(value) for value in tuple(tile_numbers)}
     ranked: list[tuple[tuple, TileLodState]] = []
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
@@ -483,6 +485,15 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
         presented_quality = "exact" if payload is None else str(getattr(payload, "quality", "exact") or "exact")
+        desired = 0 if demand is None else max(0, int(getattr(demand, "desired_level", 0) or 0))
+        target_quality_available = bool(
+            tile_number in getattr(session, "rendered_tiles", {})
+            or any(int(level) <= desired for level in resident_levels)
+            or (presented_level is not None and int(presented_level) <= desired and presented_quality != "preview")
+        )
+        blank = payload is None and not resident_levels
+        visible_missing_count = int(getattr(scope, "visible_missing_count", 0) or 0)
+        allow_preview = bool((blank and not target_quality_available) or visible_missing_count >= 2)
         ranked.append(
             (
                 _tile_priority_rank(tile, focus=focus, visible=tile_number in visible_numbers),
@@ -491,6 +502,9 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None) -> tuple[TileLod
                     resident_levels=tuple(sorted(resident_levels)),
                     presented_level=presented_level,
                     presented_quality=presented_quality,
+                    current_presentation_quality=presented_quality,
+                    allow_preview=allow_preview,
+                    target_quality_available=target_quality_available,
                     floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
                 ),
             )
@@ -658,6 +672,7 @@ def shared_transform_candidate_tiles(
     session,
     *,
     level: int,
+    tile_numbers=None,
     include_missing: bool = True,
     require_presented_preview: bool = False,
 ):
@@ -671,8 +686,11 @@ def shared_transform_candidate_tiles(
     """
 
     target_level = int(level)
+    allowed = None if tile_numbers is None else {int(tile) for tile in tuple(tile_numbers or ())}
     for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
         tile_number = int(candidate.montage_index)
+        if allowed is not None and tile_number not in allowed:
+            continue
         if tile_number in getattr(session, "rendered_tiles", {}):
             continue
         if require_presented_preview:

@@ -240,6 +240,36 @@ def test_display_presenter_does_not_infer_windowed_rgb_from_array_rank():
     assert "rgb_already_windowed=display_image.data.ndim" not in text
 
 
+def test_lod_admission_has_no_effects_side_pending_maps_or_shared_floor_markers():
+    source_roots = [
+        ROOT / "arrayscope" / "render",
+        ROOT / "arrayscope" / "window",
+        ROOT / "arrayscope" / "presentation",
+    ]
+    forbidden = (
+        "_shared_floor_tiles",
+        "_shared_floor_inflight_marker",
+        "_shared_floor_admitted_marker",
+        "pending_lod_requests",
+        "montage_lod",
+    )
+    for root in source_roots:
+        for path in root.rglob("*.py"):
+            text = path.read_text()
+            for token in forbidden:
+                assert token not in text, f"{token} found in {path.relative_to(ROOT)}"
+            for token in ("_pending_previews", "_pending_materializations", "_pending_evaluations"):
+                for prefix in ("self.", "effects.", "session."):
+                    assert f"{prefix}{token}" not in text, f"{token} found in {path.relative_to(ROOT)}"
+
+
+def test_vispy_warm_residency_has_no_backend_scheduling_timer():
+    text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
+    assert "_vispy_warm_tile_timer" not in text
+    assert "_process_vispy_warm_tile_residency" in text
+    assert "_vispy_warm_tile_scheduler" in text
+
+
 def test_image_view_shell_exposes_surface_contract():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     backend_text = (ROOT / "arrayscope" / "display" / "backends" / "base.py").read_text()

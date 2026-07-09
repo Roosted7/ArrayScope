@@ -33,7 +33,7 @@ from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import Rung
-from arrayscope.render.stages import CommitBatch
+from arrayscope.render.stages import CommitBatch, LodAdmissionScope
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
 from arrayscope.window.montage_payload_cache import (
@@ -83,14 +83,6 @@ class MontagePipelineEffects:
     def __init__(self, renderer, session) -> None:
         self.renderer = renderer
         self.session = session
-        # In-flight preview/floor rungs by (tile, rung) -> level. Guards
-        # retarget replans from resubmitting identical in-flight work (the
-        # DESIRED/EXACT rungs use session.active_tile_requests for the same
-        # purpose). A *different* level is allowed through: the supersession
-        # family stales the old instance.
-        self._pending_previews: dict[tuple[int, int], int] = {}
-        self._pending_materializations: dict[tuple[int, int, int], object] = {}
-        self._pending_evaluations: dict[int, _EvaluationClaim] = {}
 
     def _evaluation_claim(self, intent, step, tile) -> _EvaluationClaim:
         source_index = int(tile.source_index)
@@ -140,8 +132,10 @@ class MontagePipelineEffects:
 
             return evaluate_preview
 
-        materialization_key = (int(step.tile_number), int(step.rung), int(step.level))
-        request = self._pending_materializations.get(materialization_key)
+        tile_number = int(tile.montage_index)
+        request = None
+        if step.rung == Rung.DESIRED:
+            request = self.session.lifecycle.materialization_request_for(tile_number, self._level_key_for_step(tile, step))
         if step.rung == Rung.DESIRED and request is not None:
             pyramid = getattr(session, "pyramid_cache", None)
 
@@ -174,10 +168,10 @@ class MontagePipelineEffects:
 
         return evaluate_target
 
-    def tile_states(self, intent, demand):
+    def tile_states(self, intent, demand, scope: LodAdmissionScope):
         if not self._session_is_current(intent):
             return ()
-        return render_effects.tile_lod_states(self.session, demand)
+        return render_effects.tile_lod_states(self.session, demand, scope=scope)
 
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
@@ -187,7 +181,7 @@ class MontagePipelineEffects:
         if (
             step.rung in (Rung.FLOOR, Rung.PREVIEW, Rung.DESIRED)
             and tile_number not in self.session.rendered_tiles
-            and tile_number in set(getattr(self.session, "_shared_floor_tiles", ()) or ())
+            and self.session.lifecycle.preview_claim_matches(tile_number, int(Rung.PREVIEW), int(step.level))
         ):
             return False
         if (
@@ -198,21 +192,17 @@ class MontagePipelineEffects:
         ):
             return False
         if self._step_evaluates_reduced_display_payload(step, tile):
-            pending_key = (tile_number, int(step.rung))
-            if self._pending_previews.get(pending_key) == int(step.level):
-                return False  # identical rung already in flight
-            self._pending_previews[pending_key] = int(step.level)
-            return True
+            return self.session.lifecycle.preview_claimed(tile_number, int(step.rung), int(step.level))
         if step.rung == Rung.DESIRED and int(step.level) > 0 and tile_number in self.session.rendered_tiles:
             materialization_key = (tile_number, int(step.rung), int(step.level))
-            if materialization_key in self._pending_materializations:
-                return False
             pyramid = getattr(self.session, "pyramid_cache", None)
             if pyramid is None:
                 return False
             rendered = self.session.rendered_tiles.get(tile_number)
             demand = self.session.lod_policy_decision.demand
             level_key = self.session._pyramid_key_for(rendered, demand=demand, level=int(step.level))
+            if self.session.lifecycle.materialization_request_for(tile_number, level_key) is not None:
+                return False
             if pyramid.peek(level_key) is not None:
                 self.session.lifecycle.level_resident(tile_number, level_key)
                 return False
@@ -226,22 +216,20 @@ class MontagePipelineEffects:
             )
             self.session.pending_rung_materializations.append(request)
             self.session.pending_rung_materializations.mark_started(request)
-            self._pending_materializations[materialization_key] = request
             return True
         if step.rung in (Rung.DESIRED, Rung.EXACT):
-            if self._shared_floor_covers_cold_tile(tile_number):
+            if self._shared_preview_claim_covers_cold_tile(tile_number):
                 return False
             if tile_number in self.session.rendered_tiles or tile_number in self.session.skipped_tiles:
                 return False
             if tile_number in self.session.active_tile_requests:
-                claim = self._pending_evaluations.get(tile_number)
+                claim = self.session.lifecycle.evaluation_claim_for(tile_number)
                 current_claim = self._evaluation_claim(intent, step, tile)
                 if claim is not None and claim.matches_tile(intent, step, tile, current_claim.source_id):
                     return False  # identical rung already in flight
                 self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
             self.session.mark_loading(tile)
-            self.session.active_tile_requests.add(tile_number)
-            self._pending_evaluations[tile_number] = self._evaluation_claim(intent, step, tile)
+            self.session.lifecycle.evaluation_claimed(tile_number, self._evaluation_claim(intent, step, tile))
         return True
 
     def _step_evaluates_reduced_display_payload(self, step, tile) -> bool:
@@ -252,14 +240,13 @@ class MontagePipelineEffects:
             return False
         return bool(step.rung == Rung.DESIRED and int(step.level) > 0)
 
-    def _shared_floor_covers_cold_tile(self, tile_number: int) -> bool:
+    def _shared_preview_claim_covers_cold_tile(self, tile_number: int) -> bool:
         if int(tile_number) in self.session.rendered_tiles:
             return False
-        if int(tile_number) in set(getattr(self.session, "_shared_floor_tiles", ()) or ()):
-            return True
         if self.session.display_tile_payloads.get(int(tile_number)) is not None:
             return False
-        return False
+        rec = self.session.lifecycle.peek(int(tile_number))
+        return bool(rec is not None and rec.preview_claims)
 
     def rung_deps(self, intent, step) -> tuple[object, ...]:
         if not self._session_is_current(intent):
@@ -276,13 +263,10 @@ class MontagePipelineEffects:
             return
         tile_number = int(tile.montage_index)
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
-            pending_key = (tile_number, int(step.rung))
-            if self._pending_previews.get(pending_key) == int(step.level):
-                self._pending_previews.pop(pending_key, None)
+            self.session.lifecycle.preview_released(tile_number, int(step.rung), int(step.level))
             return
         if step.rung == Rung.DESIRED:
-            materialization_key = (tile_number, int(step.rung), int(step.level))
-            request = self._pending_materializations.pop(materialization_key, None)
+            request = self.session.lifecycle.materialization_request_for(tile_number, self._level_key_for_step(tile, step))
             if request is not None:
                 self.session.pending_rung_materializations._apply_release_effects(
                     self.session.pending_rung_materializations.release(request)
@@ -319,7 +303,7 @@ class MontagePipelineEffects:
 
     def _release_evaluation_claim(self, tile_number: int, *, marker=None, request_replan: bool = True) -> bool:
         tile_number = int(tile_number)
-        claim = self._pending_evaluations.get(tile_number)
+        claim = self.session.lifecycle.evaluation_claim_for(tile_number)
         if marker is not None:
             if isinstance(marker, _EvaluationClaim):
                 matched = (
@@ -334,8 +318,7 @@ class MontagePipelineEffects:
                 return False
         elif claim is None and tile_number not in self.session.active_tile_requests:
             return False
-        self._pending_evaluations.pop(tile_number, None)
-        self.session.active_tile_requests.discard(tile_number)
+        self.session.lifecycle.evaluation_request_cleared(tile_number)
         self.session.loading_tiles.discard(tile_number)
         if tile_number not in self.session.rendered_tiles and tile_number not in self.session.display_tile_payloads:
             self.session.dirty_payloads.pop(tile_number, None)
@@ -350,7 +333,11 @@ class MontagePipelineEffects:
 
         scope = None if tile_numbers is None else {int(tile) for tile in tuple(tile_numbers or ())}
         released = 0
-        for tile_number, marker in tuple(self._pending_evaluations.items()):
+        records = tuple(getattr(self.session.lifecycle, "_records", {}).items())
+        for tile_number, record in records:
+            marker = getattr(record, "evaluation_claim", None)
+            if marker is None:
+                continue
             if scope is not None and int(tile_number) not in scope:
                 continue
             released += int(
@@ -418,7 +405,7 @@ class MontagePipelineEffects:
 
         return self._admit_evaluation_result(tile, result)
 
-    def submit_shared_transform_floor(self) -> int:
+    def submit_shared_transform_floor(self, scope: LodAdmissionScope | None = None) -> int:
         """Shared display-target pass for reduced-input pipelines.
 
         FFT-over-montage-axis and similar pipelines can evaluate one reduced
@@ -432,7 +419,12 @@ class MontagePipelineEffects:
         demand = session.ingest_lod_demand()
         if demand is None or not self._session_is_current():
             return 0
-        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        visible_scope = None if scope is None else tuple(getattr(scope, "visible_tile_numbers", ()) or ())
+        plan_tiles = tuple(
+            tile
+            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            if visible_scope is None or int(tile.montage_index) in set(int(value) for value in visible_scope)
+        )
         if not plan_tiles:
             return 0
         seed = plan_tiles[0]
@@ -448,6 +440,7 @@ class MontagePipelineEffects:
                 render_effects.shared_transform_candidate_tiles(
                     session,
                     level=preview_level,
+                    tile_numbers=visible_scope,
                     include_missing=True,
                     require_presented_preview=False,
                 )
@@ -464,6 +457,7 @@ class MontagePipelineEffects:
                     render_effects.shared_transform_candidate_tiles(
                         session,
                         level=desired,
+                        tile_numbers=visible_scope,
                         include_missing=False,
                         require_presented_preview=True,
                     )
@@ -480,6 +474,7 @@ class MontagePipelineEffects:
             render_effects.shared_transform_candidate_tiles(
                 session,
                 level=desired,
+                tile_numbers=visible_scope,
                 include_missing=True,
                 require_presented_preview=False,
             )
@@ -507,12 +502,8 @@ class MontagePipelineEffects:
             tiles=tiles,
             shader_display=shader_display,
         )
-        if getattr(session, "_shared_floor_inflight_marker", None) == marker:
-            return 0  # identical batch already in flight
-        if getattr(session, "_shared_floor_admitted_marker", None) == marker:
-            return 0  # identical batch already in flight or admitted
-        session._shared_floor_inflight_marker = marker
-        session._shared_floor_tiles = tuple(int(tile.montage_index) for tile in tiles)
+        if not self._claim_shared_transform_target(tiles, level=level, lane=lane):
+            return 0
 
         def evaluate(token=None, tiles=tiles, level=level):
             return render_effects.evaluate_shared_preview(
@@ -528,22 +519,15 @@ class MontagePipelineEffects:
             )
 
         def done(rows):
-            if getattr(session, "_shared_floor_inflight_marker", None) == marker:
-                session._shared_floor_inflight_marker = None
-                session._shared_floor_tiles = ()
+            self._release_shared_transform_claims(tiles, level=level, lane=lane)
             if not rows or not self._session_is_current():
                 return
             admitted = self._admit_preview_payload(int(rows[0][0]), tuple(rows))
             if admitted:
-                session._shared_floor_admitted_marker = marker
                 self.request_presentation()
 
         def dropped():
-            if getattr(session, "_shared_floor_inflight_marker", None) == marker:
-                session._shared_floor_inflight_marker = None
-                session._shared_floor_tiles = ()
-            if getattr(session, "_shared_floor_admitted_marker", None) == marker:
-                session._shared_floor_admitted_marker = None
+            self._release_shared_transform_claims(tiles, level=level, lane=lane)
 
         handle = renderer.win.kernel.submit(
             TaskSpec(
@@ -676,15 +660,11 @@ class MontagePipelineEffects:
             if getattr(payload, "value", None) is not None:
                 self._admit_evaluation_result(tile, payload)
                 continue
-            pending_key = (int(step.tile_number), int(step.rung))
-            if self._pending_previews.get(pending_key) == int(step.level):
-                self._pending_previews.pop(pending_key, None)
+            self.session.lifecycle.preview_released(int(step.tile_number), int(step.rung), int(step.level))
             self._admit_preview_payload(int(step.tile_number), payload)
 
     def _admit_materialized_rung(self, step, request) -> None:
         tile_number = int(step.tile_number)
-        materialization_key = (tile_number, int(step.rung), int(step.level))
-        self._pending_materializations.pop(materialization_key, None)
         self.session.pending_rung_materializations.mark_resident(request)
         self.session.lod_materializations_completed = (
             int(getattr(self.session, "lod_materializations_completed", 0) or 0) + 1
@@ -694,7 +674,7 @@ class MontagePipelineEffects:
             self.session.flush_pending = True
             self.session.final_commit_pending = True
         else:
-            claim = self._pending_evaluations.get(tile_number)
+            claim = self.session.lifecycle.evaluation_claim_for(tile_number)
             if claim is not None and claim.rung == int(step.rung) and claim.level == int(step.level):
                 self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
         self.renderer.request_montage_replan(self.session)
@@ -703,7 +683,7 @@ class MontagePipelineEffects:
         session = self.session
         if not self._session_is_current():
             return 0
-        self._pending_evaluations.pop(int(tile.montage_index), None)
+        self.session.lifecycle.evaluation_request_cleared(int(tile.montage_index))
         rendered = self.renderer.win.operation_evaluator.store_montage_tile_result(
             tile,
             montage_axis=session.montage_axis,
@@ -844,6 +824,7 @@ class MontagePipelineEffects:
                 level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
                 renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
             rendered_geometry = replace(rendered_geometry, montage_tile_states=session.ensure_tile_states())
+            self._install_warm_residency_scheduler(rendered_geometry)
             renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             prepare_apply_start = perf_counter()
             prepare_stats_start = perf_counter()
@@ -1229,6 +1210,68 @@ class MontagePipelineEffects:
             details=details,
         )
 
+    def _install_warm_residency_scheduler(self, geometry) -> None:
+        view = getattr(self.renderer.win, "img_view", None)
+        if view is None or not hasattr(view, "_vispy_warm_tile_scheduler"):
+            return
+        session = self.session
+        renderer = self.renderer
+        viewport_value = (
+            int(getattr(session, "session_id", 0) or 0),
+            int(getattr(session, "viewport_revision", 0) or 0),
+            tuple(getattr(session, "visible_tile_numbers", ()) or ()),
+        )
+
+        def schedule(process) -> None:
+            if not callable(process):
+                return
+            def cancel_pending() -> None:
+                view._vispy_pending_warm_tile_payloads = {}
+                view._vispy_pending_warm_tile_context = {}
+
+            if not self._session_is_current():
+                cancel_pending()
+                return
+            if int(getattr(renderer.win.kernel, "visible_backlog", 0) or 0) > 0:
+                cancel_pending()
+                return
+            if not session.visible_plan_complete():
+                cancel_pending()
+                return
+
+            def admit():
+                return True
+
+            def done(_value=None):
+                if not self._session_is_current():
+                    cancel_pending()
+                    return
+                if int(getattr(renderer.win.kernel, "visible_backlog", 0) or 0) > 0:
+                    cancel_pending()
+                    return
+                if not session.visible_plan_complete():
+                    cancel_pending()
+                    return
+                process()
+
+            renderer.win.kernel.submit(
+                TaskSpec(
+                    key=("vispy-warm-residency", session.key, viewport_value),
+                    fn=admit,
+                    lane=WorkLane.SPECULATIVE_RESIDENCY,
+                    priority=Priority.PREFETCH,
+                    scope=f"montage:{session.key!r}:warm-residency",
+                    supersession=Supersession(("vispy-warm-residency", session.key), viewport_value),
+                    reusable=False,
+                    pass_token=False,
+                ),
+                on_done=done,
+                on_stale=lambda: None,
+                on_error=lambda exc: handle_ui_exception("vispy warm residency", exc),
+            )
+
+        view._vispy_warm_tile_scheduler = schedule
+
     def _empty_first_commit_can_wait(self, first_display_commit, explicit_auto, active_payloads, tile_delta) -> bool:
         session = self.session
         return bool(
@@ -1270,6 +1313,34 @@ class MontagePipelineEffects:
                 return tile
         return None
 
+    def _level_key_for_step(self, tile, step):
+        rendered = self.session.rendered_tiles.get(int(tile.montage_index))
+        if rendered is None:
+            return None
+        demand = self.session.lod_policy_decision.demand
+        return self.session._pyramid_key_for(rendered, demand=demand, level=int(step.level))
+
+    def _shared_claim_rung(self, *, level: int, lane) -> int:
+        if WorkLane(str(lane)) == WorkLane.DISPLAY_PREVIEW:
+            return int(Rung.PREVIEW)
+        return int(Rung.DESIRED)
+
+    def _claim_shared_transform_target(self, tiles, *, level: int, lane) -> bool:
+        rung = self._shared_claim_rung(level=level, lane=lane)
+        changed = False
+        for tile in tuple(tiles or ()):
+            changed = self.session.lifecycle.preview_claimed(
+                int(tile.montage_index),
+                rung,
+                int(level),
+            ) or changed
+        return bool(changed)
+
+    def _release_shared_transform_claims(self, tiles, *, level: int, lane) -> None:
+        rung = self._shared_claim_rung(level=level, lane=lane)
+        for tile in tuple(tiles or ()):
+            self.session.lifecycle.preview_released(int(tile.montage_index), rung, int(level))
+
     def _intent_matches_session(self, intent) -> bool:
         return (
             intent is None
@@ -1284,18 +1355,6 @@ class MontagePipelineEffects:
         if callable(predicate):
             return bool(predicate(self.session))
         return True
-
-
-def _shared_floor_candidate_tiles(session):
-    """Cold tiles a shared floor pass should cover (no payload, not rendered)."""
-
-    for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
-        tile_number = int(candidate.montage_index)
-        if tile_number in getattr(session, "rendered_tiles", {}):
-            continue
-        if getattr(session, "display_tile_payloads", {}).get(tile_number) is not None:
-            continue
-        yield candidate
 
 
 def _shared_transform_marker(session, *, demand, level: int, tiles, shader_display: bool) -> tuple:

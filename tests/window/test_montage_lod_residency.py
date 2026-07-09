@@ -193,7 +193,7 @@ def _plan_rung_materializations(session) -> tuple:
     for step in LodLadder(policy).plan(render_effects.tile_lod_states(session, demand), demand):
         if step.rung == Rung.DESIRED:
             effects.prepare_rung(None, step)
-    return tuple(effects._pending_materializations.values())
+    return tuple(session.lifecycle.active_materializations())
 
 
 def test_native_only_mode_is_unchanged_by_default():
@@ -255,7 +255,7 @@ def test_duplicate_materialization_requests_coalesce():
     session.dirty_payloads.update({0: None, 1: None})
     session.build_tile_presentation({})
 
-    assert list(_plan_rung_materializations(session)) == []
+    assert list(_plan_rung_materializations(session)) == first
     assert len(first) == 2
 
 
@@ -2350,7 +2350,6 @@ def test_non_native_desired_without_retained_source_does_not_create_native_claim
         key=level_key,
     )
     session.pending_rung_materializations.append(request)
-    effects._pending_materializations[(0, int(Rung.DESIRED), 2)] = request
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 
@@ -2389,7 +2388,7 @@ def test_non_native_desired_with_retained_source_stays_shared_only_for_cold_tile
 
     assert not effects.prepare_rung(intent, step)
 
-    assert effects._pending_previews == {}
+    assert not getattr(session.lifecycle.record(0), "preview_claims", {})
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -2411,7 +2410,7 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
     stage_key = ("stage", "retained")
     session.stage_fan_in.tile_stage_keys[0] = stage_key
     session.stage_fan_in.values[stage_key] = object()
-    session._shared_floor_tiles = (0,)
+    session.lifecycle.preview_claimed(0, int(Rung.PREVIEW), 2)
     effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
     step = RungStep(
         tile_number=0,
@@ -2425,7 +2424,7 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
 
     assert not effects.prepare_rung(_pipeline_intent_for(session), step)
 
-    assert effects._pending_previews == {}
+    assert session.lifecycle.preview_claim_matches(0, int(Rung.PREVIEW), 2)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -2464,8 +2463,6 @@ def test_shared_target_marker_is_source_identity_aware():
     )
 
     assert old_marker != retargeted_marker
-    session._shared_floor_admitted_marker = old_marker
-    assert session._shared_floor_admitted_marker != retargeted_marker
 
 
 def test_preview_commit_ack_is_actionable_for_target_followup_replan():
@@ -2782,11 +2779,11 @@ def test_source_changed_active_claim_does_not_block_retargeted_prepare():
     assert effects.prepare_rung(new_intent, step)
     assert 0 in session.active_tile_requests
     assert 0 in session.loading_tiles
-    assert effects._pending_evaluations[0].source_index == 9
+    assert session.lifecycle.evaluation_claim_for(0).source_index == 9
 
     effects.rung_dropped(old_intent, step)
     assert 0 in session.active_tile_requests
-    assert effects._pending_evaluations[0].source_index == 9
+    assert session.lifecycle.evaluation_claim_for(0).source_index == 9
 
     effects.rung_dropped(new_intent, step)
     assert 0 not in session.active_tile_requests
@@ -2817,7 +2814,6 @@ def test_stale_materialized_desired_admission_does_not_invent_native_claim():
         key=level_key,
     )
     session.pending_rung_materializations.append(request)
-    effects._pending_materializations[(0, int(Rung.DESIRED), 2)] = request
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 

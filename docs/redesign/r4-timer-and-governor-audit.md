@@ -85,6 +85,13 @@ refined level/histogram phasing. They keep a **fixed** preview LOD level and a
 **static** preview-vs-target choice. R4 owns the adaptive policy at the same
 admission boundary:
 
+**Implementation note (2026-07-09):** LOD admission now carries an explicit
+`LodAdmissionScope`; visible FLOOR/PREVIEW/DESIRED/EXACT planning is limited
+to the current visible tile numbers, while coverage/near tiles stay out of
+visible lanes. Preview/materialization/evaluation claims are lifecycle-backed,
+and VisPy warm-residency uploads are admitted through the kernel
+`SPECULATIVE_RESIDENCY` lane instead of a backend timer.
+
 - **Backlog-driven preview choice.** Showing coarser-than-target pixels is a
   data-availability + latency decision, never "the viewport demanded reduced":
   - target-quality data already producible (a resident finer level to

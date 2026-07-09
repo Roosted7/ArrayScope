@@ -16,6 +16,7 @@ from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle
 from arrayscope.render import effects
+from arrayscope.render.stages import LodAdmissionScope
 
 
 def _demand(level: int = 0) -> LodDemand:
@@ -59,6 +60,7 @@ def _session(data=None):
         stage_fan_in=StageFanInState(),
         lifecycle=TileLifecycle(),
         rendered_tiles={},
+        display_tile_payloads={},
         tile_presentation_state=SimpleNamespace(payloads={}),
         pyramid_cache=None,
         tile_semantic_source_id=lambda source_index: ("semantic", int(source_index)),
@@ -267,6 +269,44 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         assert texture_kind is not None
         assert level_data is not None
         assert level_stats is None
+
+
+def test_shared_preview_candidates_are_limited_to_visible_scope():
+    session = _session()
+    preview_payload = DisplayTilePayload(
+        1,
+        1,
+        np.ones((2, 3), dtype=np.float32),
+        None,
+        ("preview", 1),
+        lod=LodInfo(level=2, factor=4, source_shape=(4, 6), texture_shape=(2, 3)),
+        quality="preview",
+    )
+    session.display_tile_payloads[1] = preview_payload
+    session.tile_presentation_state = SimpleNamespace(payloads={1: preview_payload})
+    session.lifecycle.presentation_confirmed((1,))
+
+    first_pixel = tuple(
+        effects.shared_transform_candidate_tiles(
+            session,
+            level=1,
+            tile_numbers=(0, 1),
+            include_missing=True,
+            require_presented_preview=False,
+        )
+    )
+    upgrade = tuple(
+        effects.shared_transform_candidate_tiles(
+            session,
+            level=1,
+            tile_numbers=(0, 1),
+            include_missing=False,
+            require_presented_preview=True,
+        )
+    )
+
+    assert [int(tile.montage_index) for tile in first_pixel] == [0, 1]
+    assert [int(tile.montage_index) for tile in upgrade] == [1]
 
 
 def test_shared_preview_runs_at_demanded_display_lod():
@@ -484,7 +524,11 @@ def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
     session.lifecycle.level_resident(0, level_key)
     bridge = MontagePipelineEffects(SimpleNamespace(win=SimpleNamespace()), session)
 
-    states = bridge.tile_states(None, _demand(2))
+    states = bridge.tile_states(
+        None,
+        _demand(2),
+        LodAdmissionScope(visible_tile_numbers=frozenset({0, 1, 2})),
+    )
 
     by_tile = {state.tile_number: state for state in states}
     assert by_tile[0].resident_levels == (2,)
