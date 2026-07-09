@@ -351,14 +351,83 @@ def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, a
     }
 
 
+def _tile_number_set(values) -> set[int]:
+    if isinstance(values, dict):
+        iterable = tuple(values.keys())
+    else:
+        iterable = tuple(values or ())
+    numbers: set[int] = set()
+    for value in iterable:
+        try:
+            numbers.add(int(getattr(value, "montage_index")))
+        except AttributeError:
+            numbers.add(int(value))
+    return numbers
+
+
+def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
+    if session is None:
+        return {
+            "visible_has_backlog": False,
+            "visible_pending_tiles": 0,
+            "visible_loading_tiles": 0,
+            "visible_active_requests": 0,
+            "visible_dirty_tiles": 0,
+            "visible_upserts": 0,
+            "visible_removals": 0,
+            "visible_stage_waiters": 0,
+        }
+    fan = getattr(session, "stage_fan_in", None)
+    pending = _tile_number_set(getattr(session, "pending_tiles", ()))
+    loading = _tile_number_set(getattr(session, "loading_tiles", ()))
+    active = _tile_number_set(getattr(session, "active_tile_requests", ()))
+    dirty = _tile_number_set(getattr(session, "dirty_payloads", ()))
+    upserts = _tile_number_set(getattr(session, "pending_payload_upserts", ()))
+    removals = _tile_number_set(getattr(session, "pending_removals", ()))
+    stage_waiters = _tile_number_set(getattr(fan, "tile_stage_keys", {}) if fan is not None else {})
+    visible_pending = pending & expected
+    visible_loading = loading & expected
+    visible_active = active & expected
+    visible_dirty = dirty & expected
+    visible_upserts = upserts & expected
+    visible_removals = removals & expected
+    visible_stage_waiters = stage_waiters & expected
+    visible_changed = bool(visible_dirty or visible_upserts or visible_removals)
+    visible_has_backlog = bool(
+        visible_pending
+        or visible_loading
+        or visible_active
+        or visible_stage_waiters
+        or visible_changed
+        or (visible_changed and bool(getattr(session, "final_commit_pending", False)))
+        or (visible_changed and bool(getattr(session, "flush_pending", False)))
+    )
+    return {
+        "visible_has_backlog": visible_has_backlog,
+        "visible_pending_tiles": len(visible_pending),
+        "visible_loading_tiles": len(visible_loading),
+        "visible_active_requests": len(visible_active),
+        "visible_dirty_tiles": len(visible_dirty),
+        "visible_upserts": len(visible_upserts),
+        "visible_removals": len(visible_removals),
+        "visible_stage_waiters": len(visible_stage_waiters),
+    }
+
+
 def _montage_settled(session) -> bool:
+    if session is None:
+        return False
+    active = set(_active_planned_montage_tiles(session))
+    expected = set(_expected_requested_montage_tiles(session))
+    if not expected:
+        expected = set(active)
+    visible_checker = getattr(session, "visible_first_pixels_presented", None)
+    visible_settled = bool(visible_checker()) if callable(visible_checker) else bool(session.is_complete())
+    backlog = _visible_backlog_state(session, expected)
     return bool(
-        session is not None
-        and session.is_complete()
-        and not bool(getattr(session, "flush_pending", False))
-        and not bool(getattr(session, "final_commit_pending", False))
-        and not bool(getattr(session, "dirty_payloads", None))
-        and not bool(getattr(session, "pending_payload_upserts", None))
+        visible_settled
+        and not bool(backlog["visible_has_backlog"])
+        and not bool(getattr(session, "has_pending_level_update", lambda: False)())
     )
 
 
@@ -794,10 +863,15 @@ def _wait_for_montage_complete(
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_montage_session", None)
-        # Fail-fast stall guard: a montage that is not settled with no kernel
-        # work in flight is a lost wakeup — bail after a short grace window
-        # instead of staring at a dead session until the full timeout.
-        if not _montage_settled(session):
+        mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
+        level_state = _montage_level_presentation_state(win)
+        final_level_state = level_state
+        visibility_state = _montage_visibility_state(win, mode=str(mode))
+        final_visibility_state = visibility_state
+        presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
+        # Fail-fast only while the visible frame is still owed.  Warm/offscreen
+        # work must not make a completed visible frame look frozen.
+        if not (bool(visibility_state["fully_visible"]) and presentation_ready) and not _montage_settled(session):
             sig = _montage_stall_signature(session)
             if _montage_work_in_flight(session):
                 stall_since = None
@@ -809,7 +883,6 @@ def _wait_for_montage_complete(
             stall_last_sig = sig
         else:
             stall_since = None
-        mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
         vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
         if session is not None:
             if first_materialized_tile_ms is None and bool(getattr(session, "rendered_tiles", None)):
@@ -830,12 +903,8 @@ def _wait_for_montage_complete(
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
-        level_state = _montage_level_presentation_state(win)
-        final_level_state = level_state
         if bool(level_state["settled"]) and presentation_settled_ms is None:
             presentation_settled_ms = (perf_counter() - start) * 1000.0
-        visibility_state = _montage_visibility_state(win, mode=str(mode))
-        final_visibility_state = visibility_state
         if first_visible_tile_ms is None and int(visibility_state["active_presented_tile_count"]) > 0:
             first_visible_tile_ms = (perf_counter() - start) * 1000.0
         if session is not None:
@@ -890,7 +959,6 @@ def _wait_for_montage_complete(
             fully_visible_ms = (perf_counter() - start) * 1000.0
         current_request_count = _vispy_tile_presentation_request_count(win)
         final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
-        presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
         if fully_visible and (not vispy_tiled or final_drawn) and presentation_ready:
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
@@ -956,6 +1024,32 @@ def _wait_for_montage_complete(
     snapshot = win.collect_runtime_diagnostics()
     session = getattr(win, "_montage_session", None)
     fan_in = None if session is None else getattr(session, "stage_fan_in", None)
+    lifecycle_counts = {}
+    ledger_counts = {}
+    active_samples = ()
+    if session is not None:
+        lifecycle = getattr(session, "lifecycle", None)
+        if lifecycle is not None:
+            lifecycle_counts = dict(getattr(lifecycle, "counters", lambda: {})() or {})
+        ledger_snapshot = getattr(session, "tile_ledger_snapshot", lambda: None)()
+        if ledger_snapshot is not None:
+            ledger_counts = dict(getattr(ledger_snapshot, "counts", {}) or {})
+        samples = []
+        for tile_number in tuple(sorted(getattr(session, "active_tile_requests", ()) or ()))[:4]:
+            row = getattr(getattr(session, "tile_ledger", None), "row", lambda _tile: None)(int(tile_number))
+            task_claim = None if row is None else getattr(row, "task_claim", None)
+            claim = None if lifecycle is None else lifecycle.evaluation_claim_for(int(tile_number))
+            samples.append(
+                {
+                    "tile": int(tile_number),
+                    "eval_rung": None if claim is None else int(getattr(claim, "rung", -1)),
+                    "eval_level": None if claim is None else int(getattr(claim, "level", -1)),
+                    "task_key": None if task_claim is None else repr(getattr(task_claim, "task_key", None)),
+                    "stage_key": None if task_claim is None else repr(getattr(task_claim, "stage_key", None)),
+                    "has_payload": int(tile_number) in getattr(session, "display_tile_payloads", {}),
+                }
+            )
+        active_samples = tuple(samples)
     _stall_prefix = (
         f"STALL GUARD: montage frozen (no work in flight) after {stall_grace_s:.1f}s: "
         if stalled
@@ -974,6 +1068,12 @@ def _wait_for_montage_complete(
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"fully_visible={final_visibility_state.get('fully_visible', False)} "
         f"requested={final_visibility_state.get('requested_tile_count', 0)} "
+        f"visible_pending={final_visibility_state.get('visible_pending_tiles', 0)} "
+        f"visible_loading={final_visibility_state.get('visible_loading_tiles', 0)} "
+        f"visible_active={final_visibility_state.get('visible_active_requests', 0)} "
+        f"visible_dirty={final_visibility_state.get('visible_dirty_tiles', 0)} "
+        f"visible_upserts={final_visibility_state.get('visible_upserts', 0)} "
+        f"visible_stage={final_visibility_state.get('visible_stage_waiters', 0)} "
         f"mode={getattr(win.img_view, 'montageDisplayMode', lambda: '')()} "
         f"display_committed={False if session is None else bool(getattr(session, 'display_committed', False))} "
         f"dirty={0 if session is None else len(getattr(session, 'dirty_payloads', ()) or ())} "
@@ -986,6 +1086,9 @@ def _wait_for_montage_complete(
         f"level_pending={final_level_state.get('pending', False)} "
         f"level_stale={final_level_state.get('stale_tiles', 0)} "
         f"level_values={final_level_state.get('active_level_value_count', 0)}"
+        f" lifecycle={lifecycle_counts}"
+        f" ledger={ledger_counts}"
+        f" active_samples={active_samples}"
     )
 
 
@@ -1309,22 +1412,12 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
             and active.issubset(presented)
         )
     )
-    has_backlog = bool(
-        getattr(session, "pending_tiles", ())
-        or getattr(session, "loading_tiles", ())
-        or getattr(session, "active_tile_requests", ())
-        or session.stage_fan_in.active_requests
-        or session.stage_fan_in.attached_requests
-        or getattr(session, "final_commit_pending", False)
-        or getattr(session, "flush_pending", False)
-        or getattr(session, "dirty_payloads", ())
-        or getattr(session, "pending_removals", ())
-    )
+    backlog = _visible_backlog_state(session, expected)
     active_presented = active.intersection(presented)
     fully_visible = bool(
         str(mode) in {"tile_layer", "vispy_tile_layer"}
         and getattr(session, "display_committed", False)
-        and not has_backlog
+        and not bool(backlog["visible_has_backlog"])
         and expected.issubset(active)
         and expected.issubset(presented)
         and overlay_nonblocking
@@ -1335,6 +1428,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
         "active_planned_tile_count": len(active),
         "requested_tile_count": len(expected),
         "active_tiles": tuple(sorted(active)),
+        **backlog,
     }
 
 

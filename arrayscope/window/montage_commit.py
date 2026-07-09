@@ -36,6 +36,7 @@ from arrayscope.render.ladder import Rung
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
+from arrayscope.window.montage_session import _base_source_id
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches,
     previous_tiled_payloads_by_base_source,
@@ -171,6 +172,7 @@ class MontagePipelineEffects:
     def tile_states(self, intent, demand, scope: LodAdmissionScope):
         if not self._session_is_current(intent):
             return ()
+        self._release_inactive_evaluation_claims(getattr(scope, "visible_tile_numbers", ()))
         return render_effects.tile_lod_states(self.session, demand, scope=scope)
 
     def prepare_rung(self, intent, step) -> bool:
@@ -211,6 +213,16 @@ class MontagePipelineEffects:
             self.session.pending_rung_materializations.append(request)
             self.session.pending_rung_materializations.mark_started(request)
             return True
+        if step.rung == Rung.DESIRED and int(step.level) > 0 and bool(step.reduce_from_native):
+            if self._shared_transform_owns_display_target(tile, step):
+                self.session.discard_pending_tile(tile_number)
+                return False
+            if self.session.lifecycle.preview_claim_matches(tile_number, int(Rung.DESIRED), int(step.level)):
+                self.session.discard_pending_tile(tile_number)
+                return False
+            if self._display_payload_covers_display_target(tile_number, tile, step):
+                self.session.discard_pending_tile(tile_number)
+                return False
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             if self._shared_preview_claim_covers_cold_tile(tile_number):
                 return False
@@ -220,11 +232,33 @@ class MontagePipelineEffects:
                 claim = self.session.lifecycle.evaluation_claim_for(tile_number)
                 current_claim = self._evaluation_claim(intent, step, tile)
                 if claim is not None and claim.matches_tile(intent, step, tile, current_claim.source_id):
-                    return False  # identical rung already in flight
-                self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
+                    if self._tile_task_is_live(tile_number):
+                        return False
+                    self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
+                else:
+                    self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
+        return True
+
+    def rung_admitted(self, intent, step, task_key) -> None:
+        tile = self._tile_for_step(step)
+        if tile is None or not self._session_is_current(intent):
+            return
+        tile_number = int(tile.montage_index)
+        if self._step_evaluates_reduced_display_payload(step, tile):
+            return
+        if step.rung in (Rung.DESIRED, Rung.EXACT) and tile_number not in self.session.rendered_tiles:
+            stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
+            stage_producer_key = self._stage_producer_key(stage_key)
+            if stage_producer_key is None:
+                stage_key = None
             self.session.mark_loading(tile)
             self.session.lifecycle.evaluation_claimed(tile_number, self._evaluation_claim(intent, step, tile))
-        return True
+            self.session.tile_ledger.task_admitted(
+                tile_number,
+                task_key,
+                stage_key=stage_key,
+                stage_producer_key=stage_producer_key,
+            )
 
     def _step_evaluates_reduced_display_payload(self, step, tile) -> bool:
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
@@ -236,6 +270,66 @@ class MontagePipelineEffects:
             step.rung == Rung.DESIRED
             and int(step.level) > 0
             and not bool(getattr(step, "reduce_from_native", True))
+        )
+
+    def _display_payload_covers_display_target(self, tile_number: int, tile, step) -> bool:
+        payload = self.session.display_tile_payloads.get(int(tile_number))
+        if not self._display_payload_is_current(tile_number, tile, payload=payload):
+            return False
+        lod = getattr(payload, "lod", None)
+        if lod is None:
+            return False
+        return int(getattr(lod, "level", 0) or 0) <= int(step.level)
+
+    def _display_payload_is_current(self, tile_number: int, tile, *, payload=None) -> bool:
+        payload = self.session.display_tile_payloads.get(int(tile_number)) if payload is None else payload
+        if payload is None:
+            return False
+        if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+            return False
+        semantic_id = self.session.tile_semantic_source_id(tile.source_index)
+        payload_source_id = getattr(payload, "source_id", None)
+        if payload_source_id != semantic_id and _base_source_id(payload_source_id) != semantic_id:
+            return False
+        return int(tile_number) in set(getattr(self.session.lifecycle, "presented_tiles", ()) or ())
+
+    def _display_payload_owns_pending_tile(self, tile_number: int, tile) -> bool:
+        payload = self.session.display_tile_payloads.get(int(tile_number))
+        if not self._display_payload_is_current(tile_number, tile, payload=payload):
+            return False
+        if self._shared_transform_owns_tile_display_target(tile):
+            return True
+        lod = getattr(payload, "lod", None)
+        if lod is None or int(getattr(lod, "level", 0) or 0) <= 0:
+            return False
+        if not bool(getattr(self.session, "shader_display", False)):
+            return False
+        if str(getattr(payload, "quality", "exact") or "exact") != "preview":
+            return False
+        return bool(
+            getattr(payload, "level_stats", None) is not None
+            or getattr(payload, "level_data", None) is not None
+            or getattr(payload, "histogram_data", None) is not None
+        )
+
+    def _shared_transform_owns_display_target(self, tile, step) -> bool:
+        if not self._shared_transform_owns_tile_display_target(tile):
+            return False
+        return int(getattr(step, "level", 0) or 0) > 0
+
+    def _shared_transform_owns_tile_display_target(self, tile) -> bool:
+        demand = getattr(getattr(self.session, "lod_policy_decision", None), "demand", None)
+        if demand is None:
+            return False
+        if int(getattr(demand, "desired_level", 0) or 0) <= 0:
+            return False
+        if render_effects.preview_pipeline_commutes_for_display_lod(self.session, tile):
+            return False
+        return render_effects.shared_preview_is_useful(
+            self.session,
+            tile,
+            demand,
+            upload_preview_useful=True,
         )
 
     def _shared_preview_claim_covers_cold_tile(self, tile_number: int) -> bool:
@@ -253,7 +347,54 @@ class MontagePipelineEffects:
         stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
         if stage_key is None or stage_key in self.session.stage_fan_in.values:
             return ()
-        return (("montage-stage", stage_key),)
+        stage_producer_key = self._stage_producer_key(stage_key)
+        if stage_producer_key is None:
+            return ()
+        return (stage_producer_key,)
+
+    def _stage_producer_key(self, stage_key):
+        if stage_key is None:
+            return None
+        kernel = getattr(self.renderer, "kernel", None)
+        if kernel is None:
+            win = getattr(self.renderer, "win", None)
+            kernel = getattr(win, "kernel", None)
+        if kernel is None:
+            return None
+        if bool(getattr(kernel, "has_live_task", lambda _key: False)(stage_key)):
+            return stage_key
+        if bool(getattr(kernel, "has_completed_task", lambda _key: False)(stage_key)):
+            return stage_key
+        return None
+
+    def _tile_task_is_live(self, tile_number: int) -> bool:
+        row = self.session.tile_ledger.row(int(tile_number))
+        claim = row.task_claim
+        task_key = None if claim is None else claim.task_key
+        if task_key is None:
+            return False
+        kernel = getattr(self.renderer, "kernel", None)
+        if kernel is None:
+            win = getattr(self.renderer, "win", None)
+            kernel = getattr(win, "kernel", None)
+        if kernel is None:
+            return True
+        return bool(getattr(kernel, "has_live_task", lambda _key: True)(task_key))
+
+    def _release_inactive_evaluation_claims(self, tile_numbers=()) -> int:
+        active_requests = getattr(self.session, "active_tile_requests", None)
+        if active_requests is None:
+            return 0
+        visible = {int(tile) for tile in tuple(tile_numbers or ())}
+        scope = visible or set(int(tile) for tile in tuple(active_requests or ()))
+        released = 0
+        for tile_number in sorted(scope):
+            if tile_number not in active_requests:
+                continue
+            if self._tile_task_is_live(tile_number):
+                continue
+            released += int(self._release_evaluation_claim(tile_number, request_replan=False))
+        return released
 
     def rung_dropped(self, intent, step) -> None:
         tile = self._tile_for_step(step)
@@ -274,6 +415,7 @@ class MontagePipelineEffects:
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             marker = self._evaluation_claim(intent, step, tile)
             self._release_evaluation_claim(tile_number, marker=marker, request_replan=True)
+            self.session.tile_ledger.task_released(tile_number, reason="dropped")
 
     def retained_native_source_available(self, intent, step) -> bool:
         if not self._session_is_current(intent):
@@ -301,6 +443,28 @@ class MontagePipelineEffects:
         getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
         return getter(stage_key) is not None
 
+    def release_display_owned_pending(self, scope: LodAdmissionScope | None = None) -> int:
+        if not self._session_is_current():
+            return 0
+        pending_numbers = set(self.session.pending_tile_numbers())
+        if not pending_numbers:
+            return 0
+        visible = None
+        if scope is not None:
+            visible = {int(tile) for tile in tuple(getattr(scope, "visible_tile_numbers", ()) or ())}
+        released = 0
+        for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ()):
+            tile_number = int(tile.montage_index)
+            if tile_number not in pending_numbers:
+                continue
+            if visible is not None and tile_number not in visible:
+                continue
+            if not self._display_payload_owns_pending_tile(tile_number, tile):
+                continue
+            if self.session.discard_pending_tile(tile_number):
+                released += 1
+        return released
+
     def _release_evaluation_claim(self, tile_number: int, *, marker=None, request_replan: bool = True) -> bool:
         tile_number = int(tile_number)
         claim = self.session.lifecycle.evaluation_claim_for(tile_number)
@@ -320,6 +484,7 @@ class MontagePipelineEffects:
             return False
         self.session.lifecycle.evaluation_request_cleared(tile_number)
         self.session.loading_tiles.discard(tile_number)
+        self.session.tile_ledger.task_released(tile_number, reason="dropped")
         if tile_number not in self.session.rendered_tiles and tile_number not in self.session.display_tile_payloads:
             self.session.dirty_payloads.pop(tile_number, None)
             self.session.pending_payload_upserts.pop(tile_number, None)
@@ -327,53 +492,6 @@ class MontagePipelineEffects:
         if request_replan and self._session_is_current():
             self.renderer.request_montage_replan(self.session)
         return True
-
-    def release_idle_evaluation_claims(self, tile_numbers=None) -> int:
-        """Diag-gated repair: release active claims whose kernel work is gone."""
-
-        scope = None if tile_numbers is None else {int(tile) for tile in tuple(tile_numbers or ())}
-        released = 0
-        records = tuple(getattr(self.session.lifecycle, "_records", {}).items())
-        for tile_number, record in records:
-            marker = getattr(record, "evaluation_claim", None)
-            if marker is None:
-                continue
-            if scope is not None and int(tile_number) not in scope:
-                continue
-            released += int(
-                self._release_evaluation_claim(
-                    int(tile_number),
-                    marker=marker,
-                    request_replan=False,
-                )
-            )
-        if released and self._session_is_current():
-            self.renderer.request_montage_replan(self.session)
-        return released
-
-    def reconcile_obligations(self, *, kernel_idle: bool = False) -> dict[str, int]:
-        """Derive owed work from the tile obligation plan and execute effects."""
-
-        reconcile = getattr(self.session, "reconcile_tile_obligations", None)
-        if not callable(reconcile):
-            return {}
-
-        def release(tile_number: int) -> bool:
-            return self._release_evaluation_claim(int(tile_number), request_replan=False)
-
-        counters = reconcile(
-            kernel_idle=bool(kernel_idle),
-            release_evaluation_claim=release,
-        )
-        changed = (
-            int(counters.get("obligation_dirtied", 0) or 0)
-            + int(counters.get("obligation_requeued", 0) or 0)
-            + int(counters.get("obligation_released", 0) or 0)
-            + int(counters.get("obligation_stage_released", 0) or 0)
-        )
-        if changed and self._session_is_current():
-            self.renderer.request_montage_replan(self.session)
-        return counters
 
     def apply_commit(self, batch: CommitBatch) -> None:
         """Admit ready rung payloads; presentation happens through the gate.
@@ -737,6 +855,7 @@ class MontagePipelineEffects:
         )
         self.renderer._queue_montage_level_refinement(session, rendered)
         session.mark_materialized(rendered)
+        session.tile_ledger.task_released(int(tile.montage_index), reason="completed")
         session.dirty_tiles.append(int(tile.montage_index))
         return rendered_tile_nbytes(rendered)
 
@@ -787,7 +906,6 @@ class MontagePipelineEffects:
         display_image, rendered_geometry = direct_presentation
         dirty_tiles = session.consume_dirty_tiles()
         tile_source_ids = renderer._montage_tile_source_ids(session)
-        self.reconcile_obligations(kernel_idle=_kernel_idle(getattr(renderer.win, "kernel", None)))
         renderer._montage_committed_tile_upserts_last_flush = len(dirty_tiles)
         renderer._current_montage_geometry = session.plan.geometry
         renderer._current_montage_plan = session.plan
@@ -1133,6 +1251,14 @@ class MontagePipelineEffects:
             session.set_level_update_pending(False)
         presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
         session.mark_presented(presented_tiles)
+        released_display_pending = self.release_display_owned_pending()
+        if released_display_pending:
+            renderer._montage_display_owned_pending_released = (
+                int(getattr(renderer, "_montage_display_owned_pending_released", 0) or 0)
+                + int(released_display_pending)
+            )
+        if active_payloads:
+            renderer._queue_montage_level_stats_for_payloads(session, active_payloads)
         session.display_committed = bool(session.lifecycle.presented_tiles)
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
@@ -1175,21 +1301,11 @@ class MontagePipelineEffects:
             ),
         )
         self._record_commit_feedback(report)
-        obligation_counters = self.reconcile_obligations(kernel_idle=_kernel_idle(getattr(renderer.win, "kernel", None)))
-        obligation_backlog = bool(
-            int(obligation_counters.get("visible_target_unsettled", 0) or 0) > 0
-            or int(obligation_counters.get("target_payload_owed", 0) or 0) > 0
-            or int(obligation_counters.get("stage_ready", 0) or 0) > 0
-            or int(obligation_counters.get("stage_lost", 0) or 0) > 0
-            or int(obligation_counters.get("active_without_path", 0) or 0) > 0
-        )
         upload_backlog = bool(
             getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_removals", None)
             or getattr(session, "pending_payload_upserts", None)
-            or session.unrefined_preview_tiles(include_already_dirty=True)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
-            or obligation_backlog
             or rearmed_parked
         )
         followup_start = perf_counter()
@@ -1341,7 +1457,7 @@ class MontagePipelineEffects:
             and not getattr(tile_delta, "upserts", None)
             and not getattr(tile_delta, "removals", None)
             and not bool(getattr(session, "presentation_geometry_changed", False))
-            and not session.tile_obligation_plan().visible_target_unsettled
+            and session.visible_plan_complete()
             and not (session.has_pending_level_update() and session.has_stale_level_presentations())
         )
 
@@ -1920,12 +2036,9 @@ def rearm_ready_stage_dependents(session) -> int:
     """Keep stage-backed retained pixels from idling after their source is ready."""
 
     values = dict(getattr(session.stage_fan_in, "values", {}) or {})
-    ready_tiles = tuple(
-        int(tile_number)
-        for tile_number, key in tuple(getattr(session.stage_fan_in, "tile_stage_keys", {}).items())
-        if key in values
-    )
-    rearmed = enqueue_stage_dependent_tiles(session, ready_tiles)
+    rearmed = 0
+    for key in tuple(values):
+        rearmed += release_stage_dependents_to_direct(session, key)
 
     bound_keys = set(getattr(session.stage_fan_in, "tile_stage_keys", {}).values())
     owned_keys = (
@@ -1940,24 +2053,26 @@ def rearm_ready_stage_dependents(session) -> int:
 
 def release_stage_dependents_to_direct(session, key) -> int:
     queued = set(session.pending_tile_numbers())
-    released = 0
+    unbound = 0
+    queued_count = 0
     for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
         tile_number = int(tile_number)
         if stage_key != key:
             continue
         session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
+        unbound += 1
         if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
             continue
         if 0 <= tile_number < len(session.plan.tiles) and tile_number not in queued:
             tile = session.plan.tiles[tile_number]
             session.enqueue_pending_tile(tile)
             queued.add(tile_number)
-            released += 1
+            queued_count += 1
     session.stage_fan_in.detach_unbound_requests()
-    if released:
-        session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - released)
-        session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - released)
-    return int(released)
+    if unbound:
+        session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - unbound)
+        session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - unbound)
+    return int(queued_count)
 
 
 def montage_tile_layer_placeholder(session) -> np.ndarray:
@@ -2075,24 +2190,6 @@ def safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:
         and int(previous_montage.gap) == int(montage.gap)
         and int(previous_geometry.montage_origin_x) == int(geometry.montage_origin_x)
         and int(previous_geometry.montage_origin_y) == int(geometry.montage_origin_y)
-    )
-
-
-def _kernel_idle(kernel) -> bool:
-    if kernel is None:
-        return False
-    try:
-        diag = kernel.diagnostics()
-    except Exception:
-        return False
-    completion_queue = getattr(kernel, "completions", None)
-    return bool(
-        int(getattr(diag, "queued", 0) or 0) == 0
-        and int(getattr(diag, "running", 0) or 0) == 0
-        and int(getattr(diag, "active", 0) or 0) == 0
-        and int(getattr(diag, "parked_deps", 0) or 0) == 0
-        and int(getattr(diag, "parked_quota", 0) or 0) == 0
-        and (completion_queue is None or completion_queue.empty())
     )
 
 

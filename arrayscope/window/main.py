@@ -414,12 +414,6 @@ class ArrayScopeWindow(
         if getattr(self, "_closing", False):
             return
         self._apply_resource_governor_decisions(refresh_telemetry=False)
-        renderer = getattr(self, "renderer", None)
-        reconcile = getattr(renderer, "reconcile_current_montage_obligations", None)
-        if callable(reconcile):
-            kernel = getattr(self, "kernel", None)
-            kernel_idle = bool(kernel is not None and kernel.wait_idle(timeout=0.0))
-            reconcile(kernel_idle=kernel_idle)
 
     def _apply_resource_governor_decisions(self, *, refresh_telemetry: bool = True) -> None:
         governor = getattr(self, "resource_governor", None)

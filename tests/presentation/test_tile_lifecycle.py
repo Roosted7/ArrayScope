@@ -452,13 +452,11 @@ def test_full_tile_story(lc):
     }
 
 
-# -- sets-as-views (P2): load intent, requests, skip, stage bindings ----------
+# -- event views: load intent, requests, skip, stage bindings ----------
 
 
 def test_confirmed_evaluated_tile_leaves_loading(lc):
-    """The 2026-07-05 auto-levels wedge: presented==rendered with the legacy
-    loading set stuck at tile_count.  A confirmed EVALUATED tile must leave
-    the loading view mechanically."""
+    """A confirmed evaluated tile clears loading intent."""
 
     lc.plan_applied([0])
     lc.load_marked(0)
@@ -519,7 +517,7 @@ def test_request_views_follow_semantic_events(lc):
     assert lc.active_request_tiles == frozenset()
 
 
-def test_stage_bindings_reconcile(lc):
+def test_stage_bindings_replace_waiters(lc):
     lc.stage_bindings_replaced({"stage-a": (1, 2), "stage-b": (3,)})
     assert lc.stage_blocked_tiles == frozenset({1, 2, 3})
     assert lc.record(2).stage_key == "stage-a"

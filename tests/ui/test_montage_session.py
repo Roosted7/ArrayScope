@@ -39,6 +39,30 @@ def _session():
     )
 
 
+def _present_exact_tiles(session, *tile_numbers):
+    payloads = dict(getattr(session.tile_presentation_state, "payloads", {}) or {})
+    for tile_number in tile_numbers:
+        index = int(tile_number)
+        tile = session.plan.tiles[index]
+        image = np.ones((2, 2), dtype=np.float32)
+        payload = DisplayTilePayload(
+            tile_number=index,
+            source_index=int(tile.source_index),
+            image=image,
+            histogram_data=image,
+            source_id=("tile", int(tile.source_index), "exact"),
+        )
+        session.display_tile_payloads[index] = payload
+        session.record_tile_payload(payload)
+        payloads[index] = payload
+        session.tile_ledger.commit_emitted({index: payload})
+        session.tile_ledger.backend_ack({index: payload})
+        session.lifecycle.backend_presented_snapshot({index: payload.source_id})
+        session.lifecycle.acknowledge_presented(index, payload.source_id, payload.quality, 0)
+    session.tile_presentation_state = TilePresentationState(payloads)
+    session.lifecycle.presentation_confirmed(tile_numbers)
+
+
 def test_montage_render_session_returns_pending_tiles_in_order():
     session = _session()
 
@@ -171,7 +195,12 @@ def test_stale_committed_state_payload_is_not_complete_after_retarget():
         source_id=("src", 1, "lod", 2),
     )
     session.tile_presentation_state = TilePresentationState({0: old_payload}, revision=1)
+    session.display_tile_payloads[0] = old_payload
+    session.record_tile_payload(old_payload)
+    session.tile_ledger.commit_emitted({0: old_payload})
+    session.tile_ledger.backend_ack({0: old_payload})
     session.lifecycle.backend_presented_snapshot({0: old_payload.source_id})
+    session.lifecycle.acknowledge_presented(0, old_payload.source_id, old_payload.quality, 0)
     session.lifecycle.presentation_confirmed((0,))
 
     assert not session.visible_plan_complete()
@@ -471,12 +500,12 @@ def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
-    session.lifecycle.presentation_confirmed((0,))
+    _present_exact_tiles(session, 0)
     session.pending_tiles.append(session.plan.tiles[2])
     session.loading_tiles.add(3)
 
     assert session.visible_first_pixels_presented()
-    assert not session.visible_plan_complete()
+    assert session.visible_plan_complete()
     assert not session.is_complete()
 
 
@@ -486,7 +515,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
     session.visible_tile_numbers = frozenset({0, 1})
-    session.lifecycle.presentation_confirmed((0,))
+    _present_exact_tiles(session, 0)
 
     assert not session.visible_plan_complete()
 
@@ -496,10 +525,10 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session.loading_tiles.add(1)
     assert not session.visible_plan_complete()
     session.loading_tiles.clear()
-    session.lifecycle.presentation_confirmed((1,))
+    _present_exact_tiles(session, 1)
 
     assert session.visible_first_pixels_presented()
-    assert not session.visible_plan_complete()
+    assert session.visible_plan_complete()
 
 
 def test_montage_render_session_replacement_materialization_reopens_visible_plan():
@@ -508,7 +537,7 @@ def test_montage_render_session_replacement_materialization_reopens_visible_plan
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
-    session.lifecycle.presentation_confirmed((0,))
+    _present_exact_tiles(session, 0)
 
     session.mark_materialized(
         RenderedTile(
@@ -1296,6 +1325,57 @@ def test_shader_level_acknowledgement_settles_all_active_tiles():
     assert session.level_generation.value_counts() == {(2.0, 4.0): 3}
     assert session.level_generation.tile_values == {0: (2.0, 4.0), 2: (2.0, 4.0), 3: (2.0, 4.0)}
     assert session.level_generation.tile_revisions == {0: 1, 2: 1, 3: 1}
+
+
+def test_shader_preview_payload_with_level_evidence_enters_level_scope():
+    session = _session()
+    session.pending_tiles.clear()
+    session.shader_display = True
+    tile = session.plan.tiles[0]
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=int(tile.source_index),
+        image=np.ones((2, 2), dtype=np.complex64),
+        histogram_data=None,
+        source_id=session.tile_semantic_source_id(tile.source_index),
+        level_data=np.asarray([2.0, 8.0], dtype=np.float32),
+        quality="preview",
+        lod=LodInfo(level=2, factor=4, source_shape=(2, 2), texture_shape=(2, 2)),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+    )
+    session.display_tile_payloads[0] = payload
+    session.enqueue_pending_tile(tile)
+    session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, 2)
+
+    session.update_level_presentation_scope()
+
+    assert session.level_generation.active_tiles == frozenset({0})
+    assert session.pending_tile_numbers() == ()
+    session.acknowledge_uniform_level_presentation((2.0, 8.0))
+    assert session.level_generation.value_counts() == {(2.0, 8.0): 1}
+
+
+def test_cpu_preview_payload_stays_out_of_level_scope():
+    session = _session()
+    session.pending_tiles.clear()
+    session.shader_display = False
+    tile = session.plan.tiles[0]
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=int(tile.source_index),
+        image=np.ones((2, 2), dtype=np.float32),
+        histogram_data=np.ones((2, 2), dtype=np.float32),
+        source_id=session.tile_semantic_source_id(tile.source_index),
+        level_data=np.asarray([2.0, 8.0], dtype=np.float32),
+        quality="preview",
+        lod=LodInfo(level=2, factor=4, source_shape=(2, 2), texture_shape=(2, 2)),
+    )
+    session.display_tile_payloads[0] = payload
+    session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, 2)
+
+    session.update_level_presentation_scope()
+
+    assert session.level_generation.active_tiles == frozenset()
 
 
 def test_stale_level_delta_cannot_acknowledge_newer_target():

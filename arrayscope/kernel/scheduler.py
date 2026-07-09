@@ -42,7 +42,7 @@ from arrayscope.kernel.task import (
 
 try:  # Qt-free; operations.cancellation defines the cooperative exception.
     from arrayscope.operations.cancellation import EvaluationCancelled
-except Exception:  # pragma: no cover - import cycle guard during migration
+except Exception:  # pragma: no cover - import cycle guard during early startup
     class EvaluationCancelled(Exception):
         pass
 
@@ -397,6 +397,18 @@ class Kernel:
     def visible_backlog(self) -> int:
         with self._lock:
             return int(self._queued_visible + self._running_visible)
+
+    def has_live_task(self, key: object) -> bool:
+        with self._lock:
+            seq = self._by_key.get(key)
+            if seq is None:
+                return False
+            record = self._records.get(seq)
+            return bool(record is not None and record.state != _DONE and not record.superseded)
+
+    def has_completed_task(self, key: object) -> bool:
+        with self._lock:
+            return key in self._completed_keys
 
     # ------------------------------------------------- backend entry points
 

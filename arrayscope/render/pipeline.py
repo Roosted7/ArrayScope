@@ -69,7 +69,11 @@ class PipelineEffects(Protocol):
         ...
 
     def prepare_rung(self, intent: RenderIntent, step: RungStep) -> bool:
-        """Claim lifecycle state before a rung task is submitted."""
+        """Prepare cheap, reversible state before kernel admission."""
+        ...
+
+    def rung_admitted(self, intent: RenderIntent, step: RungStep, task_key: object) -> None:
+        """Record that the kernel accepted this rung task."""
         ...
 
     def rung_deps(self, intent: RenderIntent, step: RungStep) -> tuple[object, ...]:
@@ -285,6 +289,7 @@ class MontagePipeline:
             on_reuse=lambda payload, intent=intent, step=step: self._on_rung_reusable(intent, step, payload),
         )
         if handle is not None:
+            self.effects.rung_admitted(intent, step, step_key)
             self.counters.tasks_submitted += 1
             return True
         self.effects.rung_dropped(intent, step)

@@ -112,13 +112,10 @@ class TileRecord:
     #: Set at plan/demote/dequeue time; cleared mechanically when the
     #: backend confirms an EVALUATED tile's payload (rule 1), when the tile
     #: parks out of scope (rule 3), when it is skipped, or when the caller
-    #: explicitly descopes it.  The legacy ``loading_tiles`` set is a view
-    #: over this flag — the 2026-07-05 auto-levels wedge was exactly a
-    #: confirmed-presented tile whose parallel ``loading_tiles`` entry no
-    #: code path owned.
+    #: explicitly descopes it.  Session loading views read this flag.
     load_intent: bool = False
     #: P2 sets-as-views: an evaluation request for this tile is in flight
-    #: (the legacy ``active_tile_requests`` set is a view over this flag).
+    #: Session active-request views read this flag.
     request_active: bool = False
     #: P2 stage fan-in: the reusable-stage key this tile waits on, or None.
     #: Recorded by ``stage_attached`` so "loading without an evaluation
@@ -389,7 +386,7 @@ class TileLifecycle:
     # -- load intent / evaluation requests (P2 sets-as-views) ---------------
 
     def load_marked(self, tile_number: int) -> None:
-        """This tile owes exact content to the screen (legacy ``loading_tiles``)."""
+        """This tile owes exact content to the screen."""
 
         rec = self.record(tile_number)
         rec.load_intent = True
@@ -401,7 +398,7 @@ class TileLifecycle:
             self._load_cleared(rec)
 
     def evaluation_requested(self, tile_number: int) -> None:
-        """An evaluation request is in flight (legacy ``active_tile_requests``)."""
+        """An evaluation request is in flight."""
 
         rec = self.record(tile_number)
         rec.request_active = True

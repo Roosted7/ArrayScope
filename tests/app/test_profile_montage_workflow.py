@@ -592,6 +592,43 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     assert result["vispy_tile_presentation_draw_count"] == 4
 
 
+def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
+    from arrayscope.operations.stage_fanin import StageFanInState
+    from arrayscope.tools.profile_montage_workflow import _montage_visibility_state
+
+    session = SimpleNamespace(
+        visible_tiles=(SimpleNamespace(montage_index=0), SimpleNamespace(montage_index=1)),
+        skipped_tiles=set(),
+        lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
+        display_committed=True,
+        level_expected_indices=(10, 11),
+        pending_tiles=(SimpleNamespace(montage_index=5),),
+        loading_tiles=set(),
+        active_tile_requests=set(),
+        stage_fan_in=StageFanInState(),
+        final_commit_pending=False,
+        flush_pending=False,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+    )
+
+    class FakeImageView:
+        def montageTileOverlayCount(self):
+            return 0
+
+        def vispyPresentationDiagnostics(self):
+            return {}
+
+    win = SimpleNamespace(img_view=FakeImageView(), _montage_session=session)
+
+    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+
+    assert state["fully_visible"] is True
+    assert state["visible_pending_tiles"] == 0
+    assert state["active_presented_tile_count"] == 2
+
+
 @pytest.mark.skipif(
     os.environ.get("ARRAYSCOPE_RUN_PY_SPY_SMOKE") != "1",
     reason="opt-in real py-spy workflow smoke; set ARRAYSCOPE_RUN_PY_SPY_SMOKE=1",

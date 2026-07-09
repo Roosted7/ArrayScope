@@ -179,6 +179,8 @@ class DisplayPresentationMixin:
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()
+            elif bool(getattr(report, "presented_tiles", ())):
+                self._note_display_level_source(decision)
             if defer_side_panels:
                 self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:
@@ -299,6 +301,8 @@ class DisplayPresentationMixin:
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
                 if callable(refresh_hover):
                     refresh_hover()
+            elif bool(getattr(report, "presented_tiles", ())):
+                self._note_display_level_source(decision)
             self.win.apply_axis_flips()
             self.win.img_view.setImageStale(False)
         except Exception as e:
@@ -406,13 +410,15 @@ class DisplayPresentationMixin:
         )
 
     def _note_display_level_source(self, decision) -> None:
-        frame = getattr(self.win, "_committed_display_frame", None)
         session = getattr(self, "_montage_session", None)
-        if session is None or frame is None or frame.key.semantic_key != getattr(session, "level_key", None):
+        if session is None:
             return
         source = getattr(decision, "applied_level_source", None)
-        if source is not None:
-            session.applied_level_source = source
+        if source is None:
+            return
+        if getattr(source, "semantic_key", None) != getattr(session, "level_key", None):
+            return
+        session.applied_level_source = source
 
     def _viewport_bridge(self) -> ViewportBridge:
         bridge = getattr(self, "_viewport_bridge_instance", None)

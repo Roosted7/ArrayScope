@@ -42,6 +42,7 @@ class StubEffects:
         self.batches = []
         self.states = {}
         self.prepared = []
+        self.admitted = []
         self.dropped = []
         self.drop_intents = []
         self.deps = {}
@@ -84,6 +85,9 @@ class StubEffects:
     def rung_deps(self, intent, step):
         self.last_intent = intent
         return tuple(self.deps.get(step.tile_number, ()))
+
+    def rung_admitted(self, intent, step, task_key):
+        self.admitted.append((intent.semantic_key, step.tile_number, int(step.rung), step.level, task_key))
 
     def rung_dropped(self, intent, step):
         self.last_intent = intent

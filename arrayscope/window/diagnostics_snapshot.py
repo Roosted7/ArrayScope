@@ -50,7 +50,15 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
-    obligation_counters = {} if session is None else session.tile_obligation_counters()
+    ledger_snapshot = None if session is None else session.tile_ledger_snapshot()
+    ledger_counts = {} if ledger_snapshot is None else dict(ledger_snapshot.counts)
+    stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
+    stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
+    unresolved_stage_bindings = {
+        int(tile): key
+        for tile, key in stage_bindings.items()
+        if key not in stage_values
+    }
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -67,7 +75,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         presented_tiles=0 if session is None else len(session.lifecycle.presented_tiles),
         overlay_count=overlay_count,
         attached_stage_requests=0 if session is None else len(session.stage_fan_in.attached_requests),
-        waiting_stage_requests=0 if session is None else len(getattr(session.stage_fan_in, "tile_stage_keys", {})),
+        waiting_stage_requests=len(unresolved_stage_bindings),
         final_commit_pending=False if session is None else bool(getattr(session, "final_commit_pending", False)),
         flush_pending=False if session is None else bool(getattr(session, "flush_pending", False)),
         presentation_draw_count=int(presentation.get("draw_count", 0) or 0),
@@ -123,7 +131,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
         tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
         tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
-        tile_compute_waiting_for_stage=0 if session is None else len(getattr(session.stage_fan_in, "tile_stage_keys", {})),
+        tile_compute_waiting_for_stage=0 if session is None else int(getattr(session, "tile_compute_waiting_for_stage", 0) or 0),
         tile_compute_stage_backed_ms=0.0 if session is None else float(getattr(session, "tile_compute_stage_backed_ms", 0.0) or 0.0),
         tile_compute_direct_ms=0.0 if session is None else float(getattr(session, "tile_compute_direct_ms", 0.0) or 0.0),
         tile_compute_stage_backed_max_ms=0.0 if session is None else float(getattr(session, "tile_compute_stage_backed_max_ms", 0.0) or 0.0),
@@ -140,13 +148,16 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
         lifecycle_identity_rejections=0 if session is None else int(session.lifecycle.identity_rejections),
         dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
-        obligation_visible_target_unsettled=int(obligation_counters.get("visible_target_unsettled", 0) or 0),
-        obligation_preview_fallbacks=int(obligation_counters.get("preview_fallbacks", 0) or 0),
-        obligation_target_payload_owed=int(obligation_counters.get("target_payload_owed", 0) or 0),
-        obligation_active_without_path=int(obligation_counters.get("active_without_path", 0) or 0),
-        obligation_stage_ready=int(obligation_counters.get("stage_ready", 0) or 0),
-        obligation_stage_lost=int(obligation_counters.get("stage_lost", 0) or 0),
-        obligation_stage_blocked=int(obligation_counters.get("stage_blocked", 0) or 0),
+        ledger_needs_first_pixel=int(ledger_counts.get("needs_first_pixel", 0) or 0),
+        ledger_fallback_shown=int(ledger_counts.get("fallback_shown", 0) or 0),
+        ledger_target_schedulable=int(ledger_counts.get("target_schedulable", 0) or 0),
+        ledger_target_waiting_stage=int(ledger_counts.get("target_waiting_stage", 0) or 0),
+        ledger_target_running=int(ledger_counts.get("target_running", 0) or 0),
+        ledger_target_ready=int(ledger_counts.get("target_ready", 0) or 0),
+        ledger_target_emitted=int(ledger_counts.get("target_emitted", 0) or 0),
+        ledger_target_presented=int(ledger_counts.get("target_presented", 0) or 0),
+        ledger_orphan_running=0 if ledger_snapshot is None else int(ledger_snapshot.orphan_running),
+        ledger_parked_without_producer=0 if ledger_snapshot is None else int(ledger_snapshot.parked_without_producer),
         backend_stale_identities=_backend_stale_identities(session),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
         last_stall_signature=tuple(
@@ -394,13 +405,7 @@ def _presentation_diagnostics(window) -> dict[str, object]:
 
 
 def _lifecycle_semantic_mismatches(session) -> int:
-    """ADR 0051 migration parity: legacy collections vs the machine's mirror.
-
-    Counts tiles where the machine's semantic axis disagrees with the legacy
-    truth (`rendered_tiles` for evaluated, `loading_tiles` for evaluating).
-    Direct writes that bypass the session's mark_* methods show up here; the
-    count must trend to zero before P2 makes the machine authoritative.
-    """
+    """Count disagreement between lifecycle state and execution adapters."""
 
     if session is None:
         return 0
@@ -409,9 +414,8 @@ def _lifecycle_semantic_mismatches(session) -> int:
     evaluated = {rec.tile_number for rec in session.lifecycle if rec.semantic is Semantic.EVALUATED}
     rendered = {int(tile) for tile in session.rendered_tiles}
     loading = {int(tile) for tile in session.loading_tiles}
-    # mark_materialized keeps legacy tiles in loading until presentation
-    # acceptance, while the machine calls them evaluated; treat that overlap
-    # as agreement.
+    # Rendered-but-not-yet-presented tiles keep loading intent for atomic
+    # replacement, so evaluated+loading is agreement until acknowledgement.
     return len((evaluated ^ rendered) - loading) + len(
         session.lifecycle.evaluating_tiles - loading - rendered
     )

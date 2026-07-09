@@ -400,7 +400,7 @@ class RungMaterializationRequest(NamedTuple):
     (~¼ the texels of its source per doubling) and admitting under
     ``step_key`` when it is not None (``None`` = pass-through: the level is
     resident or claimed elsewhere).  The final step's key is always
-    ``key``.  Empty chain = single direct reduction (legacy shape).  Every
+    ``key``.  Empty chain = single direct reduction from the source.  Every
     non-None step key holds a singleflight claim taken at plan time; all of
     them are balanced on every scheduling path.
     """
@@ -923,6 +923,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             level_stats=getattr(metadata, "level_stats", None),
         )
         session.display_tile_payloads[tile_number] = payload
+        session.record_tile_payload(payload)
         lifecycle = getattr(session, "lifecycle", None)
         if lifecycle is not None and hasattr(lifecycle, "remember_presentable"):
             lifecycle.remember_presentable(tile_number, payload)

@@ -1,9 +1,4 @@
-"""Single-owner tile lifecycle (ADR 0051).
-
-Qt-free. The state machine in :mod:`tile_lifecycle` is the only writer of
-per-tile lifecycle state; window/renderer/LOD/backend components are event
-sources and effect executors.
-"""
+"""Qt-free presentation state reducers."""
 
 from .tile_lifecycle import (
     ClaimOwner,
@@ -14,7 +9,13 @@ from .tile_lifecycle import (
     TileLifecycle,
     TileRecord,
 )
-from .tile_obligations import TileObligation, TileObligationPlan, build_tile_obligation_plan
+from .tile_ledger import (
+    TileLedger,
+    TileLedgerPhase,
+    TilePayloadRef,
+    TileTarget,
+    payload_ref_from_display_payload,
+)
 
 __all__ = [
     "ClaimOwner",
@@ -22,9 +23,11 @@ __all__ = [
     "Presentation",
     "ReleaseClaim",
     "Semantic",
-    "TileObligation",
-    "TileObligationPlan",
+    "TileLedger",
+    "TileLedgerPhase",
     "TileLifecycle",
+    "TilePayloadRef",
     "TileRecord",
-    "build_tile_obligation_plan",
+    "TileTarget",
+    "payload_ref_from_display_payload",
 ]

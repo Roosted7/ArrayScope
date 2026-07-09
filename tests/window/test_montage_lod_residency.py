@@ -12,6 +12,7 @@ from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.kernel import Lane, Priority
+from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.presentation import ClaimOwner, LevelPhase, Presentation
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
@@ -19,7 +20,7 @@ from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
 from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
 from arrayscope.render.lod import admit_retained_preview_level, histogram_key_for_level_key
-from arrayscope.render.stages import CommitBatch, RenderIntent
+from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window.montage_session import (
     MontageRenderSession,
     pyramid_key_for_rendered,
@@ -156,11 +157,26 @@ def _admit_demand_level_for_test(pyramid, demand, rendered, *, semantic_source_i
 
 
 class _RungPrepareRenderer:
+    def __init__(self, *, kernel=None) -> None:
+        self.kernel = kernel
+
     def _montage_session_is_current(self, session) -> bool:
         return True
 
     def request_montage_replan(self, session) -> None:
         session._test_replan_requested = True
+
+
+class _StageProducerKernel:
+    def __init__(self, *keys, completed=()) -> None:
+        self.live = set(keys)
+        self.completed = set(completed)
+
+    def has_live_task(self, key) -> bool:
+        return key in self.live
+
+    def has_completed_task(self, key) -> bool:
+        return key in self.completed
 
 
 def _pipeline_intent_for(session, *, semantic_key=None, viewport_key="vp"):
@@ -170,6 +186,14 @@ def _pipeline_intent_for(session, *, semantic_key=None, viewport_key="vp"):
         presentation_key="presentation",
         view_range=getattr(session, "view_range", None),
         viewport_shape=getattr(session, "viewport_shape", None),
+    )
+
+
+def _pipeline_scope_for(session):
+    return LodAdmissionScope(
+        visible_tile_numbers=tuple(int(tile.montage_index) for tile in tuple(session.visible_tiles)),
+        near_tile_numbers=tuple(int(tile.montage_index) for tile in tuple(session.visible_tiles)),
+        visible_missing_count=len(tuple(session.visible_tiles)),
     )
 
 
@@ -1184,12 +1208,11 @@ def test_backend_reported_identities_drive_convergence():
     session.acknowledge_tile_presentation(delta2, report2)
     _state3, delta3 = session.build_tile_presentation({})
     assert 1 not in delta3.upserts
-    assert not session._reconcile_attempts
+    assert not session._identity_retry_attempts
 
 
-def test_backend_identity_reconciliation_retries_are_bounded():
-    """A backend that CANNOT converge (e.g. atlas capacity) must not turn
-    reconciliation into an idle commit loop: 3 attempts per identity pair."""
+def test_backend_identity_retries_are_bounded():
+    """A backend that cannot converge must not turn identity retry into a loop."""
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
     _state, delta = session.build_tile_presentation({})
@@ -1213,17 +1236,15 @@ def test_backend_identity_reconciliation_retries_are_bounded():
                 presented_identities={1: ("stuck", 6)},
             )
             session.acknowledge_tile_presentation(last_delta, stuck)
-    assert emitted <= 3, f"unbounded reconciliation retries: {emitted}"
+    assert emitted <= 3, f"unbounded identity retries: {emitted}"
 
 
 def test_settled_mismatch_is_queryable_for_followup_commit():
-    """Field defect 2026-07-05 #3: the report that reveals drawn-slot
-    staleness arrives at the END of a commit, and the reconciliation that
-    consumes it runs inside the NEXT commit — a settled session (dirty and
-    upserts drained) froze with backend_stale_identities nonzero until a pan
-    happened to schedule a commit.  The renderer now asks
-    backend_identity_mismatch_tiles() after every acknowledgement; it must
-    report actionable mismatches, exclude resigned pairs and exhausted
+    """Backend slot mismatches remain queryable after acknowledgement.
+
+    The renderer asks ``backend_identity_mismatch_tiles()`` after every
+    acknowledgement; it must report actionable mismatches, exclude resigned
+    pairs and exhausted
     attempts, and empty out on convergence."""
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
@@ -1281,7 +1302,7 @@ def test_inherited_identities_heal_on_a_rebuilt_session():
 def test_resigned_pair_stops_convergence_but_new_result_rearms():
     """The machine's resignation (bounded identity rejections) must silence
     exactly the resigned (wanted, shown) pair — the mismatch query and the
-    build reconciliation skip it — while a fresh evaluation clears the
+    build identity path skip it — while a fresh evaluation clears the
     resignation and gets new chances."""
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
@@ -1390,7 +1411,7 @@ def test_drawn_tile_with_outdated_acknowledged_identity_represents_and_rejoins_a
     report2 = TileCommitReport(presented_tiles=(0, 1), committed_upserts=(1,))
     session.acknowledge_tile_presentation(delta2, report2)
     _state3, delta3 = session.build_tile_presentation({})
-    assert 1 not in delta3.upserts, "reconciliation converges and the session settles"
+    assert 1 not in delta3.upserts, "identity retry converges and the session settles"
 
 
 def test_refresh_replans_missing_desired_level_at_unchanged_viewport():
@@ -1911,64 +1932,151 @@ def test_preview_floor_does_not_complete_full_refinement():
     assert session.is_complete()
 
 
-def test_idle_active_obligation_without_worker_path_releases_and_requeues():
-    session = _session(count=1)
-    session.rendered_tiles.clear()
-    session.dirty_payloads.pop(0, None)
-    renderer = _RungPrepareRenderer()
-    effects = MontagePipelineEffects(renderer, session)
-    intent = _pipeline_intent_for(session)
-
-    assert effects.prepare_rung(intent, _exact_step(0))
-    assert 0 in session.active_tile_requests
-    assert 0 in session.loading_tiles
-
-    counters = effects.reconcile_obligations(kernel_idle=True)
-
-    assert counters["obligation_released"] == 1
-    assert counters["obligation_requeued"] == 1
-    assert 0 not in session.active_tile_requests
-    assert 0 not in session.loading_tiles
-    assert session.pending_tile_numbers() == (0,)
-
-
-def test_stage_ready_obligation_requeues_through_single_model():
-    session = _session(count=1)
-    session.rendered_tiles.clear()
-    session.dirty_payloads.pop(0, None)
-    stage_key = ("stage", "ready")
-    session.stage_fan_in.tile_stage_keys[0] = stage_key
-    session.stage_fan_in.values[stage_key] = object()
-    renderer = _RungPrepareRenderer()
-    effects = MontagePipelineEffects(renderer, session)
-    intent = _pipeline_intent_for(session)
-    step = RungStep(
-        tile_number=0,
-        rung=Rung.DESIRED,
-        level=2,
-        reduce_from_native=True,
-        lane=Lane.DISPLAY_PREPARATION,
-        priority=Priority.VISIBLE_IMAGE,
-        reason="stage-backed exact target",
-    )
-
-    assert effects.prepare_rung(intent, step)
-    counters = effects.reconcile_obligations(kernel_idle=True)
-
-    assert counters["stage_ready"] == 1
-    assert counters["obligation_released"] == 1
-    assert counters["obligation_requeued"] == 1
-    assert session.pending_tile_numbers() == (0,)
-
-
 def test_stage_backed_rung_dep_uses_kernel_stage_task_key():
     session = _session(count=1)
     stage_key = ("stage", "in-flight")
     session.stage_fan_in.tile_stage_keys[0] = stage_key
+    session.stage_fan_in.active_requests.add(stage_key)
+    effects = MontagePipelineEffects(_RungPrepareRenderer(kernel=_StageProducerKernel(stage_key)), session)
+    step = _exact_step(0)
+
+    assert effects.rung_deps(_pipeline_intent_for(session), step) == (stage_key,)
+
+
+def test_stage_backed_rung_has_no_dependency_without_live_stage_producer():
+    session = _session(count=1)
+    stage_key = ("stage", "orphan")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    session.stage_fan_in.active_requests.add(stage_key)
     effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
     step = _exact_step(0)
 
-    assert effects.rung_deps(_pipeline_intent_for(session), step) == (("montage-stage", stage_key),)
+    assert effects.rung_deps(_pipeline_intent_for(session), step) == ()
+
+
+def test_stage_backed_rung_admission_records_live_stage_producer():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    stage_key = ("stage", "in-flight")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    renderer = _RungPrepareRenderer(kernel=_StageProducerKernel(stage_key))
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _exact_step(0)
+
+    effects.rung_admitted(intent, step, ("task", 0))
+
+    row = session.tile_ledger.row(0)
+    assert row.task_claim.task_key == ("task", 0)
+    assert row.stage_key == stage_key
+    assert row.stage_producer_key == stage_key
+
+
+def test_exact_rung_enters_running_only_after_kernel_admission():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _exact_step(0)
+
+    assert effects.prepare_rung(intent, step)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+    effects.rung_admitted(intent, step, ("task", 0))
+
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+    assert session.tile_ledger.row(0).task_claim.task_key == ("task", 0)
+
+
+def test_prepare_rung_releases_active_claim_when_task_is_not_live():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer(kernel=_StageProducerKernel())
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _exact_step(0)
+
+    effects.rung_admitted(intent, step, ("task", "missing"))
+
+    assert 0 in session.active_tile_requests
+    assert session.tile_ledger.row(0).task_claim.task_key == ("task", "missing")
+
+    assert effects.prepare_rung(intent, step)
+
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.tile_ledger.row(0).task_claim is None
+
+
+def test_preview_drop_does_not_clear_target_task_claim():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer(kernel=_StageProducerKernel(("task", "target")))
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    target_step = _exact_step(0)
+    preview_step = RungStep(
+        tile_number=0,
+        rung=Rung.PREVIEW,
+        level=4,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="preview",
+    )
+
+    effects.rung_admitted(intent, target_step, ("task", "target"))
+    session.lifecycle.preview_claimed(0, int(Rung.PREVIEW), 4)
+
+    effects.rung_dropped(intent, preview_step)
+
+    assert not session.lifecycle.preview_claim_matches(0, int(Rung.PREVIEW), 4)
+    assert session.tile_ledger.row(0).task_claim.task_key == ("task", "target")
+    assert 0 in session.active_tile_requests
+
+
+def test_tile_state_snapshot_releases_active_claim_without_live_task():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer(kernel=_StageProducerKernel())
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _exact_step(0)
+
+    effects.rung_admitted(intent, step, ("task", "gone"))
+    session.tile_ledger.task_released(0, reason="dropped")
+
+    states = effects.tile_states(intent, session.lod_policy_decision.demand, _pipeline_scope_for(session))
+
+    assert tuple(state.tile_number for state in states) == (0,)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
+
+
+def test_tile_state_snapshot_keeps_live_active_claim_out_of_ladder():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer(kernel=_StageProducerKernel(("task", "live")))
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _exact_step(0)
+
+    effects.rung_admitted(intent, step, ("task", "live"))
+
+    states = effects.tile_states(intent, session.lod_policy_decision.demand, _pipeline_scope_for(session))
+
+    assert states == ()
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
 
 
 def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact():
@@ -2592,8 +2700,8 @@ def test_retarget_index_window_clears_active_work_without_completion_queue():
     assert not session.active_tile_requests
 
 
-def test_stale_rung_drop_releases_its_prepared_active_claim_after_retarget():
-    """Cleanup is owned by the prepared rung, not by the live semantic key."""
+def test_stale_rung_drop_releases_its_admitted_active_claim_after_retarget():
+    """Cleanup is owned by the admitted rung, not by the live semantic key."""
 
     session = _session(count=1)
     session.rendered_tiles.clear()
@@ -2603,6 +2711,7 @@ def test_stale_rung_drop_releases_its_prepared_active_claim_after_retarget():
     step = _exact_step(0)
 
     assert effects.prepare_rung(old_intent, step)
+    effects.rung_admitted(old_intent, step, ("task", "old"))
     assert 0 in session.active_tile_requests
     assert 0 in session.loading_tiles
     assert session.lifecycle.evaluating_tiles == frozenset({0})
@@ -2616,7 +2725,7 @@ def test_stale_rung_drop_releases_its_prepared_active_claim_after_retarget():
     assert session._test_replan_requested is True
 
 
-def test_stale_commit_batch_releases_prepared_active_claim_after_key_retarget():
+def test_stale_commit_batch_releases_admitted_active_claim_after_key_retarget():
     """A completion between session key mutation and pipeline replan must drop."""
 
     session = _session(count=1)
@@ -2627,6 +2736,7 @@ def test_stale_commit_batch_releases_prepared_active_claim_after_key_retarget():
     step = _exact_step(0)
 
     assert effects.prepare_rung(old_intent, step)
+    effects.rung_admitted(old_intent, step, ("task", "old"))
     session.key = ("retargeted",)
 
     effects.apply_commit(
@@ -2672,6 +2782,7 @@ def test_commuting_desired_reduced_input_uses_preview_claim_not_native():
     session.dirty_payloads.pop(0, None)
 
     assert effects.prepare_rung(intent, step)
+    effects.rung_admitted(intent, step, ("display-payload", 0))
     assert session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
@@ -2707,6 +2818,7 @@ def test_non_commuting_desired_with_retained_source_uses_evaluation_claim():
     session.dirty_payloads.pop(0, None)
 
     assert effects.prepare_rung(intent, step)
+    effects.rung_admitted(intent, step, ("task", "desired"))
 
     assert not session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2)
     assert 0 in session.active_tile_requests
@@ -2767,6 +2879,176 @@ def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
     assert 0 not in session.loading_tiles
 
 
+def test_shared_desired_claim_blocks_direct_tile_target():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.lifecycle.preview_claimed(0, int(Rung.DESIRED), 2)
+    session.enqueue_pending_tile(tile)
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert not session.pending_tiles
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_presented_shared_desired_payload_blocks_direct_tile_target():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.enqueue_pending_tile(tile)
+    session.display_tile_payloads[0] = DisplayTilePayload(
+        0,
+        int(tile.source_index),
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        session.tile_semantic_source_id(tile.source_index),
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    session.lifecycle.acknowledge_presented(
+        0,
+        session.tile_semantic_source_id(tile.source_index),
+        quality="preview",
+        level=2,
+    )
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert not session.pending_tiles
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_shared_transform_pipeline_blocks_direct_display_target(monkeypatch):
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.document = ArrayDocument(
+        np.ones((TILE, TILE, 8), dtype=np.float32),
+        operations=(CenteredFFT(axis=2),),
+    )
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.enqueue_pending_tile(tile)
+    monkeypatch.setattr(render_effects, "preview_pipeline_commutes_for_display_lod", lambda _session, _tile: False)
+    monkeypatch.setattr(
+        render_effects,
+        "shared_preview_is_useful",
+        lambda _session, _tile, _demand, **_kwargs: True,
+    )
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert not session.pending_tiles
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_shared_transform_fallback_releases_per_tile_pending(monkeypatch):
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.document = ArrayDocument(
+        np.ones((TILE, TILE, 8), dtype=np.float32),
+        operations=(CenteredFFT(axis=2),),
+    )
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.enqueue_pending_tile(tile)
+    session.display_tile_payloads[0] = DisplayTilePayload(
+        0,
+        int(tile.source_index),
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        session.tile_semantic_source_id(tile.source_index),
+        lod=LodInfo(level=4, factor=16, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    session.lifecycle.acknowledge_presented(
+        0,
+        session.tile_semantic_source_id(tile.source_index),
+        quality="preview",
+        level=4,
+    )
+    monkeypatch.setattr(render_effects, "preview_pipeline_commutes_for_display_lod", lambda _session, _tile: False)
+    monkeypatch.setattr(
+        render_effects,
+        "shared_preview_is_useful",
+        lambda _session, _tile, _demand, **_kwargs: True,
+    )
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+
+    effects.release_display_owned_pending()
+
+    assert not session.pending_tiles
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
+def test_shader_preview_evidence_releases_per_tile_pending(monkeypatch):
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.shader_display = True
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.enqueue_pending_tile(tile)
+    source_id = (*session.tile_semantic_source_id(tile.source_index), "floor", "complex_rg32f", (4, 4))
+    session.display_tile_payloads[0] = DisplayTilePayload(
+        0,
+        int(tile.source_index),
+        np.ones((4, 4), dtype=np.complex64),
+        None,
+        source_id,
+        level_data=np.asarray([1.0, 4.0], dtype=np.float32),
+        quality="preview",
+        lod=LodInfo(level=4, factor=16, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+    )
+    session.lifecycle.acknowledge_presented(
+        0,
+        source_id,
+        quality="preview",
+        level=4,
+    )
+    monkeypatch.setattr(render_effects, "preview_pipeline_commutes_for_display_lod", lambda _session, _tile: True)
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+
+    effects.release_display_owned_pending()
+
+    assert not session.pending_tiles
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+
+
 def test_ready_stage_dependent_rearms_pending_tile_until_materialized():
     session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
     stage_key = ("stage", "retained")
@@ -2778,13 +3060,17 @@ def test_ready_stage_dependent_rearms_pending_tile_until_materialized():
             "stage_values": {stage_key: object()},
         }
     )
+    session.tile_compute_waiting_for_stage = 1
+    session.stage_backed_tiles_pending = 1
 
     assert not session.is_complete()
 
     assert montage_commit.rearm_ready_stage_dependents(session) == 1
 
     assert session.pending_tile_numbers() == (0,)
-    assert session.stage_fan_in.tile_stage_keys == {0: stage_key}
+    assert session.stage_fan_in.tile_stage_keys == {}
+    assert session.tile_compute_waiting_for_stage == 0
+    assert session.stage_backed_tiles_pending == 0
     assert not session.is_complete()
 
 
@@ -3147,6 +3433,7 @@ def test_source_changed_active_claim_does_not_block_retargeted_prepare():
     step = _exact_step(0)
 
     assert effects.prepare_rung(old_intent, step)
+    effects.rung_admitted(old_intent, step, ("task", "old"))
     assert 0 in session.active_tile_requests
 
     new_tile = MontageTile(
@@ -3173,6 +3460,7 @@ def test_source_changed_active_claim_does_not_block_retargeted_prepare():
     new_intent = _pipeline_intent_for(session, viewport_key="new")
 
     assert effects.prepare_rung(new_intent, step)
+    effects.rung_admitted(new_intent, step, ("task", "new"))
     assert 0 in session.active_tile_requests
     assert 0 in session.loading_tiles
     assert session.lifecycle.evaluation_claim_for(0).source_index == 9
@@ -3236,12 +3524,14 @@ def test_stale_rung_drop_does_not_clear_newer_active_claim_for_same_slot():
     step = _exact_step(0)
 
     assert effects.prepare_rung(old_intent, step)
+    effects.rung_admitted(old_intent, step, ("task", "old"))
     session.active_tile_requests.clear()
     session.loading_tiles.clear()
     session.lifecycle.evaluation_declined(0)
 
     session.key = ("retargeted",)
     assert effects.prepare_rung(new_intent, step)
+    effects.rung_admitted(new_intent, step, ("task", "new"))
     effects.rung_dropped(old_intent, step)
 
     assert 0 in session.active_tile_requests

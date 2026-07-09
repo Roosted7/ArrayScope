@@ -221,10 +221,11 @@ class MontageRuntimeMixin:
         pipeline = self._montage_pipeline_for_session(session)
         submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
+            pipeline.effects.release_display_owned_pending(scope)
             return submitted
         montage_commit.rearm_ready_stage_dependents(session)
-        pipeline.effects.reconcile_obligations(kernel_idle=montage_commit._kernel_idle(getattr(self.win, "kernel", None)))
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
+        pipeline.effects.release_display_owned_pending(scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
         if force_commit or session.flush_pending or session.final_commit_pending:
@@ -244,13 +245,6 @@ class MontageRuntimeMixin:
         if unsettled:
             self._ensure_montage_watchdog()
         return int(submitted)
-
-    def reconcile_current_montage_obligations(self, *, kernel_idle: bool = False) -> dict[str, int]:
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._montage_session_is_current(session):
-            return {}
-        pipeline = self._montage_pipeline_for_session(session)
-        return pipeline.effects.reconcile_obligations(kernel_idle=bool(kernel_idle))
 
     def replan_deferred_interactive_native_quality(self) -> bool:
         """Admit native-quality rungs deferred while an interaction was active."""

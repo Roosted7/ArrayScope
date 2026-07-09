@@ -165,8 +165,7 @@ class MontageRuntimeDiagnostics:
     lifecycle_parked: int = 0
     lifecycle_evaluating: int = 0
     lifecycle_dangling_claims: int = 0
-    # Migration parity: legacy collections that disagree with the machine's
-    # mirrored semantic axis (must trend to 0 before P2 deletes them).
+    # Tile-control collections that disagree with lifecycle-owned semantic state.
     lifecycle_semantic_mismatches: int = 0
     # P2 identity-aware acknowledgement: acks the machine refused because the
     # backend slot held a different payload identity than emitted.  Nonzero =
@@ -174,13 +173,16 @@ class MontageRuntimeDiagnostics:
     lifecycle_identity_rejections: int = 0
     # Tiles whose payload is dirty (queued for re-presentation).
     dirty_payload_tiles: int = 0
-    obligation_visible_target_unsettled: int = 0
-    obligation_preview_fallbacks: int = 0
-    obligation_target_payload_owed: int = 0
-    obligation_active_without_path: int = 0
-    obligation_stage_ready: int = 0
-    obligation_stage_lost: int = 0
-    obligation_stage_blocked: int = 0
+    ledger_needs_first_pixel: int = 0
+    ledger_fallback_shown: int = 0
+    ledger_target_schedulable: int = 0
+    ledger_target_waiting_stage: int = 0
+    ledger_target_running: int = 0
+    ledger_target_ready: int = 0
+    ledger_target_emitted: int = 0
+    ledger_target_presented: int = 0
+    ledger_orphan_running: int = 0
+    ledger_parked_without_producer: int = 0
     # Stall assertion probes (ADR 0051): each one means an unsettled montage
     # session had the same signature across diagnostics ticks.  The probe is
     # observational only and never schedules or mutates render work.
@@ -929,13 +931,16 @@ _MONTAGE_COVERED = frozenset(
         "tile_compute_direct_max_ms",
         "lead_direct_tiles",
         "stage_backed_tiles_pending",
-        "obligation_visible_target_unsettled",
-        "obligation_preview_fallbacks",
-        "obligation_target_payload_owed",
-        "obligation_active_without_path",
-        "obligation_stage_ready",
-        "obligation_stage_lost",
-        "obligation_stage_blocked",
+        "ledger_needs_first_pixel",
+        "ledger_fallback_shown",
+        "ledger_target_schedulable",
+        "ledger_target_waiting_stage",
+        "ledger_target_running",
+        "ledger_target_ready",
+        "ledger_target_emitted",
+        "ledger_target_presented",
+        "ledger_orphan_running",
+        "ledger_parked_without_producer",
     }
 )
 _MONTAGE_TIMING_COVERED = frozenset(
@@ -1093,13 +1098,17 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"stage_deps={montage.attached_stage_requests}/{montage.waiting_stage_requests}"
         ),
         (
-            "Obligations: "
-            f"unsettled={montage.obligation_visible_target_unsettled} "
-            f"preview={montage.obligation_preview_fallbacks} "
-            f"target_payload={montage.obligation_target_payload_owed} "
-            f"active_orphan={montage.obligation_active_without_path} "
-            f"stage ready/lost/blocked={montage.obligation_stage_ready}/"
-            f"{montage.obligation_stage_lost}/{montage.obligation_stage_blocked}"
+            "Tile ledger: "
+            f"first_pixel={montage.ledger_needs_first_pixel} "
+            f"fallback={montage.ledger_fallback_shown} "
+            f"schedulable={montage.ledger_target_schedulable} "
+            f"stage={montage.ledger_target_waiting_stage} "
+            f"running={montage.ledger_target_running} "
+            f"ready={montage.ledger_target_ready} "
+            f"emitted={montage.ledger_target_emitted} "
+            f"presented={montage.ledger_target_presented} "
+            f"orphan={montage.ledger_orphan_running} "
+            f"parked_no_producer={montage.ledger_parked_without_producer}"
         ),
         (
             "Compute time (ms): "

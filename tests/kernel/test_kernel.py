@@ -234,6 +234,20 @@ def test_dependency_already_satisfied_runs_immediately():
     assert ran == ["a", "b"]
 
 
+def test_task_key_presence_distinguishes_live_from_completed():
+    kernel, backend = make_manual()
+
+    kernel.submit(TaskSpec(key="a", fn=lambda: "a"))
+
+    assert kernel.has_live_task("a")
+    assert not kernel.has_completed_task("a")
+
+    backend.run_all()
+
+    assert not kernel.has_live_task("a")
+    assert kernel.has_completed_task("a")
+
+
 # ---------------------------------------------------------- supersession
 
 
