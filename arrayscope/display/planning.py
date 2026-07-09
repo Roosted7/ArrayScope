@@ -34,6 +34,7 @@ def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallb
                 histogram_range=histogram_range or levels,
                 rank=LevelSourceRank.PREVIOUS_COMMITTED,
                 semantic_key=previous_frame.key.semantic_key,
+                evidence_quality=0,
             )
         if histogram_range is not None:
             return LevelSource(
@@ -41,6 +42,7 @@ def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallb
                 histogram_range=histogram_range,
                 rank=LevelSourceRank.PREVIOUS_COMMITTED,
                 semantic_key=previous_frame.key.semantic_key,
+                evidence_quality=0,
             )
     fallback_bounds = normalize_bounds(fallback) or (0.0, 1.0)
     return LevelSource(levels=fallback_bounds, histogram_range=fallback_bounds, rank=LevelSourceRank.FALLBACK)
@@ -150,6 +152,7 @@ def _valid_source(source) -> LevelSource | None:
         expected_count=max(0, int(source.expected_count)),
         semantic_key=source.semantic_key,
         mode=getattr(source, "mode", "relative"),
+        evidence_quality=max(0, int(getattr(source, "evidence_quality", 0) or 0)),
     )
 
 

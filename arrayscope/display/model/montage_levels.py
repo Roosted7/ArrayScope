@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import IntEnum
 import math
 from typing import Iterable
 
@@ -15,6 +16,15 @@ PROVISIONAL_TILE_SAMPLE_LIMIT = 512
 REFINED_TILE_SAMPLE_LIMIT = 8192
 EXACT_TILE_SAMPLE_LIMIT = 32768
 AGGREGATE_SAMPLE_LIMIT = 65536
+
+
+class LevelEvidenceQuality(IntEnum):
+    """Quality ordering for reusable montage level evidence."""
+
+    NONE = 0
+    ROUGH_PREVIEW = 1
+    ROUGH_TARGET = 2
+    REFINED = 3
 
 
 def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=None) -> tuple[object, ...]:
@@ -46,6 +56,14 @@ class TileLevelStats:
     bounds: tuple[float, float]
     sample: np.ndarray
     refined: bool = False
+    evidence_quality: LevelEvidenceQuality | int | str = LevelEvidenceQuality.ROUGH_TARGET
+
+    def __post_init__(self) -> None:
+        quality = _coerce_evidence_quality(self.evidence_quality)
+        if bool(self.refined) and quality < LevelEvidenceQuality.REFINED:
+            quality = LevelEvidenceQuality.REFINED
+        object.__setattr__(self, "evidence_quality", quality)
+        object.__setattr__(self, "refined", bool(quality >= LevelEvidenceQuality.REFINED))
 
     @property
     def sample_count(self) -> int:
@@ -60,6 +78,14 @@ class MontageLevelStats:
     rank: LevelSourceRank
     sample: np.ndarray | None = None
     refined: bool = False
+    evidence_quality: LevelEvidenceQuality | int | str = LevelEvidenceQuality.NONE
+
+    def __post_init__(self) -> None:
+        quality = _coerce_evidence_quality(self.evidence_quality)
+        if bool(self.refined) and quality < LevelEvidenceQuality.REFINED:
+            quality = LevelEvidenceQuality.REFINED
+        object.__setattr__(self, "evidence_quality", quality)
+        object.__setattr__(self, "refined", bool(quality >= LevelEvidenceQuality.REFINED))
 
     @property
     def coverage_rank(self) -> int:
@@ -110,7 +136,7 @@ class MontageLevelTracker:
             return self.stats_for(key) if aggregate else None
         by_source = self._tiles.setdefault(key, {})
         previous = by_source.get(int(source_index))
-        if previous is None or bool(refined) or not previous.refined:
+        if _tile_stats_is_improvement(tile_stats, previous):
             by_source[int(source_index)] = tile_stats
             self._invalidate(key)
             if aggregate and previous is None and int(source_index) in expected:
@@ -130,7 +156,7 @@ class MontageLevelTracker:
         by_source = self._tiles.setdefault(key, {})
         source_index = int(tile_stats.source_index)
         previous = by_source.get(source_index)
-        if previous is None or tile_stats.refined or not previous.refined:
+        if _tile_stats_is_improvement(tile_stats, previous):
             by_source[source_index] = tile_stats
             self._invalidate(key)
             if aggregate and previous is None and source_index in expected:
@@ -158,6 +184,7 @@ class MontageLevelTracker:
                 bounds=None,
                 sample=np.asarray((), dtype=np.float32),
                 refined=True,
+                evidence_quality=LevelEvidenceQuality.REFINED,
             )
             self._invalidate(key)
 
@@ -168,6 +195,15 @@ class MontageLevelTracker:
         if stats is None:
             return False
         return bool(stats.refined) if refined else True
+
+    def source_stats(self, key: object, source_index: int) -> TileLevelStats | None:
+        return self._tiles.get(key, {}).get(int(source_index))
+
+    def has_source_quality(self, key: object, source_index: int, quality: LevelEvidenceQuality | int | str) -> bool:
+        stats = self.source_stats(key, source_index)
+        if stats is None:
+            return False
+        return _coerce_evidence_quality(stats.evidence_quality) >= _coerce_evidence_quality(quality)
 
     def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
         stats = self.stats_for(key)
@@ -185,6 +221,7 @@ class MontageLevelTracker:
             source_count=len(stats.source_indices),
             expected_count=len(stats.expected_indices),
             semantic_key=key,
+            evidence_quality=int(stats.evidence_quality),
         )
 
     def histogram_data_for_stats(self, stats: MontageLevelStats | None) -> np.ndarray | None:
@@ -211,15 +248,27 @@ class MontageLevelTracker:
         by_source = self._tiles.get(key, {})
         selected = [by_source[index] for index in sorted(expected) if index in by_source]
         if not selected:
-            stats = MontageLevelStats(None, frozenset(), expected, LevelSourceRank.NONE, None, False)
+            stats = MontageLevelStats(
+                None,
+                frozenset(),
+                expected,
+                LevelSourceRank.NONE,
+                None,
+                False,
+                LevelEvidenceQuality.NONE,
+            )
         else:
             bounds = _union_tile_bounds(selected)
             sources = frozenset(stat.source_index for stat in selected)
             rank = self._rank_for(sources, expected)
             refined = bool(selected) and all(stat.refined for stat in selected)
+            evidence_quality = min(
+                (_coerce_evidence_quality(stat.evidence_quality) for stat in selected),
+                default=LevelEvidenceQuality.NONE,
+            )
             if rank == LevelSourceRank.MONTAGE_COMPLETE and refined:
                 rank = LevelSourceRank.MONTAGE_SAMPLED_FULL
-            stats = MontageLevelStats(bounds, sources, expected, rank, None, refined)
+            stats = MontageLevelStats(bounds, sources, expected, rank, None, refined, evidence_quality)
         self._summary_cache[key] = (revision, expected, stats)
         return stats
 
@@ -233,7 +282,15 @@ class MontageLevelTracker:
             return cached[2]
         summary = self.summary_for(key)
         if summary is None or not summary.source_indices:
-            stats = MontageLevelStats(None, frozenset(), expected, LevelSourceRank.NONE, None, False)
+            stats = MontageLevelStats(
+                None,
+                frozenset(),
+                expected,
+                LevelSourceRank.NONE,
+                None,
+                False,
+                LevelEvidenceQuality.NONE,
+            )
         else:
             sample = self._sample_for_expected(key, expected, summary.source_indices)
             stats = MontageLevelStats(
@@ -243,6 +300,7 @@ class MontageLevelTracker:
                 summary.rank,
                 sample,
                 summary.refined,
+                summary.evidence_quality,
             )
         self._aggregate_cache[key] = (revision, expected, stats)
         return stats
@@ -295,7 +353,14 @@ class MontageLevelTracker:
         return LevelSourceRank.MONTAGE_VISIBLE_SUBSET
 
 
-def _sample_tile_stats(values, source_index: int, *, refined: bool, exact: bool = True) -> TileLevelStats | None:
+def _sample_tile_stats(
+    values,
+    source_index: int,
+    *,
+    refined: bool,
+    exact: bool = True,
+    evidence_quality: LevelEvidenceQuality | int | str | None = None,
+) -> TileLevelStats | None:
     finite = _finite_values(values)
     if finite is None:
         return None
@@ -304,20 +369,72 @@ def _sample_tile_stats(values, source_index: int, *, refined: bool, exact: bool 
     limit = REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT
     if sample.size > int(limit):
         sample = _sparse_even_random_sample(sample, limit=int(limit))
+    requested_quality = None if evidence_quality is None else _coerce_evidence_quality(evidence_quality)
+    allow_exact_promotion = requested_quality != LevelEvidenceQuality.ROUGH_PREVIEW
+    is_refined = bool(
+        refined
+        or (
+            allow_exact_promotion
+            and bool(exact)
+            and np.asarray(values).size <= EXACT_TILE_SAMPLE_LIMIT
+        )
+    )
+    quality = (
+        LevelEvidenceQuality.REFINED
+        if is_refined
+        else _coerce_evidence_quality(requested_quality or LevelEvidenceQuality.ROUGH_TARGET)
+    )
     return TileLevelStats(
         source_index=int(source_index),
         bounds=bounds,
         sample=sample.astype(np.float32, copy=False),
-        refined=bool(refined or (bool(exact) and np.asarray(values).size <= EXACT_TILE_SAMPLE_LIMIT)),
+        refined=is_refined,
+        evidence_quality=quality,
     )
 
 
-def sample_tile_level_stats(values, source_index: int, *, refined: bool) -> TileLevelStats | None:
-    return _sample_tile_stats(values, int(source_index), refined=bool(refined))
+def sample_tile_level_stats(
+    values,
+    source_index: int,
+    *,
+    refined: bool,
+    evidence_quality: LevelEvidenceQuality | int | str | None = None,
+) -> TileLevelStats | None:
+    return _sample_tile_stats(
+        values,
+        int(source_index),
+        refined=bool(refined),
+        evidence_quality=evidence_quality,
+    )
 
 
-def provisional_tile_level_stats(values, source_index: int) -> TileLevelStats | None:
-    return _sample_tile_stats(values, int(source_index), refined=False, exact=False)
+def provisional_tile_level_stats(
+    values,
+    source_index: int,
+    *,
+    evidence_quality: LevelEvidenceQuality | int | str = LevelEvidenceQuality.ROUGH_TARGET,
+) -> TileLevelStats | None:
+    return _sample_tile_stats(
+        values,
+        int(source_index),
+        refined=False,
+        exact=False,
+        evidence_quality=evidence_quality,
+    )
+
+
+def tile_level_stats_with_quality(
+    stats: TileLevelStats,
+    quality: LevelEvidenceQuality | int | str,
+) -> TileLevelStats:
+    quality = _coerce_evidence_quality(quality)
+    return TileLevelStats(
+        source_index=int(stats.source_index),
+        bounds=stats.bounds,
+        sample=np.asarray(stats.sample),
+        refined=bool(quality >= LevelEvidenceQuality.REFINED),
+        evidence_quality=quality,
+    )
 
 
 def _finite_sample(values, *, limit: int) -> np.ndarray:
@@ -441,3 +558,26 @@ def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit
         return existing[existing_indices].astype(np.float32, copy=False)
     addition_indices = np.linspace(0, addition.size - 1, keep_addition, dtype=np.int64)
     return np.concatenate((existing[existing_indices], addition[addition_indices])).astype(np.float32, copy=False)
+
+
+def _coerce_evidence_quality(value) -> LevelEvidenceQuality:
+    if isinstance(value, LevelEvidenceQuality):
+        return value
+    if isinstance(value, str):
+        try:
+            return LevelEvidenceQuality[value]
+        except KeyError:
+            return LevelEvidenceQuality(value)
+    return LevelEvidenceQuality(int(value))
+
+
+def _tile_stats_is_improvement(candidate: TileLevelStats, previous: TileLevelStats | None) -> bool:
+    if previous is None:
+        return True
+    candidate_quality = _coerce_evidence_quality(candidate.evidence_quality)
+    previous_quality = _coerce_evidence_quality(previous.evidence_quality)
+    if candidate_quality > previous_quality:
+        return True
+    if candidate_quality < previous_quality:
+        return False
+    return bool(candidate.refined and not previous.refined)

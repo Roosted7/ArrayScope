@@ -37,7 +37,7 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 | Modular pipeline | **Driving montage** | `arrayscope/render/`: typed stage contracts, kernel-backed MontagePipeline, Qt-free evaluation effects, tile-state snapshots, stage deps, and commit effects route the live montage render path. |
 | Unified LOD ladder | **Adopted in montage** | `render/ladder.py`: FLOOR→PREVIEW→DESIRED→EXACT pure planner now feeds montage through the pipeline; demanded-level convergence wakes via lifecycle/pipeline completions instead of a side request list. |
 | Tile lifecycle | Unchanged owner | ADR 0051 machine stays; the pipeline feeds it rung and backend-ack events instead of frame_renderer result pumps. |
-| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate with clusters B/C/E moved out or deleted; `window/montage_lod.py` is deleted, and level-stat maintenance now lives under `render/level_stats.py` with refinement admitted through the kernel. |
+| Legacy orchestration | **Dissolving** | WorkGraph is deleted and `window/evaluation_controller.py` is import-only. `frame_renderer.py` is below the R2 gate with clusters B/C/E moved out or deleted; `window/montage_lod.py` is deleted, and level-stat maintenance now lives under `render/level_stats.py` with refinement admitted through the kernel. ADR 0054 records the rough-preview / rough-target / refined level-evidence ordering. |
 | Vocabulary | Canonical in kernel | `WorkLane`/`EvalPriority` are compat aliases of kernel `Lane`/`Priority`. |
 | Hygiene | Done (first pass) | Kill switches, P3 fallbacks, tmp_probes deleted; 3 probes live in `tools/probes/`. |
 | Baseline health | Focused R4/core green; broad offscreen reds resolved | Core/operations, R4-focused architecture/governor/kernel/render/window tests, and the formerly red offscreen display/window/UI sentinels are green after the preview-to-target wakeup fix. Benchmark/manual/GPU evidence still needs re-measure before closing the redesign gate. |
@@ -54,9 +54,10 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 
 1. **R2 closes only on re-measured benchmark bars** (ground rule 8: gates
    are immutable). The pre-fix JSONLs are failure evidence, not baselines.
-2. **The window-levels cluster** (3 red tests, one likely root cause in
-   the moved level flow) is user-facing correctness — R2b item 1 before
-   anything else.
+2. **Window-level/histogram correctness remains a gate.** The rough-preview /
+   rough-target / refined evidence ordering is implemented and covered by
+   focused tests, but R2 still needs the fresh benchmark/manual/GPU evidence
+   before closure.
 3. **Hardware evidence still Linux-only** (X5c–X5e untouched by the
    redesign; Windows/macOS traces owed).
 4. **Histogram adapter remains version-sensitive** to private PyQtGraph
@@ -66,7 +67,7 @@ first-class via capabilities, core-green test bar with a known-red ledger.
 
 ## Current direction
 
-Finish R2b (window-levels cluster → overlay/ROI timing → diagnostics
-formatter → complex windowing seam → benchmark re-measure against the
-unchanged R2 gate), then R3→R5 in order (`docs/redesign/README.md` owns
-the queue), then the X5 evidence gates in `docs/roadmap.md`.
+Finish R2b evidence collection (overlay/ROI timing, diagnostics formatter,
+complex windowing seam, benchmark re-measure against the unchanged R2 gate),
+then R3→R5 in order (`docs/redesign/README.md` owns the queue), then the X5
+evidence gates in `docs/roadmap.md`.

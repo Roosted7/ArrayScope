@@ -81,6 +81,7 @@ Status terminology:
 | [0050](0050-async-multi-resolution-tile-residency.md) | Async multi-resolution tile residency | Implemented for VisPy tiled scenes (`resident` default on VisPy); retained preview level implemented; PyQtGraph adoption implemented opt-in (`ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`, default off pending the measured gate); reduce-before-ops consumer and ops-input LOD remain roadmap work. |
 | [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented, field-verified, and machine-derived dispatch landed (every event edge re-derives all pumps; the stall watchdog is an assertion). Remaining P2: sets as views + stage fan-in events, delta-walk cost; P3–P5 phased. |
 | [0053](0053-execution-kernel-and-modular-pipeline.md) | Execution kernel and modular rendering pipeline | Accepted; kernel implemented and driving app background execution after R1; R2–R5 dissolve remaining frame_renderer, montage_lod, timer, and docs/test debt. |
+| [0054](0054-montage-level-evidence-phasing.md) | Montage level evidence phasing | Implemented for montage level/histogram evidence ordering; rough preview, rough target, and refined stats are ranked explicitly. |
 
 ## Adding or changing a decision
 

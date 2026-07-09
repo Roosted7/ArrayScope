@@ -672,6 +672,40 @@ def test_preview_payloads_do_not_count_as_semantic_commits():
     assert tiled_payloads_include_semantics({0: preview, 1: exact}) is True
 
 
+def test_montage_level_metadata_publishes_when_evidence_quality_improves():
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
+    from arrayscope.window.frame_renderer import FrameRenderMixin
+
+    class Window(FrameRenderMixin):
+        def __init__(self):
+            self.win = self
+
+    session = SimpleNamespace(
+        level_key=("levels", "quality"),
+        rendered_tiles={0: object()},
+        display_tile_payloads={},
+        applied_level_source=LevelSource(
+            levels=(0.0, 10.0),
+            histogram_range=(0.0, 10.0),
+            rank=LevelSourceRank.MONTAGE_COMPLETE,
+            source_count=2,
+            expected_count=2,
+            semantic_key=("levels", "quality"),
+            evidence_quality=int(LevelEvidenceQuality.ROUGH_PREVIEW),
+        ),
+    )
+    stats = MontageLevelStats(
+        bounds=(0.0, 10.0),
+        source_indices=frozenset({0, 1}),
+        expected_indices=frozenset({0, 1}),
+        rank=LevelSourceRank.MONTAGE_COMPLETE,
+        evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+    )
+
+    assert Window()._should_publish_montage_level_metadata(session, stats) is True
+
+
 def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import TileLevelStats

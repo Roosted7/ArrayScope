@@ -49,6 +49,16 @@ Three concepts are separate:
 
 A progressive tile can be shown before a high-detail plot is complete, but automatic levels for that tile must be based on semantic coverage that includes it. User-locked levels are not overwritten by later refinement. Preview drags/manual edits may update pixels immediately while only final edits emit the semantic level-change signal.
 
+Montage level evidence is ranked separately from coverage: rough preview,
+rough target/full, then refined. Rough preview evidence may seed the first
+VisPy shader levels and histogram plot, but it remains provisional. A reduced
+target LOD is rough target evidence, not merely preview evidence, when it is
+the requested final display target. Refined evidence is admitted after visible
+presentation settles and may update the histogram/levels without a tile upload.
+Lower-quality evidence never replaces higher-quality evidence for the same
+semantic source. See
+[ADR 0054](../decisions/0054-montage-level-evidence-phasing.md).
+
 ## Unified Tiled Surface
 
 ArrayScope presents normal images, large planes, and montages through one semantic tiled image

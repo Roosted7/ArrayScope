@@ -126,9 +126,10 @@ settles.
   target and we are behind, preview shows first).
 - **Never downgrade levels/histogram.** Level/histogram evidence is never
   replaced by lower-quality evidence, and is not re-sampled (rough or refined)
-  when equal-or-better evidence already exists — the R1–R3 `has_source`/refined
-  guards enforce this; R4 preserves it while moving refinement scheduling into
-  kernel admission (drop stale side work at the owner, not in `level_stats`).
+  when equal-or-better evidence already exists. ADR 0054 makes that ordering
+  explicit: rough preview < rough target/full < refined. Metadata-only
+  histogram/level improvements are valid presentation updates even when no tile
+  payload delta uploads.
 - **Dynamic preview level.** Until R4 the preview LOD level is a renderer-local
   constant; R4 makes it dynamic from viewport demand, tile shape, op
   cost/capabilities, staged availability, cache budget, and memory pressure
@@ -145,14 +146,14 @@ settles.
   outranking it, instead of `LevelStatsService` discovering displayed payloads
   from session completion.
 
-Deferred to a focused follow-up (not strictly R4): the **PyQtGraph
-2-quality-level** presentation. Because PyQtGraph bakes levels into pixels at
-commit, its auto-levels currently crawl tile-by-tile as bounds grow, re-baking
-tiles through the fill. It should instead capture a full-coverage *rough* level
-estimate before the first CPU-LUT commit, show the preview-LOD tiles at those
-stable rough levels, then apply one *refined* level update for the final-LOD
-tiles. VisPy already does rough → hold → refined because its levels are a cheap
-late GPU uniform.
+Focused follow-up landed 2026-07-09: the **level/histogram evidence phasing**
+is now explicit in [`ADR 0054`](../decisions/0054-montage-level-evidence-phasing.md).
+PyQtGraph no longer treats every arriving tile as permission to crawl auto
+levels through the fill; it uses the best stable semantic source available for
+the commit and accepts later refined metadata through the bounded
+level-presentation path. VisPy can publish rough preview evidence early, keep it
+while target work arrives, and then update shader levels/histogram from better
+target/refined evidence without source-pixel uploads.
 
 ## Exit gate
 

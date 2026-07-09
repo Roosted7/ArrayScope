@@ -955,43 +955,22 @@ class MontagePipelineEffects:
             first_display_commit = not bool(session.display_committed)
             requested_levels = session_requested_levels(session)
             explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
+            if _commit_should_queue_level_stats(renderer, first_display_commit=first_display_commit):
+                level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
+                if level_payloads:
+                    renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
             if self._empty_first_commit_can_wait(first_display_commit, explicit_auto, active_payloads, tile_delta):
                 session.final_commit_pending = False
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
                 renderer.request_montage_replan(session)
                 return
-            if self._empty_progressive_commit_settled(first_display_commit, explicit_auto, tile_delta):
-                session.final_commit_pending = False
-                session.flush_pending = False
-                renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                session.note_committed()
-                self._finish_after_noop_commit()
-                return
-            if _commit_should_queue_level_stats(renderer, first_display_commit=first_display_commit):
-                level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
-                renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
-            rendered_geometry = replace(rendered_geometry, montage_tile_states=session.ensure_tile_states())
-            self._install_warm_residency_scheduler(rendered_geometry)
-            renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             prepare_apply_start = perf_counter()
             prepare_stats_start = perf_counter()
             level_stats = renderer._montage_level_stats_for_session(session)
             renderer._last_montage_tile_prepare_stats_ms = (perf_counter() - prepare_stats_start) * 1000.0
             semantic_commit = tiled_payloads_include_semantics(active_payloads)
             decision_force_auto = bool(explicit_auto and semantic_commit)
-            if tile_layer_auto_levels_wait_for_complete_source(
-                renderer,
-                session,
-                decision_force_auto,
-                level_stats,
-            ):
-                session.final_commit_pending = True
-                session.flush_pending = True
-                if not getattr(session, "pending_level_tiles", None) and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
-                    renderer._mark_montage_level_scan_pending(session)
-                renderer._schedule_montage_cached_level_stats(session)
-                return
             prepare_metadata_start = perf_counter()
             metadata_can_advance = bool(first_display_commit or self._side_work_visible_settled())
             level_metadata_improved = bool(
@@ -1009,7 +988,48 @@ class MontagePipelineEffects:
             # commit (field defect 2026-07).
             publish_histogram_plot = bool(first_display_commit or level_metadata_improved)
             publish_metadata = publish_auto_metadata or publish_histogram_plot or level_metadata_improved
+            # Instrumentation: record why a commit did/did not (re)apply level
+            # metadata, so the levels/histogram-stranding path is observable from
+            # runtime diagnostics without a debugger.
+            renderer._last_montage_level_decision = {
+                "first_display_commit": bool(first_display_commit),
+                "semantic_commit": bool(semantic_commit),
+                "decision_force_auto": bool(decision_force_auto),
+                "explicit_auto": bool(explicit_auto),
+                "metadata_can_advance": bool(metadata_can_advance),
+                "level_metadata_improved": bool(level_metadata_improved),
+                "publish_metadata": bool(publish_metadata),
+                "level_stats_rank": None if level_stats is None else str(getattr(level_stats, "rank", None)),
+                "level_stats_quality": int(getattr(level_stats, "evidence_quality", 0) or 0),
+                "active_payload_count": len(dict(active_payloads or {})),
+            }
+            renderer._montage_level_decision_count = int(getattr(renderer, "_montage_level_decision_count", 0)) + 1
             renderer._last_montage_tile_prepare_metadata_ms = (perf_counter() - prepare_metadata_start) * 1000.0
+            if (
+                self._empty_progressive_commit_settled(first_display_commit, explicit_auto, tile_delta)
+                and not publish_metadata
+            ):
+                session.final_commit_pending = False
+                session.flush_pending = False
+                renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
+                session.note_committed()
+                self._finish_after_noop_commit()
+                return
+            rendered_geometry = replace(rendered_geometry, montage_tile_states=session.ensure_tile_states())
+            self._install_warm_residency_scheduler(rendered_geometry)
+            renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
+            if tile_layer_auto_levels_wait_for_complete_source(
+                renderer,
+                session,
+                decision_force_auto,
+                level_stats,
+            ):
+                session.final_commit_pending = True
+                session.flush_pending = True
+                if not getattr(session, "pending_level_tiles", None) and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
+                    renderer._mark_montage_level_scan_pending(session)
+                renderer._schedule_montage_cached_level_stats(session)
+                return
             prepare_source_start = perf_counter()
             semantic_source = renderer._montage_level_source_for_session(session, allow_partial=publish_metadata)
             renderer._last_montage_tile_prepare_source_ms = (perf_counter() - prepare_source_start) * 1000.0
@@ -1230,6 +1250,8 @@ class MontagePipelineEffects:
                 _call(renderer.win, "_apply_viewport_continuity_when_ready")
                 _call(renderer, "_show_pending_montage_view_revert")
                 _call(renderer, "_refresh_hover_after_display_commit")
+        elif bool(getattr(report, "presented_tiles", ())):
+            renderer._note_display_level_source(decision)
         renderer.win.apply_axis_flips()
         renderer.win.img_view.setImageStale(False)
         return True

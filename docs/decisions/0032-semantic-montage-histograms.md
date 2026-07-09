@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Refined by
+[ADR 0054](0054-montage-level-evidence-phasing.md), which records the
+rough-preview / rough-target / refined evidence ordering.
 
 ## Context
 

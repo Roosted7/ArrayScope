@@ -54,6 +54,7 @@ class LevelSource:
     expected_count: int = 0
     semantic_key: object | None = None
     mode: LevelMode = LevelMode.USER_LOCKED
+    evidence_quality: int = 0
 
     @property
     def user_locked(self) -> bool:
@@ -70,6 +71,7 @@ class WindowLevelState:
     expected_count: int = 0
     user_locked: bool = False
     mode: LevelMode = LevelMode.RELATIVE
+    evidence_quality: int = 0
 
     def as_level_source(self) -> LevelSource:
         return LevelSource(
@@ -80,6 +82,7 @@ class WindowLevelState:
             expected_count=self.expected_count,
             semantic_key=self.semantic_key,
             mode=self.mode,
+            evidence_quality=int(self.evidence_quality),
         )
 
 
@@ -185,6 +188,7 @@ def state_from_source(source: LevelSource | None, *, mode: str | LevelMode = Lev
         expected_count=max(0, int(source.expected_count)),
         user_locked=rank == LevelSourceRank.EXPLICIT_USER and coerced_mode != LevelMode.RELATIVE,
         mode=coerced_mode,
+        evidence_quality=max(0, int(getattr(source, "evidence_quality", 0) or 0)),
     )
 
 
@@ -227,6 +231,10 @@ class WindowLevelController:
                     expected_count=0,
                     user_locked=mode == LevelMode.ABSOLUTE,
                     mode=LevelMode.USER_LOCKED if mode == LevelMode.ABSOLUTE else LevelMode.RELATIVE,
+                    evidence_quality=max(
+                        0,
+                        int(getattr(candidate_state, "evidence_quality", 0) if candidate_state is not None else getattr(previous_state, "evidence_quality", 0) if previous_state else 0),
+                    ),
                 )
 
         if explicit_auto:
@@ -254,6 +262,7 @@ class WindowLevelController:
                 source_rank=max(previous_state.source_rank, candidate_state.source_rank),
                 source_count=max(previous_state.source_count, candidate_state.source_count),
                 expected_count=max(previous_state.expected_count, candidate_state.expected_count),
+                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
                 mode=previous_state.mode,
             )
 
@@ -269,6 +278,7 @@ class WindowLevelController:
                     expected_count=candidate_state.expected_count,
                     user_locked=previous_state.user_locked,
                     mode=previous_state.mode if previous_state.user_locked else mode,
+                    evidence_quality=candidate_state.evidence_quality,
                 )
             if mode == LevelMode.RELATIVE:
                 mapped = relative_levels(previous_state.display_levels, previous_state.histogram_range, candidate_state.histogram_range)
@@ -281,6 +291,7 @@ class WindowLevelController:
                     expected_count=candidate_state.expected_count,
                     user_locked=False,
                     mode=mode,
+                    evidence_quality=candidate_state.evidence_quality,
                 )
             return candidate_state
 
@@ -296,6 +307,7 @@ class WindowLevelController:
                 source_rank=max(previous_state.source_rank, candidate_state.source_rank),
                 source_count=max(previous_state.source_count, candidate_state.source_count),
                 expected_count=max(previous_state.expected_count, candidate_state.expected_count),
+                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
                 mode=mode,
             )
 
@@ -316,9 +328,16 @@ class WindowLevelController:
                     expected_count=expected,
                     user_locked=False,
                     mode=mode,
+                    evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
                 )
             if histogram == previous_state.histogram_range and rank == previous_state.source_rank and count == previous_state.source_count:
-                return replace(previous_state, expected_count=expected, user_locked=False, mode=mode)
+                return replace(
+                    previous_state,
+                    expected_count=expected,
+                    user_locked=False,
+                    mode=mode,
+                    evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                )
             mapped = relative_levels(
                 previous_state.display_levels,
                 previous_state.histogram_range,
@@ -333,6 +352,7 @@ class WindowLevelController:
                 expected_count=expected,
                 user_locked=False,
                 mode=mode,
+                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
             )
 
         histogram = (
@@ -348,6 +368,7 @@ class WindowLevelController:
             expected_count=max(previous_state.expected_count, candidate_state.expected_count),
             user_locked=False,
             mode=mode,
+            evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
         )
 
     def _fallback_state(self, *, mode: LevelMode) -> WindowLevelState:

@@ -6,9 +6,11 @@ import pytest
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
     EXACT_TILE_SAMPLE_LIMIT,
+    LevelEvidenceQuality,
     PROVISIONAL_TILE_SAMPLE_LIMIT,
     REFINED_TILE_SAMPLE_LIMIT,
     MontageLevelTracker,
+    TileLevelStats,
 )
 from arrayscope.display.planning import LevelSourceRank
 
@@ -87,6 +89,68 @@ def test_montage_level_tracker_records_provisional_then_refined_samples():
     assert refined.bounds == provisional.bounds
     assert refined.sample is not None
     assert PROVISIONAL_TILE_SAMPLE_LIMIT < refined.sample.size <= REFINED_TILE_SAMPLE_LIMIT
+
+
+def test_montage_level_tracker_orders_preview_target_and_refined_evidence():
+    tracker = MontageLevelTracker()
+    key = "quality-scope"
+    tracker.ensure(key, (0,))
+
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (10.0, 20.0),
+            np.asarray([10.0, 20.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+        ),
+        aggregate=False,
+    )
+    preview = tracker.summary_for(key)
+
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (100.0, 200.0),
+            np.asarray([100.0, 200.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        ),
+        aggregate=False,
+    )
+    target = tracker.summary_for(key)
+
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (1.0, 2.0),
+            np.asarray([1.0, 2.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+        ),
+        aggregate=False,
+    )
+    still_target = tracker.summary_for(key)
+
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (1000.0, 2000.0),
+            np.asarray([1000.0, 2000.0], dtype=np.float32),
+            refined=True,
+        ),
+        aggregate=False,
+    )
+    refined = tracker.summary_for(key)
+
+    assert preview.bounds == (10.0, 20.0)
+    assert preview.evidence_quality == LevelEvidenceQuality.ROUGH_PREVIEW
+    assert target.bounds == (100.0, 200.0)
+    assert target.evidence_quality == LevelEvidenceQuality.ROUGH_TARGET
+    assert still_target.bounds == target.bounds
+    assert refined.bounds == (1000.0, 2000.0)
+    assert refined.evidence_quality == LevelEvidenceQuality.REFINED
 
 
 def test_montage_level_key_ignores_requested_coverage_and_layout_but_keeps_selection():

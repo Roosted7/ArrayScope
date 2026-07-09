@@ -1502,6 +1502,8 @@ class FrameRenderMixin(MontageRuntimeMixin, LevelStatsService):
         applied_count = int(getattr(applied, "source_count", 0) or 0)
         if int(stats.rank) > applied_rank:
             return True
+        if int(getattr(stats, "evidence_quality", 0) or 0) > int(getattr(applied, "evidence_quality", 0) or 0):
+            return True
         if len(stats.source_indices) > applied_count:
             return True
         applied_bounds = normalize_bounds(getattr(applied, "histogram_range", None))

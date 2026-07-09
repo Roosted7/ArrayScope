@@ -189,7 +189,8 @@ class DisplayPresentationMixin:
             # Apply axis flips after setting the image
             self.win.apply_axis_flips()
             self.win.img_view.setImageStale(False)
-            self.win.img_view.setEvaluationOverlay(False)
+            if semantic_frame_commit or getattr(geometry, "montage", None) is None:
+                self.win.img_view.setEvaluationOverlay(False)
             if defer_side_panels:
                 self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:

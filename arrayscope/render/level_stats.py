@@ -11,11 +11,13 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
+    LevelEvidenceQuality,
     MontageLevelStats,
     MontageLevelTracker,
     montage_level_key,
     provisional_tile_level_stats,
     sample_tile_level_stats,
+    tile_level_stats_with_quality,
 )
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
@@ -70,31 +72,43 @@ class LevelStatsService:
         # the final target-quality histogram/window-level pass.
         return False
 
-    def _update_montage_level_bounds_from_rendered(self, level_key, rendered, *, expected_indices=None, refined: bool = False) -> None:
+    def _update_montage_level_bounds_from_rendered(
+        self,
+        level_key,
+        rendered,
+        *,
+        expected_indices=None,
+        refined: bool = False,
+        evidence_quality: LevelEvidenceQuality | int | str | None = None,
+    ) -> None:
         if expected_indices is None:
             previous_stats = self._montage_level_tracker().stats_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
-        if refined and _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+        quality = _rendered_level_evidence_quality(
+            rendered,
+            refined=bool(refined),
+            evidence_quality=evidence_quality,
+        )
+        if refined and quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
             refined = False
+            quality = LevelEvidenceQuality.ROUGH_PREVIEW
         refined = bool(refined)
         level_stats = getattr(rendered, "level_stats", None)
-        existing_refined = tracker.has_source(level_key, source_index, refined=True)
-        existing_any = existing_refined or tracker.has_source(level_key, source_index)
-        if existing_refined or (
-            existing_any
-            and not bool(refined)
-            and (level_stats is None or not bool(getattr(level_stats, "refined", False)))
-        ):
+        if tracker.has_source_quality(level_key, source_index, quality):
             return
-        if level_stats is not None and not refined:
-            tracker.update_from_stats(level_key, level_stats, aggregate=False)
+        if level_stats is not None and (not refined or bool(getattr(level_stats, "refined", False))):
+            tracker.update_from_stats(
+                level_key,
+                tile_level_stats_with_quality(level_stats, quality),
+                aggregate=False,
+            )
             return
         level_data = getattr(rendered, "level_data", None)
         if level_data is not None and not refined:
-            stats = provisional_tile_level_stats(level_data, source_index)
+            stats = provisional_tile_level_stats(level_data, source_index, evidence_quality=quality)
             if stats is not None:
                 tracker.update_from_stats(level_key, stats, aggregate=False)
                 return
@@ -102,16 +116,29 @@ class LevelStatsService:
             render_effects.montage_refined_level_values(rendered),
             source_index,
             refined=bool(refined),
+            evidence_quality=quality,
         )
         if stats is not None:
             tracker.update_from_stats(level_key, stats, aggregate=False)
+            if refined:
+                self._montage_refined_level_applied_count = int(
+                    getattr(self, "_montage_refined_level_applied_count", 0)
+                ) + 1
         elif refined:
             # Nothing finite to sample: record that as refined evidence, or
             # level convergence re-queues this source forever and an
             # explicit-auto flush parked on the rank can never re-commit.
             tracker.record_vacuous_source(level_key, source_index)
 
-    def _update_montage_level_bounds_from_prepared(self, level_key, rendered, *, expected_indices=None, require_refined: bool = False) -> bool:
+    def _update_montage_level_bounds_from_prepared(
+        self,
+        level_key,
+        rendered,
+        *,
+        expected_indices=None,
+        require_refined: bool = False,
+        evidence_quality: LevelEvidenceQuality | int | str | None = None,
+    ) -> bool:
         """Merge already-prepared level evidence without sampling source pixels."""
 
         if expected_indices is None:
@@ -120,30 +147,38 @@ class LevelStatsService:
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
-        if bool(require_refined) and _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+        quality = _rendered_level_evidence_quality(
+            rendered,
+            refined=bool(require_refined),
+            evidence_quality=evidence_quality,
+        )
+        if bool(require_refined) and quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
             return False
-        if tracker.has_source(level_key, source_index, refined=bool(require_refined)):
+        if tracker.has_source_quality(level_key, source_index, quality):
             return True
-        if require_refined and tracker.has_source(level_key, source_index):
-            return False
         level_stats = getattr(rendered, "level_stats", None)
         if level_stats is not None:
             if require_refined and not bool(getattr(level_stats, "refined", False)):
                 return False
-            tracker.update_from_stats(level_key, level_stats, aggregate=False)
+            tracker.update_from_stats(
+                level_key,
+                tile_level_stats_with_quality(level_stats, quality),
+                aggregate=False,
+            )
             return True
         if require_refined:
             return False
         level_data = getattr(rendered, "level_data", None)
         if level_data is not None:
-            stats = provisional_tile_level_stats(level_data, source_index)
+            stats = provisional_tile_level_stats(level_data, source_index, evidence_quality=quality)
             if stats is not None:
                 tracker.update_from_stats(level_key, stats, aggregate=False)
                 return True
         return False
 
     def _queue_montage_level_refinement(self, session, rendered) -> None:
-        if _rendered_tile_is_preview(rendered) and not self._preview_evidence_can_refine():
+        quality = _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
+        if quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
             return
         tracker = self._montage_level_tracker()
         source_index = int(rendered.tile.source_index)
@@ -213,7 +248,7 @@ class LevelStatsService:
 
         queued_tiles: set[int] = set()
         for tile_number, rendered in tuple((getattr(session, "rendered_tiles", {}) or {}).items()):
-            if _rendered_tile_is_preview(rendered):
+            if _rendered_level_evidence_quality_for_session(session, rendered, refined=True) == LevelEvidenceQuality.ROUGH_PREVIEW:
                 continue
             queued_tiles.add(int(tile_number))
             self._queue_montage_level_refinement(session, rendered)
@@ -222,10 +257,10 @@ class LevelStatsService:
             tile_number = int(tile_number)
             if tile_number in queued_tiles:
                 continue
-            if str(getattr(payload, "quality", "exact") or "exact") == "preview":
-                continue
             rendered = self._rendered_tile_for_current_payload(session, tile_number, payload)
             if rendered is None:
+                continue
+            if _rendered_level_evidence_quality_for_session(session, rendered, refined=True) == LevelEvidenceQuality.ROUGH_PREVIEW:
                 continue
             self._queue_montage_level_refinement(session, rendered)
 
@@ -322,13 +357,19 @@ class LevelStatsService:
                 break
             inspected += 1
             source_index = int(rendered.tile.source_index)
-            if source_index in queued_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
+            quality = _rendered_level_evidence_quality_for_session(
+                session,
+                rendered,
+                refined=bool(require_refined),
+            )
+            if source_index in queued_sources or tracker.has_source_quality(session.level_key, source_index, quality):
                 continue
             if self._update_montage_level_bounds_from_prepared(
                 session.level_key,
                 rendered,
                 expected_indices=expected,
                 require_refined=require_refined,
+                evidence_quality=quality,
             ):
                 seeded = True
                 self._queue_montage_level_refinement(session, rendered)
@@ -368,13 +409,19 @@ class LevelStatsService:
             if rendered is None:
                 continue
             source_index = int(rendered.tile.source_index)
-            if tracker.has_source(session.level_key, source_index, refined=require_refined):
+            quality = _rendered_level_evidence_quality_for_session(
+                session,
+                rendered,
+                refined=bool(require_refined),
+            )
+            if tracker.has_source_quality(session.level_key, source_index, quality):
                 continue
             if self._update_montage_level_bounds_from_prepared(
                 session.level_key,
                 rendered,
                 expected_indices=expected,
                 require_refined=require_refined,
+                evidence_quality=quality,
             ):
                 self._queue_montage_level_refinement(session, rendered)
                 queued_sources.discard(source_index)
@@ -403,7 +450,12 @@ class LevelStatsService:
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
             pending_sources.discard(source_index)
-            if tracker.has_source(session.level_key, source_index, refined=require_refined):
+            quality = _rendered_level_evidence_quality_for_session(
+                session,
+                rendered,
+                refined=bool(require_refined),
+            )
+            if tracker.has_source_quality(session.level_key, source_index, quality):
                 continue
             batch.append(rendered)
 
@@ -431,13 +483,19 @@ class LevelStatsService:
             if rendered is None:
                 continue
             source_index = int(rendered.tile.source_index)
-            if source_index in pending_sources or tracker.has_source(session.level_key, source_index, refined=require_refined):
+            quality = _rendered_level_evidence_quality_for_session(
+                session,
+                rendered,
+                refined=bool(require_refined),
+            )
+            if source_index in pending_sources or tracker.has_source_quality(session.level_key, source_index, quality):
                 continue
             if self._update_montage_level_bounds_from_prepared(
                 session.level_key,
                 rendered,
                 expected_indices=expected,
                 require_refined=require_refined,
+                evidence_quality=quality,
             ):
                 self._queue_montage_level_refinement(session, rendered)
             else:
@@ -484,7 +542,16 @@ class LevelStatsService:
             total_bytes = 0
             for rendered in batch:
                 source_index = int(rendered.tile.source_index)
-                stats = _sample_rendered_level_evidence(rendered, refined=bool(require_refined))
+                quality = _rendered_level_evidence_quality_for_session(
+                    session,
+                    rendered,
+                    refined=bool(require_refined),
+                )
+                stats = _sample_rendered_level_evidence(
+                    rendered,
+                    refined=bool(require_refined),
+                    evidence_quality=quality,
+                )
                 rows.append((source_index, stats))
                 total_bytes += montage_commit.rendered_tile_nbytes(rendered)
             return tuple(rows), (perf_counter() - start) * 1000.0, int(total_bytes)
@@ -505,7 +572,12 @@ class LevelStatsService:
             processed = 0
             for rendered, (source_index, stats) in zip(batch, tuple(rows or ())):
                 source_index = int(source_index)
-                if not self._montage_level_tracker().has_source(current.level_key, source_index, refined=require_refined):
+                quality = _rendered_level_evidence_quality_for_session(
+                    current,
+                    rendered,
+                    refined=bool(require_refined),
+                )
+                if not self._montage_level_tracker().has_source_quality(current.level_key, source_index, quality):
                     if stats is not None:
                         self._montage_level_tracker().update_from_stats(current.level_key, stats, aggregate=False)
                     elif require_refined:
@@ -652,7 +724,8 @@ class LevelStatsService:
         while pending and len(batch) < 4:
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
-            if self._montage_level_tracker().has_source(session.level_key, source_index, refined=True):
+            quality = _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
+            if self._montage_level_tracker().has_source_quality(session.level_key, source_index, quality):
                 pending_sources = getattr(session, "pending_refined_level_sources", None)
                 if pending_sources is not None:
                     pending_sources.discard(source_index)
@@ -673,7 +746,15 @@ class LevelStatsService:
 
         def evaluate(batch=batch):
             return tuple(
-                (int(source_index), sample_tile_level_stats(source, int(source_index), refined=True))
+                (
+                    int(source_index),
+                    sample_tile_level_stats(
+                        source,
+                        int(source_index),
+                        refined=True,
+                        evidence_quality=LevelEvidenceQuality.REFINED,
+                    ),
+                )
                 for source_index, source, _rendered in batch
             )
 
@@ -801,21 +882,52 @@ def _rendered_tile_is_preview(rendered) -> bool:
     return str(getattr(rendered, "quality", "exact") or "exact") == "preview"
 
 
-def _sample_rendered_level_evidence(rendered, *, refined: bool):
+def _rendered_level_evidence_quality(rendered, *, refined: bool, evidence_quality=None) -> LevelEvidenceQuality:
+    if evidence_quality is not None:
+        return LevelEvidenceQuality(int(evidence_quality))
+    if bool(refined) and not _rendered_tile_is_preview(rendered):
+        return LevelEvidenceQuality.REFINED
+    stats = getattr(rendered, "level_stats", None)
+    if stats is not None and bool(getattr(stats, "refined", False)) and not _rendered_tile_is_preview(rendered):
+        return LevelEvidenceQuality.REFINED
+    if _rendered_tile_is_preview(rendered):
+        return LevelEvidenceQuality.ROUGH_PREVIEW
+    return LevelEvidenceQuality.ROUGH_TARGET
+
+
+def _rendered_level_evidence_quality_for_session(session, rendered, *, refined: bool) -> LevelEvidenceQuality:
+    quality = _rendered_level_evidence_quality(rendered, refined=bool(refined))
+    if quality != LevelEvidenceQuality.ROUGH_PREVIEW:
+        return quality
+    demand = getattr(getattr(session, "lod_policy_decision", None), "demand", None)
+    desired = int(getattr(demand, "desired_level", 0) or 0)
+    lod_level = int(getattr(getattr(rendered, "lod", None), "level", desired + 1) or 0)
+    if lod_level <= desired:
+        return LevelEvidenceQuality.REFINED if bool(refined) else LevelEvidenceQuality.ROUGH_TARGET
+    return quality
+
+
+def _sample_rendered_level_evidence(rendered, *, refined: bool, evidence_quality=None):
     source_index = int(rendered.tile.source_index)
+    quality = _rendered_level_evidence_quality(
+        rendered,
+        refined=bool(refined),
+        evidence_quality=evidence_quality,
+    )
     level_stats = getattr(rendered, "level_stats", None)
     if level_stats is not None and (not refined or bool(getattr(level_stats, "refined", False))):
-        return level_stats
+        return tile_level_stats_with_quality(level_stats, quality)
     if not refined:
         level_data = getattr(rendered, "level_data", None)
         if level_data is not None:
-            stats = provisional_tile_level_stats(level_data, source_index)
+            stats = provisional_tile_level_stats(level_data, source_index, evidence_quality=quality)
             if stats is not None:
                 return stats
     return sample_tile_level_stats(
         render_effects.montage_refined_level_values(rendered),
         source_index,
         refined=bool(refined),
+        evidence_quality=quality,
     )
 
 
