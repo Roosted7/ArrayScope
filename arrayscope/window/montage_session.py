@@ -1370,6 +1370,11 @@ class MontageRenderSession:
         level_data=None,
         level_stats=None,
     ) -> bool:
+        if (
+            bool(getattr(self, "shader_display", False))
+            and str(getattr(key, "component", "")) == str(TexturePlaneKind.RGB8.value)
+        ):
+            return False
         cache = self.pyramid_cache
         if cache is None:
             return False

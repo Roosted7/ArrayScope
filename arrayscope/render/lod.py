@@ -700,7 +700,10 @@ def floor_component_tags(session) -> tuple[str, ...]:
     """Component tags a floor probe may find for this session's tiles."""
 
     if bool(getattr(session, "shader_display", False)):
-        return (str(TexturePlaneKind.RGB8.value), str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
+        # VisPy/shader presentations own complex windowing on the GPU.  A
+        # retained CPU-windowed RGB preview is not compatible evidence for
+        # that path, even if it shares the semantic tile source.
+        return (str(TexturePlaneKind.COMPLEX_RG32F.value), "scalar")
     return (str(TexturePlaneKind.RGB8.value), "scalar", str(TexturePlaneKind.COMPLEX_RG32F.value))
 
 

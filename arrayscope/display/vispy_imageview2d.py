@@ -617,7 +617,14 @@ class VisPyImageView2D(ImageViewShell):
                 and not presentation_incomplete
             )
 
-            self.image = img
+            previous_mode = getattr(self, "_montage_display_mode", "none")
+            placeholder_key = _vispy_tiled_placeholder_key(img)
+            if (
+                previous_mode != "vispy_tile_layer"
+                or placeholder_key != getattr(self, "_last_vispy_tiled_placeholder_key", None)
+            ):
+                self.image = img
+                self._last_vispy_tiled_placeholder_key = placeholder_key
             if not loading_only:
                 self.histogramSource = histogramData
                 self.histogramPlotSource = histogramPlotData
@@ -1873,6 +1880,11 @@ def _requested_direct_payload_tiles(tile_payloads, tile_delta) -> set[int]:
 
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
+
+
+def _vispy_tiled_placeholder_key(img) -> tuple[object, ...]:
+    array = np.asarray(img)
+    return (tuple(int(value) for value in array.shape), array.dtype.str)
 
 
 def _tiled_structure_key(geometry, *, rgb_already_windowed, frame_plan=None):

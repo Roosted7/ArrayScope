@@ -10,9 +10,11 @@ from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, 
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
+from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.kernel import Lane, Priority
 from arrayscope.presentation import ClaimOwner, LevelPhase, Presentation
 from arrayscope.render import effects as render_effects
+from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
 from arrayscope.window import montage_commit
 from arrayscope.window.montage_commit import MontagePipelineEffects
@@ -1997,6 +1999,59 @@ def test_backend_confirmed_preview_does_not_settle_when_exact_exists():
         exact_delta.upserts[int(tile)].source_id != preview_identities[int(tile)]
         for tile in exact_delta.upserts
     )
+
+
+def test_vispy_shader_floor_ignores_retained_rgb_complex_preview():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    session.shader_display = True
+    tile = session.plan.tiles[0]
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+    rgb_key = PyramidLevelKey(
+        source_id=semantic_id,
+        tile_id=int(tile.source_index),
+        component=str(TexturePlaneKind.RGB8.value),
+        level_xy=(2, 2),
+    )
+    complex_key = PyramidLevelKey(
+        source_id=semantic_id,
+        tile_id=int(tile.source_index),
+        component=str(TexturePlaneKind.COMPLEX_RG32F.value),
+        level_xy=(2, 2),
+    )
+    pyramid.admit(rgb_key, np.zeros((TILE // 4, TILE // 4, 3), dtype=np.uint8))
+    complex_plane = np.ones((TILE // 4, TILE // 4), dtype=np.complex64)
+    pyramid.admit(complex_key, complex_plane)
+    pyramid.admit(histogram_key_for_level_key(complex_key), np.abs(complex_plane).astype(np.float32))
+
+    best = render_lod.best_floor_key(session, int(tile.source_index), tile_number=0)
+
+    assert best is not None
+    assert best[0] == complex_key
+
+
+def test_vispy_shader_preview_admission_rejects_rgb_floor_payload():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    session.shader_display = True
+    tile = session.plan.tiles[0]
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+    rgb_key = PyramidLevelKey(
+        source_id=semantic_id,
+        tile_id=int(tile.source_index),
+        component=str(TexturePlaneKind.RGB8.value),
+        level_xy=(2, 2),
+    )
+
+    admitted = session.admit_preview_plane(
+        0,
+        rgb_key,
+        np.zeros((TILE // 4, TILE // 4, 3), dtype=np.uint8),
+        texture_kind=TexturePlaneKind.RGB8,
+    )
+
+    assert admitted is False
+    assert pyramid.peek(rgb_key) is None
 
 
 def test_acknowledged_preview_floor_stays_active_until_exact_refinement():
