@@ -566,6 +566,15 @@ class LevelStatsService:
                 bool(require_refined),
             )
             if current_generation != generation:
+                if (
+                    current is not None
+                    and current.key == generation[0]
+                    and int(current.session_id) == int(generation[1])
+                    and current.level_key == generation[3]
+                ):
+                    current.level_evidence_inflight = False
+                    self._requeue_montage_level_evidence(current, batch)
+                    self._schedule_montage_cached_level_stats(current)
                 return
             current.level_evidence_inflight = False
             rows, elapsed_ms, total_bytes = result
@@ -659,6 +668,14 @@ class LevelStatsService:
                 current.level_key,
             )
             if current_generation != generation:
+                if (
+                    current is not None
+                    and current.key == generation[0]
+                    and int(current.session_id) == int(generation[1])
+                    and current.level_key == generation[3]
+                ):
+                    current.level_evidence_inflight = False
+                    self._process_montage_cached_level_stats()
                 return
             current.level_evidence_inflight = False
             self._process_montage_cached_level_stats()
@@ -835,10 +852,19 @@ class LevelStatsService:
 
 def _montage_side_work_visible_settled(renderer, session) -> bool:
     kernel = getattr(getattr(renderer, "win", None), "kernel", None)
+    pixels_settled = False
+    sync_scope = getattr(session, "sync_tile_ledger_scope", None)
+    if callable(sync_scope):
+        sync_scope()
+    ledger = getattr(session, "tile_ledger", None)
+    if ledger is not None and hasattr(ledger, "visible_target_settled"):
+        pixels_settled = bool(ledger.visible_target_settled())
+    else:
+        pixels_settled = bool(getattr(session, "visible_plan_complete", lambda: False)())
     return bool(
         kernel is not None
         and int(getattr(kernel, "visible_backlog", 0) or 0) <= 0
-        and getattr(session, "visible_plan_complete", lambda: False)()
+        and pixels_settled
         and not getattr(session, "dirty_payloads", None)
         and not getattr(session, "pending_payload_upserts", None)
         and not getattr(session, "pending_removals", None)

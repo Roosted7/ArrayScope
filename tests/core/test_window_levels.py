@@ -174,6 +174,29 @@ def test_relative_user_edit_is_not_absolute_user_lock():
     assert state.mode == window_levels.LevelMode.RELATIVE
 
 
+def test_controller_relative_queued_levels_do_not_outrank_montage_evidence():
+    candidate = window_levels.LevelSource(
+        levels=(0.0, 4000.0),
+        histogram_range=(0.0, 4000.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=8,
+        expected_count=8,
+        semantic_key="same",
+    )
+
+    state = window_levels.WindowLevelController().decide(
+        previous=None,
+        candidate=candidate,
+        user_levels=(0.0, 250.0),
+        mode="relative",
+    )
+
+    assert state.display_levels == (0.0, 250.0)
+    assert state.histogram_range == (0.0, 4000.0)
+    assert state.source_rank == window_levels.LevelSourceRank.MONTAGE_COMPLETE
+    assert not state.user_locked
+
+
 def test_window_levels_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(WINDOW_LEVELS_PATH.read_text())
 

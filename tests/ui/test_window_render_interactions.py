@@ -97,6 +97,57 @@ def test_automatic_colormap_remains_automatic_across_display_restore(qtbot):
         win.close()
 
 
+def test_relative_display_restore_does_not_queue_absolute_levels(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_recipe import DisplaySettings
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.ones((6, 7), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._queue_display_levels((0.0, 1.0))
+
+        win._apply_display_settings(
+            DisplaySettings(
+                channel="real",
+                scale="linear",
+                aspect_mode="square_pixels",
+                window_mode="relative",
+                levels=(0.0, 246.0),
+            )
+        )
+
+        assert win._pending_display_levels_for_render() is None
+    finally:
+        win.close()
+
+
+def test_absolute_display_restore_queues_exact_levels(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_recipe import DisplaySettings
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.ones((6, 7), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+
+        win._apply_display_settings(
+            DisplaySettings(
+                channel="real",
+                scale="linear",
+                aspect_mode="square_pixels",
+                window_mode="absolute",
+                levels=(0.0, 246.0),
+            )
+        )
+
+        assert win._pending_display_levels_for_render() == (0.0, 246.0)
+    finally:
+        win.close()
+
+
 def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets

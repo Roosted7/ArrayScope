@@ -604,10 +604,12 @@ class OperationActionsMixin:
             self._apply_channel_colormap()
         else:
             self._set_display_colormap(saved_colormap, user_selected=True, request_render=False)
-        queued_levels = self._queue_display_levels(settings.levels)
+        queued_levels = self._queue_display_levels(
+            settings.levels if settings.window_mode == "absolute" else None
+        )
         if queued_levels is not None:
             # _set_document and channel coercion intentionally request automatic
-            # levels for ordinary state changes.  A recipe's explicit levels are
+            # levels for ordinary state changes. Absolute recipe levels are
             # stronger and must reach the next semantic commit unchanged.
             self._force_autolevel = False
         if settings.profile_visible:

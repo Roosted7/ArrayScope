@@ -63,6 +63,7 @@ class PreviewFloorMetadata:
     texture_kind: TexturePlaneKind | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
+    quality: str = "preview"
 
 
 def _shader_mapping_key(mapping):
@@ -1074,7 +1075,8 @@ class MontageRenderSession:
             index = int(tile_number)
             payload = self.display_tile_payloads.get(index)
             preview_presented = payload is not None and str(getattr(payload, "quality", "exact")) == "preview"
-            if index not in self.rendered_tiles and not preview_presented:
+            target_lod_presented = _payload_is_reduced_target(payload)
+            if index not in self.rendered_tiles and not preview_presented and not target_lod_presented:
                 continue
             if shown_identities and payload is not None and shown_identities.get(index) != payload.source_id:
                 # Backend-active is not the same as current-presented.  PyQtGraph
@@ -1416,6 +1418,7 @@ class MontageRenderSession:
         texture_kind=None,
         level_data=None,
         level_stats=None,
+        quality: str = "preview",
     ) -> bool:
         if (
             bool(getattr(self, "shader_display", False))
@@ -1443,8 +1446,12 @@ class MontageRenderSession:
             texture_kind=texture_kind,
             level_data=None if level_data is None else np.asarray(level_data),
             level_stats=level_stats,
+            quality=str(quality or "preview"),
         )
-        if any(value is not None for value in (metadata.shader_mapping, metadata.texture_kind, metadata.level_data, metadata.level_stats)):
+        if (
+            any(value is not None for value in (metadata.shader_mapping, metadata.texture_kind, metadata.level_data, metadata.level_stats))
+            or metadata.quality != "preview"
+        ):
             self.lod_preview_metadata[key] = metadata
         rec = self.lifecycle.peek(int(tile_number))
         entry = None if rec is None else rec.levels.get(key)
@@ -2965,6 +2972,13 @@ def _preview_upgrade_owed(session, tile_number: int, payload=None) -> bool:
     if index not in getattr(session, "visible_tile_numbers", ()):
         return False
     return True
+
+
+def _payload_is_reduced_target(payload) -> bool:
+    if payload is None or str(getattr(payload, "quality", "exact") or "exact") == "preview":
+        return False
+    lod = getattr(payload, "lod", None)
+    return bool(lod is not None and int(getattr(lod, "level", 0) or 0) > 0)
 
 
 def _force_unpresented_upsert(session, tile_number: int, *, previous_payloads, backend_identities) -> bool:

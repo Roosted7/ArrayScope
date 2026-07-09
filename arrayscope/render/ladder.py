@@ -151,7 +151,8 @@ class LodLadder:
         # Per-tile reduced input is valid only for display-LOD-commuting
         # pipelines; non-commuting but reduced-input-suitable transforms use
         # the shared transform-preview path outside this ladder.
-        cheap_pre_native = bool(state.allow_preview) and (
+        preview_target_has_finer_followup = desired < max(0, int(policy.preview_level))
+        cheap_pre_native = bool(state.allow_preview) and preview_target_has_finer_followup and (
             policy.reduced_input_available or state.floor_available
         )
 

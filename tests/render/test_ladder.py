@@ -39,8 +39,15 @@ def test_cold_tile_climbs_floor_preview_desired():
 def test_coarse_demand_skips_redundant_preview_rung():
     ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(3))
-    # preview level clamps to the demand (3) and DESIRED covers it.
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 3)]
+    # The demanded target is already coarser than the preview rung, so the
+    # first display work is the target pass itself.
+    assert rungs(steps) == [(Rung.DESIRED, 3)]
+
+
+def test_preview_target_skips_floor_and_preview_rungs():
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    steps = ladder.plan_tile(TileLodState(tile_number=0), demand(2))
+    assert rungs(steps) == [(Rung.DESIRED, 2)]
 
 
 def test_converged_tile_plans_nothing():

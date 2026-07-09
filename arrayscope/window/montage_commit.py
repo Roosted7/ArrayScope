@@ -666,7 +666,9 @@ class MontagePipelineEffects:
             self._release_shared_transform_claims(tiles, level=level, lane=lane)
             if not rows or not self._session_is_current():
                 return
-            admitted = self._admit_preview_payload(int(rows[0][0]), tuple(rows))
+            desired = int(getattr(demand, "desired_level", 0) or 0)
+            quality = "exact" if int(level) <= desired else "preview"
+            admitted = self._admit_reduced_display_payload(None, int(rows[0][0]), tuple(rows), quality=quality)
             if admitted:
                 self.request_presentation()
 
@@ -805,7 +807,7 @@ class MontagePipelineEffects:
                 self._admit_evaluation_result(tile, payload)
                 continue
             self.session.lifecycle.preview_released(int(step.tile_number), int(step.rung), int(step.level))
-            self._admit_preview_payload(int(step.tile_number), payload)
+            self._admit_reduced_display_payload(step, int(step.tile_number), payload)
 
     def _admit_materialized_rung(self, step, request) -> None:
         tile_number = int(step.tile_number)
@@ -859,11 +861,13 @@ class MontagePipelineEffects:
         session.dirty_tiles.append(int(tile.montage_index))
         return rendered_tile_nbytes(rendered)
 
-    def _admit_preview_payload(self, tile_number: int, payload) -> bool:
+    def _admit_reduced_display_payload(self, step, tile_number: int, payload, *, quality: str | None = None) -> bool:
         session = self.session
         if not self._session_is_current():
             return False
         rows = payload if _looks_like_shared_preview_rows(payload) else ((int(tile_number), *payload),)
+        quality = str(quality or ("exact" if step is not None and step.rung == Rung.DESIRED else "preview"))
+        is_preview = quality == "preview"
         upserted = False
         admitted_any = False
         visible_previews = 0
@@ -878,17 +882,20 @@ class MontagePipelineEffects:
                 texture_kind=texture_kind,
                 level_data=level_data,
                 level_stats=level_stats,
+                quality=quality,
             )
             if not admitted:
                 continue
             admitted_any = True
             session._ensure_floor_payloads((tile_number,))
-            preview_upserted = (
-                int(tile_number) in session.pending_payload_upserts
+            pending_upserted = int(tile_number) in session.pending_payload_upserts
+            preview_upserted = bool(
+                is_preview
+                and pending_upserted
                 and str(getattr(session.display_tile_payloads.get(int(tile_number)), "quality", "exact")) == "preview"
             )
             visible_previews += int(preview_upserted)
-            upserted = upserted or preview_upserted
+            upserted = upserted or pending_upserted
         if visible_previews:
             session.lod_preview_presentations = (
                 int(getattr(session, "lod_preview_presentations", 0) or 0) + int(visible_previews)
@@ -1461,10 +1468,19 @@ class MontagePipelineEffects:
 
     def _side_work_visible_settled(self) -> bool:
         session = self.session
+        sync_scope = getattr(session, "sync_tile_ledger_scope", None)
+        if callable(sync_scope):
+            sync_scope()
+        ledger = getattr(session, "tile_ledger", None)
+        pixels_settled = (
+            bool(ledger.visible_target_settled())
+            if ledger is not None and hasattr(ledger, "visible_target_settled")
+            else bool(session.visible_plan_complete())
+        )
         return bool(
             self._session_is_current()
             and int(getattr(self.renderer.win.kernel, "visible_backlog", 0) or 0) <= 0
-            and session.visible_plan_complete()
+            and pixels_settled
             and not getattr(session, "dirty_payloads", None)
             and not getattr(session, "pending_payload_upserts", None)
             and not getattr(session, "pending_removals", None)

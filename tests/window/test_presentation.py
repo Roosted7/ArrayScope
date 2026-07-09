@@ -194,7 +194,7 @@ def test_frame_absolute_level_reuse_uses_committed_frame():
     assert decision.histogram_range == (200.0, 300.0)
 
 
-def test_frame_explicit_restore_levels_are_committed_with_current_histogram_domain():
+def test_frame_relative_restore_levels_are_not_a_durable_user_lock():
     decision = decide_presentation(
         _input(
             _payload([[200, 300], [200, 300]]),
@@ -206,7 +206,7 @@ def test_frame_explicit_restore_levels_are_committed_with_current_histogram_doma
 
     assert decision.levels == (210.0, 240.0)
     assert decision.histogram_range == (200.0, 300.0)
-    assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
+    assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_COMPLETE)
 
 
 def test_explicit_auto_window_wins_over_queued_restore_levels():
@@ -323,7 +323,7 @@ def test_montage_restore_levels_bind_to_the_current_semantic_source():
     assert decision.levels == (120.0, 140.0)
     assert decision.histogram_range == (100.0, 200.0)
     assert decision.level_source_key == "levels"
-    assert decision.level_source_rank == int(LevelSourceRank.EXPLICIT_USER)
+    assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
 
 
 def test_montage_absolute_preserves_numeric_levels_while_histogram_improves():

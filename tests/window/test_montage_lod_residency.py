@@ -1089,7 +1089,7 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
     )
     pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
     del session.rendered_tiles[1]
-    session.dirty_payloads.pop(1, None)
+    session.dirty_payloads.clear()
 
     _state, delta = session.build_tile_presentation({})
 
@@ -1460,7 +1460,7 @@ def test_floor_presents_blank_tile_even_while_exact_evaluation_is_in_flight():
     )
     pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
     del session.rendered_tiles[1]
-    session.dirty_payloads.pop(1, None)
+    session.dirty_payloads.clear()
     # The exact evaluation is in flight (slow stage compute).
     session.active_tile_requests.add(1)
 
@@ -1562,6 +1562,48 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     upgraded = session.display_tile_payloads[1]
     assert upgraded.quality == "preview"
     assert upgraded.lod.level == 2
+
+
+def test_reduced_target_payload_is_not_preview_when_target_lod_is_reduced():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    assert int(demand.desired_level) > 0
+
+    rendered = session.rendered_tiles[1]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = pyramid_key_for_rendered(rendered, demand=demand, level=demand.desired_level, semantic_source_id=semantic_id)
+    source, histogram, texture_kind = texture_source_for_rendered(rendered)
+    plane = reduce_box_mean(source, key.factor_xy)
+    hist = None if histogram is None else reduce_box_mean(histogram, key.factor_xy)
+
+    del session.rendered_tiles[1]
+    session.dirty_payloads.clear()
+    assert session.admit_preview_plane(
+        1,
+        key,
+        plane,
+        hist,
+        texture_kind=texture_kind,
+        level_data=np.asarray([0.0, 3000.0], dtype=np.float32),
+        quality="exact",
+    )
+
+    session._ensure_floor_payloads((1,))
+    payload = session.display_tile_payloads[1]
+    assert payload.quality == "exact"
+    assert payload.lod.level == int(demand.desired_level)
+    assert 1 in session.pending_payload_upserts
+
+    for _ in range(3):
+        _state, delta = session.build_tile_presentation({})
+        _acknowledge(session, delta)
+        session.mark_presented(tuple(delta.upserts))
+        if 1 in session.lifecycle.presented_tiles:
+            break
+
+    assert 1 in session.lifecycle.presented_tiles
+    assert 1 not in session.unrefined_preview_tiles(include_already_dirty=True)
 
 
 def test_lod_refresh_owns_its_supersession_counter_not_viewport_revision():

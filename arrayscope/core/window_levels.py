@@ -222,19 +222,34 @@ class WindowLevelController:
                         if _complete_source(candidate_state)
                         else union_bounds(histogram, candidate_state.histogram_range)
                     )
+                locked = mode == LevelMode.ABSOLUTE
+                source_rank = LevelSourceRank.EXPLICIT_USER if locked else LevelSourceRank.PREVIOUS_COMMITTED
+                source_count = 0
+                expected_count = 0
+                semantic_key = None
+                evidence_quality = 0
+                if candidate_state is not None:
+                    source_rank = LevelSourceRank.EXPLICIT_USER if locked else candidate_state.source_rank
+                    source_count = candidate_state.source_count
+                    expected_count = candidate_state.expected_count
+                    semantic_key = candidate_state.semantic_key
+                    evidence_quality = candidate_state.evidence_quality
+                elif previous_state is not None:
+                    source_rank = LevelSourceRank.EXPLICIT_USER if locked else previous_state.source_rank
+                    source_count = previous_state.source_count
+                    expected_count = previous_state.expected_count
+                    semantic_key = previous_state.semantic_key
+                    evidence_quality = previous_state.evidence_quality
                 return WindowLevelState(
-                    semantic_key=(candidate_state.semantic_key if candidate_state is not None else (previous_state.semantic_key if previous_state else None)),
+                    semantic_key=semantic_key,
                     display_levels=levels,
                     histogram_range=histogram or levels,
-                    source_rank=LevelSourceRank.EXPLICIT_USER,
-                    source_count=0,
-                    expected_count=0,
-                    user_locked=mode == LevelMode.ABSOLUTE,
-                    mode=LevelMode.USER_LOCKED if mode == LevelMode.ABSOLUTE else LevelMode.RELATIVE,
-                    evidence_quality=max(
-                        0,
-                        int(getattr(candidate_state, "evidence_quality", 0) if candidate_state is not None else getattr(previous_state, "evidence_quality", 0) if previous_state else 0),
-                    ),
+                    source_rank=source_rank,
+                    source_count=source_count,
+                    expected_count=expected_count,
+                    user_locked=locked,
+                    mode=LevelMode.USER_LOCKED if locked else LevelMode.RELATIVE,
+                    evidence_quality=max(0, int(evidence_quality)),
                 )
 
         if explicit_auto:
