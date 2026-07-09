@@ -58,6 +58,9 @@ class FakeVisual:
         self.mapping_calls = 0
         self.mappings = []
         self.textures = None
+        self.texture_calls = 0
+        self.mipmap_page = None
+        self.mipmap_calls = 0
         self.update_calls = 0
 
     def set_levels(self, levels):
@@ -74,9 +77,14 @@ class FakeVisual:
         self.modes = np.asarray(modes)
 
     def set_textures(self, scalar, color):
+        self.texture_calls += 1
         changed = self.textures != (scalar, color)
         self.textures = (scalar, color)
         return changed
+
+    def set_mipmap_page(self, page):
+        self.mipmap_calls += 1
+        self.mipmap_page = page
 
     def set_shader_mapping(self, mapping):
         self.mapping_calls += 1
@@ -624,6 +632,64 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
         for texture in (page.scalar_texture, page.color_texture)
     ) == texture_updates
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
+
+
+def test_clean_gpu_layer_update_reuses_page_bindings():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    payloads = {index: payload(index, float(index)) for index in range(5)}
+    delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=tuple(range(5)),
+        planned_tiles=tuple(range(5)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+
+    first = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+    texture_calls = [visual.texture_calls for visual in layer._visuals_by_page]
+    mipmap_calls = [visual.mipmap_calls for visual in layer._visuals_by_page]
+    geometry_calls = [visual.geometry_calls for visual in layer._visuals_by_page]
+
+    second = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+
+    assert first.page_count == 2
+    assert second.texture_uploads == 0
+    assert second.vertex_uploads == 0
+    assert [visual.texture_calls for visual in layer._visuals_by_page] == texture_calls
+    assert [visual.mipmap_calls for visual in layer._visuals_by_page] == mipmap_calls
+    assert [visual.geometry_calls for visual in layer._visuals_by_page] == geometry_calls
 
 
 def test_atlas_reuses_matching_source_identity_even_when_dirty_is_unknown():

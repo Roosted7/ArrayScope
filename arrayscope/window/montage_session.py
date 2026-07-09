@@ -1652,6 +1652,9 @@ class MontageRenderSession:
                     previous_payloads[int(tile_number)] = current
                 retained_tiles.append(int(tile_number))
             for tile_number in retained_tiles:
+                if _preview_upgrade_owed(self, int(tile_number), self.display_tile_payloads.get(int(tile_number))):
+                    self.dirty_payloads[int(tile_number)] = None
+                    continue
                 self.pending_payload_upserts.pop(int(tile_number), None)
             if retained_payloads is not None:
                 previous_state = TilePresentationState(
@@ -1729,6 +1732,13 @@ class MontageRenderSession:
         active_scope = set(active)
         for tile_number in self.lifecycle.rearm_for_scope(active_scope):
             self.dirty_payloads[int(tile_number)] = None
+        preview_upgrade_tiles = tuple(
+            int(tile)
+            for tile in active
+            if _preview_upgrade_owed(self, int(tile), self.display_tile_payloads.get(int(tile)))
+        )
+        for tile_number in preview_upgrade_tiles:
+            self.dirty_payloads[int(tile_number)] = None
         missing_payload_tiles = tuple(
             int(tile)
             for tile in active
@@ -1740,6 +1750,7 @@ class MontageRenderSession:
             dict.fromkeys(
                 (
                     *missing_payload_tiles,
+                    *preview_upgrade_tiles,
                     *(int(tile) for tile in stale_drawn),
                     *(
                         int(tile)
@@ -1776,6 +1787,7 @@ class MontageRenderSession:
                     *(int(tile) for tile in self.dirty_payloads),
                     *(int(tile) for tile in self.pending_payload_upserts),
                     *missing_payload_tiles,
+                    *preview_upgrade_tiles,
                     *stale_level_tiles,
                 )
             )
@@ -1920,6 +1932,9 @@ class MontageRenderSession:
             previous = previous_payloads.get(int(tile_number))
             force_upsert = int(tile_number) in self.pending_payload_upserts or int(tile_number) in stale_level_tiles
             if previous is payload and not force_upsert:
+                if _preview_upgrade_owed(self, int(tile_number), payload):
+                    self.dirty_payloads[int(tile_number)] = None
+                    continue
                 # The dirty record's promise is already kept: the presented
                 # payload IS this payload.  Popping the record here is what
                 # lets the commit loop settle — leaving it made every commit
@@ -1936,6 +1951,9 @@ class MontageRenderSession:
                 and previous.histogram_data is payload.histogram_data
                 and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(payload.shader_mapping)
             ):
+                if _preview_upgrade_owed(self, int(tile_number), payload):
+                    self.dirty_payloads[int(tile_number)] = None
+                    continue
                 self.dirty_payloads.pop(int(tile_number), None)
                 continue
             upserts[int(tile_number)] = payload
@@ -2833,6 +2851,30 @@ def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles
         and int(base_source_id[1]) == int(tile_number)
         and getattr(payload, "source_id", None) in getattr(session, "acknowledged_source_ids", set())
     )
+
+
+def _preview_upgrade_owed(session, tile_number: int, payload=None) -> bool:
+    """Return whether a visible preview must still converge to rendered pixels."""
+
+    index = int(tile_number)
+    payload = session.display_tile_payloads.get(index) if payload is None else payload
+    if payload is None or str(getattr(payload, "quality", "exact") or "exact") != "preview":
+        return False
+    rendered = getattr(session, "rendered_tiles", {}).get(index)
+    if rendered is None:
+        return False
+    plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    if 0 <= index < len(plan_tiles):
+        plan_tile = plan_tiles[index]
+        if int(getattr(payload, "source_index", -1)) != int(getattr(plan_tile, "source_index", -2)):
+            return False
+        if int(getattr(getattr(rendered, "tile", None), "source_index", -1)) != int(getattr(plan_tile, "source_index", -2)):
+            return False
+    if index in getattr(session, "skipped_tiles", set()):
+        return False
+    if index not in getattr(session, "visible_tile_numbers", ()):
+        return False
+    return True
 
 
 def _force_unpresented_upsert(session, tile_number: int, *, previous_payloads, backend_identities) -> bool:

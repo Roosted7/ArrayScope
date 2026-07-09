@@ -1216,6 +1216,9 @@ class GpuMontageLayer:
         self._pool = TextureAtlasPool(gloo, limits=self._device_limits)
         self._visuals_by_page: list[object] = []
         self._geometry_keys: dict[int, tuple[object, ...]] = {}
+        self._page_texture_keys: list[tuple[object, object]] = []
+        self._page_mipmap_pages: list[object | None] = []
+        self._page_visibility: list[bool] = []
         self._page_payloads_by_index: list[dict[int, DisplayTilePayload]] = []
         self._montage_geometry_key: tuple[int, int, int, int, int] | None = None
         self._atlas_serial: int = -1
@@ -1240,6 +1243,9 @@ class GpuMontageLayer:
             visual.visible = False
         self._pool = TextureAtlasPool(self._gloo, limits=self._device_limits)
         self._geometry_keys.clear()
+        self._page_texture_keys = [(None, None) for _visual in self._visuals_by_page]
+        self._page_mipmap_pages = [None for _visual in self._visuals_by_page]
+        self._page_visibility = [False for _visual in self._visuals_by_page]
         self._page_payloads_by_index.clear()
         self._montage_geometry_key = None
         self._atlas_serial = -1
@@ -1252,6 +1258,9 @@ class GpuMontageLayer:
         for visual in self._visuals_by_page:
             visual.visible = False
         self._geometry_keys.clear()
+        self._page_texture_keys = [(None, None) for _visual in self._visuals_by_page]
+        self._page_mipmap_pages = [None for _visual in self._visuals_by_page]
+        self._page_visibility = [False for _visual in self._visuals_by_page]
         self._page_payloads_by_index.clear()
         self._montage_geometry_key = None
         self._atlas_serial = -1
@@ -1320,6 +1329,15 @@ class GpuMontageLayer:
             visual.set_levels(self._levels)
             visual.set_shader_mapping(self._shader_mapping)
             self._visuals_by_page.append(visual)
+            self._page_texture_keys.append((None, None))
+            self._page_mipmap_pages.append(None)
+            self._page_visibility.append(False)
+        while len(self._page_texture_keys) < len(self._visuals_by_page):
+            self._page_texture_keys.append((None, None))
+        while len(self._page_mipmap_pages) < len(self._visuals_by_page):
+            self._page_mipmap_pages.append(None)
+        while len(self._page_visibility) < len(self._visuals_by_page):
+            self._page_visibility.append(False)
 
     def update(
         self,
@@ -1407,15 +1425,25 @@ class GpuMontageLayer:
         mapping_updates = 0
         for page_index, page in enumerate(self._pool.pages):
             visual = self._visuals_by_page[page_index]
-            visual.set_textures(page.scalar_texture, page.color_texture)
+            texture_key = (page.scalar_texture, page.color_texture)
+            if texture_key != self._page_texture_keys[page_index]:
+                visual.set_textures(page.scalar_texture, page.color_texture)
+                self._page_texture_keys[page_index] = texture_key
             set_mipmap_page = getattr(visual, "set_mipmap_page", None)
-            if set_mipmap_page is not None:
+            if set_mipmap_page is not None and page is not self._page_mipmap_pages[page_index]:
                 set_mipmap_page(page)
+                self._page_mipmap_pages[page_index] = page
             if mapping_changed:
                 mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
-            visual.visible = page_index in active_pages
-        for visual in self._visuals_by_page[len(self._pool.pages):]:
+            visible = page_index in active_pages
+            if visible != self._page_visibility[page_index] or bool(getattr(visual, "visible", False)) != visible:
+                visual.visible = visible
+                self._page_visibility[page_index] = visible
+        for page_index, visual in enumerate(self._visuals_by_page[len(self._pool.pages):], start=len(self._pool.pages)):
+            if page_index >= len(self._page_visibility) or not self._page_visibility[page_index]:
+                continue
             visual.visible = False
+            self._page_visibility[page_index] = False
         effective_presented_tiles = tuple(
             int(tile)
             for tile in tuple(texture_stats.presented_tiles or ())

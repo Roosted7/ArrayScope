@@ -1968,6 +1968,37 @@ def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
     assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
 
 
+def test_backend_confirmed_preview_does_not_settle_when_exact_exists():
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = pyramid_key_for_rendered(rendered, demand=demand, level=2, semantic_source_id=semantic_id)
+        pyramid.admit(key, reduce_box_mean(np.asarray(rendered.image), key.factor_xy))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+    preview_identities = {
+        int(tile): payload.source_id
+        for tile, payload in preview_delta.upserts.items()
+    }
+    session.lifecycle.backend_presented_snapshot(preview_identities)
+
+    assert {payload.quality for payload in preview_delta.upserts.values()} == {"preview"}
+
+    _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
+
+    assert set(exact_delta.upserts) == {0, 1}
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
+    assert all(
+        exact_delta.upserts[int(tile)].source_id != preview_identities[int(tile)]
+        for tile in exact_delta.upserts
+    )
+
+
 def test_acknowledged_preview_floor_stays_active_until_exact_refinement():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=4)
