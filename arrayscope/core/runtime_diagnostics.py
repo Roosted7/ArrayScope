@@ -174,6 +174,13 @@ class MontageRuntimeDiagnostics:
     lifecycle_identity_rejections: int = 0
     # Tiles whose payload is dirty (queued for re-presentation).
     dirty_payload_tiles: int = 0
+    obligation_visible_target_unsettled: int = 0
+    obligation_preview_fallbacks: int = 0
+    obligation_target_payload_owed: int = 0
+    obligation_active_without_path: int = 0
+    obligation_stage_ready: int = 0
+    obligation_stage_lost: int = 0
+    obligation_stage_blocked: int = 0
     # Stall assertion probes (ADR 0051): each one means an unsettled montage
     # session had the same signature across diagnostics ticks.  The probe is
     # observational only and never schedules or mutates render work.
@@ -922,6 +929,13 @@ _MONTAGE_COVERED = frozenset(
         "tile_compute_direct_max_ms",
         "lead_direct_tiles",
         "stage_backed_tiles_pending",
+        "obligation_visible_target_unsettled",
+        "obligation_preview_fallbacks",
+        "obligation_target_payload_owed",
+        "obligation_active_without_path",
+        "obligation_stage_ready",
+        "obligation_stage_lost",
+        "obligation_stage_blocked",
     }
 )
 _MONTAGE_TIMING_COVERED = frozenset(
@@ -1077,6 +1091,15 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"direct={montage.tile_compute_direct} waiting_stage={montage.tile_compute_waiting_for_stage} "
             f"lead_direct={montage.lead_direct_tiles} stage_pending={montage.stage_backed_tiles_pending} "
             f"stage_deps={montage.attached_stage_requests}/{montage.waiting_stage_requests}"
+        ),
+        (
+            "Obligations: "
+            f"unsettled={montage.obligation_visible_target_unsettled} "
+            f"preview={montage.obligation_preview_fallbacks} "
+            f"target_payload={montage.obligation_target_payload_owed} "
+            f"active_orphan={montage.obligation_active_without_path} "
+            f"stage ready/lost/blocked={montage.obligation_stage_ready}/"
+            f"{montage.obligation_stage_lost}/{montage.obligation_stage_blocked}"
         ),
         (
             "Compute time (ms): "

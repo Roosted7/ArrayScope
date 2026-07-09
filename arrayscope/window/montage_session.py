@@ -33,7 +33,7 @@ from arrayscope.display.model.presentation_generation import (
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
 from arrayscope.operations.stage_fanin import StageFanInState
-from arrayscope.presentation import ClaimOwner, LevelPhase, ReleaseClaim, TileLifecycle
+from arrayscope.presentation import ClaimOwner, LevelPhase, ReleaseClaim, TileLifecycle, build_tile_obligation_plan
 from arrayscope.display.model.tile_priority import (
     MontageTilePriorityQueue,
     TilePriorityContext,
@@ -665,6 +665,12 @@ class MontageRenderSession:
             self.stage_fan_in = state
             return
         self.stage_fan_in = LifecycleStageFanIn(self.lifecycle, state)
+
+    def tile_obligation_plan(self):
+        return build_tile_obligation_plan(self)
+
+    def tile_obligation_counters(self) -> dict[str, int]:
+        return self.tile_obligation_plan().counters()
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -2438,6 +2444,80 @@ class MontageRenderSession:
                 requeued += 1
         return requeued
 
+    def reconcile_tile_obligations(
+        self,
+        *,
+        kernel_idle: bool = False,
+        release_evaluation_claim=None,
+    ) -> dict[str, int]:
+        """Project lifecycle/presentation facts into owed work and repair gaps.
+
+        This is the single session-side obligation gate.  It does not infer
+        correctness from dirty/upsert counters; it derives those counters from
+        the visible target state.
+        """
+
+        plan = self.tile_obligation_plan()
+        counters = plan.counters()
+        dirtied = 0
+        released = 0
+        requeued = 0
+        stage_released = 0
+        for tile_number in plan.target_payload_owed:
+            if int(tile_number) not in self.dirty_payloads:
+                self.dirty_payloads[int(tile_number)] = None
+                dirtied += 1
+
+        def release(tile_number: int) -> bool:
+            nonlocal released
+            if not callable(release_evaluation_claim):
+                return False
+            if bool(release_evaluation_claim(int(tile_number))):
+                released += 1
+                return True
+            return False
+
+        lost_or_ready = tuple(dict.fromkeys((*plan.stage_lost, *plan.stage_ready)))
+        for tile_number in lost_or_ready:
+            tile_number = int(tile_number)
+            if tile_number in self.rendered_tiles or tile_number in self.skipped_tiles:
+                continue
+            if tile_number in self.active_tile_requests and not release(tile_number):
+                continue
+            if tile_number in plan.stage_lost:
+                self.stage_fan_in.tile_stage_keys.pop(tile_number, None)
+                stage_released += 1
+            if 0 <= tile_number < len(self.plan.tiles) and self.enqueue_pending_tile(self.plan.tiles[tile_number]):
+                requeued += 1
+
+        if bool(kernel_idle):
+            for tile_number in plan.active_without_path:
+                tile_number = int(tile_number)
+                if tile_number in self.rendered_tiles or tile_number in self.skipped_tiles:
+                    continue
+                if not release(tile_number):
+                    continue
+                if 0 <= tile_number < len(self.plan.tiles) and self.enqueue_pending_tile(self.plan.tiles[tile_number]):
+                    requeued += 1
+
+        if stage_released:
+            self.stage_fan_in.detach_unbound_requests()
+            self.tile_compute_waiting_for_stage = max(0, int(self.tile_compute_waiting_for_stage) - stage_released)
+            self.stage_backed_tiles_pending = max(0, int(self.stage_backed_tiles_pending) - stage_released)
+        if dirtied or requeued or released or stage_released:
+            self.flush_pending = True
+            self.final_commit_pending = True
+        counters.update(
+            {
+                "obligation_dirtied": int(dirtied),
+                "obligation_requeued": int(requeued),
+                "obligation_released": int(released),
+                "obligation_stage_released": int(stage_released),
+            }
+        )
+        self._last_tile_obligation_counters = dict(counters)
+        return counters
+
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)
         if index not in self.rendered_tiles and index not in self.skipped_tiles:
@@ -2559,11 +2639,14 @@ class MontageRenderSession:
             self.final_commit_pending = True
 
     def visible_plan_complete(self) -> bool:
+        if self.has_stale_level_presentations():
+            return False
+        return not self.tile_obligation_plan().visible_target_unsettled
+
+    def visible_first_pixels_presented(self) -> bool:
         required = set(int(tile) for tile in self.visible_tile_numbers) - set(int(tile) for tile in self.skipped_tiles)
         if not required:
             return True
-        if self.has_stale_level_presentations():
-            return False
         return all(self._tile_presentation_matches_current_plan(int(tile)) for tile in required)
 
     def _tile_presentation_matches_current_plan(self, tile_number: int) -> bool:

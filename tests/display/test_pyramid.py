@@ -272,12 +272,12 @@ class TestResidentLodPolicy:
         assert decision.applied_factor == 2
         assert decision.reason == LOD_REASON_RESIDENT_FINER
 
-    def test_accepts_one_coarser_level_but_never_beyond_acceptable(self):
+    def test_rejects_coarser_only_resident_level_for_native_fallback(self):
         coarser = resident_lod_policy(ZOOMED_OUT_4X, VIEWPORT, TILE, resident_levels=(3,))
         way_too_coarse = resident_lod_policy(ZOOMED_OUT_4X, VIEWPORT, TILE, resident_levels=(5,))
 
-        assert coarser.applied_level == 3
-        assert coarser.reason == LOD_REASON_RESIDENT_COARSER
+        assert coarser.applied_level == 0
+        assert coarser.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
         assert way_too_coarse.applied_level == 0
         assert way_too_coarse.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
 
@@ -309,10 +309,10 @@ class TestResidentLodPolicy:
         assert held.applied_level == 2
         assert fresh.demand.desired_factor == 4
 
-    def test_retain_presented_until_replacement_resident_inputs(self):
+    def test_zoom_in_prefers_native_over_coarser_only_resident_inputs(self):
         # Zoom-in: previously presented coarse level 3, demand drops to 2.
-        # While level 2 is not yet resident, the policy keeps the resident
-        # coarser level (still acceptable and closest) instead of blocking.
+        # Coarser resident data remains useful physical cache, but it must not
+        # satisfy the semantic tile target or reintroduce wrong retained pixels.
         demand = select_lod_demand(ZOOMED_OUT_4X, VIEWPORT, TILE)
         assert demand.desired_level == 2
 
@@ -323,8 +323,8 @@ class TestResidentLodPolicy:
             resident_levels=(3,),
         )
 
-        assert decision.applied_level == 3
-        assert decision.reason == LOD_REASON_RESIDENT_COARSER
+        assert decision.applied_level == 0
+        assert decision.reason == LOD_REASON_RESIDENT_NATIVE_FALLBACK
 
     def test_zoom_in_equidistant_choice_prefers_native_over_stale_coarse(self):
         # Demand level 1: native and a stale level 2 are equidistant; the

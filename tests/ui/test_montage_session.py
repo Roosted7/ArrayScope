@@ -475,7 +475,8 @@ def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
     session.pending_tiles.append(session.plan.tiles[2])
     session.loading_tiles.add(3)
 
-    assert session.visible_plan_complete()
+    assert session.visible_first_pixels_presented()
+    assert not session.visible_plan_complete()
     assert not session.is_complete()
 
 
@@ -497,7 +498,8 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session.loading_tiles.clear()
     session.lifecycle.presentation_confirmed((1,))
 
-    assert session.visible_plan_complete()
+    assert session.visible_first_pixels_presented()
+    assert not session.visible_plan_complete()
 
 
 def test_montage_render_session_replacement_materialization_reopens_visible_plan():
@@ -523,7 +525,8 @@ def test_montage_render_session_replacement_materialization_reopens_visible_plan
     # replacement payload is dirty/in flight. Full completion remains open,
     # but first-pixel visible completion does not regress to black.
     assert 0 in session.lifecycle.presented_tiles
-    assert session.visible_plan_complete()
+    assert session.visible_first_pixels_presented()
+    assert not session.visible_plan_complete()
     assert not session.is_complete()
 
 

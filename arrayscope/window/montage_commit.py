@@ -253,7 +253,7 @@ class MontagePipelineEffects:
         stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
         if stage_key is None or stage_key in self.session.stage_fan_in.values:
             return ()
-        return (stage_key,)
+        return (("montage-stage", stage_key),)
 
     def rung_dropped(self, intent, step) -> None:
         tile = self._tile_for_step(step)
@@ -350,6 +350,30 @@ class MontagePipelineEffects:
         if released and self._session_is_current():
             self.renderer.request_montage_replan(self.session)
         return released
+
+    def reconcile_obligations(self, *, kernel_idle: bool = False) -> dict[str, int]:
+        """Derive owed work from the tile obligation plan and execute effects."""
+
+        reconcile = getattr(self.session, "reconcile_tile_obligations", None)
+        if not callable(reconcile):
+            return {}
+
+        def release(tile_number: int) -> bool:
+            return self._release_evaluation_claim(int(tile_number), request_replan=False)
+
+        counters = reconcile(
+            kernel_idle=bool(kernel_idle),
+            release_evaluation_claim=release,
+        )
+        changed = (
+            int(counters.get("obligation_dirtied", 0) or 0)
+            + int(counters.get("obligation_requeued", 0) or 0)
+            + int(counters.get("obligation_released", 0) or 0)
+            + int(counters.get("obligation_stage_released", 0) or 0)
+        )
+        if changed and self._session_is_current():
+            self.renderer.request_montage_replan(self.session)
+        return counters
 
     def apply_commit(self, batch: CommitBatch) -> None:
         """Admit ready rung payloads; presentation happens through the gate.
@@ -763,6 +787,7 @@ class MontagePipelineEffects:
         display_image, rendered_geometry = direct_presentation
         dirty_tiles = session.consume_dirty_tiles()
         tile_source_ids = renderer._montage_tile_source_ids(session)
+        self.reconcile_obligations(kernel_idle=_kernel_idle(getattr(renderer.win, "kernel", None)))
         renderer._montage_committed_tile_upserts_last_flush = len(dirty_tiles)
         renderer._current_montage_geometry = session.plan.geometry
         renderer._current_montage_plan = session.plan
@@ -1150,12 +1175,21 @@ class MontagePipelineEffects:
             ),
         )
         self._record_commit_feedback(report)
+        obligation_counters = self.reconcile_obligations(kernel_idle=_kernel_idle(getattr(renderer.win, "kernel", None)))
+        obligation_backlog = bool(
+            int(obligation_counters.get("visible_target_unsettled", 0) or 0) > 0
+            or int(obligation_counters.get("target_payload_owed", 0) or 0) > 0
+            or int(obligation_counters.get("stage_ready", 0) or 0) > 0
+            or int(obligation_counters.get("stage_lost", 0) or 0) > 0
+            or int(obligation_counters.get("active_without_path", 0) or 0) > 0
+        )
         upload_backlog = bool(
             getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_removals", None)
             or getattr(session, "pending_payload_upserts", None)
             or session.unrefined_preview_tiles(include_already_dirty=True)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
+            or obligation_backlog
             or rearmed_parked
         )
         followup_start = perf_counter()
@@ -1307,6 +1341,7 @@ class MontagePipelineEffects:
             and not getattr(tile_delta, "upserts", None)
             and not getattr(tile_delta, "removals", None)
             and not bool(getattr(session, "presentation_geometry_changed", False))
+            and not session.tile_obligation_plan().visible_target_unsettled
             and not (session.has_pending_level_update() and session.has_stale_level_presentations())
         )
 
@@ -2040,6 +2075,24 @@ def safe_tiled_payload_geometry_retarget(previous_geometry, geometry) -> bool:
         and int(previous_montage.gap) == int(montage.gap)
         and int(previous_geometry.montage_origin_x) == int(geometry.montage_origin_x)
         and int(previous_geometry.montage_origin_y) == int(geometry.montage_origin_y)
+    )
+
+
+def _kernel_idle(kernel) -> bool:
+    if kernel is None:
+        return False
+    try:
+        diag = kernel.diagnostics()
+    except Exception:
+        return False
+    completion_queue = getattr(kernel, "completions", None)
+    return bool(
+        int(getattr(diag, "queued", 0) or 0) == 0
+        and int(getattr(diag, "running", 0) or 0) == 0
+        and int(getattr(diag, "active", 0) or 0) == 0
+        and int(getattr(diag, "parked_deps", 0) or 0) == 0
+        and int(getattr(diag, "parked_quota", 0) or 0) == 0
+        and (completion_queue is None or completion_queue.empty())
     )
 
 

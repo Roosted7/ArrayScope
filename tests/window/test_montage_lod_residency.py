@@ -1899,7 +1899,8 @@ def test_preview_floor_does_not_complete_full_refinement():
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
 
-    assert session.visible_plan_complete()
+    assert session.visible_first_pixels_presented()
+    assert not session.visible_plan_complete()
     assert not session.is_complete()
 
     session.mark_preview_refinements_dirty(session.unrefined_preview_tiles())
@@ -1908,6 +1909,66 @@ def test_preview_floor_does_not_complete_full_refinement():
     session.mark_presented(tuple(exact_delta.upserts))
 
     assert session.is_complete()
+
+
+def test_idle_active_obligation_without_worker_path_releases_and_requeues():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+
+    assert effects.prepare_rung(intent, _exact_step(0))
+    assert 0 in session.active_tile_requests
+    assert 0 in session.loading_tiles
+
+    counters = effects.reconcile_obligations(kernel_idle=True)
+
+    assert counters["obligation_released"] == 1
+    assert counters["obligation_requeued"] == 1
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.pending_tile_numbers() == (0,)
+
+
+def test_stage_ready_obligation_requeues_through_single_model():
+    session = _session(count=1)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.pop(0, None)
+    stage_key = ("stage", "ready")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    session.stage_fan_in.values[stage_key] = object()
+    renderer = _RungPrepareRenderer()
+    effects = MontagePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="stage-backed exact target",
+    )
+
+    assert effects.prepare_rung(intent, step)
+    counters = effects.reconcile_obligations(kernel_idle=True)
+
+    assert counters["stage_ready"] == 1
+    assert counters["obligation_released"] == 1
+    assert counters["obligation_requeued"] == 1
+    assert session.pending_tile_numbers() == (0,)
+
+
+def test_stage_backed_rung_dep_uses_kernel_stage_task_key():
+    session = _session(count=1)
+    stage_key = ("stage", "in-flight")
+    session.stage_fan_in.tile_stage_keys[0] = stage_key
+    effects = MontagePipelineEffects(_RungPrepareRenderer(), session)
+    step = _exact_step(0)
+
+    assert effects.rung_deps(_pipeline_intent_for(session), step) == (("montage-stage", stage_key),)
 
 
 def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact():

@@ -50,6 +50,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
+    obligation_counters = {} if session is None else session.tile_obligation_counters()
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -139,6 +140,13 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
         lifecycle_identity_rejections=0 if session is None else int(session.lifecycle.identity_rejections),
         dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
+        obligation_visible_target_unsettled=int(obligation_counters.get("visible_target_unsettled", 0) or 0),
+        obligation_preview_fallbacks=int(obligation_counters.get("preview_fallbacks", 0) or 0),
+        obligation_target_payload_owed=int(obligation_counters.get("target_payload_owed", 0) or 0),
+        obligation_active_without_path=int(obligation_counters.get("active_without_path", 0) or 0),
+        obligation_stage_ready=int(obligation_counters.get("stage_ready", 0) or 0),
+        obligation_stage_lost=int(obligation_counters.get("stage_lost", 0) or 0),
+        obligation_stage_blocked=int(obligation_counters.get("stage_blocked", 0) or 0),
         backend_stale_identities=_backend_stale_identities(session),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
         last_stall_signature=tuple(

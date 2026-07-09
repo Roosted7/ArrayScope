@@ -237,11 +237,12 @@ def resident_lod_policy(
     previous_factor: int | None = None,
     resident_levels=(),
 ) -> LodPolicyDecision:
-    """Apply the closest resident level to the demand without blocking.
+    """Apply resident data no coarser than the demanded semantic target.
 
     The applied level is always materialized-and-resident (level 0 counts as
-    implicitly resident), never coarser than the coarsest acceptable level,
-    and prefers finer over coarser when equidistant from the demand.
+    implicitly resident).  Finer/equal resident LODs may satisfy or improve
+    tile presentation; coarser-only resident levels stay physical cache and do
+    not decide semantic completion.
     """
 
     demand = select_lod_demand(

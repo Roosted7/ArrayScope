@@ -14,6 +14,7 @@ from .tile_lifecycle import (
     TileLifecycle,
     TileRecord,
 )
+from .tile_obligations import TileObligation, TileObligationPlan, build_tile_obligation_plan
 
 __all__ = [
     "ClaimOwner",
@@ -21,6 +22,9 @@ __all__ = [
     "Presentation",
     "ReleaseClaim",
     "Semantic",
+    "TileObligation",
+    "TileObligationPlan",
     "TileLifecycle",
     "TileRecord",
+    "build_tile_obligation_plan",
 ]
