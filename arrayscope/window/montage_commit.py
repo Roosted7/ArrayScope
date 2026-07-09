@@ -955,8 +955,17 @@ class MontagePipelineEffects:
             first_display_commit = not bool(session.display_committed)
             requested_levels = session_requested_levels(session)
             explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
-            if _commit_should_queue_level_stats(renderer, first_display_commit=first_display_commit):
-                level_payloads = active_payloads if first_display_commit else dict(tile_delta.upserts)
+            if _commit_should_queue_level_stats(
+                renderer,
+                session,
+                first_display_commit=first_display_commit,
+            ):
+                level_key = getattr(session, "level_key", None)
+                existing_level_stats = None if level_key is None else renderer._montage_level_tracker().summary_for(level_key)
+                level_stats_seeded = bool(
+                    existing_level_stats is not None and existing_level_stats.source_indices
+                )
+                level_payloads = active_payloads if first_display_commit or not level_stats_seeded else dict(tile_delta.upserts)
                 if level_payloads:
                     renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
             if self._empty_first_commit_can_wait(first_display_commit, explicit_auto, active_payloads, tile_delta):
@@ -1261,7 +1270,8 @@ class MontagePipelineEffects:
         session = self.session
         report = getattr(renderer._display_committer(), "last_tile_commit_report", None)
         acknowledge_start = perf_counter()
-        acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=normalize_bounds(renderer.win.img_view.getLevels()))
+        committed_levels = normalize_bounds(renderer.win.img_view.getLevels())
+        acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         retained_start = perf_counter()
         renderer._retained_tiled_payload_store().remember_acknowledged(
@@ -1269,10 +1279,13 @@ class MontagePipelineEffects:
         )
         renderer._last_montage_tile_retained_store_ms = (perf_counter() - retained_start) * 1000.0
         state_start = perf_counter()
-        if not session.has_stale_level_presentations():
-            session.set_level_update_pending(False)
         presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
         session.mark_presented(presented_tiles)
+        if committed_levels is not None and image_view_backend_capabilities(renderer.win.img_view).shader_windowing:
+            session.update_level_presentation_scope()
+            session.acknowledge_uniform_level_presentation(committed_levels)
+        if not session.has_stale_level_presentations():
+            session.set_level_update_pending(False)
         released_display_pending = self.release_display_owned_pending()
         if released_display_pending:
             renderer._montage_display_owned_pending_released = (
@@ -1589,11 +1602,14 @@ def _commit_report_accepted_preview_payload(report, tile_state) -> bool:
     return False
 
 
-def _commit_should_queue_level_stats(renderer, *, first_display_commit: bool) -> bool:
+def _commit_should_queue_level_stats(renderer, session, *, first_display_commit: bool) -> bool:
     capabilities = image_view_backend_capabilities(renderer.win.img_view)
     if str(getattr(capabilities, "name", "")).lower() != "vispy":
         return True
-    return bool(first_display_commit)
+    if bool(first_display_commit):
+        return True
+    stats = renderer._montage_level_tracker().summary_for(session.level_key)
+    return bool(stats is None or not stats.source_indices)
 
 
 

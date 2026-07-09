@@ -3182,27 +3182,48 @@ def test_preview_commit_ack_is_actionable_for_target_followup_replan():
     )
 
 
-def test_vispy_level_stats_queue_only_on_first_display_commit():
+def test_vispy_level_stats_queue_until_semantic_key_has_evidence():
     from types import SimpleNamespace
 
     from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     from arrayscope.window import montage_commit
 
-    vispy = SimpleNamespace(
-        win=SimpleNamespace(
-            img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy"))
-        )
-    )
+    class Renderer(SimpleNamespace):
+        def __init__(self, backend_name):
+            super().__init__(
+                win=SimpleNamespace(
+                    img_view=SimpleNamespace(
+                        rendering_capabilities=ImageViewBackendCapabilities(name=backend_name)
+                    )
+                )
+            )
+            self.tracker = MontageLevelTracker()
+
+        def _montage_level_tracker(self):
+            return self.tracker
+
+    vispy = Renderer("vispy")
     pyqtgraph = SimpleNamespace(
         win=SimpleNamespace(
             img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
         )
     )
+    session = SimpleNamespace(level_key=("levels", "retarget"), level_expected_indices=(0,))
 
-    assert montage_commit._commit_should_queue_level_stats(vispy, first_display_commit=True)
-    assert not montage_commit._commit_should_queue_level_stats(vispy, first_display_commit=False)
-    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, first_display_commit=True)
-    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, first_display_commit=False)
+    assert montage_commit._commit_should_queue_level_stats(vispy, session, first_display_commit=True)
+    assert montage_commit._commit_should_queue_level_stats(vispy, session, first_display_commit=False)
+
+    vispy.tracker.ensure_expected(session.level_key, session.level_expected_indices)
+    vispy.tracker.update_from_stats(
+        session.level_key,
+        TileLevelStats(0, (1.0, 2.0), np.asarray([1.0, 2.0], dtype=np.float32)),
+        aggregate=False,
+    )
+
+    assert not montage_commit._commit_should_queue_level_stats(vispy, session, first_display_commit=False)
+    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, session, first_display_commit=True)
+    assert montage_commit._commit_should_queue_level_stats(pyqtgraph, session, first_display_commit=False)
 
 
 def test_shared_target_waits_for_presented_preview_before_higher_quality():
