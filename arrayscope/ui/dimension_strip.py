@@ -93,21 +93,33 @@ class DimensionChip(QtWidgets.QFrame):
         layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(4)
 
-        self.index_badge = QtWidgets.QLabel(str(self.axis))
+        # The badge doubles as the profile toggle (replaces the old P button).
+        self.index_badge = QtWidgets.QToolButton()
         self.index_badge.setObjectName("DimChipBadge")
-        self.index_badge.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.index_badge.setToolTip(f"Dimension {self.axis}")
+        self.index_badge.setCheckable(True)
+        self.index_badge.setText(str(self.axis))
+        self.index_badge.clicked.connect(
+            lambda _checked=False: self.roleChanged.emit("p", self.axis)
+        )
         layout.addWidget(self.index_badge)
 
+        metrics = self.fontMetrics()
+        char = max(6, metrics.averageCharWidth())
+
         self.axis_label = QtWidgets.QLabel()
-        self.axis_label.setMinimumWidth(28)
+        self.axis_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
+        # Size text: 5 characters by default, may shrink to 3 under pressure.
+        self.axis_label.setMinimumWidth(3 * char)
+        self.axis_label.setMaximumWidth(5 * char + 4)
+        self.axis_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred
+        )
         layout.addWidget(self.axis_label)
         layout.addWidget(_make_chip_separator(self))
 
         self.y_button = QtWidgets.QToolButton(checkable=True)
         self.x_button = QtWidgets.QToolButton(checkable=True)
-        self.p_button = QtWidgets.QToolButton(checkable=True)
-        for role, button in (("y", self.y_button), ("x", self.x_button), ("p", self.p_button)):
+        for role, button in (("y", self.y_button), ("x", self.x_button)):
             button.setFixedSize(24, 22)
             button.setText(role.upper())
             button.clicked.connect(lambda _checked=False, role=role: self.roleChanged.emit(role, self.axis))
@@ -116,10 +128,12 @@ class DimensionChip(QtWidgets.QFrame):
 
         self._axis_size = 1
         self.slice_edit = SliceIndexEdit()
-        # Absorbs spare chip width and shrinks first when space gets tight;
-        # a hard minimum keeps it from ever colliding with the ops button.
-        self.slice_edit.setMinimumWidth(46)
-        self.slice_edit.setMaximumWidth(150)
+        # Defaults to fitting "100:2:200"; shrinks to ~3.5 characters before
+        # anything else in the chip gives way.
+        stepper_allowance = 24
+        self.slice_edit.setMinimumWidth(int(3.5 * char) + stepper_allowance)
+        self._slice_edit_preferred = metrics.horizontalAdvance("100:2:200") + stepper_allowance + 10
+        self.slice_edit.setMaximumWidth(max(self._slice_edit_preferred, 96) + 40)
         self.slice_edit.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
         )
@@ -134,6 +148,7 @@ class DimensionChip(QtWidgets.QFrame):
         layout.addWidget(self.ops_button)
         self.setLayout(layout)
         self._button_icon_state: dict[QtWidgets.QAbstractButton, tuple[str, str | None]] = {}
+        self._profile_available = True
 
     def update_state(self, shape, view_state, profile_axes=(), axes=None):
         size = int(shape[self.axis])
@@ -158,7 +173,13 @@ class DimensionChip(QtWidgets.QFrame):
         is_m = getattr(view_state, "montage_axis", None) == self.axis
         _set_checked_if_changed(self.y_button, is_y)
         _set_checked_if_changed(self.x_button, is_x)
-        _set_checked_if_changed(self.p_button, is_p)
+        profile_available = bool(getattr(self, "_profile_available", True))
+        _set_checked_if_changed(self.index_badge, is_p and profile_available)
+        if profile_available:
+            badge_tooltip = f"Dimension {self.axis} — click to plot a profile along it"
+        else:
+            badge_tooltip = f"Dimension {self.axis} — click to open the profile dock and plot along it"
+        _set_tooltip_if_changed(self.index_badge, badge_tooltip)
         tiled_tooltip = "Use this range as an image-axis crop"
         y_tooltip = tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Show dim {self.axis} on the image Y axis")
         x_tooltip = tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Show dim {self.axis} on the image X axis")
@@ -167,13 +188,12 @@ class DimensionChip(QtWidgets.QFrame):
         _set_tooltip_if_changed(self.y_button, y_tooltip)
         _set_text_if_changed(self.x_button, ("X→" if flipped else "X←") if is_x else "X")
         _set_tooltip_if_changed(self.x_button, x_tooltip)
-        _set_tooltip_if_changed(self.p_button, f"Plot a profile along dim {self.axis}")
         self._set_montage_state_if_changed(is_m)
         is_singleton = size == 1
         can_use_as_image = not is_singleton and view_state.image_axes is not None
         _set_enabled_if_changed(self.y_button, can_use_as_image)
         _set_enabled_if_changed(self.x_button, can_use_as_image)
-        _set_enabled_if_changed(self.p_button, not is_singleton)
+        _set_enabled_if_changed(self.index_badge, not is_singleton)
         self.slice_edit.blockSignals(True)
         try:
             axis_text = None
@@ -264,6 +284,9 @@ class DimensionStrip(QtWidgets.QWidget):
         self.chips = []
         self._columns = 0
         self._relayout_pending = False
+        self._profile_available = True
+        self._badge_width_count = None
+        self._chip_geometry = None
         layout = QtWidgets.QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(4)
@@ -277,12 +300,35 @@ class DimensionStrip(QtWidgets.QWidget):
             chip.focused.connect(self.focusedAxisChanged)
             self.chips.append(chip)
         self.setLayout(layout)
+        self._sync_badge_widths(tuple(range(int(ndim))))
         self._relayout()
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+
+    def set_profile_available(self, available: bool) -> None:
+        """Profile toggles highlight only while the profile dock is visible."""
+        available = bool(available)
+        if getattr(self, "_profile_available", None) == available:
+            return
+        self._profile_available = available
+        for chip in self.chips:
+            chip._profile_available = available
+
+    def _sync_badge_widths(self, shape) -> None:
+        # Every badge shares one width, sized to the largest visible index.
+        visible_count = len(shape)
+        if visible_count == getattr(self, "_badge_width_count", None):
+            return
+        self._badge_width_count = visible_count
+        widest = str(max(0, visible_count - 1))
+        metrics = self.fontMetrics()
+        width = metrics.horizontalAdvance(widest) + 16
+        for chip in self.chips:
+            chip.index_badge.setFixedWidth(width)
 
     def update_shape(self, shape):
         for axis, chip in enumerate(self.chips):
             chip.setVisible(axis < len(shape))
+        self._sync_badge_widths(shape)
         self._relayout()
 
     def update_state(self, shape, view_state, profile_axes=(), axes=None):
@@ -321,16 +367,19 @@ class DimensionStrip(QtWidgets.QWidget):
         self._relayout()
 
     # Chips stretch between these bounds. Width policy: give every chip the
-    # same width; shrink chips (the slice input absorbs it) before dropping a
-    # column, and keep the last, partially filled row at the same chip width
-    # as full rows.
-    MIN_CHIP_WIDTH = 222
-    MAX_CHIP_WIDTH = 240
-    CHIP_SPACING = 4
+    # same width. Under pressure the inter-chip spacing shrinks first
+    # (PREFERRED -> MIN), then the chips themselves (the slice input absorbs
+    # the change), and only then rows wrap. Chips never squash below
+    # MIN_CHIP_WIDTH, and the last, partially filled row keeps the same chip
+    # width and spacing as full rows.
+    MIN_CHIP_WIDTH = 214
+    MAX_CHIP_WIDTH = 248
+    MIN_CHIP_SPACING = 4
+    PREFERRED_CHIP_SPACING = 12
 
-    # The dims row also holds the sync-link button; reserve its footprint so
-    # the last column never clips against it.
-    SIBLING_RESERVE = 40
+    # The dims row also holds the right-aligned sync-link button; reserve its
+    # footprint (button + fixed gaps) so the last column never clips into it.
+    SIBLING_RESERVE = 56
 
     def _available_width(self):
         parent = self.parentWidget()
@@ -343,13 +392,27 @@ class DimensionStrip(QtWidgets.QWidget):
         if not visible:
             visible = self.chips
         available = self._available_width()
-        columns = max(1, (available + self.CHIP_SPACING) // (self.MIN_CHIP_WIDTH + self.CHIP_SPACING))
+        columns = max(
+            1,
+            (available + self.MIN_CHIP_SPACING) // (self.MIN_CHIP_WIDTH + self.MIN_CHIP_SPACING),
+        )
         return min(max(1, len(visible)), columns)
 
-    def _chip_width_for(self, columns):
+    def _geometry_for(self, columns):
+        """Pick (chip_width, spacing): spacing shrinks before chips do."""
         available = self._available_width()
-        share = (available - self.CHIP_SPACING * (columns - 1)) // max(1, columns)
-        return int(max(self.MIN_CHIP_WIDTH, min(self.MAX_CHIP_WIDTH, share)))
+        gaps = max(0, columns - 1)
+        if columns * self.MAX_CHIP_WIDTH + gaps * self.PREFERRED_CHIP_SPACING <= available:
+            return self.MAX_CHIP_WIDTH, self.PREFERRED_CHIP_SPACING
+        if columns * self.MAX_CHIP_WIDTH + gaps * self.MIN_CHIP_SPACING <= available:
+            spacing = self.PREFERRED_CHIP_SPACING
+            if gaps:
+                spacing = (available - columns * self.MAX_CHIP_WIDTH) // gaps
+                spacing = max(self.MIN_CHIP_SPACING, min(self.PREFERRED_CHIP_SPACING, spacing))
+            return self.MAX_CHIP_WIDTH, spacing
+        share = (available - gaps * self.MIN_CHIP_SPACING) // max(1, columns)
+        width = int(max(self.MIN_CHIP_WIDTH, min(self.MAX_CHIP_WIDTH, share)))
+        return width, self.MIN_CHIP_SPACING
 
     def _relayout(self, columns=None):
         if self._relayout_pending:
@@ -358,21 +421,22 @@ class DimensionStrip(QtWidgets.QWidget):
         if not visible:
             visible = self.chips
         columns = self._column_count() if columns is None else columns
-        chip_width = self._chip_width_for(columns)
+        chip_width, spacing = self._geometry_for(columns)
         if (
             columns == self._columns
-            and chip_width == getattr(self, "_chip_width", None)
+            and (chip_width, spacing) == getattr(self, "_chip_geometry", None)
             and self.layout().count() == len(self.chips)
         ):
             return
         self._columns = columns
-        self._chip_width = chip_width
+        self._chip_geometry = (chip_width, spacing)
         for chip in self.chips:
             chip.setFixedWidth(chip_width)
-        row_width = columns * chip_width + self.CHIP_SPACING * (columns - 1)
+        layout = self.layout()
+        layout.setHorizontalSpacing(spacing)
+        row_width = columns * chip_width + spacing * (columns - 1)
         self.setMaximumWidth(max(self.MIN_CHIP_WIDTH, row_width))
         self.setMinimumWidth(min(max(1, columns), len(visible)) * self.MIN_CHIP_WIDTH)
-        layout = self.layout()
         for chip in self.chips:
             layout.removeWidget(chip)
         for visible_index, chip in enumerate(visible):

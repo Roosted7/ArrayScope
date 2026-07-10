@@ -10,13 +10,9 @@ from arrayscope.core.roi import RoiGeometry, RoiKind
 
 
 def default_roi_label(kind, index) -> str:
-    labels = {
-        RoiKind.LINE: "Line",
-        RoiKind.RECTANGLE: "Rectangle",
-        RoiKind.POLYLINE: "Polyline",
-        RoiKind.FREEHAND_POLYGON: "Freehand",
-    }
-    return f"{labels.get(kind, 'ROI')} {int(index)}"
+    # The kind is displayed alongside the name everywhere (table, overlay,
+    # HUD), so default names are just numbers.
+    return str(int(index))
 
 
 def point_distance(a, b) -> float:
@@ -88,6 +84,7 @@ class MovableInfoPanel(QtWidgets.QLabel):
         self._drag_offset = None
         self.setObjectName("RoiInfoPanel")
         self.setWordWrap(False)
+        self.setTextFormat(QtCore.Qt.TextFormat.RichText)
         # Styling comes from the application stylesheet (QLabel#RoiInfoPanel).
 
     def mousePressEvent(self, event):

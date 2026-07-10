@@ -13,7 +13,7 @@ from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
-from arrayscope.operations.registry import get_operation_entry, operation_entries
+from arrayscope.operations.registry import get_operation_entry, operation_entries, operation_id_for
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import set_action_icon
@@ -454,6 +454,30 @@ class OperationActionsMixin:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot edit operation:\n{e}")
             return
         self.render(reason="operation-edit", force_autolevel=True)
+
+    def change_operation_axis(self, index, axis):
+        """Re-target an existing operation onto another dimension."""
+        if index is None or index < 0 or index >= len(self.document.steps):
+            return
+        operation = self.document.steps[index].operation
+        try:
+            operation_id = operation_id_for(operation)
+            entry = get_operation_entry(operation_id)
+        except Exception:
+            return
+        if not entry.requires_axis:
+            return
+        axis = int(axis)
+        if axis == int(getattr(operation, "axis", -1)):
+            return
+        parameters = {parameter.name: getattr(operation, parameter.name) for parameter in entry.parameters}
+        try:
+            self.operation_coordinator.replace_operation(index, operation_id, axis=axis, parameters=parameters)
+            self._set_document(self.operation_coordinator.document)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot change dimension:\n{e}")
+            return
+        self.render(reason="operation-axis", force_autolevel=True)
 
     def export_derived_array(self):
         file_path, _ = get_save_file_name(

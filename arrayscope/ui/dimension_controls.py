@@ -203,6 +203,20 @@ class DimensionControlMixin:
         if role == "p":
             current = list(getattr(self, "profile_axes", ()))
             axis = int(axis)
+            profile_dock = getattr(self, "profile_dock", None)
+            dock_hidden = profile_dock is not None and not self.panel_manager.is_visible("profile")
+            if dock_hidden:
+                # Clicking a dimension badge with the dock closed reopens the
+                # dock and restores the remembered profile state; a click on
+                # an axis already in that state must not toggle it off.
+                self._profile_dock_user_visible = True
+                self.layout_manager.set_managed_dock_visible(profile_dock, True, reason="badge-click")
+                if axis in current:
+                    if hasattr(self, "dimension_strip"):
+                        self.dimension_strip.update_state(
+                            self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes
+                        )
+                    return
             if axis in current and len(current) > 1:
                 current.remove(axis)
             elif axis not in current:

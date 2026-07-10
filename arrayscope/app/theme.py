@@ -592,30 +592,37 @@ QFrame[dimensionChip="true"] QToolButton {{
     min-width: 24px;
     font-weight: 600;
 }}
-QLabel#DimChipBadge {{
+QToolButton#DimChipBadge {{
     background: {t.surface_alt};
     color: {t.text_muted};
     font-size: 8.5pt;
     font-weight: 600;
-    padding: 2px 7px;
+    padding: 2px 0;
+    border: none;
     border-top-left-radius: 5px;
     border-bottom-left-radius: 5px;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
     border-right: 1px solid {t.border};
+}}
+QToolButton#DimChipBadge:hover {{
+    background: {t.border};
+    color: {t.text};
+}}
+QToolButton#DimChipBadge:checked {{
+    background: {t.accent};
+    color: {t.accent_text};
+    border-right: 1px solid {t.accent};
+}}
+QToolButton#DimChipBadge:disabled {{
+    color: {t.text_muted};
+    background: {t.surface};
 }}
 QFrame#DimChipSeparator {{
     background: {t.border};
     border: none;
     margin-top: 5px;
     margin-bottom: 5px;
-}}
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
-    border: none;
-    background: transparent;
-    width: 15px;
-}}
-QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
-    background: {t.surface_alt};
-    border-radius: 2px;
 }}
 
 /* ---------- floating chips ---------- */
@@ -634,6 +641,11 @@ QFrame#PixelHud QLabel {{
     color: {t.overlay_text};
     font-size: 9pt;
 }}
+QFrame#PixelHudSeparator {{
+    background: {t.border};
+    border: none;
+    margin: 1px 2px;
+}}
 QLabel#ArrayScopeStatusMessageLabel {{
     color: {t.text_muted};
     font-size: 8.5pt;
@@ -641,6 +653,22 @@ QLabel#ArrayScopeStatusMessageLabel {{
 QLabel#OperationsMetaLabel {{
     color: {t.text_muted};
     font-size: 8.5pt;
+}}
+QLabel#ArrayInfoLabel {{
+    color: {t.text_muted};
+    font-size: 8.5pt;
+}}
+QToolButton#OperationAxisButton {{
+    color: {t.accent};
+    font-size: 8pt;
+    font-weight: 600;
+    padding: 0 3px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+}}
+QToolButton#OperationAxisButton:hover {{
+    border-color: {t.accent};
+    background: {t.surface_alt};
 }}
 
 /* ---------- splitters ---------- */

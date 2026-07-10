@@ -253,7 +253,20 @@ class StateSyncMixin:
             if ndim == 1:
                 self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="one-dimensional")
         if hasattr(self, "dimension_strip"):
+            panel_manager = getattr(self, "panel_manager", None)
+            if panel_manager is not None and hasattr(self.dimension_strip, "set_profile_available"):
+                try:
+                    self.dimension_strip.set_profile_available(panel_manager.is_visible("profile"))
+                except KeyError:
+                    pass
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
+
+        info_label = self.widgets.get('labels', {}).get('arrayInfo') if isinstance(getattr(self, 'widgets', None), dict) else None
+        if info_label is not None:
+            nbytes = getattr(self.data, "nbytes", None)
+            size_text = "" if nbytes is None else f" · {nbytes / 1e6:.1f} MB" if nbytes >= 1e6 else f" · {nbytes / 1e3:.0f} kB"
+            info_label.setText(f"{tuple(self.data.shape)} {self.data.dtype}")
+            info_label.setToolTip(f"shape {tuple(self.data.shape)} · dtype {self.data.dtype}{size_text}")
 
         self.update_complex_indicators()
         self.update_shift_indicators()

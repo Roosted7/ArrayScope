@@ -31,9 +31,16 @@ class PixelHud(QtWidgets.QFrame):
 
     # ------------------------------------------------------------------
 
+    SEPARATOR = ("separator", "—")
+
     def set_rows(self, rows) -> None:
-        """rows: sequence of (icon_name | None, text)."""
-        rows = tuple((icon, str(text)) for icon, text in rows if str(text))
+        """rows: sequence of (icon_name | None, text); PixelHud.SEPARATOR
+        renders a thin horizontal rule instead of a text row."""
+        rows = tuple(
+            (icon, str(text))
+            for icon, text in rows
+            if (icon, text) == self.SEPARATOR or str(text)
+        )
         if rows == self._rows_key:
             return
         self._rows_key = rows
@@ -42,28 +49,39 @@ class PixelHud(QtWidgets.QFrame):
             icon_label = QtWidgets.QLabel(self)
             icon_label.setFixedSize(self._ICON_SIZE + 2, self._ICON_SIZE + 2)
             text_label = QtWidgets.QLabel(self)
+            separator = QtWidgets.QFrame(self)
+            separator.setObjectName("PixelHudSeparator")
+            separator.setFixedHeight(1)
             self._grid.addWidget(icon_label, index, 0)
             self._grid.addWidget(text_label, index, 1)
-            self._row_widgets.append((icon_label, text_label))
-        for index, (icon_label, text_label) in enumerate(self._row_widgets):
-            if index < len(rows):
-                icon_name, text = rows[index]
-                if icon_name:
-                    icon_label.setPixmap(material_icon(icon_name).pixmap(self._ICON_SIZE, self._ICON_SIZE))
-                else:
-                    icon_label.clear()
-                text_label.setText(text)
-                icon_label.setVisible(True)
-                text_label.setVisible(True)
-            else:
+            self._grid.addWidget(separator, index, 0, 1, 2)
+            self._row_widgets.append((icon_label, text_label, separator))
+        for index, (icon_label, text_label, separator) in enumerate(self._row_widgets):
+            if index >= len(rows):
                 icon_label.setVisible(False)
                 text_label.setVisible(False)
+                separator.setVisible(False)
+                continue
+            icon_name, text = rows[index]
+            if (icon_name, text) == self.SEPARATOR:
+                icon_label.setVisible(False)
+                text_label.setVisible(False)
+                separator.setVisible(True)
+                continue
+            separator.setVisible(False)
+            if icon_name:
+                icon_label.setPixmap(material_icon(icon_name).pixmap(self._ICON_SIZE, self._ICON_SIZE))
+            else:
+                icon_label.clear()
+            text_label.setText(text)
+            icon_label.setVisible(True)
+            text_label.setVisible(True)
 
     def setText(self, text) -> None:  # QLabel-compatible convenience
         self.set_rows(((None, str(text)),))
 
     def text(self) -> str:
-        return "\n".join(label.text() for _icon, label in self._row_widgets if label.isVisible())
+        return "\n".join(label.text() for _icon, label, _sep in self._row_widgets if label.isVisible())
 
     def show_rows_near(self, rows, pos) -> None:
         self.set_rows(rows)

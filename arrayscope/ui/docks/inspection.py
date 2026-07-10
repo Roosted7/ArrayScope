@@ -74,7 +74,10 @@ class InspectionDock(StandardDockWidget):
         self.stats_table.setModel(self.roi_model)
         self.stats_table.verticalHeader().hide()
         self.stats_table.horizontalHeader().setStretchLastSection(True)
-        self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stats_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
 
@@ -88,8 +91,14 @@ class InspectionDock(StandardDockWidget):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.stats_table)
         self.splitter.addWidget(self.histogram_plot)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        # Auto split: the table gets exactly its rows plus half an empty row,
+        # the histogram takes the rest (clamped to 25–75% of the range) —
+        # until the user drags the handle, which takes over for good.
+        self._splitter_user_override = False
+        self._applying_auto_split = False
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
         layout.addWidget(self.splitter, 1)
         add_size_grip(layout)
 
@@ -109,6 +118,35 @@ class InspectionDock(StandardDockWidget):
         self.clear_button.clicked.connect(self._clear_clicked)
         self.stats_table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.add_button.setEnabled(self.current_tool() in {"roi_line", "roi_rectangle"})
+
+    def _on_splitter_moved(self, _pos, _index):
+        if not self._applying_auto_split:
+            self._splitter_user_override = True
+
+    def _apply_auto_split(self):
+        if self._splitter_user_override:
+            return
+        total = self.splitter.height()
+        if total <= 60:
+            return
+        rows = max(1, self.roi_model.rowCount())
+        header_height = self.stats_table.horizontalHeader().height()
+        row_height = self.stats_table.verticalHeader().defaultSectionSize()
+        if rows and self.stats_table.rowHeight(0) > 0:
+            row_height = self.stats_table.rowHeight(0)
+        row_height = max(16, int(row_height or 24))
+        table_needed = int(header_height + (rows + 0.5) * row_height + 2 * self.stats_table.frameWidth())
+        graph = total - table_needed
+        graph = max(int(total * 0.25), min(int(total * 0.75), graph))
+        self._applying_auto_split = True
+        try:
+            self.splitter.setSizes([max(0, total - graph), graph])
+        finally:
+            self._applying_auto_split = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_auto_split()
 
     def apply_theme(self, tokens=None):
         """Restyle the histogram plot from the active theme tokens."""
@@ -160,6 +198,7 @@ class InspectionDock(StandardDockWidget):
             rows.append({"id": roi_id, "values": values, "enabled": selection.enabled, "color": selection.color})
         self.roi_model.set_rows(rows)
         self.stats_table.resizeColumnsToContents()
+        self._apply_auto_split()
 
     def set_histograms(self, histogram_results):
         self.histogram_plot.clear()

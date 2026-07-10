@@ -9,9 +9,36 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from arrayscope.operations.registry import describe_operation
+from arrayscope.operations.registry import describe_operation, get_operation_entry, operation_id_for
 from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import material_icon, set_button_icon
+
+
+def _operation_name(operation) -> str:
+    """Short display name: the registry label without axis phrasing."""
+    try:
+        entry = get_operation_entry(operation_id_for(operation))
+    except Exception:
+        return type(operation).__name__
+    label = entry.label.rstrip(".")
+    for suffix in (" over axis", " axis"):
+        if label.endswith(suffix):
+            label = label[: -len(suffix)]
+    return label
+
+
+def _operation_params_text(operation) -> str:
+    """Editable parameters line: axis plus registered parameter values."""
+    try:
+        entry = get_operation_entry(operation_id_for(operation))
+    except Exception:
+        return ""
+    parts = []
+    if entry.requires_axis:
+        parts.append(f"axis {getattr(operation, 'axis', '?')}")
+    for parameter in entry.parameters:
+        parts.append(f"{parameter.name}={getattr(operation, parameter.name, '?')}")
+    return " · ".join(parts)
 
 
 class ElidedLabel(QtWidgets.QLabel):
@@ -70,6 +97,8 @@ class OperationStackDock(StandardDockWidget):
         on_enabled_changed=None,
         on_edit_operation=None,
         on_sync_toggled=None,
+        on_change_axis=None,
+        axis_choices_provider=None,
     ):
         super().__init__("Operations", parent)
         self.setObjectName("OperationsDock")
@@ -89,6 +118,8 @@ class OperationStackDock(StandardDockWidget):
         self._on_load_view_recipe = on_load_view_recipe
         self._on_enabled_changed = on_enabled_changed
         self._on_edit_operation = on_edit_operation
+        self._on_change_axis = on_change_axis
+        self._axis_choices_provider = axis_choices_provider
         self._operations = ()
         self._steps = ()
         self._operation_shapes = ()
@@ -218,6 +249,25 @@ class OperationStackDock(StandardDockWidget):
             | Qt.QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
         )
         configure_standard_dock(self, min_size=(300, 260))
+        self._footer_compact = False
+
+    def _sync_footer_compaction(self):
+        """Collapse footer button text to icons when the dock gets narrow."""
+        compact = self.width() < 360
+        if compact == self._footer_compact:
+            return
+        self._footer_compact = compact
+        self.materialize_button.setText("" if compact else "Materialize")
+        self.more_button.setText("" if compact else "More")
+        self.more_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly
+            if compact
+            else QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_footer_compaction()
 
     def set_operations(
         self,
@@ -306,15 +356,39 @@ class OperationStackDock(StandardDockWidget):
         drag.setPixmap(material_icon("drag_indicator").pixmap(18, 18))
         drag.setToolTip("Drag to reorder")
         layout.addWidget(drag)
+
+        left_col = QtWidgets.QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(1)
+        axis = getattr(operation, "axis", None)
+        axis_button = QtWidgets.QToolButton()
+        axis_button.setObjectName("OperationAxisButton")
+        axis_button.setText("" if axis is None else f"d{int(axis)}")
+        axis_button.setToolTip("Change the dimension this operation applies to")
+        axis_button.setVisible(axis is not None)
+        if axis is not None:
+            axis_button.clicked.connect(
+                lambda _checked=False, index=index: self._show_axis_menu(index)
+            )
+        left_col.addWidget(axis_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
         enabled = QtWidgets.QCheckBox()
         enabled.setChecked(self._steps[index].enabled if self._steps else True)
         enabled.setToolTip("Enable operation")
         enabled.toggled.connect(lambda checked, index=index: self._on_enabled_changed(index, checked) if self._on_enabled_changed is not None else None)
-        layout.addWidget(enabled)
+        left_col.addWidget(enabled, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
+        layout.addLayout(left_col)
+
         text_col = QtWidgets.QVBoxLayout()
-        title_text = describe_operation(operation)
-        title = ElidedLabel(title_text)
+        text_col.setSpacing(0)
+        title = ElidedLabel(_operation_name(operation))
+        title.setToolTip(describe_operation(operation))
         text_col.addWidget(title)
+        params_text = _operation_params_text(operation)
+        if params_text:
+            params = ElidedLabel(params_text)
+            params.setToolTip(params_text)
+            params.setStyleSheet("QLabel { font-size: 8pt; }")
+            text_col.addWidget(params)
         full_meta = self._operation_meta_text(index, compact=False)
         compact_meta = self._operation_meta_text(index, compact=True)
         meta = ElidedLabel(compact_meta)
@@ -362,6 +436,34 @@ class OperationStackDock(StandardDockWidget):
         has_selection = index is not None
         self.delete_button.setEnabled(has_selection)
 
+    def _operation_at(self, index):
+        if self._steps and 0 <= index < len(self._steps):
+            return self._steps[index].operation
+        if 0 <= index < len(self._operations):
+            return self._operations[index]
+        return None
+
+    def _populate_axis_menu(self, menu, index):
+        provider = self._axis_choices_provider
+        choices = provider() if callable(provider) else ()
+        operation = self._operation_at(index)
+        current_axis = getattr(operation, "axis", None)
+        for label, axis in choices:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(current_axis is not None and int(axis) == int(current_axis))
+            action.triggered.connect(
+                lambda _checked=False, index=index, axis=axis: self._on_change_axis(index, int(axis))
+                if self._on_change_axis is not None
+                else None
+            )
+        return bool(choices)
+
+    def _show_axis_menu(self, index):
+        menu = QtWidgets.QMenu(self)
+        if self._populate_axis_menu(menu, index):
+            menu.exec(QtGui.QCursor.pos())
+
     def _show_context_menu(self, pos):
         item = self.operation_list.itemAt(pos)
         if item is not None:
@@ -370,16 +472,35 @@ class OperationStackDock(StandardDockWidget):
         if index is None:
             return
 
+        operation = self._operation_at(index)
+        step_enabled = self._steps[index].enabled if self._steps and index < len(self._steps) else True
         menu = QtWidgets.QMenu(self.operation_list)
-        delete_action = menu.addAction("Delete operation")
-        move_up_action = menu.addAction("Move up")
-        move_down_action = menu.addAction("Move down")
+        toggle_action = menu.addAction(
+            material_icon("close" if step_enabled else "done"),
+            "Disable operation" if step_enabled else "Enable operation",
+        )
+        axis_menu = menu.addMenu(material_icon("call_split"), "Change dimension")
+        if getattr(operation, "axis", None) is None or not self._populate_axis_menu(axis_menu, index):
+            axis_menu.menuAction().setEnabled(False)
+        edit_action = menu.addAction(material_icon("edit"), "Edit parameters…")
+        edit_action.setEnabled(type(operation).__name__ == "Crop")
+        menu.addSeparator()
+        move_up_action = menu.addAction(material_icon("arrow_upward"), "Move up")
+        move_down_action = menu.addAction(material_icon("arrow_downward"), "Move down")
         move_up_action.setEnabled(index > 0)
         row_count = len(self._steps) if self._steps else len(self._operations)
         move_down_action.setEnabled(index < row_count - 1)
+        menu.addSeparator()
+        delete_action = menu.addAction(material_icon("delete"), "Delete operation")
         action = menu.exec(self.operation_list.mapToGlobal(pos))
         if action == delete_action:
             self._on_delete_selected(index)
+        elif action == toggle_action:
+            if self._on_enabled_changed is not None:
+                self._on_enabled_changed(index, not step_enabled)
+        elif action == edit_action:
+            if self._on_edit_operation is not None:
+                self._on_edit_operation(index)
         elif action == move_up_action:
             self._on_move_selected_up(index)
         elif action == move_down_action:

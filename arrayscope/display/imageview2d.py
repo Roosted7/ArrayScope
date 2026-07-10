@@ -1962,7 +1962,13 @@ class ImageViewShell(QtWidgets.QWidget):
                 rows = []
         show_rows = getattr(self._hud_widget, "show_rows_near", None)
         if callable(show_rows):
-            rows.append(("colorize", str(text)) if rows else (None, str(text)))
+            if rows:
+                separator = getattr(type(self._hud_widget), "SEPARATOR", None)
+                if separator is not None:
+                    rows.append(separator)
+                rows.append(("colorize", str(text)))
+            else:
+                rows.append((None, str(text)))
             show_rows(rows, local)
         else:
             self._hud_widget.show_text_near(text, local)

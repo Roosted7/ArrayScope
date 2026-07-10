@@ -63,7 +63,9 @@ def test_dimension_strip_wraps_to_allocated_width(qt_app):
     strip._relayout()
 
     assert strip._columns == 2
-    assert strip.maximumWidth() <= 484
+    # Two columns at most: max chip width + preferred spacing must fit the
+    # 520 px allocation.
+    assert strip.maximumWidth() <= 520
     assert max(strip.chip(axis).geometry().right() for axis in range(6)) <= strip.contentsRect().right()
     assert strip.chip(2).geometry().top() > strip.chip(0).geometry().top()
     strip.close()

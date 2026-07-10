@@ -330,8 +330,6 @@ class RenderOrchestrator(
     def _on_profile_marker_moved(self, image_x, image_y):
         if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
             return
-        if not self.win.profile_dock.isVisible():
-            return
         if self.win.view_state.image_axes is None:
             return
         clamped = self._clamp_profile_marker_point(image_x, image_y)
@@ -340,9 +338,23 @@ class RenderOrchestrator(
             return
         if (float(clamped[0]), float(clamped[1])) != (float(image_x), float(image_y)):
             self.win.img_view.setProfileMarker(clamped[0], clamped[1], visible=True)
+        self._update_marker_pixel_status(clamped)
+        # The crosshair (and its status readout) stay live while the profile
+        # dock is closed; only the plot refresh needs the dock.
+        if not self.win.profile_dock.isVisible():
+            return
         self.win._pending_profile_point = (float(clamped[0]), float(clamped[1]))
         if not self.win._profile_timer.isActive():
             self.win._profile_timer.start()
+
+    def _update_marker_pixel_status(self, point) -> None:
+        """Mirror the crosshair value into the toolbar status readout."""
+        try:
+            view = self.win.img_view.getView()
+            scene_pos = view.mapViewToScene(Qt.QtCore.QPointF(float(point[0]), float(point[1])))
+            self.getPixel(scene_pos)
+        except Exception:
+            pass
 
     def _update_live_profile_from_pending_pos(self):
         from time import perf_counter
@@ -530,12 +542,23 @@ class RenderOrchestrator(
             return
         if not visible:
             self.win._profile_dock_user_visible = False
-        if not visible and self.win.widgets['buttons']['display']['live_profile'].isChecked():
-            self.win.widgets['buttons']['display']['live_profile'].setChecked(False)
+        # Closing the dock keeps live-profile state and the crosshair alive
+        # (the marker value stays readable in the toolbar status); the chip
+        # badges just stop highlighting until the dock returns.
+        strip = getattr(self.win, "dimension_strip", None)
+        if strip is not None and hasattr(strip, "set_profile_available"):
+            strip.set_profile_available(bool(visible))
+            strip.update_state(
+                self.win.data.shape,
+                self.win.view_state,
+                self.win.profile_axes,
+                axes=self.win.document.current_axes,
+            )
         if visible:
             retry_profile = getattr(self, "_retry_loading_montage_profile", None)
             if callable(retry_profile):
                 retry_profile()
+            self.update_line_plot()
 
     def _on_inspection_dock_visibility_changed(self, visible):
         if getattr(self.win, "_closing", False):

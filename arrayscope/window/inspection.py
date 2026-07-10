@@ -17,6 +17,7 @@ from arrayscope.core.scheduler import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.tile_regions import TileRegionRequest
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.tile_data_provider import TileDataProvider
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
@@ -586,26 +587,53 @@ class InspectionWorkflowMixin:
             delete_action.triggered.connect(lambda _checked=False: self._delete_roi(roi_id))
             menu.addSeparator()
         live = self.widgets["buttons"]["display"]["live_profile"].isChecked()
-        profile_action = menu.addAction("Live profile")
+        profile_action = menu.addAction(material_icon("show_chart"), "Live profile")
         profile_action.setCheckable(True)
         profile_action.setChecked(live)
         profile_action.triggered.connect(lambda checked=False: self._set_live_profile_from_context(bool(checked), image_point))
         menu.addSeparator()
-        for label, tool in (
-            ("Add line ROI", "roi_line"),
-            ("Add rectangle ROI", "roi_rectangle"),
-            ("Draw polyline ROI", "roi_polyline"),
-            ("Draw freehand ROI", "roi_freehand"),
+        for label, icon_name, tool in (
+            ("Add line ROI", "show_chart", "roi_line"),
+            ("Add rectangle ROI", "crop", "roi_rectangle"),
+            ("Draw polyline ROI", "waves", "roi_polyline"),
+            ("Draw freehand ROI", "edit", "roi_freehand"),
         ):
-            action = menu.addAction(label)
+            action = menu.addAction(material_icon(icon_name), label)
             action.triggered.connect(lambda checked=False, tool=tool, image_point=image_point: self._add_roi_for_tool_at(tool, image_point))
         menu.addSeparator()
-        show_inspection = menu.addAction("Show inspection dock")
+        # Save-viewport entry: clicking the parent saves the default flavor
+        # (viewport with overlays); hovering expands the specific options.
+        save_menu = menu.addMenu(material_icon("save"), "Save viewport")
+        default_action = save_menu.addAction(material_icon("save"), "Viewport with overlays")
+        default_font = default_action.font()
+        default_font.setBold(True)
+        default_action.setFont(default_font)
+        default_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-with-overlays"))
+        without_action = save_menu.addAction(material_icon("crop"), "Viewport without overlays")
+        without_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-without-overlays"))
+        full_action = save_menu.addAction(material_icon("data_array"), "Full content")
+        full_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("full-content"))
+        save_menu.menuAction().triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-with-overlays"))
+        menu.addSeparator()
+        show_inspection = menu.addAction(material_icon("analytics"), "Show inspection dock")
         show_inspection.triggered.connect(self._show_inspection_dock)
-        clear_rois = menu.addAction("Clear ROIs")
+        clear_rois = menu.addAction(material_icon("delete_sweep"), "Clear ROIs")
         clear_rois.setEnabled(hasattr(self, "img_view") and bool(self.img_view.roiSelections()))
         clear_rois.triggered.connect(self._clear_rois)
         menu.exec(global_pos)
+
+    def _save_viewport_stub(self, flavor: str) -> None:
+        """Placeholder for viewport export (implementation to follow)."""
+        labels = {
+            "viewport-with-overlays": "viewport with overlays",
+            "viewport-without-overlays": "viewport without overlays",
+            "full-content": "full content",
+        }
+        show_status_message(
+            self,
+            f"Save {labels.get(flavor, flavor)}: not implemented yet.",
+            timeout=3000,
+        )
 
     def _set_live_profile_from_context(self, enabled, image_point=None):
         self.widgets["buttons"]["display"]["live_profile"].setChecked(bool(enabled))
@@ -632,14 +660,21 @@ class InspectionWorkflowMixin:
             return
         # Cached for the hover HUD (per-ROI rows on mouse-over).
         self._hud_stats_by_roi = dict(stats_by_roi)
-        lines = []
+        rows = []
         for _roi_id, (selection, stats) in list(stats_by_roi.items())[:6]:
-            label = selection.label
-            kind = selection.geometry.kind.value.replace("_", " ")
-            mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f" mean={stats.mean:.4g}"
-            count = f" n={stats.finite_count}"
-            lines.append(f"{label}: {kind}{count}{mean}")
-        self.img_view.setRoiInfoText("\n".join(lines))
+            from html import escape
+
+            label = escape(str(selection.label))
+            kind = escape(selection.geometry.kind.value.replace("_", " "))
+            mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f"mean={stats.mean:.4g}"
+            count = f"n={stats.finite_count}"
+            rows.append(
+                f"<tr><td><b>{label}</b>&nbsp;<i>{kind}</i>:</td>"
+                f"<td align='right' style='padding-left:10px'>{count}</td>"
+                f"<td align='right' style='padding-left:10px'>{mean}</td></tr>"
+            )
+        text = "" if not rows else "<table cellspacing='0' cellpadding='0'>" + "".join(rows) + "</table>"
+        self.img_view.setRoiInfoText(text)
 
     def _refresh_hidden_roi_overlay_from_committed_frame(self) -> None:
         if not hasattr(self, "img_view") or not hasattr(self, "inspection_dock"):

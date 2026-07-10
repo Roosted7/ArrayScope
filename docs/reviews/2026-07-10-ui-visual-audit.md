@@ -89,6 +89,36 @@ Second pass (same day, from on-system screenshots + feedback):
 
 Still open: B1 (empty 1D profile curve — pipeline-linked).
 
+Third pass (same day, user feedback on interactive session):
+
+- Dimension strip: index badge is the profile toggle (P button removed);
+  badges share one width sized to the largest index, un-highlight while the
+  profile dock is hidden, and reopen it on click. Slice input defaults to
+  fitting `100:2:200` (min ~3.5 chars); size label centered (5→3 chars);
+  inter-chip spacing 12 px preferred shrinking to 4 px before chips shrink;
+  sync button pinned right with fixed gaps; native spin arrows restored
+  (the QSS subcontrol rules had hidden them).
+- Profile semantics: closing the dock keeps the live crosshair and its
+  value readout; reopening restores the remembered state; badge clicks and
+  live-profile enable auto-open the dock; crosshair moves mirror the value
+  into the toolbar status.
+- Toolbar: left controls / centered status text (pixel value + muted
+  shape·dtype, both eliding with full-text tooltips) / right-aligned
+  window-mode + auto-levels + sync.
+- ROI: default names are plain numbers; renameable inline in the
+  inspection table; the overlay renders bold name + italic kind left-aligned
+  with n/mean column-aligned right; the hover HUD separates ROI/profile
+  context from the pixel row with a thin rule.
+- Inspection dock: auto split sizes the table to its rows plus half an
+  empty row (histogram clamped to 25–75%), until the user drags the handle.
+- Operations dock: accent axis chip (d0/d2…) above the enable checkbox
+  opens a change-dimension menu; rows show name / parameters / shape·dtype
+  on separate lines; the context menu gained enable-disable, change
+  dimension, edit parameters — all iconed; Materialize/More collapse to
+  icons below ~360 px.
+- Image context menu: icons on every entry plus a stubbed "Save viewport"
+  submenu (with overlays default/bold, without overlays, full content).
+
 Known interaction: styling `HistogramLUTItem.region` brushes breaks offscreen
 VisPy grabs (`test_vispy_direct_tiled_complex_display_images_render_nonblank`);
 only the region line pens are themed.

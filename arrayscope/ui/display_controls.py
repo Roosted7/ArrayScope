@@ -31,6 +31,13 @@ def _scale_value_for_button(window, button) -> str:
     return "linear"
 
 
+
+def _make_array_info_label():
+    label = QtWidgets.QLabel("")
+    label.setObjectName("ArrayInfoLabel")
+    return label
+
+
 class DisplayControlBuildMixin:
     def _build_window_ui(self, data, filepath):
         self.state_binder = ViewStateBinder()
@@ -83,7 +90,7 @@ class DisplayControlBuildMixin:
                 'slice': QtWidgets.QLabel('Slice'),
                 'dimensions': QtWidgets.QLabel('Dimensions'),
                 'pixelValue': PixelStatusLabel(),
-                'arrayInfo': QtWidgets.QLabel('')
+                'arrayInfo': _make_array_info_label()
             },
             'spins': {
                 'slice_indices': [QtWidgets.QSpinBox(minimum=0, maximum=data.shape[i]-1) for i in range(data.ndim)]
@@ -293,7 +300,11 @@ class DisplayControlBuildMixin:
         self.dimension_strip.focusedAxisChanged.connect(lambda axis: setattr(self, "_focused_dimension_axis", int(axis)))
         for container in self.dim_containers:
             container.hide()
-        self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
+        # Strip centered in the leftover space; sync button pinned to the
+        # right edge with fixed gaps on both sides (it never gets squeezed).
+        self.layouts['dims'].addStretch(1)
+        self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.layouts['dims'].addStretch(1)
         self.sync_dims_button = QtWidgets.QToolButton()
         self.sync_dims_button.setCheckable(True)
         set_button_icon(
@@ -302,11 +313,22 @@ class DisplayControlBuildMixin:
             tooltip="Sync dimension indexing with other linked ArrayScope windows (also from separately started sessions)",
         )
         self.sync_dims_button.toggled.connect(lambda checked: self._on_sync_facet_toggled("dims", checked))
+        self.layouts['dims'].addSpacing(12)
         self.layouts['dims'].addWidget(self.sync_dims_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.layouts['dims'].addSpacing(12)
+        def _apply_dimension_strip_state(value):
+            panel_manager = getattr(self, "panel_manager", None)
+            if panel_manager is not None:
+                try:
+                    self.dimension_strip.set_profile_available(panel_manager.is_visible("profile"))
+                except KeyError:
+                    pass
+            self.dimension_strip.update_state(value[0], value[1], value[2], axes=value[3])
+
         self.state_binder.bind(
             "dimension-strip",
             read=lambda win: (tuple(win.data.shape), win.view_state, tuple(win.profile_axes), win.document.current_axes),
-            apply=lambda value: self.dimension_strip.update_state(value[0], value[1], value[2], axes=value[3]),
+            apply=_apply_dimension_strip_state,
         )
         for axis in range(data.ndim):
             self.state_binder.bind(
@@ -526,8 +548,13 @@ class DisplayControlBuildMixin:
             ),
             apply=lambda value: self.display_toolbar.set_current(channel=value[0], scale=value[1], window_mode=value[2]),
         )
-        self.layouts['topUp'].addWidget(self.widgets['labels']['pixelValue'])
-        self.layouts['topUp'].addWidget(self.widgets['labels']['arrayInfo'])
+        # Status readouts live in the toolbar's centered section; the array
+        # info is secondary (muted, elides via Ignored policy, full text on
+        # hover).
+        array_info = self.widgets['labels']['arrayInfo']
+        array_info.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.display_toolbar.add_center_widget(self.widgets['labels']['pixelValue'])
+        self.display_toolbar.add_center_widget(array_info)
 
     def _compose_central_layout(self):
         self.layouts['botLeft'].addLayout(self.layouts['dims'])
@@ -577,6 +604,9 @@ class DisplayControlBuildMixin:
             on_select_roi=self._select_roi,
             on_sync_toggled=lambda checked: self._on_sync_facet_toggled("rois", checked),
         )
+        self.inspection_dock.roi_model.set_rename_callback(
+            lambda roi_id, text: self._update_roi_selection(roi_id, label=text)
+        )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.inspection_dock)
         self.panel_manager.register_panel("inspection", "Inspection", self.inspection_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.LeftDockWidgetArea)
         self.inspection_dock.visibilityChanged.connect(self._on_inspection_dock_visibility_changed)
@@ -599,6 +629,8 @@ class DisplayControlBuildMixin:
             on_enabled_changed=self.set_operation_enabled,
             on_edit_operation=self.edit_operation,
             on_sync_toggled=lambda checked: self._on_sync_facet_toggled("operations", checked),
+            on_change_axis=self.change_operation_axis,
+            axis_choices_provider=self._axis_choices,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self.panel_manager.register_panel("operations", "Operations", self.operation_dock, default_area=Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea)

@@ -84,6 +84,20 @@ class DisplayToolbar(QtWidgets.QToolBar):
             if button is not None:
                 configure_tool_button(button)
 
+        # Expanding center section: the status readout (pixel/crosshair value,
+        # slice context) lives between the left view controls and the
+        # right-aligned window/level controls.
+        self.center_container = QtWidgets.QWidget()
+        self.center_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred
+        )
+        self._center_layout = QtWidgets.QHBoxLayout(self.center_container)
+        self._center_layout.setContentsMargins(10, 0, 10, 0)
+        self._center_layout.setSpacing(10)
+        self._center_layout.addStretch(1)
+        self._center_layout.addStretch(1)
+        self.addWidget(self.center_container)
+
         self.addSeparator()
         self.window_combo = self._add_group("Window", "contrast", _WINDOW_ITEMS)
         self.window_combo.currentIndexChanged.connect(
@@ -112,6 +126,11 @@ class DisplayToolbar(QtWidgets.QToolBar):
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
+
+    def add_center_widget(self, widget) -> None:
+        """Add a widget to the centered status section (kept centered in the
+        free space between the left and right control groups)."""
+        self._center_layout.insertWidget(self._center_layout.count() - 1, widget)
 
     def _add_group(self, label_text, icon_name, items):
         icon_label = QtWidgets.QLabel()
