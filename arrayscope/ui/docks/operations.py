@@ -325,7 +325,8 @@ class OperationStackDock(StandardDockWidget):
         edit = QtWidgets.QToolButton()
         set_button_icon(edit, "edit", tooltip="Edit operation")
         edit.setFixedSize(24, 24)
-        edit.setEnabled(type(operation).__name__ == "Crop")
+        # Only operations with editable parameters get the button at all.
+        edit.setVisible(type(operation).__name__ == "Crop")
         edit.clicked.connect(lambda _checked=False, index=index: self._on_edit_operation(index) if self._on_edit_operation is not None else None)
         layout.addWidget(edit)
         delete = QtWidgets.QToolButton()

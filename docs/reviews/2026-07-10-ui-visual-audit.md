@@ -62,10 +62,32 @@ label fixed), C5 (histogram axes labeled), B2 (`finite_bounds` masks ±Inf;
 forces linear scale). Colorbar gradient ticks are hidden (colormaps stay
 editable via the gradient context menu).
 
-Still open: C2 (toolbar clips below ~460 px width — it lives in a plain
-layout, not a QMainWindow toolbar, so no overflow chevron), B1 (empty 1D
-profile plot — appears linked to the pipeline stall below), and the wasted
-top area in the 1D layout.
+Second pass (same day, from on-system screenshots + feedback):
+
+- Icons are now explicitly tinted from the palette (raw Material SVGs are
+  black — invisible on dark systems), with disabled and checked-state
+  variants, re-tinted on theme switch (`icons.refresh_icon_tints`).
+- Native theme derives full ArrayScope tokens from the OS palette instead
+  of dropping all styling (readable chips/HUD/checked states, system colors).
+- Selected list rows use a surface fill + accent edge instead of a full
+  accent fill (ops rows stay readable when selected).
+- Dimension chips: index badge bubble on the left, size without brackets,
+  `|` separators, elastic widths (slice input shrinks before rows reflow;
+  chip widths stay consistent across wrapped rows; sync-button footprint
+  reserved so nothing clips), native-style spin arrows.
+- C2 resolved: adaptive toolbar — iconed group labels and combo entries;
+  degradation order: hide label text → hide label icons → icon-only combo
+  entries; toolbar takes stretch priority over the eliding status labels.
+- Size grips only on detached panels; inspection table/histogram split is a
+  QSplitter; ops edit button hidden for non-editable operations.
+- ROI right-click menu (rename/recolor/delete); hover HUD gains iconed
+  context rows for the hovered ROI (label/kind, mean/n, min/max) and the
+  profile marker; the HUD follows the cursor during ROI/profile drags (drag
+  moves are re-emitted as scene mouse-moves — the pointer driver consumes
+  them otherwise).
+- 1D input caps the central-area height so the profile dock gets the space.
+
+Still open: B1 (empty 1D profile curve — pipeline-linked).
 
 Known interaction: styling `HistogramLUTItem.region` brushes breaks offscreen
 VisPy grabs (`test_vispy_direct_tiled_complex_display_images_render_nonblank`);

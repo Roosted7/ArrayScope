@@ -432,6 +432,9 @@ class DisplayControlBuildMixin:
             self.img_view.setLevelPresentationChangeHandler(self._on_level_presentation_changed)
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
+        set_hud_provider = getattr(self.img_view, "setHudContextProvider", None)
+        if callable(set_hud_provider):
+            set_hud_provider(self._hud_context_rows)
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))
@@ -510,7 +513,10 @@ class DisplayControlBuildMixin:
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
         self.display_toolbar.syncWindowToggled.connect(lambda checked: self._on_sync_facet_toggled("levels", checked))
-        self.layouts['topUp'].addWidget(self.display_toolbar)
+        # Stretch priority: the toolbar claims spare row width before the
+        # (eliding) pixel/array status labels, so it only compacts when the
+        # window is genuinely tight.
+        self.layouts['topUp'].addWidget(self.display_toolbar, 1)
         self.state_binder.bind(
             "display-toolbar",
             read=lambda win: (

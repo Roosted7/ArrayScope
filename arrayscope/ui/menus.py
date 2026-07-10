@@ -405,6 +405,9 @@ class WindowMenuMixin:
         app = QtWidgets.QApplication.instance()
         if app is None:
             return
+        from arrayscope.ui.icons import refresh_icon_tints
+
+        refresh_icon_tints()
         windows = [w for w in app.topLevelWidgets() if isinstance(w, type(self))]
         if self not in windows:
             windows.append(self)
@@ -422,6 +425,10 @@ class WindowMenuMixin:
             apply_inspection = getattr(inspection_dock, "apply_theme", None)
             if callable(apply_inspection):
                 apply_inspection()
+            toolbar = getattr(window, "display_toolbar", None)
+            refresh_toolbar = getattr(toolbar, "refresh_icons", None)
+            if callable(refresh_toolbar):
+                refresh_toolbar()
 
     def _sync_theme_actions(self):
         if not hasattr(self, "_theme_actions"):

@@ -5,18 +5,68 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
+from arrayscope.ui.icons import material_icon
 
-class PixelHud(QtWidgets.QLabel):
+
+class PixelHud(QtWidgets.QFrame):
+    """Cursor-following info chip.
+
+    Shows the pixel readout, optionally preceded by context rows (hovered ROI
+    or profile marker details), each with a small leading icon.
+    """
+
+    _ICON_SIZE = 13
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("PixelHud")
-        self.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
-        # Styling comes from the application stylesheet (QLabel#PixelHud).
         self.setAttribute(Qt.QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._grid = QtWidgets.QGridLayout(self)
+        self._grid.setContentsMargins(7, 5, 8, 5)
+        self._grid.setHorizontalSpacing(5)
+        self._grid.setVerticalSpacing(2)
+        self._row_widgets: list[tuple[QtWidgets.QLabel, QtWidgets.QLabel]] = []
+        self._rows_key = None
         self.hide()
 
-    def show_text_near(self, text, pos):
-        self.setText(text)
+    # ------------------------------------------------------------------
+
+    def set_rows(self, rows) -> None:
+        """rows: sequence of (icon_name | None, text)."""
+        rows = tuple((icon, str(text)) for icon, text in rows if str(text))
+        if rows == self._rows_key:
+            return
+        self._rows_key = rows
+        while len(self._row_widgets) < len(rows):
+            index = len(self._row_widgets)
+            icon_label = QtWidgets.QLabel(self)
+            icon_label.setFixedSize(self._ICON_SIZE + 2, self._ICON_SIZE + 2)
+            text_label = QtWidgets.QLabel(self)
+            self._grid.addWidget(icon_label, index, 0)
+            self._grid.addWidget(text_label, index, 1)
+            self._row_widgets.append((icon_label, text_label))
+        for index, (icon_label, text_label) in enumerate(self._row_widgets):
+            if index < len(rows):
+                icon_name, text = rows[index]
+                if icon_name:
+                    icon_label.setPixmap(material_icon(icon_name).pixmap(self._ICON_SIZE, self._ICON_SIZE))
+                else:
+                    icon_label.clear()
+                text_label.setText(text)
+                icon_label.setVisible(True)
+                text_label.setVisible(True)
+            else:
+                icon_label.setVisible(False)
+                text_label.setVisible(False)
+
+    def setText(self, text) -> None:  # QLabel-compatible convenience
+        self.set_rows(((None, str(text)),))
+
+    def text(self) -> str:
+        return "\n".join(label.text() for _icon, label in self._row_widgets if label.isVisible())
+
+    def show_rows_near(self, rows, pos) -> None:
+        self.set_rows(rows)
         self.adjustSize()
         parent = self.parentWidget()
         if parent is None:
@@ -29,3 +79,6 @@ class PixelHud(QtWidgets.QLabel):
             self.move(x, y)
         self.show()
         self.raise_()
+
+    def show_text_near(self, text, pos) -> None:
+        self.show_rows_near(((None, str(text)),), pos)

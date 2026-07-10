@@ -1,12 +1,38 @@
-"""Compact display controls for the ArrayScope main window."""
+"""Compact, width-adaptive display controls for the ArrayScope main window.
+
+The toolbar degrades gracefully as horizontal space shrinks:
+
+- level 0: icon + text before each dropdown; dropdown entries show icon + text
+- level 1: label text hidden, label icons kept (first adaptation)
+- level 2: label icons hidden too
+- level 3: dropdown entry text hidden, leaving icon-only entries
+"""
 
 from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
-from arrayscope.ui.icons import set_action_icon
+from arrayscope.ui.icons import glyph_icon, material_icon, set_action_icon
 from arrayscope.ui.widgets import TOOL_BUTTON_STYLE, configure_tool_button
+
+
+_CHANNEL_ITEMS = (
+    ("Complex", "complex", "ℂ"),
+    ("Real", "real", "ℝ"),
+    ("Abs", "abs", "|z|"),
+    ("Imag", "imag", "ℑ"),
+    ("Phase", "angle", "φ"),
+)
+_SCALE_ITEMS = (
+    ("Linear", "linear", "lin"),
+    ("Log", "log", "log"),
+    ("Symlog", "symlog", "±log"),
+)
+_WINDOW_ITEMS = (
+    ("Relative", "relative", "%"),
+    ("Absolute", "absolute", "#"),
+)
 
 
 class DisplayToolbar(QtWidgets.QToolBar):
@@ -24,23 +50,24 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.setMovable(False)
         self.setIconSize(Qt.QtCore.QSize(16, 16))
         self.setStyleSheet(TOOL_BUTTON_STYLE)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self._channel_options_state: tuple[tuple[str, bool], ...] | None = None
+        self._compact_level = 0
+        self._group_icon_labels: list[tuple[QtWidgets.QLabel, str]] = []
+        # QToolBar manages child visibility through the QWidgetActions
+        # returned by addWidget; hiding the widgets directly gets undone.
+        self._group_icon_actions: list = []
+        self._group_text_actions: list = []
+        self._combo_items: list[tuple[QtWidgets.QComboBox, tuple[tuple[str, str, str], ...]]] = []
 
-        self.channel_combo = QtWidgets.QComboBox()
-        for label, value in (("Complex", "complex"), ("Real", "real"), ("Abs", "abs"), ("Imag", "imag"), ("Phase", "angle")):
-            self.channel_combo.addItem(label, value)
+        self.channel_combo = self._add_group("Channel", "layers", _CHANNEL_ITEMS)
         self.channel_combo.currentIndexChanged.connect(self._channel_index_changed)
-        self.addWidget(QtWidgets.QLabel("Channel "))
-        self.addWidget(self.channel_combo)
 
-        self.scale_combo = QtWidgets.QComboBox()
-        self.scale_combo.addItem("Linear", "linear")
-        self.scale_combo.addItem("Log", "log")
-        self.scale_combo.addItem("Symlog", "symlog")
-        self.scale_combo.currentIndexChanged.connect(lambda _i: self.scaleChanged.emit(self.scale_combo.currentData()))
         self.addSeparator()
-        self.addWidget(QtWidgets.QLabel("Scale "))
-        self.addWidget(self.scale_combo)
+        self.scale_combo = self._add_group("Scale", "linear_scale", _SCALE_ITEMS)
+        self.scale_combo.currentIndexChanged.connect(
+            lambda _i: self.scaleChanged.emit(self.scale_combo.currentData())
+        )
 
         self.addSeparator()
         self.fit_action = self.addAction("Fit")
@@ -57,13 +84,11 @@ class DisplayToolbar(QtWidgets.QToolBar):
             if button is not None:
                 configure_tool_button(button)
 
-        self.window_combo = QtWidgets.QComboBox()
-        self.window_combo.addItem("Relative", "relative")
-        self.window_combo.addItem("Absolute", "absolute")
-        self.window_combo.currentIndexChanged.connect(lambda _i: self.windowModeChanged.emit(self.window_combo.currentData()))
         self.addSeparator()
-        self.addWidget(QtWidgets.QLabel("Window "))
-        self.addWidget(self.window_combo)
+        self.window_combo = self._add_group("Window", "contrast", _WINDOW_ITEMS)
+        self.window_combo.currentIndexChanged.connect(
+            lambda _i: self.windowModeChanged.emit(self.window_combo.currentData())
+        )
 
         self.auto_window_action = self.addAction("Auto")
         set_action_icon(self.auto_window_action, "tonality")
@@ -83,6 +108,86 @@ class DisplayToolbar(QtWidgets.QToolBar):
         button = self.widgetForAction(self.sync_window_action)
         if button is not None:
             configure_tool_button(button)
+
+    # ------------------------------------------------------------------
+    # Construction helpers
+    # ------------------------------------------------------------------
+
+    def _add_group(self, label_text, icon_name, items):
+        icon_label = QtWidgets.QLabel()
+        icon_label.setPixmap(material_icon(icon_name).pixmap(14, 14))
+        icon_label.setToolTip(label_text)
+        self._group_icon_actions.append(self.addWidget(icon_label))
+        self._group_icon_labels.append((icon_label, icon_name))
+
+        text_label = QtWidgets.QLabel(label_text)
+        self._group_text_actions.append(self.addWidget(text_label))
+
+        combo = QtWidgets.QComboBox()
+        combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setToolTip(label_text)
+        for text, value, glyph in items:
+            combo.addItem(glyph_icon(glyph), text, value)
+            combo.setItemData(combo.count() - 1, text, QtCore.Qt.ItemDataRole.ToolTipRole)
+        self.addWidget(combo)
+        self._combo_items.append((combo, tuple(items)))
+        return combo
+
+    # ------------------------------------------------------------------
+    # Width adaptation
+    # ------------------------------------------------------------------
+
+    def compact_level(self) -> int:
+        return self._compact_level
+
+    def _apply_compact_level(self, level: int) -> None:
+        level = max(0, min(3, int(level)))
+        self._compact_level = level
+        for action in self._group_text_actions:
+            action.setVisible(level < 1)
+        for action in self._group_icon_actions:
+            action.setVisible(level < 2)
+        for combo, items in self._combo_items:
+            for index, (text, _value, _glyph) in enumerate(items):
+                combo.setItemText(index, "" if level >= 3 else text)
+            combo.setMaximumWidth(46 if level >= 3 else 16_777_215)
+
+    def _required_width(self, level: int) -> int:
+        self._apply_compact_level(level)
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        return self.sizeHint().width()
+
+    def adapt_to_width(self, available: int | None = None) -> int:
+        """Pick the least-compact level that fits `available` pixels."""
+        available = int(self.width() if available is None else available)
+        previous = self._compact_level
+        chosen = 3
+        for level in range(4):
+            if self._required_width(level) <= available:
+                chosen = level
+                break
+        if chosen != self._compact_level or chosen != previous:
+            self._apply_compact_level(chosen)
+        return self._compact_level
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.adapt_to_width(event.size().width())
+
+    def refresh_icons(self) -> None:
+        """Re-tint label pixmaps and combo item icons for the active palette."""
+        for icon_label, name in self._group_icon_labels:
+            icon_label.setPixmap(material_icon(name).pixmap(14, 14))
+        for combo, items in self._combo_items:
+            for index, (_text, _value, glyph) in enumerate(items):
+                combo.setItemIcon(index, glyph_icon(glyph))
+
+    # ------------------------------------------------------------------
+    # State API (unchanged)
+    # ------------------------------------------------------------------
 
     def set_channel_options(self, enabled_channels):
         state = tuple(

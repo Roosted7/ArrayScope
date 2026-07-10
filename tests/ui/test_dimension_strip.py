@@ -84,19 +84,23 @@ def test_chip_labels_show_axis_metadata_when_available(qt_app):
 
     strip.update_state((4, 5, 6), state, profile_axes=(2,), axes=axes)
 
-    assert strip.chip(0).axis_label.text() == "Readout [4]"
-    assert strip.chip(1).axis_label.text() == "1 [5]"
-    assert strip.chip(2).axis_label.text() == "Slice [6]"
+    assert strip.chip(0).axis_label.text() == "Readout · 4"
+    # Positional fallback names collapse to the size; the badge shows the index.
+    assert strip.chip(1).axis_label.text() == "5"
+    assert strip.chip(2).axis_label.text() == "Slice · 6"
+    assert strip.chip(0).index_badge.text() == "0"
+    assert strip.chip(2).index_badge.text() == "2"
     assert "spacing: 1.5 mm" in strip.chip(0).axis_label.toolTip()
     assert "origin: -9 mm" in strip.chip(2).axis_label.toolTip()
 
-    # Default axes keep the compact positional label.
+    # Default axes keep the compact size-only label; the badge carries the
+    # dimension index.
     strip.update_state((4, 5, 6), state, profile_axes=(2,), axes=default_axes((4, 5, 6)))
-    assert strip.chip(0).axis_label.text() == "0 [4]"
+    assert strip.chip(0).axis_label.text() == "4"
 
     # Without metadata, behavior is unchanged.
     strip.update_state((4, 5, 6), state, profile_axes=(2,))
-    assert strip.chip(0).axis_label.text() == "0 [4]"
+    assert strip.chip(0).axis_label.text() == "4"
     strip.close()
 
 
@@ -110,7 +114,7 @@ def test_chip_ignores_axes_that_do_not_match_shape(qt_app):
 
     strip.update_state((4, 5), state, axes=(AxisInfo("readout", "Readout", 4),))
 
-    assert strip.chip(0).axis_label.text() == "0 [4]"
+    assert strip.chip(0).axis_label.text() == "4"
     strip.close()
 
 

@@ -23,12 +23,21 @@ class _SliceSelectionValidator(QtGui.QValidator):
         return state, text, pos
 
 
+def _make_chip_separator(parent) -> QtWidgets.QFrame:
+    separator = QtWidgets.QFrame(parent)
+    separator.setObjectName("DimChipSeparator")
+    separator.setFixedWidth(1)
+    return separator
+
+
 class SliceIndexEdit(QtWidgets.QAbstractSpinBox):
     stepRequested = Qt.QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.PlusMinus)
+        # Native-style arrows render cleanly in every theme (the PlusMinus
+        # glyphs looked rough, especially on light palettes).
+        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.lineEdit().setValidator(_SliceSelectionValidator(self))
 
     def text(self):
@@ -80,12 +89,20 @@ class DimensionChip(QtWidgets.QFrame):
         self.customContextMenuRequested.connect(lambda _pos: self.operationRequested.emit(self.axis))
 
         layout = QtWidgets.QHBoxLayout()
-        layout.setContentsMargins(5, 3, 5, 3)
-        layout.setSpacing(3)
+        # The index badge sits flush against the chip's left edge.
+        layout.setContentsMargins(0, 0, 6, 0)
+        layout.setSpacing(4)
+
+        self.index_badge = QtWidgets.QLabel(str(self.axis))
+        self.index_badge.setObjectName("DimChipBadge")
+        self.index_badge.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.index_badge.setToolTip(f"Dimension {self.axis}")
+        layout.addWidget(self.index_badge)
 
         self.axis_label = QtWidgets.QLabel()
-        self.axis_label.setMinimumWidth(52)
+        self.axis_label.setMinimumWidth(28)
         layout.addWidget(self.axis_label)
+        layout.addWidget(_make_chip_separator(self))
 
         self.y_button = QtWidgets.QToolButton(checkable=True)
         self.x_button = QtWidgets.QToolButton(checkable=True)
@@ -95,30 +112,45 @@ class DimensionChip(QtWidgets.QFrame):
             button.setText(role.upper())
             button.clicked.connect(lambda _checked=False, role=role: self.roleChanged.emit(role, self.axis))
             layout.addWidget(button)
+        layout.addWidget(_make_chip_separator(self))
 
         self._axis_size = 1
         self.slice_edit = SliceIndexEdit()
-        self.slice_edit.setFixedWidth(68)
+        # Absorbs spare chip width and shrinks first when space gets tight;
+        # a hard minimum keeps it from ever colliding with the ops button.
+        self.slice_edit.setMinimumWidth(46)
+        self.slice_edit.setMaximumWidth(150)
+        self.slice_edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
+        )
         self.slice_edit.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
         self.slice_edit.editingFinished.connect(self._slice_edit_finished)
         self.slice_edit.stepRequested.connect(self._slice_edit_stepped)
-        layout.addWidget(self.slice_edit)
+        layout.addWidget(self.slice_edit, 1)
 
         self.ops_button = QtWidgets.QToolButton()
         set_button_icon(self.ops_button, "add", tooltip="Add operation on this dimension")
         self.ops_button.clicked.connect(lambda: self.operationRequested.emit(self.axis))
         layout.addWidget(self.ops_button)
         self.setLayout(layout)
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(238)
         self._button_icon_state: dict[QtWidgets.QAbstractButton, tuple[str, str | None]] = {}
 
     def update_state(self, shape, view_state, profile_axes=(), axes=None):
         size = int(shape[self.axis])
         self._axis_size = size
         axis_info = _axis_info_for(axes, shape, self.axis)
-        _set_text_if_changed(self.axis_label, f"{_elide(axis_display_name(axis_info, self.axis))} [{size}]")
-        _set_tooltip_if_changed(self.axis_label, "" if axis_info is None else axis_metadata_summary(axis_info))
+        display_name = _elide(axis_display_name(axis_info, self.axis))
+        # The chip badge already shows the dimension index; the label carries
+        # the size (plus the metadata name when one exists).
+        if display_name == str(self.axis):
+            label_text = str(size)
+        else:
+            label_text = f"{display_name} · {size}"
+        _set_text_if_changed(self.axis_label, label_text)
+        _set_tooltip_if_changed(
+            self.axis_label,
+            f"{size} elements" if axis_info is None else axis_metadata_summary(axis_info),
+        )
         image_axes = view_state.image_axes or ()
         is_y = len(image_axes) > 0 and image_axes[0] == self.axis
         is_x = len(image_axes) > 1 and image_axes[1] == self.axis
@@ -288,16 +320,36 @@ class DimensionStrip(QtWidgets.QWidget):
         self._relayout_pending = False
         self._relayout()
 
+    # Chips stretch between these bounds. Width policy: give every chip the
+    # same width; shrink chips (the slice input absorbs it) before dropping a
+    # column, and keep the last, partially filled row at the same chip width
+    # as full rows.
+    MIN_CHIP_WIDTH = 222
+    MAX_CHIP_WIDTH = 240
+    CHIP_SPACING = 4
+
+    # The dims row also holds the sync-link button; reserve its footprint so
+    # the last column never clips against it.
+    SIBLING_RESERVE = 40
+
+    def _available_width(self):
+        parent = self.parentWidget()
+        if parent is not None and parent.contentsRect().width() > 0:
+            return max(1, parent.contentsRect().width() - self.SIBLING_RESERVE)
+        return max(1, self.contentsRect().width() or self.width())
+
     def _column_count(self):
         visible = [chip for chip in self.chips if chip.isVisible()]
         if not visible:
             visible = self.chips
-        parent = self.parentWidget()
-        parent_width = 0 if parent is None else parent.contentsRect().width()
-        available_width = max(1, parent_width or self.contentsRect().width() or self.width())
-        chip_width = 242
-        columns = max(1, available_width // chip_width)
+        available = self._available_width()
+        columns = max(1, (available + self.CHIP_SPACING) // (self.MIN_CHIP_WIDTH + self.CHIP_SPACING))
         return min(max(1, len(visible)), columns)
+
+    def _chip_width_for(self, columns):
+        available = self._available_width()
+        share = (available - self.CHIP_SPACING * (columns - 1)) // max(1, columns)
+        return int(max(self.MIN_CHIP_WIDTH, min(self.MAX_CHIP_WIDTH, share)))
 
     def _relayout(self, columns=None):
         if self._relayout_pending:
@@ -306,11 +358,20 @@ class DimensionStrip(QtWidgets.QWidget):
         if not visible:
             visible = self.chips
         columns = self._column_count() if columns is None else columns
-        if columns == self._columns and self.layout().count() == len(self.chips):
+        chip_width = self._chip_width_for(columns)
+        if (
+            columns == self._columns
+            and chip_width == getattr(self, "_chip_width", None)
+            and self.layout().count() == len(self.chips)
+        ):
             return
         self._columns = columns
-        self.setMaximumWidth(max(220, columns * 242))
-        self.setMinimumWidth(min(max(1, columns), len(visible)) * 220)
+        self._chip_width = chip_width
+        for chip in self.chips:
+            chip.setFixedWidth(chip_width)
+        row_width = columns * chip_width + self.CHIP_SPACING * (columns - 1)
+        self.setMaximumWidth(max(self.MIN_CHIP_WIDTH, row_width))
+        self.setMinimumWidth(min(max(1, columns), len(visible)) * self.MIN_CHIP_WIDTH)
         layout = self.layout()
         for chip in self.chips:
             layout.removeWidget(chip)

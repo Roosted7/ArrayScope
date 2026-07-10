@@ -12,7 +12,7 @@ backgrounds, overlays, level handles).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from enum import Enum
 from typing import Optional
 
@@ -168,6 +168,61 @@ def resolve_theme_tokens(choice, app=None) -> ThemeTokens:
         return DARK_TOKENS
     if choice == ThemeChoice.LIGHT:
         return LIGHT_TOKENS
+    if choice == ThemeChoice.NATIVE:
+        return _tokens_from_native_palette(app)
+    return DARK_TOKENS if _system_prefers_dark(app) else LIGHT_TOKENS
+
+
+def _tokens_from_native_palette(app) -> ThemeTokens:
+    """Derive tokens from the OS palette: system colors, ArrayScope styling.
+
+    A bare native style left custom widgets (chips, HUD, checked states)
+    unstyled and often unreadable; deriving tokens from the real palette
+    keeps the system's colors while restoring consistent chrome.
+    """
+    try:
+        from pyqtgraph.Qt import QtGui
+
+        palette = app.style().standardPalette() if app is not None else QtGui.QPalette()
+        role = QtGui.QPalette.ColorRole
+        is_dark = palette.color(role.Window).lightnessF() < 0.5
+        base_tokens = DARK_TOKENS if is_dark else LIGHT_TOKENS
+
+        def name(color_role):
+            return palette.color(color_role).name()
+
+        window = palette.color(role.Window)
+        surface_alt = window.lighter(115) if is_dark else window.darker(105)
+        border = window.lighter(140) if is_dark else window.darker(120)
+        border_strong = window.lighter(170) if is_dark else window.darker(135)
+        overlay = QtGui.QColor(window)
+        return dataclasses_replace(
+            base_tokens,
+            name="native",
+            is_dark=is_dark,
+            window=name(role.Window),
+            surface=name(role.Button),
+            surface_alt=surface_alt.name(),
+            base=name(role.Base),
+            text=name(role.WindowText),
+            text_muted=palette.color(
+                QtGui.QPalette.ColorGroup.Disabled, role.WindowText
+            ).name(),
+            border=border.name(),
+            border_strong=border_strong.name(),
+            accent=name(role.Highlight),
+            accent_hover=palette.color(role.Highlight).lighter(112).name(),
+            accent_text=name(role.HighlightedText),
+            canvas=name(role.Base),
+            plot_text=name(role.WindowText),
+            overlay_bg=f"rgba({overlay.red()}, {overlay.green()}, {overlay.blue()}, 215)",
+            overlay_text=name(role.WindowText),
+        )
+    except Exception:
+        return _system_dark_fallback(app)
+
+
+def _system_dark_fallback(app) -> ThemeTokens:
     return DARK_TOKENS if _system_prefers_dark(app) else LIGHT_TOKENS
 
 
@@ -191,13 +246,13 @@ def apply_theme_to_qapplication(app, choice) -> ThemeResult:
         return result
     tokens = resolve_theme_tokens(choice, app)
     if choice == ThemeChoice.NATIVE:
-        # Native keeps the OS widget look untouched; only data surfaces
-        # (pyqtgraph) get theme-consistent colors.
-        app.setStyleSheet("")
+        # Native keeps the OS palette but still applies the ArrayScope
+        # stylesheet built from palette-derived tokens, so custom widgets
+        # (chips, HUD, checked states) stay readable.
         app.setPalette(app.style().standardPalette())
     else:
         _apply_palette(app, tokens)
-        app.setStyleSheet(build_stylesheet(tokens))
+    app.setStyleSheet(build_stylesheet(tokens))
     app.setProperty("_arrayscope_theme_tokens", tokens)
     _apply_pyqtgraph_defaults(tokens)
     return result
@@ -402,7 +457,7 @@ QStatusBar {{
 QStatusBar::item {{ border: none; }}
 
 /* ---------- item views ---------- */
-QTableView, QTreeView, QListView, QListWidget {{
+QTableView, QTreeView {{
     background: {t.base};
     color: {t.text};
     border: 1px solid {t.border};
@@ -413,6 +468,25 @@ QTableView, QTreeView, QListView, QListWidget {{
     selection-color: {t.accent_text};
     font-size: 9pt;
     outline: 0;
+}}
+QListView, QListWidget {{
+    background: {t.base};
+    color: {t.text};
+    border: 1px solid {t.border};
+    border-radius: 4px;
+    alternate-background-color: {t.surface_alt};
+    font-size: 9pt;
+    outline: 0;
+}}
+/* Selected list rows keep readable text (row widgets carry their own
+   colors); the accent lives in an edge marker instead of a full fill. */
+QListView::item:selected, QListWidget::item:selected {{
+    background: {t.surface_alt};
+    border-left: 3px solid {t.accent};
+    color: {t.text};
+}}
+QListView::item:hover:!selected, QListWidget::item:hover:!selected {{
+    background: {t.surface_alt};
 }}
 QHeaderView::section {{
     background: {t.surface};
@@ -518,14 +592,46 @@ QFrame[dimensionChip="true"] QToolButton {{
     min-width: 24px;
     font-weight: 600;
 }}
+QLabel#DimChipBadge {{
+    background: {t.surface_alt};
+    color: {t.text_muted};
+    font-size: 8.5pt;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-top-left-radius: 5px;
+    border-bottom-left-radius: 5px;
+    border-right: 1px solid {t.border};
+}}
+QFrame#DimChipSeparator {{
+    background: {t.border};
+    border: none;
+    margin-top: 5px;
+    margin-bottom: 5px;
+}}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+    border: none;
+    background: transparent;
+    width: 15px;
+}}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
+    background: {t.surface_alt};
+    border-radius: 2px;
+}}
 
 /* ---------- floating chips ---------- */
-QLabel#PixelHud, QLabel#EvaluationOverlay, QLabel#RoiInfoPanel {{
+QLabel#EvaluationOverlay, QLabel#RoiInfoPanel, QFrame#PixelHud {{
     background: {t.overlay_bg};
     color: {t.overlay_text};
     border: 1px solid {t.border_strong};
     border-radius: 5px;
     padding: 5px 8px;
+    font-size: 9pt;
+}}
+QFrame#PixelHud {{ padding: 0; }}
+QFrame#PixelHud QLabel {{
+    background: transparent;
+    border: none;
+    color: {t.overlay_text};
     font-size: 9pt;
 }}
 QLabel#ArrayScopeStatusMessageLabel {{

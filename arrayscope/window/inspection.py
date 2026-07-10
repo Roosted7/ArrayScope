@@ -485,8 +485,106 @@ class InspectionWorkflowMixin:
     def _set_inspection_dock_visible_from_user(self, visible):
         self.layout_manager.set_inspection_dock_visible_from_user(visible)
 
+    def _hud_context_rows(self):
+        """Extra hover-HUD rows for the ROI or profile marker under the cursor."""
+        view = getattr(self, "img_view", None)
+        if view is None:
+            return ()
+        state = view.interaction_controller.state
+        target = state.capture or state.hover
+        if target is None:
+            return ()
+        rows = []
+        if target.kind == "roi" and target.object_id:
+            roi_id = str(target.object_id)
+            selection = self.roi_store.get(roi_id)
+            if selection is not None:
+                kind = selection.geometry.kind.value.replace("_", " ")
+                rows.append(("crop", f"{selection.label} · {kind}"))
+                payload = getattr(self, "_hud_stats_by_roi", {}).get(roi_id)
+                if payload is not None:
+                    _selection, stats = payload
+                    mean = getattr(stats, "mean", None)
+                    if mean is not None and np.isfinite(mean):
+                        rows.append(("functions", f"mean {mean:.4g} · n {stats.finite_count}"))
+                    minimum = getattr(stats, "minimum", None)
+                    maximum = getattr(stats, "maximum", None)
+                    if minimum is not None and maximum is not None:
+                        rows.append(("analytics", f"min {minimum:.4g} · max {maximum:.4g}"))
+        elif target.kind == "profile":
+            position = view.profileMarkerPosition()
+            axes_text = ", ".join(f"d{axis}" for axis in tuple(getattr(self, "profile_axes", ()) or ()))
+            if position is not None:
+                rows.append(("show_chart", f"Profile {axes_text} @ ({position[0]:.0f}, {position[1]:.0f})"))
+            else:
+                rows.append(("show_chart", f"Profile {axes_text}"))
+        return tuple(rows)
+
+    def _roi_at_image_point(self, image_point):
+        if image_point is None or not hasattr(self, "img_view"):
+            return None
+        try:
+            tolerance = self.img_view._pointer_interaction._hit_tolerance()
+        except Exception:
+            tolerance = 3.0
+        try:
+            candidates = self.img_view.roiHitCandidates(
+                (float(image_point[0]), float(image_point[1])), tolerance=float(tolerance)
+            )
+        except Exception:
+            return None
+        return candidates[-1] if candidates else None
+
+    def _update_roi_selection(self, roi_id, **changes):
+        import dataclasses
+
+        roi_id = str(roi_id)
+        selections = tuple(
+            dataclasses.replace(selection, **changes) if str(selection.id) == roi_id else selection
+            for selection in self.img_view.roiSelections()
+        )
+        self.img_view.setRoiSelections(selections, selected_id=roi_id)
+        self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections()).select(roi_id)
+        self._refresh_inspection_dock()
+        self._notify_sync("rois")
+
+    def _rename_roi(self, roi_id):
+        selection = self.roi_store.get(str(roi_id))
+        if selection is None:
+            return
+        text, accepted = QtWidgets.QInputDialog.getText(
+            self, "Rename ROI", "ROI name:", text=selection.label
+        )
+        if accepted and text.strip():
+            self._update_roi_selection(roi_id, label=text.strip())
+
+    def _change_roi_color(self, roi_id):
+        from pyqtgraph.Qt import QtGui
+
+        selection = self.roi_store.get(str(roi_id))
+        if selection is None:
+            return
+        current = QtGui.QColor(*selection.color)
+        color = QtWidgets.QColorDialog.getColor(current, self, "ROI color")
+        if color.isValid():
+            self._update_roi_selection(roi_id, color=(color.red(), color.green(), color.blue()))
+
     def _show_image_context_menu(self, global_pos, image_point=None):
+        from arrayscope.ui.icons import material_icon
+
         menu = QtWidgets.QMenu(self)
+        roi_selection = self._roi_at_image_point(image_point)
+        if roi_selection is not None:
+            roi_id = str(roi_selection.id)
+            header = menu.addAction(f"{roi_selection.label}")
+            header.setEnabled(False)
+            rename_action = menu.addAction(material_icon("edit"), "Rename ROI…")
+            rename_action.triggered.connect(lambda _checked=False: self._rename_roi(roi_id))
+            color_action = menu.addAction(material_icon("colorize"), "Change color…")
+            color_action.triggered.connect(lambda _checked=False: self._change_roi_color(roi_id))
+            delete_action = menu.addAction(material_icon("delete"), "Delete ROI")
+            delete_action.triggered.connect(lambda _checked=False: self._delete_roi(roi_id))
+            menu.addSeparator()
         live = self.widgets["buttons"]["display"]["live_profile"].isChecked()
         profile_action = menu.addAction("Live profile")
         profile_action.setCheckable(True)
@@ -532,6 +630,8 @@ class InspectionWorkflowMixin:
     def _update_roi_info_overlay(self, stats_by_roi):
         if not hasattr(self, "img_view"):
             return
+        # Cached for the hover HUD (per-ROI rows on mouse-over).
+        self._hud_stats_by_roi = dict(stats_by_roi)
         lines = []
         for _roi_id, (selection, stats) in list(stats_by_roi.items())[:6]:
             label = selection.label

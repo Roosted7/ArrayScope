@@ -31,6 +31,18 @@ class ManagedPanel:
     auto_visible: bool = False
 
 
+def _set_body_size_grips_visible(body, visible: bool) -> None:
+    """Panel size grips only make sense on floating panels.
+
+    Docked panels live inside the main window, where a QSizeGrip would
+    (confusingly) resize the whole application window.
+    """
+    if body is None:
+        return
+    for grip in body.findChildren(QtWidgets.QSizeGrip):
+        grip.setVisible(bool(visible))
+
+
 class PanelManager:
     def __init__(self, window):
         self.window = window
@@ -60,6 +72,7 @@ class PanelManager:
         self._panels_by_name[panel.name] = panel
         self._names_by_dock[dock] = panel.name
         dock.setTitleBarWidget(_DockPanelTitleBar(self.window, panel, self))
+        _set_body_size_grips_visible(panel.body, panel.location == PanelLocation.DETACHED)
         return panel
 
     def name_for_dock(self, dock):
@@ -168,6 +181,7 @@ class PanelManager:
         if QtWidgets.QDockWidget.widget(panel.dock) is not panel.body:
             panel.body.setParent(None)
             panel.dock.setWidget(panel.body)
+        _set_body_size_grips_visible(panel.body, False)
 
     def _store_body_in_hidden_dock(self, panel: ManagedPanel) -> None:
         self._set_body_in_dock(panel)
@@ -196,6 +210,7 @@ class PanelManager:
         )
         dialog.closedByUser.connect(lambda name=panel.name: self._hide_detached_from_dialog(name))
         panel.dialog = dialog
+        _set_body_size_grips_visible(panel.body, True)
         dialog.resize(max(320, panel.body.width()), max(220, panel.body.height()))
         dialog.show()
 

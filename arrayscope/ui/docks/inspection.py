@@ -77,14 +77,20 @@ class InspectionDock(StandardDockWidget):
         self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        layout.addWidget(self.stats_table)
 
         self.histogram_plot = pg.PlotWidget()
         self.histogram_plot.showGrid(x=True, y=True, alpha=0.25)
         self.histogram_plot.setMinimumHeight(120)
         self.histogram_plot.getPlotItem().setLabel("bottom", "Value")
         self.histogram_plot.getPlotItem().setLabel("left", "Count")
-        layout.addWidget(self.histogram_plot, 1)
+
+        self.splitter = QtWidgets.QSplitter(Qt.QtCore.Qt.Orientation.Vertical)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(self.stats_table)
+        self.splitter.addWidget(self.histogram_plot)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.splitter, 1)
         add_size_grip(layout)
 
         body.setLayout(layout)

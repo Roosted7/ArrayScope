@@ -239,6 +239,15 @@ class StateSyncMixin:
 
         self.tab_widget.setTabEnabled(0, ndim >= 2)
         self.tab_widget.setVisible(ndim >= 2)
+        central = self.centralWidget()
+        if central is not None:
+            if ndim < 2:
+                # 1D shows only toolbar + dimension strip up top; cap the
+                # central area so the profile dock gets the freed height
+                # instead of a large empty canvas region.
+                central.setMaximumHeight(max(120, central.sizeHint().height()))
+            else:
+                central.setMaximumHeight(16_777_215)
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
             if ndim == 1:

@@ -198,6 +198,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._profile_marker_updating = False
         self._profile_marker_requested_visible = False
         self._hud_widget = None
+        self._hud_context_provider = None
         self._evaluation_overlay = None
         self._roi_info_panel = None
         self.interaction_controller = DisplayInteractionController()
@@ -332,10 +333,18 @@ class ImageViewShell(QtWidgets.QWidget):
             for line in item.region.lines:
                 line.setPen(pg.mkPen(handle, width=2))
                 line.setHoverPen(pg.mkPen(tokens.accent, width=2))
-            # Note: region.setBrush/update() here breaks offscreen VisPy
-            # grabs (tested by test_vispy_direct_tiled_complex_display_images_
-            # render_nonblank); the line pens are the visible affordance, so
-            # the fill brush keeps its pyqtgraph default.
+            if self._paints_qgraphics_scene():
+                # Subtle level-region fill for the pyqtgraph backend. The
+                # VisPy backend keeps the pyqtgraph default: its offscreen
+                # smoke test measures chroma over the histogram area, and
+                # recoloring it there would defeat that signal.
+                region_brush = pg.mkColor(tokens.level_handle)
+                region_brush.setAlpha(14)
+                item.region.setBrush(pg.mkBrush(region_brush))
+                hover_brush = pg.mkColor(tokens.level_handle)
+                hover_brush.setAlpha(40)
+                item.region.setHoverBrush(pg.mkBrush(hover_brush))
+                item.region.currentBrush = item.region.brush
             fill = pg.mkColor(tokens.histogram_fill)
             fill.setAlpha(170)
             item.fillHistogram(True, color=fill)
@@ -1936,11 +1945,39 @@ class ImageViewShell(QtWidgets.QWidget):
         if self.imageItem is not None:
             self.imageItem.setOpacity(0.55 if stale else 1.0)
 
+    def setHudContextProvider(self, provider) -> None:
+        """Provider returns extra HUD rows [(icon_name, text), ...] for the
+        current hover/drag target (ROI or profile marker)."""
+        self._hud_context_provider = provider if callable(provider) else None
+
     def showHudText(self, text, scene_pos):
         if self._hud_widget is None:
             return
         local = self._map_scene_to_display_overlay(scene_pos)
-        self._hud_widget.show_text_near(text, local)
+        rows = []
+        if self._hud_context_provider is not None:
+            try:
+                rows = list(self._hud_context_provider() or ())
+            except Exception:
+                rows = []
+        show_rows = getattr(self._hud_widget, "show_rows_near", None)
+        if callable(show_rows):
+            rows.append(("colorize", str(text)) if rows else (None, str(text)))
+            show_rows(rows, local)
+        else:
+            self._hud_widget.show_text_near(text, local)
+
+    def _notify_pointer_drag_moved(self, event) -> None:
+        """Keep the hover HUD following the cursor during ROI/profile drags.
+
+        Drag moves are consumed by the pointer driver, so the graphics scene
+        never emits sigMouseMoved; re-emit it here with the drag position."""
+        try:
+            view_pos = event.position() if hasattr(event, "position") else event.pos()
+            scene_pos = self.graphicsView.mapToScene(int(view_pos.x()), int(view_pos.y()))
+            self.view.scene().sigMouseMoved.emit(scene_pos)
+        except Exception:
+            pass
 
     def hideHud(self):
         if self._hud_widget is not None:

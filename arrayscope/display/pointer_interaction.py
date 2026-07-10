@@ -46,6 +46,9 @@ class QtPointerInteractionDriver:
                 )
                 self._owner._apply_drag_result(result)
                 self._owner.sync_interaction_state(self._controller.state)
+            notify_drag = getattr(self._owner, "_notify_pointer_drag_moved", None)
+            if callable(notify_drag):
+                notify_drag(event)
             event.accept()
             return True
         if event_type == QtCore.QEvent.Type.MouseButtonRelease and event.button() == QtCore.Qt.MouseButton.LeftButton:
