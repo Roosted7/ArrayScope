@@ -85,6 +85,7 @@ class LinePlotController:
         self.widget = pg.PlotWidget(viewBox=AxisConstrainedViewBox(owner))
         self.widget.showGrid(x=True, y=True, alpha=0.25)
         pg.setConfigOptions(antialias=True)
+        self.apply_theme()
 
         self.current_line_data = None
         self.crosshair = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((150, 0, 0, 180), width=2))
@@ -103,6 +104,21 @@ class LinePlotController:
         self.color = (50, 100, 200)
         self.plot_style = "line"
         self.widget.getViewBox().sigRangeChanged.connect(self.on_range_changed)
+
+    def apply_theme(self, tokens=None):
+        """Restyle the plot from the active theme tokens (construction + runtime switches)."""
+        from arrayscope.app.theme import current_theme_tokens
+
+        tokens = tokens or current_theme_tokens()
+        try:
+            self.widget.setBackground(tokens.canvas)
+            axis_pen = pg.mkPen(tokens.plot_text)
+            for name in ("left", "bottom"):
+                axis = self.widget.getPlotItem().getAxis(name)
+                axis.setPen(axis_pen)
+                axis.setTextPen(axis_pen)
+        except Exception:
+            pass
 
     def update(self, data, view_state):
         self.update_line_result(make_line(data, view_state), view_state)

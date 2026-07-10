@@ -103,10 +103,10 @@ class OperationStackDock(StandardDockWidget):
         layout.setSpacing(6)
 
         header = QtWidgets.QHBoxLayout()
-        self.add_button = QtWidgets.QPushButton("Add")
-        self.palette_button = QtWidgets.QPushButton("Search")
+        self.add_button = QtWidgets.QPushButton("Add operation")
+        self.palette_button = QtWidgets.QToolButton()
         set_button_icon(self.add_button, "add")
-        set_button_icon(self.palette_button, "search")
+        set_button_icon(self.palette_button, "search", tooltip="Search operations and commands (Ctrl+K)")
         header.addWidget(self.add_button)
         header.addWidget(self.palette_button)
         header.addStretch(1)
@@ -135,41 +135,63 @@ class OperationStackDock(StandardDockWidget):
 
         self.shape_label = QtWidgets.QLabel("Output shape: -")
         self.derived_estimate_label = QtWidgets.QLabel("Full derived: -")
+        for label in (self.shape_label, self.derived_estimate_label):
+            label.setObjectName("OperationsMetaLabel")
         layout.addWidget(self.shape_label)
         layout.addWidget(self.derived_estimate_label)
 
-        button_layout = QtWidgets.QGridLayout()
-        self.undo_button = QtWidgets.QPushButton("Undo")
-        self.clear_button = QtWidgets.QPushButton("Clear")
-        self.delete_button = QtWidgets.QPushButton("Delete")
+        # Frequent actions get a compact row; recipe/view/export management is
+        # tucked into a single "More" menu so rare actions don't crowd the dock.
+        self.undo_button = QtWidgets.QToolButton()
+        self.delete_button = QtWidgets.QToolButton()
+        self.clear_button = QtWidgets.QToolButton()
+        self.materialize_button = QtWidgets.QPushButton("Materialize")
+        set_button_icon(self.undo_button, "undo", tooltip="Undo last operation")
+        set_button_icon(self.delete_button, "delete", tooltip="Delete selected operation")
+        set_button_icon(self.clear_button, "delete_sweep", tooltip="Clear all operations")
+        set_button_icon(self.materialize_button, "inventory_2")
+        self.materialize_button.setToolTip("Evaluate the full derived array and keep it resident")
+
+        # Rare actions stay as real buttons (stable API, signal wiring) but are
+        # presented as menu entries rather than a wall of buttons.
         self.save_button = QtWidgets.QPushButton("Save Recipe")
         self.load_button = QtWidgets.QPushButton("Load Recipe")
-        self.materialize_button = QtWidgets.QPushButton("Materialize")
         self.export_button = QtWidgets.QPushButton("Export Derived")
         self.save_view_button = QtWidgets.QPushButton("Save View")
         self.load_view_button = QtWidgets.QPushButton("Load View")
-        for button, icon_name in (
-            (self.undo_button, "undo"),
-            (self.clear_button, "delete_sweep"),
-            (self.delete_button, "delete"),
-            (self.save_button, "save"),
-            (self.load_button, "folder_open"),
-            (self.materialize_button, "inventory_2"),
-            (self.export_button, "download"),
-            (self.save_view_button, "view_quilt"),
-            (self.load_view_button, "folder_open"),
-        ):
-            set_button_icon(button, icon_name)
+        for button in (self.save_button, self.load_button, self.export_button, self.save_view_button, self.load_view_button):
+            button.setVisible(False)
 
-        button_layout.addWidget(self.undo_button, 0, 0)
-        button_layout.addWidget(self.clear_button, 0, 1)
-        button_layout.addWidget(self.delete_button, 1, 0)
-        button_layout.addWidget(self.save_button, 1, 1)
-        button_layout.addWidget(self.load_button, 2, 0)
-        button_layout.addWidget(self.materialize_button, 2, 1)
-        button_layout.addWidget(self.export_button, 3, 0)
-        button_layout.addWidget(self.save_view_button, 3, 1)
-        button_layout.addWidget(self.load_view_button, 4, 0, 1, 2)
+        self.more_button = QtWidgets.QToolButton()
+        self.more_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_button.setText("More")
+        set_button_icon(self.more_button, "folder_open", tooltip="Recipes, views and export")
+        more_menu = QtWidgets.QMenu(self.more_button)
+        for entry in (
+            ("Save Operation Recipe…", "save", self.save_button),
+            ("Load Operation Recipe…", "folder_open", self.load_button),
+            None,
+            ("Save View Recipe…", "view_quilt", self.save_view_button),
+            ("Load View Recipe…", "folder_open", self.load_view_button),
+            None,
+            ("Export Derived Array…", "download", self.export_button),
+        ):
+            if entry is None:
+                more_menu.addSeparator()
+                continue
+            label, icon_name, proxy = entry
+            action = more_menu.addAction(material_icon(icon_name), label)
+            action.triggered.connect(lambda _checked=False, button=proxy: button.click())
+        self.more_button.setMenu(more_menu)
+
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.setSpacing(4)
+        button_layout.addWidget(self.undo_button)
+        button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.clear_button)
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.materialize_button)
+        button_layout.addWidget(self.more_button)
         layout.addLayout(button_layout)
         add_size_grip(layout)
 

@@ -3,8 +3,17 @@ import numpy as np
 from arrayscope.display.levels import finite_bounds
 
 
-def test_finite_bounds_ignores_nan_without_copying_contract():
+def test_finite_bounds_masks_inf_to_finite_structure():
+    # ±Inf must not blow the window to the float range or void the bounds;
+    # the non-finite entries are masked (a copy is made only in this rare
+    # path, and only of the already-sampled array).
     data = np.array([[np.nan, 1.0], [2.0, np.inf]])
+
+    assert finite_bounds(data) == (1.0, 2.0)
+
+
+def test_finite_bounds_all_nonfinite_returns_none():
+    data = np.array([[np.nan, np.inf], [-np.inf, np.nan]])
 
     assert finite_bounds(data) is None
 

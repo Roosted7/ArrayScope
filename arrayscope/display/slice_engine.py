@@ -107,7 +107,7 @@ def make_image(data, state, colormap_lut=None):
 
     image_data = apply_channel(image_data, channel)
     image_data = _apply_scale(image_data, state.scale)
-    image_data = np.nan_to_num(image_data)
+    image_data = _sanitize_nonfinite_for_display(image_data)
     return DisplayImage(
         data=image_data,
         default_levels=default_levels,
@@ -158,7 +158,7 @@ def make_image_from_slab(slab, request, colormap_lut=None):
 
     image_data = apply_channel(image_data, channel)
     image_data = _apply_scale(image_data, state.scale)
-    image_data = np.nan_to_num(image_data)
+    image_data = _sanitize_nonfinite_for_display(image_data)
     return DisplayImage(
         data=image_data,
         default_levels=default_levels,
@@ -314,6 +314,24 @@ def _extract_display_axes(data, state, display_axes):
 def _present_axes_for_slab(state, display_axes):
     display_axis_set = {int(axis) for axis in display_axes}
     return tuple(axis for axis in range(state.ndim) if axis in display_axis_set)
+
+
+def _sanitize_nonfinite_for_display(image_data):
+    """Replace NaN/±Inf with values inside the finite data range.
+
+    A bare ``nan_to_num`` maps ±Inf to the float max, which blows the display
+    window to ±1e308/±3.4e38 and hides all finite structure. Clamping to the
+    finite min/max keeps autolevels meaningful; NaN renders at the low end.
+    """
+    if not np.issubdtype(np.asarray(image_data).dtype, np.floating):
+        return np.nan_to_num(image_data)
+    from arrayscope.display.levels import finite_bounds
+
+    bounds = finite_bounds(image_data)
+    if bounds is None:
+        return np.nan_to_num(image_data, nan=0.0, posinf=0.0, neginf=0.0)
+    low, high = bounds
+    return np.nan_to_num(image_data, nan=low, posinf=high, neginf=low)
 
 
 def _apply_scale(data, scale):

@@ -107,6 +107,24 @@ class WindowMenuMixin:
         set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
         view_menu.addAction(reset_layout_action)
+        view_menu.addSeparator()
+        theme_menu = QtWidgets.QMenu("Theme", self)
+        view_menu.addMenu(theme_menu)
+        self._theme_actions = {}
+        self._theme_action_group = QtGui.QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        for choice, label in (
+            (ThemeChoice.SYSTEM, "System"),
+            (ThemeChoice.DARK, "Dark"),
+            (ThemeChoice.LIGHT, "Light"),
+            (ThemeChoice.NATIVE, "OS Native"),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            self._theme_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._apply_theme_choice(choice))
+            theme_menu.addAction(action)
+            self._theme_actions[choice] = action
+        self._sync_theme_actions()
         performance_menu = QtWidgets.QMenu("Performance", self)
         self.menuBar().addMenu(performance_menu)
         self._performance_menu = performance_menu
@@ -253,22 +271,6 @@ class WindowMenuMixin:
         self._developer_menu = developer_menu
         self._diagnostics_action = diagnostics_action
 
-        theme_menu = self.menuBar().addMenu("Theme")
-        self._theme_actions = {}
-        self._theme_action_group = QtGui.QActionGroup(self)
-        self._theme_action_group.setExclusive(True)
-        for choice, label in (
-            (ThemeChoice.SYSTEM, "System / Native"),
-            (ThemeChoice.NATIVE, "Native"),
-            (ThemeChoice.DARK, "Dark"),
-            (ThemeChoice.LIGHT, "Light"),
-        ):
-            action = QtGui.QAction(label, self, checkable=True)
-            self._theme_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._apply_theme_choice(choice))
-            theme_menu.addAction(action)
-            self._theme_actions[choice] = action
-        self._sync_theme_actions()
 
     def _sync_performance_actions(self):
         if not hasattr(self, "_fft_backend_actions"):
@@ -394,6 +396,33 @@ class WindowMenuMixin:
         current = getattr(self, "app_settings", AppSettingsState())
         return dataclasses.replace(current, **changes)
 
+    def _retheme_presentation_surfaces(self):
+        """Restyle pyqtgraph surfaces in every open ArrayScope window.
+
+        The palette/stylesheet switch is application-wide, but pyqtgraph
+        widgets keep their construction-time colors until told otherwise.
+        """
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        windows = [w for w in app.topLevelWidgets() if isinstance(w, type(self))]
+        if self not in windows:
+            windows.append(self)
+        for window in windows:
+            view = getattr(window, "img_view", None)
+            apply_view = getattr(view, "applyThemeTokens", None)
+            if callable(apply_view):
+                apply_view()
+            profile_dock = getattr(window, "profile_dock", None)
+            line_plot = getattr(profile_dock, "line_plot", None)
+            apply_line = getattr(line_plot, "apply_theme", None)
+            if callable(apply_line):
+                apply_line()
+            inspection_dock = getattr(window, "inspection_dock", None)
+            apply_inspection = getattr(inspection_dock, "apply_theme", None)
+            if callable(apply_inspection):
+                apply_inspection()
+
     def _sync_theme_actions(self):
         if not hasattr(self, "_theme_actions"):
             return
@@ -404,6 +433,7 @@ class WindowMenuMixin:
 
     def _apply_theme_choice(self, choice, persist=True):
         result = apply_theme_to_qapplication(QtWidgets.QApplication.instance(), choice)
+        self._retheme_presentation_surfaces()
         if result.warning:
             show_status_message(self, f"Theme warning: {result.warning}")
             if persist:

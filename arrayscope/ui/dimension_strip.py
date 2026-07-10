@@ -73,6 +73,7 @@ class DimensionChip(QtWidgets.QFrame):
             parent.installEventFilter(self)
         self.axis = int(axis)
         self.setObjectName(f"DimensionChip{axis}")
+        self.setProperty("dimensionChip", True)
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setFocusPolicy(Qt.QtCore.Qt.FocusPolicy.StrongFocus)
         self.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -127,19 +128,15 @@ class DimensionChip(QtWidgets.QFrame):
         _set_checked_if_changed(self.x_button, is_x)
         _set_checked_if_changed(self.p_button, is_p)
         tiled_tooltip = "Use this range as an image-axis crop"
-        y_tooltip = tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Use dim {self.axis} as image Y axis")
-        x_tooltip = tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Use dim {self.axis} as image X axis")
-        self._set_button_icon_if_changed(
-            self.y_button,
-            "arrow_downward" if is_y and view_state.axis_flipped[self.axis] else "arrow_upward",
-            tooltip=y_tooltip,
-        )
-        self._set_button_icon_if_changed(
-            self.x_button,
-            "arrow_forward" if is_x and view_state.axis_flipped[self.axis] else "arrow_back",
-            tooltip=x_tooltip,
-        )
-        _set_tooltip_if_changed(self.p_button, f"Toggle dim {self.axis} as profile axis")
+        y_tooltip = tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Show dim {self.axis} on the image Y axis")
+        x_tooltip = tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Show dim {self.axis} on the image X axis")
+        flipped = bool(view_state.axis_flipped[self.axis])
+        _set_text_if_changed(self.y_button, ("Y↓" if flipped else "Y↑") if is_y else "Y")
+        _set_tooltip_if_changed(self.y_button, y_tooltip)
+        _set_text_if_changed(self.x_button, ("X→" if flipped else "X←") if is_x else "X")
+        _set_tooltip_if_changed(self.x_button, x_tooltip)
+        _set_tooltip_if_changed(self.p_button, f"Plot a profile along dim {self.axis}")
+        self._set_montage_state_if_changed(is_m)
         is_singleton = size == 1
         can_use_as_image = not is_singleton and view_state.image_axes is not None
         _set_enabled_if_changed(self.y_button, can_use_as_image)
@@ -174,6 +171,15 @@ class DimensionChip(QtWidgets.QFrame):
             return
         set_button_icon(button, name, tooltip=tooltip)
         self._button_icon_state[button] = key
+
+    def _set_montage_state_if_changed(self, is_montage: bool) -> None:
+        is_montage = bool(is_montage)
+        if self.property("montageAxis") == is_montage:
+            return
+        self.setProperty("montageAxis", is_montage)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
 
     def _set_slice_text_if_changed(self, text: str) -> None:
         if self.slice_edit.text() != text:

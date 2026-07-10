@@ -170,9 +170,15 @@ def operation_id_for(operation) -> str:
 def describe_operation(operation) -> str:
     operation_id = operation_id_for(operation)
     entry = get_operation_entry(operation_id)
-    parts = [entry.label.rstrip(".")]
+    label = entry.label.rstrip(".")
+    parts = [label]
     if entry.requires_axis:
-        parts.append(f"axis {getattr(operation, 'axis')}")
+        axis = getattr(operation, "axis")
+        if label.endswith(" over axis"):
+            # "Mean over axis" + 2 -> "Mean over axis 2", not "... axis axis 2".
+            parts = [f"{label} {axis}"]
+        else:
+            parts = [f"{label} · axis {axis}"]
     for parameter in entry.parameters:
         parts.append(f"{parameter.name}={getattr(operation, parameter.name)}")
     return " ".join(parts)

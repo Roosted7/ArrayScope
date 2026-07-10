@@ -82,6 +82,8 @@ class InspectionDock(StandardDockWidget):
         self.histogram_plot = pg.PlotWidget()
         self.histogram_plot.showGrid(x=True, y=True, alpha=0.25)
         self.histogram_plot.setMinimumHeight(120)
+        self.histogram_plot.getPlotItem().setLabel("bottom", "Value")
+        self.histogram_plot.getPlotItem().setLabel("left", "Count")
         layout.addWidget(self.histogram_plot, 1)
         add_size_grip(layout)
 
@@ -101,6 +103,21 @@ class InspectionDock(StandardDockWidget):
         self.clear_button.clicked.connect(self._clear_clicked)
         self.stats_table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.add_button.setEnabled(self.current_tool() in {"roi_line", "roi_rectangle"})
+
+    def apply_theme(self, tokens=None):
+        """Restyle the histogram plot from the active theme tokens."""
+        from arrayscope.app.theme import current_theme_tokens
+
+        tokens = tokens or current_theme_tokens()
+        try:
+            self.histogram_plot.setBackground(tokens.canvas)
+            axis_pen = pg.mkPen(tokens.plot_text)
+            for name in ("left", "bottom"):
+                axis = self.histogram_plot.getPlotItem().getAxis(name)
+                axis.setPen(axis_pen)
+                axis.setTextPen(axis_pen)
+        except Exception:
+            pass
 
     def current_tool(self):
         return self.tool_combo.currentData() or "cursor"

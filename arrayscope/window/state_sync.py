@@ -150,6 +150,11 @@ class StateSyncMixin:
     def _set_channel(self, channel, *, user_selected: bool, force_autolevel: bool = True):
         self._channel_user_selected = bool(user_selected)
         self._set_view_state(self.view_state.with_channel(channel))
+        if self.view_state.channel == ChannelMode.ANGLE and self.view_state.scale != ScaleMode.LINEAR:
+            # Log/symlog of a signed cyclic phase is meaningless and renders
+            # near-black; phase always displays on a linear scale.
+            self._set_view_state(self.view_state.with_scale(ScaleMode.LINEAR))
+            show_status_message(self, "Phase channel uses a linear scale.", timeout=2500)
         self._force_autolevel = True
         self._apply_channel_colormap()
         self._update_channel_controls()

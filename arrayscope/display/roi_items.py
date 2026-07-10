@@ -88,10 +88,7 @@ class MovableInfoPanel(QtWidgets.QLabel):
         self._drag_offset = None
         self.setObjectName("RoiInfoPanel")
         self.setWordWrap(False)
-        self.setStyleSheet(
-            "QLabel#RoiInfoPanel { background: rgba(20, 20, 20, 175); color: white; "
-            "border: 1px solid rgba(255, 255, 255, 90); border-radius: 4px; padding: 6px 8px; }"
-        )
+        # Styling comes from the application stylesheet (QLabel#RoiInfoPanel).
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:

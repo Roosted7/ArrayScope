@@ -301,6 +301,57 @@ class ImageViewShell(QtWidgets.QWidget):
                 self._interaction_application = app
             except Exception:
                 pass
+        self.applyThemeTokens()
+
+    def applyThemeTokens(self, tokens=None):
+        """Restyle plot surfaces from the active theme tokens.
+
+        Called at construction and again on runtime theme switches; pyqtgraph
+        widgets do not follow QPalette on their own.
+        """
+        from arrayscope.app.theme import current_theme_tokens
+
+        tokens = tokens or current_theme_tokens()
+        try:
+            # VisPy paints its own GL canvas beneath a transparent
+            # GraphicsView; an opaque background here would cover it.
+            if self._paints_qgraphics_scene():
+                self.graphicsView.setBackground(tokens.canvas)
+        except Exception:
+            pass
+        histogram = getattr(self, "histogram", None)
+        if histogram is None:
+            return
+        try:
+            histogram.setBackground(tokens.canvas)
+        except Exception:
+            pass
+        try:
+            item = histogram.item
+            handle = pg.mkColor(tokens.level_handle)
+            for line in item.region.lines:
+                line.setPen(pg.mkPen(handle, width=2))
+                line.setHoverPen(pg.mkPen(tokens.accent, width=2))
+            # Note: region.setBrush/update() here breaks offscreen VisPy
+            # grabs (tested by test_vispy_direct_tiled_complex_display_images_
+            # render_nonblank); the line pens are the visible affordance, so
+            # the fill brush keeps its pyqtgraph default.
+            fill = pg.mkColor(tokens.histogram_fill)
+            fill.setAlpha(170)
+            item.fillHistogram(True, color=fill)
+            axis_pen = pg.mkPen(tokens.plot_text)
+            item.axis.setPen(axis_pen)
+            item.axis.setTextPen(axis_pen)
+        except Exception:
+            pass
+        try:
+            # The gradient tick handles (one per colormap stop) read as visual
+            # noise; colormaps are managed by ArrayScope's channel policy and
+            # remain editable through the gradient context menu.
+            item.gradient.showTicks(False)
+        except Exception:
+            pass
+
     def _histogram_preview_immediate(self) -> bool:
         return True
 
@@ -1724,6 +1775,12 @@ class ImageViewShell(QtWidgets.QWidget):
         self._display_colormap_lut = lut
         self._display_colormap_key = _array_content_key(lut)
         self.histogram.gradient.setColorMap(colormap)
+        try:
+            # setColorMap recreates gradient ticks; keep them hidden (see
+            # applyThemeTokens) so the colorbar stays clean.
+            self.histogram.gradient.showTicks(False)
+        except Exception:
+            pass
         image = getattr(self.imageItem, "image", None)
         if image is not None and np.asarray(image).ndim == 2:
             self.imageItem.setLookupTable(lut)
@@ -1834,10 +1891,7 @@ class ImageViewShell(QtWidgets.QWidget):
             overlay = QtWidgets.QLabel(self._display_overlay_parent())
             overlay.setObjectName("EvaluationOverlay")
             overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            overlay.setStyleSheet(
-                "QLabel#EvaluationOverlay { background: rgba(20, 20, 20, 170); color: white; "
-                "padding: 6px 8px; border-radius: 4px; }"
-            )
+            # Styling comes from the application stylesheet (QLabel#EvaluationOverlay).
             self._evaluation_overlay = overlay
         self._evaluation_overlay.setText(str(text))
         self._evaluation_overlay.adjustSize()

@@ -9,12 +9,10 @@ prefer_pyside6()
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 
-TOOL_BUTTON_STYLE = (
-    "QToolButton { padding: 4px 7px; border: 1px solid palette(mid); border-radius: 4px; }"
-    "QToolButton:hover { border-color: palette(highlight); }"
-    "QToolButton:pressed { background: palette(midlight); }"
-    "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
-)
+# Kept as a named constant for callers/tests; the visual styling itself now
+# lives in the application stylesheet (arrayscope.app.theme.build_stylesheet),
+# so per-widget stylesheets no longer override the active theme.
+TOOL_BUTTON_STYLE = ""
 
 
 def configure_tool_button(button: QtWidgets.QToolButton) -> QtWidgets.QToolButton:

@@ -11,10 +11,7 @@ class PixelHud(QtWidgets.QLabel):
         super().__init__(parent)
         self.setObjectName("PixelHud")
         self.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignLeft | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.setStyleSheet(
-            "QLabel#PixelHud { background: rgba(20, 20, 20, 175); color: white; "
-            "padding: 4px 6px; border-radius: 4px; }"
-        )
+        # Styling comes from the application stylesheet (QLabel#PixelHud).
         self.setAttribute(Qt.QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.hide()
 

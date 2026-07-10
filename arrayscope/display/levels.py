@@ -22,6 +22,15 @@ def finite_bounds(data, *, exact_limit=4_000_000, max_samples=1_000_000):
             warnings.simplefilter("ignore", RuntimeWarning)
             minimum = np.nanmin(sample)
             maximum = np.nanmax(sample)
+            if not np.isfinite(minimum) or not np.isfinite(maximum):
+                # ±Inf in the data must not blow the window to the float
+                # range (it hides all finite structure). Mask only in this
+                # rare path so the common case stays copy-free.
+                finite = sample[np.isfinite(sample)]
+                if finite.size == 0:
+                    return None
+                minimum = finite.min()
+                maximum = finite.max()
     except (TypeError, ValueError, FloatingPointError):
         return None
     if not np.isfinite(minimum) or not np.isfinite(maximum):
