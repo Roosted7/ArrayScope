@@ -15,6 +15,7 @@ from arrayscope.presentation import (
     ReleaseClaim,
     Semantic,
     TileLifecycle,
+    TileTarget,
 )
 
 
@@ -69,6 +70,18 @@ def test_skip(lc):
     assert lc.record(4).semantic is Semantic.SKIPPED
 
 
+def test_preview_claim_identity_changes_with_semantic_window(lc):
+    assert lc.preview_claimed(0, 1, 4, ("window", 1))
+    assert lc.preview_claim_matches(0, 1, 4, ("window", 1))
+
+    # The same slot/rung/LOD in a shifted index window is new work. A stale
+    # completion from the predecessor must not release the successor claim.
+    assert lc.preview_claimed(0, 1, 4, ("window", 2))
+    assert not lc.preview_released(0, 1, 4, ("window", 1))
+    assert lc.preview_claim_matches(0, 1, 4, ("window", 2))
+    assert lc.preview_claim_active(0, ("window", 2))
+
+
 # -- rule 1: acknowledged presentation only ----------------------------------
 
 
@@ -106,12 +119,13 @@ def test_fresh_evaluation_invalidates_stale_emit_identity(lc):
 
 
 def test_best_presentable_prefers_exact_current_source(lc):
-    Payload = namedtuple("Payload", "source_id quality lod")
+    Payload = namedtuple("Payload", "source_id quality lod source_index")
     Lod = namedtuple("Lod", "level")
     semantic = ("montage-tile", "doc", 3)
-    preview = Payload((*semantic, "floor", "scalar", (4, 4)), "preview", Lod(4))
-    exact = Payload((*semantic, "texture_kind", "scalar", "lod", 0, 0), "exact", Lod(0))
-    other = Payload(("montage-tile", "other", 3, "texture_kind", "scalar"), "exact", Lod(0))
+    preview = Payload((*semantic, "floor", "scalar", (4, 4)), "preview", Lod(4), 3)
+    exact = Payload((*semantic, "texture_kind", "scalar", "lod", 0, 0), "exact", Lod(0), 3)
+    other = Payload(("montage-tile", "other", 3, "texture_kind", "scalar"), "exact", Lod(0), 3)
+    lc.retarget({3: TileTarget(3, 3, semantic, 0)})
 
     lc.remember_presentable(3, preview)
     lc.remember_presentable(3, other)
@@ -119,7 +133,7 @@ def test_best_presentable_prefers_exact_current_source(lc):
 
     assert lc.best_presentable(3, semantic, 0) is exact
     assert lc.best_presentable(3, ("missing",), 0) is None
-    assert lc.may_remove_visible(3)
+    assert not lc.may_remove_visible(3)
     lc.acknowledge_presented(3, exact.source_id, exact.quality, exact.lod.level)
     assert not lc.may_remove_visible(3)
 

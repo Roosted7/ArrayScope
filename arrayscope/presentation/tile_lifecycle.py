@@ -32,9 +32,9 @@ Structural rules (ADR 0051):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Mapping
 
 
 class Semantic(str, Enum):
@@ -66,6 +66,102 @@ class ClaimOwner(str, Enum):
     WALK = "walk"
     INGEST = "ingest"
     PREVIEW = "preview"
+
+
+class TilePhase(str, Enum):
+    """Observable phase of one region in the current frame target."""
+
+    OUT_OF_SCOPE = "out_of_scope"
+    NEEDS_FIRST_PIXEL = "needs_first_pixel"
+    FALLBACK_SHOWN = "fallback_shown"
+    TARGET_SCHEDULABLE = "target_schedulable"
+    TARGET_WAITING_STAGE = "target_waiting_stage"
+    TARGET_RUNNING = "target_running"
+    TARGET_READY = "target_ready"
+    TARGET_EMITTED = "target_emitted"
+    TARGET_PRESENTED = "target_presented"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class TilePayloadRef:
+    """Backend-independent identity metadata for a presentable payload."""
+
+    source_id: object
+    quality: str
+    lod_level: int
+    source_index: int
+    texture_kind: object = None
+    shader_mapping_key: object = None
+    payload: object = None
+
+    def __post_init__(self) -> None:
+        quality = str(self.quality or "exact")
+        if quality == "preview":
+            quality = "fallback"
+        if quality not in {"fallback", "exact"}:
+            raise ValueError(f"tile payload quality must be fallback/exact, got {quality!r}")
+        object.__setattr__(self, "quality", quality)
+        object.__setattr__(self, "lod_level", max(0, int(self.lod_level)))
+        object.__setattr__(self, "source_index", int(self.source_index))
+
+    @property
+    def is_target_quality(self) -> bool:
+        return self.quality == "exact"
+
+    def satisfies_target(self, target: "TileTarget") -> bool:
+        return bool(
+            self.is_target_quality
+            and int(self.source_index) == int(target.source_index)
+            and int(self.lod_level) <= int(target.lod_level)
+        )
+
+
+@dataclass(frozen=True)
+class TileTarget:
+    tile_number: int
+    source_index: int
+    semantic_source_id: object
+    lod_level: int = 0
+    quality: str = "exact"
+    visible: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tile_number", int(self.tile_number))
+        object.__setattr__(self, "source_index", int(self.source_index))
+        object.__setattr__(self, "lod_level", max(0, int(self.lod_level)))
+        if str(self.quality or "exact") != "exact":
+            raise ValueError("tile targets are exact; preview is only a fallback")
+        object.__setattr__(self, "quality", "exact")
+        object.__setattr__(self, "visible", bool(self.visible))
+
+
+@dataclass(frozen=True)
+class TileTaskClaim:
+    task_key: object
+    stage_key: object = None
+
+    def __post_init__(self) -> None:
+        if self.task_key is None and self.stage_key is None:
+            raise ValueError("a tile claim needs an admitted task key or a stage key")
+
+
+@dataclass(frozen=True)
+class TilePresentationCommand:
+    tile_number: int
+    payload: object
+    payload_ref: TilePayloadRef
+
+
+@dataclass(frozen=True)
+class TileLifecycleSnapshot:
+    counts: Mapping[str, int]
+    visible_tiles: int
+    first_pixels_presented: bool
+    visible_target_settled: bool
+    orphan_running: int
+    parked_without_producer: int
 
 
 @dataclass(frozen=True)
@@ -122,7 +218,10 @@ class TileRecord:
     #: request" is a queryable machine fact instead of set correlation.
     stage_key: object = None
     #: Pipeline-owned reduced preview/floor claims keyed by rung integer.
-    preview_claims: dict[int, int] = field(default_factory=dict)
+    #: The value carries both LOD and semantic-window identity: montage slots
+    #: are reused across index scrolls, so ``(slot, rung, level)`` alone can
+    #: refer to a completely different source population.
+    preview_claims: dict[int, tuple[int, object]] = field(default_factory=dict)
     #: Opaque metadata for the current kernel evaluation claim. The lifecycle
     #: owns the presence of the claim; effects own the metadata shape.
     evaluation_claim: object = None
@@ -130,6 +229,123 @@ class TileRecord:
     #: keyed by their source identity.  The lifecycle owns the ordering
     #: decision; the display/session layer still owns the payload contents.
     presentable_payloads: dict[object, object] = field(default_factory=dict)
+    #: Canonical current target and task/dependency obligation.  These fields
+    #: absorb the former parallel TileLedger; all per-tile truth now lives on
+    #: this record.
+    target: TileTarget | None = None
+    task_claim: TileTaskClaim | None = None
+    stage_producer_key: object = None
+    failed_reason: str = ""
+
+    @property
+    def active(self) -> bool:
+        return bool(
+            self.target is not None
+            and self.target.visible
+            and self.semantic is not Semantic.SKIPPED
+            and not self.failed_reason
+        )
+
+    @property
+    def acknowledged_payload(self) -> TilePayloadRef | None:
+        payload = self._payload_for_identity(self.presented_source_id)
+        if payload is None:
+            return None
+        quality = str(self.presented_quality or payload.quality)
+        if quality == "preview":
+            quality = "fallback"
+        level = payload.lod_level if self.presented_level is None else int(self.presented_level)
+        return replace(payload, quality=quality, lod_level=level)
+
+    @property
+    def backend_payload(self) -> TilePayloadRef | None:
+        return self._payload_for_identity(self.backend_source_id)
+
+    @property
+    def target_payload(self) -> TilePayloadRef | None:
+        if self.target is None:
+            return None
+        candidates = (
+            ref
+            for ref in (payload_ref_from_display_payload(value) for value in self.presentable_payloads.values())
+            if ref.satisfies_target(self.target)
+        )
+        return min(candidates, key=lambda ref: (ref.lod_level, repr(ref.source_id)), default=None)
+
+    @property
+    def fallback_payload(self) -> TilePayloadRef | None:
+        if self.target is None:
+            return None
+        candidates = (
+            ref
+            for ref in (payload_ref_from_display_payload(value) for value in self.presentable_payloads.values())
+            if ref.source_index == self.target.source_index and not ref.satisfies_target(self.target)
+        )
+        return min(candidates, key=lambda ref: (0 if ref.quality == "exact" else 1, ref.lod_level), default=None)
+
+    @property
+    def target_payload_satisfies(self) -> bool:
+        return self.target_payload is not None
+
+    @property
+    def target_settled(self) -> bool:
+        payload = self.acknowledged_payload
+        return bool(
+            self.target is not None
+            and payload is not None
+            and payload.satisfies_target(self.target)
+            and _payload_refs_match(payload, self.backend_payload)
+        )
+
+    @property
+    def first_pixel_presented(self) -> bool:
+        payload = self.acknowledged_payload
+        return bool(
+            self.active
+            and self.target is not None
+            and payload is not None
+            and payload.source_index == self.target.source_index
+            and self.backend_source_id == self.presented_source_id
+        )
+
+    @property
+    def phase(self) -> TilePhase:
+        if self.target is None or not self.target.visible:
+            return TilePhase.OUT_OF_SCOPE
+        if self.semantic is Semantic.SKIPPED:
+            return TilePhase.SKIPPED
+        if self.failed_reason:
+            return TilePhase.FAILED
+        if self.target_settled:
+            return TilePhase.TARGET_PRESENTED
+        if self.presentation is Presentation.EMITTED:
+            return TilePhase.TARGET_EMITTED
+        if self.target_payload_satisfies:
+            return TilePhase.TARGET_READY
+        if self.task_claim is not None and self.task_claim.task_key is not None:
+            return TilePhase.TARGET_RUNNING
+        if self.stage_key is not None:
+            return TilePhase.TARGET_WAITING_STAGE
+        if self.first_pixel_presented:
+            return TilePhase.FALLBACK_SHOWN
+        if self.acknowledged_payload is None:
+            return TilePhase.NEEDS_FIRST_PIXEL
+        return TilePhase.TARGET_SCHEDULABLE
+
+    def _payload_for_identity(self, source_id) -> TilePayloadRef | None:
+        if source_id is None:
+            return None
+        payload = self.presentable_payloads.get(source_id)
+        if payload is not None:
+            return payload_ref_from_display_payload(payload)
+        if self.target is None:
+            return None
+        return TilePayloadRef(
+            source_id=source_id,
+            quality=self.presented_quality or "exact",
+            lod_level=0 if self.presented_level is None else self.presented_level,
+            source_index=self.target.source_index,
+        )
 
 
 class TileLifecycle:
@@ -182,6 +398,203 @@ class TileLifecycle:
             rec = TileRecord(index)
             self._records[index] = rec
         return rec
+
+    # ``row`` is the vocabulary used by diagnostics and model tests.  It is
+    # deliberately the same object as ``record``: there is no parallel tile
+    # ledger to reconcile.
+    row = record
+
+    def retarget(self, targets: Mapping[int, TileTarget]) -> None:
+        """Atomically adopt the current visible target set."""
+
+        wanted = {int(tile): target for tile, target in dict(targets).items()}
+        for tile_number, target in wanted.items():
+            rec = self.record(tile_number)
+            if rec.target == target:
+                continue
+            previous_source = None if rec.target is None else rec.target.source_index
+            rec.target = target
+            rec.failed_reason = ""
+            rec.task_claim = None
+            rec.stage_producer_key = None
+            if previous_source is not None and previous_source != target.source_index:
+                # A slot may be retargeted hundreds of times during a fast
+                # montage scrub.  Presentable payloads are first-pixel
+                # candidates for the *current* source, not a per-slot history.
+                # Keep current-source values that may already have been
+                # remapped into this record and the one payload whose identity
+                # the backend still reports physically resident.  Retaining
+                # every superseded value made target_payload/backlog queries
+                # grow without bound (and turned a scrub into millions of
+                # payload normalizations).
+                rec.presentable_payloads = {
+                    source_id: payload
+                    for source_id, payload in rec.presentable_payloads.items()
+                    if source_id == rec.backend_source_id
+                    or int(getattr(payload, "source_index", -1)) == int(target.source_index)
+                }
+                # Physical backend truth survives retarget for diagnostics,
+                # but it is no longer a semantically presented current tile.
+                rec.presented_source_id = None
+                rec.presented_quality = ""
+                rec.presented_level = None
+                rec.presentation = Presentation.UNPRESENTED
+                self._presented.discard(tile_number)
+        for tile_number, rec in tuple(self._records.items()):
+            if tile_number in wanted or rec.target is None:
+                continue
+            rec.target = TileTarget(
+                tile_number=rec.target.tile_number,
+                source_index=rec.target.source_index,
+                semantic_source_id=rec.target.semantic_source_id,
+                lod_level=rec.target.lod_level,
+                visible=False,
+            )
+            rec.task_claim = None
+            rec.stage_producer_key = None
+
+    def fallback_ready(self, tile_number: int, payload: TilePayloadRef | object) -> None:
+        ref = _coerce_payload_ref(payload)
+        rec = self.record(tile_number)
+        if rec.target is None or ref.source_index != rec.target.source_index:
+            return
+        rec.presentable_payloads[ref.source_id] = _stored_payload(ref)
+
+    def target_ready(self, tile_number: int, payload: TilePayloadRef | object) -> None:
+        ref = _coerce_payload_ref(payload)
+        rec = self.record(tile_number)
+        if rec.target is None or not ref.satisfies_target(rec.target):
+            return
+        rec.presentable_payloads[ref.source_id] = _stored_payload(ref)
+        rec.task_claim = None
+        rec.stage_producer_key = None
+        self._stage_unbound(rec)
+
+    def target_invalidated(self, tile_number: int) -> None:
+        rec = self.record(tile_number)
+        rec.task_claim = None
+        rec.stage_producer_key = None
+        rec.evaluation_claim = None
+        if rec.presentation is Presentation.PRESENTED:
+            rec.presented_quality = "preview"
+        if rec.presentation is not Presentation.PRESENTED:
+            rec.presentation = Presentation.UNPRESENTED
+
+    def task_requested(self, tile_number: int, *, stage_key=None, stage_producer_key=None) -> None:
+        rec = self.record(tile_number)
+        rec.stage_key = stage_key
+        rec.stage_producer_key = stage_producer_key
+
+    def task_admitted(self, tile_number: int, task_key, *, stage_key=None, stage_producer_key=None) -> None:
+        if task_key is None and stage_key is None:
+            return
+        rec = self.record(tile_number)
+        rec.task_claim = TileTaskClaim(task_key, stage_key)
+        rec.stage_key = stage_key
+        rec.stage_producer_key = stage_producer_key
+
+    def task_released(self, tile_number: int, *, reason: str = "") -> None:
+        rec = self.record(tile_number)
+        rec.task_claim = None
+        rec.stage_producer_key = None
+        rec.failed_reason = str(reason or "") if reason and reason not in {"stale", "dropped", "cancelled", "completed"} else ""
+
+    def stage_waiting(self, tile_number: int, stage_key, producer_key) -> None:
+        if stage_key is None or producer_key is None:
+            return
+        self.stage_attached(tile_number, stage_key)
+        self.record(tile_number).stage_producer_key = producer_key
+
+    def stage_ready(self, stage_key) -> tuple[int, ...]:
+        waiting = self.stage_resolved(stage_key)
+        for tile_number in waiting:
+            self.record(tile_number).stage_producer_key = None
+        return waiting
+
+    def commit_emitted(self, upserts: Mapping[int, object]) -> None:
+        for tile_number, payload in dict(upserts).items():
+            ref = _coerce_payload_ref(payload)
+            rec = self.record(tile_number)
+            rec.presentable_payloads[ref.source_id] = _stored_payload(ref)
+            rec.presented_quality = "preview" if ref.quality == "fallback" else ref.quality
+            rec.presented_level = ref.lod_level
+            self.upsert_emitted(tile_number, ref.source_id)
+
+    def backend_ack(
+        self,
+        accepted_payloads: Mapping[int, object],
+        *,
+        backend_payloads: Mapping[int, object] | None = None,
+    ) -> tuple[int, ...]:
+        accepted_refs = {int(tile): _coerce_payload_ref(payload) for tile, payload in dict(accepted_payloads).items()}
+        backend_refs = {
+            int(tile): _coerce_payload_ref(payload)
+            for tile, payload in dict(backend_payloads or accepted_payloads).items()
+        }
+        metadata_accepted = {
+            tile
+            for tile, ref in accepted_refs.items()
+            if _payload_refs_match(self.record(tile)._payload_for_identity(self.record(tile).emitted_source_id), ref)
+        }
+        merged_backend = dict(self.backend_presented_identities)
+        merged_backend.update({tile: ref.source_id for tile, ref in backend_refs.items()})
+        confirmed = self.commit_acknowledged(
+            emitted_tiles=tuple(accepted_refs),
+            accepted_tiles=tuple(metadata_accepted),
+            active_scope=tuple(tile for tile, rec in self._records.items() if rec.active),
+            presented_identities=merged_backend,
+        )
+        return tuple(sorted(confirmed))
+
+    def presentation_changes(self, *, max_items: int | None = None) -> tuple[TilePresentationCommand, ...]:
+        commands: list[TilePresentationCommand] = []
+        for tile_number, rec in sorted(self._records.items()):
+            if not rec.active or rec.presentation is Presentation.EMITTED:
+                continue
+            payload = rec.target_payload or rec.fallback_payload
+            if payload is None:
+                continue
+            if _payload_refs_match(rec.acknowledged_payload, payload):
+                continue
+            commands.append(TilePresentationCommand(tile_number, payload.payload, payload))
+            if max_items is not None and len(commands) >= max(0, int(max_items)):
+                break
+        return tuple(commands)
+
+    def visible_first_pixels_presented(self) -> bool:
+        rows = tuple(rec for rec in self._records.values() if rec.active)
+        return bool(not rows or all(_record_first_pixel_presented(rec) for rec in rows))
+
+    def visible_target_settled(self) -> bool:
+        rows = tuple(rec for rec in self._records.values() if rec.active)
+        return bool(not rows or all(_record_target_settled(rec) for rec in rows))
+
+    def target_unsettled_tiles(self, tile_numbers) -> tuple[int, ...]:
+        """Return scoped target obligations without redefining visibility."""
+
+        unsettled = []
+        for tile_number in tuple(tile_numbers or ()):
+            rec = self._records.get(int(tile_number))
+            if rec is None or not _record_target_settled(rec):
+                unsettled.append(int(tile_number))
+        return tuple(dict.fromkeys(unsettled))
+
+    def target_settled(self, tile_numbers) -> bool:
+        return not self.target_unsettled_tiles(tile_numbers)
+
+    def snapshot(self) -> TileLifecycleSnapshot:
+        rows = tuple(rec for rec in self._records.values() if rec.active)
+        counts: dict[str, int] = {}
+        for rec in rows:
+            counts[rec.phase.value] = counts.get(rec.phase.value, 0) + 1
+        return TileLifecycleSnapshot(
+            counts=dict(sorted(counts.items())),
+            visible_tiles=len(rows),
+            first_pixels_presented=self.visible_first_pixels_presented(),
+            visible_target_settled=self.visible_target_settled(),
+            orphan_running=sum(1 for rec in rows if rec.request_active and rec.task_claim is None),
+            parked_without_producer=sum(1 for rec in rows if rec.stage_key is not None and rec.stage_producer_key is None),
+        )
 
     def peek(self, tile_number: int) -> TileRecord | None:
         return self._records.get(int(tile_number))
@@ -281,6 +694,32 @@ class TileLifecycle:
             return
         self.record(tile_number).presentable_payloads[source_id] = payload
 
+    def payload_is_current(self, tile_number: int, payload: object) -> bool:
+        """Whether ``payload`` is known-safe for this slot's current target.
+
+        Materialization mechanics are deliberately irrelevant here. A reduced
+        shared-target payload may never appear in a renderer-local native
+        ``rendered_tiles`` map, yet it is still current target-quality content.
+        """
+
+        rec = self._records.get(int(tile_number))
+        if rec is None or rec.target is None or payload is None:
+            return False
+        ref = payload_ref_from_display_payload(payload)
+        return bool(
+            int(ref.source_index) == int(rec.target.source_index)
+            and ref.source_id in rec.presentable_payloads
+        )
+
+    def current_presentable_payload(self, tile_number: int):
+        """Return the best target/fallback payload for the current slot."""
+
+        rec = self._records.get(int(tile_number))
+        if rec is None:
+            return None
+        ref = rec.target_payload or rec.fallback_payload
+        return None if ref is None else ref.payload
+
     def best_presentable(self, tile_number: int, semantic_source=None, target_level: int | None = None):
         """Return the best safe fallback payload for this tile, or ``None``.
 
@@ -341,7 +780,17 @@ class TileLifecycle:
         rec = self._records.get(int(tile_number))
         if rec is None:
             return True
-        return rec.presentation is not Presentation.PRESENTED
+        if not rec.active:
+            return True
+        backend = rec.backend_payload
+        # A slot mapped to a different semantic source must clear rather than
+        # lie about values. For the same source (quality/LOD/layout changes),
+        # an unpresented successor is the strongest reason to retain pixels.
+        return bool(
+            backend is not None
+            and rec.target is not None
+            and int(backend.source_index) != int(rec.target.source_index)
+        )
 
     def evaluation_declined(self, tile_number: int) -> tuple[ReleaseClaim, ...]:
         """Admission declined or work dropped: back to planned, claims released."""
@@ -425,30 +874,47 @@ class TileLifecycle:
         for index in tuple(self._active_requests):
             self._request_cleared(self._records[index])
 
-    def preview_claimed(self, tile_number: int, rung: int, level: int) -> bool:
+    def preview_claimed(self, tile_number: int, rung: int, level: int, semantic_key: object) -> bool:
         rec = self.record(tile_number)
         rung = int(rung)
         level = int(level)
-        if rec.preview_claims.get(rung) == level:
+        claim = (level, semantic_key)
+        if rec.preview_claims.get(rung) == claim:
             return False
-        rec.preview_claims[rung] = level
+        rec.preview_claims[rung] = claim
         return True
 
-    def preview_claim_matches(self, tile_number: int, rung: int, level: int) -> bool:
+    def preview_claim_matches(self, tile_number: int, rung: int, level: int, semantic_key: object) -> bool:
         rec = self._records.get(int(tile_number))
-        return bool(rec is not None and rec.preview_claims.get(int(rung)) == int(level))
+        return bool(
+            rec is not None
+            and rec.preview_claims.get(int(rung)) == (int(level), semantic_key)
+        )
 
-    def preview_released(self, tile_number: int, rung: int, level: int | None = None) -> bool:
+    def preview_released(
+        self,
+        tile_number: int,
+        rung: int,
+        level: int,
+        semantic_key: object,
+    ) -> bool:
         rec = self._records.get(int(tile_number))
         if rec is None:
             return False
         rung = int(rung)
         if rung not in rec.preview_claims:
             return False
-        if level is not None and rec.preview_claims.get(rung) != int(level):
+        if rec.preview_claims.get(rung) != (int(level), semantic_key):
             return False
         rec.preview_claims.pop(rung, None)
         return True
+
+    def preview_claim_active(self, tile_number: int, semantic_key: object) -> bool:
+        rec = self._records.get(int(tile_number))
+        return bool(
+            rec is not None
+            and any(key == semantic_key for _level, key in rec.preview_claims.values())
+        )
 
     def materialization_request_for(self, tile_number: int, level_key=None):
         rec = self._records.get(int(tile_number))
@@ -980,3 +1446,94 @@ def _request_level_keys(request: object) -> tuple[object, ...]:
         if key is not None:
             keys.append(key)
     return tuple(keys)
+
+
+def payload_ref_from_display_payload(payload) -> TilePayloadRef:
+    if isinstance(payload, TilePayloadRef):
+        return payload
+    lod = getattr(payload, "lod", None)
+    texture_kind = getattr(payload, "texture_kind", None)
+    shader_mapping = getattr(payload, "shader_mapping", None)
+    quality = str(getattr(payload, "quality", "exact") or "exact")
+    return TilePayloadRef(
+        source_id=getattr(payload, "source_id", None),
+        quality="fallback" if quality == "preview" else quality,
+        lod_level=int(getattr(lod, "level", 0) or 0),
+        source_index=int(getattr(payload, "source_index", -1)),
+        texture_kind=None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
+        shader_mapping_key=None if shader_mapping is None else getattr(shader_mapping, "identity_key", shader_mapping),
+        payload=payload,
+    )
+
+
+def _record_presented_payload_fields(rec: TileRecord) -> tuple[str, int, int] | None:
+    """Read acknowledged payload facts without allocating a normalized ref.
+
+    Settlement is queried far more often than payloads change.  Constructing a
+    fresh ``TilePayloadRef`` (and shader identity tuple) for every tile/query
+    made the lifecycle query itself a dominant render cost.
+    """
+
+    if rec.presented_source_id is None:
+        return None
+    payload = rec.presentable_payloads.get(rec.presented_source_id)
+    if payload is None:
+        if rec.target is None:
+            return None
+        return (
+            str(rec.presented_quality or "exact"),
+            0 if rec.presented_level is None else int(rec.presented_level),
+            int(rec.target.source_index),
+        )
+    quality = str(rec.presented_quality or getattr(payload, "quality", "exact") or "exact")
+    if quality == "preview":
+        quality = "fallback"
+    lod = getattr(payload, "lod", None)
+    level = int(getattr(lod, "level", 0) or 0) if rec.presented_level is None else int(rec.presented_level)
+    return quality, level, int(getattr(payload, "source_index", -1))
+
+
+def _record_first_pixel_presented(rec: TileRecord) -> bool:
+    fields = _record_presented_payload_fields(rec)
+    return bool(
+        fields is not None
+        and rec.target is not None
+        and fields[2] == int(rec.target.source_index)
+        and rec.backend_source_id == rec.presented_source_id
+    )
+
+
+def _record_target_settled(rec: TileRecord) -> bool:
+    fields = _record_presented_payload_fields(rec)
+    return bool(
+        fields is not None
+        and rec.target is not None
+        and fields[0] == "exact"
+        and fields[2] == int(rec.target.source_index)
+        and fields[1] <= int(rec.target.lod_level)
+        and rec.backend_source_id == rec.presented_source_id
+    )
+
+
+def _coerce_payload_ref(payload) -> TilePayloadRef:
+    return payload_ref_from_display_payload(payload)
+
+
+def _stored_payload(ref: TilePayloadRef):
+    payload = ref.payload
+    if payload is not None and getattr(payload, "source_id", None) == ref.source_id:
+        return payload
+    return ref
+
+
+def _payload_refs_match(left: TilePayloadRef | None, right: TilePayloadRef | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return bool(
+        left.source_id == right.source_id
+        and left.quality == right.quality
+        and left.lod_level == right.lod_level
+        and left.source_index == right.source_index
+        and left.texture_kind == right.texture_kind
+        and left.shader_mapping_key == right.shader_mapping_key
+    )

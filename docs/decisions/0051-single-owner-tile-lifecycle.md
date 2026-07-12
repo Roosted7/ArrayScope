@@ -1,8 +1,9 @@
 # 0051 — Single-owner tile lifecycle (presentation-pipeline rework)
 
-**Status:** Accepted (2026-07-04). P1-P3 (presentation, semantic, and residency axes
-authoritative, identity-aware acknowledgement, event-driven convergence) implemented on
-`feature/lod-residency` as of 2026-07-06; later phases tracked below.
+**Status:** Implemented and strengthened by redesign R5 (2026-07-09).
+Presentation, semantic, residency, target/task, payload-candidate, emission,
+backend-identity, acknowledgement, and settlement facts now share one
+`TileLifecycle` record; the temporary parallel tile ledger is deleted.
 
 ## Context
 

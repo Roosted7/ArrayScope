@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+from itertools import permutations
+
+from arrayscope.presentation import TileLifecycle, TilePayloadRef, TilePhase, TileTarget
+
+
+def _target(tile=0, *, source=10, level=0):
+    return TileTarget(tile, source, ("semantic", source), lod_level=level)
+
+
+def _payload(source_id, *, quality="exact", source=10, level=0, kind="complex_rg32f", shader=("shader", 1)):
+    return TilePayloadRef(
+        source_id=source_id,
+        quality=quality,
+        lod_level=level,
+        source_index=source,
+        texture_kind=kind,
+        shader_mapping_key=shader,
+        payload=("payload", source_id),
+    )
+
+
+def test_fallback_presented_never_settles_exact_target():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target(level=0)})
+    fallback = _payload(("tile", 0, "preview"), quality="fallback", level=4)
+
+    ledger.fallback_ready(0, fallback)
+    assert ledger.presentation_changes()[0].payload_ref == fallback
+    ledger.commit_emitted({0: fallback})
+    assert ledger.backend_ack({0: fallback}) == (0,)
+
+    row = ledger.row(0)
+    assert row.phase is TilePhase.FALLBACK_SHOWN
+    assert row.first_pixel_presented
+    assert not row.target_settled
+    assert not ledger.visible_target_settled()
+
+
+def test_task_cannot_be_running_without_admitted_key_or_stage_key():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target()})
+
+    ledger.task_admitted(0, None)
+
+    assert ledger.row(0).task_claim is None
+    assert ledger.row(0).phase is TilePhase.NEEDS_FIRST_PIXEL
+    assert ledger.snapshot().orphan_running == 0
+
+
+def test_stage_task_records_producer_key():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target()})
+
+    ledger.task_admitted(0, ("tile", 0), stage_key=("stage", 0), stage_producer_key=("stage", 0))
+
+    assert ledger.row(0).phase is TilePhase.TARGET_RUNNING
+    assert ledger.snapshot().parked_without_producer == 0
+    assert ledger.row(0).stage_producer_key == ("stage", 0)
+
+
+def test_dropped_task_returns_tile_to_schedulable_state():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target()})
+    ledger.task_admitted(0, ("task", 0))
+
+    assert ledger.row(0).phase is TilePhase.TARGET_RUNNING
+
+    ledger.task_released(0, reason="stale")
+
+    assert ledger.row(0).task_claim is None
+    assert ledger.row(0).phase is TilePhase.NEEDS_FIRST_PIXEL
+    assert not ledger.visible_target_settled()
+
+
+def test_stage_ready_wakes_dependents_once():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target(), 1: _target(1, source=11)})
+    ledger.stage_waiting(0, ("stage", 1), ("stage-task", 1))
+    ledger.stage_waiting(1, ("stage", 1), ("stage-task", 1))
+
+    assert ledger.row(0).phase is TilePhase.TARGET_WAITING_STAGE
+
+    assert ledger.stage_ready(("stage", 1)) == (0, 1)
+    assert ledger.stage_ready(("stage", 1)) == ()
+    assert ledger.row(0).stage_key is None
+    assert ledger.row(1).stage_key is None
+
+
+def test_finer_exact_payload_supersedes_fallback_but_coarser_exact_does_not():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target(level=2)})
+    fallback = _payload(("tile", 0, "preview"), quality="fallback", level=4)
+    coarser = _payload(("tile", 0, "coarse"), quality="exact", level=3)
+    finer = _payload(("tile", 0, "fine"), quality="exact", level=1)
+
+    ledger.fallback_ready(0, fallback)
+    ledger.target_ready(0, coarser)
+    assert ledger.row(0).target_payload is None
+
+    ledger.target_ready(0, finer)
+    assert ledger.presentation_changes()[0].payload_ref == finer
+
+
+def test_backend_ack_rejects_wrong_payload_metadata():
+    ledger = TileLifecycle()
+    ledger.retarget({0: _target(level=0)})
+    exact = _payload(("tile", 0, "exact"), level=0)
+    wrong_kind = _payload(("tile", 0, "exact"), level=0, kind="rgb8")
+
+    ledger.target_ready(0, exact)
+    ledger.commit_emitted({0: exact})
+
+    assert ledger.backend_ack({0: wrong_kind}) == ()
+    assert not ledger.visible_target_settled()
+
+    assert ledger.backend_ack({0: exact}) == (0,)
+    assert ledger.visible_target_settled()
+
+
+def test_payload_arrival_order_cannot_downgrade_target_choice():
+    fallback = _payload(("tile", 0, "preview"), quality="fallback", level=4)
+    target = _payload(("tile", 0, "exact"), level=0)
+
+    for arrival_order in permutations((fallback, target)):
+        lifecycle = TileLifecycle()
+        lifecycle.retarget({0: _target(level=0)})
+        for payload in arrival_order:
+            if payload.quality == "fallback":
+                lifecycle.fallback_ready(0, payload)
+            else:
+                lifecycle.target_ready(0, payload)
+
+        command = lifecycle.presentation_changes()[0]
+        assert command.payload_ref == target
+        lifecycle.commit_emitted({0: target})
+        assert lifecycle.backend_ack({0: target}) == (0,)
+        assert lifecycle.visible_target_settled()
+
+
+def test_current_payload_does_not_depend_on_native_renderer_materialization_identity():
+    lifecycle = TileLifecycle()
+    lifecycle.retarget({0: _target(level=2)})
+    reduced_shared_target = _payload(("shared-transform", "target", 0), source=10, level=2)
+
+    lifecycle.target_ready(0, reduced_shared_target)
+
+    assert lifecycle.payload_is_current(0, reduced_shared_target)
+    assert not lifecycle.payload_is_current(0, _payload(("stale", 0), source=11, level=2))
+
+
+def test_source_retarget_preserves_physical_truth_but_rejects_stale_pixels():
+    lifecycle = TileLifecycle()
+    exact = _payload(("tile", 0, "exact"), source=10)
+    lifecycle.retarget({0: _target(source=10)})
+    lifecycle.target_ready(0, exact)
+    lifecycle.commit_emitted({0: exact})
+    lifecycle.backend_ack({0: exact})
+
+    lifecycle.retarget({0: _target(source=11)})
+
+    row = lifecycle.row(0)
+    assert row.backend_source_id == exact.source_id
+    assert row.presented_source_id is None
+    assert not row.first_pixel_presented
+    assert not row.target_settled
+
+
+def test_retarget_bounds_presentable_history_to_current_and_physical_predecessor():
+    lifecycle = TileLifecycle()
+    first = _payload(("tile", 10), source=10)
+    lifecycle.retarget({0: _target(source=10)})
+    lifecycle.target_ready(0, first)
+    lifecycle.commit_emitted({0: first})
+    lifecycle.backend_ack({0: first})
+
+    for source in range(11, 40):
+        successor = _payload(("tile", source), source=source)
+        # Index-window remapping can install a successor immediately before
+        # the lifecycle receives its new target.
+        lifecycle.remember_presentable(0, successor)
+        lifecycle.retarget({0: _target(source=source)})
+        lifecycle.target_ready(0, successor)
+
+        row = lifecycle.row(0)
+        assert set(row.presentable_payloads) == {first.source_id, successor.source_id}
+        assert row.target_payload is not None
+        assert row.target_payload.source_id == successor.source_id
+
+
+def test_active_unpresented_successor_cannot_remove_retained_pixels():
+    lifecycle = TileLifecycle()
+    lifecycle.retarget({0: _target(source=10)})
+
+    assert lifecycle.row(0).phase is TilePhase.NEEDS_FIRST_PIXEL
+    assert not lifecycle.may_remove_visible(0)
+    assert lifecycle.may_remove_visible(0, memory_pressure=True)
+
+    lifecycle.retarget({})
+    assert lifecycle.may_remove_visible(0)
+
+
+def test_partial_backend_ack_settles_only_confirmed_region():
+    lifecycle = TileLifecycle()
+    first = _payload(("tile", 0, "exact"), source=10)
+    second = _payload(("tile", 1, "exact"), source=11)
+    lifecycle.retarget({0: _target(source=10), 1: _target(1, source=11)})
+    lifecycle.target_ready(0, first)
+    lifecycle.target_ready(1, second)
+    lifecycle.commit_emitted({0: first, 1: second})
+
+    assert lifecycle.backend_ack({0: first}) == (0,)
+    assert lifecycle.row(0).target_settled
+    assert not lifecycle.row(1).target_settled
+    assert not lifecycle.visible_target_settled()
