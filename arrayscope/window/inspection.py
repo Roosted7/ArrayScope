@@ -549,26 +549,38 @@ class InspectionWorkflowMixin:
         self._refresh_inspection_dock()
         self._notify_sync("rois")
 
-    def _rename_roi(self, roi_id):
-        selection = self.roi_store.get(str(roi_id))
-        if selection is None:
-            return
-        text, accepted = QtWidgets.QInputDialog.getText(
-            self, "Rename ROI", "ROI name:", text=selection.label
-        )
-        if accepted and text.strip():
-            self._update_roi_selection(roi_id, label=text.strip())
-
-    def _change_roi_color(self, roi_id):
+    def _rename_roi(self, roi_id, global_pos=None):
         from pyqtgraph.Qt import QtGui
 
+        from arrayscope.ui.bubbles import LineEditBubble
+
         selection = self.roi_store.get(str(roi_id))
         if selection is None:
             return
-        current = QtGui.QColor(*selection.color)
-        color = QtWidgets.QColorDialog.getColor(current, self, "ROI color")
-        if color.isValid():
-            self._update_roi_selection(roi_id, color=(color.red(), color.green(), color.blue()))
+        bubble = LineEditBubble(
+            self,
+            icon_name="edit",
+            initial=selection.label,
+            on_accept=lambda text, roi_id=str(roi_id): self._update_roi_selection(roi_id, label=text),
+        )
+        bubble.open_at(global_pos or QtGui.QCursor.pos(), focus_widget=bubble.edit)
+
+    def _change_roi_color(self, roi_id, global_pos=None):
+        from pyqtgraph.Qt import QtGui
+
+        from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+        from arrayscope.ui.bubbles import ColorSwatchBubble
+
+        selection = self.roi_store.get(str(roi_id))
+        if selection is None:
+            return
+        bubble = ColorSwatchBubble(
+            self,
+            colors=DEFAULT_ROI_COLORS,
+            current=selection.color,
+            on_accept=lambda color, roi_id=str(roi_id): self._update_roi_selection(roi_id, color=color),
+        )
+        bubble.open_at(global_pos or QtGui.QCursor.pos())
 
     def _show_image_context_menu(self, global_pos, image_point=None):
         from arrayscope.ui.icons import material_icon
@@ -662,19 +674,10 @@ class InspectionWorkflowMixin:
         self._hud_stats_by_roi = dict(stats_by_roi)
         rows = []
         for _roi_id, (selection, stats) in list(stats_by_roi.items())[:6]:
-            from html import escape
-
-            label = escape(str(selection.label))
-            kind = escape(selection.geometry.kind.value.replace("_", " "))
+            kind = selection.geometry.kind.value.replace("_", " ")
             mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f"mean={stats.mean:.4g}"
-            count = f"n={stats.finite_count}"
-            rows.append(
-                f"<tr><td><b>{label}</b>&nbsp;<i>{kind}</i>:</td>"
-                f"<td align='right' style='padding-left:10px'>{count}</td>"
-                f"<td align='right' style='padding-left:10px'>{mean}</td></tr>"
-            )
-        text = "" if not rows else "<table cellspacing='0' cellpadding='0'>" + "".join(rows) + "</table>"
-        self.img_view.setRoiInfoText(text)
+            rows.append((selection.label, kind, f"n={stats.finite_count}", mean))
+        self.img_view.setRoiInfoRows(rows)
 
     def _refresh_hidden_roi_overlay_from_committed_frame(self) -> None:
         if not hasattr(self, "img_view") or not hasattr(self, "inspection_dock"):

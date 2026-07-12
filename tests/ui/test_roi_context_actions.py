@@ -84,3 +84,45 @@ def test_pixel_hud_renders_multiple_rows(qtbot):
 
     hud.show_text_near("(1, 1) = 2.0", QtCore.QPointF(5, 5))
     assert hud.text() == "(1, 1) = 2.0"
+
+
+def test_line_edit_bubble_applies_text(qtbot):
+    from arrayscope.ui.bubbles import LineEditBubble
+    from pyqtgraph.Qt import QtCore
+
+    accepted = []
+    bubble = LineEditBubble(None, initial="old", on_accept=accepted.append)
+    qtbot.addWidget(bubble)
+    bubble.open_at(QtCore.QPoint(100, 100), focus_widget=bubble.edit)
+    bubble.edit.setText("new name")
+    bubble.edit.returnPressed.emit()
+    assert accepted == ["new name"]
+
+
+def test_color_swatch_bubble_picks_color(qtbot):
+    from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+    from arrayscope.ui.bubbles import ColorSwatchBubble
+    from pyqtgraph.Qt import QtCore, QtWidgets
+
+    picked = []
+    bubble = ColorSwatchBubble(None, colors=DEFAULT_ROI_COLORS, current=DEFAULT_ROI_COLORS[0], on_accept=picked.append)
+    qtbot.addWidget(bubble)
+    bubble.open_at(QtCore.QPoint(100, 100))
+    swatches = [b for b in bubble.findChildren(QtWidgets.QToolButton) if b.objectName() == "ColorSwatchButton"]
+    assert len(swatches) == len(DEFAULT_ROI_COLORS)
+    swatches[1].click()
+    assert picked == [tuple(DEFAULT_ROI_COLORS[1][:3])]
+
+
+def test_roi_overlay_panel_renders_structured_rows(qtbot):
+    from arrayscope.display.roi_items import MovableInfoPanel
+
+    panel = MovableInfoPanel()
+    qtbot.addWidget(panel)
+    panel.set_rows((("1", "rectangle", "n=36", "mean=4.2"), ("Lesion", "line", "n=25", "")))
+    panel.show()
+    text = panel.text()
+    assert "n=36" in text
+    assert "Lesion" in text
+    panel.setText("plain fallback")
+    assert panel.text() == "plain fallback"

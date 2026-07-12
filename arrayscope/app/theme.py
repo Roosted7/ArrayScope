@@ -301,9 +301,100 @@ def _apply_palette(app, tokens: ThemeTokens) -> None:
     app.setPalette(palette)
 
 
+def _arrow_asset_paths(tokens: ThemeTokens):
+    """Write tiny theme-tinted arrow PNGs for spinbox steppers.
+
+    Qt stylesheets cannot draw primitive arrows once a subcontrol is styled,
+    and unstyled native steppers render inconsistently across themes. File
+    URLs to generated pixmaps give crisp, consistent arrows everywhere.
+    """
+    import os
+    import tempfile
+
+    from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+    if QtWidgets.QApplication.instance() is None:
+        return None
+    cache_dir = os.path.join(tempfile.gettempdir(), "arrayscope-theme-assets")
+    os.makedirs(cache_dir, exist_ok=True)
+    paths = {}
+    for state, color_name in (("", tokens.text), ("_muted", tokens.text_muted)):
+        color = QtGui.QColor(color_name)
+        for direction in ("up", "down"):
+            file_name = f"arrow_{direction}{state}_{color.name().lstrip('#')}.png"
+            path = os.path.join(cache_dir, file_name)
+            if not os.path.exists(path):
+                pixmap = QtGui.QPixmap(16, 16)
+                pixmap.setDevicePixelRatio(2.0)
+                pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+                painter = QtGui.QPainter(pixmap)
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                if direction == "up":
+                    points = (QtCore.QPointF(1.2, 5.6), QtCore.QPointF(6.8, 5.6), QtCore.QPointF(4.0, 2.4))
+                else:
+                    points = (QtCore.QPointF(1.2, 2.4), QtCore.QPointF(6.8, 2.4), QtCore.QPointF(4.0, 5.6))
+                painter.drawPolygon(QtGui.QPolygonF(points))
+                painter.end()
+                if not pixmap.save(path, "PNG"):
+                    return None
+            paths[f"{direction}{state}"] = path.replace(os.sep, "/")
+    return paths
+
+
+def _spin_stepper_stylesheet(tokens: ThemeTokens) -> str:
+    try:
+        paths = _arrow_asset_paths(tokens)
+    except Exception:
+        paths = None
+    if not paths:
+        return ""
+    return f"""
+QAbstractSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 16px;
+    border: none;
+    background: transparent;
+    border-top-right-radius: 3px;
+}}
+QAbstractSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 16px;
+    border: none;
+    background: transparent;
+    border-bottom-right-radius: 3px;
+}}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
+    background: {tokens.surface_alt};
+}}
+QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{
+    background: {tokens.border};
+}}
+QAbstractSpinBox::up-arrow {{
+    image: url({paths['up']});
+    width: 8px;
+    height: 8px;
+}}
+QAbstractSpinBox::down-arrow {{
+    image: url({paths['down']});
+    width: 8px;
+    height: 8px;
+}}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{
+    image: url({paths['up_muted']});
+}}
+QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{
+    image: url({paths['down_muted']});
+}}
+"""
+
+
 def build_stylesheet(tokens: ThemeTokens) -> str:
     t = tokens
-    return f"""
+    return _spin_stepper_stylesheet(tokens) + f"""
 /* ---------- global chrome ---------- */
 QMainWindow, QDialog {{
     background: {t.window};
@@ -626,7 +717,7 @@ QFrame#DimChipSeparator {{
 }}
 
 /* ---------- floating chips ---------- */
-QLabel#EvaluationOverlay, QLabel#RoiInfoPanel, QFrame#PixelHud {{
+QLabel#EvaluationOverlay, QFrame#RoiInfoPanel, QFrame#PixelHud {{
     background: {t.overlay_bg};
     color: {t.overlay_text};
     border: 1px solid {t.border_strong};
@@ -634,7 +725,13 @@ QLabel#EvaluationOverlay, QLabel#RoiInfoPanel, QFrame#PixelHud {{
     padding: 5px 8px;
     font-size: 9pt;
 }}
-QFrame#PixelHud {{ padding: 0; }}
+QFrame#PixelHud, QFrame#RoiInfoPanel {{ padding: 0; }}
+QFrame#RoiInfoPanel QLabel {{
+    background: transparent;
+    border: none;
+    color: {t.overlay_text};
+    font-size: 9pt;
+}}
 QFrame#PixelHud QLabel {{
     background: transparent;
     border: none;
@@ -645,6 +742,17 @@ QFrame#PixelHudSeparator {{
     background: {t.border};
     border: none;
     margin: 1px 2px;
+}}
+QFrame#EditBubble {{
+    background: {t.surface};
+    border: 1px solid {t.border_strong};
+    border-radius: 6px;
+}}
+QFrame#EditBubble QLabel {{ font-size: 9pt; }}
+QFrame#RoiInfoDivider {{
+    background: {t.border};
+    border: none;
+    margin: 1px 0;
 }}
 QLabel#ArrayScopeStatusMessageLabel {{
     color: {t.text_muted};

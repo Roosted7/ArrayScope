@@ -215,6 +215,7 @@ class ArrayScopeWindow(
         self.interaction_mode = InteractionMode.CURSOR
                 
         self._build_window_ui(data, filepath)
+        self._update_array_info_label()
         from arrayscope.sync.controller import WindowSyncController
 
         self.sync_controller = WindowSyncController(self)

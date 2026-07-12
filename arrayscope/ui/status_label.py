@@ -1,17 +1,49 @@
-"""Compact eliding status label for the main toolbar row."""
+"""Compact eliding status labels for the main toolbar row."""
 
 from __future__ import annotations
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 
+class ElideLabel(QtWidgets.QLabel):
+    """QLabel that paints elided text and never forces the layout wider.
+
+    Regular QLabels demand their full text width as a minimum; inside the
+    toolbar's centered status section that would block shrinking. An
+    `Ignored` policy is no good either — next to stretch items it collapses
+    to zero width. Preferred policy + a zero minimum hint gives natural
+    width when there is room and graceful eliding when there is not.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(str(text), parent)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(0, hint.height())
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        metrics = self.fontMetrics()
+        text = metrics.elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, max(8, self.width()))
+        painter.drawText(self.rect(), self.alignment() | QtCore.Qt.AlignmentFlag.AlignVCenter, text)
+
+
 class PixelStatusLabel(QtWidgets.QLabel):
+    statusChanged = QtCore.Signal(str)
+
     def __init__(self, parent=None):
         super().__init__("", parent)
         self._value_text = ""
         self._slice_text = ""
         self.setMinimumWidth(0)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setMaximumWidth(420)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(0, hint.height())
 
     def set_pixel_status(self, value_text, slice_text=""):
         self._value_text = str(value_text)
@@ -20,6 +52,7 @@ class PixelStatusLabel(QtWidgets.QLabel):
         self.setToolTip(full)
         self.setText(full)
         self.update()
+        self.statusChanged.emit(full)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)

@@ -229,7 +229,8 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         _process_events(qtbot, count=10)
 
         model = win.inspection_dock.roi_model
-        assert model.data(model.index(0, 2)) == "9"
+        # Column 0 is the color swatch; Count sits at column 3.
+        assert model.data(model.index(0, 3)) == "9"
         assert len(win.inspection_dock.histogram_plot.listDataItems()) == 1
         assert not getattr(win, "_inspection_stale", False)
     finally:
@@ -355,7 +356,7 @@ def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot,
 
         model = win.inspection_dock.roi_model
         assert model.rowCount() == 1
-        assert model.data(model.index(0, 2)) == "36"
+        assert model.data(model.index(0, 3)) == "36"
         assert len(win.inspection_dock.histogram_plot.listDataItems()) == 1
         assert not getattr(win, "_inspection_stale", False)
     finally:

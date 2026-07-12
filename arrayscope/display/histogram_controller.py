@@ -20,7 +20,7 @@ from arrayscope.display.histogram_plot import (
     finite_increasing_pair,
     sample_histogram_data,
 )
-from arrayscope.ui.icons import set_button_icon
+from arrayscope.ui.icons import material_icon, set_button_icon
 
 
 MIN_LEVEL_SPAN_FRACTION = 1e-12
@@ -812,6 +812,9 @@ class HistogramLevelEditPopup(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(frame)
         layout.setContentsMargins(8, 6, 6, 6)
         layout.setSpacing(6)
+        icon_label = QtWidgets.QLabel(frame)
+        icon_label.setPixmap(material_icon("tonality").pixmap(14, 14))
+        layout.addWidget(icon_label)
         layout.addWidget(QtWidgets.QLabel(str(label)))
         self.edit = HistogramNumberEdit(value=value, step=step, parent=frame)
         self.edit.setFixedWidth(92)

@@ -18,7 +18,7 @@ from arrayscope.ui.roi_model import RoiTableModel
 
 
 class InspectionDock(StandardDockWidget):
-    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None, on_sync_toggled=None):
+    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None, on_sync_toggled=None, on_change_color=None):
         super().__init__("Inspection", parent)
         self.setObjectName("InspectionDock")
         self._on_sync_toggled = on_sync_toggled
@@ -27,6 +27,7 @@ class InspectionDock(StandardDockWidget):
         self._on_delete_roi = on_delete_roi
         self._on_clear_rois = on_clear_rois
         self._on_select_roi = on_select_roi
+        self._on_change_color = on_change_color
         self._roi_ids = []
         self._stats_by_roi = {}
         self._updating = False
@@ -117,7 +118,20 @@ class InspectionDock(StandardDockWidget):
         self.delete_button.clicked.connect(self._delete_clicked)
         self.clear_button.clicked.connect(self._clear_clicked)
         self.stats_table.selectionModel().selectionChanged.connect(self._selection_changed)
+        self.stats_table.clicked.connect(self._cell_clicked)
         self.add_button.setEnabled(self.current_tool() in {"roi_line", "roi_rectangle"})
+
+    def _cell_clicked(self, index):
+        """Single-click editing: color swatch opens the picker bubble, the
+        name cell goes straight into inline rename."""
+        if not index.isValid():
+            return
+        if index.column() == RoiTableModel.COLOR_COLUMN:
+            roi_id = self.roi_model.roi_id_for_row(index.row())
+            if roi_id is not None and self._on_change_color is not None:
+                self._on_change_color(roi_id)
+        elif index.column() == RoiTableModel.NAME_COLUMN:
+            self.stats_table.edit(index)
 
     def _on_splitter_moved(self, _pos, _index):
         if not self._applying_auto_split:

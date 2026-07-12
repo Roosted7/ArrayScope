@@ -98,7 +98,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self._center_layout.addStretch(1)
         self.addWidget(self.center_container)
 
-        self.addSeparator()
+        # Visible only while status text sits next to it; a lone divider at
+        # the right edge is noise.
+        self._right_separator = self.addSeparator()
         self.window_combo = self._add_group("Window", "contrast", _WINDOW_ITEMS)
         self.window_combo.currentIndexChanged.connect(
             lambda _i: self.windowModeChanged.emit(self.window_combo.currentData())
@@ -131,6 +133,15 @@ class DisplayToolbar(QtWidgets.QToolBar):
         """Add a widget to the centered status section (kept centered in the
         free space between the left and right control groups)."""
         self._center_layout.insertWidget(self._center_layout.count() - 1, widget)
+
+    def sync_center_separator(self) -> None:
+        has_text = False
+        for index in range(self._center_layout.count()):
+            item_widget = self._center_layout.itemAt(index).widget()
+            if item_widget is not None and bool(getattr(item_widget, "text", lambda: "")()):
+                has_text = True
+                break
+        self._right_separator.setVisible(has_text)
 
     def _add_group(self, label_text, icon_name, items):
         icon_label = QtWidgets.QLabel()

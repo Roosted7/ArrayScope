@@ -33,8 +33,11 @@ def _scale_value_for_button(window, button) -> str:
 
 
 def _make_array_info_label():
-    label = QtWidgets.QLabel("")
+    from arrayscope.ui.status_label import ElideLabel
+
+    label = ElideLabel("")
     label.setObjectName("ArrayInfoLabel")
+    label.setMaximumWidth(240)
     return label
 
 
@@ -552,9 +555,11 @@ class DisplayControlBuildMixin:
         # info is secondary (muted, elides via Ignored policy, full text on
         # hover).
         array_info = self.widgets['labels']['arrayInfo']
-        array_info.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
-        self.display_toolbar.add_center_widget(self.widgets['labels']['pixelValue'])
+        pixel_label = self.widgets['labels']['pixelValue']
+        self.display_toolbar.add_center_widget(pixel_label)
         self.display_toolbar.add_center_widget(array_info)
+        pixel_label.statusChanged.connect(lambda _text: self.display_toolbar.sync_center_separator())
+        self.display_toolbar.sync_center_separator()
 
     def _compose_central_layout(self):
         self.layouts['botLeft'].addLayout(self.layouts['dims'])
@@ -603,6 +608,7 @@ class DisplayControlBuildMixin:
             on_clear_rois=self._clear_rois,
             on_select_roi=self._select_roi,
             on_sync_toggled=lambda checked: self._on_sync_facet_toggled("rois", checked),
+            on_change_color=self._change_roi_color,
         )
         self.inspection_dock.roi_model.set_rename_callback(
             lambda roi_id, text: self._update_roi_selection(roi_id, label=text)

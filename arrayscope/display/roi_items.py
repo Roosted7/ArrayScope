@@ -78,14 +78,93 @@ def sync_item_to_roi_geometry(item, geometry: RoiGeometry) -> None:
         item.setState(state)
 
 
-class MovableInfoPanel(QtWidgets.QLabel):
+class MovableInfoPanel(QtWidgets.QFrame):
+    """Draggable ROI summary overlay.
+
+    Structured mode (`set_rows`) renders one line per ROI: bold name +
+    italic kind on the left, then a single continuous vertical divider,
+    then the value columns right-aligned so they line up across rows.
+    `setText` remains for plain-text callers (VisPy path, tests).
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_offset = None
         self.setObjectName("RoiInfoPanel")
-        self.setWordWrap(False)
-        self.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        # Styling comes from the application stylesheet (QLabel#RoiInfoPanel).
+        self._grid = QtWidgets.QGridLayout(self)
+        self._grid.setContentsMargins(8, 5, 8, 5)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(2)
+        self._row_widgets = []
+        self._divider = QtWidgets.QFrame(self)
+        self._divider.setObjectName("RoiInfoDivider")
+        self._divider.setFixedWidth(1)
+        self._divider.hide()
+        self._plain_label = QtWidgets.QLabel(self)
+        self._plain_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self._grid.addWidget(self._plain_label, 0, 0, 1, 4)
+        self._plain_label.hide()
+        # Styling comes from the application stylesheet (QFrame#RoiInfoPanel).
+
+    def setText(self, text):
+        self._plain_label.setText(str(text))
+        self._plain_label.setVisible(bool(str(text)))
+        for widgets in self._row_widgets:
+            for widget in widgets:
+                widget.setVisible(False)
+        self._divider.hide()
+
+    def text(self):
+        if self._plain_label.isVisible() or not self._row_widgets:
+            return self._plain_label.text()
+        import re
+
+        lines = []
+        for widgets in self._row_widgets:
+            if not widgets[0].isVisible():
+                continue
+            name = re.sub("<[^>]+>", "", widgets[0].text()).replace("&nbsp;", " ")
+            values = " ".join(w.text() for w in widgets[1:] if w.isVisible() and w.text())
+            lines.append(f"{name}: {values}".strip())
+        return "\n".join(lines)
+
+    def set_rows(self, rows):
+        """rows: sequence of (name, kind, *value_columns)."""
+        self._plain_label.hide()
+        rows = tuple(rows)
+        value_columns = max((len(row) - 2 for row in rows), default=0)
+        while len(self._row_widgets) < len(rows):
+            index = len(self._row_widgets) + 1  # row 0 is the plain label
+            name_label = QtWidgets.QLabel(self)
+            name_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            widgets = [name_label]
+            self._grid.addWidget(name_label, index, 0)
+            for column in range(2):
+                value_label = QtWidgets.QLabel(self)
+                value_label.setAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+                self._grid.addWidget(value_label, index, 2 + column)
+                widgets.append(value_label)
+            self._row_widgets.append(tuple(widgets))
+        from html import escape
+
+        for index, widgets in enumerate(self._row_widgets):
+            if index >= len(rows):
+                for widget in widgets:
+                    widget.setVisible(False)
+                continue
+            name, kind, *values = rows[index]
+            widgets[0].setText(f"<b>{escape(str(name))}</b>&nbsp;<i>{escape(str(kind))}</i>")
+            widgets[0].setVisible(True)
+            for column, value_label in enumerate(widgets[1:]):
+                value_label.setText(str(values[column]) if column < len(values) else "")
+                value_label.setVisible(column < max(1, value_columns))
+        if rows:
+            self._grid.addWidget(self._divider, 1, 1, len(rows), 1)
+            self._divider.show()
+        else:
+            self._divider.hide()
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:

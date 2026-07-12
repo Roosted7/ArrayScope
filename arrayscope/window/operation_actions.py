@@ -444,16 +444,38 @@ class OperationActionsMixin:
         if type(operation).__name__ != "Crop":
             return
         axis_size = self.base_data.shape[operation.axis]
-        params = self._crop_parameters_dialog(operation.axis, axis_size, start=operation.start, stop=operation.stop)
-        if params is None:
-            return
-        try:
-            self.operation_coordinator.replace_operation(index, "crop", axis=operation.axis, parameters=params)
-            self._set_document(self.operation_coordinator.document)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot edit operation:\n{e}")
-            return
-        self.render(reason="operation-edit", force_autolevel=True)
+        from arrayscope.ui.bubbles import EditBubble
+
+        bubble = EditBubble(self, icon_name="crop")
+        bubble.content_layout.addWidget(QtWidgets.QLabel("start"))
+        start_spin = QtWidgets.QSpinBox(bubble)
+        start_spin.setRange(0, max(0, axis_size - 1))
+        start_spin.setValue(int(operation.start))
+        bubble.add_widget(start_spin)
+        bubble.content_layout.addWidget(QtWidgets.QLabel("stop"))
+        stop_spin = QtWidgets.QSpinBox(bubble)
+        stop_spin.setRange(1, axis_size)
+        stop_spin.setValue(int(operation.stop if operation.stop is not None else axis_size))
+        bubble.add_widget(stop_spin)
+
+        def _apply():
+            start = int(start_spin.value())
+            stop = int(stop_spin.value())
+            if stop <= start:
+                show_status_message(self, "Crop stop must be greater than start.", timeout=2500)
+                return
+            try:
+                self.operation_coordinator.replace_operation(
+                    index, "crop", axis=operation.axis, parameters={"start": start, "stop": stop}
+                )
+                self._set_document(self.operation_coordinator.document)
+            except Exception as e:
+                show_status_message(self, f"Cannot edit operation: {e}", timeout=4000)
+                return
+            self.render(reason="operation-edit", force_autolevel=True)
+
+        bubble.add_confirm(_apply)
+        bubble.open_at(QtGui.QCursor.pos(), focus_widget=start_spin)
 
     def change_operation_axis(self, index, axis):
         """Re-target an existing operation onto another dimension."""

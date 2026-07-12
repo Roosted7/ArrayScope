@@ -28,17 +28,15 @@ def _operation_name(operation) -> str:
 
 
 def _operation_params_text(operation) -> str:
-    """Editable parameters line: axis plus registered parameter values."""
+    """Editable parameters line (the axis already shows in the d-chip)."""
     try:
         entry = get_operation_entry(operation_id_for(operation))
     except Exception:
         return ""
-    parts = []
-    if entry.requires_axis:
-        parts.append(f"axis {getattr(operation, 'axis', '?')}")
-    for parameter in entry.parameters:
-        parts.append(f"{parameter.name}={getattr(operation, parameter.name, '?')}")
-    return " · ".join(parts)
+    return " · ".join(
+        f"{parameter.name}={getattr(operation, parameter.name, '?')}"
+        for parameter in entry.parameters
+    )
 
 
 class ElidedLabel(QtWidgets.QLabel):

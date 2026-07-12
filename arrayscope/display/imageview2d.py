@@ -1927,6 +1927,20 @@ class ImageViewShell(QtWidgets.QWidget):
         item = getattr(self, "_montage_tile_overlay_item", None)
         return 0 if item is None else int(item.overlay_count)
 
+    def setRoiInfoRows(self, rows):
+        rows = tuple(rows or ())
+        if not rows:
+            if self._roi_info_panel is not None:
+                self._roi_info_panel.hide()
+            return
+        if self._roi_info_panel is None:
+            self._roi_info_panel = MovableInfoPanel(self._display_overlay_parent())
+            self._roi_info_panel.move(12, 44)
+        self._roi_info_panel.set_rows(rows)
+        self._roi_info_panel.adjustSize()
+        self._roi_info_panel.show()
+        self._roi_info_panel.raise_()
+
     def setRoiInfoText(self, text):
         text = str(text or "")
         if not text:

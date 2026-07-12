@@ -261,12 +261,7 @@ class StateSyncMixin:
                     pass
             self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
 
-        info_label = self.widgets.get('labels', {}).get('arrayInfo') if isinstance(getattr(self, 'widgets', None), dict) else None
-        if info_label is not None:
-            nbytes = getattr(self.data, "nbytes", None)
-            size_text = "" if nbytes is None else f" · {nbytes / 1e6:.1f} MB" if nbytes >= 1e6 else f" · {nbytes / 1e3:.0f} kB"
-            info_label.setText(f"{tuple(self.data.shape)} {self.data.dtype}")
-            info_label.setToolTip(f"shape {tuple(self.data.shape)} · dtype {self.data.dtype}{size_text}")
+        self._update_array_info_label()
 
         self.update_complex_indicators()
         self.update_shift_indicators()
@@ -275,6 +270,18 @@ class StateSyncMixin:
         # binder's change detection must not skip the re-apply.
         self.state_binder.forget()
         self._sync_controls_from_view_state()
+
+    def _update_array_info_label(self):
+        info_label = self.widgets.get('labels', {}).get('arrayInfo') if isinstance(getattr(self, 'widgets', None), dict) else None
+        if info_label is None:
+            return
+        nbytes = getattr(self.data, "nbytes", None)
+        size_text = "" if nbytes is None else f" · {nbytes / 1e6:.1f} MB" if nbytes >= 1e6 else f" · {nbytes / 1e3:.0f} kB"
+        info_label.setText(f"{tuple(self.data.shape)} {self.data.dtype}")
+        info_label.setToolTip(f"shape {tuple(self.data.shape)} · dtype {self.data.dtype}{size_text}")
+        toolbar = getattr(self, "display_toolbar", None)
+        if toolbar is not None and hasattr(toolbar, "sync_center_separator"):
+            toolbar.sync_center_separator()
 
     def _update_operation_dock(self):
         from time import perf_counter
