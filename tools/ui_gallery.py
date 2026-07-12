@@ -357,6 +357,19 @@ def s_diagnostics(ctx: Ctx):
     ctx.shot(dialog, "diagnostics_dialog")
 
 
+@scenario("colormap_designer")
+def s_colormap_designer(ctx: Ctx):
+    win = ctx.window(_kspace(128), size=(1000, 700))
+    ctx.shot(win, "complex_phase_picker")
+    from arrayscope.ui.colormap_designer import ColormapDesignerDialog
+
+    dialog = ColormapDesignerDialog(win)
+    dialog.show()
+    ctx.pump(6)
+    ctx.shot(dialog, "designer_dialog")
+    dialog.close()
+
+
 @scenario("first_run_hints")
 def s_first_run_hints(ctx: Ctx):
     from pyqtgraph.Qt import QtCore

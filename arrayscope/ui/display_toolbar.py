@@ -33,19 +33,8 @@ _WINDOW_ITEMS = (
     ("Relative", "relative", "%"),
     ("Absolute", "absolute", "#"),
 )
-# glyph=None: the item icon is a gradient preview of the colormap itself.
-_COLORMAP_ITEMS = (
-    ("Gray", "gray", None),
-    ("Viridis", "viridis", None),
-    ("Plasma", "plasma", None),
-    ("Inferno", "inferno", None),
-    ("Magma", "magma", None),
-    ("Cividis", "cividis", None),
-    ("Turbo", "turbo", None),
-    ("Warm", "d3-warm", None),
-    ("Cool", "d3-cool", None),
-    ("Phase", "PAL-relaxed", None),
-)
+# Sentinel entry that opens the colormap designer instead of selecting.
+CUSTOMIZE_COLORMAP = "__customize_colormaps__"
 
 _COLORMAP_ICON_CACHE: dict[str, object] = {}
 
@@ -58,9 +47,9 @@ def _colormap_icon(name):
         return icon
     icon = QtGui.QIcon()
     try:
-        from arrayscope.display.colormaps import named_colormap
+        from arrayscope.display.colormap_library import get_colormap
 
-        lut = named_colormap(name).getLookupTable(0.0, 1.0, 32, alpha=False)
+        lut = get_colormap(name).getLookupTable(0.0, 1.0, 32, alpha=False)
         pixmap = QtGui.QPixmap(len(lut), 12)
         painter = QtGui.QPainter(pixmap)
         for index, rgb in enumerate(lut):
@@ -81,6 +70,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
     channelChanged = Qt.QtCore.Signal(str)
     scaleChanged = Qt.QtCore.Signal(str)
     colormapChanged = Qt.QtCore.Signal(str)
+    colormapCustomizeRequested = Qt.QtCore.Signal()
     fitRequested = Qt.QtCore.Signal(bool)
     oneToOneRequested = Qt.QtCore.Signal()
     windowModeChanged = Qt.QtCore.Signal(str)
@@ -113,10 +103,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
         )
 
         self.addSeparator()
-        self.colormap_combo = self._add_group("Color", "palette", _COLORMAP_ITEMS)
-        self.colormap_combo.currentIndexChanged.connect(
-            lambda _i: self.colormapChanged.emit(self.colormap_combo.currentData())
-        )
+        self.colormap_combo = self._add_group("Color", "palette", ())
+        self._colormap_previous_index = 0
+        self.colormap_combo.currentIndexChanged.connect(self._colormap_index_changed)
 
         self.addSeparator()
         self.fit_action = self.addAction("Fit")
@@ -182,6 +171,46 @@ class DisplayToolbar(QtWidgets.QToolBar):
         """Add a widget to the centered status section (kept centered in the
         free space between the left and right control groups)."""
         self._center_layout.insertWidget(self._center_layout.count() - 1, widget)
+
+    def set_colormap_options(self, names, *, current=None) -> None:
+        """Rebuild the picker for the active channel family."""
+        combo = self.colormap_combo
+        items = tuple((str(name), str(name), None) for name in names)
+        blocker = QtCore.QSignalBlocker(combo)
+        try:
+            combo.clear()
+            for text, value, glyph in items:
+                combo.addItem(_item_icon(value, glyph), "" if self._compact_level >= 3 else text, value)
+                combo.setItemData(combo.count() - 1, text, QtCore.Qt.ItemDataRole.ToolTipRole)
+            combo.addItem(material_icon("edit"), "" if self._compact_level >= 3 else "Customize…", CUSTOMIZE_COLORMAP)
+            combo.setItemData(combo.count() - 1, "Edit, create and import colormaps", QtCore.Qt.ItemDataRole.ToolTipRole)
+            if current is not None:
+                index = combo.findData(str(current))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            self._colormap_previous_index = combo.currentIndex()
+        finally:
+            blocker.unblock()
+        # Registered items drive the compact re-labeling / icon refresh.
+        self._combo_items = [
+            entry if entry[0] is not combo else (combo, items + (("Customize…", CUSTOMIZE_COLORMAP, "…"),))
+            for entry in self._combo_items
+        ]
+
+    def _colormap_index_changed(self, index) -> None:
+        combo = self.colormap_combo
+        value = combo.itemData(index)
+        if value == CUSTOMIZE_COLORMAP:
+            blocker = QtCore.QSignalBlocker(combo)
+            try:
+                combo.setCurrentIndex(max(0, self._colormap_previous_index))
+            finally:
+                blocker.unblock()
+            self.colormapCustomizeRequested.emit()
+            return
+        self._colormap_previous_index = index
+        if value:
+            self.colormapChanged.emit(str(value))
 
     def sync_center_separator(self) -> None:
         has_text = False

@@ -598,6 +598,11 @@ class DisplayControlBuildMixin:
         self.display_toolbar.colormapChanged.connect(
             lambda name: self._set_display_colormap(name, user_selected=True, request_render=True)
         )
+        self.display_toolbar.colormapCustomizeRequested.connect(self.open_colormap_designer)
+        from arrayscope.display import colormap_library
+
+        colormap_library.add_library_listener(self._refresh_colormap_options)
+        self._refresh_colormap_options()
         self.display_toolbar.fitRequested.connect(lambda checked=False: self.fit_image_to_view(bool(checked)))
         self.display_toolbar.oneToOneRequested.connect(self.one_to_one_image)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)

@@ -136,6 +136,7 @@ class DimensionControlMixin:
 
     def _update_channel_controls(self):
         """Keep channel options in sync with the current array dtype."""
+        self._refresh_colormap_options()
         is_complex = self._current_is_complex()
         channel_buttons = self.widgets['buttons']['channel']
         enabled_channels = {
@@ -449,6 +450,30 @@ class DimensionControlMixin:
                 
         # Pass event to parent if not handled
         super().keyPressEvent(event)
+
+    def _refresh_colormap_options(self):
+        """The picker offers only maps valid for the active channel family
+        (cyclic maps for phase/complex, sequential/diverging otherwise)."""
+        toolbar = getattr(self, "display_toolbar", None)
+        if toolbar is None or not hasattr(toolbar, "set_colormap_options"):
+            return
+        from arrayscope.display import colormap_library
+        from arrayscope.display.colormap_policy import colormap_family
+
+        family = colormap_family(self.view_state.channel)
+        names = [info.name for info in colormap_library.colormaps_for_family(family)]
+        toolbar.set_colormap_options(names, current=getattr(self, "current_colormap", None))
+
+    def open_colormap_designer(self):
+        from arrayscope.ui.colormap_designer import ColormapDesignerDialog
+
+        dialog = getattr(self, "_colormap_designer_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = ColormapDesignerDialog(self)
+            self._colormap_designer_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def step_active_slice(self, delta):
         axis = getattr(self, "_focused_dimension_axis", None)

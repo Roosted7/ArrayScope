@@ -50,10 +50,21 @@ def d3_cool_colormap():
 
 
 def named_colormap(colormap_name):
+    # Persistent user-defined maps shadow built-ins by name.
+    try:
+        from arrayscope.display import colormap_library
+
+        user_info = colormap_library._load_user_cache().get(str(colormap_name))
+        if user_info is not None and user_info.stops:
+            return colormap_library._colormap_from_stops(user_info.stops)
+    except Exception:
+        pass
     if colormap_name == "gray":
         return gray_colormap()
     if colormap_name == "PAL-relaxed":
         return phase_colormap()
+    if colormap_name == "hsv-phase":
+        return hsv_phase_colormap()
     if colormap_name == "d3-warm":
         return d3_warm_colormap()
     if colormap_name == "d3-cool":

@@ -612,21 +612,59 @@ class RenderOrchestrator(
     def _phase_colormap(self):
         return phase_colormap()
 
+    def _family_colormap_choices(self) -> dict:
+        choices = getattr(self.win, "_colormap_choice_by_family", None)
+        if choices is None:
+            choices = {"scalar": (None, False), "phase": (None, False)}
+            self.win._colormap_choice_by_family = choices
+        return choices
+
     def _apply_channel_colormap(self):
+        from arrayscope.display.colormap_policy import colormap_family
+
+        family = colormap_family(self.win.view_state.channel)
+        stored_name, stored_user = self._family_colormap_choices().get(family, (None, False))
         name = resolved_colormap_name(
             self.win.view_state.channel,
-            getattr(self.win, "current_colormap", None),
-            user_selected=bool(getattr(self.win, "_colormap_user_selected", False)),
+            stored_name,
+            user_selected=bool(stored_user),
         )
         self._set_display_colormap(
             name,
-            user_selected=bool(getattr(self.win, "_colormap_user_selected", False)),
+            user_selected=bool(stored_user),
             request_render=False,
         )
+
+    def _coerced_colormap_for_family(self, name: str, family: str) -> str:
+        """Phase presentation needs a cyclic map; anything else renders a hard
+        seam at ±π. Non-cyclic requests fall back to the phase default."""
+        if family != "phase":
+            return str(name)
+        try:
+            from arrayscope.display import colormap_library
+
+            info = colormap_library.find_colormap(str(name))
+        except Exception:
+            info = None
+        if info is not None and info.kind != colormap_library.CYCLIC:
+            from arrayscope.display.colormap_policy import PHASE_DEFAULT_COLORMAP
+            from arrayscope.ui.toasts import show_status_message
+
+            show_status_message(
+                self.win,
+                f"{name} is not cyclic; phase display uses {PHASE_DEFAULT_COLORMAP}.",
+                timeout=3000,
+            )
+            return PHASE_DEFAULT_COLORMAP
+        return str(name)
 
     def _set_display_colormap(self, name, *, user_selected: bool, request_render: bool) -> str:
         """Apply one named LUT to the colorbar and every rendering strategy."""
 
+        from arrayscope.display.colormap_policy import colormap_family
+
+        family = colormap_family(self.win.view_state.channel)
+        name = self._coerced_colormap_for_family(name, family)
         colormap = named_colormap(str(name))
         if colormap is None:
             raise ValueError(f"unknown colormap: {name}")
@@ -635,6 +673,7 @@ class RenderOrchestrator(
         self.win.img_view.setColorMap(colormap)
         self.win.current_colormap = str(name)
         self.win._colormap_user_selected = bool(user_selected)
+        self._family_colormap_choices()[family] = (str(name), bool(user_selected))
         current_key = key_getter() if callable(key_getter) else None
 
         # Shader-backed paths update uniforms in setColorMap.  The CPU complex
