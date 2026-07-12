@@ -17,7 +17,7 @@ from arrayscope.window.montage_payload_cache import (
 )
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
-    montage_session_key,
+    frame_session_key,
 )
 
 
@@ -97,9 +97,9 @@ def _committed_tiled_frame(geometry, *, key):
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self._tracker = MontageLevelTracker()
@@ -134,14 +134,57 @@ def test_known_montage_level_source_is_not_resampled(monkeypatch):
     assert calls == []
 
 
+def test_montage_source_level_cache_reuses_overlapping_selection_and_keeps_refined():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+        montage_level_key,
+    )
+    from arrayscope.render.level_stats import LevelStatsService
+
+    service = LevelStatsService()
+    base = ViewState.from_shape((8, 8, 12))
+    first_state = base.with_montage_axis(2, indices=tuple(range(8)), text="0:8")
+    shifted_state = base.with_montage_axis(2, indices=tuple(range(1, 9)), text="1:9")
+    first_key = montage_level_key("document", first_state)
+    shifted_key = montage_level_key("document", shifted_state)
+    refined = TileLevelStats(
+        3,
+        (10.0, 20.0),
+        np.asarray([10.0, 20.0], dtype=np.float32),
+        refined=True,
+    )
+    rough = TileLevelStats(
+        3,
+        (0.0, 1.0),
+        np.asarray([0.0, 1.0], dtype=np.float32),
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+    service._remember_montage_source_level_stats(first_key, refined)
+    service._remember_montage_source_level_stats(shifted_key, rough)
+
+    cached = service._cached_montage_source_level_stats(
+        shifted_key,
+        3,
+        LevelEvidenceQuality.REFINED,
+    )
+    assert cached is refined
+    assert cached.bounds == (10.0, 20.0)
+
+
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     import arrayscope.render.level_stats as level_stats
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
+            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+
             self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -193,11 +236,14 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
 def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
+            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+
             self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -259,15 +305,18 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
 
     class Window(LevelStatsService):
         def __init__(self, session):
+            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+
             self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
             self.kernel = InlineKernel()
-            self._montage_session = session
+            self._frame_session = session
             self._tracker = MontageLevelTracker()
             self.applied = 0
             self.scheduled = 0
 
-        def _montage_session_is_current(self, session):
-            return session is self._montage_session
+        def _frame_session_is_current(self, session):
+            return session is self._frame_session
 
         def _montage_level_tracker(self):
             return self._tracker
@@ -326,9 +375,9 @@ def test_preview_payload_level_data_updates_provisional_level_tracker(monkeypatc
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     import arrayscope.render.level_stats as level_stats
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(
@@ -389,9 +438,9 @@ def test_preview_level_evidence_is_not_promoted_to_refined_when_pyqtgraph_waits(
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self._tracker = MontageLevelTracker()
@@ -450,9 +499,9 @@ def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact(
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
@@ -511,9 +560,9 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
@@ -523,7 +572,7 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
         def _montage_level_tracker(self):
             return self._tracker
 
-        def _montage_session_is_current(self, session):
+        def _frame_session_is_current(self, session):
             return True
 
         def _settle_montage_visible_plan_if_complete(self, session):
@@ -570,7 +619,7 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
         refined=True,
     )
 
-    assert win._finish_montage_session_if_complete(session) is True
+    assert win._finish_frame_session_if_complete(session) is True
 
     stats = win._tracker.summary_for(session.level_key)
     assert stats.refined is False
@@ -583,9 +632,9 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
     from arrayscope.display.backend_contract import VISPY_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
@@ -596,7 +645,7 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
         def _montage_level_tracker(self):
             return self._tracker
 
-        def _montage_session_is_current(self, session):
+        def _frame_session_is_current(self, session):
             return True
 
         def _settle_montage_visible_plan_if_complete(self, session):
@@ -635,7 +684,7 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
     )
     win = Window()
 
-    assert win._finish_montage_session_if_complete(session) is True
+    assert win._finish_frame_session_if_complete(session) is True
 
     stats = win._tracker.summary_for(session.level_key)
     assert stats.bounds == (1.0, 4.0)
@@ -648,7 +697,7 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
 
 def test_preview_payloads_do_not_count_as_semantic_commits():
     from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.window.montage_commit import tiled_payloads_include_semantics
+    from arrayscope.window.frame_effects import tiled_payloads_include_semantics
 
     image = np.zeros((2, 2), dtype=np.float32)
     preview = DisplayTilePayload(
@@ -675,9 +724,9 @@ def test_preview_payloads_do_not_count_as_semantic_commits():
 def test_montage_level_metadata_publishes_when_evidence_quality_improves():
     from arrayscope.core.window_levels import LevelSource, LevelSourceRank
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -709,7 +758,7 @@ def test_montage_level_metadata_publishes_when_evidence_quality_improves():
 def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import TileLevelStats
-    from arrayscope.window.frame_renderer import _rendered_tile_from_previous_payload
+    from arrayscope.window.frame_controller import _rendered_tile_from_previous_payload
 
     stats = TileLevelStats(5, (2.0, 8.0), np.asarray([2.0, 8.0], dtype=np.float32))
     level_data = np.asarray([2.0, 8.0], dtype=np.float32)
@@ -732,10 +781,10 @@ def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
     assert rendered.level_stats is stats
 
 
-def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
+def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
     from arrayscope.core.window_levels import LevelSourceRank
-    from arrayscope.display.model.montage_levels import MontageLevelStats
-    from arrayscope.window.frame_renderer import _tile_layer_auto_levels_wait_for_complete_source
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
+    from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
 
     window = SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")))
     window.win = window
@@ -757,6 +806,7 @@ def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
         source_indices=frozenset({0, 1}),
         expected_indices=frozenset({0, 1}),
         rank=LevelSourceRank.MONTAGE_COMPLETE,
+        evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
     )
     sampled_full = MontageLevelStats(
         bounds=(0.0, 1.0),
@@ -766,15 +816,15 @@ def test_pyqtgraph_auto_levels_wait_for_complete_semantic_source():
         refined=True,
     )
 
-    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, partial) is True
-    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, complete) is False
-    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, sampled_full) is False
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, partial) is True
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, complete) is True
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, sampled_full) is False
 
 
-def test_shader_auto_levels_do_not_wait_for_complete_cpu_window_source():
+def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
     from arrayscope.core.window_levels import LevelSourceRank
-    from arrayscope.display.model.montage_levels import MontageLevelStats
-    from arrayscope.window.frame_renderer import _tile_layer_auto_levels_wait_for_complete_source
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
+    from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True))
@@ -786,9 +836,73 @@ def test_shader_auto_levels_do_not_wait_for_complete_cpu_window_source():
         source_indices=frozenset({0}),
         expected_indices=frozenset({0, 1}),
         rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
     )
 
-    assert _tile_layer_auto_levels_wait_for_complete_source(window, session, True, partial) is False
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, None) is True
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, partial) is False
+
+
+def test_refined_evidence_resumes_parked_first_commit_with_dirty_payloads():
+    from arrayscope.render.level_stats import LevelStatsService
+
+    requested = []
+
+    session = SimpleNamespace(
+        pending_level_tiles=deque(),
+        level_scan_remaining_tiles=0,
+        flush_pending=True,
+        final_commit_pending=True,
+        dirty_payloads={0: None},
+        pending_payload_upserts={0: object()},
+        pending_removals=set(),
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(request_presentation=lambda: requested.append(True))
+        ),
+    )
+
+    LevelStatsService()._maybe_publish_after_level_evidence(session, processed=1)
+
+    assert requested == [True]
+
+
+def test_first_cpu_level_scan_continuation_uses_visible_lane():
+    from arrayscope.kernel import Lane, Priority
+    from arrayscope.render.level_stats import LevelStatsService
+
+    submitted = []
+
+    class Kernel:
+        def submit(self, spec, **callbacks):
+            submitted.append((spec, callbacks))
+            return object()
+
+        def submit_speculative_batch(self, **_kwargs):
+            raise AssertionError("first-frame correctness continuation must not use a speculative lane")
+
+    image_view = SimpleNamespace(
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", shader_windowing=False)
+    )
+    service = LevelStatsService()
+    service.win = SimpleNamespace(kernel=Kernel(), img_view=image_view)
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=1,
+        viewport_revision=0,
+        level_key=("levels",),
+        force_auto=True,
+        user_levels_override=None,
+        display_committed=False,
+        level_evidence_inflight=False,
+    )
+    service._frame_session = session
+
+    service._invite_montage_level_evidence_continuation(session)
+
+    assert len(submitted) == 1
+    spec, _callbacks = submitted[0]
+    assert spec.lane == Lane.VISIBLE_MATERIALIZATION
+    assert spec.priority == Priority.VISIBLE_IMAGE
 
 
 def test_auto_small_scalar_montage_uses_tile_layer():
@@ -804,9 +918,9 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
 
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.viewport import ViewportMode
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -828,7 +942,7 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
     win._pending_viewport_continuity_range = lambda: ((100.0, 120.0), (200.0, 220.0))
     win._pending_viewport_continuity_columns = lambda: 3
 
-    viewport_plan = FrameRenderMixin._montage_viewport_plan(win, state)
+    viewport_plan = FrameControllerMixin._montage_viewport_plan(win, state)
 
     assert viewport_plan.view_range == ((100.0, 120.0), (200.0, 220.0))
     assert viewport_plan.plan.columns == 3
@@ -839,9 +953,9 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
 
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.viewport import ViewportMode
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -862,7 +976,7 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
     win._pending_viewport_continuity_range = lambda: ((100.0, 120.0), (200.0, 220.0))
     win._pending_viewport_continuity_columns = lambda: "auto"
 
-    viewport_plan = FrameRenderMixin._montage_viewport_plan(win, state)
+    viewport_plan = FrameControllerMixin._montage_viewport_plan(win, state)
 
     assert viewport_plan.view_range == ((100.0, 120.0), (200.0, 220.0))
     assert viewport_plan.plan.columns is not None
@@ -874,10 +988,10 @@ def test_initial_montage_plan_without_image_measures_startup_lod_from_layout():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.lod import LOD_REASON_INVALID_VIEW, select_lod_demand
     from arrayscope.display.viewport import ViewportMode
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.montage_viewport import square_montage_fit_view_range
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -900,7 +1014,7 @@ def test_initial_montage_plan_without_image_measures_startup_lod_from_layout():
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
 
-    viewport_plan = FrameRenderMixin._montage_viewport_plan(win, state)
+    viewport_plan = FrameControllerMixin._montage_viewport_plan(win, state)
 
     assert viewport_plan.view_range == square_montage_fit_view_range(
         viewport_plan.plan,
@@ -915,13 +1029,53 @@ def test_initial_montage_plan_without_image_measures_startup_lod_from_layout():
     assert demand.desired_level > 0
 
 
+def test_auto_successor_plan_uses_successor_fit_while_predecessor_camera_is_retained():
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.montage_viewport import square_montage_fit_view_range
+
+    class Window(FrameControllerMixin):
+        def __init__(self):
+            self.win = self
+
+    win = Window()
+    state = ViewState.from_shape((336, 336, 272)).with_montage_axis(
+        2,
+        columns=21,
+        indices=tuple(range(272)),
+        text=":",
+    )
+    predecessor_range = ((0.0, 4380.0), (0.0, 2695.0))
+    win._frame_session = SimpleNamespace(montage_axis=2, display_committed=True)
+    win.img_view = SimpleNamespace(
+        image=np.zeros((1, 1), dtype=np.float32),
+        viewport_controller=SimpleNamespace(
+            is_fit_locked=lambda: False,
+            is_auto_active=lambda: True,
+        ),
+        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(1245, 753))),
+        getView=lambda: SimpleNamespace(viewRange=lambda: predecessor_range),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
+    )
+
+    viewport_plan = FrameControllerMixin._montage_viewport_plan(win, state)
+
+    assert viewport_plan.view_range == square_montage_fit_view_range(
+        viewport_plan.plan,
+        viewport_plan.viewport_shape,
+    )
+    assert len(viewport_plan.candidate_tiles()) == 272
+
+
 def test_visible_tile_classifier_respects_native_queue_policy():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, native_lod_policy, resident_lod_policy
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.montage_runtime import MontageRuntimeMixin
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
-    class Window(MontageRuntimeMixin):
+    class Window(FrameRuntimeMixin):
         def __init__(self):
             self.replans = 0
 
@@ -969,17 +1123,17 @@ def test_visible_tile_classifier_respects_native_queue_policy():
     )
 
     win = Window()
-    MontageRuntimeMixin._classify_visible_montage_tiles(win, coarse_resident)
+    FrameRuntimeMixin._classify_visible_montage_tiles(win, coarse_resident)
     assert coarse_resident.pending_tiles == []
     assert win.replans == 0
 
-    MontageRuntimeMixin._classify_visible_montage_tiles(win, native)
+    FrameRuntimeMixin._classify_visible_montage_tiles(win, native)
     assert sorted(int(tile.montage_index) for tile in native.pending_tiles) == [0, 1, 2, 3]
     assert win.replans == 1
 
 
 def test_montage_commit_reschedules_restored_roi_stats():
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     calls = []
     win = SimpleNamespace(
@@ -989,7 +1143,7 @@ def test_montage_commit_reschedules_restored_roi_stats():
     )
     win.win = win
 
-    FrameRenderMixin._notify_file_session_montage_committed(win)
+    FrameControllerMixin._notify_file_session_montage_committed(win)
 
     assert calls == ["viewport", ("roi", "montage-semantic-commit")]
 
@@ -1025,7 +1179,7 @@ def test_auto_small_scalar_vispy_montage_uses_tile_layer():
 
 
 def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace()
     window = SimpleNamespace(
@@ -1047,10 +1201,34 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
 
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
+    assert limits["max_free_retargets"] == 24
+    assert "max_item_free_upserts" not in limits
+    assert limits["pace_resident_retargets"] is False
+
+
+def test_vispy_atomic_source_marker_ignores_lod_but_not_source_index():
+    from arrayscope.window import frame_effects as montage_commit
+
+    coarse = SimpleNamespace(
+        source_id=(("semantic", 42), "texture_kind", "scalar", "lod", 3),
+        source_index=42,
+    )
+    exact = SimpleNamespace(
+        source_id=(("semantic", 42), "texture_kind", "scalar", "lod", 0),
+        source_index=42,
+    )
+    wrong_source = SimpleNamespace(
+        source_id=(("semantic", 43), "texture_kind", "scalar", "lod", 0),
+        source_index=43,
+    )
+
+    marker = montage_commit._shader_source_transaction_payload_marker(coarse)
+    assert montage_commit._shader_source_transaction_payload_marker(exact) == marker
+    assert montage_commit._shader_source_transaction_payload_marker(wrong_source) != marker
 
 
 def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(display_committed=False)
 
@@ -1076,7 +1254,7 @@ def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
 
 
 def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
     texture = np.zeros((512, 512), dtype=np.complex64)
@@ -1116,7 +1294,7 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
 
 
 def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
     semantic = np.zeros((1024, 1024), dtype=np.complex64)
@@ -1127,6 +1305,7 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
         semantic_data=semantic,
     )
     session = SimpleNamespace(
+        display_committed=True,
         has_pending_level_update=lambda: True,
         has_stale_level_presentations=lambda: True,
         display_tile_payloads={},
@@ -1150,14 +1329,15 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
 
     assert limits["max_upserts"] == 3
     assert limits["max_upsert_bytes"] == 1024 * 1024
-    assert limits["cold_deadline_ms"] == 24.0
+    assert limits["cold_deadline_ms"] == 2.0
     assert limits["upsert_cost_fn"](payload) == image.nbytes
 
 
 def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(
+        display_committed=True,
         dirty_payloads={0: None},
         pending_payload_upserts={},
         pending_removals=set(),
@@ -1183,12 +1363,52 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
 
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 4096
-    assert limits["cold_deadline_ms"] == 24.0
+    assert limits["cold_deadline_ms"] == 2.0
     assert limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32))) == 8 * 8 * 4
 
 
+def test_pyqtgraph_first_frame_is_one_uncapped_refined_transaction():
+    from arrayscope.window import frame_effects as montage_commit
+
+    session = SimpleNamespace(
+        display_committed=False,
+        dirty_payloads={0: None},
+        pending_payload_upserts={0: None},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        )
+    )
+    window.win = window
+
+    assert montage_commit.tile_layer_upsert_limits(window, session) == {}
+
+
+def test_presentation_cold_walk_budget_keeps_callback_safety_margin():
+    from arrayscope.window.frame_effects import presentation_upload_control_budget_ms
+
+    decision = SimpleNamespace(budget_ms=100.0)
+    window = SimpleNamespace()
+    window.win = window
+
+    assert presentation_upload_control_budget_ms(
+        window,
+        "tile_layer_commit",
+        decision,
+        interactive=False,
+    ) == 12.0
+
+
 def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
     from arrayscope.display.model.frame import TileCommitReport
 
     report = TileCommitReport(
@@ -1202,7 +1422,7 @@ def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
 
 
 def test_retained_payload_store_receives_only_accepted_delta_payloads():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
     from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta
 
     payloads = {
@@ -1238,7 +1458,7 @@ def test_retained_payload_store_receives_only_accepted_delta_payloads():
 
 
 def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(display_committed=True)
     window = SimpleNamespace(
@@ -1261,7 +1481,7 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
 
 
 def test_vispy_persistent_tile_layer_can_direct_delta_first_session_commit():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(display_committed=False)
     window = SimpleNamespace(
@@ -1288,7 +1508,7 @@ def test_vispy_persistent_tile_layer_can_direct_delta_first_session_commit():
 
 
 def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -1305,6 +1525,7 @@ def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
     )
     window.win = window
     session = SimpleNamespace(
+        display_committed=True,
         dirty_payloads={0: None},
         pending_payload_upserts={},
         pending_removals=set(),
@@ -1323,7 +1544,7 @@ def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
 
 
 def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature():
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
@@ -1345,7 +1566,10 @@ def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature(
         pending_payload_upserts={},
         output_dtype=np.dtype("float32"),
         rgb=False,
-        lifecycle=SimpleNamespace(presented_tiles=frozenset()),
+        lifecycle=SimpleNamespace(
+            presented_tiles=frozenset(),
+            snapshot=lambda: SimpleNamespace(counts={}),
+        ),
         rendered_tiles={},
     )
 
@@ -1360,7 +1584,7 @@ def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature(
 
 def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationState
-    from arrayscope.window import montage_commit
+    from arrayscope.window import frame_effects as montage_commit
 
     payload = DisplayTilePayload(
         tile_number=0,
@@ -1503,7 +1727,7 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
 
 def test_tile_presentation_admission_uses_backend_cost_function():
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_session import FrameSession
 
     tiles = tuple(
         MontageTile(
@@ -1519,7 +1743,7 @@ def test_tile_presentation_admission_uses_backend_cost_function():
         )
         for index in range(2)
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key=("test",),
         render_generation=1,
@@ -1567,8 +1791,9 @@ def test_tile_presentation_admission_uses_backend_cost_function():
 
 
 def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
+    from arrayscope.display.model.frame import TileCommitReport
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_session import FrameSession
 
     tiles = tuple(
         MontageTile(
@@ -1584,7 +1809,7 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
         )
         for index in range(4)
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key=("test",),
         render_generation=1,
@@ -1620,8 +1845,16 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
         session.dirty_payloads[index] = None
 
     state, delta = session.build_tile_presentation({})
-    session.tile_presentation_state = state
-    session.lifecycle.presentation_confirmed((0,))
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(
+            presented_tiles=frozenset(delta.upserts),
+            committed_upserts=frozenset(delta.upserts),
+            delta_key=(delta.base_revision, delta.target_revision),
+            presented_identities={tile: payload.source_id for tile, payload in delta.upserts.items()},
+        ),
+    )
+    session.mark_presented(tuple(delta.upserts))
     session.visible_tiles = tiles
 
     _state, delta = session.build_tile_presentation(
@@ -1637,7 +1870,7 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
 
 def test_tile_presentation_limits_cap_resident_retarget_upserts():
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_session import FrameSession
 
     tiles = tuple(
         MontageTile(
@@ -1653,7 +1886,7 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
         )
         for index in range(4)
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key=("test",),
         render_generation=1,
@@ -1702,10 +1935,8 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
         max_upsert_bytes=1,
         upsert_cost_fn=lambda _payload: 0,
         # PyQtGraph semantics: remaps are byte-free but not time-free, so the
-        # item cap paces them in priority order.  On persistent GPU-residency
-        # backends (default, pace_resident_retargets=False) remaps are instant
-        # and exempt — pinned by
-        # test_resident_retarget_upserts_bypass_cold_priority_cap.
+        # item cap paces them in priority order. Persistent GPU residency can
+        # explicitly opt out when a remap is a single page-geometry update.
         pace_resident_retargets=True,
     )
 
@@ -1750,8 +1981,8 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import MontageTileState, make_montage_plan
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
     class Controller:
         def __init__(self):
@@ -1760,7 +1991,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
         def clear_group(self, group):
             self.groups.append(group)
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self):
             super().__init__()
             self.win = self
@@ -1768,7 +1999,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8, gap=1)
     controller = Controller()
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=7,
         key=("session",),
         render_generation=1,
@@ -1795,7 +2026,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     session.tile_states = [MontageTileState.UNLOADED for _tile in plan.tiles]
     session.tile_states[7] = MontageTileState.LOADING
     win = Window()
-    win._montage_session = session
+    win._frame_session = session
     win.view_state = state
     win.montage_tile_evaluation_controller = controller
     win._viewport_interaction_active = True
@@ -1815,11 +2046,11 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window import montage_commit
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window import frame_effects as montage_commit
+    from arrayscope.window.frame_session import FrameSession
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
             self.win = self
@@ -1854,7 +2085,7 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         def apply_montage_presentation(self, session):
             self.commits += 1
 
-        def retarget_montage_pipeline(self, session):
+        def retarget_frame_pipeline(self, session):
             self.pipeline_retargets += 1
 
     document = ArrayDocument(np.zeros((2, 2, 10), dtype=np.float32))
@@ -1870,9 +2101,9 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         shader_display=True,
         persistent_tile_residency=True,
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=11,
-        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        key=frame_session_key(_document_key(document), state, viewport_plan, None),
         render_generation=1,
         level_key=("levels",),
         level_expected_indices=tuple(range(10)),
@@ -1894,7 +2125,7 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         pending_tiles=[],
     )
     win = Window(document, state, viewport_plan)
-    win._montage_session = session
+    win._frame_session = session
     submitted_stage_plans = []
     monkeypatch.setattr(
         montage_commit,
@@ -1902,7 +2133,7 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         lambda *_args, **_kwargs: pytest.fail("interactive viewport update must not plan stage fan-in"),
     )
     monkeypatch.setattr(
-        "arrayscope.window.frame_renderer.montage_commit.submit_deferred_stage_fan_in_plan",
+        "arrayscope.window.frame_controller.montage_commit.submit_deferred_stage_fan_in_plan",
         lambda _renderer, _session, tiles: submitted_stage_plans.append(tuple(tiles)) or True,
     )
 
@@ -1929,10 +2160,10 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
             self.win = self
@@ -1955,7 +2186,7 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def retarget_montage_pipeline(self, session):
+        def retarget_frame_pipeline(self, session):
             self.pipeline_retargets += 1
 
         def apply_montage_presentation(self, session):
@@ -1974,9 +2205,9 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
         shader_display=True,
         persistent_tile_residency=True,
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=12,
-        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        key=frame_session_key(_document_key(document), state, viewport_plan, None),
         render_generation=1,
         level_key=("levels",),
         level_expected_indices=tuple(range(4)),
@@ -1998,7 +2229,7 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
         pending_tiles=list(plan.tiles),
     )
     win = Window(document, state, viewport_plan)
-    win._montage_session = session
+    win._frame_session = session
     win._viewport_interaction_active = False
     monkeypatch.setattr(QtWidgets.QApplication, "mouseButtons", lambda: QtCore.Qt.MouseButton.NoButton)
 
@@ -2013,9 +2244,9 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window import montage_commit
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window import frame_effects as montage_commit
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
     class Planner:
         def plan(self, **kwargs):
@@ -2028,7 +2259,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
 
             return key_for
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document, old_state):
             super().__init__()
             self.win = self
@@ -2052,7 +2283,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
             return Planner()
 
         def _montage_quality_policy_mode(self):
-            return self._montage_session.lod_policy_mode
+            return self._frame_session.lod_policy_mode
 
         def _capture_render_generation(self):
             return 2
@@ -2066,12 +2297,12 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         def _queue_montage_cached_level_stats(self, *_args, **_kwargs):
             pass
 
-        def commit_montage_session_presentation(self, session):
-            assert session is self._montage_session
+        def commit_frame_session_presentation(self, session):
+            assert session is self._frame_session
             self.commits += 1
 
-        def retarget_montage_pipeline(self, session):
-            assert session is self._montage_session
+        def retarget_frame_pipeline(self, session):
+            assert session is self._frame_session
             self.pipeline_retargets += 1
 
     document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
@@ -2089,9 +2320,9 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     new_viewport = MontageViewportPlan(
         2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), True, True
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
-        key=montage_session_key(_document_key(document), old_state, old_viewport, None),
+        key=frame_session_key(_document_key(document), old_state, old_viewport, None),
         render_generation=1,
         level_key=("levels",),
         level_expected_indices=(0, 1),
@@ -2115,7 +2346,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     )
     session.shader_display = True
     win = Window(document, old_state)
-    win._montage_session = session
+    win._frame_session = session
     submitted_stage_plans = []
     monkeypatch.setattr(
         montage_commit,
@@ -2123,11 +2354,11 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         lambda *_args, **_kwargs: pytest.fail("active index-window retarget must not plan stage fan-in"),
     )
     monkeypatch.setattr(
-        "arrayscope.window.frame_renderer.montage_commit.submit_deferred_stage_fan_in_plan",
+        "arrayscope.window.frame_controller.montage_commit.submit_deferred_stage_fan_in_plan",
         lambda _renderer, _session, tiles: submitted_stage_plans.append(tuple(tiles)) or True,
     )
 
-    handled = win._maybe_retarget_montage_session(
+    handled = win._maybe_retarget_frame_session(
         session,
         document=document,
         axis=2,
@@ -2166,10 +2397,10 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document):
             super().__init__()
             self.win = self
@@ -2177,7 +2408,7 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
             self.viewport_retargets = 0
 
         def _montage_quality_policy_mode(self):
-            return self._montage_session.lod_policy_mode
+            return self._frame_session.lod_policy_mode
 
         def _try_update_montage_viewport_only(self):
             self.viewport_retargets += 1
@@ -2194,9 +2425,9 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
     new_viewport = MontageViewportPlan(
         2, tuple(range(6)), (4, 12), (2, 2), plan, ((1.0, 3.0), (0.5, 2.5)), True, True
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
-        key=montage_session_key(_document_key(document), state, old_viewport, None),
+        key=frame_session_key(_document_key(document), state, old_viewport, None),
         render_generation=1,
         level_key=("levels",),
         level_expected_indices=tuple(range(6)),
@@ -2220,9 +2451,9 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
     )
     session.shader_display = True
     win = Window(document)
-    win._montage_session = session
+    win._frame_session = session
 
-    handled = win._maybe_retarget_montage_session(
+    handled = win._maybe_retarget_frame_session(
         session,
         document=document,
         axis=2,
@@ -2247,16 +2478,16 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
 
     assert handled is True
     assert win.viewport_retargets == 1
-    assert getattr(win, "_montage_session_retarget_last_reject", "") != "view-range"
+    assert getattr(win, "_frame_session_retarget_last_reject", "") != "view-range"
 
 
-def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
+def test_resize_retarget_requests_presentation_through_gate(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.backend_contract import ImageViewBackendCapabilities
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan
 
     class Planner:
@@ -2282,7 +2513,7 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
 
         pending_rung_materializations = ()
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self):
             super().__init__()
             self.win = self
@@ -2294,24 +2525,26 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
                 ),
                 montageDisplayMode=lambda: "tile_layer",
             )
-            self._montage_session = Session()
+            self._frame_session = Session()
             self.commits = 0
+            self.presentation_requests = 0
 
-        def _is_current_montage_session(self, session_id, key):
+        def _is_current_frame_session(self, session_id, key):
             return session_id == 1 and key == ("session",)
 
         def _montage_frame_planner(self):
             return Planner()
 
-        def commit_montage_session_presentation(self, session):
-            assert session is self._montage_session
+        def commit_frame_session_presentation(self, session):
+            assert session is self._frame_session
             self.commits += 1
 
-        def retarget_montage_pipeline(self, session):
-            assert session is self._montage_session
+        def retarget_frame_pipeline(self, session):
+            assert session is self._frame_session
 
         def apply_montage_presentation(self, session):
-            raise AssertionError("resize geometry should commit immediately when no commit is active")
+            assert session is self._frame_session
+            self.presentation_requests += 1
 
     state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(4, 4), columns=2)
@@ -2328,8 +2561,9 @@ def test_resize_retarget_commits_presentation_geometry_immediately(qt_app):
     win = Window()
 
     assert win._retarget_montage_resize_payloads(viewport_plan) is True
-    assert win._montage_session.retargeted is True
-    assert win.commits == 1
+    assert win._frame_session.retargeted is True
+    assert win.commits == 0
+    assert win.presentation_requests == 1
 
 
 def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app):
@@ -2338,10 +2572,10 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document, state, viewport_plan):
             super().__init__()
             self.win = self
@@ -2365,7 +2599,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def retarget_montage_pipeline(self, session):
+        def retarget_frame_pipeline(self, session):
             self.pipeline_retargets += 1
 
         def apply_montage_presentation(self, session):
@@ -2384,9 +2618,9 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         shader_display=False,
         persistent_tile_residency=False,
     )
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=13,
-        key=montage_session_key(_document_key(document), state, viewport_plan, None),
+        key=frame_session_key(_document_key(document), state, viewport_plan, None),
         render_generation=1,
         level_key=("levels",),
         level_expected_indices=tuple(range(4)),
@@ -2410,12 +2644,12 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
     session.level_generation.target_levels = (2.0, 4.0)
     session.set_level_update_pending(True)
     win = Window(document, state, viewport_plan)
-    win._montage_session = session
+    win._frame_session = session
     win._viewport_interaction_active = False
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert win._montage_session is session
+    assert win._frame_session is session
     assert session.level_generation.target_levels == (2.0, 4.0)
 
 
@@ -2423,10 +2657,10 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.frame_renderer import FrameRenderMixin
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, state, viewport_plan):
             super().__init__()
             self.win = self
@@ -2438,10 +2672,10 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
         def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
 
-        def _is_current_montage_session(self, session_id, key):
+        def _is_current_frame_session(self, session_id, key):
             return True
 
-        def retarget_montage_pipeline(self, session):
+        def retarget_frame_pipeline(self, session):
             tile = session.next_tile()
             if tile is not None:
                 self.scheduled.append(int(tile.montage_index))
@@ -2449,7 +2683,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
     viewport_plan = SimpleNamespace(priority_focus=(10.0, 1.0))
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=12,
         key="key",
         render_generation=1,
@@ -2473,7 +2707,7 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
         pending_tiles=list(plan.tiles),
     )
     win = Window(state, viewport_plan)
-    win._montage_session = session
+    win._frame_session = session
 
     win.apply_montage_priority_retarget()
 
@@ -2487,9 +2721,9 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
     from arrayscope.display.model.frame import DisplayFrameKey
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self):
             super().__init__()
             self.win = self
@@ -2523,9 +2757,9 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.montage import MontageTileState
     from arrayscope.display.model.frame import DisplayFrameKey
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class Window(QtCore.QObject, FrameRenderMixin):
+    class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self):
             super().__init__()
             self.win = self
@@ -2561,7 +2795,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
-    from arrayscope.window.montage_commit import persistent_gpu_tile_residency_backend, persistent_tile_residency_backend
+    from arrayscope.window.frame_effects import persistent_gpu_tile_residency_backend, persistent_tile_residency_backend
 
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
@@ -2693,7 +2927,7 @@ def test_recent_payload_cache_requires_matching_lod_factor():
 
 def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
     from arrayscope.display.slice_engine import DisplayImage
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     image = np.arange(4, dtype=np.float32).reshape(2, 2)
     cached = DisplayImage(image, histogram_data=image.copy())
@@ -2709,7 +2943,7 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
         def cached_montage_tile_by_key(self, _key):
             return cached
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -2735,7 +2969,7 @@ def test_montage_cache_resolver_accepts_single_display_image_cache_hit():
 def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_single():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     image = np.arange(4, dtype=np.float32).reshape(2, 2)
     histogram = image.copy()
@@ -2768,7 +3002,7 @@ def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_sin
         def cached_montage_tile_by_key(self, _key):
             return None
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
 
@@ -2833,10 +3067,10 @@ def test_previous_complex_shader_payload_accepts_complex_texture():
     assert _payload_compatible_with_tile(payload, state, shader_display=True)
 
 
-def test_tiled_payload_source_id_changes_when_texture_content_changes():
+def test_tiled_payload_source_id_follows_semantic_materialization_identity():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import RenderedTile, make_montage_plan
-    from arrayscope.window.montage_session import MontageRenderSession
+    from arrayscope.window.frame_session import FrameSession
 
     state = ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(2, 2), columns=1)
@@ -2853,7 +3087,7 @@ def test_tiled_payload_source_id_changes_when_texture_content_changes():
             slab_nbytes=int(image.nbytes),
         )
 
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key=("session",),
         render_generation=1,
@@ -2880,10 +3114,12 @@ def test_tiled_payload_source_id_changes_when_texture_content_changes():
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
     session.rendered_tiles[0] = rendered(2.0)
     second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    third = session.snapshot_display_tile_payloads({0: ("tile", 0, "revision", 2)})[0]
 
     assert _base_tile_source_id(first.source_id) == ("tile", 0)
     assert _base_tile_source_id(second.source_id) == ("tile", 0)
-    assert first.source_id != second.source_id
+    assert first.source_id == second.source_id
+    assert third.source_id != second.source_id
 
 
 def test_auto_large_rgb_montage_uses_tile_layer():
@@ -2894,21 +3130,84 @@ def test_auto_large_rgb_montage_uses_tile_layer():
     assert decision.backend == "tile_layer"
 
 
+def test_cpu_successor_requires_every_visible_current_payload():
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.window.frame_effects import _cpu_successor_payloads_ready
+
+    image = np.ones((2, 2), dtype=np.float32)
+    tiles = (
+        SimpleNamespace(montage_index=0, source_index=10),
+        SimpleNamespace(montage_index=1, source_index=11),
+    )
+
+    def payload(tile_number, source_index, *, quality="exact"):
+        return DisplayTilePayload(
+            tile_number,
+            source_index,
+            image,
+            image,
+            ("semantic", source_index),
+            quality=quality,
+        )
+
+    session = SimpleNamespace(
+        visible_tile_numbers=frozenset({0, 1}),
+        skipped_tiles=set(),
+        plan=SimpleNamespace(tiles=tiles),
+        display_tile_payloads={
+            0: payload(0, 10),
+            1: payload(1, 11),
+        },
+        tile_semantic_source_id=lambda source_index: ("semantic", source_index),
+        lifecycle=SimpleNamespace(payload_is_current=lambda *_args: False),
+    )
+
+    assert _cpu_successor_payloads_ready(session)
+
+    session.display_tile_payloads.pop(1)
+    assert not _cpu_successor_payloads_ready(session)
+
+    session.display_tile_payloads[1] = payload(1, 11, quality="preview")
+    assert _cpu_successor_payloads_ready(session)
+
+    session.display_tile_payloads[1] = payload(1, 99)
+    assert not _cpu_successor_payloads_ready(session)
+
+
+def test_cpu_successor_excludes_skipped_visible_tiles_from_atomic_obligation():
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.window.frame_effects import _cpu_successor_payloads_ready
+
+    image = np.ones((2, 2), dtype=np.float32)
+    tile = SimpleNamespace(montage_index=0, source_index=10)
+    payload = DisplayTilePayload(0, 10, image, image, ("semantic", 10))
+    session = SimpleNamespace(
+        visible_tile_numbers=frozenset({0, 1}),
+        skipped_tiles={1},
+        plan=SimpleNamespace(tiles=(tile, SimpleNamespace(montage_index=1, source_index=11))),
+        display_tile_payloads={0: payload},
+        tile_semantic_source_id=lambda source_index: ("semantic", source_index),
+        lifecycle=SimpleNamespace(payload_is_current=lambda *_args: False),
+    )
+
+    assert _cpu_successor_payloads_ready(session)
+
+
 
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
     from arrayscope.display.geometry import MontageGeometry
     from arrayscope.display.model.frame import TilePresentationDelta, TilePresentationState
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.montage_backend import MontageBackendDecision
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
             self.commits = 0
 
-        def _montage_session_is_current(self, _session):
+        def _frame_session_is_current(self, _session):
             return True
 
         def _classify_visible_montage_tiles(self, _session):
@@ -2957,15 +3256,42 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         plan=SimpleNamespace(geometry=geometry, display_shape=(2, 2)),
         view_state=None,
         rgb=False,
-        lifecycle=SimpleNamespace(presented_tiles=frozenset()),
+        lifecycle=SimpleNamespace(
+            presented_tiles=frozenset(),
+            snapshot=lambda: SimpleNamespace(counts={}),
+        ),
     )
 
     win = _Window()
-    win.commit_montage_session_presentation(session)
+    win.commit_frame_session_presentation(session)
 
     assert win.commits == 0
     assert session.final_commit_pending is False
     assert session.flush_pending is False
+
+
+def test_replacement_plan_keeps_committed_content_extent_until_backend_commit():
+    from arrayscope.window.frame_controller import FrameControllerMixin
+
+    published = []
+
+    class Window(FrameControllerMixin):
+        def __init__(self):
+            self.win = self
+            self._committed_display_frame = object()
+
+        def _publish_montage_content_extent(self, plan):
+            published.append(plan)
+
+    win = Window()
+    replacement_plan = object()
+
+    assert win._publish_first_frame_content_extent(replacement_plan) is False
+    assert published == []
+
+    win._committed_display_frame = None
+    assert win._publish_first_frame_content_extent(replacement_plan) is True
+    assert published == [replacement_plan]
 
 
 def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
@@ -2973,13 +3299,13 @@ def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Evaluator:
         def cached_montage_tile(self, *_args, **_kwargs):
             return object()
 
-    class Window(FrameRenderMixin):
+    class Window(FrameControllerMixin):
         def __init__(self, document, state, viewport_plan):
             self.win = self
             self.document = document
@@ -3007,8 +3333,8 @@ def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
     new_plan = make_montage_plan(new_state, axis=2, indices=(1, 2), tile_shape=(2, 2), columns=2)
     old_viewport = MontageViewportPlan(2, (0, 1), (4, 8), (2, 2), old_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
     new_viewport = MontageViewportPlan(2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
-    old_key = montage_session_key(_document_key(document), old_state, old_viewport, None)
-    new_key = montage_session_key(_document_key(document), new_state, new_viewport, None)
+    old_key = frame_session_key(_document_key(document), old_state, old_viewport, None)
+    new_key = frame_session_key(_document_key(document), new_state, new_viewport, None)
 
     win = Window(document, new_state, new_viewport)
     win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(request_key=old_key))
@@ -3040,13 +3366,13 @@ def test_montage_viewport_update_token_tracks_viewport_revision():
 
 
 def test_stale_montage_viewport_update_token_does_not_run():
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.view_state = SimpleNamespace(montage_axis=2)
-            self._montage_session = SimpleNamespace(
+            self._frame_session = SimpleNamespace(
                 session_id=1,
                 key="session",
                 render_generation=2,
@@ -3073,14 +3399,14 @@ def test_stale_montage_viewport_update_token_does_not_run():
     assert win.called is False
 
 
-def test_montage_viewport_immediate_continuation_does_not_reenter():
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+def test_montage_viewport_continuation_yields_to_receiver_owned_gate():
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.view_state = SimpleNamespace(montage_axis=2)
-            self._montage_session = SimpleNamespace(
+            self._frame_session = SimpleNamespace(
                 session_id=1,
                 key="session",
                 render_generation=2,
@@ -3090,6 +3416,7 @@ def test_montage_viewport_immediate_continuation_does_not_reenter():
             )
             self.calls = 0
             self.public_retargets = 0
+            self.scheduled = []
 
         def _try_update_montage_viewport_only(self):
             self.calls += 1
@@ -3102,17 +3429,21 @@ def test_montage_viewport_immediate_continuation_does_not_reenter():
             self.public_retargets += 1
             super().retarget_montage_viewport()
 
+        def _schedule_frame_viewport_update(self, *, delay_ms=None):
+            self.scheduled.append(delay_ms)
+
     win = _Window()
 
     win.apply_montage_viewport_retarget()
 
-    assert win.calls == 3
+    assert win.calls == 1
+    assert win.scheduled == [1]
     assert win.public_retargets == 0
     assert not getattr(win, "_montage_viewport_update_running", False)
 
 
 def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     class _LiveProfile:
         def isChecked(self):
@@ -3124,7 +3455,7 @@ def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
         def isVisible(self):
             return bool(self.visible)
 
-    class _Window(FrameRenderMixin):
+    class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.view_state = SimpleNamespace(montage_axis=2)
@@ -3149,7 +3480,7 @@ def test_loading_montage_profile_retry_waits_for_visibility_without_timer():
     assert win.updated == [(1.0, 2.0)]
 
 
-def test_montage_session_key_excludes_transient_viewport_range():
+def test_frame_session_key_excludes_transient_viewport_range():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
@@ -3158,10 +3489,10 @@ def test_montage_session_key_excludes_transient_viewport_range():
     first = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((0, 10), (0, 10)), True, True)
     second = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((10, 20), (0, 10)), True, True)
 
-    assert montage_session_key("doc", state, first, None) == montage_session_key("doc", state, second, None)
+    assert frame_session_key("doc", state, first, None) == frame_session_key("doc", state, second, None)
 
 
-def test_montage_session_key_changes_with_population_but_not_layout_reflow():
+def test_frame_session_key_changes_with_population_but_not_layout_reflow():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
@@ -3172,16 +3503,16 @@ def test_montage_session_key_changes_with_population_but_not_layout_reflow():
     changed_population = MontageViewportPlan(2, tuple(range(5)), (100, 100), (4, 4), plan3, None, True, True)
     changed_layout = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan2, None, True, True)
 
-    key = montage_session_key("doc", state, base, None)
-    assert key != montage_session_key("doc", state, changed_population, None)
-    assert key == montage_session_key("doc", state, changed_layout, None)
+    key = frame_session_key("doc", state, base, None)
+    assert key != frame_session_key("doc", state, changed_population, None)
+    assert key == frame_session_key("doc", state, changed_layout, None)
 
 
 def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.montage_commit import safe_tiled_payload_geometry_retarget
+    from arrayscope.window.frame_effects import safe_tiled_payload_geometry_retarget
 
     state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
@@ -3197,3 +3528,16 @@ def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
 
     assert safe_tiled_payload_geometry_retarget(previous, reflow)
     assert not safe_tiled_payload_geometry_retarget(previous, incompatible)
+
+
+def test_automatic_level_generation_target_is_not_reclassified_as_user_intent():
+    from arrayscope.window.frame_effects import session_requested_levels
+
+    session = SimpleNamespace(
+        level_generation=SimpleNamespace(target_levels=(-0.5, 7.5)),
+        user_levels_override=None,
+    )
+    assert session_requested_levels(session) is None
+
+    session.user_levels_override = (2.0, 4.0)
+    assert session_requested_levels(session) == (2.0, 4.0)

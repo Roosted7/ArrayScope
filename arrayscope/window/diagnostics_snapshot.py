@@ -42,7 +42,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         if controller is not None:
             schedulers.append(controller.diagnostics())
 
-    session = getattr(window.renderer, "_montage_session", None)
+    session = getattr(window.renderer, "_frame_session", None)
     overlay_count = _montage_overlay_count(window)
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
@@ -50,8 +50,8 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
-    ledger_snapshot = None if session is None else session.tile_ledger_snapshot()
-    ledger_counts = {} if ledger_snapshot is None else dict(ledger_snapshot.counts)
+    lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
+    lifecycle_phase_counts = {} if lifecycle_snapshot is None else dict(lifecycle_snapshot.counts)
     stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
     stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
     unresolved_stage_bindings = {
@@ -148,16 +148,18 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
         lifecycle_identity_rejections=0 if session is None else int(session.lifecycle.identity_rejections),
         dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
-        ledger_needs_first_pixel=int(ledger_counts.get("needs_first_pixel", 0) or 0),
-        ledger_fallback_shown=int(ledger_counts.get("fallback_shown", 0) or 0),
-        ledger_target_schedulable=int(ledger_counts.get("target_schedulable", 0) or 0),
-        ledger_target_waiting_stage=int(ledger_counts.get("target_waiting_stage", 0) or 0),
-        ledger_target_running=int(ledger_counts.get("target_running", 0) or 0),
-        ledger_target_ready=int(ledger_counts.get("target_ready", 0) or 0),
-        ledger_target_emitted=int(ledger_counts.get("target_emitted", 0) or 0),
-        ledger_target_presented=int(ledger_counts.get("target_presented", 0) or 0),
-        ledger_orphan_running=0 if ledger_snapshot is None else int(ledger_snapshot.orphan_running),
-        ledger_parked_without_producer=0 if ledger_snapshot is None else int(ledger_snapshot.parked_without_producer),
+        lifecycle_needs_first_pixel=int(lifecycle_phase_counts.get("needs_first_pixel", 0) or 0),
+        lifecycle_fallback_shown=int(lifecycle_phase_counts.get("fallback_shown", 0) or 0),
+        lifecycle_target_schedulable=int(lifecycle_phase_counts.get("target_schedulable", 0) or 0),
+        lifecycle_target_waiting_stage=int(lifecycle_phase_counts.get("target_waiting_stage", 0) or 0),
+        lifecycle_target_running=int(lifecycle_phase_counts.get("target_running", 0) or 0),
+        lifecycle_target_ready=int(lifecycle_phase_counts.get("target_ready", 0) or 0),
+        lifecycle_target_emitted=int(lifecycle_phase_counts.get("target_emitted", 0) or 0),
+        lifecycle_target_presented=int(lifecycle_phase_counts.get("target_presented", 0) or 0),
+        lifecycle_orphan_running=0 if lifecycle_snapshot is None else int(lifecycle_snapshot.orphan_running),
+        lifecycle_parked_without_producer=(
+            0 if lifecycle_snapshot is None else int(lifecycle_snapshot.parked_without_producer)
+        ),
         backend_stale_identities=_backend_stale_identities(session),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
         last_stall_signature=tuple(
@@ -276,7 +278,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_viewport_plan_ms=getattr(window.renderer, "_last_montage_viewport_plan_ms", None),
             last_cache_resolve_ms=getattr(window.renderer, "_last_montage_cache_resolve_ms", None),
             last_stage_plan_ms=getattr(window.renderer, "_last_montage_stage_plan_ms", None),
-            last_session_setup_ms=getattr(window.renderer, "_last_montage_session_setup_ms", None),
+            last_session_setup_ms=getattr(window.renderer, "_last_frame_session_setup_ms", None),
             last_initial_commit_ms=getattr(window.renderer, "_last_montage_initial_commit_ms", None),
             last_tile_eval_ms=getattr(window.renderer, "_last_montage_tile_eval_ms", None),
             last_display_cache_lookup_ms=getattr(window.renderer, "_last_montage_display_cache_lookup_ms", None),

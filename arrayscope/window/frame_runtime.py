@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from time import monotonic, perf_counter
+from time import perf_counter
 
 import numpy as np
 import pyqtgraph.Qt as Qt
@@ -21,12 +21,12 @@ from arrayscope.display.pyramid import PyramidCache
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder
-from arrayscope.render.pipeline import MontagePipeline
+from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 from arrayscope.ui.toasts import show_revert_action
 from arrayscope.render import lod as render_lod
-from arrayscope.window import montage_commit
-from arrayscope.window.montage_commit import MontagePipelineEffects
+from arrayscope.window import frame_effects as montage_commit
+from arrayscope.window.frame_effects import FramePipelineEffects
 from arrayscope.window.montage_viewport import prioritize_montage_tiles, square_montage_fit_view_range
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
@@ -34,42 +34,47 @@ from arrayscope.window.render_contract import (
 )
 
 
-MONTAGE_LOADING_OVERLAY_REFRESH_INTERVAL_MS = 125.0
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
+MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION = 0.35
 
 
-class MontageRuntimeMixin:
+class FrameRuntimeMixin:
     def _on_montage_tile_slow(self, session_id):
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         # Not the shared predicate: on_slow callbacks capture only the session
         # id, so this is intentionally an id-only currency check.
         if session is None or int(session.session_id) != int(session_id):
             return
-        self._show_montage_session_loading_overlay(session)
+        self._show_frame_session_loading_overlay(session)
 
-    def show_montage_session_slow_overlay(self, session):
-        self._show_montage_session_loading_overlay_if_current(int(session.session_id), session.key)
+    def show_frame_session_slow_overlay(self, session):
+        self._show_frame_session_loading_overlay_if_current(int(session.session_id), session.key)
 
-    def _stop_montage_session_slow_overlay(self):
-        self._montage_session_slow_key = None
+    def _stop_frame_session_slow_overlay(self):
+        self._frame_session_slow_key = None
 
-    def _show_montage_session_loading_overlay_if_current(self, session_id, key):
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._is_current_montage_session(session_id, key):
+    def _show_frame_session_loading_overlay_if_current(self, session_id, key):
+        session = getattr(self, "_frame_session", None)
+        if session is None or not self._is_current_frame_session(session_id, key):
             return
         if session.visible_plan_complete():
             return
         if not session.pending_tiles and not session.loading_tiles and not session.stage_fan_in.attached_requests:
             return
-        self._show_montage_session_loading_overlay(session)
+        self._show_frame_session_loading_overlay(session)
 
-    def _show_montage_session_loading_overlay(self, session):
-        if not self._montage_session_is_current(session):
+    def _show_frame_session_loading_overlay(self, session):
+        if not self._frame_session_is_current(session):
             return
         if session.visible_plan_complete():
             return
         session.show_loading_overlays = True
-        self.apply_montage_presentation(session)
+        # The loading chrome is an overlay, not a frame transaction. The
+        # caller has already committed/submitted the current presentation;
+        # requesting it again here duplicated the initial backend commit and
+        # made a cold render callback pay the full tile-layer walk twice.
+        # Later payload completions naturally carry ``show_loading_overlays``
+        # through their own bounded presentation requests.
         self.win.img_view.setImageStale(True)
         self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
         rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
@@ -116,18 +121,59 @@ class MontageRuntimeMixin:
             view_range=session.view_range,
             viewport_shape=tuple(session.viewport_shape),
             interactive=_interactive_active(self),
+            tile_source_ids=tuple(
+                (
+                    int(tile.montage_index),
+                    session.tile_semantic_source_id(int(tile.source_index)),
+                )
+                for tile in tuple(getattr(session.plan, "tiles", ()) or ())
+            ),
+            tile_source_indices=tuple(
+                (int(tile.montage_index), int(tile.source_index))
+                for tile in tuple(getattr(session.plan, "tiles", ()) or ())
+            ),
         )
 
     def _lod_admission_scope(self, session, intent: RenderIntent) -> LodAdmissionScope:
-        visible = frozenset(int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ()))
-        coverage = set(visible)
+        frame_plan = getattr(session, "frame_plan", None)
+        onscreen_tiles = getattr(session, "onscreen_tile_numbers", None)
+        visible_source = (
+            tuple(onscreen_tiles())
+            if bool(getattr(session, "display_committed", False)) and callable(onscreen_tiles)
+            else tuple(getattr(session, "visible_tile_numbers", ()) or ())
+        )
+        visible = frozenset(int(tile) for tile in visible_source)
+        # Session visibility intentionally retains a coverage ring so camera
+        # motion never reveals black edges. It is not visible admission:
+        # FramePlan.active is the canonical on-screen set, while coverage and
+        # near tiles remain lower-priority retained/speculative work.
+        coverage = set(
+            int(tile)
+            for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())
+        )
+        coverage.update(visible)
         coverage.update(int(tile) for tile in tuple(getattr(session, "loading_tiles", ()) or ()))
         coverage.update(int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ()))
-        near = (
-            tuple(getattr(session, "_near_tile_numbers", lambda **_kwargs: ())(margin_tiles=2))
-            if hasattr(session, "_near_tile_numbers")
-            else ()
-        )
+        if (
+            not bool(getattr(session, "shader_display", False))
+            and (
+                bool(getattr(session, "_cpu_atomic_successor_pending", False))
+                or bool(getattr(session, "source_window_changed_pending", False))
+            )
+        ):
+            # A CPU source-window handoff is one indivisible presentation.
+            # FramePlan.active is normally the admission scope, but the
+            # atomic successor must materialize every tile in the session's
+            # zero-margin visible coverage. Excluding an edge tile here left
+            # the successor permanently waiting with no pending producer.
+            visible = frozenset((*visible, *coverage))
+        near = tuple(getattr(frame_plan, "near_region_ids", ()) or ())
+        if not near:
+            near = (
+                tuple(getattr(session, "_near_tile_numbers", lambda **_kwargs: ())(margin_tiles=2))
+                if hasattr(session, "_near_tile_numbers")
+                else ()
+            )
         skipped = set(int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ()))
         missing = 0
         for tile_number in visible:
@@ -145,7 +191,7 @@ class MontageRuntimeMixin:
             visible_missing_count=missing,
         )
 
-    def _montage_pipeline_for_session(self, session) -> MontagePipeline:
+    def _frame_pipeline_for_session(self, session) -> FramePipeline:
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
             seed_tile = next(iter(tuple(getattr(session.plan, "tiles", ()) or ())), None)
@@ -153,9 +199,9 @@ class MontageRuntimeMixin:
                 seed_tile is not None
                 and render_effects.preview_pipeline_commutes_for_display_lod(session, seed_tile)
             )
-            pipeline = MontagePipeline(
+            pipeline = FramePipeline(
                 self.win.kernel,
-                MontagePipelineEffects(self, session),
+                FramePipelineEffects(self, session),
                 LodLadder(
                     LadderPolicy(
                         mode=str(getattr(session, "lod_policy_mode", "native-only") or "native-only"),
@@ -171,14 +217,14 @@ class MontageRuntimeMixin:
                 commit_max_items=8,
             )
             session.pipeline = pipeline
-        self._montage_pipeline = pipeline
+        self._frame_pipeline = pipeline
         return pipeline
 
     def request_montage_replan(self, session) -> None:
         """Coalesced ladder replan: at most one per event-loop turn.
 
         Per-completion callbacks (level ready, stage done/stale, declined
-        admissions) must NOT call `retarget_montage_pipeline` directly: a
+        admissions) must NOT call `retarget_frame_pipeline` directly: a
         full replan snapshots every tile, so N completions × N tiles was an
         O(N²) GUI-thread storm (272-tile fill: 204 replans, 2.5–14 s
         event-loop gaps). They mark their own bounded state and request one
@@ -201,24 +247,28 @@ class MontageRuntimeMixin:
             # freshly demoted tiles sat at their coarse floor with no wakeup
             # left (the onscreen-only mixed-LOD scroll stall — a timing race the
             # busier onscreen event loop loses and the offscreen one wins).
-            # retarget_montage_pipeline re-validates the session and is
+            # retarget_frame_pipeline re-validates the session and is
             # idempotent, so replanning the current session is always safe.
-            current = getattr(self, "_montage_session", None)
-            if current is None or not self._montage_session_is_current(current):
+            current = getattr(self, "_frame_session", None)
+            if current is None or not self._frame_session_is_current(current):
                 return
-            self.retarget_montage_pipeline(current)
+            self.retarget_frame_pipeline(current)
 
         # Timer category: UI cosmetic. Event-turn barrier for coalescing a
         # current-session replan; kernel completion still owns work delivery.
-        Qt.QtCore.QTimer.singleShot(0, self, fire)
+        # A zero timer re-armed by completion/presentation callbacks can stay
+        # continuously ready and outrun Qt's input/heartbeat timers. One
+        # millisecond preserves event-turn coalescing while forcing a real
+        # dispatcher opportunity between replans.
+        Qt.QtCore.QTimer.singleShot(1, self, fire)
 
-    def retarget_montage_pipeline(self, session, *, force_commit: bool = False) -> int:
-        if session is None or not self._montage_session_is_current(session):
+    def retarget_frame_pipeline(self, session, *, force_commit: bool = False) -> int:
+        if session is None or not self._frame_session_is_current(session):
             return 0
         render_lod.selected_lod_factor(session)
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
-        pipeline = self._montage_pipeline_for_session(session)
+        pipeline = self._frame_pipeline_for_session(session)
         submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             pipeline.effects.release_display_owned_pending(scope)
@@ -231,7 +281,7 @@ class MontageRuntimeMixin:
         if force_commit or session.flush_pending or session.final_commit_pending:
             self.apply_ready_montage_display(session)
         if not submitted:
-            self._finish_montage_session_if_complete(session)
+            self._finish_frame_session_if_complete(session)
         unsettled = bool(
             getattr(session, "pending_tiles", None)
             or getattr(session, "active_tile_requests", None)
@@ -249,16 +299,21 @@ class MontageRuntimeMixin:
     def replan_deferred_interactive_native_quality(self) -> bool:
         """Admit native-quality rungs deferred while an interaction was active."""
 
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._montage_session_is_current(session):
+        session = getattr(self, "_frame_session", None)
+        if session is None or not self._frame_session_is_current(session):
             return False
         pipeline = getattr(session, "pipeline", None)
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
-        if deferred <= int(getattr(self, "_montage_native_deferred_replanned", 0) or 0):
+        residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
+        if (
+            not residency_deferred
+            and deferred <= int(getattr(self, "_montage_native_deferred_replanned", 0) or 0)
+        ):
             return False
+        session._interactive_residency_deferred = False
         self._montage_native_deferred_replanned = deferred
-        self.retarget_montage_pipeline(session)
+        self.retarget_frame_pipeline(session, force_commit=residency_deferred)
         return True
 
     # -- stall assertion probe (ADR 0051) -------------------------------------
@@ -299,8 +354,8 @@ class MontageRuntimeMixin:
         if not self._montage_assertion_probe_enabled():
             self._montage_watchdog_stop()
             return
-        session = getattr(self, "_montage_session", None)
-        if session is None or not self._montage_session_is_current(session):
+        session = getattr(self, "_frame_session", None)
+        if session is None or not self._frame_session_is_current(session):
             self._montage_watchdog_stop()
             return
         pending = len(session.pending_tiles)
@@ -417,26 +472,17 @@ class MontageRuntimeMixin:
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
         if not hasattr(self.win.img_view, "setMontageTileOverlays"):
             return
-        session = getattr(self, "_montage_session", None)
-        show_loading = bool(getattr(session, "show_loading_overlays", False))
+        session = getattr(self, "_frame_session", None)
         candidate_numbers: tuple[int, ...] | None = None
         tile_state_revision = None
         if session is not None and getattr(session, "plan", None) is plan:
             tile_state_revision = int(getattr(session, "tile_state_revision", 0) or 0)
             candidates = set(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
-            if show_loading:
-                candidates.update(int(tile) for tile in getattr(session, "loading_tiles", ()) or ())
-                candidates.update(
-                    int(tile)
-                    for tile in set(getattr(session, "rendered_tiles", {}) or {})
-                    - set(session.lifecycle.presented_tiles)
-                )
             candidate_numbers = tuple(sorted(candidates))
             key = (
                 id(plan),
                 tuple(int(value) for value in viewport_rect),
                 tile_state_revision,
-                show_loading,
                 candidate_numbers,
             )
             if key == getattr(self, "_last_montage_overlay_update_key", None):
@@ -446,19 +492,7 @@ class MontageRuntimeMixin:
                 if int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0) != 0:
                     self.win.img_view.setMontageTileOverlays(())
                 return
-            if (
-                show_loading
-                and int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0) > 0
-                and (
-                    monotonic() - float(getattr(self, "_last_montage_loading_overlay_refresh_monotonic", 0.0) or 0.0)
-                )
-                * 1000.0
-                < MONTAGE_LOADING_OVERLAY_REFRESH_INTERVAL_MS
-            ):
-                return
             self._last_montage_overlay_update_key = key
-            if show_loading:
-                self._last_montage_loading_overlay_refresh_monotonic = monotonic()
         overlays = []
         viewport_x0, viewport_y0, viewport_x1, viewport_y1 = (int(value) for value in viewport_rect)
         if candidate_numbers is None:
@@ -472,9 +506,12 @@ class MontageRuntimeMixin:
             )
         for tile in tiles:
             state = tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(tile_states) else MontageTileState.UNLOADED
-            if state == MontageTileState.LOADING and not show_loading:
-                continue
-            if state not in {MontageTileState.LOADING, MontageTileState.SKIPPED}:
+            # In-progress work is represented once by the evaluation overlay
+            # and diagnostics. Per-tile loading rectangles doubled scene item
+            # count, covered compatible predecessor pixels, and made a valid
+            # retained frame look partially black. Only durable skipped/error
+            # slots belong in the committed scene.
+            if state != MontageTileState.SKIPPED:
                 continue
             tile_x0 = int(tile.x0)
             tile_y0 = int(tile.y0)
@@ -577,7 +614,7 @@ class MontageRuntimeMixin:
         if getattr(self, "_montage_viewport_update_running", False):
             self.win._montage_viewport_update_pending = True
             return
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         self._montage_viewport_update_token = None if session is None else _montage_work_token(session, "viewport_update")
         self.apply_montage_viewport_retarget()
 
@@ -586,8 +623,8 @@ class MontageRuntimeMixin:
             return
         if getattr(self.win.view_state, "montage_axis", None) is None:
             return
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
+        session = getattr(self, "_frame_session", None)
+        if not self._frame_session_is_current(session):
             return
         if not session.pending_tiles:
             return
@@ -637,8 +674,8 @@ class MontageRuntimeMixin:
         self._montage_priority_retarget_pending = False
         if getattr(self.win, "_closing", False):
             return
-        session = getattr(self, "_montage_session", None)
-        if not self._montage_session_is_current(session):
+        session = getattr(self, "_frame_session", None)
+        if not self._frame_session_is_current(session):
             return
         token = getattr(self, "_montage_priority_retarget_token", None)
         if not _montage_work_token_is_current(session, token, "priority_retarget"):
@@ -678,78 +715,77 @@ class MontageRuntimeMixin:
         self._last_montage_priority_retarget_pending = len(session.pending_tiles)
         self._record_gui_budget(budget)
         if session.pending_tiles:
-            self.retarget_montage_pipeline(session)
+            self.retarget_frame_pipeline(session)
 
     def apply_montage_viewport_retarget(self) -> None:
-        while True:
-            if getattr(self.win, "_closing", False):
-                return
-            session = getattr(self, "_montage_session", None)
-            token = getattr(self, "_montage_viewport_update_token", None)
-            if token is not None and (
-                session is None or not _montage_work_token_is_current(session, token, "viewport_update")
-            ):
-                return
-            if getattr(self, "_montage_viewport_update_running", False):
-                self.win._montage_viewport_update_pending = True
-                return
-            self._montage_viewport_update_running = True
-            self.win._montage_viewport_update_pending = False
-            try:
-                if self._try_update_montage_viewport_only():
-                    retargeted = getattr(self, "_montage_session", None)
-                    if retargeted is not None:
-                        _complete_inline_work(
-                            self,
-                            WorkItem(
-                                key=(
-                                    "montage_viewport_retarget",
-                                    retargeted.key,
-                                    int(retargeted.session_id),
-                                    int(getattr(retargeted, "viewport_revision", 0) or 0),
-                                ),
-                                lane=WorkLane.DISPLAY_PREPARATION,
-                                quality="retained",
-                                supersession_key=("montage-viewport-retarget", retargeted.key),
-                                supersession_value=int(retargeted.session_id),
+        if getattr(self.win, "_closing", False):
+            return
+        session = getattr(self, "_frame_session", None)
+        token = getattr(self, "_montage_viewport_update_token", None)
+        if token is not None and (
+            session is None or not _montage_work_token_is_current(session, token, "viewport_update")
+        ):
+            return
+        if getattr(self, "_montage_viewport_update_running", False):
+            self.win._montage_viewport_update_pending = True
+            return
+        self._montage_viewport_update_running = True
+        self.win._montage_viewport_update_pending = False
+        try:
+            if self._try_update_montage_viewport_only():
+                retargeted = getattr(self, "_frame_session", None)
+                if retargeted is not None:
+                    _complete_inline_work(
+                        self,
+                        WorkItem(
+                            key=(
+                                "montage_viewport_retarget",
+                                retargeted.key,
+                                int(retargeted.session_id),
+                                int(getattr(retargeted, "viewport_revision", 0) or 0),
                             ),
-                        )
-                else:
-                    self.update_image_view()
-            finally:
-                self._montage_viewport_update_running = False
-            if not getattr(self.win, "_montage_viewport_update_pending", False):
-                return
-            if not getattr(self, "_montage_viewport_continue_immediately", False):
-                # A new viewport retarget arrived while this bounded apply was
-                # running. The active retarget path already submitted current
-                # correctness work; this flag is not a delayed drain queue.
-                return
-            # Budgeted additions remained when the apply yielded mid-batch.
-            # Continue in this stack frame instead of re-entering through
-            # retarget_montage_viewport(), which calls this method again.
-            self.win._montage_viewport_update_pending = False
-            self._montage_viewport_continue_immediately = False
+                            lane=WorkLane.DISPLAY_PREPARATION,
+                            quality="retained",
+                            supersession_key=("montage-viewport-retarget", retargeted.key),
+                            supersession_value=int(retargeted.session_id),
+                        ),
+                    )
+            else:
+                self.update_image_view()
+        finally:
+            self._montage_viewport_update_running = False
+        if not getattr(self.win, "_montage_viewport_update_pending", False):
+            return
+        if not getattr(self, "_montage_viewport_continue_immediately", False):
+            # A newer retarget already submitted current correctness work.
+            return
+        # Budgeted additions remain. One viewport slice per receiver-owned
+        # event turn keeps fit/zoom callbacks bounded and lets paints/input run
+        # between additions; the pending flag is the lost-wakeup obligation.
+        self._montage_viewport_continue_immediately = False
+        schedule = getattr(self, "_schedule_frame_viewport_update", None)
+        if not callable(schedule):
+            raise RuntimeError("montage viewport continuation has no receiver-owned gate")
+        schedule(delay_ms=1)
 
-    def _publish_montage_content_extent(self, plan) -> None:
+    def _publish_montage_content_extent(self, plan) -> bool:
         """Publish the semantic montage extent as the viewport content shape.
 
-        Layout geometry is known at plan time; camera policy (fit/unlock/1:1)
-        must never wait for — or trust — physical tile commits. Without this,
-        unlocking fit while commits are still gated (preview-floor first
-        fill) re-fits the camera around the stale single-slice shape.
+        A first frame may publish this at plan time. Replacements publish only
+        after the backend commit succeeds: the acknowledged frame owns camera
+        coordinates, and moving the camera to uncommitted layout geometry can
+        make still-resident old pixels appear black.
         """
 
         geometry = getattr(plan, "geometry", plan)
         montage = getattr(geometry, "montage", geometry)
         set_extent = getattr(self.win.img_view, "setViewportContentExtent", None)
         if not callable(set_extent):
-            return
+            return False
         if montage is None or not getattr(montage, "indices", ()):
-            set_extent(None)
-            return
+            return bool(set_extent(None))
         (x0, x1), (y0, y1) = _montage_full_view_range(montage)
-        set_extent((max(1, int(round(y1 - y0))), max(1, int(round(x1 - x0)))))
+        return bool(set_extent((max(1, int(round(y1 - y0))), max(1, int(round(x1 - x0))))))
 
     def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):
@@ -888,9 +924,16 @@ class MontageRuntimeMixin:
         if source_ids is None:
             source_ids = {}
             session.tile_source_ids = source_ids
+        plan = getattr(session, "plan", None)
+        plan_tiles_tuple = tuple(getattr(plan, "tiles", ()) or ())
+        if (
+            getattr(session, "_tile_source_ids_plan", None) is plan
+            and len(source_ids) == len(plan_tiles_tuple)
+        ):
+            return source_ids
         plan_tiles = {
             int(tile.montage_index): tile
-            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            for tile in plan_tiles_tuple
         }
         for stale in tuple(source_ids):
             if int(stale) not in plan_tiles:
@@ -925,7 +968,8 @@ class MontageRuntimeMixin:
                         None if histogram is None else tuple(np.shape(histogram)),
                         None if histogram is None else str(np.asarray(histogram).dtype),
                     )
-        return dict(source_ids)
+        session._tile_source_ids_plan = plan
+        return source_ids
     def _classify_visible_montage_tiles(self, session) -> None:
         if not render_lod.native_missing_tile_queue_required(
             str(getattr(session, "lod_policy_mode", "")),
@@ -1012,9 +1056,13 @@ def _should_auto_fit_montage_view(
         return False
     if _viewport_controller_auto_active_for_range(viewport_controller, view_range):
         return True
-    if int(visible_count) <= 0:
-        return bool(viewport_controller is None)
+    near_auto = getattr(viewport_controller, "is_near_auto", None)
+    if callable(near_auto) and bool(near_auto(view_range)):
+        return True
     if view_ranges_near(view_range, full_range):
+        return True
+    visible_fraction = max(0, int(visible_count)) / float(max(1, int(tile_count)))
+    if visible_fraction <= MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION:
         return True
     return False
 
@@ -1024,6 +1072,9 @@ def _viewport_controller_auto_active_for_range(viewport_controller, view_range) 
         return False
     active = getattr(viewport_controller, "is_auto_active", None)
     if callable(active) and bool(active()):
+        return True
+    near_auto = getattr(viewport_controller, "is_near_auto", None)
+    if callable(near_auto) and bool(near_auto(view_range)):
         return True
     return False
 
@@ -1115,7 +1166,7 @@ def _montage_priority_focus(window, view_range) -> tuple[float, float] | None:
     except Exception:
         pass
     try:
-        plan = getattr(getattr(window, "_montage_session", None), "plan", None)
+        plan = getattr(getattr(window, "_frame_session", None), "plan", None)
         if plan is not None:
             focus = _nearest_montage_tile_center(plan, view_range)
             if focus is not None:

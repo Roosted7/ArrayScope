@@ -58,6 +58,6 @@ class RenderResourceMixin:
             evaluator.apply_memory_policy(policy)
 
     def _montage_render_active(self) -> bool:
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         return bool(session is not None and (session.pending_tiles or session.loading_tiles))
     

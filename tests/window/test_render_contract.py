@@ -88,11 +88,11 @@ def test_orchestrator_predicates_delegate_to_the_contract():
 
     orchestrator.win._closing = False
     session = _session()
-    orchestrator._montage_session = session
-    assert orchestrator._montage_session_is_current(session)
-    assert orchestrator._is_current_montage_session(1, ("doc", "view"))
-    orchestrator._montage_session = _session(session_id=2)
-    assert not orchestrator._montage_session_is_current(session)
+    orchestrator._frame_session = session
+    assert orchestrator._frame_session_is_current(session)
+    assert orchestrator._is_current_frame_session(1, ("doc", "view"))
+    orchestrator._frame_session = _session(session_id=2)
+    assert not orchestrator._frame_session_is_current(session)
 
 
 def test_orchestrator_owns_the_render_generation():

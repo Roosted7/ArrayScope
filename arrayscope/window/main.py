@@ -346,7 +346,7 @@ class ArrayScopeWindow(
                     return True
             except Exception:
                 pass
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if session is None:
             return False
         return bool(
@@ -364,7 +364,7 @@ class ArrayScopeWindow(
         )
 
     def _scheduler_busy_state(self) -> SchedulerBusyState:
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         stage_ready = False
         backlog = 0
         if session is not None:
@@ -442,7 +442,10 @@ class ArrayScopeWindow(
         # only this drain knob plus commit batch bounds and kernel lane quotas.
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
-            decision = governor.decide_bridge_drain(interactive=interactive)
+            decision = governor.decide_bridge_drain(
+                interactive=interactive,
+                busy_state=busy,
+            )
             bridge.set_max_items_per_drain(decision.batch_limit)
             bridge.set_budget_ms(decision.budget_ms)
         # Montage prefetch asks the governor for a per-run tile budget in
@@ -557,8 +560,8 @@ class ArrayScopeWindow(
     # ------------------------------------------------------------------
 
     @property
-    def _montage_session(self):
-        return getattr(self.renderer, "_montage_session", None)
+    def _frame_session(self):
+        return getattr(self.renderer, "_frame_session", None)
 
     @property
     def display_geometry(self):

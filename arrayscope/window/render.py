@@ -28,7 +28,7 @@ from arrayscope.display.geometry import display_geometry_coordinates_equal
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.evaluation_controller import EvalPriority
 from arrayscope.window.interaction_mode import InteractionMode
-from arrayscope.window.frame_renderer import FrameRenderMixin
+from arrayscope.window.frame_controller import FrameControllerMixin
 from arrayscope.window.render_contract import RenderGeneration, generation_is_current
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
@@ -43,7 +43,7 @@ def getNumberOfDecimalPlaces(number):
 
 class RenderOrchestrator(
     DisplayPresentationMixin,
-    FrameRenderMixin,
+    FrameControllerMixin,
     RenderPrefetchMixin,
     RenderResourceMixin,
     Qt.QtCore.QObject,
@@ -662,6 +662,9 @@ class RenderOrchestrator(
         self.win.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
 
     def fit_image_to_view(self, enabled=True):
+        note_interaction = getattr(self.win, "_note_viewport_interaction", None)
+        if callable(note_interaction):
+            note_interaction("fit-toggle")
         self.win.widgets['buttons']['display']['fit'].setChecked(bool(enabled))
         if hasattr(self.win, "display_toolbar"):
             blocker = Qt.QtCore.QSignalBlocker(self.win.display_toolbar.fit_action)
@@ -691,7 +694,7 @@ class RenderOrchestrator(
         auto_bounds = normalize_bounds(self.win.img_view.getHistogramDataBounds())
         has_committed_target = bool(
             getattr(self.win, "_committed_display_frame", None) is not None
-            or bool(getattr(getattr(self, "_montage_session", None), "display_committed", False))
+            or bool(getattr(getattr(self, "_frame_session", None), "display_committed", False))
         )
         auto_source = self._apply_display_level_override(
             auto_bounds,
@@ -725,7 +728,7 @@ class RenderOrchestrator(
             cancel_level_interaction()
         self.win._force_autolevel = False
         self._pending_auto_level_source = None
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         has_committed_target = bool(
             getattr(self.win, "_committed_display_frame", None) is not None
             or bool(getattr(session, "display_committed", False))
@@ -982,6 +985,7 @@ class RenderOrchestrator(
         self._advance_render_generation(f"render:{reason}")
         self.win._set_view_state(self.win.view_state.for_shape(self.win.data.shape, preserve_flags=True))
         self.win._coerce_channel_for_current_dtype()
+        self._last_render_preamble_ms = (perf_counter() - render_start) * 1000.0
         control_start = perf_counter()
         if self._interactive_slice_controls_are_current(reason=reason, defer_side_panels=defer_side_panels):
             if hasattr(self.win, "tab_widget"):
@@ -996,7 +1000,10 @@ class RenderOrchestrator(
             self.win.update_shift_indicators()
             self.win._interactive_slice_controls_synced_state = None
         self._last_control_sync_ms = (perf_counter() - control_start) * 1000.0
+        frame_update_start = perf_counter()
         self.update_image_view(force_autolevel=force_autolevel, defer_side_panels=defer_side_panels)
+        self._last_frame_update_ms = (perf_counter() - frame_update_start) * 1000.0
+        side_panel_start = perf_counter()
         if defer_side_panels:
             self.win._deferred_side_panel_refresh_pending = True
         else:
@@ -1005,6 +1012,7 @@ class RenderOrchestrator(
             self.win._update_operation_dock()
             self.win._sync_progressive_docks()
             self.win._deferred_side_panel_refresh_pending = False
+        self._last_side_panel_sync_ms = (perf_counter() - side_panel_start) * 1000.0
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
 
     def _interactive_slice_controls_are_current(self, *, reason: str, defer_side_panels: bool) -> bool:

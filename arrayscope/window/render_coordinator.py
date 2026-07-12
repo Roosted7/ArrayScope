@@ -24,7 +24,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self,
         window,
         *,
-        interactive_interval_ms: int = 16,
+        interactive_interval_ms: int = 32,
         quiet_interval_ms: int = 80,
         busy_retry_ms: int = 40,
     ):
@@ -34,6 +34,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._quiet_interval_ms = max(1, int(quiet_interval_ms))
         self._busy_retry_ms = max(1, int(busy_retry_ms))
         self._pending_request: RenderRequest | None = None
+        self._pending_side_work_cancel = False
         self._interactive_active = False
         self.requested = 0
         self.flushed = 0
@@ -107,23 +108,18 @@ class RenderCoordinator(Qt.QtCore.QObject):
             if not self._interactive_active:
                 self._interactive_active = True
                 self._notify_interaction_state_changed()
-            cache_hit = self._interactive_cache_hit()
-            supersedes_presentation = False if cache_hit else self._interactive_render_supersedes_presentation(reason)
+            self._pending_side_work_cancel = True
             if self._presentation_draw_pending():
                 self.presentation_backpressure_skips += 1
-                if cache_hit or not supersedes_presentation:
-                    self._quiet_timer.start(self._quiet_interval_ms)
-                    return
-            if not cache_hit:
-                self._window._cancel_render_dependent_work_for_interactive_change()
+                self._quiet_timer.start(self._quiet_interval_ms)
+                return
+            # Cache/materialization and presentation supersession are render
+            # concerns. Probing every visible tile here made a tiny input
+            # action block on evaluator cache locks for up to 44 ms. Cancel
+            # stale side work cheaply and let the coalesced flush decide what
+            # pixels/evaluation can be reused.
             self._quiet_timer.start(self._quiet_interval_ms)
-            if cache_hit:
-                self.immediate_cache_flushes += 1
-                self._render_timer.start(0)
-            elif supersedes_presentation:
-                self._render_timer.stop()
-                self._flush_timer()
-            elif not self._render_timer.isActive():
+            if not self._render_timer.isActive():
                 self._render_timer.start(self._interactive_interval_ms)
             return True
         self._render_timer.start(0)
@@ -135,6 +131,7 @@ class RenderCoordinator(Qt.QtCore.QObject):
 
     def cancel_pending(self) -> None:
         self._pending_request = None
+        self._pending_side_work_cancel = False
         self._render_timer.stop()
         self._quiet_timer.stop()
         if self._interactive_active:
@@ -208,6 +205,9 @@ class RenderCoordinator(Qt.QtCore.QObject):
         self._pending_request = None
         if request is None or getattr(self._window, "_closing", False):
             return
+        if request.interactive and self._pending_side_work_cancel:
+            self._pending_side_work_cancel = False
+            self._window._cancel_render_dependent_work_for_interactive_change()
         self.flushed += 1
         self._window.render(
             reason=request.reason,

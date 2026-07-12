@@ -63,7 +63,7 @@ def test_visible_render_paths_do_not_compare_partial_document_keys():
         (ROOT / rel).read_text()
         for rel in (
             Path("arrayscope/window/render.py"),
-            Path("arrayscope/window/frame_renderer.py"),
+            Path("arrayscope/window/frame_controller.py"),
             Path("arrayscope/window/render_prefetch.py"),
         )
     )
@@ -136,7 +136,7 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
 
 
 def test_montage_stall_probe_is_diagnostics_only():
-    path = ROOT / "arrayscope" / "window" / "montage_runtime.py"
+    path = ROOT / "arrayscope" / "window" / "frame_runtime.py"
     text = path.read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
@@ -159,15 +159,15 @@ def test_montage_stall_probe_is_diagnostics_only():
 
 
 def test_frame_renderer_stays_below_r2_line_count_gate():
-    path = ROOT / "arrayscope" / "window" / "frame_renderer.py"
+    path = ROOT / "arrayscope" / "window" / "frame_controller.py"
     assert len(path.read_text().splitlines()) < 2000
 
 
 def test_montage_commits_flow_through_pipeline_effects_and_shared_surface():
-    frame_text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
-    commit_text = (ROOT / "arrayscope" / "window" / "montage_commit.py").read_text()
-    assert "_commit_montage_session_tile_layer(" not in frame_text
-    assert "class MontagePipelineEffects" in commit_text
+    frame_text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
+    commit_text = (ROOT / "arrayscope" / "window" / "frame_effects.py").read_text()
+    assert "_commit_frame_session_tile_layer(" not in frame_text
+    assert "class FramePipelineEffects" in commit_text
     assert ".commit_tiled_delta(" in commit_text
 
 
@@ -214,7 +214,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/display/model/montage_levels.py"),
-        Path("arrayscope/window/frame_renderer.py"),
+        Path("arrayscope/window/frame_controller.py"),
         Path("arrayscope/window/viewport_bridge.py"),
         Path("arrayscope/window/display_presenter.py"),
     ):
@@ -264,6 +264,24 @@ def test_lod_admission_has_no_effects_side_pending_maps_or_shared_floor_markers(
                     assert f"{prefix}{token}" not in text, f"{token} found in {path.relative_to(ROOT)}"
 
 
+def test_tile_lifecycle_is_the_only_per_region_transaction_owner():
+    assert not (ROOT / "arrayscope" / "presentation" / "tile_ledger.py").exists()
+    for path in (ROOT / "arrayscope").rglob("*.py"):
+        text = path.read_text()
+        assert "tile_ledger" not in text, f"parallel tile ledger found in {path.relative_to(ROOT)}"
+
+
+def test_frame_control_plane_has_no_legacy_module_shims():
+    removed = (
+        "frame_renderer.py",
+        "montage_commit.py",
+        "montage_runtime.py",
+        "montage_session.py",
+    )
+    for name in removed:
+        assert not (ROOT / "arrayscope" / "window" / name).exists()
+
+
 def test_qtimers_are_explicitly_allowlisted_by_category():
     """R4 guard: new timers must be justified as UI cosmetic or anti-hang."""
 
@@ -301,9 +319,9 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ("arrayscope/window/layout_controller.py", "WindowLayoutManager.set_managed_dock_visible", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/window/main.py", "ArrayScopeWindow.__init__", "singleShot", "UI cosmetic"): 2,
             ("arrayscope/window/main.py", "ArrayScopeWindow._note_viewport_interaction", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/window/montage_commit.py", "MontagePipelineEffects.request_presentation", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/montage_runtime.py", "MontageRuntimeMixin.request_montage_replan", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/montage_runtime.py", "MontageRuntimeMixin._ensure_montage_watchdog", "QTimer", "anti-hang fallback"): 1,
+            ("arrayscope/window/frame_effects.py", "FramePipelineEffects.request_presentation", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/frame_runtime.py", "FrameRuntimeMixin.request_montage_replan", "singleShot", "UI cosmetic"): 1,
+            ("arrayscope/window/frame_runtime.py", "FrameRuntimeMixin._ensure_montage_watchdog", "QTimer", "anti-hang fallback"): 1,
             ("arrayscope/window/render_coordinator.py", "RenderCoordinator.__init__", "QTimer", "UI cosmetic"): 2,
         }
     )
@@ -539,7 +557,7 @@ def test_histogram_imageitem_binding_is_centralized():
 
 
 def test_frame_renderer_does_not_mutate_image_items_directly():
-    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     forbidden = (".setImage(", ".setMontageTileLayerPresentation(", "ImageItem(")
     for token in forbidden:
         assert token not in text
@@ -720,33 +738,33 @@ def test_scheduler_v2_pure_modules_are_qt_free():
         assert "pyqtgraph" not in text
 
 
-def test_montage_state_modules_are_qt_free():
+def test_frame_state_modules_are_qt_free():
     for rel in (
         Path("arrayscope/display/montage.py"),
         Path("arrayscope/display/geometry.py"),
-        Path("arrayscope/window/montage_session.py"),
+        Path("arrayscope/window/frame_session.py"),
     ):
         text = (ROOT / rel).read_text()
         assert "pyqtgraph" not in text
-        if rel != Path("arrayscope/window/montage_session.py"):
+        if rel != Path("arrayscope/window/frame_session.py"):
             assert "Qt" not in text
 
 
 def test_update_image_view_does_not_batch_missing_regions():
-    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "update_image_view":
             segment = ast.get_source_segment(text, node) or ""
             assert "tuple((tile, evaluate_image_snapshot" not in segment
             assert "for tile in missing_tiles)" not in segment
-            assert "retarget_montage_pipeline" in segment
+            assert "retarget_frame_pipeline" in segment
             return
     raise AssertionError("update_image_view not found")
 
 
 def test_legacy_montage_tile_callbacks_are_deleted():
-    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     for name in (
         "_on_montage_tile_done",
         "_on_montage_tile_error",
@@ -755,12 +773,12 @@ def test_legacy_montage_tile_callbacks_are_deleted():
         "_schedule_montage_tile_result_flush",
     ):
         assert f"def {name}" not in text
-    session_text = (ROOT / "arrayscope" / "window" / "montage_session.py").read_text()
+    session_text = (ROOT / "arrayscope" / "window" / "frame_session.py").read_text()
     assert "def mark_loaded" not in session_text
 
 
 def test_frame_renderer_does_not_use_legacy_normal_render_decision_helper():
-    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     assert "choose_visible_render_decision" not in text
     assert "estimate_visible_render_context" not in text
 
@@ -776,7 +794,7 @@ def test_kernel_adapters_do_not_own_window_lane_quotas():
 
 
 def test_frame_renderer_has_no_legacy_normal_degraded_preview_branch():
-    text = (ROOT / "arrayscope" / "window" / "frame_renderer.py").read_text()
+    text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     assert "RenderDecisionKind.DEGRADED_PREVIEW" not in text
     assert "store_display_tile_result" not in text
 
@@ -813,7 +831,7 @@ def test_render_staleness_vocabulary_is_defined_once():
 
     orchestration = (
         "window/render.py",
-        "window/frame_renderer.py",
+        "window/frame_controller.py",
         "window/display_presenter.py",
         "window/render_prefetch.py",
         "window/render_resources.py",
