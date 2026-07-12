@@ -357,6 +357,18 @@ def s_diagnostics(ctx: Ctx):
     ctx.shot(dialog, "diagnostics_dialog")
 
 
+@scenario("first_run_hints")
+def s_first_run_hints(ctx: Ctx):
+    from pyqtgraph.Qt import QtCore
+
+    settings = QtCore.QSettings()
+    settings.setValue("first_run_hints_dismissed", False)
+    settings.sync()
+    win = ctx.window(_phantom2d(192), size=(1000, 700))
+    ctx.pump(8)
+    ctx.shot(win, "hints_overlay")
+
+
 @scenario("dialog_command_palette")
 def s_palette(ctx: Ctx):
     from pyqtgraph.Qt import QtCore
@@ -411,6 +423,9 @@ def run_child(name: str, theme: str, out_root: Path) -> None:
     settings.clear()
     settings.setValue("theme", theme)
     settings.setValue("image_rendering_backend", "pyqtgraph")
+    # Keep the one-time hints out of regression shots; a dedicated scenario
+    # re-enables them explicitly.
+    settings.setValue("first_run_hints_dismissed", True)
     settings.sync()
 
     out_dir = out_root / name

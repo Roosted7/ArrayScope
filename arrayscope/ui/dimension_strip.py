@@ -278,6 +278,7 @@ class DimensionStrip(QtWidgets.QWidget):
     sliceTextChanged = Qt.QtCore.Signal(int, str)
     operationRequested = Qt.QtCore.Signal(int)
     focusedAxisChanged = Qt.QtCore.Signal(int)
+    layoutChanged = Qt.QtCore.Signal()
 
     def __init__(self, ndim, parent=None):
         super().__init__(parent)
@@ -343,6 +344,18 @@ class DimensionStrip(QtWidgets.QWidget):
     def chip(self, axis):
         return self.chips[int(axis)]
 
+    def row_metrics(self):
+        """(row_count, row_height, vertical_spacing) for the current width.
+
+        Columns are recomputed fresh so callers get correct heights even
+        before a deferred relayout lands.
+        """
+        visible = [chip for chip in self.chips if chip.isVisible()] or self.chips
+        columns = max(1, self._column_count())
+        rows = (len(visible) + columns - 1) // columns
+        row_height = max(28, self.chips[0].sizeHint().height() if self.chips else 28)
+        return rows, row_height, self.layout().verticalSpacing()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         columns = self._column_count()
@@ -355,6 +368,11 @@ class DimensionStrip(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def _schedule_relayout(self):
+        if self._column_count() != self._columns:
+            # Row-count changes move the surrounding chrome height, which
+            # viewport-continuity measures synchronously — do not defer.
+            self._run_scheduled_relayout()
+            return
         if self._relayout_pending:
             return
         self._relayout_pending = True
@@ -365,6 +383,9 @@ class DimensionStrip(QtWidgets.QWidget):
     def _run_scheduled_relayout(self):
         self._relayout_pending = False
         self._relayout()
+        # Height consumers re-sync even when the grid itself was unchanged
+        # (the surrounding scroll area may have been sized from stale rows).
+        self.layoutChanged.emit()
 
     # Chips stretch between these bounds. Width policy: give every chip the
     # same width. Under pressure the inter-chip spacing shrinks first
@@ -374,8 +395,9 @@ class DimensionStrip(QtWidgets.QWidget):
     # width and spacing as full rows.
     MIN_CHIP_WIDTH = 214
     MAX_CHIP_WIDTH = 248
-    MIN_CHIP_SPACING = 4
-    PREFERRED_CHIP_SPACING = 12
+    # Hard floor: chips never sit closer than this (the old preferred gap).
+    MIN_CHIP_SPACING = 12
+    PREFERRED_CHIP_SPACING = 16
 
     # The dims row also holds the right-aligned sync-link button; reserve its
     # footprint (button + fixed gaps) so the last column never clips into it.
@@ -447,6 +469,7 @@ class DimensionStrip(QtWidgets.QWidget):
             layout.setColumnStretch(col, 0)
         layout.invalidate()
         self.updateGeometry()
+        self.layoutChanged.emit()
 
 
 def _shift_slice_text(text, delta, axis_size):

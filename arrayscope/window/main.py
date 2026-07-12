@@ -273,6 +273,17 @@ class ArrayScopeWindow(
         # startup layout has settled.
         Qt.QtCore.QTimer.singleShot(0, self, lambda: setattr(self, "_progressive_preserve_enabled", True))
 
+        def show_first_run_hints():
+            if getattr(self, "_closing", False):
+                return
+            from arrayscope.ui.hints import maybe_show_first_run_hints
+
+            maybe_show_first_run_hints(self)
+
+        # Timer category: UI cosmetic. One-time discoverability hints appear
+        # after the first layout pass and never gate data flow.
+        Qt.QtCore.QTimer.singleShot(0, self, show_first_run_hints)
+
         # Set up file watcher if a filepath was provided (QFileSystemWatcher uses
         # OS-native events: inotify on Linux, FSEvents on macOS, ReadDirectoryChanges on Windows)
         self._file_watcher = None
@@ -512,7 +523,10 @@ class ArrayScopeWindow(
         super().resizeEvent(event)
         self._note_viewport_interaction("resize")
         if hasattr(self, "dimension_strip"):
-            self.dimension_strip._schedule_relayout()
+            # Synchronous: viewport-continuity restore measures chrome right
+            # after resizing, so the dims-area height must be settled (the
+            # relayout early-returns when geometry is unchanged).
+            self.dimension_strip._run_scheduled_relayout()
 
     def _on_sync_facet_toggled(self, facet, enabled):
         controller = getattr(self, "sync_controller", None)

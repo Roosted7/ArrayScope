@@ -32,6 +32,54 @@ def _scale_value_for_button(window, button) -> str:
 
 
 
+class _DimsResizeHandle(QtWidgets.QWidget):
+    """Thin drag handle: resizes the dimension-strip area; double-click
+    restores the automatic two-rows-plus-peek height."""
+
+    def __init__(self, parent=None, *, on_drag_delta, on_reset):
+        super().__init__(parent)
+        self.setFixedHeight(9)
+        self.setCursor(Qt.QtCore.Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("Drag to resize the dimension area; double-click to reset")
+        self._on_drag_delta = on_drag_delta
+        self._on_reset = on_reset
+        self._press_y = None
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        color = self.palette().mid().color()
+        painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        center_x = self.width() / 2
+        for offset in (-12, 0, 12):
+            painter.drawEllipse(Qt.QtCore.QPointF(center_x + offset, self.height() / 2), 1.5, 1.5)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.QtCore.Qt.MouseButton.LeftButton:
+            self._press_y = event.globalPosition().y() if hasattr(event, "globalPosition") else event.globalY()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press_y is None:
+            return
+        y = event.globalPosition().y() if hasattr(event, "globalPosition") else event.globalY()
+        delta = y - self._press_y
+        if abs(delta) >= 1:
+            # Handle sits below the area: dragging down grows it.
+            self._on_drag_delta(delta)
+            self._press_y = y
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._press_y = None
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self._on_reset()
+        event.accept()
+
+
 def _make_array_info_label():
     from arrayscope.ui.status_label import ElideLabel
 
@@ -303,11 +351,25 @@ class DisplayControlBuildMixin:
         self.dimension_strip.focusedAxisChanged.connect(lambda axis: setattr(self, "_focused_dimension_axis", int(axis)))
         for container in self.dim_containers:
             container.hide()
-        # Strip centered in the leftover space; sync button pinned to the
-        # right edge with fixed gaps on both sides (it never gets squeezed).
-        self.layouts['dims'].addStretch(1)
-        self.layouts['dims'].addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.layouts['dims'].addStretch(1)
+        # The strip lives in a vertically scrollable area: two rows visible by
+        # default (plus a peek of the third), user-adjustable via the handle
+        # below, never wasting space when a single row suffices.
+        strip_wrap = QtWidgets.QWidget()
+        wrap_layout = QtWidgets.QHBoxLayout(strip_wrap)
+        wrap_layout.setContentsMargins(0, 0, 0, 0)
+        wrap_layout.addStretch(1)
+        wrap_layout.addWidget(self.dimension_strip, 0, Qt.QtCore.Qt.AlignmentFlag.AlignTop)
+        wrap_layout.addStretch(1)
+        self.dims_scroll = QtWidgets.QScrollArea()
+        self.dims_scroll.setObjectName("DimsScrollArea")
+        self.dims_scroll.setWidgetResizable(True)
+        self.dims_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.dims_scroll.setHorizontalScrollBarPolicy(Qt.QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.dims_scroll.setVerticalScrollBarPolicy(Qt.QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.dims_scroll.setWidget(strip_wrap)
+        self._dims_height_override = None
+        self.dimension_strip.layoutChanged.connect(self._sync_dims_area_height)
+        self.layouts['dims'].addWidget(self.dims_scroll, 1)
         self.sync_dims_button = QtWidgets.QToolButton()
         self.sync_dims_button.setCheckable(True)
         set_button_icon(
@@ -533,6 +595,9 @@ class DisplayControlBuildMixin:
         self.display_toolbar = DisplayToolbar(self)
         self.display_toolbar.channelChanged.connect(self._on_channel_clicked)
         self.display_toolbar.scaleChanged.connect(self._on_scale_clicked)
+        self.display_toolbar.colormapChanged.connect(
+            lambda name: self._set_display_colormap(name, user_selected=True, request_render=True)
+        )
         self.display_toolbar.fitRequested.connect(lambda checked=False: self.fit_image_to_view(bool(checked)))
         self.display_toolbar.oneToOneRequested.connect(self.one_to_one_image)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
@@ -548,8 +613,11 @@ class DisplayControlBuildMixin:
                 win.view_state.channel.value,
                 win.view_state.scale.value,
                 "absolute" if win.widgets['buttons']['display']['window_absolute'].isChecked() else "relative",
+                getattr(win, "current_colormap", None),
             ),
-            apply=lambda value: self.display_toolbar.set_current(channel=value[0], scale=value[1], window_mode=value[2]),
+            apply=lambda value: self.display_toolbar.set_current(
+                channel=value[0], scale=value[1], window_mode=value[2], colormap=value[3]
+            ),
         )
         # Status readouts live in the toolbar's centered section; the array
         # info is secondary (muted, elides via Ignored policy, full text on
@@ -561,8 +629,54 @@ class DisplayControlBuildMixin:
         pixel_label.statusChanged.connect(lambda _text: self.display_toolbar.sync_center_separator())
         self.display_toolbar.sync_center_separator()
 
+    DIMS_ROW_PEEK = 12
+
+    def _dims_row_heights(self):
+        rows, row_height, vspacing = self.dimension_strip.row_metrics()
+
+        def height_for(visible_rows):
+            visible_rows = max(1, min(rows, visible_rows))
+            height = visible_rows * row_height + max(0, visible_rows - 1) * vspacing
+            if rows > visible_rows:
+                height += self.DIMS_ROW_PEEK
+            return height
+
+        return rows, height_for
+
+    def _sync_dims_area_height(self):
+        scroll = getattr(self, "dims_scroll", None)
+        if scroll is None:
+            return
+        rows, height_for = self._dims_row_heights()
+        full = height_for(rows)
+        minimum = height_for(1)
+        if self._dims_height_override is None:
+            target = height_for(min(2, rows))
+        else:
+            target = max(minimum, min(full, int(self._dims_height_override)))
+        scroll.setMinimumHeight(minimum)
+        scroll.setMaximumHeight(full)
+        scroll.setFixedHeight(target)
+
+    def _adjust_dims_area_height(self, delta):
+        rows, height_for = self._dims_row_heights()
+        current = self.dims_scroll.height()
+        self._dims_height_override = max(height_for(1), min(height_for(rows), current + int(delta)))
+        self._sync_dims_area_height()
+
+    def _reset_dims_area_height(self):
+        self._dims_height_override = None
+        self._sync_dims_area_height()
+
     def _compose_central_layout(self):
         self.layouts['botLeft'].addLayout(self.layouts['dims'])
+        handle = _DimsResizeHandle(
+            on_drag_delta=self._adjust_dims_area_height,
+            on_reset=self._reset_dims_area_height,
+        )
+        self.layouts['botLeft'].addWidget(handle)
+        self._dims_resize_handle = handle
+        self._sync_dims_area_height()
         
         
         # Create container widgets for proper alignment

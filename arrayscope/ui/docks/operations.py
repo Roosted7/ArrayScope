@@ -211,6 +211,9 @@ class OperationStackDock(StandardDockWidget):
             label, icon_name, proxy = entry
             action = more_menu.addAction(material_icon(icon_name), label)
             action.triggered.connect(lambda _checked=False, button=proxy: button.click())
+        recent_menu = more_menu.addMenu(material_icon("folder_open"), "Recent Recipes")
+        recent_menu.setToolTipsVisible(True)
+        recent_menu.aboutToShow.connect(lambda menu=recent_menu: self._populate_recent_recipes(menu))
         self.more_button.setMenu(more_menu)
 
         button_layout = QtWidgets.QHBoxLayout()
@@ -433,6 +436,16 @@ class OperationStackDock(StandardDockWidget):
         index = self.current_operation_index()
         has_selection = index is not None
         self.delete_button.setEnabled(has_selection)
+
+    def _populate_recent_recipes(self, menu):
+        window = self.parent()
+        populate = getattr(window, "populate_recent_recipes_menu", None)
+        if callable(populate):
+            populate(menu)
+        else:
+            menu.clear()
+            action = menu.addAction("No recent recipes")
+            action.setEnabled(False)
 
     def _operation_at(self, index):
         if self._steps and 0 <= index < len(self._steps):

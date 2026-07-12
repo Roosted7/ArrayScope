@@ -351,6 +351,8 @@ def _spin_stepper_stylesheet(tokens: ThemeTokens) -> str:
     if not paths:
         return ""
     return f"""
+/* Reserve room so text never runs under the styled stepper buttons. */
+QAbstractSpinBox {{ padding-right: 17px; }}
 QAbstractSpinBox::up-button {{
     subcontrol-origin: border;
     subcontrol-position: top right;
@@ -747,6 +749,21 @@ QFrame#EditBubble {{
     background: {t.surface};
     border: 1px solid {t.border_strong};
     border-radius: 6px;
+}}
+QFrame#FirstRunHints {{
+    background: {t.overlay_bg};
+    border: 1px solid {t.accent};
+    border-radius: 6px;
+}}
+QFrame#FirstRunHints QLabel {{
+    background: transparent;
+    border: none;
+    color: {t.overlay_text};
+    font-size: 9pt;
+}}
+QPushButton#FirstRunHintsDismiss {{
+    padding: 2px 10px;
+    font-size: 8.5pt;
 }}
 QFrame#EditBubble QLabel {{ font-size: 9pt; }}
 QFrame#RoiInfoDivider {{

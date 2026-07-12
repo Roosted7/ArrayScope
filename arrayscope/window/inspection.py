@@ -620,12 +620,12 @@ class InspectionWorkflowMixin:
         default_font = default_action.font()
         default_font.setBold(True)
         default_action.setFont(default_font)
-        default_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-with-overlays"))
+        default_action.triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-with-overlays"))
         without_action = save_menu.addAction(material_icon("crop"), "Viewport without overlays")
-        without_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-without-overlays"))
+        without_action.triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-without-overlays"))
         full_action = save_menu.addAction(material_icon("data_array"), "Full content")
-        full_action.triggered.connect(lambda _checked=False: self._save_viewport_stub("full-content"))
-        save_menu.menuAction().triggered.connect(lambda _checked=False: self._save_viewport_stub("viewport-with-overlays"))
+        full_action.triggered.connect(lambda _checked=False: self._save_viewport_image("full-content"))
+        save_menu.menuAction().triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-with-overlays"))
         menu.addSeparator()
         show_inspection = menu.addAction(material_icon("analytics"), "Show inspection dock")
         show_inspection.triggered.connect(self._show_inspection_dock)
@@ -634,18 +634,90 @@ class InspectionWorkflowMixin:
         clear_rois.triggered.connect(self._clear_rois)
         menu.exec(global_pos)
 
-    def _save_viewport_stub(self, flavor: str) -> None:
-        """Placeholder for viewport export (implementation to follow)."""
-        labels = {
-            "viewport-with-overlays": "viewport with overlays",
-            "viewport-without-overlays": "viewport without overlays",
-            "full-content": "full content",
-        }
-        show_status_message(
+    def _save_viewport_image(self, flavor: str) -> None:
+        """Export the current view as a PNG.
+
+        - viewport-with-overlays: what you see (ROIs, crosshair, chips).
+        - viewport-without-overlays: same crop, overlays hidden.
+        - full-content: the displayed image at native resolution with the
+          current LUT/levels applied.
+        """
+        from arrayscope.ui.file_dialogs import get_save_file_name
+
+        file_path, _ = get_save_file_name(
             self,
-            f"Save {labels.get(flavor, flavor)}: not implemented yet.",
-            timeout=3000,
+            "Save viewport image",
+            f"arrayscope-{flavor}.png",
+            "PNG image (*.png)",
         )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+        if flavor == "full-content":
+            image = self._full_content_qimage()
+            saved = image is not None and not image.isNull() and image.save(file_path, "PNG")
+        else:
+            pixmap = self._grab_viewport_pixmap(include_overlays=flavor == "viewport-with-overlays")
+            saved = pixmap is not None and not pixmap.isNull() and pixmap.save(file_path, "PNG")
+        if saved:
+            show_status_message(self, f"Saved {file_path}", timeout=3500)
+        else:
+            show_status_message(self, "Could not save viewport image.", timeout=3500)
+
+    def _grab_viewport_pixmap(self, *, include_overlays: bool):
+        view = getattr(self, "img_view", None)
+        if view is None:
+            return None
+        hidden = []
+        if not include_overlays:
+            candidates = [
+                getattr(view, "_hud_widget", None),
+                getattr(view, "_evaluation_overlay", None),
+                getattr(view, "_roi_info_panel", None),
+                getattr(view, "_profile_vline", None),
+                getattr(view, "_profile_hline", None),
+                getattr(view, "_profile_handle", None),
+            ]
+            for item, _selection in getattr(view, "_roi_items", {}).values():
+                candidates.append(item)
+            for candidate in candidates:
+                if candidate is not None and candidate.isVisible():
+                    candidate.setVisible(False)
+                    hidden.append(candidate)
+        try:
+            return view.graphicsView.grab()
+        finally:
+            for candidate in hidden:
+                candidate.setVisible(True)
+
+    def _full_content_qimage(self):
+        view = getattr(self, "img_view", None)
+        image_item = getattr(view, "imageItem", None)
+        if image_item is None:
+            return None
+        try:
+            image_item.render()
+            qimage = getattr(image_item, "qimage", None)
+            if qimage is not None:
+                return qimage.copy()
+        except Exception:
+            pass
+        # Fallback: render the presented array with the active LUT/levels
+        # (tiled presentations don't populate the base image item).
+        try:
+            import pyqtgraph as pg
+
+            data = getattr(view, "image", None)
+            if data is None:
+                return None
+            data = np.asarray(data)
+            lut = view.displayColorMapLookupTable() if data.ndim == 2 else None
+            levels = view.getLevels() if data.ndim == 2 else None
+            argb, alpha = pg.functions.makeARGB(data, lut=lut, levels=levels)
+            return pg.functions.makeQImage(argb, alpha, transpose=False).copy()
+        except Exception:
+            return None
 
     def _set_live_profile_from_context(self, enabled, image_point=None):
         self.widgets["buttons"]["display"]["live_profile"].setChecked(bool(enabled))

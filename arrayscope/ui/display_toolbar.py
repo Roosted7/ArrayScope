@@ -33,11 +33,54 @@ _WINDOW_ITEMS = (
     ("Relative", "relative", "%"),
     ("Absolute", "absolute", "#"),
 )
+# glyph=None: the item icon is a gradient preview of the colormap itself.
+_COLORMAP_ITEMS = (
+    ("Gray", "gray", None),
+    ("Viridis", "viridis", None),
+    ("Plasma", "plasma", None),
+    ("Inferno", "inferno", None),
+    ("Magma", "magma", None),
+    ("Cividis", "cividis", None),
+    ("Turbo", "turbo", None),
+    ("Warm", "d3-warm", None),
+    ("Cool", "d3-cool", None),
+    ("Phase", "PAL-relaxed", None),
+)
+
+_COLORMAP_ICON_CACHE: dict[str, object] = {}
+
+
+def _colormap_icon(name):
+    from pyqtgraph.Qt import QtGui
+
+    icon = _COLORMAP_ICON_CACHE.get(name)
+    if icon is not None:
+        return icon
+    icon = QtGui.QIcon()
+    try:
+        from arrayscope.display.colormaps import named_colormap
+
+        lut = named_colormap(name).getLookupTable(0.0, 1.0, 32, alpha=False)
+        pixmap = QtGui.QPixmap(len(lut), 12)
+        painter = QtGui.QPainter(pixmap)
+        for index, rgb in enumerate(lut):
+            painter.fillRect(index, 0, 1, 12, QtGui.QColor(int(rgb[0]), int(rgb[1]), int(rgb[2])))
+        painter.end()
+        icon = QtGui.QIcon(pixmap.scaled(32, 12))
+    except Exception:
+        pass
+    _COLORMAP_ICON_CACHE[name] = icon
+    return icon
+
+
+def _item_icon(value, glyph):
+    return glyph_icon(glyph) if glyph else _colormap_icon(value)
 
 
 class DisplayToolbar(QtWidgets.QToolBar):
     channelChanged = Qt.QtCore.Signal(str)
     scaleChanged = Qt.QtCore.Signal(str)
+    colormapChanged = Qt.QtCore.Signal(str)
     fitRequested = Qt.QtCore.Signal(bool)
     oneToOneRequested = Qt.QtCore.Signal()
     windowModeChanged = Qt.QtCore.Signal(str)
@@ -67,6 +110,12 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.scale_combo = self._add_group("Scale", "linear_scale", _SCALE_ITEMS)
         self.scale_combo.currentIndexChanged.connect(
             lambda _i: self.scaleChanged.emit(self.scale_combo.currentData())
+        )
+
+        self.addSeparator()
+        self.colormap_combo = self._add_group("Color", "palette", _COLORMAP_ITEMS)
+        self.colormap_combo.currentIndexChanged.connect(
+            lambda _i: self.colormapChanged.emit(self.colormap_combo.currentData())
         )
 
         self.addSeparator()
@@ -156,8 +205,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
         combo = QtWidgets.QComboBox()
         combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
         combo.setToolTip(label_text)
-        for text, value, glyph in items:
-            combo.addItem(glyph_icon(glyph), text, value)
+        for item in items:
+            text, value, glyph = item
+            combo.addItem(_item_icon(value, glyph), text, value)
             combo.setItemData(combo.count() - 1, text, QtCore.Qt.ItemDataRole.ToolTipRole)
         self.addWidget(combo)
         self._combo_items.append((combo, tuple(items)))
@@ -211,9 +261,10 @@ class DisplayToolbar(QtWidgets.QToolBar):
         """Re-tint label pixmaps and combo item icons for the active palette."""
         for icon_label, name in self._group_icon_labels:
             icon_label.setPixmap(material_icon(name).pixmap(14, 14))
+        _COLORMAP_ICON_CACHE.clear()
         for combo, items in self._combo_items:
-            for index, (_text, _value, glyph) in enumerate(items):
-                combo.setItemIcon(index, glyph_icon(glyph))
+            for index, (_text, value, glyph) in enumerate(items):
+                combo.setItemIcon(index, _item_icon(value, glyph))
 
     # ------------------------------------------------------------------
     # State API (unchanged)
@@ -239,11 +290,12 @@ class DisplayToolbar(QtWidgets.QToolBar):
             return
         self.channelChanged.emit(self.channel_combo.currentData())
 
-    def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None):
+    def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None, colormap=None):
         for combo, value in (
             (self.channel_combo, channel),
             (self.scale_combo, scale),
             (self.window_combo, window_mode),
+            (self.colormap_combo, colormap),
         ):
             if value is None:
                 continue

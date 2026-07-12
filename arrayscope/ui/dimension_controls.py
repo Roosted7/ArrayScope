@@ -424,10 +424,18 @@ class DimensionControlMixin:
                 self.step_active_slice(-1 if key == Qt.QtCore.Qt.Key.Key_BracketLeft else 1)
                 event.accept()
                 return
+            if key in (Qt.QtCore.Qt.Key.Key_PageUp, Qt.QtCore.Qt.Key.Key_PageDown):
+                self.step_active_slice(1 if key == Qt.QtCore.Qt.Key.Key_PageUp else -1)
+                event.accept()
+                return
 
         if modifiers == Qt.QtCore.Qt.KeyboardModifier.ShiftModifier:
             if key in (Qt.QtCore.Qt.Key.Key_BracketLeft, Qt.QtCore.Qt.Key.Key_BracketRight):
                 self.step_active_slice(-10 if key == Qt.QtCore.Qt.Key.Key_BracketLeft else 10)
+                event.accept()
+                return
+            if key in (Qt.QtCore.Qt.Key.Key_PageUp, Qt.QtCore.Qt.Key.Key_PageDown):
+                self.step_active_slice(10 if key == Qt.QtCore.Qt.Key.Key_PageUp else -10)
                 event.accept()
                 return
         
@@ -443,7 +451,9 @@ class DimensionControlMixin:
         super().keyPressEvent(event)
 
     def step_active_slice(self, delta):
-        axis = getattr(self, "_active_slice_axis", None)
+        axis = getattr(self, "_focused_dimension_axis", None)
+        if axis is None or axis >= self.data.ndim or axis in self.view_state.display_axes() or self.data.shape[axis] == 1:
+            axis = getattr(self, "_active_slice_axis", None)
         if axis is None or axis in self.view_state.display_axes() or self.data.shape[axis] == 1:
             for candidate in self.view_state.non_display_axes():
                 if self.data.shape[candidate] > 1:

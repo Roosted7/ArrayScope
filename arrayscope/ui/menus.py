@@ -65,6 +65,10 @@ class WindowMenuMixin:
         export_derived_action.triggered.connect(self.export_derived_array)
         for action in (save_recipe_action, load_recipe_action, save_view_action, load_view_action, export_derived_action):
             file_menu.addAction(action)
+        recent_menu = QtWidgets.QMenu("Recent Recipes", self)
+        recent_menu.setToolTipsVisible(True)
+        file_menu.addMenu(recent_menu)
+        recent_menu.aboutToShow.connect(lambda menu=recent_menu: self.populate_recent_recipes_menu(menu))
 
         view_menu = self.menuBar().addMenu("View")
         operation_action = self.layout_manager.make_managed_dock_action(

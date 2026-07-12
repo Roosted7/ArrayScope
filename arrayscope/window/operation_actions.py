@@ -368,6 +368,19 @@ class OperationActionsMixin:
         self._set_document(self.operation_coordinator.document)
         self.render(reason="operation-clear", force_autolevel=True)
 
+    RECENT_RECIPES_KEY = "recent_recipes"
+    RECENT_RECIPES_LIMIT = 5
+
+    def recent_recipe_paths(self):
+        value = self._settings.value(self.RECENT_RECIPES_KEY)
+        if isinstance(value, str):
+            value = [value]
+        return [str(path) for path in (value or []) if str(path)]
+
+    def _remember_recent_recipe(self, file_path):
+        paths = [str(file_path)] + [p for p in self.recent_recipe_paths() if p != str(file_path)]
+        self._settings.setValue(self.RECENT_RECIPES_KEY, paths[: self.RECENT_RECIPES_LIMIT])
+
     def save_operation_recipe(self):
         file_path, _ = get_save_file_name(
             self,
@@ -383,6 +396,8 @@ class OperationActionsMixin:
             save_recipe(file_path, self.document.steps)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Save Error", f"Failed to save recipe:\n{e}")
+            return
+        self._remember_recent_recipe(file_path)
 
     def load_operation_recipe(self):
         file_path, _ = get_open_file_name(
@@ -393,6 +408,9 @@ class OperationActionsMixin:
         )
         if not file_path:
             return
+        self.load_operation_recipe_from_path(file_path)
+
+    def load_operation_recipe_from_path(self, file_path):
         try:
             steps = load_recipe_steps(file_path, self.base_data.shape)
             self.operation_coordinator.load_steps(steps)
@@ -404,7 +422,23 @@ class OperationActionsMixin:
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
             return
+        self._remember_recent_recipe(file_path)
         self.render(reason="recipe-load", force_autolevel=True)
+
+    def populate_recent_recipes_menu(self, menu):
+        """Fill `menu` with the most recently saved/loaded recipes."""
+        import os
+
+        menu.clear()
+        paths = self.recent_recipe_paths()
+        if not paths:
+            action = menu.addAction("No recent recipes")
+            action.setEnabled(False)
+            return
+        for path in paths:
+            action = menu.addAction(os.path.basename(path))
+            action.setToolTip(path)
+            action.triggered.connect(lambda _checked=False, path=path: self.load_operation_recipe_from_path(path))
 
     def materialize_current_array(self):
         if not self._confirm_expensive_full_array("Materialize", self.data.shape, self.data.dtype):
