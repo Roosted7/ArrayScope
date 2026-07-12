@@ -2,7 +2,7 @@
 
 Pre-redesign, "what quality should this tile get next" was answered in at
 least four places: `render.lod.plan_materialization` (desired LOD),
-the preview/floor methods on `FrameRenderMixin` (Plans 04/05), ingest
+the preview/floor methods on `FrameControllerMixin` (Plans 04/05), ingest
 reduction admission, and native-only policy checks. They cooperated through
 shared mutable session state and could disagree — the source of the
 stall/loop defect class documented in ADR 0051.
@@ -58,13 +58,16 @@ class TileLodState:
 
     ``resident_levels`` are backend-acknowledged levels (lifecycle claims),
     ``presented_level`` is the currently presented level (None = placeholder
-    still visible), ``floor_available`` means a retained floor payload can be
-    committed without new evaluation.
+    still visible), ``ready_level`` is lifecycle-owned materialized payload
+    awaiting backend acknowledgement, and ``floor_available`` means a retained
+    floor payload can be committed without new evaluation.
     """
 
     tile_number: int
     resident_levels: tuple[int, ...] = ()
     presented_level: int | None = None
+    ready_level: int | None = None
+    ready_quality: str = ""
     floor_available: bool = False
     presented_quality: str = "exact"
     current_presentation_quality: str = "exact"
@@ -129,6 +132,8 @@ class LodLadder:
         presented = state.presented_level
         presented_preview = str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
         resident = frozenset(int(level) for level in state.resident_levels)
+        ready = None if state.ready_level is None else int(state.ready_level)
+        ready_preview = str(state.ready_quality or "") in {"preview", "fallback"}
 
         def finest_available() -> float:
             """Finest (lowest) level that exists or is already planned.
@@ -142,6 +147,8 @@ class LodLadder:
             candidates = [float(level) for level in resident]
             if presented is not None:
                 candidates.append(float(presented))
+            if ready is not None:
+                candidates.append(float(ready))
             candidates.extend(float(step.level) for step in steps)
             return min(candidates) if candidates else float("inf")
 
@@ -157,7 +164,7 @@ class LodLadder:
         )
 
         # 1) FLOOR — only while the tile has nothing committable at all.
-        if presented is None and not resident and cheap_pre_native:
+        if presented is None and ready is None and not resident and cheap_pre_native:
             floor_level = max(policy.floor_level, desired)
             steps.append(
                 RungStep(
@@ -198,10 +205,12 @@ class LodLadder:
         # command to replace already-presented finer data. Demotion belongs to
         # memory/eviction policy; the ladder must keep camera-only zooms from
         # churning materialization and presentation.
-        preview_satisfies_display_demand = bool(
-            presented_preview and desired > 0 and presented == desired
+        ready_satisfies_display_demand = bool(
+            ready is not None
+            and not ready_preview
+            and ready == desired
         )
-        desired_resident = preview_satisfies_display_demand or (
+        desired_resident = ready_satisfies_display_demand or (
             desired in resident and not presented_preview
         ) or (presented == desired and not presented_preview)
         if presented is not None and int(presented) <= desired and not presented_preview:
@@ -258,7 +267,8 @@ class LodLadder:
     # ------------------------------------------------------------- helpers
 
     def _native_only_plan(self, state: TileLodState) -> tuple[RungStep, ...]:
-        if state.presented_level == 0 or 0 in set(state.resident_levels):
+        ready_native = state.ready_level == 0 and str(state.ready_quality or "") not in {"preview", "fallback"}
+        if state.presented_level == 0 or 0 in set(state.resident_levels) or ready_native:
             return ()
         return (
             RungStep(

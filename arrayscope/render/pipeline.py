@@ -1,4 +1,4 @@
-"""MontagePipeline: ladder plans → kernel tasks → commit batches.
+"""FramePipeline: ladder plans → kernel tasks → commit batches.
 
 One modular chunk per stage, one owner per piece of state:
 
@@ -21,10 +21,11 @@ acknowledgement.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from arrayscope.kernel import Kernel, Supersession, TaskSpec
+from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, PipelineCounters, RenderIntent
 
@@ -101,12 +102,13 @@ class _RungKey:
 
     semantic_key: object
     tile_number: int
+    source_id: object
     rung: int
     level: int
 
 
-class MontagePipeline:
-    """Schedules montage quality progression on the kernel.
+class FramePipeline:
+    """Schedules quality progression for regions of any image frame.
 
     Supersession contract (the part that kept breaking pre-redesign, now in
     exactly one place):
@@ -120,7 +122,8 @@ class MontagePipeline:
       rung work at all; levels/LUT ride commit metadata).
     """
 
-    SCOPE = "montage"
+    SCOPE = "frame"
+    ADMISSION_CHUNK = 24
 
     def __init__(
         self,
@@ -137,6 +140,10 @@ class MontagePipeline:
         self._commit_max_items = max(1, int(commit_max_items))
         self._current_intent: RenderIntent | None = None
         self._ready_upserts: list = []
+        self._pending_admissions: deque[tuple[RenderIntent, RungStep]] = deque()
+        self._admission_generation = 0
+        self._admission_continuation_armed = False
+        self._admission_continuation_sequence = 0
 
     # ----------------------------------------------------------- lifecycle
 
@@ -150,6 +157,10 @@ class MontagePipeline:
 
         previous = self._current_intent
         self._current_intent = intent
+        self._admission_generation += 1
+        admission_generation = int(self._admission_generation)
+        self._admission_continuation_armed = False
+        self._pending_admissions.clear()
         self.counters.intents += 1
         if previous is not None and previous.semantic_key != intent.semantic_key:
             # Semantic change: everything under the old target is stale.
@@ -161,6 +172,20 @@ class MontagePipeline:
 
         states = self.effects.tile_states(intent, demand, scope)
         steps = self.ladder.plan(states, demand)
+        self.last_plan_states = tuple(
+            (
+                int(state.tile_number),
+                tuple(int(level) for level in state.resident_levels),
+                state.presented_level,
+                state.ready_level,
+                bool(state.allow_preview),
+            )
+            for state in states
+        )
+        self.last_plan_steps = tuple(
+            (int(step.tile_number), int(step.rung), int(step.level))
+            for step in steps
+        )
         self.counters.ladder_plans += 1
         submitted = 0
         first_pixel_tiles = {
@@ -173,13 +198,17 @@ class MontagePipeline:
             for state in states
             if str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
         }
+        must_supersede_deferred = bool(
+            previous is not None and previous.semantic_key == intent.semantic_key
+        )
         # Cross-rung/cross-tile ordering comes from priorities plus this
         # submission order (the kernel heap is FIFO within equal priority).
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
             if self._defer_quality_behind_first_pixel(step, first_pixel_tiles):
-                self._supersede_deferred_step(intent, step)
+                if must_supersede_deferred:
+                    self._supersede_deferred_step(intent, step)
                 self.counters.first_pixel_quality_deferred += 1
                 continue
             if (
@@ -188,12 +217,17 @@ class MontagePipeline:
             ):
                 self.counters.interactive_native_deferred += 1
                 continue
-            if self._submit_step(intent, step, step_key=self._rung_key(intent, step)):
-                submitted += 1
+            self._pending_admissions.append((intent, step))
+        submitted += self._drain_pending_admissions(admission_generation)
+        if self._pending_admissions:
+            self._arm_admission_continuation(admission_generation)
         self._flush_ready()
         return submitted
 
     def close(self) -> None:
+        self._admission_generation += 1
+        self._pending_admissions.clear()
+        self._admission_continuation_armed = False
         if self._current_intent is not None:
             self.kernel.clear_scope(self._scope(self._current_intent.semantic_key))
 
@@ -206,6 +240,7 @@ class MontagePipeline:
         return _RungKey(
             semantic_key=intent.semantic_key,
             tile_number=int(step.tile_number),
+            source_id=intent.source_id_for_tile(int(step.tile_number)),
             rung=int(step.rung),
             level=int(step.level),
         )
@@ -276,7 +311,7 @@ class MontagePipeline:
             # results may still land in caches when superseded.
             supersession=Supersession(
                 family=("rung", intent.semantic_key, step.tile_number, int(step.rung)),
-                value=(int(step.level),),
+                value=(intent.source_id_for_tile(int(step.tile_number)), int(step.level)),
             ),
             reusable=True,
             pass_token=True,
@@ -295,19 +330,88 @@ class MontagePipeline:
         self.effects.rung_dropped(intent, step)
         return False
 
+    def _drain_pending_admissions(self, generation: int) -> int:
+        """Submit one bounded chunk of already-planned visible rung work."""
+
+        if int(generation) != int(self._admission_generation):
+            return 0
+        submitted = 0
+        inspected = 0
+        while self._pending_admissions and inspected < int(self.ADMISSION_CHUNK):
+            queued_intent, step = self._pending_admissions.popleft()
+            inspected += 1
+            current = self._current_intent
+            if current is None or queued_intent is not current:
+                continue
+            if self._submit_step(queued_intent, step, step_key=self._rung_key(queued_intent, step)):
+                submitted += 1
+        return submitted
+
+    def _arm_admission_continuation(self, generation: int) -> None:
+        if int(generation) != int(self._admission_generation) or not self._pending_admissions:
+            return
+        if self._admission_continuation_armed:
+            return
+        intent = self._current_intent
+        if intent is None:
+            return
+        self._admission_continuation_armed = True
+        self._admission_continuation_sequence += 1
+        sequence = int(self._admission_continuation_sequence)
+
+        def done(_value=None, generation=generation):
+            if int(generation) != int(self._admission_generation):
+                return
+            self._admission_continuation_armed = False
+            self._drain_pending_admissions(generation)
+            if self._pending_admissions:
+                self._arm_admission_continuation(generation)
+
+        def stale(generation=generation):
+            if int(generation) == int(self._admission_generation):
+                self._admission_continuation_armed = False
+
+        def failed(exc, generation=generation):
+            if int(generation) == int(self._admission_generation):
+                self._admission_continuation_armed = False
+            raise exc
+
+        handle = self.kernel.submit(
+            TaskSpec(
+                key=("frame-admission", id(self), generation, sequence),
+                fn=lambda: True,
+                lane=Lane.VISIBLE_PLANNING,
+                priority=Priority.VISIBLE_IMAGE,
+                scope=self._scope(intent.semantic_key),
+                supersession=Supersession(("frame-admission", id(self)), generation),
+                reusable=False,
+                pass_token=False,
+            ),
+            on_done=done,
+            on_stale=stale,
+            on_error=failed,
+        )
+        if handle is None:
+            self._admission_continuation_armed = False
+
     def _supersede_deferred_step(self, intent: RenderIntent, step: RungStep) -> None:
         """Invalidate older work for a rung we intentionally delay."""
 
         self.kernel.supersede(
             ("rung", intent.semantic_key, step.tile_number, int(step.rung)),
-            ("deferred", int(step.level), int(self.counters.intents)),
+            (
+                "deferred",
+                intent.source_id_for_tile(int(step.tile_number)),
+                int(step.level),
+                int(self.counters.intents),
+            ),
         )
 
     # Handlers run on the GUI thread (kernel bridge drain).
 
     def _on_rung_done(self, intent: RenderIntent, step: RungStep, payload) -> None:
         current = self._current_intent
-        if current is None or intent.semantic_key != current.semantic_key:
+        if not self._intent_step_matches_current(intent, step, current):
             self.effects.rung_dropped(intent, step)
             return
         if payload is None:
@@ -321,6 +425,14 @@ class MontagePipeline:
         # rung must never commit. It still owns lifecycle claims from
         # prepare_rung(), so release those with the preparing intent.
         self.effects.rung_dropped(intent, step)
+
+    @staticmethod
+    def _intent_step_matches_current(intent: RenderIntent, step: RungStep, current) -> bool:
+        if current is None or intent.semantic_key != current.semantic_key:
+            return False
+        previous_source = intent.source_id_for_tile(int(step.tile_number))
+        current_source = current.source_id_for_tile(int(step.tile_number))
+        return previous_source == current_source
 
     def _on_rung_stale(self, intent: RenderIntent, step: RungStep) -> None:
         self.effects.rung_dropped(intent, step)
@@ -344,7 +456,7 @@ class MontagePipeline:
         queued, self._ready_upserts = self._ready_upserts, []
         batch_items = []
         for queued_intent, step, payload in queued:
-            if queued_intent.semantic_key == intent.semantic_key:
+            if self._intent_step_matches_current(queued_intent, step, intent):
                 batch_items.append((step, payload))
             else:
                 self.effects.rung_dropped(queued_intent, step)
@@ -360,4 +472,4 @@ class MontagePipeline:
         self.effects.apply_commit(batch)
 
 
-__all__ = ["MontagePipeline", "PipelineEffects"]
+__all__ = ["FramePipeline", "PipelineEffects"]

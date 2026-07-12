@@ -1,6 +1,6 @@
 """Qt-free montage evaluation effects for the modular render pipeline.
 
-R2 moves worker-side tile evaluation out of ``window.frame_renderer`` so the
+R2 moves worker-side tile evaluation out of the window frame controller so the
 pipeline can submit kernel tasks without reaching back into the GUI
 orchestrator.  These functions deliberately return the same payload shapes as
 the legacy methods while keeping all Qt/backend work out of the module.
@@ -19,6 +19,7 @@ from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.montage_levels import (
     provisional_tile_level_stats,
     sample_tile_level_stats,
+    tile_level_stats_with_quality,
 )
 from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.shader_mapping import (
@@ -454,15 +455,19 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
     ranked: list[tuple[tuple, TileLodState]] = []
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
     visible_numbers = set(getattr(session, "visible_tile_numbers", ()) or ())
+    skipped_numbers = set(getattr(session, "skipped_tiles", ()) or ())
+    active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
+    backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
+    presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
     focus = _viewport_focus(getattr(session, "view_range", None))
     preview_cache = getattr(session, "pyramid_cache", None)
     for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
             continue
-        if tile_number in set(getattr(session, "skipped_tiles", ()) or ()):
+        if tile_number in skipped_numbers:
             continue
-        if tile_number in set(getattr(session, "active_tile_requests", ()) or ()):
+        if tile_number in active_request_numbers:
             continue
         record = session.lifecycle.peek(tile_number)
         resident_levels = set(
@@ -475,13 +480,37 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         payload = payloads.get(tile_number)
         payload_current = False
         if payload is not None and int(getattr(payload, "source_index", -1)) == int(tile.source_index):
-            backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
             if backend_identities:
                 payload_current = backend_identities.get(tile_number) == getattr(payload, "source_id", None)
             else:
-                payload_current = tile_number in set(getattr(session.lifecycle, "presented_tiles", ()) or ())
+                payload_current = tile_number in presented_numbers
         if not payload_current:
             payload = None
+        ready_ref = None if record is None else (record.target_payload or record.fallback_payload)
+        ready_level = None if ready_ref is None else int(getattr(ready_ref, "lod_level", 0) or 0)
+        ready_quality = "" if ready_ref is None else str(getattr(ready_ref, "quality", "") or "")
+        committable_exact_payload = bool(
+            payload is not None
+            and str(getattr(payload, "quality", "exact") or "exact") != "preview"
+        )
+        committable_exact_ready = bool(
+            ready_ref is not None
+            and str(getattr(ready_ref, "quality", "") or "") != "preview"
+        )
+        if (
+            not committable_exact_payload
+            and not committable_exact_ready
+            and getattr(session, "rendered_tiles", None) is not None
+            and tile_number not in session.rendered_tiles
+        ):
+            # Lifecycle residency is physical pyramid evidence, not by itself
+            # a committable payload. After an index scroll a cold edge can own
+            # a resident reduced level while having neither a native RenderedTile
+            # nor a presentable wrapper. Letting that level satisfy the ladder
+            # produces zero steps and strands either an atomic CPU successor
+            # or a shader frame at fallback quality forever. A preview wrapper
+            # does not make a physically resident target rung committable.
+            resident_levels.clear()
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
         presented_quality = "exact" if payload is None else str(getattr(payload, "quality", "exact") or "exact")
@@ -501,6 +530,8 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
                     tile_number=tile_number,
                     resident_levels=tuple(sorted(resident_levels)),
                     presented_level=presented_level,
+                    ready_level=ready_level,
+                    ready_quality=ready_quality,
                     presented_quality=presented_quality,
                     current_presentation_quality=presented_quality,
                     allow_preview=allow_preview,
@@ -965,8 +996,20 @@ def reduced_preview_view_state(view_state, shape, *, factor_xy: tuple[int, int],
 
 
 def attach_montage_tile_level_stats(display_image, tile, *, refined: bool = False):
-    if getattr(display_image, "level_stats", None) is not None:
-        return display_image
+    existing = getattr(display_image, "level_stats", None)
+    if existing is not None:
+        # A normal single-image evaluation labels its local evidence source
+        # as zero. Once that value becomes a montage tile, the plan's source
+        # index is authoritative; carrying the local label made one source
+        # appear repeatedly sampled while another could never complete.
+        return replace(
+            display_image,
+            level_stats=tile_level_stats_with_quality(
+                existing,
+                getattr(existing, "evidence_quality", 0),
+                source_index=int(tile.source_index),
+            ),
+        )
     level_data = getattr(display_image, "level_data", None)
     if level_data is not None:
         stats = (

@@ -8,13 +8,13 @@ from arrayscope.display.lod import LodInfo
 from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
-from arrayscope.window.montage_session import MontageRenderSession
+from arrayscope.window.frame_session import FrameSession
 
 
 def _session():
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4)
-    return MontageRenderSession(
+    return FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -40,6 +40,11 @@ def _session():
 
 
 def _present_exact_tiles(session, *tile_numbers):
+    # Tests that mutate ``visible_tiles`` directly must publish the new
+    # lifecycle targets just as the production viewport retarget does. A
+    # presented payload without an active semantic target is intentionally
+    # not sufficient evidence for visible completion.
+    session.sync_lifecycle_scope()
     payloads = dict(getattr(session.tile_presentation_state, "payloads", {}) or {})
     for tile_number in tile_numbers:
         index = int(tile_number)
@@ -55,9 +60,8 @@ def _present_exact_tiles(session, *tile_numbers):
         session.display_tile_payloads[index] = payload
         session.record_tile_payload(payload)
         payloads[index] = payload
-        session.tile_ledger.commit_emitted({index: payload})
-        session.tile_ledger.backend_ack({index: payload})
-        session.lifecycle.backend_presented_snapshot({index: payload.source_id})
+        session.lifecycle.commit_emitted({index: payload})
+        session.lifecycle.backend_ack({index: payload})
         session.lifecycle.acknowledge_presented(index, payload.source_id, payload.quality, 0)
     session.tile_presentation_state = TilePresentationState(payloads)
     session.lifecycle.presentation_confirmed(tile_numbers)
@@ -124,7 +128,7 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
 
 
 def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_backlog():
-    from arrayscope.window.montage_runtime import _stall_tile_probe_row_actionable
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
 
     session = _session()
     image = np.ones((2, 2), dtype=np.float32)
@@ -156,7 +160,7 @@ def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_back
 
 
 def test_stall_probe_row_keeps_stale_presented_identity_actionable():
-    from arrayscope.window.montage_runtime import _stall_tile_probe_row_actionable
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
 
     session = _session()
     image = np.ones((2, 2), dtype=np.float32)
@@ -197,8 +201,8 @@ def test_stale_committed_state_payload_is_not_complete_after_retarget():
     session.tile_presentation_state = TilePresentationState({0: old_payload}, revision=1)
     session.display_tile_payloads[0] = old_payload
     session.record_tile_payload(old_payload)
-    session.tile_ledger.commit_emitted({0: old_payload})
-    session.tile_ledger.backend_ack({0: old_payload})
+    session.lifecycle.commit_emitted({0: old_payload})
+    session.lifecycle.backend_ack({0: old_payload})
     session.lifecycle.backend_presented_snapshot({0: old_payload.source_id})
     session.lifecycle.acknowledge_presented(0, old_payload.source_id, old_payload.quality, 0)
     session.lifecycle.presentation_confirmed((0,))
@@ -579,7 +583,7 @@ def test_montage_render_session_delta_carries_near_sources_without_payloads():
 def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
     state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -630,7 +634,7 @@ def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
 def _zoomed_out_session(*, dtype=np.float32, rgb=False):
     state = ViewState.from_shape((8, 8, 1)).with_montage_axis(2, indices=(0,), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(8, 8), columns=1)
-    return MontageRenderSession(
+    return FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -812,7 +816,7 @@ def test_shader_mapping_change_reuses_texture_content_identity():
 def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8)
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -859,7 +863,7 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
 def test_retarget_viewport_range_change_with_same_tiles_is_camera_only():
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8)
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -992,7 +996,7 @@ def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
     state = ViewState.from_shape((2, 2, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     first_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=2)
     second_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3)
-    session = MontageRenderSession(
+    session = FrameSession(
         session_id=1,
         key="key",
         render_generation=1,
@@ -1157,7 +1161,7 @@ def test_montage_render_session_reuses_tile_state_tuple_until_revision_changes()
 
 
 def test_montage_overlay_refresh_caches_empty_and_repeated_state():
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     class ImageView:
         def __init__(self):
@@ -1173,11 +1177,11 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
 
     session = _session()
     image_view = ImageView()
-    owner = SimpleNamespace(img_view=image_view, _montage_session=session)
+    owner = SimpleNamespace(img_view=image_view, _frame_session=session)
     owner.win = owner
     rect = (0, 0, 20, 20)
 
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameControllerMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
@@ -1186,7 +1190,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 0
 
     session.mark_skipped(session.plan.tiles[1])
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameControllerMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
@@ -1195,7 +1199,7 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
     assert len(image_view.overlays) == 1
 
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameControllerMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
@@ -1204,9 +1208,8 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
 
 
-def test_montage_loading_overlay_refresh_has_own_cadence(monkeypatch):
-    import arrayscope.window.frame_renderer as frame_renderer
-    from arrayscope.window.frame_renderer import FrameRenderMixin
+def test_montage_loading_state_does_not_create_per_tile_scene_overlays():
+    from arrayscope.window.frame_controller import FrameControllerMixin
 
     class ImageView:
         def __init__(self):
@@ -1220,44 +1223,30 @@ def test_montage_loading_overlay_refresh_has_own_cadence(monkeypatch):
         def montageTileOverlayCount(self):
             return len(self.overlays)
 
-    now = [10.0]
-    from arrayscope.window import montage_runtime
-
-    monkeypatch.setattr(montage_runtime, "monotonic", lambda: now[0])
     session = _session()
     session.show_loading_overlays = True
     session.mark_loading(session.plan.tiles[0])
     image_view = ImageView()
-    owner = SimpleNamespace(img_view=image_view, _montage_session=session)
+    owner = SimpleNamespace(img_view=image_view, _frame_session=session)
     owner.win = owner
     rect = (0, 0, 20, 20)
 
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameControllerMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
         rect,
     )
-    assert image_view.calls == 1
+    assert image_view.calls == 0
 
     session.mark_loading(session.plan.tiles[1])
-    now[0] += 0.01
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
+    FrameControllerMixin._update_montage_tile_overlays_for_plan(
         owner,
         session.plan,
         session.ensure_tile_states(),
         rect,
     )
-    assert image_view.calls == 1
-
-    now[0] += 0.2
-    FrameRenderMixin._update_montage_tile_overlays_for_plan(
-        owner,
-        session.plan,
-        session.ensure_tile_states(),
-        rect,
-    )
-    assert image_view.calls == 2
+    assert image_view.calls == 0
 
 
 def test_level_presentation_finish_reuses_settled_generation():
@@ -1545,7 +1534,7 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
         image.shape,
         image.nbytes,
     )
-    shifted = MontageRenderSession(
+    shifted = FrameSession(
         session_id=2,
         key="key",
         render_generation=1,
@@ -1599,7 +1588,7 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
     shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
-    shifted = MontageRenderSession(
+    shifted = FrameSession(
         session_id=2,
         key="key",
         render_generation=1,
@@ -1658,7 +1647,7 @@ def test_seeded_payloads_only_confirm_when_backend_identity_matches():
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
     shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
-    shifted = MontageRenderSession(
+    shifted = FrameSession(
         session_id=2,
         key="key",
         render_generation=1,
@@ -1725,7 +1714,7 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
 
     shifted_state = ViewState.from_shape((2, 2, 7)).with_montage_axis(2, indices=(3, 4, 5, 6), text="3:7")
     shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4)
-    shifted = MontageRenderSession(
+    shifted = FrameSession(
         session_id=2,
         key="key",
         render_generation=1,
@@ -1778,7 +1767,7 @@ def _session_with_pending_tiles():
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
     plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4)
-    return MontageRenderSession(
+    return FrameSession(
         session_id=1,
         key="key",
         render_generation=1,

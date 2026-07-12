@@ -14,7 +14,7 @@ from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.operations.stage_fanin import StageFanInState
-from arrayscope.presentation import ClaimOwner, TileLifecycle
+from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
 from arrayscope.render.stages import LodAdmissionScope
 
@@ -110,6 +110,7 @@ def test_evaluate_target_tile_level_zero_returns_native_tile_payload():
     assert result.compute_path == "direct"
     assert result.slab_shape == (4, 6)
     assert result.value.level_stats is not None
+    assert result.value.level_stats.source_index == tile.source_index
 
 
 def test_evaluate_target_tile_level_zero_uses_cached_stage_without_waiting_binding(monkeypatch):
@@ -410,6 +411,7 @@ def test_tile_lod_states_reads_lifecycle_and_presented_payload_level():
     session.lifecycle.level_resident(0, level_key)
     session.lifecycle.level_claimed(0, stale_level_key, ClaimOwner.PREVIEW)
     session.lifecycle.level_resident(0, stale_level_key)
+    session.rendered_tiles[0] = object()
     session.lifecycle.presentation_confirmed((1,))
     session.tile_presentation_state = SimpleNamespace(
         payloads={
@@ -462,6 +464,39 @@ def test_tile_lod_states_ignores_stale_presented_payload_after_slot_retarget():
     assert states[0].resident_levels == ()
 
 
+def test_tile_lod_states_does_not_treat_resident_level_as_committable_behind_preview():
+    session = _session()
+    tile = session.plan.tiles[0]
+    semantic_source = session.tile_semantic_source_id(tile.source_index)
+    level_key = PyramidLevelKey(
+        source_id=semantic_source,
+        tile_id=int(tile.source_index),
+        component="scalar",
+        level_xy=(5, 5),
+    )
+    session.lifecycle.level_claimed(0, level_key, ClaimOwner.PREVIEW)
+    session.lifecycle.level_resident(0, level_key)
+    preview = DisplayTilePayload(
+        0,
+        int(tile.source_index),
+        np.ones((2, 3), dtype=np.float32),
+        None,
+        (semantic_source, "preview"),
+        lod=LodInfo(1, 2, (4, 6), (2, 3)),
+        quality="preview",
+    )
+    session.lifecycle.fallback_ready(0, preview)
+    session.lifecycle.presentation_confirmed((0,))
+    session.lifecycle.backend_presented_snapshot({0: preview.source_id})
+    session.tile_presentation_state = SimpleNamespace(payloads={0: preview})
+
+    state = effects.tile_lod_states(session, _demand(5), tile_numbers=(0,))[0]
+
+    assert state.presented_quality == "preview"
+    assert state.resident_levels == ()
+    assert state.target_quality_available is False
+
+
 def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
     session = _session()
     demand = _demand(1)
@@ -511,7 +546,7 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
 
 
 def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
-    from arrayscope.window.montage_commit import MontagePipelineEffects
+    from arrayscope.window.frame_effects import FramePipelineEffects
 
     session = _session()
     level_key = PyramidLevelKey(
@@ -522,7 +557,8 @@ def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
     )
     session.lifecycle.level_claimed(0, level_key, ClaimOwner.EVALUATION)
     session.lifecycle.level_resident(0, level_key)
-    bridge = MontagePipelineEffects(SimpleNamespace(win=SimpleNamespace()), session)
+    session.rendered_tiles[0] = object()
+    bridge = FramePipelineEffects(SimpleNamespace(win=SimpleNamespace()), session)
 
     states = bridge.tile_states(
         None,
@@ -532,3 +568,70 @@ def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
 
     by_tile = {state.tile_number: state for state in states}
     assert by_tile[0].resident_levels == (2,)
+
+
+def test_pipeline_effects_tile_states_exposes_ready_unacknowledged_fallback():
+    session = _session()
+    tile = session.plan.tiles[0]
+    session.lifecycle.retarget(
+        {
+            0: TileTarget(
+                tile_number=0,
+                source_index=int(tile.source_index),
+                semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+                lod_level=0,
+            )
+        }
+    )
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=int(tile.source_index),
+        image=np.zeros((2, 3), dtype=np.float32),
+        histogram_data=None,
+        source_id=("preview", int(tile.source_index)),
+        lod=LodInfo(2, 4, (4, 6), (2, 3), 0),
+        quality="preview",
+    )
+    session.lifecycle.fallback_ready(0, payload)
+
+    state = effects.tile_lod_states(session, _demand(0), tile_numbers=(0,))[0]
+
+    assert state.presented_level is None
+    assert state.ready_level == 2
+    assert state.ready_quality == "fallback"
+
+
+def test_cpu_auto_first_commit_plans_target_without_unpresentable_preview_floor():
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    session = _session()
+    session.force_auto = True
+    session.user_levels_override = None
+    session.display_committed = False
+    bridge = FramePipelineEffects(SimpleNamespace(win=SimpleNamespace()), session)
+
+    states = bridge.tile_states(
+        None,
+        _demand(0),
+        LodAdmissionScope(visible_tile_numbers=frozenset({0, 1, 2})),
+    )
+
+    assert states
+    assert all(not state.allow_preview for state in states)
+
+
+def test_presentation_commit_replays_extent_camera_retarget_after_guard_release():
+    from arrayscope.window.frame_effects import _finish_presentation_commit
+
+    scheduled = []
+    renderer = SimpleNamespace(
+        _montage_presentation_commit_active=True,
+        _frame_viewport_retarget_after_commit=True,
+        _schedule_frame_viewport_update=lambda *, delay_ms=None: scheduled.append(delay_ms),
+    )
+
+    _finish_presentation_commit(renderer)
+
+    assert renderer._montage_presentation_commit_active is False
+    assert renderer._frame_viewport_retarget_after_commit is False
+    assert scheduled == [1]

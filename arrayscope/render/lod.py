@@ -524,9 +524,8 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
 
     Camera changes never restart evaluation. They only request presentation
     work when the current payload is too coarse for the new demand, still a
-    preview, or absent. A coarser demand does not demote an already-presented
-    exact/finer payload: zoom must remain a camera transform once correct
-    pixels are on screen. This recomputes the decision from the current
+    preview, absent, or an already-resident demanded level can consolidate
+    active atlas classes without an upload. This recomputes the decision from the current
     ``view_range``/``viewport_shape`` (demand math plus pyramid peeks; never
     reduction or other bulk work), queues singleflight materializations for
     missing display payloads, and dirties tiles only when a swap improves
@@ -594,9 +593,20 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
             continue
-        if presented_level <= desired and not residency_pressure_demote:
+        consolidate_to_resident_demand = bool(
+            desired > presented_level and desired in resident
+        )
+        if (
+            presented_level <= desired
+            and not residency_pressure_demote
+            and not consolidate_to_resident_demand
+        ):
             continue
-        applied = int(choose_resident_level(demand, tuple(sorted(resident))))
+        applied = (
+            desired
+            if consolidate_to_resident_demand
+            else int(choose_resident_level(demand, tuple(sorted(resident))))
+        )
         if presented_level != applied:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
@@ -826,15 +836,28 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         )
     if tile is None:
         return False
-    if payload is not None and str(getattr(payload, "quality", "exact")) != "preview":
-        return False
     best = best_floor_key(session, int(tile.source_index), tile_number=int(tile_number))
     if best is None:
         return False
     if payload is None:
         return True
     presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-    return int(best[1]) != presented
+    best_level = int(best[1])
+    metadata_fn = getattr(session, "preview_floor_metadata", None)
+    metadata = metadata_fn(best[0]) if callable(metadata_fn) else None
+    best_quality = str(getattr(metadata, "quality", "preview") or "preview")
+    if str(getattr(payload, "quality", "exact")) != "preview":
+        # "Exact" describes the reduced target's semantic quality, not native
+        # resolution. A level-5 exact target must still swap to an already
+        # resident level-1 exact target after zooming in. Refusing every exact
+        # floor left the ladder with zero work (target resident) while the
+        # backend stayed permanently coarse.
+        desired = int(session.lod_policy_decision.demand.desired_level)
+        return bool(presented > desired and best_level < presented)
+    return bool(
+        best_level != presented
+        or best_quality != str(getattr(payload, "quality", "preview") or "preview")
+    )
 
 
 def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None) -> None:
@@ -870,8 +893,6 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             # stage-backed fills leaving black tiles for seconds while their
             # level-2 floor planes sat resident in the pinned cache.
             continue
-        if existing is not None and str(getattr(existing, "quality", "exact")) != "preview":
-            continue
         tile = by_number.get(tile_number)
         if tile is None:
             continue
@@ -881,18 +902,26 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         if best is None:
             continue
         key, level, owning_cache = best
-        if existing is not None:
-            presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
-            if presented == int(level):
-                continue
-        plane = owning_cache.peek(key)
-        if plane is None:
-            continue
-        histogram = owning_cache.peek(histogram_key_for_level_key(key))
         metadata = None
         metadata_fn = getattr(session, "preview_floor_metadata", None)
         if callable(metadata_fn):
             metadata = metadata_fn(key)
+        best_quality = str(getattr(metadata, "quality", "preview") or "preview")
+        if existing is not None:
+            presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
+            if (
+                presented == int(level)
+                and str(getattr(existing, "quality", "preview") or "preview") == best_quality
+            ):
+                continue
+            if str(getattr(existing, "quality", "exact")) != "preview":
+                desired = int(session.lod_policy_decision.demand.desired_level)
+                if presented <= desired or int(level) >= presented:
+                    continue
+        plane = owning_cache.peek(key)
+        if plane is None:
+            continue
+        histogram = owning_cache.peek(histogram_key_for_level_key(key))
         texture_kind = getattr(metadata, "texture_kind", None)
         if texture_kind is None:
             texture_kind = floor_texture_kind(key.component)

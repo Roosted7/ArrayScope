@@ -1,6 +1,6 @@
 """The modular rendering pipeline (redesign R2/R3).
 
-This package replaces the monolithic `window/frame_renderer.py` +
+This package replaces the monolithic `window/frame_controller.py` +
 legacy window-level LOD orchestration with modular chunks, each owning one
 well-defined task and its state:
 
@@ -8,7 +8,7 @@ well-defined task and its state:
 - `render.ladder`   — the unified LOD ladder: ONE owner for "which quality
                       rung does each tile need next" (floor → preview →
                       desired → exact). Pure planning, no I/O, no Qt.
-- `render.pipeline` — MontagePipeline: turns ladder plans into kernel tasks,
+- `render.pipeline` — FramePipeline: turns ladder plans into kernel tasks,
                       consumes TileLifecycle events, emits bounded commit
                       batches through an injected Effects protocol.
 
@@ -27,6 +27,7 @@ Ownership rules:
 """
 
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
+from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import (
     CommitBatch,
     RenderIntent,
@@ -35,6 +36,7 @@ from arrayscope.render.stages import (
 
 __all__ = [
     "CommitBatch",
+    "FramePipeline",
     "LodLadder",
     "RenderIntent",
     "Rung",

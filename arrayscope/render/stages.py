@@ -34,14 +34,30 @@ class RenderIntent:
     view_range: tuple | None
     viewport_shape: tuple[int, int] | None
     interactive: bool = False
+    tile_source_ids: tuple[tuple[int, object], ...] = ()
+    tile_source_indices: tuple[tuple[int, int], ...] = ()
+
+    def source_id_for_tile(self, tile_number: int):
+        tile_number = int(tile_number)
+        for candidate, source_id in self.tile_source_ids:
+            if int(candidate) == tile_number:
+                return source_id
+        return None
+
+    def source_index_for_tile(self, tile_number: int) -> int | None:
+        tile_number = int(tile_number)
+        for candidate, source_index in self.tile_source_indices:
+            if int(candidate) == tile_number:
+                return int(source_index)
+        return None
 
     @staticmethod
     def semantic_key_for_montage(document_key, view_state, viewport_plan, colormap_lut):
         """Return the montage session key used for pipeline supersession."""
 
-        from arrayscope.window.montage_viewport import montage_session_key
+        from arrayscope.window.montage_viewport import frame_session_key
 
-        return montage_session_key(document_key, view_state, viewport_plan, colormap_lut)
+        return frame_session_key(document_key, view_state, viewport_plan, colormap_lut)
 
 
 @dataclass(frozen=True)

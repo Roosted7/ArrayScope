@@ -1,4 +1,4 @@
-"""Qt-free state for progressive montage rendering."""
+"""Qt-free context and derived views for progressive image-frame rendering."""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ from arrayscope.presentation import (
     ClaimOwner,
     LevelPhase,
     ReleaseClaim,
-    TileLedger,
     TileLifecycle,
     TileTarget,
     payload_ref_from_display_payload,
@@ -447,7 +446,7 @@ class LifecycleStageFanIn(StageFanInState):
 
 
 @dataclass
-class MontageRenderSession:
+class FrameSession:
     session_id: int
     key: object
     render_generation: int
@@ -485,6 +484,8 @@ class MontageRenderSession:
     pending_level_sources: set[int] = field(default_factory=set)
     level_scan_cursor: int = 0
     level_scan_remaining_tiles: int = 0
+    level_evidence_inflight: bool = False
+    level_evidence_generation: object | None = None
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_refined_level_sources: set[int] = field(default_factory=set)
     tile_compute_cache_hits: int = 0
@@ -526,6 +527,7 @@ class MontageRenderSession:
     presented_order: list[int] = field(default_factory=list)
     presentation_geometry_changed: bool = False
     _layout_geometry_changed_pending: bool = False
+    source_window_changed_pending: bool = False
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -545,7 +547,6 @@ class MontageRenderSession:
     lod_floor_presentations: int = 0
     lod_target_revision: int = 0
     lifecycle: TileLifecycle = field(default_factory=TileLifecycle)
-    tile_ledger: TileLedger = field(default_factory=TileLedger)
     # Window-agnostic texel identity base for pyramid floors/previews
     # (montage_tile_semantic_key); falls back to session key when unset.
     semantic_key: object = None
@@ -604,6 +605,23 @@ class MontageRenderSession:
                 self.dirty_payloads[int(tile_number)] = None
         return tuple(rearmed)
 
+    def onscreen_tile_numbers(self) -> tuple[int, ...]:
+        """Canonical physical viewport set; coverage remains a separate ring."""
+
+        active = tuple(
+            int(tile)
+            for tile in tuple(getattr(getattr(self, "frame_plan", None), "active_region_ids", ()) or ())
+        )
+        if active:
+            return tuple(dict.fromkeys(active))
+        return tuple(sorted(int(tile) for tile in self.visible_tile_numbers))
+
+    def onscreen_target_unsettled_tiles(self) -> tuple[int, ...]:
+        return self.lifecycle.target_unsettled_tiles(self.onscreen_tile_numbers())
+
+    def onscreen_target_settled(self) -> bool:
+        return not self.onscreen_target_unsettled_tiles()
+
     @property
     def level_revision(self) -> int:
         return int(self.level_generation.revision)
@@ -658,7 +676,7 @@ class MontageRenderSession:
         )
         for index in sorted(int(tile) for tile in self.rendered_tiles):
             self.dirty_payloads.setdefault(int(index), None)
-        self.sync_tile_ledger_scope()
+        self.sync_lifecycle_scope()
 
     def attach_stage_fan_in(self, state: StageFanInState) -> None:
         """Install (or replace) the stage fan-in, machine bindings included.
@@ -673,7 +691,7 @@ class MontageRenderSession:
             return
         self.stage_fan_in = LifecycleStageFanIn(self.lifecycle, state)
 
-    def sync_tile_ledger_scope(self) -> None:
+    def sync_lifecycle_scope(self) -> None:
         demand = getattr(getattr(self, "lod_policy_decision", None), "demand", None)
         target_level = int(getattr(demand, "desired_level", 0) or 0)
         targets: dict[int, TileTarget] = {}
@@ -688,22 +706,46 @@ class MontageRenderSession:
                 semantic_source_id=self.tile_semantic_source_id(source_index),
                 lod_level=target_level,
             )
-        self.tile_ledger.retarget(targets)
-        for payload in tuple(getattr(self, "display_tile_payloads", {}).values()):
-            self.record_tile_payload(payload)
-        for payload in tuple(getattr(getattr(self, "tile_presentation_state", None), "payloads", {}).values()):
-            self.record_tile_payload(payload)
+        target_signature = tuple(
+            (tile, target.source_index, target.semantic_source_id, target.lod_level)
+            for tile, target in sorted(targets.items())
+        )
+        if getattr(self, "_lifecycle_target_signature", None) != target_signature:
+            self.lifecycle.retarget(targets)
+            self._lifecycle_target_signature = target_signature
+
+        # Payload mutation sites report lifecycle events directly.  This scan
+        # remains as a safety net for restored/cached presentation state, but
+        # unchanged payload objects must not be re-normalized on every
+        # settlement query: that made each query O(visible tiles * payload
+        # identity construction), and a 272-tile fill performed millions of
+        # redundant conversions.
+        seen = getattr(self, "_lifecycle_payload_objects", None)
+        if seen is None:
+            seen = {}
+            self._lifecycle_payload_objects = seen
+        payload_sets = (
+            getattr(self, "display_tile_payloads", {}),
+            getattr(getattr(self, "tile_presentation_state", None), "payloads", {}),
+        )
+        for payloads in payload_sets:
+            for tile_number, payload in tuple((payloads or {}).items()):
+                marker = id(payload)
+                key = (id(payloads), int(tile_number))
+                if seen.get(key) == marker:
+                    continue
+                seen[key] = marker
+                self.record_tile_payload(payload)
 
     def record_tile_payload(self, payload) -> None:
         ref = payload_ref_from_display_payload(payload)
         if ref.quality == "exact":
-            self.tile_ledger.target_ready(int(ref.payload.tile_number), ref)
+            self.lifecycle.target_ready(int(ref.payload.tile_number), ref)
         else:
-            self.tile_ledger.fallback_ready(int(ref.payload.tile_number), ref)
+            self.lifecycle.fallback_ready(int(ref.payload.tile_number), ref)
 
-    def tile_ledger_snapshot(self):
-        self.sync_tile_ledger_scope()
-        return self.tile_ledger.snapshot()
+    def lifecycle_snapshot(self):
+        return self.lifecycle.snapshot()
 
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
@@ -732,7 +774,12 @@ class MontageRenderSession:
         self.view_range = view_range
         layout_changed = False
         if plan is not None:
-            layout_changed = getattr(plan, "geometry", None) != getattr(self.plan, "geometry", None)
+            previous_geometry = getattr(self.plan, "geometry", None)
+            next_geometry = getattr(plan, "geometry", None)
+            layout_changed = (
+                getattr(next_geometry, "layout_identity", None)
+                != getattr(previous_geometry, "layout_identity", None)
+            )
             self.plan = plan
             if layout_changed:
                 self._layout_geometry_changed_pending = True
@@ -778,7 +825,7 @@ class MontageRenderSession:
         )
         self.visible_tiles = active
         self.visible_tile_numbers = frozenset(active_numbers)
-        self.sync_tile_ledger_scope()
+        self.sync_lifecycle_scope()
         if presentation_changed:
             self.update_level_presentation_scope()
         self.priority_retargeted_tiles = self.retarget_tile_priority(
@@ -838,6 +885,20 @@ class MontageRenderSession:
             for index, source_id in old_source_ids.items()
             if source_id is not None
         }
+        # Shared-transform/floor payloads can be the only resident semantic
+        # evidence for a tile.  Derive the source map from those payloads too;
+        # relying on the renderer-local source-id cache made a partially
+        # populated cache turn an overlapping scroll into fresh preview work.
+        for index, payload in {**old_state_payloads, **old_display_payloads}.items():
+            source_id = _base_source_id(getattr(payload, "source_id", None))
+            if source_id is None:
+                continue
+            try:
+                old_indices_by_source.setdefault(source_id, int(index))
+            except TypeError:
+                # Source identities are expected to be hashable, but a custom
+                # operation must not make retargeting itself fail if it isn't.
+                continue
         self.session_id = int(session_id)
         self.key = key
         self.semantic_key = semantic_key
@@ -856,6 +917,12 @@ class MontageRenderSession:
         self.pending_level_sources.clear()
         self.pending_refined_level_tiles.clear()
         self.pending_refined_level_sources.clear()
+        # The in-flight flag belongs to the old level/session generation. Its
+        # callback will reject itself by generation; carrying this bare bool
+        # into the new window prevents that window from admitting any evidence
+        # work and strands all level presentations stale.
+        self.level_evidence_inflight = False
+        self.level_evidence_generation = None
         # The evidence scan indexed the OLD window's level key; restart the
         # counters so the new key's evidence is armed from scratch (the
         # renderer re-marks the scan whenever a commit parks on evidence).
@@ -884,6 +951,11 @@ class MontageRenderSession:
             if rendered is None and old_index is not None and old_index in old_rendered_tiles:
                 rendered = replace(old_rendered_tiles[int(old_index)], tile=tile)
                 remapped += 1
+            resident_payload = None
+            if rendered is None and old_index is not None:
+                resident_payload = old_display_payloads.get(int(old_index))
+                if resident_payload is None:
+                    resident_payload = old_state_payloads.get(int(old_index))
             if rendered is not None:
                 self.mark_materialized(rendered)
                 if new_source is not None:
@@ -891,6 +963,37 @@ class MontageRenderSession:
                 if new_source != old_source_ids.get(index):
                     changed_slots.add(index)
                     self.lifecycle.presentation_discarded(index)
+                hits += 1
+            elif resident_payload is not None:
+                # Shared reduced transforms can own a complete current
+                # payload without creating a renderer-local RenderedTile.
+                # Index-window retargeting used to ignore that lifecycle
+                # payload and key reuse only through ``rendered_tiles``. A
+                # one-index scroll therefore rebuilt all 60 previews instead
+                # of remapping the 59 overlapping semantic sources.
+                # This branch deliberately has no current native RenderedTile.
+                # Remove the predecessor slot entry before installing the
+                # resident remap; otherwise a later presentation build sees
+                # ``rendered_tiles[index]`` and overwrites the correct remap
+                # with the old slot source (mixed +N source window at idle).
+                self.rendered_tiles.pop(index, None)
+                payload = replace(
+                    resident_payload,
+                    tile_number=index,
+                    source_index=int(tile.source_index),
+                )
+                self.lifecycle.presentation_discarded(index)
+                self.display_tile_payloads[index] = payload
+                if new_source is not None:
+                    self.tile_source_ids[index] = new_source
+                self.lifecycle.remember_presentable(index, payload)
+                self.record_tile_payload(payload)
+                self.pending_payload_upserts[index] = None
+                self.pending_removals.discard(index)
+                self.skipped_tiles.discard(index)
+                changed_slots.add(index)
+                self.mark_tile_state(tile, MontageTileState.LOADED)
+                remapped += 1
                 hits += 1
             else:
                 # Demote: the semantic slot is active for a new source, while
@@ -926,6 +1029,13 @@ class MontageRenderSession:
             self.pending_payload_upserts.pop(int(index), None)
             self.pending_removals.discard(int(index))
         if obsolete_slots or changed_slots:
+            # A CPU-windowed backend cannot expose a partially replaced source
+            # window.  Frame effects consumes this backend-specific guard; it
+            # is harmless on shader backends.  Crucially, ordinary montage
+            # index scrolling changes semantic sources without changing layout
+            # geometry, so the former geometry-only arming missed the exact
+            # full -> subset -> full transition seen on screen.
+            self.source_window_changed_pending = True
             retained_state = {
                 int(tile): payload
                 for tile, payload in old_state_payloads.items()
@@ -944,9 +1054,17 @@ class MontageRenderSession:
             int(tile.montage_index) for tile in self.visible_tiles
         )
         self._selected_lod_factor()
-        self.sync_tile_ledger_scope()
+        self.sync_lifecycle_scope()
         self.update_level_presentation_scope()
         self.mark_ladder_swaps_for_viewport()
+        # Retargeting is itself a presentation-producing mutation. A final
+        # index/viewport change can arrive after the previous bounded commit
+        # cleared these flags; leaving newly-created dirty/upsert/removal
+        # obligations unarmed strands a semantically live session with no
+        # backend pixels and no remaining kernel completion to wake it.
+        if self.dirty_payloads or self.pending_payload_upserts or self.pending_removals:
+            self.flush_pending = True
+            self.final_commit_pending = True
         return {
             "hits": int(hits),
             "misses": int(misses),
@@ -1046,7 +1164,7 @@ class MontageRenderSession:
 
     def mark_materialized(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
-        self.tile_ledger.target_invalidated(index)
+        self.lifecycle.target_invalidated(index)
         self.rendered_tiles[index] = rendered
         # A replacement tile must be assigned a fresh semantic source identity
         # and presentation payload on the next commit.  Other loaded tiles keep
@@ -1055,6 +1173,8 @@ class MontageRenderSession:
         self.display_tile_payloads.pop(index, None)
         self.level_generation.forget_tile(index)
         self.dirty_payloads[index] = None
+        self.flush_pending = True
+        self.final_commit_pending = True
         self.stage_fan_in.tile_stage_keys.pop(index, None)
         self.stage_fan_in.detach_unbound_requests()
         self.active_tile_requests.discard(index)
@@ -1167,7 +1287,6 @@ class MontageRenderSession:
             base_source_id,
             texture_kind=texture_kind,
             lod=lod,
-            texture_data=texture_data,
         )
         previous = self.display_tile_payloads.get(tile_number)
         if (
@@ -1280,7 +1399,6 @@ class MontageRenderSession:
                         base_source_id,
                         texture_kind=getattr(rendered, "texture_kind", None),
                         lod=lod,
-                        texture_data=texture_data,
                     )
                     previous = by_source.get(source_id)
             if previous is None:
@@ -1324,7 +1442,7 @@ class MontageRenderSession:
         if changed_state or confirmed_tiles:
             self.invalidate_tile_states()
 
-    def _payload_source_id(self, base_source_id, *, texture_kind, lod: LodInfo, texture_data) -> tuple[object, ...]:
+    def _payload_source_id(self, base_source_id, *, texture_kind, lod: LodInfo) -> tuple[object, ...]:
         prefix = tuple(base_source_id) if isinstance(base_source_id, tuple) else (base_source_id,)
         return (
             *prefix,
@@ -1334,8 +1452,6 @@ class MontageRenderSession:
             int(lod.factor),
             int(lod.level),
             int(lod.gutter),
-            "content",
-            _array_content_token(texture_data),
         )
 
     def _selected_lod_factor(self) -> int:
@@ -1526,6 +1642,161 @@ class MontageRenderSession:
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
         return source, histogram, lod
 
+    def _paced_pending_presentation_followup(
+        self,
+        *,
+        cold_deadline_ms: float | None,
+        max_upserts: int | None,
+        max_upsert_bytes: int | None,
+        upsert_cost_fn,
+        item_free_upsert_fn,
+        max_item_free_upserts: int | None,
+        max_free_retargets: int | None,
+        pace_resident_retargets: bool,
+    ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
+        """Emit the next already-built backend transaction slice.
+
+        A backend deadline may acknowledge only part of a proposed delta. The
+        unacknowledged payloads remain in ``pending_payload_upserts``. Once
+        structure and visibility are stable, rebuilding the complete semantic
+        transaction before every follow-up is both redundant and O(grid size).
+        This path consumes only payloads the lifecycle already owns; any
+        structural/removal/level ambiguity falls back to full reconciliation.
+        """
+
+        if max_upserts is None:
+            return None
+        if not self.pending_payload_upserts:
+            return None
+        if self.pending_removals or self.has_pending_level_update() or self.has_stale_level_presentations():
+            return None
+        if bool(getattr(self, "_layout_geometry_changed_pending", False)):
+            return None
+        planned = tuple(
+            dict.fromkeys(
+                int(tile.montage_index)
+                for tile in tuple(self.visible_tiles)
+                if int(tile.montage_index) not in self.skipped_tiles
+            )
+        )
+        if not planned or planned != tuple(self._last_planned_tiles):
+            return None
+        active = tuple(self._last_active_tiles)
+        if not active:
+            return None
+        active_set = set(active)
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        candidate_numbers = tuple(
+            dict.fromkeys(
+                int(tile) for tile in self.pending_payload_upserts
+            )
+        )
+        candidate_numbers = tuple(
+            tile
+            for tile in candidate_numbers
+            if tile in active_set
+            and _payload_matches_current_tile(
+                self,
+                int(tile),
+                self.display_tile_payloads.get(int(tile)),
+                plan_tiles_by_number,
+            )
+        )
+        unpresented = active_set.difference(self.lifecycle.presented_tiles)
+        if unpresented:
+            coverage_candidates = tuple(
+                tile for tile in candidate_numbers if int(tile) in unpresented
+            )
+            if not coverage_candidates:
+                # The cached follow-up can only drain wrappers built by the
+                # previous transaction.  When visible holes still exist but
+                # none of those wrappers covers a hole, fall through to the
+                # full builder so it spends its bounded build budget creating
+                # missing first pixels.  Draining preview upgrades here
+                # starved TARGET_READY edge tiles indefinitely.
+                return None
+            candidate_numbers = coverage_candidates
+        if not candidate_numbers:
+            # Slot numbers remain 0..N across an index-window scroll. A cached
+            # follow-up containing the predecessor source mapping is therefore
+            # not reusable merely because ``planned == _last_planned_tiles``;
+            # fall through to the identity-aware full builder, which repairs
+            # stale wrappers and mappings.
+            return None
+        ordered = self._prioritized_tile_numbers(candidate_numbers)
+        payloads = {int(tile): self.display_tile_payloads[int(tile)] for tile in ordered}
+        resident_retargets = {
+            int(tile)
+            for tile, payload in payloads.items()
+            if payload.source_id in self.acknowledged_source_ids
+        }
+        admission = TileAdmissionQueue(self._tile_priority_context()).admit(
+            tuple(payloads),
+            retained=(),
+            free_fn=(
+                (lambda tile: int(tile) in resident_retargets)
+                if resident_retargets and not pace_resident_retargets
+                else None
+            ),
+            max_free=max_free_retargets,
+            item_free_fn=(
+                (lambda tile: bool(item_free_upsert_fn(payloads[int(tile)])))
+                if item_free_upsert_fn is not None
+                else None
+            ),
+            max_item_free=max_item_free_upserts,
+            cost_fn=(
+                lambda tile: (
+                    0
+                    if int(tile) in resident_retargets
+                    else int(
+                        upsert_cost_fn(payloads[int(tile)])
+                        if upsert_cost_fn is not None
+                        else getattr(payloads[int(tile)], "nbytes", 0) or 0
+                    )
+                )
+            ),
+            max_items=max_upserts,
+            max_bytes=max_upsert_bytes,
+            deadline_ms=cold_deadline_ms,
+        )
+        upserts = {
+            int(tile): payloads[int(tile)]
+            for tile in admission.admitted
+            if int(tile) in payloads
+        }
+        if not upserts:
+            return None
+        previous_state = self.tile_presentation_state
+        self.payload_revision += 1
+        near = tuple(self._last_near_tiles)
+        near_source_ids = {
+            int(tile): self.display_tile_payloads[int(tile)].source_id
+            for tile in near
+            if int(tile) in self.display_tile_payloads
+        }
+        delta = TilePresentationDelta(
+            structure_revision=self.structure_revision,
+            payload_revision=self.payload_revision,
+            visibility_revision=self.visibility_revision,
+            level_revision=self.level_revision,
+            histogram_revision=self.histogram_revision,
+            viewport_revision=self.viewport_revision,
+            base_revision=int(previous_state.revision),
+            target_revision=int(previous_state.revision) + 1,
+            transaction_generation=int(self.session_id),
+            cold_deadline_ms=cold_deadline_ms,
+            upserts=upserts,
+            active_tiles=active,
+            planned_tiles=planned,
+            near_tiles=near,
+            near_tile_source_ids=near_source_ids,
+        )
+        return previous_state.apply_delta(delta), delta
+
     def build_tile_presentation(
         self,
         source_ids: dict[int, object] | None,
@@ -1536,21 +1807,53 @@ class MontageRenderSession:
         upsert_cost_fn=None,
         item_free_upsert_fn=None,
         max_item_free_upserts: int | None = None,
+        max_free_retargets: int | None = None,
         pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
+        pending_followup = self._paced_pending_presentation_followup(
+            cold_deadline_ms=cold_deadline_ms,
+            max_upserts=max_upserts,
+            max_upsert_bytes=max_upsert_bytes,
+            upsert_cost_fn=upsert_cost_fn,
+            item_free_upsert_fn=item_free_upsert_fn,
+            max_item_free_upserts=max_item_free_upserts,
+            max_free_retargets=max_free_retargets,
+            pace_resident_retargets=pace_resident_retargets,
+        )
+        if pending_followup is not None:
+            return pending_followup
         previous_state = self.tile_presentation_state
         previous_payloads = dict(previous_state.payloads)
-        loaded = {int(index) for index in self.rendered_tiles}
-        planned_numbers = {
-            int(tile.montage_index)
-            for tile in tuple(self.visible_tiles)
-            if int(tile.montage_index) not in self.skipped_tiles
-        }
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile
-            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-        }
+        materialized = {int(index) for index in self.rendered_tiles}
+        planned_numbers = set(self.visible_tile_numbers).difference(self.skipped_tiles)
+        plan_tiles_cache = getattr(self, "_plan_tiles_by_number_cache", None)
+        if plan_tiles_cache is None or plan_tiles_cache[0] is not self.plan:
+            plan_tiles_by_number = {
+                int(tile.montage_index): tile
+                for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+            }
+            self._plan_tiles_by_number_cache = (self.plan, plan_tiles_by_number)
+        else:
+            plan_tiles_by_number = plan_tiles_cache[1]
+        dirty_numbers = set(int(tile) for tile in self.dirty_payloads)
+        dirty_numbers.update(int(tile) for tile in self.pending_payload_upserts)
+        reconcile_numbers = dirty_numbers.intersection(planned_numbers)
+        reconcile_numbers.update(planned_numbers.difference(previous_payloads))
+        # Lifecycle owns target/fallback readiness. Shared reduced transforms
+        # produce valid target payloads without creating native per-tile
+        # ``rendered_tiles`` entries; treating that renderer-local map as the
+        # readiness authority removed every such payload from the commit.
+        for tile_number in reconcile_numbers:
+            current = self.display_tile_payloads.get(int(tile_number))
+            if self.lifecycle.payload_is_current(int(tile_number), current):
+                materialized.add(int(tile_number))
+                continue
+            payload = self.lifecycle.current_presentable_payload(int(tile_number))
+            if payload is None or getattr(payload, "source_id", None) is None:
+                continue
+            self.display_tile_payloads[int(tile_number)] = payload
+            materialized.add(int(tile_number))
         fallback_payloads = None
         target_level = int(
             getattr(getattr(getattr(self, "lod_policy_decision", None), "demand", None), "desired_level", 0)
@@ -1580,18 +1883,12 @@ class MontageRenderSession:
             )
             self.tile_presentation_state = previous_state
         for stale in tuple(self.display_tile_payloads):
-            if int(stale) not in loaded:
+            if int(stale) not in materialized:
                 payload = self.display_tile_payloads.get(int(stale))
                 if (
                     payload is not None
                     and int(stale) in planned_numbers
-                    and (
-                        _payload_matches_current_tile(self, int(stale), payload, plan_tiles_by_number)
-                        or (
-                            int(stale) in self.pending_payload_upserts
-                            and str(getattr(payload, "quality", "exact") or "exact") == "preview"
-                        )
-                    )
+                    and self.lifecycle.payload_is_current(int(stale), payload)
                 ):
                     # Atomic presentation: a planned tile with compatible
                     # preview/exact pixels keeps them until a replacement is
@@ -1606,7 +1903,7 @@ class MontageRenderSession:
                 self.level_generation.forget_tile(int(stale))
         for tile_number, payload in tuple(self.display_tile_payloads.items()):
             index = int(tile_number)
-            if index not in loaded:
+            if index not in materialized:
                 continue
             tile = plan_tiles_by_number.get(index)
             if tile is not None and int(getattr(payload, "source_index", -1)) == int(tile.source_index):
@@ -1624,18 +1921,14 @@ class MontageRenderSession:
                 if int(tile.montage_index) in planned_numbers
             )
         )
-        fallback_backed = {
-            int(tile)
-            for tile, payload in previous_payloads.items()
-            if int(tile) in planned_numbers
-            and _payload_matches_current_tile(self, int(tile), payload, plan_tiles_by_number)
-        }
-        payload_backed = set(int(tile) for tile in self.display_tile_payloads) | fallback_backed
-        active = tuple(
-            int(tile)
-            for tile in planned
-            if int(tile) in current_loaded or int(tile) in payload_backed
-        )
+        # ``active_tiles`` is the visible presentation scope, not the subset
+        # whose successor payload happens to be ready in this drain.  A
+        # persistent backend uses active scope to decide which existing slot
+        # mappings remain drawn; shrinking it to ``current_loaded`` made a
+        # complete predecessor montage become 12/24/... tiles while a new
+        # operation or LOD materialized.  Payload absence means "retain the
+        # compatible committed slot", never "hide this visible tile".
+        active = tuple(int(tile) for tile in planned)
         stale_level_tiles = ()
         if self.has_pending_level_update():
             # Filter before prioritizing: ordering every active tile per commit
@@ -1809,17 +2102,23 @@ class MontageRenderSession:
         )
         for tile_number in missing_payload_tiles:
             self.dirty_payloads[int(tile_number)] = None
+        unpresented_tiles = tuple(
+            int(tile)
+            for tile in active
+            if int(tile) not in self.lifecycle.presented_tiles
+        )
         correctness_priority_tiles = tuple(
             dict.fromkeys(
                 (
                     *missing_payload_tiles,
-                    *preview_upgrade_tiles,
                     *(int(tile) for tile in stale_drawn),
-                    *(
-                        int(tile)
-                        for tile in active
-                        if int(tile) not in self.lifecycle.presented_tiles
-                    ),
+                    *unpresented_tiles,
+                    # Coverage outranks refinement. Once every active slot has
+                    # acknowledged pixels, oldest/coarsest preview upgrades
+                    # become the correctness-priority set; before that they
+                    # remain ordinary visible work and cannot starve edge
+                    # first pixels under a center-focused admission cap.
+                    *(() if unpresented_tiles else preview_upgrade_tiles),
                 )
             )
         )
@@ -1844,11 +2143,16 @@ class MontageRenderSession:
                 context=priority_context,
             )
 
+        lifecycle_change_tiles = tuple(
+            int(command.tile_number)
+            for command in self.lifecycle.presentation_changes()
+        )
         dirty_payload_tiles = tuple(
             dict.fromkeys(
                 (
                     *(int(tile) for tile in self.dirty_payloads),
                     *(int(tile) for tile in self.pending_payload_upserts),
+                    *lifecycle_change_tiles,
                     *missing_payload_tiles,
                     *preview_upgrade_tiles,
                     *stale_level_tiles,
@@ -1866,7 +2170,11 @@ class MontageRenderSession:
         # admission still has choices.
         build_limit = None
         if max_upserts is not None:
-            build_limit = max(int(max_upserts) * 2, 8)
+            # Build only what this transaction can admit. Over-building 2x
+            # made a nominal 12-item VisPy slice spend 40 ms reducing/wrapping
+            # 24 tiles before a 20 ms backend apply, breaching the 50 ms GUI
+            # hard gate without improving committed throughput.
+            build_limit = max(int(max_upserts), 8)
         floor_first_fill_active = self._lod_preview_floor_first_fill_active(planned_numbers)
         if floor_first_fill_active:
             floor_payload_tiles = tuple(planned_numbers)
@@ -1931,17 +2239,6 @@ class MontageRenderSession:
         )
         if floor_active_tiles or presented_preview_tiles:
             active = tuple(dict.fromkeys((*active, *presented_preview_tiles, *floor_active_tiles)))
-        for tile_number in tuple(self.pending_payload_upserts):
-            payload = self.display_tile_payloads.get(int(tile_number))
-            previous = previous_payloads.get(int(tile_number))
-            if (
-                payload is not None
-                and previous is payload
-                and not backend_identities
-                and int(tile_number) not in stale_identity_removals
-                and payload.source_id not in self.acknowledged_source_ids
-            ):
-                self.pending_payload_upserts.pop(int(tile_number), None)
         # Progress guarantee: a pending upsert is payload-backed.  A retained
         # stale backend slot may be visibly present while the replacement exact
         # tile is still evaluating, but without a current desired payload there
@@ -1964,6 +2261,16 @@ class MontageRenderSession:
                     continue
                 self.dirty_payloads.pop(int(tile_number), None)
         current_payloads = self.display_tile_payloads
+        # Payload creation can occur later in this same build (for example a
+        # shared reduced target admitted by the LOD ladder). Reconcile queued
+        # removals at the transaction boundary, after every payload-building
+        # step, so a newly current lifecycle payload wins atomically even when
+        # its upsert is deferred by the per-commit cap.
+        for tile_number in planned_numbers:
+            if self.lifecycle.payload_is_current(
+                int(tile_number), current_payloads.get(int(tile_number))
+            ):
+                self.pending_removals.discard(int(tile_number))
         valid_tile_count = len(tuple(getattr(self.plan, "tiles", ()) or ()))
         physical_pending_removals = {
             int(tile)
@@ -1992,6 +2299,17 @@ class MontageRenderSession:
             payload = current_payloads.get(int(tile_number))
             if payload is None:
                 continue
+            shown_identity = backend_identities.get(int(tile_number))
+            rec = self.lifecycle.peek(int(tile_number))
+            if (
+                shown_identity is not None
+                and rec is not None
+                and (payload.source_id, shown_identity) in rec.resigned
+            ):
+                # The lifecycle already bounded retries for exactly this
+                # wanted/shown pair. Coverage admission must not reopen that
+                # loop merely because the tile is semantically unpresented.
+                continue
             previous = previous_payloads.get(int(tile_number))
             force_upsert = int(tile_number) in self.pending_payload_upserts or int(tile_number) in stale_level_tiles
             if previous is payload and not force_upsert:
@@ -2010,10 +2328,14 @@ class MontageRenderSession:
                 not force_upsert
                 and previous is not None
                 and previous.source_id == payload.source_id
-                and previous.image is payload.image
-                and previous.histogram_data is payload.histogram_data
                 and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(payload.shader_mapping)
             ):
+                # ``source_id`` is the canonical materialization identity.
+                # Rebuilt Python wrappers (or separately sampled histogram
+                # arrays) do not mean new backend pixels; requiring object
+                # identity here re-emitted the same acknowledged preview on
+                # every upgrade replan and sustained an infinite commit/draw
+                # loop. New pixel content must carry a new source identity.
                 if _preview_upgrade_owed(self, int(tile_number), payload):
                     self.dirty_payloads[int(tile_number)] = None
                     continue
@@ -2049,12 +2371,54 @@ class MontageRenderSession:
             for tile, payload in upserts.items()
             if int(tile) not in resident_retarget_tiles
         }
-        all_candidate_upserts = dict(upserts)
+        active_set = set(int(tile) for tile in active)
+        all_candidate_upserts = {
+            int(tile): payload
+            for tile, payload in upserts.items()
+            if int(tile) in active_set
+        }
+        onscreen = set(self.onscreen_tile_numbers())
+        onscreen_unsettled = set(self.lifecycle.target_unsettled_tiles(onscreen))
+        if self.display_committed and onscreen_unsettled:
+            # Coverage-ring payloads remain drawn/retained, but they may not
+            # consume a backend transaction while an actual on-screen target
+            # is unfinished. Otherwise a small zoom target shared an 8-item
+            # upload slice with five near tiles and could sit stale for seconds
+            # despite all required pixels already being materialized.
+            all_candidate_upserts = {
+                int(tile): payload
+                for tile, payload in all_candidate_upserts.items()
+                if int(tile) in onscreen
+            }
+            cold_upserts = {
+                int(tile): payload
+                for tile, payload in cold_upserts.items()
+                if int(tile) in onscreen
+            }
+            resident_retarget_tiles.intersection_update(onscreen)
+        coverage_upserts = {
+            int(tile): payload
+            for tile, payload in all_candidate_upserts.items()
+            if int(tile) in set(unpresented_tiles)
+        }
+        if coverage_upserts:
+            # First-pixel coverage is a transaction class, not merely a
+            # priority hint. Mixing it with upgrades allowed center-focused
+            # replacement work to consume every bounded batch while edge
+            # slots remained absent for hundreds of commits.
+            all_candidate_upserts = coverage_upserts
+            cold_upserts = {
+                int(tile): payload
+                for tile, payload in cold_upserts.items()
+                if int(tile) in coverage_upserts
+            }
+            resident_retarget_tiles.intersection_update(coverage_upserts)
         free_retarget_tiles = frozenset() if pace_resident_retargets else frozenset(resident_retarget_tiles)
         admission = TileAdmissionQueue(priority_context).admit(
             tuple(all_candidate_upserts),
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
+            max_free=max_free_retargets,
             item_free_fn=(
                 (lambda tile: bool(item_free_upsert_fn(all_candidate_upserts[int(tile)])))
                 if item_free_upsert_fn is not None
@@ -2124,10 +2488,6 @@ class MontageRenderSession:
         force_refresh = False
         clear_reason = ""
 
-        self.tile_ledger.commit_emitted(upserts)
-        for tile_number, payload in upserts.items():
-            self.lifecycle.upsert_emitted(int(tile_number), payload.source_id)
-
         base_revision = int(getattr(previous_state, "revision", 0))
         target_revision = base_revision + (1 if upserts or removals else 0)
         if upserts or removals:
@@ -2160,6 +2520,7 @@ class MontageRenderSession:
             viewport_revision=self.viewport_revision,
             base_revision=base_revision,
             target_revision=target_revision,
+            transaction_generation=int(self.session_id),
             cold_deadline_ms=cold_deadline_ms,
             upserts=upserts,
             removals=removals,
@@ -2172,6 +2533,114 @@ class MontageRenderSession:
         )
         state = previous_state.apply_delta(delta)
         return state, delta
+
+    def build_atomic_source_successor_presentation(
+        self,
+    ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
+        """Build a complete same-layout source remap without full reconciliation.
+
+        The general builder repairs arbitrary lifecycle, visibility, removal,
+        and level states. A VisPy scroll successor has a narrower contract:
+        unchanged slots and one current payload for every visible tile. After
+        validating that contract, construct the immutable all-slot delta
+        directly. Ambiguous cases return ``None`` to the general builder.
+        """
+
+        self._atomic_fast_reject_reason = ""
+        if bool(getattr(self, "_layout_geometry_changed_pending", False)):
+            self._atomic_fast_reject_reason = "layout"
+            return None
+        planned = tuple(
+            dict.fromkeys(
+                int(tile.montage_index)
+                for tile in tuple(self.visible_tiles)
+                if int(tile.montage_index) not in self.skipped_tiles
+            )
+        )
+        if not planned or planned != tuple(self._last_planned_tiles):
+            self._atomic_fast_reject_reason = "planned"
+            return None
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        # Cache-hit scroll windows commonly have 58-59 payload mirrors ready
+        # and one entering edge represented only by a resident LOD floor.
+        # Materialize only those missing wrappers; scanning/rebuilding all 60
+        # erased the fast path's benefit.
+        missing_floor = tuple(
+            int(tile_number)
+            for tile_number in planned
+            if not _payload_matches_current_tile(
+                self,
+                int(tile_number),
+                self.display_tile_payloads.get(int(tile_number)),
+                plan_tiles_by_number,
+            )
+            and not _payload_matches_current_tile(
+                self,
+                int(tile_number),
+                self.lifecycle.current_presentable_payload(int(tile_number)),
+                plan_tiles_by_number,
+            )
+        )
+        if missing_floor:
+            self._ensure_floor_payloads(missing_floor)
+        payloads = {}
+        for tile_number in planned:
+            payload = self.display_tile_payloads.get(int(tile_number))
+            if not _payload_matches_current_tile(
+                self,
+                int(tile_number),
+                payload,
+                plan_tiles_by_number,
+            ):
+                payload = self.lifecycle.current_presentable_payload(
+                    int(tile_number)
+                )
+            if not _payload_matches_current_tile(
+                self,
+                int(tile_number),
+                payload,
+                plan_tiles_by_number,
+            ):
+                self._atomic_fast_reject_reason = f"payload:{int(tile_number)}"
+                return None
+            self.display_tile_payloads[int(tile_number)] = payload
+            payloads[int(tile_number)] = payload
+        previous_state = self.tile_presentation_state
+        previous_tiles = set(int(tile) for tile in previous_state.payloads)
+        if previous_tiles and previous_tiles != set(planned):
+            self._atomic_fast_reject_reason = "previous-scope"
+            return None
+        self.payload_revision += 1
+        near = tuple(
+            tile
+            for tile in self._near_tile_numbers(margin_tiles=2)
+            if int(tile) not in self.skipped_tiles
+        )
+        near_source_ids = {
+            int(tile): self.display_tile_payloads[int(tile)].source_id
+            for tile in near
+            if int(tile) in self.display_tile_payloads
+        }
+        delta = TilePresentationDelta(
+            structure_revision=self.structure_revision,
+            payload_revision=self.payload_revision,
+            visibility_revision=self.visibility_revision,
+            level_revision=self.level_revision,
+            histogram_revision=self.histogram_revision,
+            viewport_revision=self.viewport_revision,
+            base_revision=int(previous_state.revision),
+            target_revision=int(previous_state.revision) + 1,
+            transaction_generation=int(self.session_id),
+            upserts=payloads,
+            active_tiles=planned,
+            planned_tiles=planned,
+            near_tiles=near,
+            near_tile_source_ids=near_source_ids,
+        )
+        return previous_state.apply_delta(delta), delta
 
     def acknowledge_tile_presentation(
         self,
@@ -2194,6 +2663,13 @@ class MontageRenderSession:
             # Acknowledge nothing and park nothing: every dirty entry stays
             # armed, so the next flush re-presents through a real commit.
             return self.tile_presentation_state
+        # Production marks the handoff immediately before invoking the
+        # backend. Keeping acknowledgement self-contained is both defensive
+        # (an accepted backend report proves that handoff occurred) and lets
+        # transaction-level tests model the boundary without reaching into
+        # renderer effects. Repeating the same emitted identities is
+        # idempotent.
+        self.lifecycle.commit_emitted(delta.upserts)
         level_delta_stale = bool(
             self.has_pending_level_update()
             and dict(delta.upserts)
@@ -2217,15 +2693,6 @@ class MontageRenderSession:
         )
         if set(machine_accepted) != set(report_accepted):
             report = replace(report, committed_upserts=frozenset(machine_accepted))
-        ledger_accepted = self.tile_ledger.backend_ack(
-            {
-                int(tile): delta.upserts[int(tile)]
-                for tile in tuple(report.accepted_upserts(delta))
-                if int(tile) in delta.upserts
-            }
-        )
-        if set(ledger_accepted) != set(report.accepted_upserts(delta)):
-            report = replace(report, committed_upserts=frozenset(ledger_accepted))
         acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
         self.tile_presentation_state = acknowledged
         accepted_upserts = report.accepted_upserts(delta)
@@ -2435,6 +2902,14 @@ class MontageRenderSession:
                         and source_index is not None
                         and evaluation_claim_source_index == source_index
                     ),
+                    "preview_claims": () if rec is None else tuple(
+                        (
+                            int(rung),
+                            int(claim[0]),
+                            bool(claim[1] == (self.key, semantic_source)),
+                        )
+                        for rung, claim in sorted(rec.preview_claims.items())
+                    ),
                     "semantic_state": "" if rec is None else str(rec.semantic.value),
                     "presentation_state": "" if rec is None else str(rec.presentation.value),
                     "presented_quality": "" if rec is None else str(getattr(rec, "presented_quality", "")),
@@ -2618,12 +3093,10 @@ class MontageRenderSession:
     def visible_plan_complete(self) -> bool:
         if self.has_stale_level_presentations():
             return False
-        self.sync_tile_ledger_scope()
-        return self.tile_ledger.visible_target_settled()
+        return self.lifecycle.visible_target_settled()
 
     def visible_first_pixels_presented(self) -> bool:
-        self.sync_tile_ledger_scope()
-        return self.tile_ledger.visible_first_pixels_presented()
+        return self.lifecycle.visible_first_pixels_presented()
 
     def _tile_presentation_matches_current_plan(self, tile_number: int) -> bool:
         index = int(tile_number)
@@ -2682,8 +3155,13 @@ class MontageRenderSession:
 
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
-        self.final_commit_pending = False
-        self.flush_pending = False
+        commit_owed = bool(
+            self.dirty_payloads
+            or self.pending_payload_upserts
+            or self.pending_removals
+        )
+        self.final_commit_pending = commit_owed
+        self.flush_pending = commit_owed
 
     def enqueue_pending_tile(self, tile: MontageTile) -> bool:
         self._ensure_pending_priority_queue()
@@ -3009,13 +3487,6 @@ def _diag_identity(value, *, limit: int = 180) -> str:
     if len(text) <= int(limit):
         return text
     return text[: max(0, int(limit) - 3)] + "..."
-
-
-def _array_content_token(array) -> tuple[object, ...]:
-    values = np.asarray(array)
-    shape = tuple(int(value) for value in values.shape)
-    dtype = values.dtype.str
-    return shape, dtype, id(values)
 
 
 def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[object, ...]:

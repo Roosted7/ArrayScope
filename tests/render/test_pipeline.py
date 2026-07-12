@@ -1,4 +1,4 @@
-"""MontagePipeline scheduling skeleton against the real kernel.
+"""FramePipeline scheduling skeleton against the real kernel.
 
 Pins: retarget submits exactly the missing rung work, semantic changes clear
 the scope, viewport changes supersede per-tile rung families, and commit
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from arrayscope.display.lod import LodDemand
 from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane, TaskSpec
-from arrayscope.render.ladder import LadderPolicy, LodLadder, TileLodState
-from arrayscope.render.pipeline import MontagePipeline
+from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
+from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 
 
@@ -76,7 +76,13 @@ class StubEffects:
         # Mirror the real effects' in-flight/admitted dedupe: an identical
         # (tile, rung, level) is prepared at most once per target — that is
         # the guard that makes camera-only replans free.
-        marker = (intent.semantic_key, step.tile_number, int(step.rung), step.level)
+        marker = (
+            intent.semantic_key,
+            intent.source_id_for_tile(step.tile_number),
+            step.tile_number,
+            int(step.rung),
+            step.level,
+        )
         if marker in self.prepared:
             return False
         self.prepared.append(marker)
@@ -102,7 +108,7 @@ def make_pipeline(tiles=2, **policy_kwargs):
     kernel = Kernel(InlineWorkerBackend(), handler_error_hook=lambda ctx, exc: None)
     effects = StubEffects(tiles=tiles)
     ladder = LodLadder(LadderPolicy(**policy_kwargs)) if policy_kwargs else LodLadder()
-    pipeline = MontagePipeline(kernel, effects, ladder)
+    pipeline = FramePipeline(kernel, effects, ladder)
     return kernel, effects, pipeline
 
 
@@ -111,7 +117,7 @@ def make_manual_pipeline(tiles=2, **policy_kwargs):
     kernel = Kernel(backend, handler_error_hook=lambda ctx, exc: None)
     effects = StubEffects(tiles=tiles)
     ladder = LodLadder(LadderPolicy(**policy_kwargs)) if policy_kwargs else LodLadder()
-    pipeline = MontagePipeline(kernel, effects, ladder)
+    pipeline = FramePipeline(kernel, effects, ladder)
     return kernel, backend, effects, pipeline
 
 
@@ -142,7 +148,7 @@ def drain(kernel):
         kernel.dispatch_event(event)
 
 
-def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False):
+def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False, source_id=None):
     return RenderIntent(
         semantic_key=semantic,
         viewport_key=viewport,
@@ -150,6 +156,8 @@ def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False):
         view_range=((0.0, 10.0), (0.0, 10.0)),
         viewport_shape=(100, 100),
         interactive=bool(interactive),
+        tile_source_ids=() if source_id is None else ((0, source_id),),
+        tile_source_indices=() if source_id is None else ((0, int(source_id[-1])),),
     )
 
 
@@ -305,7 +313,7 @@ def test_zoom_out_over_presented_native_submits_no_display_demotions():
     assert effects.batches == []
 
 
-def test_preview_at_non_native_demand_level_satisfies_display_demand():
+def test_preview_at_non_native_demand_level_still_admits_target_rung():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.states[0] = TileLodState(
         tile_number=0,
@@ -314,16 +322,16 @@ def test_preview_at_non_native_demand_level_satisfies_display_demand():
         presented_quality="preview",
     )
 
-    assert pipeline.retarget(intent(interactive=False), demand(3), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=False), demand(3), scope(0)) == 1
     drain(kernel)
 
-    assert effects.evaluated == []
+    assert effects.evaluated == [(0, Rung.DESIRED, 3)]
 
 
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=1)
-    pipeline = MontagePipeline(kernel, effects, LodLadder())
+    pipeline = FramePipeline(kernel, effects, LodLadder())
 
     pipeline.retarget(intent(semantic="window-1"), demand(1), scope(0))
     old_done = kernel.callbacks[0]["on_done"]
@@ -340,7 +348,7 @@ def test_stale_done_from_previous_semantic_is_dropped_not_committed():
 def test_none_completion_releases_prepared_rung_claim():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=1)
-    pipeline = MontagePipeline(kernel, effects, LodLadder())
+    pipeline = FramePipeline(kernel, effects, LodLadder())
 
     pipeline.retarget(intent(semantic="window-1"), demand(1), scope(0))
     done = kernel.callbacks[0]["on_done"]
@@ -351,6 +359,26 @@ def test_none_completion_releases_prepared_rung_claim():
     assert effects.batches == []
     assert any(drop.semantic_key == "window-1" for drop in effects.drop_intents)
     assert (step.tile_number, step.rung, step.level) in effects.dropped
+
+
+def test_same_frame_slot_source_change_supersedes_old_rung_identity():
+    kernel = CaptureKernel()
+    effects = StubEffects(tiles=1)
+    pipeline = FramePipeline(kernel, effects, LodLadder())
+
+    old_intent = intent(semantic="stable-frame", source_id=("source", 10))
+    new_intent = intent(semantic="stable-frame", source_id=("source", 11))
+    pipeline.retarget(old_intent, demand(1), scope(0))
+    old_done = kernel.callbacks[0]["on_done"]
+    old_step = kernel.specs[0].key
+
+    pipeline.retarget(new_intent, demand(1), scope(0))
+    old_done(("payload", old_step.tile_number, old_step.level))
+
+    assert effects.batches == []
+    assert kernel.specs[0].key.source_id == ("source", 10)
+    assert any(spec.key.source_id == ("source", 11) for spec in kernel.specs[1:])
+    assert effects.drop_intents[-1] is old_intent
 
 
 def test_dropped_queued_rung_releases_prepared_state():
@@ -398,7 +426,7 @@ def test_pipeline_never_expresses_rung_ordering_through_deps():
 
     kernel = CaptureKernel()
     effects = StubEffects(tiles=2)
-    pipeline = MontagePipeline(kernel, effects, LodLadder())
+    pipeline = FramePipeline(kernel, effects, LodLadder())
 
     assert pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2)) == 4
 
@@ -411,7 +439,7 @@ def test_pipeline_never_expresses_rung_ordering_through_deps():
 def test_retarget_plans_visible_scope_only_not_coverage_or_near_tiles():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=6)
-    pipeline = MontagePipeline(kernel, effects, LodLadder())
+    pipeline = FramePipeline(kernel, effects, LodLadder())
 
     admission_scope = LodAdmissionScope(
         visible_tile_numbers=frozenset({2, 4}),
@@ -426,3 +454,23 @@ def test_retarget_plans_visible_scope_only_not_coverage_or_near_tiles():
     submitted_tiles = {int(spec.key.tile_number) for spec in kernel.specs}
     assert submitted_tiles == {2, 4}
     assert all(spec.lane in (Lane.DISPLAY_PREVIEW, Lane.DISPLAY_PREPARATION) for spec in kernel.specs)
+
+
+def test_large_visible_plan_admission_is_chunked_and_completion_driven():
+    kernel, backend, effects, pipeline = make_manual_pipeline(tiles=40)
+    visible = tuple(range(40))
+
+    submitted = pipeline.retarget(intent(), demand(1), scope(*visible, missing=40))
+
+    assert submitted == pipeline.ADMISSION_CHUNK
+    assert pipeline.counters.tasks_submitted == pipeline.ADMISSION_CHUNK
+    assert len(pipeline._pending_admissions) == 80 - pipeline.ADMISSION_CHUNK
+
+    while backend.run_next():
+        drain(kernel)
+    drain(kernel)
+
+    assert pipeline.counters.tasks_submitted == 80
+    assert len(effects.evaluated) == 80
+    assert not pipeline._pending_admissions
+    assert not pipeline._admission_continuation_armed

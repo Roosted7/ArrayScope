@@ -156,6 +156,7 @@ class TileCommitReport:
     existing_items_shown: int = 0
     relocated_tiles: int = 0
     storage_rebuilds: int = 0
+    vertex_uploads: int = 0
     cold_work_ms: float = 0.0
     visibility_work_ms: float = 0.0
     total_ms: float = 0.0
@@ -168,6 +169,9 @@ class TileCommitReport:
     # (ADR 0051 rule 1; field defect 2026-07-05, JSONL 112841).  None means
     # unbound (legacy constructions/tests): the causality check is skipped.
     delta_key: tuple[int, int] | None = None
+    # Presentation revisions are local to one FrameSession and can repeat
+    # after a retarget/rebirth. Bind acknowledgement to that session too.
+    transaction_generation: int | None = None
     # Ground truth from the backend: the payload identity each drawn tile
     # ACTUALLY holds after this commit (tile -> source_id).  The session
     # converges its presentation against this map (ADR 0051 rule 1); its own
@@ -180,6 +184,8 @@ class TileCommitReport:
             object.__setattr__(
                 self, "delta_key", (int(self.delta_key[0]), int(self.delta_key[1]))
             )
+        if self.transaction_generation is not None:
+            object.__setattr__(self, "transaction_generation", int(self.transaction_generation))
         if self.presented_identities is not None:
             object.__setattr__(
                 self,
@@ -217,6 +223,12 @@ class TileCommitReport:
     def acknowledges(self, delta: "TilePresentationDelta") -> bool:
         """Whether this report was produced by committing exactly ``delta``."""
 
+        if (
+            self.transaction_generation is not None
+            and delta.transaction_generation is not None
+            and int(self.transaction_generation) != int(delta.transaction_generation)
+        ):
+            return False
         if self.delta_key is None:
             return True
         return self.delta_key == (int(delta.base_revision), int(delta.target_revision))
@@ -239,6 +251,7 @@ class TilePresentationDelta:
     viewport_revision: int
     base_revision: int = 0
     target_revision: int = 0
+    transaction_generation: int | None = None
     cold_deadline_ms: float | None = None
     upserts: Mapping[int, DisplayTilePayload] = field(default_factory=dict)
     removals: tuple[int, ...] = ()
@@ -270,6 +283,8 @@ class TilePresentationDelta:
         object.__setattr__(self, "base_revision", int(self.base_revision))
         target = int(self.target_revision) if int(self.target_revision) else int(self.base_revision) + (1 if upserts or removals else 0)
         object.__setattr__(self, "target_revision", target)
+        if self.transaction_generation is not None:
+            object.__setattr__(self, "transaction_generation", int(self.transaction_generation))
         deadline = self.cold_deadline_ms
         object.__setattr__(self, "cold_deadline_ms", None if deadline is None else max(0.0, float(deadline)))
         object.__setattr__(self, "upserts", upserts)

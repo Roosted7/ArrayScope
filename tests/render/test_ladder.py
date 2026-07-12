@@ -56,6 +56,25 @@ def test_converged_tile_plans_nothing():
     assert ladder.plan_tile(state, demand(1)) == ()
 
 
+def test_ready_unacknowledged_preview_is_not_recomputed_during_commit_gap():
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    floor_ready = TileLodState(tile_number=0, ready_level=4, ready_quality="fallback")
+    preview_ready = TileLodState(tile_number=0, ready_level=2, ready_quality="fallback")
+
+    assert rungs(ladder.plan_tile(floor_ready, demand(1))) == [
+        (Rung.PREVIEW, 2),
+        (Rung.DESIRED, 1),
+    ]
+    assert rungs(ladder.plan_tile(preview_ready, demand(1))) == [(Rung.DESIRED, 1)]
+
+
+def test_ready_unacknowledged_target_is_converged_for_admission():
+    ladder = LodLadder()
+    state = TileLodState(tile_number=0, ready_level=1, ready_quality="exact")
+
+    assert ladder.plan_tile(state, demand(1)) == ()
+
+
 def test_zoom_in_refines_progressively():
     ladder = LodLadder(LadderPolicy(preview_level=2))
     state = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))

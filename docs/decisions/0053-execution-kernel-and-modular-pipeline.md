@@ -1,6 +1,7 @@
 # 0053 — Execution kernel and the modular rendering pipeline
 
-**Status:** Accepted (2026-07-07). Redesign branch `redesign`.
+**Status:** Accepted (2026-07-07); R5–R7 frame-transaction cutover landed
+(2026-07-09), R8 evidence pending. Redesign branch `redesign`.
 **Drives:** the plan set in [`docs/redesign/`](../redesign/README.md).
 
 ## Problem
@@ -71,15 +72,16 @@ CommitBatch → AckExpectation`. One owner per state:
 | commit batching queue | `render/pipeline.py` |
 | GPU/CPU application | backend adapter, GUI thread only |
 
-R2 ports the live montage path into this contract: Qt-free evaluation
+R2 ported the live montage path into this contract: Qt-free evaluation
 effects, lifecycle-backed tile-state snapshots, stage fan-in as kernel
 dependencies, commit batches applied through `present_tiled`, and the
-diagnostics-only stall assertion probe. `frame_renderer.py` is below the R2
-line gate (1,888 lines). R3 moved LOD convergence into the pipeline ladder,
+diagnostics-only stall assertion probe. R3 moved LOD convergence into the pipeline ladder,
 deleted `window/montage_lod.py`, collapsed montage residency to one
 `PyramidCache`, and moved montage level-stat maintenance to
-`render/level_stats.py`; R4 owns the remaining timer-to-kernel cleanup for
-level-stat publication.
+`render/level_stats.py`; R4 completed the timer/governor implementation.
+R5 then folded target/task/payload/ack settlement into one `TileLifecycle`,
+R6 generalized the scheduler as `FramePipeline`/`FrameSession`, and R7
+deleted the montage-era control-plane modules. R8 owns final evidence.
 
 ### Unified LOD ladder (`render/ladder.py`)
 
@@ -106,13 +108,11 @@ waiter.
 
 `core/work_graph.py`, `core/scheduler.py` (compat aliases already point at
 the kernel), `window/evaluation_controller.py` (after R1),
-`window/frame_renderer.py` dissolved per the
-[method map](../redesign/frame-renderer-map.md) (R2/R3; R2 clusters B/C/E
-complete, R3 deleted `window/montage_lod.py` and moved level stats to
-`render/level_stats.py`), pacing-governor
-batch machinery reduced to governor-as-telemetry (R4). Tests pinning
-deleted machinery are deleted with it (R5) — a test asserting timer pacing
-of work the kernel now schedules is a wrong-path signpost, not coverage.
+The legacy frame renderer, montage commit/runtime/session modules,
+`window/montage_lod.py`, WorkGraph, and parallel tile ledger are deleted.
+Their live replacements are the frame controller/effects/runtime/session
+modules, `FramePipeline`, `TileLifecycle`, and governor-as-telemetry. R9
+removes remaining tests that pin deleted mechanics.
 
 ## Rejected alternatives
 
