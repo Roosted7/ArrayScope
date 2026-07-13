@@ -598,7 +598,12 @@ class InspectionWorkflowMixin:
             delete_action = menu.addAction(material_icon("delete"), "Delete ROI")
             delete_action.triggered.connect(lambda _checked=False: self._delete_roi(roi_id))
             menu.addSeparator()
-        live = self.widgets["buttons"]["display"]["live_profile"].isChecked()
+        # Truthful checked state: the button can be stale-checked while the
+        # marker is gone (e.g. cleared by a clamp failure); showing that as
+        # active forced a click to "disable" before one could enable.
+        live_button = self.widgets["buttons"]["display"]["live_profile"]
+        marker_visible = hasattr(self, "img_view") and self.img_view.profileMarkerPosition() is not None
+        live = live_button.isChecked() and marker_visible
         profile_action = menu.addAction(material_icon("show_chart"), "Live profile")
         profile_action.setCheckable(True)
         profile_action.setChecked(live)
@@ -720,7 +725,13 @@ class InspectionWorkflowMixin:
             return None
 
     def _set_live_profile_from_context(self, enabled, image_point=None):
-        self.widgets["buttons"]["display"]["live_profile"].setChecked(bool(enabled))
+        button = self.widgets["buttons"]["display"]["live_profile"]
+        if bool(enabled) and button.isChecked():
+            # setChecked would be a no-op on a stale-checked button; re-run
+            # the activation path explicitly so one click always works.
+            self._on_live_profile_toggled(True)
+        else:
+            button.setChecked(bool(enabled))
         if enabled and image_point is not None:
             self.img_view.setProfileMarker(image_point[0], image_point[1], visible=True)
             self._on_profile_marker_moved(image_point[0], image_point[1])

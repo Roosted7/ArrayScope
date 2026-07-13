@@ -538,27 +538,33 @@ class RenderOrchestrator(
     def _on_profile_dock_visibility_changed(self, visible):
         if getattr(self.win, "_closing", False):
             return
+        # Badge availability must track every visibility transition — the
+        # canvas-preserve guard below skips user-driven show/hide, which is
+        # exactly when the chips need to (un)highlight.
+        self._sync_profile_strip_availability(bool(visible))
         if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
             return
         if not visible:
             self.win._profile_dock_user_visible = False
-        # Closing the dock keeps live-profile state and the crosshair alive
-        # (the marker value stays readable in the toolbar status); the chip
-        # badges just stop highlighting until the dock returns.
-        strip = getattr(self.win, "dimension_strip", None)
-        if strip is not None and hasattr(strip, "set_profile_available"):
-            strip.set_profile_available(bool(visible))
-            strip.update_state(
-                self.win.data.shape,
-                self.win.view_state,
-                self.win.profile_axes,
-                axes=self.win.document.current_axes,
-            )
         if visible:
             retry_profile = getattr(self, "_retry_loading_montage_profile", None)
             if callable(retry_profile):
                 retry_profile()
             self.update_line_plot()
+
+    def _sync_profile_strip_availability(self, visible: bool) -> None:
+        """Closing the dock keeps live-profile state and the crosshair alive;
+        the chip badges just stop highlighting until the dock returns."""
+        strip = getattr(self.win, "dimension_strip", None)
+        if strip is None or not hasattr(strip, "set_profile_available"):
+            return
+        strip.set_profile_available(bool(visible))
+        strip.update_state(
+            self.win.data.shape,
+            self.win.view_state,
+            self.win.profile_axes,
+            axes=self.win.document.current_axes,
+        )
 
     def _on_inspection_dock_visibility_changed(self, visible):
         if getattr(self.win, "_closing", False):

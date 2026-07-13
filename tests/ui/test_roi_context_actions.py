@@ -126,3 +126,43 @@ def test_roi_overlay_panel_renders_structured_rows(qtbot):
     assert "Lesion" in text
     panel.setText("plain fallback")
     assert panel.text() == "plain fallback"
+
+
+def test_profile_badges_track_dock_visibility(qtbot):
+    win = _window(qtbot, data=np.random.default_rng(0).normal(size=(24, 24, 4)))
+    badge = win.dimension_strip.chip(0).index_badge
+    live = win.widgets["buttons"]["display"]["live_profile"]
+
+    live.setChecked(True)
+    process_events(qtbot, count=12)
+    assert win.profile_dock.isVisible()
+    assert badge.isChecked(), "profile axis badge should highlight while the dock is visible"
+
+    win.layout_manager.set_profile_dock_visible_from_user(False)
+    process_events(qtbot, count=12)
+    assert not badge.isChecked(), "badges must un-highlight when the profile dock closes"
+    # Live profile state and the crosshair survive the dock closing.
+    assert live.isChecked()
+    assert win.img_view.profileMarkerPosition() is not None
+
+    win.layout_manager.set_profile_dock_visible_from_user(True)
+    process_events(qtbot, count=12)
+    assert badge.isChecked(), "reopening the dock restores the badge highlight"
+
+
+def test_live_profile_context_click_recovers_from_stale_checked_state(qtbot):
+    win = _window(qtbot, data=np.random.default_rng(0).normal(size=(24, 24, 4)))
+    live = win.widgets["buttons"]["display"]["live_profile"]
+    live.setChecked(True)
+    process_events(qtbot, count=12)
+
+    # Simulate the stale state: button checked but the marker was cleared.
+    win.renderer._clear_live_profile_marker()
+    process_events(qtbot, count=4)
+    assert live.isChecked()
+    assert win.img_view.profileMarkerPosition() is None
+
+    # One context-menu activation must fully re-enable live profile.
+    win._set_live_profile_from_context(True, (5.0, 5.0))
+    process_events(qtbot, count=12)
+    assert win.img_view.profileMarkerPosition() == (5.0, 5.0)

@@ -49,6 +49,14 @@ def pytest_xdist_auto_num_workers(config):
 # Keep direct-import test modules from replacing the real package in sys.modules.
 import arrayscope  # noqa: F401
 
+# Modules that tests monkeypatch but production code imports lazily must be
+# in the identity snapshot below from the start; otherwise the teardown
+# deletes the never-snapshotted sys.modules entry while the parent package
+# attribute keeps the old object, and later `from arrayscope.display import
+# colormap_library` resolves a *different* module than the running code uses
+# (patched writes become invisible to the UI under test).
+import arrayscope.display.colormap_library  # noqa: F401
+
 
 def _arrayscope_module_names():
     return [
