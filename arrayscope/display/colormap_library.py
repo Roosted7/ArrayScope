@@ -32,44 +32,155 @@ class ColormapInfo:
     source: str  # "builtin" | "user"
     # None for built-ins resolved through pyqtgraph / factories.
     stops: tuple[tuple[float, tuple[int, int, int]], ...] | None = None
+    group: str = "Other"
+    hidden: bool = False
 
 
-# Curated built-in library. Kind assignments follow the CET taxonomy
-# (L=linear, D=diverging, C=cyclic); ArrayScope's own maps keep their roles.
-_BUILTIN_SPECS = (
-    # Sequential / linear
-    ("gray", SEQUENTIAL),
-    ("viridis", SEQUENTIAL),
-    ("plasma", SEQUENTIAL),
-    ("inferno", SEQUENTIAL),
-    ("magma", SEQUENTIAL),
-    ("cividis", SEQUENTIAL),
-    ("turbo", SEQUENTIAL),
-    ("d3-warm", SEQUENTIAL),
-    ("d3-cool", SEQUENTIAL),
-    ("CET-L1", SEQUENTIAL),
-    ("CET-L3", SEQUENTIAL),
-    ("CET-L8", SEQUENTIAL),
-    ("CET-L16", SEQUENTIAL),
-    ("CET-L17", SEQUENTIAL),
-    ("CET-CBL1", SEQUENTIAL),
-    # Diverging
-    ("CET-D1", DIVERGING),
-    ("CET-D3", DIVERGING),
-    ("CET-D7", DIVERGING),
-    ("CET-D13", DIVERGING),
-    ("CET-CBD1", DIVERGING),
-    # Cyclic (phase-safe)
-    ("PAL-relaxed", CYCLIC),
-    ("PAL-relaxed_bright", CYCLIC),
-    ("hsv-phase", CYCLIC),
-    ("CET-C1", CYCLIC),
-    ("CET-C2", CYCLIC),
-    ("CET-C3", CYCLIC),
-    ("CET-C6", CYCLIC),
-    ("CET-C7", CYCLIC),
-    ("CET-CBC1", CYCLIC),
+_LIPARI_STOPS = (
+    (0.0, (3, 19, 38)),
+    (0.0312, (6, 29, 53)),
+    (0.0625, (9, 40, 68)),
+    (0.0938, (14, 51, 83)),
+    (0.125, (24, 62, 97)),
+    (0.1562, (37, 72, 109)),
+    (0.1875, (54, 81, 118)),
+    (0.2188, (69, 88, 122)),
+    (0.25, (82, 91, 122)),
+    (0.2812, (92, 93, 121)),
+    (0.3125, (101, 94, 119)),
+    (0.3438, (110, 95, 117)),
+    (0.375, (120, 95, 114)),
+    (0.4062, (130, 96, 112)),
+    (0.4375, (141, 97, 109)),
+    (0.4688, (152, 97, 106)),
+    (0.5, (165, 98, 103)),
+    (0.5312, (176, 99, 100)),
+    (0.5625, (190, 101, 97)),
+    (0.5938, (203, 104, 95)),
+    (0.625, (216, 110, 94)),
+    (0.6562, (226, 119, 96)),
+    (0.6875, (232, 130, 101)),
+    (0.7188, (234, 142, 108)),
+    (0.75, (233, 153, 115)),
+    (0.7812, (231, 163, 122)),
+    (0.8125, (229, 173, 130)),
+    (0.8438, (229, 184, 140)),
+    (0.875, (231, 195, 152)),
+    (0.9062, (235, 207, 167)),
+    (0.9375, (240, 219, 183)),
+    (0.9688, (246, 232, 201)),
+    (1.0, (253, 245, 218)),
 )
+_NAVIA_STOPS = (
+    (0.0, (3, 19, 39)),
+    (0.0312, (5, 28, 54)),
+    (0.0625, (5, 37, 70)),
+    (0.0938, (6, 47, 86)),
+    (0.125, (7, 57, 102)),
+    (0.1562, (10, 67, 116)),
+    (0.1875, (14, 77, 129)),
+    (0.2188, (20, 87, 138)),
+    (0.25, (27, 96, 143)),
+    (0.2812, (32, 104, 145)),
+    (0.3125, (38, 111, 144)),
+    (0.3438, (42, 116, 142)),
+    (0.375, (47, 121, 139)),
+    (0.4062, (51, 125, 137)),
+    (0.4375, (55, 129, 134)),
+    (0.4688, (60, 134, 131)),
+    (0.5, (65, 138, 128)),
+    (0.5312, (70, 143, 125)),
+    (0.5625, (76, 148, 122)),
+    (0.5938, (82, 154, 118)),
+    (0.625, (89, 160, 114)),
+    (0.6562, (98, 168, 110)),
+    (0.6875, (107, 176, 106)),
+    (0.7188, (120, 185, 104)),
+    (0.75, (135, 194, 105)),
+    (0.7812, (154, 204, 112)),
+    (0.8125, (174, 213, 125)),
+    (0.8438, (193, 220, 141)),
+    (0.875, (209, 227, 159)),
+    (0.9062, (223, 232, 176)),
+    (0.9375, (234, 237, 191)),
+    (0.9688, (244, 241, 205)),
+    (1.0, (252, 244, 217)),
+)
+
+
+# Curated built-in library, grouped for navigable pickers — an opinionated,
+# high-quality set rather than an exhaustive one. Kind assignments follow
+# the CET taxonomy (L=linear, D=diverging, C=cyclic). "crameri:<file>"
+# entries load Fabio Crameri's Scientific colour maps from the cmcrameri
+# package at runtime; Lipari and Navia keep embedded samples as fallback so
+# they exist even without cmcrameri installed.
+_BUILTIN_SPECS = (
+    # (name, kind, group, stops | "crameri:<file>" | None=pyqtgraph)
+    ("gray", SEQUENTIAL, "Classic", None),
+    ("d3-warm", SEQUENTIAL, "Classic", None),
+    ("d3-cool", SEQUENTIAL, "Classic", None),
+    ("viridis", SEQUENTIAL, "Perceptual", None),
+    ("plasma", SEQUENTIAL, "Perceptual", None),
+    ("inferno", SEQUENTIAL, "Perceptual", None),
+    ("cividis", SEQUENTIAL, "Perceptual", None),
+    ("turbo", SEQUENTIAL, "Perceptual", None),
+    ("Batlow", SEQUENTIAL, "Scientific", "crameri:batlow"),
+    ("Lipari", SEQUENTIAL, "Scientific", "crameri:lipari"),
+    ("Navia", SEQUENTIAL, "Scientific", "crameri:navia"),
+    ("Davos", SEQUENTIAL, "Scientific", "crameri:davos"),
+    ("LaJolla", SEQUENTIAL, "Scientific", "crameri:lajolla"),
+    ("Oslo", SEQUENTIAL, "Scientific", "crameri:oslo"),
+    ("CET-L1", SEQUENTIAL, "CET Linear", None),
+    ("CET-L17", SEQUENTIAL, "CET Linear", None),
+    ("CET-CBL1", SEQUENTIAL, "CET Linear", None),
+    ("Vik", DIVERGING, "Diverging", "crameri:vik"),
+    ("Roma", DIVERGING, "Diverging", "crameri:roma"),
+    ("Broc", DIVERGING, "Diverging", "crameri:broc"),
+    ("CET-D1", DIVERGING, "Diverging", None),
+    ("CET-CBD1", DIVERGING, "Diverging", None),
+    ("PAL-relaxed", CYCLIC, "Cyclic / Phase", None),
+    ("PAL-relaxed_bright", CYCLIC, "Cyclic / Phase", None),
+    ("hsv-phase", CYCLIC, "Cyclic / Phase", None),
+    ("RomaO", CYCLIC, "Cyclic / Phase", "crameri:romaO"),
+    ("VikO", CYCLIC, "Cyclic / Phase", "crameri:vikO"),
+    ("CorkO", CYCLIC, "Cyclic / Phase", "crameri:corkO"),
+    ("CET-C2", CYCLIC, "Cyclic / Phase", None),
+    ("CET-C6", CYCLIC, "Cyclic / Phase", None),
+    ("CET-CBC1", CYCLIC, "Cyclic / Phase", None),
+)
+
+_CRAMERI_FALLBACK_STOPS = {"lipari": _LIPARI_STOPS, "navia": _NAVIA_STOPS}
+_crameri_stops_cache: dict = {}
+
+
+def _resolve_builtin_stops(spec_stops):
+    """None => pyqtgraph name; tuple => embedded; 'crameri:x' => cmcrameri."""
+    if spec_stops is None or isinstance(spec_stops, tuple):
+        return spec_stops
+    file_stem = str(spec_stops).partition(":")[2]
+    if file_stem in _crameri_stops_cache:
+        return _crameri_stops_cache[file_stem]
+    stops = None
+    try:
+        from pathlib import Path
+
+        import cmcrameri
+
+        table = np.loadtxt(Path(cmcrameri.__file__).parent / "cmaps" / f"{file_stem}.txt")
+        stops = _stops_from_table(table)
+    except Exception:
+        stops = _CRAMERI_FALLBACK_STOPS.get(file_stem)
+    _crameri_stops_cache[file_stem] = stops
+    return stops
+
+
+def _builtin_spec_available(spec_stops) -> bool:
+    if spec_stops is None or isinstance(spec_stops, tuple):
+        return True
+    return _resolve_builtin_stops(spec_stops) is not None
+
+
+GROUP_ORDER = ("Perceptual", "Scientific", "Classic", "CET Linear", "Diverging", "Cyclic / Phase", "User")
 
 _user_cache: dict[str, ColormapInfo] | None = None
 _listeners: list = []
@@ -81,14 +192,28 @@ _listeners: list = []
 
 
 def builtin_colormaps() -> tuple[ColormapInfo, ...]:
-    return tuple(ColormapInfo(name, kind, "builtin") for name, kind in _BUILTIN_SPECS)
+    hidden = hidden_builtins()
+    result = []
+    for name, kind, group, spec_stops in _BUILTIN_SPECS:
+        if not _builtin_spec_available(spec_stops):
+            continue
+        stops = spec_stops if isinstance(spec_stops, tuple) else None
+        result.append(ColormapInfo(name, kind, "builtin", stops, group, name in hidden))
+    return tuple(result)
+
+
+def builtin_group_for(name: str) -> str | None:
+    for spec_name, _kind, group, _stops in _BUILTIN_SPECS:
+        if spec_name == str(name):
+            return group
+    return None
 
 
 def user_colormaps() -> tuple[ColormapInfo, ...]:
     return tuple(_load_user_cache().values())
 
 
-def list_colormaps(kind: str | None = None) -> tuple[ColormapInfo, ...]:
+def list_colormaps(kind: str | None = None, *, include_hidden: bool = False) -> tuple[ColormapInfo, ...]:
     """User maps first (they shadow built-ins by name), then built-ins."""
     seen = set()
     result = []
@@ -96,9 +221,24 @@ def list_colormaps(kind: str | None = None) -> tuple[ColormapInfo, ...]:
         if info.name in seen:
             continue
         seen.add(info.name)
+        if info.hidden and not include_hidden:
+            continue
         if kind is None or info.kind == kind:
             result.append(info)
     return tuple(result)
+
+
+def grouped_colormaps(family: str | None = None, *, include_hidden: bool = False):
+    """Ordered [(group, [infos])], optionally filtered to a channel family."""
+    kinds = None if family is None else kinds_for_family(family)
+    by_group: dict[str, list[ColormapInfo]] = {}
+    for info in list_colormaps(include_hidden=include_hidden):
+        if kinds is not None and info.kind not in kinds:
+            continue
+        by_group.setdefault(info.group, []).append(info)
+    ordered = [group for group in GROUP_ORDER if group in by_group]
+    ordered += [group for group in sorted(by_group) if group not in ordered]
+    return [(group, by_group[group]) for group in ordered]
 
 
 def kinds_for_family(family: str) -> tuple[str, ...]:
@@ -112,9 +252,20 @@ def colormaps_for_family(family: str) -> tuple[ColormapInfo, ...]:
 
 
 def find_colormap(name: str) -> ColormapInfo | None:
-    for info in list_colormaps():
+    for info in list_colormaps(include_hidden=True):
         if info.name == str(name):
             return info
+    return None
+
+
+def builtin_stops_colormap(name: str):
+    """ColorMap for a built-in that carries its own stops (embedded or
+    cmcrameri-backed); None when the name resolves elsewhere."""
+    for spec_name, _kind, _group, spec_stops in _BUILTIN_SPECS:
+        if spec_name == str(name) and spec_stops is not None:
+            stops = _resolve_builtin_stops(spec_stops)
+            if stops is not None:
+                return _colormap_from_stops(stops)
     return None
 
 
@@ -123,6 +274,11 @@ def get_colormap(name: str):
     info = _load_user_cache().get(str(name))
     if info is not None and info.stops:
         return _colormap_from_stops(info.stops)
+    for spec_name, _kind, _group, spec_stops in _BUILTIN_SPECS:
+        if spec_name == str(name) and spec_stops is not None:
+            stops = _resolve_builtin_stops(spec_stops)
+            if stops is not None:
+                return _colormap_from_stops(stops)
     from arrayscope.display.colormaps import named_colormap
 
     return named_colormap(str(name))
@@ -207,7 +363,8 @@ def save_user_colormap(name: str, kind: str, stops) -> ColormapInfo:
     normalized = _normalize_stops(stops)
     if len(normalized) < 2:
         raise ValueError("a colormap needs at least two stops")
-    info = ColormapInfo(name, str(kind), "user", normalized)
+    group = builtin_group_for(name) or "User"
+    info = ColormapInfo(name, str(kind), "user", normalized, group)
     directory = user_colormap_directory()
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, f"{_safe_file_name(name)}.json"), "w") as handle:
@@ -245,7 +402,7 @@ def export_colormap(name: str, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def import_colormap_file(path: str, *, name: str | None = None, kind: str = SEQUENTIAL) -> ColormapInfo:
+def import_colormap_file(path: str, *, name: str | None = None, kind: str | None = None) -> ColormapInfo:
     """Import a colormap from .json (ours), .mat (MATLAB), .csv/.txt or .npy.
 
     Tabular formats hold an N×3 (or N×4, alpha ignored) array in 0–1 floats
@@ -262,6 +419,9 @@ def import_colormap_file(path: str, *, name: str | None = None, kind: str = SEQU
     else:  # csv / txt / anything np.loadtxt can read
         table = _loadtxt_any(path)
     stops = _stops_from_table(np.asarray(table))
+    if kind is None:
+        detected, confidence = detect_colormap_kind(stops)
+        kind = detected if confidence >= 0.9 else SEQUENTIAL
     default_name = os.path.splitext(os.path.basename(path))[0]
     return save_user_colormap(name or default_name, kind, stops)
 
@@ -316,6 +476,93 @@ def _stops_from_table(table: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
+# Hidden built-ins (deletable, restorable)
+# ---------------------------------------------------------------------------
+
+
+def _hidden_file() -> str:
+    return os.path.join(user_colormap_directory(), "hidden-builtins.json")
+
+
+def hidden_builtins() -> frozenset[str]:
+    try:
+        with open(_hidden_file()) as handle:
+            return frozenset(str(name) for name in json.load(handle))
+    except Exception:
+        return frozenset()
+
+
+def set_builtin_hidden(name: str, hidden: bool) -> None:
+    names = set(hidden_builtins())
+    if bool(hidden):
+        names.add(str(name))
+    else:
+        names.discard(str(name))
+    os.makedirs(user_colormap_directory(), exist_ok=True)
+    with open(_hidden_file(), "w") as handle:
+        json.dump(sorted(names), handle)
+    _notify()
+
+
+def overrides_builtin(name: str) -> bool:
+    return str(name) in _load_user_cache() and builtin_group_for(name) is not None
+
+
+def reset_builtin(name: str) -> bool:
+    """Remove a user override and/or un-hide the built-in of this name."""
+    changed = False
+    if overrides_builtin(name):
+        changed = delete_user_colormap(name) or changed
+    if str(name) in hidden_builtins():
+        set_builtin_hidden(name, False)
+        changed = True
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# Kind detection for imported tables
+# ---------------------------------------------------------------------------
+
+
+def detect_colormap_kind(stops) -> tuple[str, float]:
+    """Best-guess (kind, confidence 0..1) from stop colors.
+
+    Cyclic: endpoints nearly identical. Diverging: endpoint lightness
+    similar with a strong lightness extremum near the middle. Otherwise
+    sequential, scored by lightness monotonicity.
+    """
+    colors = np.asarray([color for _pos, color in stops], dtype=float)
+    if len(colors) < 3:
+        return SEQUENTIAL, 0.0
+    lightness = colors @ np.array([0.299, 0.587, 0.114])
+    span = max(1.0, float(lightness.max() - lightness.min()))
+
+    endpoint_rgb_distance = float(np.linalg.norm(colors[0] - colors[-1]))
+    cyclic_score = max(0.0, 1.0 - endpoint_rgb_distance / 90.0)
+
+    endpoint_l_delta = abs(float(lightness[0] - lightness[-1]))
+    mid = len(lightness) // 2
+    center_zone = lightness[max(1, mid - max(1, len(lightness) // 4)) : mid + max(2, len(lightness) // 4)]
+    center_extreme = max(
+        float(center_zone.max() - max(lightness[0], lightness[-1])),
+        float(min(lightness[0], lightness[-1]) - center_zone.min()),
+    )
+    diverging_score = max(0.0, min(1.0, center_extreme / (0.35 * span))) * max(
+        0.0, 1.0 - endpoint_l_delta / (0.3 * span)
+    )
+    # A cyclic map also has matching endpoints; prefer cyclic when both fire.
+    diverging_score *= 1.0 - 0.5 * cyclic_score
+
+    diffs = np.diff(lightness)
+    monotonic_score = float(max((diffs >= -1e-9).mean(), (diffs <= 1e-9).mean()))
+    sequential_score = monotonic_score * max(0.0, 1.0 - cyclic_score)
+
+    scores = {CYCLIC: cyclic_score, DIVERGING: diverging_score, SEQUENTIAL: sequential_score}
+    best = max(scores, key=scores.get)
+    return best, float(scores[best])
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -359,7 +606,7 @@ def _info_from_json_file(path: str) -> ColormapInfo:
     )
     if len(stops) < 2:
         raise ValueError(f"colormap file has fewer than two stops: {path}")
-    return ColormapInfo(name, kind, "user", stops)
+    return ColormapInfo(name, kind, "user", stops, builtin_group_for(name) or "User")
 
 
 def _safe_file_name(name: str) -> str:

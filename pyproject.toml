@@ -36,6 +36,7 @@ dependencies = [
     "imageio>=2.9.0",
     "imageio-ffmpeg>=0.4.2",
     "Pillow>=8.0.0",
+    "cmcrameri>=1.0.0",
     "qt-material-icons>=0.3.0",
     "psutil>=7.0.0",
 ]

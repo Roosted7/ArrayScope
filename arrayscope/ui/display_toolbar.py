@@ -103,9 +103,23 @@ class DisplayToolbar(QtWidgets.QToolBar):
         )
 
         self.addSeparator()
-        self.colormap_combo = self._add_group("Color", "palette", ())
-        self._colormap_previous_index = 0
-        self.colormap_combo.currentIndexChanged.connect(self._colormap_index_changed)
+        icon_label = QtWidgets.QLabel()
+        icon_label.setPixmap(material_icon("palette").pixmap(14, 14))
+        icon_label.setToolTip("Color")
+        self._group_icon_actions.append(self.addWidget(icon_label))
+        self._group_icon_labels.append((icon_label, "palette"))
+        text_label = QtWidgets.QLabel("Color")
+        self._group_text_actions.append(self.addWidget(text_label))
+        # Grouped fold-out picker: submenus per colormap group.
+        self.colormap_button = QtWidgets.QToolButton()
+        self.colormap_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.colormap_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.colormap_button.setToolTip("Colormap")
+        self._colormap_menu = QtWidgets.QMenu(self.colormap_button)
+        self.colormap_button.setMenu(self._colormap_menu)
+        self._colormap_family = "scalar"
+        self._current_colormap = None
+        self.addWidget(self.colormap_button)
 
         self.addSeparator()
         self.fit_action = self.addAction("Fit")
@@ -172,45 +186,59 @@ class DisplayToolbar(QtWidgets.QToolBar):
         free space between the left and right control groups)."""
         self._center_layout.insertWidget(self._center_layout.count() - 1, widget)
 
-    def set_colormap_options(self, names, *, current=None) -> None:
-        """Rebuild the picker for the active channel family."""
-        combo = self.colormap_combo
-        items = tuple((str(name), str(name), None) for name in names)
-        blocker = QtCore.QSignalBlocker(combo)
-        try:
-            combo.clear()
-            for text, value, glyph in items:
-                combo.addItem(_item_icon(value, glyph), "" if self._compact_level >= 3 else text, value)
-                combo.setItemData(combo.count() - 1, text, QtCore.Qt.ItemDataRole.ToolTipRole)
-            combo.addItem(material_icon("edit"), "" if self._compact_level >= 3 else "Customize…", CUSTOMIZE_COLORMAP)
-            combo.setItemData(combo.count() - 1, "Edit, create and import colormaps", QtCore.Qt.ItemDataRole.ToolTipRole)
-            if current is not None:
-                index = combo.findData(str(current))
-                if index >= 0:
-                    combo.setCurrentIndex(index)
-            self._colormap_previous_index = combo.currentIndex()
-        finally:
-            blocker.unblock()
-        # Registered items drive the compact re-labeling / icon refresh.
-        self._combo_items = [
-            entry if entry[0] is not combo else (combo, items + (("Customize…", CUSTOMIZE_COLORMAP, "…"),))
-            for entry in self._combo_items
-        ]
+    def set_colormap_options(self, family, *, current=None) -> None:
+        """Rebuild the grouped picker menu for the active channel family."""
+        from arrayscope.display import colormap_library as library
 
-    def _colormap_index_changed(self, index) -> None:
-        combo = self.colormap_combo
-        value = combo.itemData(index)
-        if value == CUSTOMIZE_COLORMAP:
-            blocker = QtCore.QSignalBlocker(combo)
-            try:
-                combo.setCurrentIndex(max(0, self._colormap_previous_index))
-            finally:
-                blocker.unblock()
-            self.colormapCustomizeRequested.emit()
-            return
-        self._colormap_previous_index = index
-        if value:
-            self.colormapChanged.emit(str(value))
+        self._colormap_family = str(family)
+        if current is not None:
+            self._current_colormap = str(current)
+        menu = self._colormap_menu
+        names = tuple(
+            info.name
+            for _group, infos in library.grouped_colormaps(self._colormap_family)
+            for info in infos
+        )
+        state = (self._colormap_family, names)
+        # Binder syncs call this often; never tear the menu down while the
+        # user is browsing it, and skip rebuilds when nothing changed.
+        if state == getattr(self, "_colormap_menu_state", None) or menu.isVisible():
+            if state == getattr(self, "_colormap_menu_state", None):
+                self._sync_colormap_button()
+                return
+        self._colormap_menu_state = state
+        menu.clear()
+        for group, infos in library.grouped_colormaps(self._colormap_family):
+            submenu = menu.addMenu(group)
+            for info in infos:
+                action = submenu.addAction(_colormap_icon(info.name), info.name)
+                action.setCheckable(True)
+                action.setChecked(self._current_colormap == info.name)
+                action.triggered.connect(
+                    lambda _checked=False, name=info.name: self._pick_colormap(name)
+                )
+        menu.addSeparator()
+        customize = menu.addAction(material_icon("edit"), "Customize…")
+        customize.setToolTip("Edit, create and import colormaps")
+        customize.triggered.connect(self.colormapCustomizeRequested)
+        self._sync_colormap_button()
+
+    def _pick_colormap(self, name: str) -> None:
+        self._current_colormap = str(name)
+        self._sync_colormap_button()
+        self.colormapChanged.emit(str(name))
+
+    def _sync_colormap_button(self) -> None:
+        name = self._current_colormap or ""
+        self.colormap_button.setIcon(_colormap_icon(name) if name else material_icon("palette"))
+        self.colormap_button.setText("" if self._compact_level >= 3 else name)
+        self.colormap_button.setToolTip(f"Colormap: {name}" if name else "Colormap")
+        for group_action in self._colormap_menu.actions():
+            submenu = group_action.menu()
+            if submenu is None:
+                continue
+            for action in submenu.actions():
+                action.setChecked(action.text() == name)
 
     def sync_center_separator(self) -> None:
         has_text = False
@@ -260,6 +288,8 @@ class DisplayToolbar(QtWidgets.QToolBar):
             for index, (text, _value, _glyph) in enumerate(items):
                 combo.setItemText(index, "" if level >= 3 else text)
             combo.setMaximumWidth(46 if level >= 3 else 16_777_215)
+        if hasattr(self, "colormap_button"):
+            self._sync_colormap_button()
 
     def _required_width(self, level: int) -> int:
         self._apply_compact_level(level)
@@ -294,6 +324,8 @@ class DisplayToolbar(QtWidgets.QToolBar):
         for combo, items in self._combo_items:
             for index, (_text, value, glyph) in enumerate(items):
                 combo.setItemIcon(index, _item_icon(value, glyph))
+        if hasattr(self, "colormap_button"):
+            self.set_colormap_options(self._colormap_family, current=self._current_colormap)
 
     # ------------------------------------------------------------------
     # State API (unchanged)
@@ -320,11 +352,13 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.channelChanged.emit(self.channel_combo.currentData())
 
     def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None, colormap=None):
+        if colormap is not None and str(colormap) != self._current_colormap:
+            self._current_colormap = str(colormap)
+            self._sync_colormap_button()
         for combo, value in (
             (self.channel_combo, channel),
             (self.scale_combo, scale),
             (self.window_combo, window_mode),
-            (self.colormap_combo, colormap),
         ):
             if value is None:
                 continue

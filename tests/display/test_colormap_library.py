@@ -27,7 +27,8 @@ def test_family_filtering_is_phase_safe():
     scalar_names = {info.name for info in library.colormaps_for_family("scalar")}
     assert "viridis" not in phase_names
     assert "PAL-relaxed" in phase_names
-    assert "CET-C1" in phase_names
+    assert "CET-C2" in phase_names
+    assert "RomaO" in phase_names
     assert "viridis" in scalar_names
     assert "PAL-relaxed" not in scalar_names
 
@@ -99,3 +100,52 @@ def test_policy_family_mapping():
     assert colormap_family("angle") == "phase"
     assert colormap_family("real") == "scalar"
     assert colormap_family("abs") == "scalar"
+
+
+def test_grouped_colormaps_order_and_membership():
+    groups = dict(library.grouped_colormaps())
+    assert "Scientific" in groups
+    names = {info.name for info in groups["Scientific"]}
+    assert {"Lipari", "Navia"} <= names
+    ordered = [group for group, _infos in library.grouped_colormaps()]
+    assert ordered.index("Perceptual") < ordered.index("Cyclic / Phase")
+
+
+def test_hidden_builtin_round_trip():
+    assert library.find_colormap("turbo").hidden is False
+    library.set_builtin_hidden("turbo", True)
+    visible = {info.name for info in library.list_colormaps()}
+    assert "turbo" not in visible
+    assert library.find_colormap("turbo").hidden is True
+    assert library.reset_builtin("turbo")
+    assert library.find_colormap("turbo").hidden is False
+
+
+def test_builtin_override_and_reset():
+    stops = ((0.0, (255, 0, 0)), (1.0, (0, 0, 255)))
+    library.save_user_colormap("viridis", library.SEQUENTIAL, stops)
+    assert library.overrides_builtin("viridis")
+    info = library.find_colormap("viridis")
+    assert info.source == "user" and info.group == "Perceptual"
+    assert library.reset_builtin("viridis")
+    assert library.find_colormap("viridis").source == "builtin"
+
+
+def test_kind_detection_on_real_maps():
+    detect = library.detect_colormap_kind
+    kind, confidence = detect(library.colormap_stops("RomaO", 33))
+    assert kind == library.CYCLIC and confidence > 0.9
+    kind, confidence = detect(library.colormap_stops("Vik", 33))
+    assert kind == library.DIVERGING and confidence > 0.9
+    kind, _confidence = detect(library.colormap_stops("Batlow", 33))
+    assert kind == library.SEQUENTIAL
+
+
+def test_import_auto_detects_cyclic(tmp_path):
+    table = np.asarray(
+        [library.get_colormap("RomaO").getLookupTable(0.0, 1.0, 64, alpha=False)]
+    )[0]
+    path = tmp_path / "wrapped.csv"
+    np.savetxt(path, table, delimiter=",")
+    info = library.import_colormap_file(str(path), name="wrapped")
+    assert info.kind == library.CYCLIC

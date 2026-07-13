@@ -50,13 +50,17 @@ def d3_cool_colormap():
 
 
 def named_colormap(colormap_name):
-    # Persistent user-defined maps shadow built-ins by name.
+    # Persistent user-defined maps shadow built-ins by name; stop-backed
+    # built-ins (embedded / cmcrameri) resolve through the library too.
     try:
         from arrayscope.display import colormap_library
 
         user_info = colormap_library._load_user_cache().get(str(colormap_name))
         if user_info is not None and user_info.stops:
             return colormap_library._colormap_from_stops(user_info.stops)
+        builtin = colormap_library.builtin_stops_colormap(colormap_name)
+        if builtin is not None:
+            return builtin
     except Exception:
         pass
     if colormap_name == "gray":
