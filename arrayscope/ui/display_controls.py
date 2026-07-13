@@ -522,6 +522,9 @@ class DisplayControlBuildMixin:
         set_hud_provider = getattr(self.img_view, "setHudContextProvider", None)
         if callable(set_hud_provider):
             set_hud_provider(self._hud_context_rows)
+        set_gradient_handler = getattr(self.img_view, "setGradientEditHandler", None)
+        if callable(set_gradient_handler):
+            set_gradient_handler(self._on_histogram_gradient_edited)
         self.image_tab_layout.addWidget(self.img_view)
         self.image_tab.setLayout(self.image_tab_layout)
         self.img_view.getView().scene().sigMouseMoved.connect(lambda pos: self._on_image_mouse_moved(pos))

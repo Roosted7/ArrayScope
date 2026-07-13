@@ -41,11 +41,7 @@ def _designer(qtbot, win):
 
 
 def _select(dialog, name):
-    for row in range(dialog.list_widget.count()):
-        if dialog.list_widget.item(row).data(0x0100) == name:  # UserRole
-            dialog.list_widget.setCurrentRow(row)
-            return True
-    return False
+    return dialog.select_map(name)
 
 
 def test_rename_moves_instead_of_duplicating(qtbot):
@@ -126,6 +122,62 @@ def test_delete_builtin_hides_and_reset_restores(qtbot):
         dialog.reset_button.click()
         process_events(qtbot)
         assert "turbo" in {info.name for info in library.list_colormaps()}
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_drag_layout_persists_and_group_rename(qtbot):
+    from arrayscope.display import colormap_library as library
+
+    win = _window(qtbot)
+    dialog = _designer(qtbot, win)
+    try:
+        # Simulate a drop result: move turbo into Favorites at the front.
+        tree = dialog.tree
+        turbo_item = None
+        for gi in range(tree.topLevelItemCount()):
+            group_item = tree.topLevelItem(gi)
+            for ci in range(group_item.childCount()):
+                if group_item.child(ci).data(0, 0x0100) == "turbo":
+                    turbo_item = group_item.takeChild(ci)
+                    break
+            if turbo_item is not None:
+                break
+        favorites = tree.topLevelItem(0)
+        favorites.insertChild(0, turbo_item)
+        dialog._persist_layout()
+        groups = dict(library.grouped_colormaps())
+        favorites_names = [i.name for i in groups[library.FAVORITES_GROUP]]
+        assert favorites_names[0] == "turbo"
+
+        library.rename_group("Perceptual", "Mine")
+        process_events(qtbot)
+        assert "Mine" in {g for g, _ in library.grouped_colormaps()}
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_kind_filter_hides_non_matching(qtbot):
+    from arrayscope.display import colormap_library as library
+
+    win = _window(qtbot)
+    dialog = _designer(qtbot, win)
+    try:
+        dialog.filter_combo.setCurrentIndex(dialog.filter_combo.findData(library.CYCLIC))
+        process_events(qtbot)
+        assert dialog.select_map("PAL-relaxed")
+        visible = []
+        tree = dialog.tree
+        for gi in range(tree.topLevelItemCount()):
+            group_item = tree.topLevelItem(gi)
+            for ci in range(group_item.childCount()):
+                child = group_item.child(ci)
+                if not child.isHidden():
+                    visible.append(str(child.data(0, 0x0100)))
+        assert "viridis" not in visible
+        assert "RomaO" in visible
     finally:
         dialog.close()
         win.close()

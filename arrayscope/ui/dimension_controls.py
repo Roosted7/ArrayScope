@@ -457,12 +457,47 @@ class DimensionControlMixin:
         toolbar = getattr(self, "display_toolbar", None)
         if toolbar is None or not hasattr(toolbar, "set_colormap_options"):
             return
-        from arrayscope.display import colormap_library
         from arrayscope.display.colormap_policy import colormap_family
 
         family = colormap_family(self.view_state.channel)
-        names = [info.name for info in colormap_library.colormaps_for_family(family)]
-        toolbar.set_colormap_options(names, current=getattr(self, "current_colormap", None))
+        toolbar.set_colormap_options(family, current=getattr(self, "current_colormap", None))
+
+    def _on_histogram_gradient_edited(self, colormap):
+        """Direct gradient edits become the persistent "Adjusted" user map.
+
+        This keeps the classic pyqtgraph tweak-the-ticks workflow (and its
+        right-click preset menu) available to advanced users while staying
+        coherent with recipes, sync and the phase-safe policy: the edit is a
+        named map, applied through the normal pipeline.
+        """
+        from arrayscope.display import colormap_library as library
+        from arrayscope.display.colormap_policy import colormap_family
+        from arrayscope.ui.toasts import show_status_message
+
+        try:
+            import pyqtgraph as pg
+
+            positions, colors = colormap.getStops(mode=pg.ColorMap.BYTE)
+            stops = tuple(
+                (float(position), (int(color[0]), int(color[1]), int(color[2])))
+                for position, color in zip(positions, colors)
+            )
+        except Exception:
+            return
+        if len(stops) < 2:
+            return
+        family = colormap_family(self.view_state.channel)
+        kind = library.CYCLIC if family == "phase" else library.SEQUENTIAL
+        try:
+            library.save_user_colormap("Adjusted", kind, stops)
+        except Exception:
+            return
+        self._set_display_colormap("Adjusted", user_selected=True, request_render=True)
+        show_status_message(
+            self,
+            "Histogram gradient saved as “Adjusted” — rename it in Color ▸ Customize… to keep it.",
+            timeout=3500,
+        )
 
     def open_colormap_designer(self):
         from arrayscope.ui.colormap_designer import ColormapDesignerDialog

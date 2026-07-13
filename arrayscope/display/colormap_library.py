@@ -24,6 +24,10 @@ DIVERGING = "diverging"
 CYCLIC = "cyclic"
 KINDS = (SEQUENTIAL, DIVERGING, CYCLIC)
 
+# The empty group renders ungrouped at the top of pickers ("Favorites").
+FAVORITES_GROUP = ""
+FAVORITES_LABEL = "Favorites"
+
 
 @dataclass(frozen=True)
 class ColormapInfo:
@@ -116,37 +120,40 @@ _NAVIA_STOPS = (
 # they exist even without cmcrameri installed.
 _BUILTIN_SPECS = (
     # (name, kind, group, stops | "crameri:<file>" | None=pyqtgraph)
-    ("gray", SEQUENTIAL, "Classic", None),
-    ("d3-warm", SEQUENTIAL, "Classic", None),
-    ("d3-cool", SEQUENTIAL, "Classic", None),
-    ("viridis", SEQUENTIAL, "Perceptual", None),
+    # Group "" = Favorites: a handful of go-to maps shown ungrouped at the
+    # top of pickers. Groups are collections; the *kind* is separate
+    # metadata (and a filter in the designer).
+    ("gray", SEQUENTIAL, FAVORITES_GROUP, None),
+    ("viridis", SEQUENTIAL, FAVORITES_GROUP, None),
+    ("Batlow", SEQUENTIAL, FAVORITES_GROUP, "crameri:batlow"),
+    ("Vik", DIVERGING, FAVORITES_GROUP, "crameri:vik"),
+    ("PAL-relaxed", CYCLIC, FAVORITES_GROUP, None),
+    ("RomaO", CYCLIC, FAVORITES_GROUP, "crameri:romaO"),
     ("plasma", SEQUENTIAL, "Perceptual", None),
     ("inferno", SEQUENTIAL, "Perceptual", None),
     ("cividis", SEQUENTIAL, "Perceptual", None),
     ("turbo", SEQUENTIAL, "Perceptual", None),
-    ("Batlow", SEQUENTIAL, "Scientific", "crameri:batlow"),
     ("Lipari", SEQUENTIAL, "Scientific", "crameri:lipari"),
     ("Navia", SEQUENTIAL, "Scientific", "crameri:navia"),
     ("Davos", SEQUENTIAL, "Scientific", "crameri:davos"),
     ("LaJolla", SEQUENTIAL, "Scientific", "crameri:lajolla"),
     ("Oslo", SEQUENTIAL, "Scientific", "crameri:oslo"),
-    ("CET-L1", SEQUENTIAL, "CET Linear", None),
-    ("CET-L17", SEQUENTIAL, "CET Linear", None),
-    ("CET-CBL1", SEQUENTIAL, "CET Linear", None),
-    ("Vik", DIVERGING, "Diverging", "crameri:vik"),
-    ("Roma", DIVERGING, "Diverging", "crameri:roma"),
-    ("Broc", DIVERGING, "Diverging", "crameri:broc"),
-    ("CET-D1", DIVERGING, "Diverging", None),
-    ("CET-CBD1", DIVERGING, "Diverging", None),
-    ("PAL-relaxed", CYCLIC, "Cyclic / Phase", None),
-    ("PAL-relaxed_bright", CYCLIC, "Cyclic / Phase", None),
-    ("hsv-phase", CYCLIC, "Cyclic / Phase", None),
-    ("RomaO", CYCLIC, "Cyclic / Phase", "crameri:romaO"),
-    ("VikO", CYCLIC, "Cyclic / Phase", "crameri:vikO"),
-    ("CorkO", CYCLIC, "Cyclic / Phase", "crameri:corkO"),
-    ("CET-C2", CYCLIC, "Cyclic / Phase", None),
-    ("CET-C6", CYCLIC, "Cyclic / Phase", None),
-    ("CET-CBC1", CYCLIC, "Cyclic / Phase", None),
+    ("Roma", DIVERGING, "Scientific", "crameri:roma"),
+    ("Broc", DIVERGING, "Scientific", "crameri:broc"),
+    ("VikO", CYCLIC, "Scientific", "crameri:vikO"),
+    ("CorkO", CYCLIC, "Scientific", "crameri:corkO"),
+    ("CET-L1", SEQUENTIAL, "CET", None),
+    ("CET-L17", SEQUENTIAL, "CET", None),
+    ("CET-CBL1", SEQUENTIAL, "CET", None),
+    ("CET-D1", DIVERGING, "CET", None),
+    ("CET-CBD1", DIVERGING, "CET", None),
+    ("CET-C2", CYCLIC, "CET", None),
+    ("CET-C6", CYCLIC, "CET", None),
+    ("CET-CBC1", CYCLIC, "CET", None),
+    ("d3-warm", SEQUENTIAL, "Classic", None),
+    ("d3-cool", SEQUENTIAL, "Classic", None),
+    ("hsv-phase", CYCLIC, "Classic", None),
+    ("PAL-relaxed_bright", CYCLIC, "Classic", None),
 )
 
 _CRAMERI_FALLBACK_STOPS = {"lipari": _LIPARI_STOPS, "navia": _NAVIA_STOPS}
@@ -180,7 +187,7 @@ def _builtin_spec_available(spec_stops) -> bool:
     return _resolve_builtin_stops(spec_stops) is not None
 
 
-GROUP_ORDER = ("Perceptual", "Scientific", "Classic", "CET Linear", "Diverging", "Cyclic / Phase", "User")
+GROUP_ORDER = (FAVORITES_GROUP, "Perceptual", "Scientific", "CET", "Classic", "User")
 
 _user_cache: dict[str, ColormapInfo] | None = None
 _listeners: list = []
@@ -228,15 +235,86 @@ def list_colormaps(kind: str | None = None, *, include_hidden: bool = False) -> 
     return tuple(result)
 
 
+def _layout_file() -> str:
+    return os.path.join(user_colormap_directory(), "layout.json")
+
+
+_layout_cache: dict | None = None
+
+
+def _load_layout() -> dict:
+    global _layout_cache
+    if _layout_cache is None:
+        try:
+            with open(_layout_file()) as handle:
+                payload = json.load(handle)
+            _layout_cache = {
+                "group_order": [str(g) for g in payload.get("group_order", [])],
+                "map_groups": {str(k): str(v) for k, v in payload.get("map_groups", {}).items()},
+                "map_order": {str(k): int(v) for k, v in payload.get("map_order", {}).items()},
+            }
+        except Exception:
+            _layout_cache = {"group_order": [], "map_groups": {}, "map_order": {}}
+    return _layout_cache
+
+
+def _save_layout(layout: dict) -> None:
+    global _layout_cache
+    os.makedirs(user_colormap_directory(), exist_ok=True)
+    with open(_layout_file(), "w") as handle:
+        json.dump(layout, handle, indent=2)
+    _layout_cache = None
+    _notify()
+
+
+def effective_group(info: ColormapInfo) -> str:
+    return _load_layout()["map_groups"].get(info.name, info.group)
+
+
+def apply_library_layout(group_order, map_groups, map_order) -> None:
+    """Persist a user arrangement (from the designer's drag & drop)."""
+    _save_layout(
+        {
+            "group_order": [str(g) for g in group_order],
+            "map_groups": {str(k): str(v) for k, v in map_groups.items()},
+            "map_order": {str(k): int(v) for k, v in map_order.items()},
+        }
+    )
+
+
+def rename_group(old: str, new: str) -> None:
+    """Rename a group: reassign every member map and the order entry."""
+    old, new = str(old), str(new).strip()
+    if not new or old == new or old == FAVORITES_GROUP:
+        return
+    layout = dict(_load_layout())
+    map_groups = dict(layout["map_groups"])
+    for info in list_colormaps(include_hidden=True):
+        if effective_group(info) == old:
+            map_groups[info.name] = new
+    group_order = [new if g == old else g for g in layout["group_order"]]
+    _save_layout({"group_order": group_order, "map_groups": map_groups, "map_order": layout["map_order"]})
+
+
 def grouped_colormaps(family: str | None = None, *, include_hidden: bool = False):
-    """Ordered [(group, [infos])], optionally filtered to a channel family."""
+    """Ordered [(group, [infos])], honoring the persisted user layout."""
     kinds = None if family is None else kinds_for_family(family)
+    layout = _load_layout()
     by_group: dict[str, list[ColormapInfo]] = {}
+    default_positions = {name: index for index, (name, *_rest) in enumerate(_BUILTIN_SPECS)}
     for info in list_colormaps(include_hidden=include_hidden):
         if kinds is not None and info.kind not in kinds:
             continue
-        by_group.setdefault(info.group, []).append(info)
-    ordered = [group for group in GROUP_ORDER if group in by_group]
+        by_group.setdefault(effective_group(info), []).append(info)
+    for group, infos in by_group.items():
+        infos.sort(
+            key=lambda info: (
+                layout["map_order"].get(info.name, 10_000 + default_positions.get(info.name, 20_000)),
+                info.name.lower(),
+            )
+        )
+    ordered = [group for group in layout["group_order"] if group in by_group]
+    ordered += [group for group in GROUP_ORDER if group in by_group and group not in ordered]
     ordered += [group for group in sorted(by_group) if group not in ordered]
     return [(group, by_group[group]) for group in ordered]
 
@@ -348,8 +426,9 @@ def _load_user_cache() -> dict[str, ColormapInfo]:
 
 
 def refresh_user_colormaps() -> None:
-    global _user_cache
+    global _user_cache, _layout_cache
     _user_cache = None
+    _layout_cache = None
     _load_user_cache()
     _notify()
 
@@ -363,7 +442,8 @@ def save_user_colormap(name: str, kind: str, stops) -> ColormapInfo:
     normalized = _normalize_stops(stops)
     if len(normalized) < 2:
         raise ValueError("a colormap needs at least two stops")
-    group = builtin_group_for(name) or "User"
+    builtin_group = builtin_group_for(name)
+    group = "User" if builtin_group is None else builtin_group
     info = ColormapInfo(name, str(kind), "user", normalized, group)
     directory = user_colormap_directory()
     os.makedirs(directory, exist_ok=True)
@@ -606,7 +686,8 @@ def _info_from_json_file(path: str) -> ColormapInfo:
     )
     if len(stops) < 2:
         raise ValueError(f"colormap file has fewer than two stops: {path}")
-    return ColormapInfo(name, kind, "user", stops, builtin_group_for(name) or "User")
+    builtin_group = builtin_group_for(name)
+    return ColormapInfo(name, kind, "user", stops, "User" if builtin_group is None else builtin_group)
 
 
 def _safe_file_name(name: str) -> str:

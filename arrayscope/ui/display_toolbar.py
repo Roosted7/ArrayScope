@@ -208,15 +208,29 @@ class DisplayToolbar(QtWidgets.QToolBar):
                 return
         self._colormap_menu_state = state
         menu.clear()
-        for group, infos in library.grouped_colormaps(self._colormap_family):
+
+        def add_map_action(target, info):
+            action = target.addAction(_colormap_icon(info.name), info.name)
+            action.setCheckable(True)
+            action.setChecked(self._current_colormap == info.name)
+            action.triggered.connect(
+                lambda _checked=False, name=info.name: self._pick_colormap(name)
+            )
+
+        grouped = library.grouped_colormaps(self._colormap_family)
+        # Favorites (the empty group) sit ungrouped at the top for one-click
+        # access; everything else folds out per group.
+        for group, infos in grouped:
+            if group == library.FAVORITES_GROUP:
+                for info in infos:
+                    add_map_action(menu, info)
+                menu.addSeparator()
+        for group, infos in grouped:
+            if group == library.FAVORITES_GROUP:
+                continue
             submenu = menu.addMenu(group)
             for info in infos:
-                action = submenu.addAction(_colormap_icon(info.name), info.name)
-                action.setCheckable(True)
-                action.setChecked(self._current_colormap == info.name)
-                action.triggered.connect(
-                    lambda _checked=False, name=info.name: self._pick_colormap(name)
-                )
+                add_map_action(submenu, info)
         menu.addSeparator()
         customize = menu.addAction(material_icon("edit"), "Customize…")
         customize.setToolTip("Edit, create and import colormaps")
@@ -236,6 +250,8 @@ class DisplayToolbar(QtWidgets.QToolBar):
         for group_action in self._colormap_menu.actions():
             submenu = group_action.menu()
             if submenu is None:
+                if group_action.isCheckable():
+                    group_action.setChecked(group_action.text() == name)
                 continue
             for action in submenu.actions():
                 action.setChecked(action.text() == name)

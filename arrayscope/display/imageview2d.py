@@ -262,6 +262,14 @@ class ImageViewShell(QtWidgets.QWidget):
         if finish_signal is not None:
             finish_signal.connect(self._on_histogram_level_change_finished)
         self._histogram_display_controller.install()
+        # Advanced flow: direct gradient editing (ticks / right-click presets)
+        # funnels back through the colormap pipeline via this handler.
+        self._applying_display_colormap = False
+        self._gradient_edit_handler = None
+        try:
+            self.histogram.gradient.sigGradientChangeFinished.connect(self._on_histogram_gradient_finished)
+        except Exception:
+            pass
         
         # Initialize levels
         self.levelMin = 0.0
@@ -351,13 +359,6 @@ class ImageViewShell(QtWidgets.QWidget):
             axis_pen = pg.mkPen(tokens.plot_text)
             item.axis.setPen(axis_pen)
             item.axis.setTextPen(axis_pen)
-        except Exception:
-            pass
-        try:
-            # The gradient tick handles (one per colormap stop) read as visual
-            # noise; colormaps are managed by ArrayScope's channel policy and
-            # remain editable through the gradient context menu.
-            item.gradient.showTicks(False)
         except Exception:
             pass
 
@@ -1783,13 +1784,11 @@ class ImageViewShell(QtWidgets.QWidget):
         self._display_colormap = colormap
         self._display_colormap_lut = lut
         self._display_colormap_key = _array_content_key(lut)
-        self.histogram.gradient.setColorMap(colormap)
+        self._applying_display_colormap = True
         try:
-            # setColorMap recreates gradient ticks; keep them hidden (see
-            # applyThemeTokens) so the colorbar stays clean.
-            self.histogram.gradient.showTicks(False)
-        except Exception:
-            pass
+            self.histogram.gradient.setColorMap(colormap)
+        finally:
+            self._applying_display_colormap = False
         image = getattr(self.imageItem, "image", None)
         if image is not None and np.asarray(image).ndim == 2:
             self.imageItem.setLookupTable(lut)
@@ -1958,6 +1957,20 @@ class ImageViewShell(QtWidgets.QWidget):
     def setImageStale(self, stale: bool):
         if self.imageItem is not None:
             self.imageItem.setOpacity(0.55 if stale else 1.0)
+
+    def setGradientEditHandler(self, handler) -> None:
+        """Callback(pg.ColorMap) invoked when the user edits the histogram
+        gradient directly (drag ticks or pick a preset from its menu)."""
+        self._gradient_edit_handler = handler if callable(handler) else None
+
+    def _on_histogram_gradient_finished(self, gradient) -> None:
+        if self._applying_display_colormap or self._gradient_edit_handler is None:
+            return
+        try:
+            colormap = gradient.colorMap()
+        except Exception:
+            return
+        self._gradient_edit_handler(colormap)
 
     def setHudContextProvider(self, provider) -> None:
         """Provider returns extra HUD rows [(icon_name, text), ...] for the

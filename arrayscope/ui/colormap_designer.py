@@ -1,10 +1,16 @@
-"""Colormap designer: browse, edit, create, import and export colormaps.
+"""Colormap designer: browse, arrange, edit, create, import and export.
 
 Interaction model:
 
+- The library tree is drag-reorderable (like the operations dock): maps can
+  be moved within and between groups, groups can be reordered and renamed
+  inline; the arrangement persists and drives the toolbar picker. The
+  Favorites section (top, unnamed) holds the go-to maps.
+- The *kind* (sequential/diverging/cyclic) is metadata, not a group — use
+  the filter above the tree to narrow the list.
 - Edits save automatically when you switch maps or close the dialog — no
   silent loss. Renaming a user map moves it (no stale pre-rename copy).
-- Built-ins are editable too: saving stores a user override under the same
+- Built-ins are editable: saving stores a user override under the same
   name; ``Reset`` restores the system definition. ``Revert`` undoes the most
   recent change made in this session. Each button only appears when it
   leads to a different state.
@@ -30,7 +36,8 @@ _KIND_LABELS = (
     ("Diverging", library.DIVERGING),
     ("Cyclic (phase-safe)", library.CYCLIC),
 )
-_SORT_MODES = (("Group", "group"), ("Name", "name"), ("Kind", "kind"))
+_NAME_ROLE = QtCore.Qt.ItemDataRole.UserRole
+_GROUP_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
 
 
 def _preview_icon(name: str, width: int = 96, height: int = 14) -> QtGui.QIcon:
@@ -46,34 +53,82 @@ def _preview_icon(name: str, width: int = 96, height: int = 14) -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
+class _ColormapTree(QtWidgets.QTreeWidget):
+    """Groups as parents, maps as draggable children."""
+
+    orderEdited = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderHidden(True)
+        self.setIconSize(QtCore.QSize(96, 14))
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.setExpandsOnDoubleClick(False)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self._normalize()
+        self.orderEdited.emit()
+
+    def _normalize(self):
+        """Keep the two-level shape: groups top-level, maps under groups."""
+        # Maps dropped at the top level slide into the nearest group above.
+        index = 0
+        while index < self.topLevelItemCount():
+            item = self.topLevelItem(index)
+            if item.data(0, _NAME_ROLE):
+                self.takeTopLevelItem(index)
+                target = self.topLevelItem(max(0, index - 1))
+                if target is not None:
+                    target.addChild(item)
+                    target.setExpanded(True)
+                continue
+            # Groups accidentally nested under groups move back to top level.
+            child_index = 0
+            while child_index < item.childCount():
+                child = item.child(child_index)
+                if child.data(0, _NAME_ROLE):
+                    child_index += 1
+                    continue
+                item.takeChild(child_index)
+                self.insertTopLevelItem(self.indexOfTopLevelItem(item) + 1, child)
+            index += 1
+
+
 class ColormapDesignerDialog(QtWidgets.QDialog):
     def __init__(self, window):
         super().__init__(window)
         self._window = window
         self.setWindowTitle("Colormaps")
         self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
-        self.resize(720, 460)
+        self.resize(740, 480)
         self._loaded = None  # (name, kind, stops, source)
-        self._revert_snapshot = None  # (name, payload-or-None) set on each save
+        self._revert_snapshot = None
         self._suppress_dirty = False
+        self._reloading = False
 
         root = QtWidgets.QHBoxLayout(self)
 
-        # -- left: library list ---------------------------------------------
+        # -- left: library tree -------------------------------------------
         left = QtWidgets.QVBoxLayout()
-        sort_row = QtWidgets.QHBoxLayout()
-        sort_row.addWidget(QtWidgets.QLabel("Sort by"))
-        self.sort_combo = QtWidgets.QComboBox(self)
-        for label, mode in _SORT_MODES:
-            self.sort_combo.addItem(label, mode)
-        sort_row.addWidget(self.sort_combo)
-        sort_row.addStretch(1)
-        left.addLayout(sort_row)
-        self.list_widget = QtWidgets.QListWidget(self)
-        self.list_widget.setIconSize(QtCore.QSize(96, 14))
-        self.list_widget.setMinimumWidth(250)
-        left.addWidget(self.list_widget, 1)
-        list_buttons = QtWidgets.QHBoxLayout()
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("Show"))
+        self.filter_combo = QtWidgets.QComboBox(self)
+        self.filter_combo.addItem("All kinds", None)
+        for label, kind in _KIND_LABELS:
+            self.filter_combo.addItem(label, kind)
+        filter_row.addWidget(self.filter_combo)
+        filter_row.addStretch(1)
+        left.addLayout(filter_row)
+        self.tree = _ColormapTree(self)
+        self.tree.setMinimumWidth(260)
+        left.addWidget(self.tree, 1)
+        hint = QtWidgets.QLabel("Drag to rearrange · double-click a group to rename it")
+        hint.setObjectName("OperationsMetaLabel")
+        left.addWidget(hint)
+        tree_buttons = QtWidgets.QHBoxLayout()
         self.new_button = QtWidgets.QToolButton(self)
         set_button_icon(self.new_button, "add", tooltip="New colormap")
         self.duplicate_button = QtWidgets.QToolButton(self)
@@ -85,12 +140,12 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self.delete_button = QtWidgets.QToolButton(self)
         set_button_icon(self.delete_button, "delete", tooltip="Delete (built-ins are hidden and can be restored)")
         for button in (self.new_button, self.duplicate_button, self.import_button, self.export_button, self.delete_button):
-            list_buttons.addWidget(button)
-        list_buttons.addStretch(1)
-        left.addLayout(list_buttons)
+            tree_buttons.addWidget(button)
+        tree_buttons.addStretch(1)
+        left.addLayout(tree_buttons)
         root.addLayout(left)
 
-        # -- right: editor -----------------------------------------------------
+        # -- right: editor ---------------------------------------------------
         right = QtWidgets.QVBoxLayout()
         form = QtWidgets.QFormLayout()
         self.name_edit = QtWidgets.QLineEdit(self)
@@ -136,8 +191,10 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         right.addLayout(actions)
         root.addLayout(right, 1)
 
-        self.sort_combo.currentIndexChanged.connect(lambda *_: self._reload_list(select=self._selected_name()))
-        self.list_widget.currentItemChanged.connect(self._on_selection_changed)
+        self.filter_combo.currentIndexChanged.connect(lambda *_: self._apply_kind_filter())
+        self.tree.currentItemChanged.connect(self._on_selection_changed)
+        self.tree.orderEdited.connect(self._persist_layout)
+        self.tree.itemChanged.connect(self._on_item_changed)
         self.new_button.clicked.connect(self._new_map)
         self.duplicate_button.clicked.connect(self._duplicate_map)
         self.import_button.clicked.connect(self._import_map)
@@ -150,76 +207,133 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self.kind_combo.currentIndexChanged.connect(lambda *_: self._sync_action_states())
         self.name_edit.textEdited.connect(lambda *_: self._sync_action_states())
 
-        self._reload_list(select=getattr(window, "current_colormap", None))
+        self._reload_tree(select=getattr(window, "current_colormap", None))
 
     # ------------------------------------------------------------------
-    # List handling
+    # Tree building / selection
     # ------------------------------------------------------------------
 
-    def _reload_list(self, select=None):
-        self.list_widget.blockSignals(True)
-        self.list_widget.clear()
-        mode = self.sort_combo.currentData() or "group"
-        infos = list(library.list_colormaps(include_hidden=True))
-        if mode == "name":
-            infos.sort(key=lambda info: info.name.lower())
-            self._add_items(infos)
-        elif mode == "kind":
-            for kind in library.KINDS:
-                subset = sorted((i for i in infos if i.kind == kind), key=lambda i: i.name.lower())
-                if subset:
-                    self._add_header(kind.capitalize())
-                    self._add_items(subset)
-        else:
-            for group, subset in library.grouped_colormaps(include_hidden=True):
-                self._add_header(group)
-                self._add_items(subset)
-        self.list_widget.blockSignals(False)
-        target = str(select) if select is not None else None
-        selected = False
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
-                self.list_widget.setCurrentRow(row)
-                selected = True
-                break
-        if not selected:
-            for row in range(self.list_widget.count()):
-                if self.list_widget.item(row).data(QtCore.Qt.ItemDataRole.UserRole):
-                    self.list_widget.setCurrentRow(row)
-                    break
+    def _reload_tree(self, select=None):
+        self._reloading = True
+        try:
+            self.tree.clear()
+            for group, infos in library.grouped_colormaps(include_hidden=True):
+                group_item = QtWidgets.QTreeWidgetItem(
+                    [library.FAVORITES_LABEL if group == library.FAVORITES_GROUP else group]
+                )
+                group_item.setData(0, _GROUP_ROLE, group)
+                font = group_item.font(0)
+                font.setBold(True)
+                group_item.setFont(0, font)
+                flags = (
+                    QtCore.Qt.ItemFlag.ItemIsEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsDropEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsDragEnabled
+                )
+                if group != library.FAVORITES_GROUP:
+                    flags |= QtCore.Qt.ItemFlag.ItemIsEditable
+                group_item.setFlags(flags)
+                self.tree.addTopLevelItem(group_item)
+                for info in infos:
+                    group_item.addChild(self._map_item(info))
+                group_item.setExpanded(True)
+        finally:
+            self._reloading = False
+        self._apply_kind_filter()
+        if select is not None:
+            self.select_map(str(select))
+        if self.tree.currentItem() is None or not self.tree.currentItem().data(0, _NAME_ROLE):
+            self._select_first_map()
         self._load_selected()
 
-    def _add_header(self, text):
-        item = QtWidgets.QListWidgetItem(str(text))
-        item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
-        font = item.font()
-        font.setBold(True)
-        item.setFont(font)
-        self.list_widget.addItem(item)
+    def _map_item(self, info):
+        suffix = ""
+        if info.hidden:
+            suffix = "  (hidden)"
+        elif info.source == "user" and library.overrides_builtin(info.name):
+            suffix = "  (modified)"
+        elif info.source == "user":
+            suffix = "  (user)"
+        item = QtWidgets.QTreeWidgetItem([f"{info.name}{suffix}"])
+        item.setIcon(0, _preview_icon(info.name))
+        item.setData(0, _NAME_ROLE, info.name)
+        item.setToolTip(0, f"{info.kind} · {'user' if info.source == 'user' else 'built-in'}")
+        item.setFlags(
+            QtCore.Qt.ItemFlag.ItemIsEnabled
+            | QtCore.Qt.ItemFlag.ItemIsSelectable
+            | QtCore.Qt.ItemFlag.ItemIsDragEnabled
+        )
+        if info.hidden:
+            item.setForeground(0, self.palette().brush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text))
+        return item
 
-    def _add_items(self, infos):
-        for info in infos:
-            suffix = ""
-            if info.hidden:
-                suffix = "  (hidden)"
-            elif info.source == "user" and library.overrides_builtin(info.name):
-                suffix = "  (modified)"
-            elif info.source == "user":
-                suffix = "  (user)"
-            item = QtWidgets.QListWidgetItem(_preview_icon(info.name), f"{info.name}{suffix}")
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, info.name)
-            item.setToolTip(f"{info.kind} · {info.group}")
-            if info.hidden:
-                item.setForeground(self.palette().brush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text))
-            self.list_widget.addItem(item)
+    def select_map(self, name: str) -> bool:
+        for group_index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(group_index)
+            for child_index in range(group_item.childCount()):
+                child = group_item.child(child_index)
+                if child.data(0, _NAME_ROLE) == str(name):
+                    self.tree.setCurrentItem(child)
+                    return True
+        return False
 
-    def _selected_name(self):
-        item = self.list_widget.currentItem()
+    def selected_map_name(self):
+        item = self.tree.currentItem()
         if item is None:
             return None
-        value = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        value = item.data(0, _NAME_ROLE)
         return None if value is None else str(value)
+
+    def _select_first_map(self):
+        for group_index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(group_index)
+            if group_item.childCount():
+                self.tree.setCurrentItem(group_item.child(0))
+                return
+
+    def _apply_kind_filter(self):
+        wanted = self.filter_combo.currentData()
+        for group_index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(group_index)
+            visible_children = 0
+            for child_index in range(group_item.childCount()):
+                child = group_item.child(child_index)
+                info = library.find_colormap(str(child.data(0, _NAME_ROLE)))
+                hide = wanted is not None and (info is None or info.kind != wanted)
+                child.setHidden(hide)
+                visible_children += 0 if hide else 1
+            group_item.setHidden(visible_children == 0)
+
+    # ------------------------------------------------------------------
+    # Layout persistence (drag & drop, group rename)
+    # ------------------------------------------------------------------
+
+    def _persist_layout(self):
+        group_order = []
+        map_groups = {}
+        map_order = {}
+        for group_index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(group_index)
+            group = str(group_item.data(0, _GROUP_ROLE))
+            group_order.append(group)
+            for child_index in range(group_item.childCount()):
+                name = str(group_item.child(child_index).data(0, _NAME_ROLE))
+                map_groups[name] = group
+                map_order[name] = child_index
+        library.apply_library_layout(group_order, map_groups, map_order)
+
+    def _on_item_changed(self, item, _column):
+        if self._reloading or item.parent() is not None:
+            return
+        old_group = str(item.data(0, _GROUP_ROLE))
+        new_group = item.text(0).strip()
+        if not new_group or new_group == old_group or old_group == library.FAVORITES_GROUP:
+            self._reload_tree(select=self.selected_map_name())
+            return
+        item.setData(0, _GROUP_ROLE, new_group)
+        library.rename_group(old_group, new_group)
+        self._persist_layout()
+        self._reload_tree(select=self.selected_map_name())
 
     # ------------------------------------------------------------------
     # Editor state
@@ -240,11 +354,13 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         return bool(current_name) and (current_name, current_kind, current_stops) != (name, kind, stops)
 
     def _on_selection_changed(self, *_args):
+        if self._reloading:
+            return
         self._autosave_pending_edits()
         self._load_selected()
 
     def _load_selected(self):
-        name = self._selected_name()
+        name = self.selected_map_name()
         if name is None:
             return
         info = library.find_colormap(name)
@@ -286,7 +402,6 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self._revert_snapshot = (str(name), payload, str(name) in library.hidden_builtins())
 
     def _autosave_pending_edits(self):
-        """Edits persist when leaving a map; renames move the file."""
         if self._suppress_dirty or not self._editor_dirty():
             return
         loaded_name, _kind, _stops, loaded_source = self._loaded
@@ -300,12 +415,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         if loaded_source == "user" and new_name != loaded_name:
             library.delete_user_colormap(loaded_name)
         self._loaded = (new_name, new_kind, new_stops, "user")
-        self._refresh_previews(select=new_name)
-
-    def _refresh_previews(self, select=None):
-        self.list_widget.blockSignals(True)
-        self._reload_list(select=select or self._selected_name())
-        self.list_widget.blockSignals(False)
+        self._reload_tree(select=new_name)
 
     def _revert(self, _checked=False):
         if self._revert_snapshot is None:
@@ -320,22 +430,22 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         if was_hidden != (name in library.hidden_builtins()):
             library.set_builtin_hidden(name, was_hidden)
         self._loaded = None
-        self._reload_list(select=name if library.find_colormap(name) else None)
+        self._reload_tree(select=name if library.find_colormap(name) else None)
         show_status_message(self._window, f"Reverted the last change to “{name}”.", timeout=2500)
 
     def _reset(self, _checked=False):
-        name = self._selected_name()
+        name = self.selected_map_name()
         if name is None:
             return
         self._snapshot_before_change(name)
         if library.reset_builtin(name):
             self._loaded = None
-            self._reload_list(select=name)
+            self._reload_tree(select=name)
             show_status_message(self._window, f"Restored “{name}” to the system definition.", timeout=2500)
 
     def _apply_and_close(self, _checked=False):
         self._autosave_pending_edits()
-        name = self.name_edit.text().strip() or self._selected_name()
+        name = self.name_edit.text().strip() or self.selected_map_name()
         if name:
             setter = getattr(self._window, "_set_display_colormap", None)
             if callable(setter):
@@ -355,13 +465,10 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------
 
     def _sync_action_states(self):
-        name = self._selected_name()
+        name = self.selected_map_name()
         info = None if name is None else library.find_colormap(name)
 
-        # Reset: only when the selection deviates from a system definition.
         resettable = info is not None and (library.overrides_builtin(info.name) or info.hidden)
-        # Revert: only when this session recorded a change to undo — and not
-        # when it would land on the same state Reset produces.
         revertable = self._revert_snapshot is not None
         if revertable and resettable and info is not None:
             snap_name, payload, was_hidden = self._revert_snapshot
@@ -371,11 +478,9 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self.reset_button.setVisible(resettable)
         self.delete_button.setEnabled(info is not None and not (info.source == "builtin" and info.hidden))
 
-        # Apply: blocked when the kind cannot be presented right now.
-        window = self._window
         family = None
         try:
-            family = colormap_family(window.view_state.channel)
+            family = colormap_family(self._window.view_state.channel)
         except Exception:
             pass
         kind = self.kind_combo.currentData()
@@ -404,24 +509,24 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
             self.source_label.setText("Built-in colormap — editing it stores your override under the same name.")
 
     # ------------------------------------------------------------------
-    # List actions
+    # Tree actions
     # ------------------------------------------------------------------
 
     def _new_map(self, _checked=False):
         self._autosave_pending_edits()
         name = self._unique_name("custom")
         library.save_user_colormap(name, library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255))))
-        self._reload_list(select=name)
+        self._reload_tree(select=name)
 
     def _duplicate_map(self, _checked=False):
         self._autosave_pending_edits()
-        source = self._selected_name()
+        source = self.selected_map_name()
         if source is None:
             return
         info = library.find_colormap(source)
         name = self._unique_name(source)
         library.save_user_colormap(name, info.kind, library.colormap_stops(source, points=17))
-        self._reload_list(select=name)
+        self._reload_tree(select=name)
 
     def _unique_name(self, base):
         existing = {info.name for info in library.list_colormaps(include_hidden=True)}
@@ -448,7 +553,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         except Exception as exc:
             show_status_message(self._window, f"Import failed: {exc}", timeout=4000)
             return
-        self._reload_list(select=info.name)
+        self._reload_tree(select=info.name)
         show_status_message(
             self._window,
             f"Imported “{info.name}” as {info.kind} — adjust the kind if the guess is wrong.",
@@ -456,7 +561,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         )
 
     def _export_map(self, _checked=False):
-        name = self._selected_name()
+        name = self.selected_map_name()
         if name is None:
             return
         path, _ = get_save_file_name(self, "Export colormap", f"{name}.json", "JSON (*.json)")
@@ -472,7 +577,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         show_status_message(self._window, f"Exported {path}", timeout=2500)
 
     def _delete_map(self, _checked=False):
-        name = self._selected_name()
+        name = self.selected_map_name()
         if name is None:
             return
         info = library.find_colormap(name)
@@ -488,5 +593,5 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
             library.set_builtin_hidden(name, True)
             message = f"Hid built-in “{name}” — select it and press Reset to restore."
         self._loaded = None
-        self._reload_list()
+        self._reload_tree()
         show_status_message(self._window, message, timeout=3000)

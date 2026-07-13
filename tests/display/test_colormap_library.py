@@ -108,7 +108,31 @@ def test_grouped_colormaps_order_and_membership():
     names = {info.name for info in groups["Scientific"]}
     assert {"Lipari", "Navia"} <= names
     ordered = [group for group, _infos in library.grouped_colormaps()]
-    assert ordered.index("Perceptual") < ordered.index("Cyclic / Phase")
+    # Favorites (the empty group) leads, before the named collections.
+    assert ordered.index(library.FAVORITES_GROUP) < ordered.index("Perceptual")
+    favorites = {info.name for info in groups[library.FAVORITES_GROUP]}
+    assert {"gray", "viridis", "Batlow"} <= favorites
+
+
+def test_layout_persistence_reorders_and_regroups(tmp_path):
+    library.apply_library_layout(
+        group_order=["Perceptual", library.FAVORITES_GROUP],
+        map_groups={"turbo": library.FAVORITES_GROUP},
+        map_order={"turbo": 0, "gray": 1},
+    )
+    groups = library.grouped_colormaps()
+    ordered = [group for group, _infos in groups]
+    assert ordered.index("Perceptual") < ordered.index(library.FAVORITES_GROUP)
+    favorites = [info.name for info in dict(groups)[library.FAVORITES_GROUP]]
+    assert favorites[0] == "turbo"
+    assert favorites[1] == "gray"
+
+
+def test_rename_group_moves_members(tmp_path):
+    library.rename_group("Perceptual", "My Maps")
+    groups = dict(library.grouped_colormaps())
+    assert "Perceptual" not in groups
+    assert "turbo" in {info.name for info in groups["My Maps"]}
 
 
 def test_hidden_builtin_round_trip():
@@ -126,7 +150,7 @@ def test_builtin_override_and_reset():
     library.save_user_colormap("viridis", library.SEQUENTIAL, stops)
     assert library.overrides_builtin("viridis")
     info = library.find_colormap("viridis")
-    assert info.source == "user" and info.group == "Perceptual"
+    assert info.source == "user" and info.group == library.builtin_group_for("viridis")
     assert library.reset_builtin("viridis")
     assert library.find_colormap("viridis").source == "builtin"
 
