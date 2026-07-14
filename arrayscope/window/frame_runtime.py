@@ -59,6 +59,15 @@ class FrameRuntimeMixin:
             for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
         }
         rows = []
+        physical_getter = getattr(self.win.img_view, "tileTruthPhysicalRows", None)
+        physical_rows = (
+            {}
+            if not callable(physical_getter)
+            else {
+                int(tile): dict(row)
+                for tile, row in dict(physical_getter() or {}).items()
+            }
+        )
         for row in session.diagnostic_tile_identity_rows(
             limit=max(1, len(tiles)),
             include_all_visible=True,
@@ -69,6 +78,7 @@ class FrameRuntimeMixin:
             rows.append(
                 {
                     **row,
+                    **physical_rows.get(int(row.get("tile", -1)), {}),
                     "tile_rect": (
                         int(tile.x0),
                         int(tile.y0),

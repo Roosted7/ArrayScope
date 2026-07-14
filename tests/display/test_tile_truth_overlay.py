@@ -12,6 +12,13 @@ def _row(tile: int, rect, *, drawable: bool):
         "drawable": drawable,
         "target_texture_kind": "complex_rg32f",
         "acknowledged_texture_kind": "complex_rg32f" if drawable else None,
+        "physical_texture_kind": "complex_rg32f",
+        "physical_storage_mode": "complex",
+        "physical_mapping_mode": 4.0,
+        "physical_component_mode": 2.0,
+        "physical_levels": (0.0, 8.0),
+        "physical_texture_shape": (16, 16, 2),
+        "physical_texture_dtype": "float32",
         "target_channel": "complex",
         "target_complex_mapping": ("phase_color", "abs", "mapped"),
         "real_plane_identity": {
@@ -62,6 +69,7 @@ def test_tile_truth_overlay_positions_one_label_inside_each_tile(qt_app):
     assert "slot 0  DRAW" in layer.labels[0].text()
     assert "slot 1  LOAD" in layer.labels[1].text()
     assert "planes r 0x1000:16x16:float32  i 0x2000:16x16:float32" in layer.labels[0].text()
+    assert "phys complex_rg32f/complex map 4.0 comp 2.0" in layer.labels[0].text()
     assert layer.labels[0].testAttribute(
         QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
     )

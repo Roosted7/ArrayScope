@@ -466,6 +466,10 @@ def test_pyqtgraph_complex_semantic_transition_hides_unacknowledged_tiles(qt_app
         assert report.presented_tiles == frozenset({0})
         assert report.presented_identities == {0: successors[0].tile_identity}
         assert tuple(tile for tile, state in view._montage_tile_layer.states.items() if state.visible) == (0,)
+        physical = view.tileTruthPhysicalRows()
+        assert physical[0]["physical_texture_kind"] == "rgb8"
+        assert physical[0]["physical_mapping_mode"] == "cpu_rgb"
+        assert physical[0]["physical_acknowledged_identity"] == successors[0].tile_identity
         _assert_truth_record(targets, report.presented_identities, mixed)
     finally:
         view.close()
@@ -499,4 +503,9 @@ def test_vispy_complex_semantic_transition_hides_unacknowledged_tiles():
     assert stats.presented_tiles == (0,)
     assert stats.presented_identities == {0: successors[0].tile_identity}
     assert set(pool.tile_resident_keys) == {0}
+    physical = pool.tile_truth_physical_rows()
+    assert physical[0]["physical_texture_kind"] == "complex_rg32f"
+    assert physical[0]["physical_storage_mode"] == "complex"
+    assert physical[0]["physical_texture_shape"] == (4, 4, 2)
+    assert physical[0]["physical_acknowledged_identity"] == successors[0].tile_identity
     _assert_truth_record(targets, stats.presented_identities, mixed)

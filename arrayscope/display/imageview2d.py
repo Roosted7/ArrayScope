@@ -1943,6 +1943,12 @@ class ImageViewShell(QtWidgets.QWidget):
         layer = self._ensure_tile_truth_overlay_layer()
         layer.set_rows(rows)
 
+    def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
+        layer = self._montage_tile_layer
+        if layer is None:
+            return {}
+        return layer.tile_truth_physical_rows()
+
     def _ensure_tile_truth_overlay_layer(self) -> TileTruthOverlayLayer:
         layer = self._tile_truth_overlay_layer
         if layer is None:

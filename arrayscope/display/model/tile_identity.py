@@ -213,8 +213,8 @@ def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -
         "target_lod": None if typed_target is None else _lod_record(typed_target.lod),
         "acknowledged_lod": None if identity is None else _lod_record(identity.lod),
         "texture_kind": texture_kind,
-        "real_plane_identity": _plane_record(real_plane),
-        "imag_plane_identity": _plane_record(imag_plane),
+        "real_plane_identity": plane_identity_record(real_plane),
+        "imag_plane_identity": plane_identity_record(imag_plane),
         "complex_mapping": complex_mapping,
         "lod": None
         if lod is None
@@ -235,7 +235,7 @@ def _lod_record(lod: TileLodIdentity) -> dict[str, int]:
     }
 
 
-def _plane_record(plane: ArrayPlaneIdentity | None) -> dict[str, object] | None:
+def plane_identity_record(plane: ArrayPlaneIdentity | None) -> dict[str, object] | None:
     if plane is None:
         return None
     return {
@@ -266,6 +266,7 @@ __all__ = [
     "array_plane_identities",
     "acknowledged_identity_satisfies_target",
     "complex_mapping_identity",
+    "plane_identity_record",
     "tile_ack_identity",
     "tile_truth_record",
 ]

@@ -1310,6 +1310,15 @@ def test_tile_truth_overlay_rows_include_each_plan_tile_rectangle():
         def setTileTruthOverlayRows(self, rows):
             self.rows = tuple(rows or ())
 
+        def tileTruthPhysicalRows(self):
+            return {
+                int(tile.montage_index): {
+                    "physical_texture_kind": "scalar_r32f",
+                    "physical_mapping_mode": 0.0,
+                }
+                for tile in session.plan.tiles
+            }
+
     session = _session()
     image_view = ImageView()
     owner = SimpleNamespace(
@@ -1327,6 +1336,7 @@ def test_tile_truth_overlay_rows_include_each_plan_tile_rectangle():
         for tile in session.plan.tiles
     }
     assert {int(row["tile"]): row["tile_rect"] for row in image_view.rows} == expected
+    assert all(row["physical_texture_kind"] == "scalar_r32f" for row in image_view.rows)
 
 
 def test_montage_loading_state_does_not_create_per_tile_scene_overlays():

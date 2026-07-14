@@ -25,6 +25,16 @@ def tile_truth_overlay_row_text(row) -> str:
             f"src {row.get('target_source')} -> {row.get('acknowledged_source')}",
             f"tex {row.get('target_texture_kind')} -> {row.get('acknowledged_texture_kind')}",
             (
+                f"phys {row.get('physical_texture_kind')}/"
+                f"{row.get('physical_storage_mode')} map {row.get('physical_mapping_mode')} "
+                f"comp {row.get('physical_component_mode')}"
+            ),
+            (
+                f"phys-levels {row.get('physical_levels')} "
+                f"shape {row.get('physical_texture_shape')} "
+                f"dtype {row.get('physical_texture_dtype')}"
+            ),
+            (
                 f"planes r {_plane_identity_text(row.get('real_plane_identity'))}  "
                 f"i {_plane_identity_text(row.get('imag_plane_identity'))}"
             ),

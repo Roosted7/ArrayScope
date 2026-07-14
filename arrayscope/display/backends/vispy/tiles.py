@@ -24,7 +24,11 @@ from arrayscope.display.shader_mapping import (
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
-from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+from arrayscope.display.model.tile_identity import (
+    acknowledged_identity_satisfies_target,
+    array_plane_identities,
+    plane_identity_record,
+)
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 
@@ -226,6 +230,7 @@ class TextureAtlasPool:
         self.tile_uvs: dict[int, tuple[float, float, float, float]] = {}
         self.source_ids: dict[object, object] = {}
         self.acknowledged_identities: dict[object, object] = {}
+        self.physical_upload_records: dict[object, dict[str, object]] = {}
         self.last_used: dict[object, int] = {}
         self.active_resident_keys: set[object] = set()
         # Keys whose tile(s) now present a different residency class (ADR
@@ -263,6 +268,25 @@ class TextureAtlasPool:
             for tile, key in self.tile_resident_keys.items()
             if key in self.source_ids
         }
+
+    def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
+        rows: dict[int, dict[str, object]] = {}
+        for tile, resident_key in self.tile_resident_keys.items():
+            slot_ref = self.tile_slots.get(int(tile))
+            record = self.physical_upload_records.get(resident_key)
+            if slot_ref is None or record is None:
+                continue
+            page_index, slot = (int(slot_ref[0]), int(slot_ref[1]))
+            rows[int(tile)] = {
+                **record,
+                "physical_page": page_index,
+                "physical_slot": slot,
+                "physical_acknowledged_identity": self.acknowledged_identities.get(
+                    resident_key,
+                    self.source_ids.get(resident_key),
+                ),
+            }
+        return rows
 
     @property
     def resident_count(self) -> int:
@@ -356,6 +380,7 @@ class TextureAtlasPool:
             self.tile_uvs.clear()
             self.source_ids.clear()
             self.acknowledged_identities.clear()
+            self.physical_upload_records.clear()
             self.last_used.clear()
             self.active_resident_keys.clear()
             self.superseded_keys.clear()
@@ -485,6 +510,7 @@ class TextureAtlasPool:
                 self.resident_slots.pop(key, None)
                 self.source_ids.pop(key, None)
                 self.acknowledged_identities.pop(key, None)
+                self.physical_upload_records.pop(key, None)
                 self.last_used.pop(key, None)
                 self.superseded_keys.discard(key)
                 self.eviction_count += 1
@@ -793,6 +819,18 @@ class TextureAtlasPool:
                 page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
             self.acknowledged_identities[resident_key] = getattr(payload, "tile_identity", None) or payload.source_id
+            upload_plane = scalar if scalar is not None else color
+            real_plane, imag_plane = array_plane_identities(upload_plane)
+            self.physical_upload_records[resident_key] = {
+                "physical_texture_kind": _payload_texture_kind(payload).value,
+                "physical_storage_mode": str(page.storage_mode),
+                "physical_texture_dtype": str(np.asarray(upload_plane).dtype),
+                "physical_texture_shape": tuple(
+                    int(value) for value in np.asarray(upload_plane).shape
+                ),
+                "physical_real_plane_identity": plane_identity_record(real_plane),
+                "physical_imag_plane_identity": plane_identity_record(imag_plane),
+            }
             updated += 1
 
         payload_presented_tiles = tuple(
@@ -1165,6 +1203,7 @@ class TextureAtlasPool:
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
         self.acknowledged_identities.pop(victim, None)
+        self.physical_upload_records.pop(victim, None)
         self.last_used.pop(victim, None)
         if victim in self.superseded_keys:
             self.superseded_reclaimed_count += 1
@@ -1274,6 +1313,48 @@ class GpuMontageLayer:
     @property
     def last_stats(self) -> TileLayerUpdateStats:
         return self._last_stats
+
+    def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
+        rows = self._pool.tile_truth_physical_rows()
+        for tile_number, row in rows.items():
+            slot_ref = self._pool.tile_slots.get(int(tile_number))
+            if slot_ref is None:
+                continue
+            page_index = int(slot_ref[0])
+            if page_index >= len(self._visuals_by_page):
+                continue
+            visual = self._visuals_by_page[page_index]
+            payloads = (
+                self._page_payloads_by_index[page_index]
+                if page_index < len(self._page_payloads_by_index)
+                else {}
+            )
+            ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
+            try:
+                payload_offset = ordered_tiles.index(int(tile_number)) * 6
+            except ValueError:
+                payload_offset = -1
+            mode_data = np.asarray(getattr(visual, "mode_data", ()), dtype=np.float32)
+            physical_mode = (
+                None
+                if payload_offset < 0 or payload_offset >= len(mode_data)
+                else float(mode_data[payload_offset])
+            )
+            row.update(
+                {
+                    "physical_mapping_mode": physical_mode,
+                    "physical_component_mode": float(
+                        getattr(visual, "_component_mode", 0.0)
+                    ),
+                    "physical_levels": tuple(
+                        float(value) for value in getattr(visual, "_levels", ())
+                    ),
+                    "physical_shader_mapping_key": repr(
+                        getattr(visual, "_shader_mapping_key", None)
+                    ),
+                }
+            )
+        return rows
 
     def changed_page_indices(self) -> tuple[int, ...]:
         return tuple(int(index) for index in self._changed_pages)

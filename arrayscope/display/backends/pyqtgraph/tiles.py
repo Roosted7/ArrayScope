@@ -13,7 +13,11 @@ from pyqtgraph.Qt import QtGui
 
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
-from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+from arrayscope.display.model.tile_identity import (
+    acknowledged_identity_satisfies_target,
+    array_plane_identities,
+    plane_identity_record,
+)
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.tile_layout import tile_layout_map, tile_layout_regions
@@ -162,6 +166,41 @@ class MontageTileLayer:
     @property
     def states(self) -> dict[int, TileLayerItemState]:
         return self._states
+
+    def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
+        """Describe the arrays and mapping the visible ImageItems draw now."""
+
+        rows: dict[int, dict[str, object]] = {}
+        for tile_number, state in self._states.items():
+            image = getattr(state.item, "image", None)
+            if not state.visible or image is None:
+                continue
+            values = np.asarray(image)
+            if values.ndim >= 3 and values.shape[-1] in (3, 4):
+                kind = TexturePlaneKind.RGB8
+                mapping_mode = "cpu_rgb"
+            elif np.iscomplexobj(values) or (
+                values.ndim >= 3 and values.shape[-1] == 2
+            ):
+                kind = TexturePlaneKind.COMPLEX_RG32F
+                mapping_mode = "complex_array"
+            else:
+                kind = TexturePlaneKind.SCALAR_R32F
+                mapping_mode = "scalar_levels"
+            real_plane, imag_plane = array_plane_identities(values)
+            rows[int(tile_number)] = {
+                "physical_texture_kind": kind.value,
+                "physical_storage_mode": "image_item",
+                "physical_texture_dtype": str(values.dtype),
+                "physical_texture_shape": tuple(int(value) for value in values.shape),
+                "physical_real_plane_identity": plane_identity_record(real_plane),
+                "physical_imag_plane_identity": plane_identity_record(imag_plane),
+                "physical_mapping_mode": mapping_mode,
+                "physical_component_mode": None,
+                "physical_levels": tuple(float(value) for value in state.levels),
+                "physical_acknowledged_identity": state.acknowledged_identity,
+            }
+        return rows
 
     def set_lookup_table(self, lut) -> None:
         """Apply the frame colormap to every resident scalar tile item."""

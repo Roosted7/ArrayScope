@@ -1789,6 +1789,12 @@ class VisPyImageView2D(ImageViewShell):
         self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
         return stats
 
+    def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is None:
+            return {}
+        return layer.tile_truth_physical_rows()
+
     def _request_vispy_tile_layer_redraw(self) -> None:
         self._vispy_tile_presentation_request_count = int(
             getattr(self, "_vispy_tile_presentation_request_count", 0) or 0
