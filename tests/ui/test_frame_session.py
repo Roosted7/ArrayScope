@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
+from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
@@ -552,6 +555,34 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     _present_exact_tiles(session, 1)
 
     assert session.visible_first_pixels_presented()
+    assert session.visible_plan_complete()
+
+
+def test_montage_render_session_visible_plan_is_gated_by_onscreen_not_coverage_ring():
+    session = _session()
+    session.pending_tiles.clear()
+    session.loading_tiles.clear()
+    session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
+    session.visible_tile_numbers = frozenset({0, 1})
+    session.frame_plan = FramePlanner().plan(
+        target=FrameTarget(
+            semantic_key="key",
+            viewport_key="viewport",
+            presentation_key="levels",
+            quality="exact-visible",
+        ),
+        view_state=session.view_state,
+        display_shape=session.plan.display_shape,
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+        viewport_shape=session.viewport_shape,
+        view_range=((0.0, 1.0), (0.0, 1.0)),
+        montage_plan=session.plan,
+    )
+    assert session.frame_plan.active_region_ids == (0,)
+    _present_exact_tiles(session, 0)
+
+    assert session.onscreen_target_settled()
+    assert not session.lifecycle.visible_target_settled()
     assert session.visible_plan_complete()
 
 

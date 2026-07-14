@@ -3274,7 +3274,7 @@ class FrameSession:
     def visible_plan_complete(self) -> bool:
         if self.has_stale_level_presentations():
             return False
-        return self.lifecycle.visible_target_settled()
+        return self.onscreen_target_settled()
 
     def visible_first_pixels_presented(self) -> bool:
         return self.lifecycle.visible_first_pixels_presented()
