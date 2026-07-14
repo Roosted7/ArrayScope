@@ -2005,6 +2005,19 @@ class FramePipelineEffects:
         if active_payloads:
             renderer._queue_montage_level_stats_for_payloads(session, active_payloads)
         session.display_committed = bool(session.lifecycle.presented_tiles)
+        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
+        if semantic_progress is not None and (
+            semantic_progress.inflight_generation is not None
+            or int(semantic_progress.pending_batches) > 0
+        ):
+            # A shader backend can commit rough levels while refined semantic
+            # evidence is quota-parked behind the just-finished visible work.
+            # The commit changes that eligibility without producing another
+            # kernel completion, so reconcile the existing lane quota at the
+            # state transition instead of adding a polling timer.
+            reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
+            if callable(reconcile_quotas):
+                reconcile_quotas(refresh_telemetry=False)
         if (
             bool(getattr(session, "_cpu_atomic_successor_pending", False))
             and session.lifecycle.visible_first_pixels_presented()

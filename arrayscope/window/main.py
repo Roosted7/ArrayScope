@@ -16,6 +16,7 @@ from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusySta
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.kernel import Kernel, Lane, Priority, ThreadWorkerBackend
 from arrayscope.kernel.eval_adapter import KernelEvaluationController
 from arrayscope.kernel.qt_bridge import QtKernelBridge
@@ -387,6 +388,7 @@ class ArrayScopeWindow(
         session = getattr(self, "_frame_session", None)
         stage_ready = False
         backlog = 0
+        semantic_evidence_blocking = False
         if session is not None:
             stage_ready = bool(
                 session.stage_fan_in.values
@@ -397,6 +399,17 @@ class ArrayScopeWindow(
                 len(getattr(session, "pending_payload_upserts", ()) or ())
                 + len(getattr(session, "pending_removals", ()) or ())
             )
+            semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
+            capabilities = image_view_backend_capabilities(self.img_view)
+            semantic_evidence_blocking = bool(
+                semantic_progress is not None
+                and not bool(capabilities.shader_windowing)
+                and not bool(getattr(session, "display_committed", False))
+                and (
+                    semantic_progress.inflight_generation is not None
+                    or int(semantic_progress.pending_batches) > 0
+                )
+            )
         return SchedulerBusyState(
             visible_busy=getattr(getattr(self, "visible_evaluation_controller", None), "is_busy", lambda: False)(),
             montage_busy=getattr(getattr(self, "montage_tile_evaluation_controller", None), "is_busy", lambda: False)(),
@@ -404,6 +417,7 @@ class ArrayScopeWindow(
             prefetch_busy=getattr(getattr(self, "prefetch_evaluation_controller", None), "is_busy", lambda: False)(),
             result_backlog=backlog,
             stage_ready_or_in_flight=stage_ready,
+            semantic_evidence_blocking=semantic_evidence_blocking,
         )
 
     def _interaction_active_now(self) -> bool:

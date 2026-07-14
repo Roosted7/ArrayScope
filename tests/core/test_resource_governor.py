@@ -103,6 +103,31 @@ def test_histogram_workers_park_only_behind_runnable_visible_work():
     assert "runnable user-visible rendering" in busy.reason
     assert between_bursts.target_workers == between_bursts.max_workers
 
+    bookkeeping_only = governor.decide_lane_workers(
+        ComputeLane.HISTOGRAM,
+        interactive=False,
+        busy_state=SchedulerBusyState(result_backlog=2),
+    )
+    assert bookkeeping_only.target_workers == bookkeeping_only.max_workers
+
+
+def test_blocking_semantic_evidence_keeps_one_histogram_worker():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
+
+    decision = governor.decide_lane_workers(
+        ComputeLane.HISTOGRAM,
+        interactive=True,
+        busy_state=SchedulerBusyState(
+            visible_busy=True,
+            result_backlog=2,
+            semantic_evidence_blocking=True,
+        ),
+    )
+
+    assert decision.target_workers == 1
+    assert decision.min_workers == 1
+    assert "blocks first presentation" in decision.reason
+
 
 def test_tile_worker_product_guard_still_holds():
     policy = _policy(MemoryProfileChoice.AGGRESSIVE)

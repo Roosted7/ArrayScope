@@ -31,6 +31,7 @@ class SchedulerBusyState:
     queued_callbacks: int = 0
     result_backlog: int = 0
     stage_ready_or_in_flight: bool = False
+    semantic_evidence_blocking: bool = False
 
 
 @dataclass(frozen=True)
@@ -250,11 +251,13 @@ class ResourceGovernor:
                 desired = 1
                 reasons.append("prefetch kept narrow while user-visible work is active")
         elif lane == ComputeLane.HISTOGRAM:
-            if (
+            if busy_state.semantic_evidence_blocking:
+                desired = min(desired, 1)
+                reasons.append("semantic level evidence blocks first presentation")
+            elif (
                 busy_state.visible_busy
                 or busy_state.montage_busy
                 or busy_state.stage_busy
-                or busy_state.result_backlog > 0
             ):
                 min_workers = 0
                 desired = 0
