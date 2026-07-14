@@ -34,6 +34,13 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > was reverted and the rejected measurements are recorded in the redesign
 > README. The active measured cause is now committed-frame `level_source`.
 
+> **[Codex 2026-07-14 — P2 result]** Committing `level_source` removed the
+> workflow's first-evidence-quality failure but regressed the real VisPy V2
+> priority gate from 14/16 to 4/16 nearest first-cohort tiles and exposed a
+> rough-bounds relative-window error. The code was reverted; the redesign
+> README records the measurements and missing maturity rule. The active
+> measured cause is now viewport-intent replay.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

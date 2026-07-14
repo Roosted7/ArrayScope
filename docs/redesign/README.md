@@ -276,6 +276,22 @@ acceptance.
 > prefetch suppression on the critical path. P2 (committed-frame
 > `level_source`) is next.
 
+> **[Codex 2026-07-14 — P2 rejected; committed `level_source` crossed an
+> unproven maturity boundary]** Experimentally carried the selected
+> `LevelSource` through `DisplayTiledPresentation` into
+> `CommittedDisplayFrame`, including viewport re-commits and concrete level
+> changes. The VisPy workflow stopped failing
+> `first_visible_level_evidence_quality`, but did not improve the bars: FFT
+> elapsed **12,855.7 → 13,139.3 ms** (+2.2%) and heartbeat max
+> **223.2 → 230.2 ms**. More importantly, the real V2 VisPy center-out gate
+> regressed from the accepted **14/16** nearest tiles in the first cohort to
+> **4/16**. The focused relative-level scenario also mapped `5:15` over a
+> rough committed `9:10` source and produced **24:214** instead of
+> **105:115**. All P2 runtime and test edits were reverted. The missing
+> prerequisite is an explicit maturity/semantic rule for when level evidence
+> may become committed-frame truth; do not blindly port the marathon field.
+> P3 (viewport intent replay) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that
