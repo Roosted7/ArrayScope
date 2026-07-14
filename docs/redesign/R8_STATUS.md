@@ -127,6 +127,27 @@ next hypothesis must address full-window convergence/settlement as an R8C
 truth-and-convergence slice; the benchmark and scheduling/throughput policy
 remain untouched.
 
+### Rejected overlay presentation
+
+The first `a78adbf` overlay presentation is not accepted as the R8B debug
+overlay. It renders all lifecycle rows in one global HUD, so the identity is
+not spatially attached to the tile whose pixels it describes. That makes it
+too difficult to correlate a flash with one slot and fails the stated
+per-tile requirement. The lifecycle rows remain valid evidence, but the UI
+must be replaced by one overlay on each visible tile for both PyQtGraph and
+VisPy.
+
+Work stopped again at this checkpoint before changing the overlay. Two other
+confirmed issues are intentionally kept separate from that replacement:
+
+- `seed_display_tile_payloads()` retargets a reused wrapper's
+  `tile_number`/`source_index` without rebuilding its typed `tile_identity`.
+  A slot-3 payload can therefore carry acknowledged source 0 and is correctly
+  rejected forever by the truth firewall.
+- `montage_prefetch.py` still calls the removed
+  `_is_current_montage_session()` API from a completion callback; the
+  canonical method is `_is_current_frame_session()`.
+
 ## Remaining R8 work
 
 - Exercise the typed firewall through the full ArrayScopeWindow real-file path
