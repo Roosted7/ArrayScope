@@ -7,6 +7,7 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
 from arrayscope.window.frame_session import FrameSession
 
@@ -243,7 +244,7 @@ def test_backend_confirmed_current_payload_rehydrates_active_state():
     session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
     payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
     session.tile_presentation_state = TilePresentationState()
-    session.lifecycle.backend_presented_snapshot({0: payload.source_id})
+    session.lifecycle.backend_presented_snapshot({0: tile_ack_identity(payload)})
     session.lifecycle.presentation_discarded(0)
     assert 0 in session.loading_tiles
 
@@ -282,7 +283,9 @@ def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     payloads = session.snapshot_display_tile_payloads(source_ids)
     session.display_tile_payloads.update(payloads)
     session.tile_presentation_state = TilePresentationState()
-    session.lifecycle.backend_presented_snapshot({tile: payload.source_id for tile, payload in payloads.items()})
+    session.lifecycle.backend_presented_snapshot(
+        {tile: tile_ack_identity(payload) for tile, payload in payloads.items()}
+    )
     for tile in payloads:
         session.pending_payload_upserts[int(tile)] = None
         session.dirty_payloads[int(tile)] = None
@@ -290,7 +293,10 @@ def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     state, delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert delta.upserts == {}
-    assert delta.active_tiles == (0, 1, 2)
+    # Active is the complete committed target scope. Tile 3 has no compatible
+    # payload yet and therefore remains an explicit placeholder, not an
+    # omitted obligation.
+    assert delta.active_tiles == (0, 1, 2, 3)
     assert set(state.active_payloads(delta)) == {0, 1, 2}
     assert session.pending_payload_upserts == {}
     assert session.dirty_payloads == {}
