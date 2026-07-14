@@ -262,6 +262,20 @@ acceptance.
 > P-program, while the live product ordering is again maintained in
 > `docs/roadmap.md`.
 
+> **[Codex 2026-07-14 — P1 rejected; narrowed prefetch-busy was not a
+> measured improvement]** Replaced the broad session-collection busy test
+> experimentally with V1's canonical `required_target_settled()` plus live
+> kernel/controller work, then ran the same real-Wayland scroll phases before
+> and after. VisPy FFT elapsed **12,855.7 → 12,899.7 ms** (+0.3%) and heartbeat
+> max **223.2 → 229.7 ms**; scalar elapsed **7,448.7 → 9,383.5 ms** (+26.0%)
+> while heartbeat max changed **180.6 → 165.5 ms**. Both variants remained
+> gate-red. PyQtGraph froze identically before and after at **50/60 presented,
+> 10 dirty upserts, idle kernel, 4.0 s stall**. The runtime/test change was
+> reverted, leaving no P1 code delta. Do not reapply the marathon's narrowed
+> busy predicate on architectural plausibility alone; require a trace showing
+> prefetch suppression on the critical path. P2 (committed-frame
+> `level_source`) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

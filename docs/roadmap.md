@@ -28,6 +28,12 @@ stage-cache snapshot/cancellation → governor policy → admission batching →
 gate pacing → slot relocation. Every P commit carries before/after trace and
 benchmark evidence; the real-display pixel/trace gates must stay green.
 
+> **[Codex 2026-07-14 — P1 result]** Narrowing prefetch-busy was measured on
+> both backends, produced no FFT improvement, regressed the scalar elapsed
+> sample, and did not change PyQtGraph's 50/60 presentation freeze. The code
+> was reverted and the rejected measurements are recorded in the redesign
+> README. The active measured cause is now committed-frame `level_source`.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do
