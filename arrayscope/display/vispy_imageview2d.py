@@ -1268,13 +1268,31 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_profile_hover_part = part
         self._sync_vispy_profile_marker()
 
-    def setViewportContentExtent(self, extent) -> None:
-        super().setViewportContentExtent(extent)
+    def setViewportContentExtent(self, extent) -> bool:
+        changed = super().setViewportContentExtent(extent)
         if extent is not None:
             # Keep the scene bounds item in step: the ViewBox aspect-relock
             # on fit-unlock ranges around children bounds, which otherwise
             # still hold the pre-plan single-slice rect until a commit lands.
-            self._sync_vispy_bounds(extent)
+            # Bounds publication is plan-owned geometry, not user camera
+            # input. Preserve the committed camera until acknowledgement
+            # explicitly replays AUTO/FIT for the successor extent.
+            prior_range = self.view.viewRange()
+            blocker = QtCore.QSignalBlocker(self.view)
+            self._viewport_applying = True
+            try:
+                self._sync_vispy_bounds(extent)
+                self.view.setRange(
+                    xRange=prior_range[0],
+                    yRange=prior_range[1],
+                    padding=0,
+                )
+            finally:
+                blocker.unblock()
+                self._viewport_applying = False
+            if changed:
+                self._remember_accepted_view_range()
+        return bool(changed)
 
     def _viewport_content_shape(self):
         extent = getattr(self, "_viewport_content_extent", None)

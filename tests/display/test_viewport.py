@@ -294,6 +294,36 @@ def test_user_range_change_far_from_auto_demotes_auto_mode():
     assert controller.mode == ViewportMode.USER
 
 
+def test_new_content_fit_promotes_auto_when_previous_baseline_is_stale():
+    controller = ViewportController(mode=ViewportMode.USER)
+    controller.last_auto_view_range = ((-5.0, 15.0), (0.0, 10.0))
+    new_fit = ((-5.0, 25.0), (0.0, 15.0))
+
+    assert controller.promote_content_fit(
+        new_fit,
+        _size(200, 100),
+        display_rect=(0.0, 0.0, 20.0, 15.0),
+    )
+    assert controller.mode == ViewportMode.AUTO_UNTOUCHED
+    assert controller.last_auto_view_range == new_fit
+
+
+def test_auto_fit_remembers_viewbox_accepted_range():
+    class AdjustingViewBox(FakeViewBox):
+        def setRange(self, *, xRange, yRange, padding=0):
+            self.range = [
+                [float(xRange[0]) - 0.25, float(xRange[1]) + 0.25],
+                list(yRange),
+            ]
+
+    controller = ViewportController()
+    view = AdjustingViewBox()
+
+    controller.apply_after_image(view, (10, 10), _size(100, 100))
+
+    assert controller.last_auto_view_range == ((-0.25, 10.25), (0.0, 10.0))
+
+
 def test_auto_resize_refits_even_if_current_range_is_far_from_previous_auto():
     controller = ViewportController()
     view = FakeViewBox()

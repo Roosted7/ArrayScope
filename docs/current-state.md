@@ -31,6 +31,9 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
 4. A stranded required tile is no longer silent: after two idle seconds it
    emits a `stall` owner-chain event, writes the bounded trace, and shows a
    persistent diagnostic.
+5. Acknowledged montage extent changes replay AUTO/FIT camera intent against
+   successor geometry; backend bounds changes no longer become USER input,
+   and an actual USER camera is preserved.
 
 ## Known open work
 

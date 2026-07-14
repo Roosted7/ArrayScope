@@ -301,6 +301,31 @@ acceptance.
 > may become committed-frame truth; do not blindly port the marathon field.
 > P3 (viewport intent replay) is next.
 
+> **[Codex 2026-07-14 — P3 complete as a viewport-truth fix; no performance
+> credit claimed]** `setViewportContentExtent()` now reports a real semantic
+> extent transition, and acknowledgement replays AUTO/FIT against that
+> successor extent while preserving an explicit USER camera. The canonical
+> controller recognizes the accepted square-pixel content fit even when its
+> previous auto baseline belongs to the predecessor. VisPy publishes hidden
+> bounds inside the same programmatic transaction and restores the committed
+> camera until acknowledgement, so backend scene geometry cannot masquerade
+> as user input. The focused display/window/harness slices are **328 passed,
+> 2 skipped**; the V1 boundary and V2 center-out real-Wayland gates remain
+> green on both backends (**4 passed**).
+>
+> **[Codex 2026-07-14 — P3 negative result / remaining stall]** The exact
+> real-Wayland FFT/scalar workflow still stops in the FFT phase before it can
+> write a phase metrics record. Before and after both ended with **7/60 active
+> tiles, 53 dirty tiles, no work in flight, `report_committed=0`, `ack_new=0`,
+> and `ViewportMode.USER`**. The trace changed only within run noise:
+> **61,712 → 59,500 events**, **136 → 137 backend acks**, and input-to-first-
+> ack **6819.9 → 6811.6 ms**. This is expected for the fixture's explicit USER
+> camera: P3 must not move it. Do not cite P3 as a fix for the idle
+> presentation-gate stall or broaden AUTO promotion to capture USER state.
+> The failed workflow evidence is retained under the ignored
+> `tests/artifacts/redesign-p3-2026-07-14/{before,after}` directories. P4
+> (background histogram aggregation) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

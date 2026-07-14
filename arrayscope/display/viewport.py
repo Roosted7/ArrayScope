@@ -145,6 +145,35 @@ class ViewportController:
             return True
         return self.is_auto_active()
 
+    def promote_content_fit(
+        self,
+        view_range,
+        viewport_size,
+        *,
+        display_rect=None,
+        tolerance_fraction: float = 0.04,
+    ) -> bool:
+        """Recognize the content-maximizing square-pixel range as AUTO.
+
+        A newly acknowledged content extent can replace the previous auto
+        baseline before the resulting ViewBox signal is delivered. Compare
+        with the fit for the current content rather than misclassifying that
+        programmatic range change as a user pan.
+        """
+
+        if self.mode == ViewportMode.FIT or display_rect is None:
+            return False
+        try:
+            current = _normalize_view_range(view_range)
+            target = square_pixel_fit_view_range(display_rect, viewport_size)
+        except Exception:
+            return False
+        if not view_ranges_near(current, target, tolerance_fraction=tolerance_fraction):
+            return False
+        self.mode = ViewportMode.AUTO_UNTOUCHED
+        self.last_auto_view_range = current
+        return True
+
     def one_to_one(self, view_box, image_shape, viewport_size, display_rect=None):
         _set_one_to_one(view_box, image_shape, viewport_size, display_rect=_display_rect(image_shape, display_rect))
         self.mode = ViewportMode.USER
@@ -198,7 +227,12 @@ class ViewportController:
     def _auto_square_fit(self, view_box, viewport_size, *, display_rect=None):
         view_range = square_pixel_fit_view_range(display_rect, viewport_size)
         view_box.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
-        self.last_auto_view_range = view_range
+        # ViewBox may make a final aspect-lock adjustment. The accepted range,
+        # not the pre-adjustment request, is the baseline for later signals.
+        try:
+            self.last_auto_view_range = _normalize_view_range(view_box.viewRange())
+        except Exception:
+            self.last_auto_view_range = view_range
 
     def _current_view_is_near_auto(self, view_box, *, base_view_range=None) -> bool:
         if self.last_auto_view_range is None:

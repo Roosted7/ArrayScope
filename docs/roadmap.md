@@ -42,6 +42,13 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > README records the measurements and missing maturity rule. The active
 > measured cause is now viewport-intent replay.
 
+> **[Codex 2026-07-14 — P3 result]** Acknowledged content-extent changes now
+> replay AUTO/FIT without moving USER cameras, including VisPy's hidden-bounds
+> update. Focused and real-pixel gates pass on both backends. The canonical
+> USER-camera workflow remained stalled at the same 7/60 presentation state,
+> so P3 carries no performance credit and the stall remains open. The active
+> measured cause is now background histogram aggregation.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

@@ -2966,6 +2966,37 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
     view.close()
 
 
+def test_imageview_replays_auto_intent_only_after_content_extent_changes(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.viewport import ViewportMode
+
+    view = ImageView2D()
+    try:
+        view.resize(400, 240)
+        view.show()
+        view.setImage(np.zeros((2, 5), dtype=float))
+        qt_app.processEvents()
+
+        before = view.getView().viewRange()
+        assert view.setViewportContentExtent((4, 10)) is True
+        assert view.getView().viewRange() == before
+        assert view.refreshViewportContentExtentIntent() is True
+        qt_app.processEvents()
+        assert view.viewport_controller.mode == ViewportMode.AUTO_UNTOUCHED
+        assert view.viewport_controller.is_near_auto(view.getView().viewRange())
+        assert view.setViewportContentExtent((4, 10)) is False
+
+        view.getView().setRange(xRange=(2.0, 4.0), yRange=(1.0, 3.0), padding=0)
+        qt_app.processEvents()
+        assert view.viewport_controller.mode == ViewportMode.USER
+        user_range = view.getView().viewRange()
+        assert view.setViewportContentExtent((8, 20)) is True
+        assert view.refreshViewportContentExtentIntent() is False
+        assert view.getView().viewRange() == user_range
+    finally:
+        view.close()
+
+
 def test_imageview_manual_resize_preserves_screen_zoom_after_layout(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.viewport import ViewportMode

@@ -58,6 +58,11 @@ profile tool (5,639 vs 2,788 lines). The scroll/zoompan phase work from
    `refreshViewportContentExtentIntent()`** (`imageview2d.py`,
    `viewport.py`) — replay AUTO/FIT intent against the acknowledged
    successor extent; fixes fit-vs-user misclassification.
+   **[Codex 2026-07-14 — re-derived and landed as P3]** The focused
+   AUTO/FIT/USER contract and both real-display pixel gates pass. The
+   canonical benchmark fixture is USER-owned and its existing 7/60 idle
+   presentation stall did not change; P3 therefore carries correctness, not
+   performance, credit. Do not retry it as a stall fix.
 10. **Background histogram aggregation** (`level_stats.py`,
     `montage_levels.py`) — binning off the GUI thread behind
     `(key, session, level_key, revision)` guards, plus the arithmetic

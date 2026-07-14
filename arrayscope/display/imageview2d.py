@@ -1877,7 +1877,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 self._viewport_applying = False
             self._after_viewport_camera_change()
 
-    def setViewportContentExtent(self, extent) -> None:
+    def setViewportContentExtent(self, extent) -> bool:
         """Set the semantic (height, width) the viewport treats as content.
 
         Layout geometry is semantic: montage/tiled planners call this at plan
@@ -1888,9 +1888,33 @@ class ImageViewShell(QtWidgets.QWidget):
         shape (first bad commit 2995d039).
         """
 
-        self._viewport_content_extent = (
+        normalized = (
             None if extent is None else (max(1, int(extent[0])), max(1, int(extent[1])))
         )
+        changed = normalized != getattr(self, "_viewport_content_extent", None)
+        self._viewport_content_extent = normalized
+        return bool(changed)
+
+    def refreshViewportContentExtentIntent(self) -> bool:
+        """Replay AUTO/FIT intent after a new content extent is acknowledged."""
+
+        controller = self.viewport_controller
+        if self.image is None or not (controller.is_fit_locked() or controller.is_auto_active()):
+            return False
+        self._viewport_applying = True
+        try:
+            controller.apply_after_image(
+                self.view,
+                self._viewport_content_shape(),
+                self.graphicsView.viewport().size(),
+                policy=ViewportPolicy.RESET_FOR_NEW_SHAPE,
+                display_rect=self._current_image_viewport_rect(),
+            )
+        finally:
+            self._viewport_applying = False
+        self._enforce_viewport_constraints()
+        self._after_viewport_camera_change()
+        return True
 
     def _viewport_content_shape(self):
         """(height, width) the viewport controller should treat as content."""
@@ -2475,7 +2499,14 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _on_view_range_changed(self, *_args):
         if not self._viewport_applying:
-            self.viewport_controller.note_user_range_changed(self.view.viewRange())
+            view_range = self.view.viewRange()
+            promoted = self.viewport_controller.promote_content_fit(
+                view_range,
+                self.graphicsView.viewport().size(),
+                display_rect=self._current_image_viewport_rect(),
+            )
+            if not promoted:
+                self.viewport_controller.note_user_range_changed(view_range)
             self._enforce_viewport_constraints()
         self._sync_profile_marker_visibility()
         if self._tile_truth_overlay_layer is not None:

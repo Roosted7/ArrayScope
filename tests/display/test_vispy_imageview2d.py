@@ -1668,6 +1668,20 @@ def test_vispy_direct_tiled_fit_syncs_camera_immediately(qt_app):
         assert view._vispy_view.camera.aspect is None
         assert view._vispy_camera_key[:2] == expected
 
+        view.setFitLocked(False)
+        qt_app.processEvents()
+        assert view.viewport_controller.mode.value == "auto_untouched"
+        assert view.viewport_controller.is_near_auto(view.getView().viewRange())
+
+        previous_range = view.getView().viewRange()
+        assert view.setViewportContentExtent((4, 10)) is True
+        assert view.getView().viewRange() == previous_range
+        assert view.viewport_controller.mode.value == "auto_untouched"
+        assert view.refreshViewportContentExtentIntent() is True
+        qt_app.processEvents()
+        assert view.viewport_controller.mode.value == "auto_untouched"
+        assert view.viewport_controller.is_near_auto(view.getView().viewRange())
+
         view.oneToOne()
         assert view._vispy_view.camera.aspect == 1.0
     finally:
