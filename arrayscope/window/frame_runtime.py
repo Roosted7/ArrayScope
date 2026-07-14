@@ -418,6 +418,10 @@ class FrameRuntimeMixin:
         level_evidence = len(getattr(session, "pending_level_tiles", ()) or ()) + int(
             getattr(session, "level_scan_remaining_tiles", 0) or 0
         )
+        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
+        if semantic_progress is not None:
+            level_evidence += int(semantic_progress.pending_batches)
+            level_evidence += int(semantic_progress.inflight_generation is not None)
         # Level-value convergence drains stale tiles through budgeted commits
         # without touching dirty/upsert queues; its progress must be part of
         # the stall signature or a long drain reads as a frozen session.

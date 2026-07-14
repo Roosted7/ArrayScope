@@ -74,6 +74,51 @@ class PreviewFloorMetadata:
     quality: str = "preview"
 
 
+@dataclass(frozen=True)
+class SemanticLevelEvidenceTarget:
+    """Immutable full-population statistics obligation for one frame."""
+
+    generation: object
+    level_key: object
+    expected_sources: tuple[int, ...]
+    pixel_limit: int
+    aggregate_sample_limit: int
+    blocking_batch_limit: int
+    background_batch_limit: int
+
+    @property
+    def target_population(self) -> int:
+        return len(self.expected_sources)
+
+
+@dataclass
+class SemanticLevelEvidenceProgress:
+    """Bounded scheduler progress; LevelStatsService is its only mutator."""
+
+    target: SemanticLevelEvidenceTarget
+    cursor: int = 0
+    covered_sources: set[int] = field(default_factory=set)
+    covered_sources_sample: list[int] = field(default_factory=list)
+    current_batch_limit: int = 1
+    inflight_generation: object | None = None
+    blocking_reason: str = "waiting-semantic-sources"
+
+    @property
+    def pending_batches(self) -> int:
+        remaining = max(0, int(self.target.target_population) - len(self.covered_sources))
+        limit = max(1, int(self.current_batch_limit))
+        return (remaining + limit - 1) // limit
+
+    def record_covered(self, source_index: int) -> bool:
+        source_index = int(source_index)
+        if source_index in self.covered_sources:
+            return False
+        self.covered_sources.add(source_index)
+        if len(self.covered_sources_sample) < 64:
+            self.covered_sources_sample.append(source_index)
+        return True
+
+
 def _shader_mapping_key(mapping):
     return None if mapping is None else getattr(mapping, "identity_key", mapping)
 
@@ -496,6 +541,8 @@ class FrameSession:
     level_scan_remaining_tiles: int = 0
     level_evidence_inflight: bool = False
     level_evidence_generation: object | None = None
+    semantic_level_evidence_target: SemanticLevelEvidenceTarget | None = None
+    semantic_level_evidence_progress: SemanticLevelEvidenceProgress | None = None
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_refined_level_sources: set[int] = field(default_factory=set)
     tile_compute_cache_hits: int = 0
@@ -932,6 +979,7 @@ class FrameSession:
         # work and strands all level presentations stale.
         self.level_evidence_inflight = False
         self.level_evidence_generation = None
+        self.invalidate_semantic_level_evidence()
         # The evidence scan indexed the OLD window's level key; restart the
         # counters so the new key's evidence is armed from scratch (the
         # renderer re-marks the scan whenever a commit parks on evidence).
@@ -1136,6 +1184,37 @@ class FrameSession:
 
     def has_pending_level_update(self) -> bool:
         return bool(self._level_update_pending and not self.level_presentation_snapshot().settled)
+
+    def invalidate_semantic_level_evidence(self) -> None:
+        """Drop scheduler progress when the semantic frame generation changes."""
+
+        self.semantic_level_evidence_target = None
+        self.semantic_level_evidence_progress = None
+
+    def semantic_level_evidence_diagnostics(self) -> dict[str, object]:
+        target = self.semantic_level_evidence_target
+        progress = self.semantic_level_evidence_progress
+        if target is None or progress is None:
+            return {
+                "target_population": 0,
+                "covered_sources": (),
+                "covered_source_count": 0,
+                "pending_batches": 0,
+                "inflight_generation": None,
+                "blocking_reason": "inactive",
+                "source_batch_limit": 0,
+                "pixel_limit": 0,
+            }
+        return {
+            "target_population": int(target.target_population),
+            "covered_sources": tuple(progress.covered_sources_sample),
+            "covered_source_count": len(progress.covered_sources),
+            "pending_batches": int(progress.pending_batches),
+            "inflight_generation": progress.inflight_generation,
+            "blocking_reason": str(progress.blocking_reason),
+            "source_batch_limit": int(progress.current_batch_limit),
+            "pixel_limit": int(target.pixel_limit),
+        }
 
     def set_level_update_pending(self, pending: bool) -> None:
         self._level_update_pending = bool(pending)

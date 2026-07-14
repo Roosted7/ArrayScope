@@ -95,6 +95,14 @@ class MontageRuntimeDiagnostics:
     pending_removals: int = 0
     pending_level_tiles: int = 0
     level_scan_remaining_tiles: int = 0
+    semantic_evidence_target_population: int = 0
+    semantic_evidence_covered_sources: tuple[int, ...] = ()
+    semantic_evidence_covered_source_count: int = 0
+    semantic_evidence_pending_batches: int = 0
+    semantic_evidence_inflight_generation: object | None = None
+    semantic_evidence_blocking_reason: str = "inactive"
+    semantic_evidence_source_batch_limit: int = 0
+    semantic_evidence_pixel_limit: int = 0
     skipped_tiles: int = 0
     visible_tiles: int = 0
     presented_tiles: int = 0
@@ -660,6 +668,8 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
         or int(getattr(montage, "loading_tiles", 0) or 0)
         or int(getattr(montage, "pending_level_tiles", 0) or 0)
         or int(getattr(montage, "level_scan_remaining_tiles", 0) or 0)
+        or int(getattr(montage, "semantic_evidence_pending_batches", 0) or 0)
+        or getattr(montage, "semantic_evidence_inflight_generation", None) is not None
         or int(getattr(montage, "attached_stage_requests", 0) or 0)
         or int(getattr(montage, "waiting_stage_requests", 0) or 0)
         or bool(getattr(montage, "final_commit_pending", False))
@@ -879,6 +889,14 @@ _MONTAGE_COVERED = frozenset(
         "pending_payload_upserts",
         "pending_removals",
         "level_scan_remaining_tiles",
+        "semantic_evidence_target_population",
+        "semantic_evidence_covered_sources",
+        "semantic_evidence_covered_source_count",
+        "semantic_evidence_pending_batches",
+        "semantic_evidence_inflight_generation",
+        "semantic_evidence_blocking_reason",
+        "semantic_evidence_source_batch_limit",
+        "semantic_evidence_pixel_limit",
         "flush_pending",
         "final_commit_pending",
         "tile_lod_policy",
@@ -1075,6 +1093,17 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"upserts={montage.pending_payload_upserts} "
             f"removals={montage.pending_removals} level_scan={montage.level_scan_remaining_tiles} "
             f"flush={_bool_text(montage.flush_pending)} final={_bool_text(montage.final_commit_pending)}"
+        ),
+        (
+            "Semantic evidence: "
+            f"covered={montage.semantic_evidence_covered_source_count}/"
+            f"{montage.semantic_evidence_target_population} "
+            f"sources={montage.semantic_evidence_covered_sources} "
+            f"batches={montage.semantic_evidence_pending_batches} "
+            f"inflight={montage.semantic_evidence_inflight_generation!r} "
+            f"bounds={montage.semantic_evidence_source_batch_limit}src/"
+            f"{montage.semantic_evidence_pixel_limit}px "
+            f"reason={montage.semantic_evidence_blocking_reason}"
         ),
         (
             "Session: "

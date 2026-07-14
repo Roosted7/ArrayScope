@@ -60,6 +60,20 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         for tile, key in stage_bindings.items()
         if key not in stage_values
     }
+    semantic_evidence = (
+        {
+            "target_population": 0,
+            "covered_sources": (),
+            "covered_source_count": 0,
+            "pending_batches": 0,
+            "inflight_generation": None,
+            "blocking_reason": "inactive",
+            "source_batch_limit": 0,
+            "pixel_limit": 0,
+        }
+        if session is None
+        else session.semantic_level_evidence_diagnostics()
+    )
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
@@ -71,6 +85,14 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
         level_scan_remaining_tiles=0 if session is None else int(getattr(session, "level_scan_remaining_tiles", 0) or 0),
+        semantic_evidence_target_population=int(semantic_evidence["target_population"]),
+        semantic_evidence_covered_sources=tuple(semantic_evidence["covered_sources"]),
+        semantic_evidence_covered_source_count=int(semantic_evidence["covered_source_count"]),
+        semantic_evidence_pending_batches=int(semantic_evidence["pending_batches"]),
+        semantic_evidence_inflight_generation=semantic_evidence["inflight_generation"],
+        semantic_evidence_blocking_reason=str(semantic_evidence["blocking_reason"]),
+        semantic_evidence_source_batch_limit=int(semantic_evidence["source_batch_limit"]),
+        semantic_evidence_pixel_limit=int(semantic_evidence["pixel_limit"]),
         skipped_tiles=0 if session is None else len(session.skipped_tiles),
         visible_tiles=0 if session is None else len(session.visible_tiles),
         presented_tiles=0 if session is None else len(session.lifecycle.presented_tiles),

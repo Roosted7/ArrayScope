@@ -19,9 +19,11 @@ from arrayscope.kernel import (
 )
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
+    AGGREGATE_SAMPLE_LIMIT,
     LevelEvidenceQuality,
     MontageLevelStats,
     MontageLevelTracker,
+    REFINED_TILE_SAMPLE_LIMIT,
     montage_level_key,
     provisional_tile_level_stats,
     sample_tile_level_stats,
@@ -29,9 +31,17 @@ from arrayscope.display.model.montage_levels import (
 )
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
-from arrayscope.operations.evaluator import _document_key
+from arrayscope.operations.evaluator import (
+    _document_key,
+    evaluate_level_evidence_snapshot,
+    stage_document_key,
+)
 from arrayscope.render import effects as render_effects
 from arrayscope.window import frame_effects as montage_commit
+from arrayscope.window.frame_session import (
+    SemanticLevelEvidenceProgress,
+    SemanticLevelEvidenceTarget,
+)
 
 
 MONTAGE_LEVEL_STATS_COMMIT_BATCH = 4
@@ -370,11 +380,189 @@ class LevelStatsService:
             self._montage_level_tracker_instance = tracker
         return tracker
 
+    def _ensure_semantic_level_evidence_target(self, session):
+        document = getattr(session, "document", None)
+        view_state = getattr(session, "view_state", None)
+        if document is None or view_state is None or getattr(session, "montage_axis", None) is None:
+            return None
+        expected = self._montage_level_expected_indices(session)
+        generation = (
+            int(getattr(session, "session_id", 0) or 0),
+            getattr(session, "level_key", None),
+            expected,
+        )
+        current = getattr(session, "semantic_level_evidence_target", None)
+        if current is not None and current.generation == generation:
+            return current
+        target = SemanticLevelEvidenceTarget(
+            generation=generation,
+            level_key=session.level_key,
+            expected_sources=expected,
+            pixel_limit=int(REFINED_TILE_SAMPLE_LIMIT),
+            aggregate_sample_limit=int(AGGREGATE_SAMPLE_LIMIT),
+            blocking_batch_limit=int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH),
+            background_batch_limit=int(MONTAGE_LEVEL_STATS_BACKGROUND_BATCH),
+        )
+        visible_dependency = bool(
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        )
+        progress = SemanticLevelEvidenceProgress(
+            target=target,
+            current_batch_limit=(
+                target.blocking_batch_limit
+                if visible_dependency
+                else target.background_batch_limit
+            ),
+        )
+        session.semantic_level_evidence_target = target
+        session.semantic_level_evidence_progress = progress
+        self._montage_level_tracker().ensure_expected(session.level_key, expected)
+        return target
+
+    def _take_semantic_level_evidence_sources(self, session) -> tuple[int, ...]:
+        target = self._ensure_semantic_level_evidence_target(session)
+        progress = getattr(session, "semantic_level_evidence_progress", None)
+        if target is None or progress is None:
+            return ()
+        tracker = self._montage_level_tracker()
+        limit = max(1, int(progress.current_batch_limit))
+        sources: list[int] = []
+        inspected = 0
+        while progress.cursor < target.target_population and inspected < limit:
+            source_index = int(target.expected_sources[progress.cursor])
+            progress.cursor += 1
+            inspected += 1
+            cached = self._cached_montage_source_level_stats(
+                target.level_key,
+                source_index,
+                LevelEvidenceQuality.REFINED,
+            )
+            if cached is not None:
+                tracker.update_from_stats(target.level_key, cached, aggregate=False)
+            if tracker.has_source_quality(
+                target.level_key,
+                source_index,
+                LevelEvidenceQuality.REFINED,
+            ):
+                progress.record_covered(source_index)
+                continue
+            sources.append(source_index)
+        return tuple(sources)
+
+    def _schedule_semantic_level_evidence(self, session) -> None:
+        if not self._frame_session_is_current(session):
+            return
+        target = self._ensure_semantic_level_evidence_target(session)
+        progress = getattr(session, "semantic_level_evidence_progress", None)
+        if target is None or progress is None or progress.inflight_generation is not None:
+            return
+        visible_dependency = bool(
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        )
+        progress.current_batch_limit = int(
+            target.blocking_batch_limit if visible_dependency else target.background_batch_limit
+        )
+        if len(progress.covered_sources) >= target.target_population:
+            progress.blocking_reason = "ready"
+            return
+        sources = self._take_semantic_level_evidence_sources(session)
+        if not sources and progress.cursor >= target.target_population:
+            progress.blocking_reason = "ready"
+            self._maybe_publish_after_level_evidence(session, processed=1)
+            return
+
+        generation = target.generation
+        progress.inflight_generation = generation
+        progress.blocking_reason = "worker-in-flight"
+        document = session.document
+        view_state = session.view_state
+        evaluator = getattr(getattr(self, "win", None), "operation_evaluator", None)
+        stage_cache = None if evaluator is None else evaluator.stage_cache
+        document_key = stage_document_key(document)
+
+        def evaluate(token, sources=sources):
+            return evaluate_level_evidence_snapshot(
+                document,
+                view_state,
+                sources,
+                pixel_limit=target.pixel_limit,
+                cancellation_token=token,
+                stage_cache=stage_cache,
+                stage_document_key=document_key,
+            )
+
+        def release(owner) -> bool:
+            owner_progress = getattr(owner, "semantic_level_evidence_progress", None)
+            if owner_progress is None or owner_progress.inflight_generation != generation:
+                return False
+            owner_progress.inflight_generation = None
+            return True
+
+        def done(result):
+            current = getattr(self, "_frame_session", None)
+            current_target = None if current is None else getattr(current, "semantic_level_evidence_target", None)
+            if current is not session or current_target is None or current_target.generation != generation:
+                release(session)
+                return
+            release(current)
+            tracker = self._montage_level_tracker()
+            merged = 0
+            for source in tuple(result.sources):
+                source_index = int(source.source_index)
+                if source.stats is None:
+                    tracker.record_vacuous_source(current.level_key, source_index)
+                else:
+                    tracker.update_from_stats(current.level_key, source.stats, aggregate=False)
+                    self._remember_montage_source_level_stats(current.level_key, source.stats)
+                if progress.record_covered(source_index):
+                    merged += 1
+            self._semantic_level_evidence_last_merged = int(merged)
+            self._last_montage_level_stats_ms = float(result.elapsed_ms)
+            if len(progress.covered_sources) >= target.target_population:
+                progress.blocking_reason = "ready"
+            else:
+                progress.blocking_reason = "waiting-semantic-sources"
+            self._maybe_publish_after_level_evidence(current, processed=int(merged))
+            self._schedule_semantic_level_evidence(current)
+
+        def stale():
+            if release(session):
+                progress.blocking_reason = "superseded"
+
+        def failed(exc):
+            if release(session):
+                progress.blocking_reason = f"error:{type(exc).__name__}"
+            handle_ui_exception("semantic montage level evidence", exc)
+
+        # An all-cached cursor slice still advances only one bounded GUI pass;
+        # the no-op worker completion is the continuation for the next slice.
+        max_items = max(1, len(sources))
+        handle = self.win.kernel.submit_speculative_batch(
+            kind="semantic-level-evidence",
+            scope="montage:semantic-level-evidence",
+            generation=generation,
+            key=("semantic-level-evidence", generation, int(progress.cursor)),
+            fn=evaluate,
+            on_done=done,
+            on_stale=stale,
+            on_error=failed,
+            priority=Priority.HISTOGRAM,
+            lane=WorkLane.HISTOGRAM_REFINEMENT,
+            max_items=max_items,
+            pass_token=True,
+        )
+        if handle is None:
+            release(session)
+            progress.blocking_reason = "kernel-admission"
+
     def _schedule_montage_cached_level_stats(self, session) -> None:
         if (
             not getattr(session, "pending_level_tiles", None)
             and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
         ):
+            self._schedule_semantic_level_evidence(session)
             return
         self._process_montage_cached_level_stats()
 
@@ -623,6 +811,7 @@ class LevelStatsService:
             return
         pending = getattr(session, "pending_level_tiles", None)
         if not pending and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
+            self._schedule_semantic_level_evidence(session)
             return
         if getattr(session, "level_evidence_inflight", False):
             return
@@ -944,7 +1133,19 @@ class LevelStatsService:
         # (~68 no-op commits for a 272-tile scene).  Commit when the evidence
         # queue actually drained — the parked flush re-checks the rank then —
         # or when nothing is parked (metadata refresh for a settled session).
-        evidence_remaining = bool(pending) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
+        semantic_remaining = bool(
+            semantic_progress is not None
+            and (
+                semantic_progress.inflight_generation is not None
+                or int(semantic_progress.pending_batches) > 0
+            )
+        )
+        evidence_remaining = bool(
+            pending
+            or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            or semantic_remaining
+        )
         flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
         can_resume_parked_flush = bool(flush_parked and not evidence_remaining)
         can_refresh_settled_metadata = bool(

@@ -361,12 +361,20 @@ class ArrayScopeWindow(
         session = getattr(self, "_frame_session", None)
         if session is None:
             return False
+        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         return bool(
             getattr(session, "pending_tiles", None)
             or getattr(session, "loading_tiles", None)
             or getattr(session, "active_tile_requests", None)
             or getattr(session, "pending_level_tiles", None)
             or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            or (
+                semantic_progress is not None
+                and (
+                    semantic_progress.inflight_generation is not None
+                    or int(semantic_progress.pending_batches) > 0
+                )
+            )
             or getattr(session, "pending_payload_upserts", None)
             or getattr(session, "pending_removals", None)
             or getattr(session, "dirty_payloads", None)
