@@ -452,10 +452,13 @@ Two test-first hypotheses did not close the end-to-end gate:
    no additional semantic evidence and still has the identical six-source
    tracker state after ten seconds.
 
-These production experiments remain uncommitted. Do not extend the prefetch or
-admission policy next. First prove why the existing montage prefetch walk has no
-candidate/stage owner for this raw-data semantic population, and decide whether
-full-range level evidence belongs to a dedicated bounded histogram lane rather
-than display-tile prefetch. The marathon branch has no implementation for that
-missing-source evidence owner; its histogram changes only move aggregation of
-already-collected per-source samples off the GUI thread.
+Both insufficient production experiments and their focused helper tests were
+removed after this checkpoint; neither remains in the working tree. Do not
+extend the prefetch or admission policy next. The read-only ownership trace
+proved that raw montages are explicitly rejected by generic montage prefetch
+(`blocked_no_stage`) and that the level-evidence service only scans already
+rendered payloads. Decide whether full-range level evidence belongs to a
+dedicated bounded histogram lane rather than display-tile prefetch. The
+marathon branch has no implementation for that missing-source evidence owner;
+its histogram changes only move aggregation of already-collected per-source
+samples off the GUI thread.
