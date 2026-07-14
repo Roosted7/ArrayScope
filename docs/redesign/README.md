@@ -362,6 +362,28 @@ acceptance.
 > move histogram work back to Qt to chase this unrelated stall. P5 (coalesced
 > completion drain) is next.
 
+> **[Codex 2026-07-14 — P5 rejected after three real-display regressions]**
+> Re-derived the proposed empty-edge completion notification, one coalesced
+> Qt event, and timer-paced bounded continuations. The unit model was green
+> (**9 passed**) and the last real trace reduced completion delivery to **42
+> bridge drains for 205 kernel completions** (16.10 ms max, 8.56 ms p95), but
+> the physical VisPy V2 gate failed on every attempt: all **36/36** successor
+> targets remained exact-dirty with only level-4 previews presented.
+> Production code and the experiment-only tests were therefore removed; P5
+> receives no performance or correctness credit.
+>
+> **[Codex 2026-07-14 — P5 recurrence record / do not retry these shapes]**
+> Three variants failed the same pixel gate: pacing capacity waiters one per
+> turn; firing the original waiter snapshot after each bounded drain; and
+> explicitly continuing a waiter that re-arms without another completion.
+> The latter closed the synthetic lost-wake test yet still stranded the real
+> frame, proving the bridge notification flood cannot be isolated from the
+> pipeline's capacity/refill protocol by changing `CompletionQueue` alone.
+> The rejected trace contains **3,081 events**, **204 completed / 1 cancelled
+> kernel outcomes**, **368 backend acknowledgements**, and the loud stall.
+> P6 (LOD-plan cadence and synchronous-title removal) is next; it must be
+> measured on the unchanged completion bridge.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

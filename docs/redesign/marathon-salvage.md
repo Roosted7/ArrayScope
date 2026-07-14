@@ -83,6 +83,12 @@ Ordered by confidence:
     continuation so Qt gets real dispatcher edges between bounded chunks.
     Closest to port-as-is in this tier; the central "don't flood Qt ahead
     of paint/input" fix.
+    **[Codex 2026-07-14 — rejected as P5]** Three independently paced
+    variants passed the focused bridge model but stranded all 36 exact VisPy
+    V2 targets at preview quality on real Wayland. The experiment was removed.
+    Do not retry completion-edge coalescing without first redesigning and
+    proving the pipeline capacity/refill contract that depends on completion
+    turns.
 12. **LOD-plan cadence throttle + synchronous `setTitle` removal**
     (`display_presenter.py`, `viewport_bridge.py`) — 16 ms replan cadence
     during interaction; setTitle was 20–35 ms on the wheel path.

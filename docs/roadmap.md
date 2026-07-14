@@ -58,6 +58,13 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > 7/60 presentation stall persists. The active measured cause is now the
 > coalesced kernel completion drain.
 
+> **[Codex 2026-07-14 — P5 result]** Coalescing 205 completions into 42
+> bridge drains bounded the observed drain callbacks, but all three capacity-
+> wake variants failed the real VisPy priority gate with 36/36 exact targets
+> stranded at preview quality. The runtime experiment was removed and the
+> failed designs are recorded in the redesign README. The active measured
+> cause is now LOD-plan cadence plus synchronous-title removal.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

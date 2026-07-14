@@ -50,6 +50,11 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    viewport/ROI, cache-rebind, and transition behavior debt.
 3. Hardware evidence remains Linux-only; the histogram adapter remains
    sensitive to private PyQtGraph API.
+4. **Completion-drain coalescing is rejected in isolation.** Empty-edge
+   notification plus timer continuations passed its unit model but broke the
+   real VisPy V2 pixel gate in three capacity-wake variants. The unchanged
+   per-completion bridge remains production truth until the pipeline refill
+   contract is redesigned with a real-display proof.
 
 ## Material risks
 
