@@ -218,3 +218,60 @@ The final relevant broad slice is 615 passed (`tests/display`, both transition
 regressions, and `test_montage_backend.py` excluding only the known scheduling
 policy assertion). Compileall, Ruff `F821,E9`, and `git diff --check` are also
 green.
+
+## 2026-07-14 R8C stop checkpoint: transition-matrix audit
+
+Work stopped again after two rejected R8C assumptions.
+
+1. **Rejected: the existing lifecycle suite already expresses the R8C
+   transition contract.** It mixed opaque source IDs with typed backend
+   acknowledgements, treated active targets as synonymous with drawn
+   payloads, stopped convergence before `note_committed()`, and expected the
+   session to duplicate the surface's physical-removal ownership. Those
+   tests have been modernized in four green, test-only commits.
+2. **Rejected: every VisPy atlas slot on a visible page is a drawn tile.** A
+   real Wayland layout-reflow probe reported sources 0 through 2 as unsafe
+   with no current target, but those rows came from resident-only pool slots.
+   VisPy draws only the tile keys in the page's active payload mapping; page
+   visibility alone is insufficient evidence. This probe result is discarded
+   and must be repeated against active vertices/page payloads.
+
+The audit did find one real viewport defect before stopping:
+`FrameSession.retarget_viewport()` compared
+`MontageGeometry.layout_identity`, a property that does not exist. Both sides
+therefore evaluated as `None`, every column/row reflow appeared unchanged,
+and queued tiles retained predecessor coordinates. Comparing the typed
+`MontageGeometry` values directly fixes both focused regressions. The full
+frame-session and viewport-priority slice is 104 passed.
+
+Next single hypothesis after this checkpoint: when the Wayland VisPy probe
+restricts its acknowledgement scan to `_page_payloads_by_index`, every drawn
+tile after the FFT/FFTShift/iFFT reflow will have a current compatible target.
+Do not change production code unless that corrected physical draw set still
+contains a mismatch.
+
+### Invalidated reflow visual probe
+
+The corrected draw-set identity scan itself reported zero mismatches, but its
+Wayland geometry was not acceptable visual evidence. It deliberately resized
+the outer window from `1200x520` to `520x900` to force a 10-column -> 1-column
+reflow; the second size left the actual image viewport effectively obscured by
+docks. That run is retained only as backend-state evidence and discarded as a
+visual smoke. Repeat at realistic desktop sizes and assert a usable viewport
+extent before accepting the reflow visually.
+
+The automated geometry comparison evidence remains valid: the synthetic
+complex, complete frame-session, viewport-priority, semantic-transition, and
+cross-backend viewport-transition slice is 115 passed. No scheduling or
+throughput policy changed.
+
+### Valid realistic reflow smoke
+
+The replacement actual-Wayland smoke kept the outer window landscape at
+`1200x820 -> 1050x820`; the measured image viewport remained usable at
+`741x585 -> 591x585`. PyQtGraph and VisPy both reflowed the centered 12-tile
+FFT/FFTShift/iFFT fixture from 5 columns to 4, settled all 12 drawn tiles, and
+reported zero drawn acknowledgement/target mismatches. The per-tile truth
+overlay was enabled. Screenshots are `/tmp/r8c-realistic-pyqtgraph.png` and
+`/tmp/r8c-realistic-vispy.png` (ephemeral local evidence, not repository
+artifacts).

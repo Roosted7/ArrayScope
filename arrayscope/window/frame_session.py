@@ -788,10 +788,7 @@ class FrameSession:
         if plan is not None:
             previous_geometry = getattr(self.plan, "geometry", None)
             next_geometry = getattr(plan, "geometry", None)
-            layout_changed = (
-                getattr(next_geometry, "layout_identity", None)
-                != getattr(previous_geometry, "layout_identity", None)
-            )
+            layout_changed = next_geometry != previous_geometry
             self.plan = plan
             if layout_changed:
                 self._layout_geometry_changed_pending = True
