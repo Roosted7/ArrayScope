@@ -56,7 +56,7 @@ real hardware:
 | V1 | **Black tiles.** One owner for "which tiles must render": admission, completion, and evidence scoping all read the same set (fix dossier B1+B2, including the level-evidence deadlock). Delete the tests that pin the narrowed predicates | Harness scenario: one-index scroll with a boundary-landing tile settles fully on real Wayland, both backends; no black tile, no parked evidence pass; `trace_verify` clean |
 | V2 | **Priority order.** One ranker. Per-tile viewport distance becomes part of kernel ordering (or per-tile rung interleaving); delete the other two rankers (fix dossier A1–A4) | Harness scenario: cold montage load + fast scroll paints center-out, proven from the recorded commit/ack trace, not a unit sort |
 | V3 | **Loud non-convergence.** Any tile unsettled with no work in flight for >2 s emits the `stall` trace event with the owner-chain snapshot and a visible diagnostic (tracing-pipeline T2; this failure class has recurred ~5×) | Injecting a stranded tile produces the diagnostic + ring-buffer dump |
-| V4 | Merge `redesign` → `main`. The branch is 116 commits adrift; every week unmerged is risk | `main` runs the fixed viewer; roadmap (X5…) resumes |
+| V4 | Merge `redesign` → `main`. At merge readiness the branch is 122 commits ahead; every week unmerged is risk | `main` runs the fixed viewer; roadmap (X5…) resumes |
 | P1… | **Performance program to the bars above**, one measured cause at a time against the frozen T1 baseline, drawing from [marathon-salvage.md](marathon-salvage.md) Tiers 2–3 (order given there: prefetch-busy, level_source, viewport intent, histogram aggregation, coalesced drain, cadence throttle, stage-cache snapshot, governor policy, admission batching, gate pacing, slot relocation) | Each P-step: one cause, before/after trace + benchmark numbers in the commit; bars trend green |
 
 A step is done only when its harness scenario passes **on a real display**.
@@ -239,6 +239,21 @@ acceptance.
 > owner chain being investigated, and then retried the same architecture.
 > V3 deletes that repair and the dialog-visible gate. The watchdog is evidence
 > only: it never schedules, releases, retries, or marks a tile complete.
+
+> **[Codex 2026-07-14 — V4 merge-readiness boundary; broad suite remains
+> red]** All required V-step acceptance evidence is now present: the V1 and
+> V2 pixel/trace scenarios pass on real Wayland on both backends, and the V3
+> stranded-tile injection produces the visible diagnostic plus trace dump.
+> The final pre-merge parallel non-GPU suite is **42 failed, 1874 passed,
+> 3 skipped, 2 teardown errors** in 98.56 s. A serial replay of that failed
+> set is **41 failed, 1 passed, 430 deselected, 2 teardown errors**, so this
+> is not being dismissed as xdist noise. The set includes tests that still
+> read the deleted flat `window._montage_session`, the intentionally
+> superseded exclusive boundary-intersection expectation, and unresolved
+> coalescer, levels, viewport/ROI, cache-rebind, and transition behavior.
+> Those failures remain explicit post-merge product/test debt; merging V4
+> certifies the named visible-truth fixes, not a broadly green test suite.
+> Do not later cite this merge as evidence that the full suite passed.
 
 ## The visible-truth harness (the only gate)
 
