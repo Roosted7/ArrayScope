@@ -87,11 +87,12 @@ def _adversarial_payloads(*, shader_display: bool) -> dict[int, DisplayTilePaylo
     for tile_number, (_name, plane) in enumerate(_adversarial_complex_planes()):
         rgb, magnitude = complex_to_rgb(plane)
         kind = TexturePlaneKind.COMPLEX_RG32F if shader_display else TexturePlaneKind.RGB8
+        physical = plane if shader_display else rgb
         identity = replace(
             _target(tile_number),
             texture_kind=kind,
-            real_plane=array_plane_identities(plane)[0],
-            imag_plane=array_plane_identities(plane)[1],
+            real_plane=array_plane_identities(physical)[0],
+            imag_plane=array_plane_identities(physical)[1],
         )
         payloads[tile_number] = DisplayTilePayload(
             tile_number=tile_number,
@@ -99,7 +100,7 @@ def _adversarial_payloads(*, shader_display: bool) -> dict[int, DisplayTilePaylo
             image=rgb,
             histogram_data=magnitude,
             source_id=("adversarial-complex", tile_number),
-            texture_data=plane if shader_display else rgb,
+            texture_data=physical,
             texture_kind=kind,
             semantic_data=plane,
             semantic_histogram_data=magnitude,
@@ -148,19 +149,31 @@ def _target(source_index: int) -> TileIdentity:
     )
 
 
-def _payload(tile_number: int, source_index: int) -> DisplayTilePayload:
+def _payload(
+    tile_number: int,
+    source_index: int,
+    *,
+    shader_display: bool = True,
+) -> DisplayTilePayload:
     plane = _complex_plane(source_index)
     rgb, magnitude = complex_to_rgb(plane)
-    real_plane, imag_plane = array_plane_identities(plane)
-    identity = replace(_target(source_index), real_plane=real_plane, imag_plane=imag_plane)
+    kind = TexturePlaneKind.COMPLEX_RG32F if shader_display else TexturePlaneKind.RGB8
+    physical = plane if shader_display else rgb
+    real_plane, imag_plane = array_plane_identities(physical)
+    identity = replace(
+        _target(source_index),
+        texture_kind=kind,
+        real_plane=real_plane,
+        imag_plane=imag_plane,
+    )
     return DisplayTilePayload(
         tile_number=tile_number,
         source_index=source_index,
         image=rgb,
         histogram_data=magnitude,
         source_id=("synthetic-complex", source_index),
-        texture_data=plane,
-        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        texture_data=physical,
+        texture_kind=kind,
         semantic_data=plane,
         semantic_histogram_data=magnitude,
         shader_mapping=_MAPPING,
@@ -226,10 +239,20 @@ def _adversarial_delta(payloads: dict[int, DisplayTilePayload]) -> TilePresentat
     )
 
 
-def _transition_fixture():
-    first = {tile: _payload(tile, tile) for tile in range(4)}
-    successors = {tile: _payload(tile, tile + 3) for tile in range(4)}
-    targets = {tile: _target(tile + 3) for tile in range(4)}
+def _transition_fixture(*, shader_display: bool):
+    kind = TexturePlaneKind.COMPLEX_RG32F if shader_display else TexturePlaneKind.RGB8
+    first = {
+        tile: _payload(tile, tile, shader_display=shader_display)
+        for tile in range(4)
+    }
+    successors = {
+        tile: _payload(tile, tile + 3, shader_display=shader_display)
+        for tile in range(4)
+    }
+    targets = {
+        tile: replace(_target(tile + 3), texture_kind=kind)
+        for tile in range(4)
+    }
     mixed = dict(first)
     mixed[0] = successors[0]
     return first, successors, targets, mixed
@@ -398,7 +421,13 @@ def test_vispy_adversarial_complex_fixture_uploads_cpu_reference_planes():
         assert np.all(reference[..., 3] == 255)
 
 
-def _assert_truth_record(targets, acknowledged, payloads):
+def _assert_truth_record(
+    targets,
+    acknowledged,
+    payloads,
+    *,
+    expected_texture_kind: TexturePlaneKind,
+):
     rows = tuple(
         tile_truth_record(
             tile_number=tile,
@@ -409,18 +438,21 @@ def _assert_truth_record(targets, acknowledged, payloads):
         for tile in range(4)
     )
     assert rows[0]["drawable"] is True
-    assert rows[0]["texture_kind"] == "complex_rg32f"
+    assert rows[0]["texture_kind"] == expected_texture_kind.value
     assert rows[0]["real_plane_identity"] is not None
-    assert rows[0]["imag_plane_identity"] is not None
     assert rows[0]["real_plane_identity"]["pointer"] > 0
-    assert rows[0]["imag_plane_identity"]["pointer"] > 0
+    if expected_texture_kind == TexturePlaneKind.COMPLEX_RG32F:
+        assert rows[0]["imag_plane_identity"] is not None
+        assert rows[0]["imag_plane_identity"]["pointer"] > 0
+    else:
+        assert rows[0]["imag_plane_identity"] is None
     assert rows[0]["complex_mapping"] == ("phase_color", "abs", "mapped")
     assert rows[0]["lod"] == {"level": 0, "factor": 1, "gutter": 0}
     assert rows[0]["levels_generation"] == 9
     assert rows[0]["target_source"] == 3
     assert rows[0]["acknowledged_source"] == 3
-    assert rows[0]["target_texture_kind"] == "complex_rg32f"
-    assert rows[0]["acknowledged_texture_kind"] == "complex_rg32f"
+    assert rows[0]["target_texture_kind"] == expected_texture_kind.value
+    assert rows[0]["acknowledged_texture_kind"] == expected_texture_kind.value
     assert rows[0]["target_channel"] == "complex"
     assert rows[0]["acknowledged_channel"] == "complex"
     assert rows[0]["target_lod"] == {"level": 0, "factor": 1, "gutter": 0}
@@ -430,7 +462,10 @@ def _assert_truth_record(targets, acknowledged, payloads):
     overlay = tile_truth_overlay_text(rows)
     assert "slot 0  DRAW" in overlay
     assert "src 3 -> 3" in overlay
-    assert "tex complex_rg32f -> complex_rg32f" in overlay
+    assert (
+        f"tex {expected_texture_kind.value} -> {expected_texture_kind.value}"
+        in overlay
+    )
     assert "planes r 0x" in overlay
     assert "complex  phase_color/abs/mapped" in overlay
     assert "lod 0 -> 0" in overlay
@@ -438,7 +473,7 @@ def _assert_truth_record(targets, acknowledged, payloads):
 
 
 def test_pyqtgraph_complex_semantic_transition_hides_unacknowledged_tiles(qt_app):
-    first, successors, targets, mixed = _transition_fixture()
+    first, successors, targets, mixed = _transition_fixture(shader_display=False)
     view = ImageView2D()
     try:
         view.setTiledPresentation(
@@ -470,13 +505,22 @@ def test_pyqtgraph_complex_semantic_transition_hides_unacknowledged_tiles(qt_app
         assert physical[0]["physical_texture_kind"] == "rgb8"
         assert physical[0]["physical_mapping_mode"] == "cpu_rgb"
         assert physical[0]["physical_acknowledged_identity"] == successors[0].tile_identity
-        _assert_truth_record(targets, report.presented_identities, mixed)
+        assert (
+            physical[0]["physical_acknowledged_identity"].texture_kind.value
+            == physical[0]["physical_texture_kind"]
+        )
+        _assert_truth_record(
+            targets,
+            report.presented_identities,
+            mixed,
+            expected_texture_kind=TexturePlaneKind.RGB8,
+        )
     finally:
         view.close()
 
 
 def test_vispy_complex_semantic_transition_hides_unacknowledged_tiles():
-    first, successors, targets, mixed = _transition_fixture()
+    first, successors, targets, mixed = _transition_fixture(shader_display=True)
     pool = TextureAtlasPool(_Gloo(), max_texture_size=32)
     pool.update_payloads(
         first,
@@ -508,4 +552,9 @@ def test_vispy_complex_semantic_transition_hides_unacknowledged_tiles():
     assert physical[0]["physical_storage_mode"] == "complex"
     assert physical[0]["physical_texture_shape"] == (4, 4, 2)
     assert physical[0]["physical_acknowledged_identity"] == successors[0].tile_identity
-    _assert_truth_record(targets, stats.presented_identities, mixed)
+    _assert_truth_record(
+        targets,
+        stats.presented_identities,
+        mixed,
+        expected_texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+    )
