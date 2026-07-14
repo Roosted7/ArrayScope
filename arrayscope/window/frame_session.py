@@ -691,14 +691,20 @@ class FrameSession:
         return self.first_pass_quality == quality
 
     def first_pass_pixels_presented(self) -> bool:
-        """Whether every planned source is acknowledged at the latched quality."""
+        """Whether every physical onscreen target is acknowledged at the latched quality."""
 
         quality = self.first_pass_quality
-        tiles = tuple(getattr(self.plan, "tiles", ()) or ())
-        if quality is None or not tiles:
+        plan_tiles = {
+            int(getattr(tile, "montage_index", offset)): tile
+            for offset, tile in enumerate(tuple(getattr(self.plan, "tiles", ()) or ()))
+        }
+        tile_numbers = tuple(self.onscreen_tile_numbers())
+        if quality is None or not tile_numbers:
             return False
-        for offset, tile in enumerate(tiles):
-            tile_number = int(getattr(tile, "montage_index", offset))
+        for tile_number in tile_numbers:
+            tile = plan_tiles.get(int(tile_number))
+            if tile is None:
+                return False
             payload = self.display_tile_payloads.get(tile_number)
             if (
                 payload is None

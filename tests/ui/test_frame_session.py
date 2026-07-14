@@ -80,6 +80,15 @@ def test_montage_render_session_returns_pending_tiles_in_order():
     assert session.next_tile().source_index == 1
 
 
+def test_first_pass_physical_completion_is_scoped_to_onscreen_targets():
+    session = _session()
+    session.frame_plan = SimpleNamespace(active_region_ids=(0, 1))
+    session.first_pass_quality = "exact"
+    _present_exact_tiles(session, 0, 1)
+
+    assert session.first_pass_pixels_presented()
+
+
 def test_montage_render_session_retarget_changes_next_pending_tile():
     session = _session()
     session.view_range = ((0.0, 12.0), (0.0, 4.0))

@@ -346,9 +346,18 @@ class LevelStatsService:
             return False
         if not session.first_pass_pixels_presented():
             return False
+        plan_tiles = {
+            int(getattr(tile, "montage_index", offset)): tile
+            for offset, tile in enumerate(
+                tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            )
+        }
+        onscreen = getattr(session, "onscreen_tile_numbers", None)
+        tile_numbers = tuple(onscreen()) if callable(onscreen) else tuple(plan_tiles)
         expected = {
-            int(tile.source_index)
-            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            int(plan_tiles[int(tile_number)].source_index)
+            for tile_number in tile_numbers
+            if int(tile_number) in plan_tiles
         }
         summary = self._montage_level_tracker().summary_for(session.level_key)
         covered = set() if summary is None else set(int(source) for source in summary.source_indices)

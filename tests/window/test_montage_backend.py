@@ -794,6 +794,30 @@ def test_vispy_first_pass_level_metadata_publishes_on_rough_coverage_growth():
     assert Window()._should_publish_montage_level_metadata(session, stats) is False
 
 
+def test_first_pass_rough_evidence_completion_uses_physical_onscreen_scope():
+    from arrayscope.render.level_stats import LevelStatsService
+
+    tiles = tuple(
+        SimpleNamespace(montage_index=index, source_index=100 + index)
+        for index in range(4)
+    )
+    summary = SimpleNamespace(source_indices=frozenset({100, 101}))
+    service = SimpleNamespace(
+        _montage_level_tracker=lambda: SimpleNamespace(
+            summary_for=lambda _key: summary,
+        )
+    )
+    session = SimpleNamespace(
+        shader_display=True,
+        level_key=("levels", "onscreen-first-pass"),
+        plan=SimpleNamespace(tiles=tiles),
+        first_pass_pixels_presented=lambda: True,
+        onscreen_tile_numbers=lambda: (0, 1),
+    )
+
+    assert LevelStatsService._first_pass_level_evidence_complete(service, session)
+
+
 def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import TileLevelStats
