@@ -33,6 +33,7 @@ from arrayscope.display.model.tiled_histogram_identity import (
     tiled_histogram_key,
     tiled_semantic_histogram_identity,
 )
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
@@ -305,6 +306,17 @@ class VisPyImageView2D(ImageViewShell):
 
     def clearMontageTileLayer(self) -> None:
         self.hide_tiled_presentation("surface-reset")
+
+    def invalidate_tiled_presentation(self, reason: str) -> None:
+        """Hide semantically superseded pixels without discarding residency."""
+
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is not None:
+            layer.clear()
+        self._montage_display_mode = "none"
+        self.imageItem.setVisible(False)
+        _set_visual_visible(getattr(self, "_vispy_image", None), False)
+        _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
     def hide_tiled_presentation(self, reason: str) -> None:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
@@ -1911,6 +1923,7 @@ def _tiled_source_key(tile_payloads, tile_source_ids):
         (
             int(tile),
             ids.get(int(tile), getattr(payload, "source_id", None)),
+            tile_ack_identity(payload),
         )
         for tile, payload in sorted(dict(tile_payloads).items())
     )

@@ -92,6 +92,9 @@ class _FakeImageView:
     def hide_tiled_presentation(self, reason):
         self.hide_tiled_reason = str(reason)
 
+    def invalidate_tiled_presentation(self, reason):
+        self.invalidate_tiled_reason = str(reason)
+
     def reset_tiled_residency(self, reason):
         self.reset_tiled_reason = str(reason)
 

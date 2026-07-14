@@ -85,6 +85,33 @@ def test_hide_tiled_presentation_deactivates_surface(qt_app, backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app, backend):
+    view = _shown_view(backend, qt_app)
+    try:
+        canvas = np.zeros((10, 12), dtype=np.float32)
+        _present_tiled(view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        if backend == "pyqtgraph":
+            layer = view._montage_tile_layer
+            resident_before = len(layer.states)
+        else:
+            layer = view._vispy_gpu_montage_layer
+            resident_before = layer._pool.resident_count
+
+        view.invalidate_tiled_presentation("semantic-transition")
+
+        assert view.montageDisplayMode() == "none"
+        assert resident_before > 0
+        if backend == "pyqtgraph":
+            assert len(layer.states) == resident_before
+            assert all(not state.visible and not state.item.isVisible() for state in layer.states.values())
+        else:
+            assert layer._pool.resident_count == resident_before
+            assert all(not visual.visible for visual in layer._visuals_by_page)
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_reset_tiled_residency_survives_and_recommits(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:

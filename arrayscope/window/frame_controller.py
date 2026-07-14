@@ -27,6 +27,7 @@ from arrayscope.display.montage import (
     make_montage_plan,
 )
 from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.display.backends.base import surface_for_view
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.stages import RenderIntent
@@ -690,18 +691,26 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # singleflight claims in the shared pyramid; scrubbing back to the
         # same slice would find those levels permanently claimed (stale
         # wrong-LOD tiles).  Balance them before the replacement takes over.
-        render_lod.release_session_claims(getattr(self, "_frame_session", None))
+        dying_session = getattr(self, "_frame_session", None)
+        render_lod.release_session_claims(dying_session)
         # Backend slots outlive sessions (persistent tile residency), so the
         # identity ground truth from the last report stays valid — but a fresh
         # lifecycle starts without backend slot truth, blind to inherited
         # stale slots until its own first report.  Inherit the backend snapshot
         # into the new lifecycle; tiles absent from the new plan fall out
         # naturally (no current payload → mismatch scan skips them).
-        dying_session = getattr(self, "_frame_session", None)
         if dying_session is not None:
             inherited = getattr(dying_session.lifecycle, "backend_presented_identities", None)
             if inherited:
                 session.lifecycle.backend_presented_snapshot(inherited)
+        # Activating a new target is an atomic visibility boundary.  Backend
+        # residency outlives a FrameSession, but inherited slot mappings do
+        # not: until the new session explicitly rebinds and acknowledges them,
+        # they are not evidence for the new target (including viewport-only
+        # retargets whose semantic key intentionally remains stable).
+        surface_for_view(self.win.img_view).invalidate_tiled_presentation(
+            "frame-session-transition"
+        )
         self._frame_session = session
         # A live session can receive cached/refined level evidence as soon as
         # its level work is queued below.  Attach its one effects owner first
@@ -956,6 +965,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._frame_session_id = session_id
         setup_start = perf_counter()
         model_start = perf_counter()
+        # Index-window retargeting mutates this session in place.  The backend
+        # mappings still name the predecessor window until the successor
+        # commit acknowledges its bindings, so make the target change an
+        # atomic visibility boundary just like a FrameSession replacement.
+        surface_for_view(self.win.img_view).invalidate_tiled_presentation(
+            "frame-index-window-retarget"
+        )
         stats = session.retarget_index_window(
             session_id=session_id,
             key=session_key,

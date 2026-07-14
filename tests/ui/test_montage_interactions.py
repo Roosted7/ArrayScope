@@ -857,6 +857,133 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.close()
 
 
+def test_semantic_montage_transition_never_leaves_old_tiles_visible(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(12 * 10 * 6, dtype=np.float32).reshape(12, 10, 6)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text=":")
+        win._set_view_state(state)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
+            timeout=10_000,
+        )
+        assert any(tile.visible for tile in win.img_view._montage_tile_layer.states.values())
+        previous = win.renderer._frame_session
+
+        win.operation_coordinator.load_operations(
+            (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+        )
+        win._set_document(win.operation_coordinator.document)
+        win._coerce_channel_for_current_dtype()
+        win.update_image_view()
+
+        current = win.renderer._frame_session
+        assert current is not previous
+        assert current.semantic_key != previous.semantic_key
+        for tile_number, tile_state in win.img_view._montage_tile_layer.states.items():
+            if not tile_state.visible or not tile_state.item.isVisible():
+                continue
+            lifecycle = current.lifecycle.peek(int(tile_number))
+            assert lifecycle is not None and lifecycle.target is not None
+            assert acknowledged_identity_satisfies_target(
+                tile_state.acknowledged_identity,
+                lifecycle.target.identity,
+            )
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
+
+    def visible_acknowledgements(view):
+        if backend == "pyqtgraph":
+            return {
+                int(tile_number): state.acknowledged_identity
+                for tile_number, state in view._montage_tile_layer.states.items()
+                if state.visible and state.item.isVisible()
+            }
+        layer = view._vispy_gpu_montage_layer
+        pool = layer._pool
+        return {
+            int(tile_number): pool.acknowledged_identities.get(resident_key)
+            for tile_number, resident_key in pool.tile_resident_keys.items()
+            if layer._visuals_by_page[int(pool.tile_slots[int(tile_number)][0])].visible
+        }
+
+    data = np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        if image_view_backend_capabilities(win.img_view).name != backend:
+            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        _process_events(qtbot)
+        initial = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text="0:6")
+        win._set_view_state(initial)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
+            timeout=10_000,
+        )
+        assert visible_acknowledgements(win.img_view)
+        previous = win.renderer._frame_session
+        previous_semantic_key = previous.semantic_key
+
+        retargeted = win.view_state.with_montage_axis(
+            2,
+            columns=3,
+            indices=tuple(range(2, 8)),
+            text="2:8",
+        )
+        win._set_view_state(retargeted)
+        win.update_image_view()
+
+        qtbot.waitUntil(
+            lambda: tuple(
+                int(tile.source_index)
+                for tile in win.renderer._frame_session.plan.tiles
+            )
+            == tuple(range(2, 8)),
+            timeout=10_000,
+        )
+        current = win.renderer._frame_session
+        assert current is previous
+        assert current.semantic_key == previous_semantic_key
+        for tile_number, acknowledged_identity in visible_acknowledgements(win.img_view).items():
+            lifecycle = current.lifecycle.peek(int(tile_number))
+            assert lifecycle is not None and lifecycle.target is not None
+            assert acknowledged_identity_satisfies_target(
+                acknowledged_identity,
+                lifecycle.target.identity,
+            )
+    finally:
+        win.close()
+        settings.setValue(
+            "image_rendering_backend",
+            ImageRenderingBackendChoice.PYQTGRAPH.value,
+        )
+        settings.sync()
+
+
 def test_large_complex_montage_auto_uses_tile_layer(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

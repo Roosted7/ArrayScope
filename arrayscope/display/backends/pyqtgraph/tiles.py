@@ -220,6 +220,12 @@ class MontageTileLayer:
         self._rgb_source_cache_bytes = 0
         self._resident_bytes = 0
 
+    def hide_all(self) -> None:
+        """Hide every mapped tile while retaining its physical residency."""
+
+        for tile_number in tuple(self._states):
+            self._hide_tile(int(tile_number))
+
     def update_presentation(
         self,
         img,

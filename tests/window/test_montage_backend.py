@@ -2262,6 +2262,55 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
 
             return key_for
 
+    class Surface:
+        def __init__(self):
+            self.invalidations = []
+            self.capabilities = ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+            self.widget = None
+
+        def present_tiled(self, _presentation):
+            raise AssertionError("presentation is owned by the test window")
+
+        def invalidate_tiled_presentation(self, reason):
+            self.invalidations.append(str(reason))
+
+        def hide_tiled_presentation(self, _reason):
+            pass
+
+        def reset_tiled_residency(self, _reason):
+            pass
+
+        def set_profile_bounds(self, _bounds):
+            pass
+
+        def apply_camera(self, _image_shape, _viewport_policy, **_kwargs):
+            pass
+
+        def map_scene_to_overlay(self, scene_pos):
+            return scene_pos
+
+        def current_viewport_rect(self):
+            return None
+
+        def presentation_diagnostics(self):
+            return {}
+
+        def interaction_event_owner(self):
+            return "test"
+
+        def sync_interaction_state(self, _state):
+            pass
+
+        def reset_surface(self, _reason):
+            pass
+
+        def teardown_surface(self):
+            pass
+
     class Window(QtCore.QObject, FrameControllerMixin):
         def __init__(self, document, old_state):
             super().__init__()
@@ -2269,12 +2318,10 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
             self.document = document
             self.view_state = old_state
             self.operation_evaluator = Evaluator()
+            self.surface = Surface()
             self.img_view = SimpleNamespace(
-                rendering_capabilities=ImageViewBackendCapabilities(
-                    name="vispy",
-                    persistent_tile_residency=True,
-                    shader_windowing=True,
-                )
+                surface=self.surface,
+                rendering_capabilities=self.surface.capabilities,
             )
             self._viewport_interaction_active = True
             self.pipeline_retargets = 0
@@ -2390,6 +2437,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     assert session.deferred_missing_tiles == (new_plan.tiles[1],)
     assert session.retained_stage_decision == "deferred-interaction"
     assert submitted_stage_plans == [(new_plan.tiles[1],)]
+    assert win.surface.invalidations == ["frame-index-window-retarget"]
     assert win.commits == 1
     assert win.pipeline_retargets == 1
 

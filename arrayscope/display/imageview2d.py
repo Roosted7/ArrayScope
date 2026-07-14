@@ -737,6 +737,15 @@ class ImageViewShell(QtWidgets.QWidget):
     def clearMontageTileLayer(self) -> None:
         self.reset_tiled_residency("surface-reset")
 
+    def invalidate_tiled_presentation(self, reason: str) -> None:
+        """Hide semantically superseded pixels without discarding residency."""
+
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.hide_all()
+        self._montage_tile_layer_histogram_key = None
+        self._montage_display_mode = "none"
+        self.imageItem.setVisible(False)
+
     def hide_tiled_presentation(self, reason: str) -> None:
         if self._montage_tile_layer is not None:
             self._montage_tile_layer.clear()

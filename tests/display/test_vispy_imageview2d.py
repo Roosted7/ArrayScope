@@ -2413,6 +2413,99 @@ def test_vispy_first_typed_tiled_commit_applies_payload_pixels_and_levels_before
         view.close()
 
 
+def test_vispy_reuploads_when_opaque_source_key_aliases_a_different_typed_identity(qt_app):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    def identity(source_index):
+        return TileIdentity(
+            document_generation="document",
+            operation_key=(),
+            source_index=source_index,
+            image_axes=(0, 1),
+            axis_flips=(False, False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=("slice", source_index),
+            lod=TileLodIdentity(),
+        )
+
+    aliased_source_id = ("opaque-source-key",)
+    first = DisplayTilePayload(
+        0,
+        0,
+        np.zeros((2, 2), dtype=np.float32),
+        None,
+        aliased_source_id,
+        tile_identity=identity(0),
+    )
+    current = DisplayTilePayload(
+        0,
+        136,
+        np.full((2, 2), 136.0, dtype=np.float32),
+        None,
+        aliased_source_id,
+        tile_identity=identity(136),
+    )
+    geometry = _single_tile_montage_geometry()
+    view = VisPyImageView2D()
+    try:
+        first_delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts={0: first},
+            active_tiles=(0,),
+            planned_tiles=(0,),
+            target_identities={0: first.tile_identity},
+        )
+        view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: first}),
+            tile_delta=first_delta,
+            histogramPlotData=None,
+            levels=(0.0, 136.0),
+            histogramRange=(0.0, 136.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        current_delta = TilePresentationDelta(
+            structure_revision=2,
+            payload_revision=2,
+            visibility_revision=2,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=2,
+            upserts={},
+            active_tiles=(0,),
+            planned_tiles=(0,),
+            target_identities={0: current.tile_identity},
+        )
+        view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: current}),
+            tile_delta=current_delta,
+            histogramPlotData=None,
+            levels=(0.0, 136.0),
+            histogramRange=(0.0, 136.0),
+            rgb_already_windowed=False,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        stats = view._vispy_gpu_montage_layer.last_stats
+        assert stats.presented_identities == {0: current.tile_identity}
+        assert stats.texture_uploads == 1
+    finally:
+        view.close()
+
+
 def test_vispy_first_class_tiled_warms_loaded_near_sources_after_visible_commit(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

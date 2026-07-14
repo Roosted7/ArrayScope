@@ -28,6 +28,7 @@ from arrayscope.display.model.tile_identity import (
     acknowledged_identity_satisfies_target,
     array_plane_identities,
     plane_identity_record,
+    tile_ack_identity,
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
@@ -772,11 +773,16 @@ class TextureAtlasPool:
             page = self.pages[int(page_index)]
             self._touch(resident_key)
             source_changed = self.source_ids.get(resident_key) != payload.source_id
+            acknowledged_changed = (
+                self.acknowledged_identities.get(resident_key)
+                != tile_ack_identity(payload)
+            )
             missing_uploaded_source = resident_key not in self.source_ids
             should_upload = bool(
                 layout_invalidates_residency
                 or newly_assigned
                 or source_changed
+                or acknowledged_changed
                 or missing_uploaded_source
             )
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
@@ -838,6 +844,8 @@ class TextureAtlasPool:
             for tile_number, payload in payload_items
             if int(tile_number) in active_tile_slots
             and self.source_ids.get(_resident_key(payload)) == payload.source_id
+            and self.acknowledged_identities.get(_resident_key(payload))
+            == tile_ack_identity(payload)
         )
         presented_tiles = tuple(
             dict.fromkeys(
@@ -1046,7 +1054,11 @@ class TextureAtlasPool:
                 skipped += 1
                 continue
             resident_key = _resident_key(payload)
-            if self.source_ids.get(resident_key) == payload.source_id:
+            if (
+                self.source_ids.get(resident_key) == payload.source_id
+                and self.acknowledged_identities.get(resident_key)
+                == tile_ack_identity(payload)
+            ):
                 self._touch(resident_key)
                 skipped += 1
                 continue
@@ -2401,6 +2413,8 @@ def _active_mapping_key(payloads, *, active_tiles, pool, rgb_already_windowed: b
         if pool.tile_resident_keys.get(tile) != resident_key:
             return None
         if pool.source_ids.get(resident_key) != payload.source_id:
+            return None
+        if pool.acknowledged_identities.get(resident_key) != tile_ack_identity(payload):
             return None
         slot = pool.tile_slots.get(tile)
         if slot is None:

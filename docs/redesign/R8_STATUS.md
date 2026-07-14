@@ -151,3 +151,70 @@ throughput or change scheduling policy during either step.
   cause fix.
 - Only then proceed through the R8C semantic/quality/presentation/viewport
   matrix and R8D measurement work.
+
+## 2026-07-14 stop checkpoint: two rejected hypotheses
+
+Work stopped after the second rejected hypothesis, as required by the R8
+workflow.
+
+1. **Rejected: the last PyQtGraph tile contains a wrong committed complex
+   plane.** On the centered `133:139` standalone fixture, every exact complex
+   payload, magnitude plane, CPU phase RGB base, histogram source, and final
+   `ImageItem` pixel matched an independently chunked reference, including
+   source 138. The wrong orange tile was not caused by that committed plane.
+2. **Rejected: directly replacing `ViewState.montage_indices` is a sufficient
+   synchronous viewport-retarget test boundary.** The attempted regression
+   remained on the same active `FrameSession` for ten seconds. The test setup
+   did not prove the intended session-transition boundary and must not be used
+   as evidence.
+
+The first back-to-back raw -> FFT/FFTShift/iFFT probe instead found the
+concrete PyQtGraph defect: after the complex target became current, all old
+raw `ImageItem`s remained visible even though their typed acknowledgements did
+not satisfy the complex targets. Hiding all physical tile mappings at every
+new frame-session activation removes that unacknowledged visibility while
+retaining residency.
+
+The corresponding real VisPy run then exposed a separate identity alias: an
+opaque source key for source 136 could hit a resident entry whose typed
+acknowledged identity still named source 0. Source-key-only fast paths skipped
+the upload and treated the stale atlas slot as presented. All VisPy reuse,
+warm-skip, active-mapping, and view-cache paths now also require the typed
+acknowledged identity to equal the payload acknowledgement.
+
+Current evidence before resuming:
+
+- Focused synthetic identity, surface invalidation, and semantic-transition
+  tests: 4 passed.
+- Full display slice in the maintained conda environment: 528 passed.
+- Relevant display/UI/window slice: 105 passed with the pre-existing
+  scheduling-policy assertion that expects `max_free_retargets == 24` while
+  production returns 12. Scheduling is intentionally out of scope.
+- Actual Wayland centered four-phase smoke on both backends (`raw0`, complex
+  FFT/FFTShift/iFFT, `raw1`, complex FFT/FFTShift/iFFT): all phases settled,
+  no unsafe visible identities, black empty background, matching alternating
+  checkerboard phase, and tile sources 133 through 138.
+
+Next single hypothesis after this checkpoint: a viewport retarget must be
+driven through the canonical viewport controller (or wait for the initial
+progressive session to become fully complete) before asserting the atomic
+presentation boundary. Do not change production code for that test until the
+real control-flow boundary is demonstrated.
+
+### Resolution after the stop checkpoint
+
+The canonical control flow was demonstrated: an index-window change mutates
+the existing `FrameSession` through `retarget_index_window`; session object
+replacement is neither expected nor required. Waiting for the active plan to
+name sources 2 through 7 reproduced the invariant violation before any fix:
+PyQtGraph tile slot 4 remained visibly acknowledged as source 4 while its
+current lifecycle target named source 6.
+
+The in-place retarget now invalidates visible backend mappings immediately
+before mutating lifecycle targets, using the same residency-preserving surface
+operation as full session activation. The cross-backend regression passes on
+both the deterministic offscreen adapter path and the actual Wayland display.
+The final relevant broad slice is 615 passed (`tests/display`, both transition
+regressions, and `test_montage_backend.py` excluding only the known scheduling
+policy assertion). Compileall, Ruff `F821,E9`, and `git diff --check` are also
+green.
