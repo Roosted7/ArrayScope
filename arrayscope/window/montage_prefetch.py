@@ -142,7 +142,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             return result
 
         def done(result, tile=tile, session_id=session.session_id, session_key=session.key, preview_walk_only=preview_walk_only):
-            if not window._is_current_montage_session(session_id, session_key):
+            if not window._is_current_frame_session(session_id, session_key):
                 window.win.operation_evaluator.note_prefetch_stale()
                 return
             if not preview_walk_only:

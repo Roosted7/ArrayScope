@@ -515,6 +515,15 @@ def test_predictive_compute_modules_exist():
         assert (ROOT / rel).exists()
 
 
+def test_render_orchestrator_uses_one_frame_session_staleness_guard_name():
+    offenders = []
+    stale_name = "_is_current_" + "montage_session"
+    for path in (ROOT / "arrayscope" / "window").rglob("*.py"):
+        if stale_name in path.read_text():
+            offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []
+
+
 def test_display_semantics_live_in_display_package():
     canonical = (
         Path("arrayscope/display/model/frame.py"),

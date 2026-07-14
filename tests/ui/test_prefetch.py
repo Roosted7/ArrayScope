@@ -162,6 +162,90 @@ def test_montage_prefetch_denial_does_not_cap_slice_prefetch(qtbot):
         win.close()
 
 
+def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
+    qtbot,
+    monkeypatch,
+):
+    _clear_arrayscope_settings()
+    from arrayscope.core.scheduler import WorkStart
+    from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window import montage_prefetch
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.request_operation("reverse", 0)
+        state = win.view_state.with_montage_axis(
+            2,
+            columns=4,
+            indices=tuple(range(8)),
+            text=":",
+        )
+        win._set_view_state(state)
+        win.render(reason="test-prefetch-completion-guard")
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not None,
+            timeout=5000,
+        )
+        session = win.renderer._frame_session
+        assert session.document.enabled_operations
+
+        captured = {}
+
+        def capture_prefetch(_evaluate, *, on_done, **_kwargs):
+            captured["done"] = on_done
+            return WorkStart(True)
+
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: False)
+        monkeypatch.setattr(
+            montage_prefetch,
+            "_candidate_tiles",
+            lambda _session: (session.plan.tiles[-1],),
+        )
+        monkeypatch.setattr(
+            montage_prefetch,
+            "_stage_for_tile",
+            lambda _owner, _session, _tile: (object(), object(), object()),
+        )
+        monkeypatch.setattr(
+            win.operation_evaluator,
+            "cached_montage_tile",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            win.prefetch_evaluation_controller,
+            "start_prefetch",
+            capture_prefetch,
+        )
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(
+            win.renderer,
+            session,
+            max_tiles=1,
+        )
+        assert decisions[0].decision == "scheduled"
+        assert callable(captured.get("done"))
+
+        win._set_view_state(win.view_state.with_slice(2, 1))
+        win.render(reason="test-prefetch-completion-superseded")
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not session,
+            timeout=5000,
+        )
+        stale_before = win.operation_evaluator.display_cache_diagnostics().prefetch_stale
+
+        captured["done"](object())
+
+        assert (
+            win.operation_evaluator.display_cache_diagnostics().prefetch_stale
+            == stale_before + 1
+        )
+    finally:
+        win.close()
+
+
 def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState

@@ -462,10 +462,14 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
     try:
         _process_events(qtbot)
         _settle_initial_render(win, qtbot)
-        monkeypatch.setattr(win.renderer, "_is_current_montage_session", lambda session_id, key: session_id == 999 and key == ("test-session",))
         monkeypatch.setattr(
             win.renderer,
-            "commit_montage_session_presentation",
+            "_is_current_frame_session",
+            lambda session_id, key: session_id == 999 and key == ("test-session",),
+        )
+        monkeypatch.setattr(
+            win.renderer,
+            "commit_frame_session_presentation",
             lambda _session: calls.append(
                 (
                     bool(session.final_commit_pending),
@@ -473,7 +477,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
                 )
             ),
         )
-        win.renderer._montage_session = session
+        win.renderer._frame_session = session
 
         win.renderer.apply_ready_montage_display(session)
 
