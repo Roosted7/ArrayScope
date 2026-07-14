@@ -41,14 +41,13 @@ _COLORMAP_ICON_CACHE: dict[str, object] = {}
 
 def _colormap_icon(name):
     from pyqtgraph.Qt import QtGui
+    from arrayscope.display.colormap_library import get_colormap
 
     icon = _COLORMAP_ICON_CACHE.get(name)
     if icon is not None:
         return icon
     icon = QtGui.QIcon()
     try:
-        from arrayscope.display.colormap_library import get_colormap
-
         lut = get_colormap(name).getLookupTable(0.0, 1.0, 32, alpha=False)
         pixmap = QtGui.QPixmap(len(lut), 12)
         painter = QtGui.QPainter(pixmap)

@@ -1230,8 +1230,9 @@ def rendering_benchmark_environment(results=()) -> RenderingBenchmarkEnvironment
 
 
 def _gpu_limits_from_results(results):
+    from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits, query_gpu_device_limits
+
     try:
-        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
         from vispy import gloo
 
         limits = query_gpu_device_limits(gloo)
@@ -1243,7 +1244,6 @@ def _gpu_limits_from_results(results):
     # already closed by the time the environment record is written, so make a
     # short-lived context for the query.
     try:
-        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
         from vispy import app as vispy_app, gloo
 
         canvas = vispy_app.Canvas(show=False, size=(4, 4))
@@ -1259,17 +1259,12 @@ def _gpu_limits_from_results(results):
     for result in tuple(results or ()):
         timing = getattr(result, "timing", None)
         if timing is not None and int(getattr(timing, "tile_layer_device_max_texture_size", 0) or 0):
-            from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits
-
             return GpuDeviceLimits(max_texture_size=int(timing.tile_layer_device_max_texture_size), source="benchmark_timing")
     try:
-        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
         from vispy import gloo
 
         return query_gpu_device_limits(gloo)
     except Exception:
-        from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits
-
         return GpuDeviceLimits()
 
 

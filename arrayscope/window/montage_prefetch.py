@@ -16,6 +16,9 @@ from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
+from arrayscope.render.effects import rendered_tile_from_evaluation_result
+from arrayscope.render.lod import admit_retained_preview_level
+from arrayscope.window.frame_effects import interactive_active
 
 
 @dataclass(frozen=True)
@@ -254,12 +257,7 @@ def _stage_for_tile(window, session, tile):
 
 
 def _interaction_active(window) -> bool:
-    try:
-        from arrayscope.window.frame_renderer import _viewport_interaction_active
-
-        return bool(_viewport_interaction_active(window))
-    except Exception:
-        return False
+    return bool(interactive_active(window))
 
 
 def _busy(window, session=None) -> bool:
@@ -450,22 +448,15 @@ def _admit_walk_preview(session, tile, result) -> bool:
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
-    try:
-        from arrayscope.window.frame_renderer import _rendered_tile_from_evaluation_result
-        from arrayscope.render.lod import admit_retained_preview_level
-
-        rendered = _rendered_tile_from_evaluation_result(tile, result)
-        return bool(
-            admit_retained_preview_level(
-                preview,
-                rendered,
-                semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
-                preview_level=level,
-            )
+    rendered = rendered_tile_from_evaluation_result(tile, result)
+    return bool(
+        admit_retained_preview_level(
+            preview,
+            rendered,
+            semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
+            preview_level=level,
         )
-    except Exception:
-        # Speculative polish must never fail the prefetch result.
-        return False
+    )
 
 
 def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:

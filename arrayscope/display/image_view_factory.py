@@ -87,10 +87,10 @@ def _probe_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
 def _probe_hardware_gl_renderer() -> str | None:
     """Create a short-lived GL context and return its renderer string."""
 
+    from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
+
     try:
         from vispy import app as vispy_app, gloo
-
-        from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
 
         canvas = vispy_app.Canvas(show=False, size=(4, 4))
         try:

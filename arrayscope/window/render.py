@@ -646,9 +646,9 @@ class RenderOrchestrator(
         seam at ±π. Non-cyclic requests fall back to the phase default."""
         if family != "phase":
             return str(name)
-        try:
-            from arrayscope.display import colormap_library
+        from arrayscope.display import colormap_library
 
+        try:
             info = colormap_library.find_colormap(str(name))
         except Exception:
             info = None

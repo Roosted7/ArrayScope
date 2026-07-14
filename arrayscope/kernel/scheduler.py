@@ -39,12 +39,7 @@ from arrayscope.kernel.task import (
     TaskSpec,
     WorkItem,
 )
-
-try:  # Qt-free; operations.cancellation defines the cooperative exception.
-    from arrayscope.operations.cancellation import EvaluationCancelled
-except Exception:  # pragma: no cover - import cycle guard during early startup
-    class EvaluationCancelled(Exception):
-        pass
+from arrayscope.operations.cancellation import EvaluationCancelled
 
 
 _QUEUED = "queued"

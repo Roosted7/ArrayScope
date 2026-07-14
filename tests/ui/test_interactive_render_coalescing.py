@@ -171,21 +171,21 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
 def test_montage_side_panels_defer_while_viewport_interaction_active():
     from types import SimpleNamespace
 
-    import arrayscope.window.frame_renderer as frame_renderer
+    from arrayscope.window.frame_controller import _should_defer_montage_side_panels
 
     def _renderer(active):
         renderer = SimpleNamespace(win=SimpleNamespace(_viewport_interaction_active=active))
         return renderer
 
-    assert frame_renderer._should_defer_montage_side_panels(
+    assert _should_defer_montage_side_panels(
         _renderer(True),
         SimpleNamespace(defer_side_panels=False),
     )
-    assert frame_renderer._should_defer_montage_side_panels(
+    assert _should_defer_montage_side_panels(
         _renderer(False),
         SimpleNamespace(defer_side_panels=True),
     )
-    assert not frame_renderer._should_defer_montage_side_panels(
+    assert not _should_defer_montage_side_panels(
         _renderer(False),
         SimpleNamespace(defer_side_panels=False),
     )

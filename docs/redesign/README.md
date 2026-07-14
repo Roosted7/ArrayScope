@@ -63,6 +63,36 @@ A step is done only when its harness scenario passes **on a real display**.
 Counters, lifecycle diagnostics, and unit tests are debugging aids, not
 acceptance.
 
+### Codex execution record (added 2026-07-14; not part of the original plan)
+
+> **[Codex 2026-07-14 — V0 complete]** Repaired both dead
+> `montage_prefetch.py` imports: interaction state now comes from the live
+> frame-effects owner and retained-preview conversion from `render.effects`.
+> Removed the broad exception fallbacks that had made both paths silently
+> inert. Added `tests/app/test_import_health.py`, which imports all 214
+> `arrayscope` modules and rejects internal imports hidden behind unreported
+> broad exception handlers. The guard also exposed and removed stale silent
+> internal-import fallbacks in the kernel, evaluator, colormap, backend-probe,
+> and benchmark paths. Focused result: 14 tests passed (import health,
+> prefetch, live side-panel owner, deleted-module guard).
+>
+> **[Codex 2026-07-14 — V0 rejected approach / recurrence note]** Merely
+> changing `frame_renderer` to another private window-module import would
+> keep the same deletion hazard. V0 instead imports the existing canonical
+> functions. No V0-scoped issue is carried forward; T1 is the next queue item.
+>
+> **[Codex 2026-07-14 — open broad-suite debt discovered during V0]** The
+> documented full-suite command completed with **47 failed, 1844 passed,
+> 3 skipped, 2 teardown errors**. A pristine `eeee204a` worktree reproduced
+> representative failures in the stale timer allowlist and tests that still
+> reach the deleted flat `window._montage_session` owner, proving those two
+> classes predate V0; the remaining failures have not yet been individually
+> baseline-certified. The failures also include render-coalescer timing,
+> viewport/session ownership, montage settlement, and VisPy upload assertions.
+> Do not repeat the R8 mistake of calling the branch broadly green: T1 must
+> freeze an honest baseline, and V1/V2 must migrate or delete tests that pin
+> superseded owners while preserving their user-visible assertions.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

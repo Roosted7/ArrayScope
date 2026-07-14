@@ -8,6 +8,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.operations.cancellation import EvaluationCancelled
+from arrayscope.operations.cost import operation_output_dtype
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.stage_cache import StageCache
@@ -1136,11 +1137,6 @@ def _format_nbytes(nbytes):
 
 def _estimated_dtype(document):
     dtype = getattr(document.base_data, "dtype", np.dtype(float))
-    try:
-        from arrayscope.operations.cost import operation_output_dtype
-
-        for operation in document.enabled_operations:
-            dtype = operation_output_dtype(dtype, operation)
-    except Exception:
-        pass
+    for operation in document.enabled_operations:
+        dtype = operation_output_dtype(dtype, operation)
     return np.dtype(dtype)
