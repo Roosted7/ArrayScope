@@ -120,3 +120,30 @@ def test_trace_verify_forgets_targets_released_from_scope(tmp_path):
     result = verify_trace(path)
     assert result["ok"]
     assert result["required_targets"] == 0
+
+
+def test_trace_verify_rejects_loud_stall_event(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "stall",
+                "session_id": 9,
+                "owner_chain": {"required_unsettled": [4]},
+                "sequence": 1,
+            }
+        )
+        + "\n"
+    )
+
+    result = verify_trace(path)
+    assert not result["ok"]
+    assert result["violations"] == (
+        {
+            "invariant": "no_stall_events",
+            "session_id": 9,
+            "owner_chain": {"required_unsettled": [4]},
+        },
+    )

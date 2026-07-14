@@ -13,6 +13,7 @@ def verify_trace(path: str | Path) -> dict[str, object]:
     targets: dict[int, dict[str, object]] = {}
     acknowledgements: dict[int, dict[str, object]] = {}
     first_ack_sequences: dict[int, int] = {}
+    stalls: list[dict[str, object]] = []
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -20,6 +21,9 @@ def verify_trace(path: str | Path) -> dict[str, object]:
         event_count += 1
         event = json.loads(line)
         kind = str(event.get("kind", ""))
+        if kind == "stall":
+            stalls.append(event)
+            continue
         if kind == "lifecycle":
             edge = str(event.get("edge", ""))
             tile = int(event.get("tile", -1))
@@ -65,6 +69,13 @@ def verify_trace(path: str | Path) -> dict[str, object]:
             "target": targets[tile],
         }
         for tile in missing
+    ) + tuple(
+        {
+            "invariant": "no_stall_events",
+            "session_id": event.get("session_id"),
+            "owner_chain": event.get("owner_chain"),
+        }
+        for event in stalls
     )
     return {
         "ok": not violations,

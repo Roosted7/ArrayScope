@@ -135,7 +135,7 @@ def test_canvas_preserve_controller_owns_strong_preserve_path():
     assert "commit_nudge" in preserve_text
 
 
-def test_montage_stall_probe_is_diagnostics_only():
+def test_montage_stall_probe_is_evidence_only():
     path = ROOT / "arrayscope" / "window" / "frame_runtime.py"
     text = path.read_text()
     tree = ast.parse(text)
@@ -154,6 +154,10 @@ def test_montage_stall_probe_is_diagnostics_only():
             for token in forbidden:
                 assert token not in source
             assert "_montage_stall_assertions" in source
+            assert "release_idle_evaluation_claims" not in source
+            assert 'emit_trace(\n            "stall"' in source
+            assert "TRACE.dump" in source
+            assert "show_status_message" in source
             return
     raise AssertionError("_montage_watchdog_tick not found")
 

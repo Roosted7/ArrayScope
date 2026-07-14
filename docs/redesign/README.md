@@ -218,6 +218,28 @@ acceptance.
 > were removed/migrated; pixel identity, one-index continuity, and trace order
 > are now the gates.
 
+> **[Codex 2026-07-14 — V3 complete; non-convergence is loud]** The
+> receiver-owned watchdog now observes every live frame session, not only an
+> open diagnostics dialog. A required tile whose owner signature is unchanged
+> for at least two seconds, with the kernel/completion queue and presentation
+> continuation idle, emits one schema-v1 `stall` event containing the required
+> tile IDs, lifecycle rows, queue/evidence counts, stage ownership, and commit
+> flags. It dumps the bounded trace tail to
+> `/tmp/arrayscope-stall-<session>-<count>.trace.jsonl`, stores that path in
+> diagnostics state, and shows a persistent status-bar error with the path.
+> When no JSONL sink was requested, the watchdog activates only the bounded
+> 8 MiB ring so production stalls still have evidence. `trace_verify` now
+> rejects any captured stall event. The injected stranded-tile regression
+> proves the event, owner chain, ≥2 s threshold, dump contents, and visible
+> diagnostic.
+>
+> **[Codex 2026-07-14 — V3 rejected repair / recurrence note]** The old
+> diagnostics-only probe silently called `release_idle_evaluation_claims()`
+> when the kernel was idle. That changed live lifecycle state, erased the
+> owner chain being investigated, and then retried the same architecture.
+> V3 deletes that repair and the dialog-visible gate. The watchdog is evidence
+> only: it never schedules, releases, retries, or marks a tile complete.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

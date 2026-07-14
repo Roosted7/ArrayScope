@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -11,6 +13,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
+from arrayscope.core.trace import TRACE, emit_trace
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.imageview2d import MontageTileOverlay
@@ -24,7 +27,7 @@ from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder
 from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
-from arrayscope.ui.toasts import show_revert_action
+from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.render import lod as render_lod
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import FramePipelineEffects
@@ -357,31 +360,29 @@ class FrameRuntimeMixin:
         self.retarget_frame_pipeline(session, force_commit=residency_deferred)
         return True
 
-    # -- stall assertion probe (ADR 0051) -------------------------------------
+    # -- loud non-convergence assertion (V3) ----------------------------------
     # The live render path must make lost wakeups impossible by construction.
-    # This probe is diagnostics-only: when the diagnostics dialog is visible it
-    # records a frozen unsettled signature, but it never mutates session state
-    # or schedules work.
-
-    def _montage_assertion_probe_enabled(self) -> bool:
-        dialog = getattr(self.win, "_diagnostics_dialog", None)
-        return bool(dialog is not None and dialog.isVisible())
+    # It never mutates session state or schedules work: a stranded owner chain
+    # is evidence to expose, not state the watchdog is allowed to repair.
 
     def _ensure_montage_watchdog(self) -> None:
-        if not self._montage_assertion_probe_enabled():
-            self._montage_watchdog_stop()
-            return
+        if not TRACE.enabled:
+            # V3 keeps only the bounded in-memory tail when no JSONL sink was
+            # requested, so a production stall always has evidence to dump.
+            TRACE.configure()
         timer = getattr(self, "_montage_watchdog_timer", None)
         if timer is None:
-            # Timer category: anti-hang fallback. Diagnostics-only stall
-            # assertion probe; it never mutates rendering state.
+            # Timer category: anti-hang fallback. It observes owner state and
+            # emits evidence only; it never mutates rendering state.
             timer = Qt.QtCore.QTimer(self)
             timer.setInterval(1000)
             timer.timeout.connect(self._montage_watchdog_tick)
             self._montage_watchdog_timer = timer
             self._montage_watchdog_state = None
+            self._montage_watchdog_state_since = 0.0
         if not timer.isActive():
             self._montage_watchdog_state = None
+            self._montage_watchdog_state_since = 0.0
             timer.start()
 
     def _montage_watchdog_stop(self) -> None:
@@ -389,12 +390,10 @@ class FrameRuntimeMixin:
         if timer is not None:
             timer.stop()
         self._montage_watchdog_state = None
+        self._montage_watchdog_state_since = 0.0
 
     @Qt.QtCore.Slot()
     def _montage_watchdog_tick(self) -> None:
-        if not self._montage_assertion_probe_enabled():
-            self._montage_watchdog_stop()
-            return
         session = getattr(self, "_frame_session", None)
         if session is None or not self._frame_session_is_current(session):
             self._montage_watchdog_stop()
@@ -421,25 +420,12 @@ class FrameRuntimeMixin:
             if session.has_pending_level_update()
             else 0
         )
-        unsettled = bool(
-            pending
-            or evaluating
-            or active
-            or dirty
-            or upserts
-            or lod_pending
-            or planning_deferred
-            or level_evidence
-            or level_stale
-            or session.flush_pending
-            or session.final_commit_pending
-        )
-        if not unsettled:
+        required_unsettled = tuple(session.required_target_unsettled_tiles())
+        if not required_unsettled:
             self._montage_watchdog_stop()
             return
         if planning_deferred:
-            # Deferred planning is scheduled work, not a stall; if it wedges,
-            # the stable signature below reports it without re-kicking work.
+            # Deferred planning still owns a scheduled continuation.
             return
         level_timer = getattr(self, "_montage_level_stats_timer", None)
         if level_evidence and level_timer is not None and level_timer.isActive():
@@ -465,7 +451,13 @@ class FrameRuntimeMixin:
         previous = getattr(self, "_montage_watchdog_state", None)
         self._montage_watchdog_state = signature
         if previous != signature:
+            self._montage_watchdog_state_since = perf_counter()
             return  # work is progressing; stay armed.
+        stalled_for = perf_counter() - float(
+            getattr(self, "_montage_watchdog_state_since", 0.0) or 0.0
+        )
+        if stalled_for < 2.0:
+            return
         kernel = getattr(self.win, "kernel", None)
         kernel_diag = None if kernel is None else kernel.diagnostics()
         completion_queue = None if kernel is None else getattr(kernel, "completions", None)
@@ -478,28 +470,47 @@ class FrameRuntimeMixin:
             and int(getattr(kernel_diag, "parked_quota", 0) or 0) == 0
             and (completion_queue is None or completion_queue.empty())
         )
-        if kernel_idle and active:
-            pipeline = getattr(session, "pipeline", None)
-            effects = getattr(pipeline, "effects", None)
-            release = getattr(effects, "release_idle_evaluation_claims", None)
-            released = 0 if release is None else int(release(session.active_tile_requests))
-            if released:
-                print(
-                    "[arrayscope] STALL REPAIR: "
-                    f"released_idle_evaluation_claims={released}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                self._montage_watchdog_state = None
-                return
+        if not kernel_idle or bool(
+            getattr(self, "_montage_presentation_gate_armed", False)
+        ):
+            return
         probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
         actionable_probe = tuple(row for row in tuple(probe) if _stall_tile_probe_row_actionable(row))
-        if not actionable_probe and session.visible_plan_complete():
-            self._montage_watchdog_last_refinement_backlog = signature
-            self._montage_watchdog_stop()
-            return
         self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
         self._montage_watchdog_last_stall = signature
+        owner_chain = {
+            "required_unsettled": required_unsettled,
+            "pending": pending,
+            "evaluating": evaluating,
+            "active_requests": active,
+            "dirty": dirty,
+            "upserts": upserts,
+            "lod_pending": lod_pending,
+            "level_evidence": level_evidence,
+            "level_stale": level_stale,
+            "flush_pending": bool(session.flush_pending),
+            "final_commit_pending": bool(session.final_commit_pending),
+            "stage_active": len(session.stage_fan_in.active_requests),
+            "stage_attached": len(session.stage_fan_in.attached_requests),
+            "tile_rows": actionable_probe[:20],
+        }
+        emit_trace(
+            "stall",
+            session_id=int(session.session_id),
+            stalled_ms=float(stalled_for * 1000.0),
+            owner_chain=owner_chain,
+        )
+        dump_path = Path(tempfile.gettempdir()) / (
+            f"arrayscope-stall-{int(session.session_id)}-"
+            f"{int(getattr(self, '_montage_stall_assertions', 0))}.trace.jsonl"
+        )
+        TRACE.dump(dump_path)
+        self._montage_watchdog_last_trace_path = str(dump_path)
+        show_status_message(
+            self.win,
+            f"Rendering stalled; trace saved to {dump_path}",
+            timeout=0,
+        )
         print(
             "[arrayscope] STALL ASSERTION PROBE FIRED (ADR 0051): "
             f"signature={signature} "
@@ -513,6 +524,7 @@ class FrameRuntimeMixin:
         )
         for row in actionable_probe[:20]:
             print(f"[arrayscope] STALL TILE PROBE: {row}", file=sys.stderr, flush=True)
+        self._montage_watchdog_stop()
 
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
         FrameRuntimeMixin._refresh_tile_truth_overlay(self)

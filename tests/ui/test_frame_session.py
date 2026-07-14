@@ -2039,3 +2039,108 @@ def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
     for tile in tuple(session.pending_tiles):
         expected = reflowed.tiles[int(tile.montage_index)]
         assert (tile.x0, tile.y0) == (expected.x0, expected.y0)
+
+
+def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
+    tmp_path, monkeypatch, qtbot
+):
+    import json
+    from pathlib import Path
+
+    from arrayscope.core.trace import close_trace, configure_trace
+    from arrayscope.window import frame_runtime
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+    from pyqtgraph.Qt import QtWidgets
+
+    monkeypatch.setattr(frame_runtime, "perf_counter", lambda: 12.1)
+
+    class Completions:
+        @staticmethod
+        def empty():
+            return True
+
+    kernel = SimpleNamespace(
+        diagnostics=lambda: SimpleNamespace(
+            queued=0,
+            running=0,
+            active=0,
+            parked_deps=0,
+            parked_quota=0,
+        ),
+        completions=Completions(),
+    )
+    session_id = abs(hash(str(tmp_path))) % 1_000_000 + 10_000
+    session = SimpleNamespace(
+        session_id=session_id,
+        pending_tiles=(),
+        lifecycle=SimpleNamespace(evaluating_tiles=frozenset(), presented_tiles=frozenset()),
+        active_tile_requests=frozenset(),
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_rung_materializations=(),
+        stage_planning_deferred=False,
+        pending_level_tiles=(),
+        level_scan_remaining_tiles=0,
+        semantic_level_evidence_progress=None,
+        has_pending_level_update=lambda: False,
+        required_target_unsettled_tiles=lambda: (5,),
+        flush_pending=False,
+        final_commit_pending=False,
+        rendered_tiles={},
+        diagnostic_tile_identity_rows=lambda **_kwargs: (
+            {"tile": 5, "visible_first_pixel_complete": False},
+        ),
+        stage_fan_in=SimpleNamespace(
+            active_requests=frozenset(),
+            attached_requests=frozenset(),
+            tile_stage_keys={},
+        ),
+        loading_tiles=frozenset(),
+    )
+    window = QtWidgets.QMainWindow()
+    window.kernel = kernel
+    qtbot.addWidget(window)
+
+    class Renderer(FrameRuntimeMixin):
+        def __init__(self):
+            self.win = window
+            self._frame_session = session
+            self._montage_watchdog_state = (
+                session_id,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            self._montage_watchdog_state_since = 10.0
+
+        @staticmethod
+        def _frame_session_is_current(_session):
+            return True
+
+    trace_path = tmp_path / "live.trace.jsonl"
+    configure_trace(trace_path)
+    renderer = Renderer()
+    try:
+        renderer._montage_watchdog_tick()
+    finally:
+        close_trace()
+
+    dump_path = Path(renderer._montage_watchdog_last_trace_path)
+    try:
+        rows = [json.loads(line) for line in dump_path.read_text().splitlines()]
+        stall = next(row for row in rows if row.get("kind") == "stall")
+        assert stall["session_id"] == session_id
+        assert stall["owner_chain"]["required_unsettled"] == [5]
+        assert stall["stalled_ms"] >= 2000.0
+        label = window._arrayscope_status_message_widget
+        assert str(dump_path) in label.property("arrayscope_status_message_text")
+        assert window._arrayscope_status_message_timer is None
+    finally:
+        dump_path.unlink(missing_ok=True)
