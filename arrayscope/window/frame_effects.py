@@ -1962,6 +1962,7 @@ class FramePipelineEffects:
         presented_before = set(session.lifecycle.presented_tiles)
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
+        _call(renderer, "_refresh_tile_truth_overlay")
         retained_start = perf_counter()
         renderer._retained_tiled_payload_store().remember_acknowledged(
             accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)

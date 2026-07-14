@@ -35,6 +35,12 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         _process_events(qtbot)
         developer = _menu(win, "Developer")
         assert _action(developer, "Verify icons") is not None
+        truth_overlay = _action(developer, "Tile truth overlay")
+        assert truth_overlay.isCheckable()
+        truth_overlay.trigger()
+        assert win.renderer._tile_truth_overlay_enabled is True
+        truth_overlay.trigger()
+        assert win.renderer._tile_truth_overlay_enabled is False
         _action(developer, "Diagnostics").trigger()
         _process_events(qtbot)
 

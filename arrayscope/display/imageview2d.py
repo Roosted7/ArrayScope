@@ -44,7 +44,7 @@ from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_hit_test import RoiHitIndex
-from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
+from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem, tile_truth_overlay_text
 from arrayscope.display.profile_marker import ProfileMarkerOwner
 from arrayscope.display.pointer_interaction import QtPointerInteractionDriver
 from arrayscope.display.roi_items import (
@@ -212,6 +212,8 @@ class ImageViewShell(QtWidgets.QWidget):
         self._interaction_visual_profile_part: str | None = None
         self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
+        self._tile_truth_overlay = None
+        self._tile_truth_overlay_rows = ()
         self._roi_counter = 0
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
@@ -1925,6 +1927,40 @@ class ImageViewShell(QtWidgets.QWidget):
     def montageTileOverlayCount(self) -> int:
         item = getattr(self, "_montage_tile_overlay_item", None)
         return 0 if item is None else int(item.overlay_count)
+
+    def setTileTruthOverlayRows(self, rows) -> None:
+        """Show an opt-in backend-neutral HUD sourced from lifecycle truth."""
+
+        rows = tuple(rows or ())
+        self._tile_truth_overlay_rows = rows
+        text = tile_truth_overlay_text(rows)
+        if not text:
+            if self._tile_truth_overlay is not None:
+                self._tile_truth_overlay.hide()
+            return
+        if self._tile_truth_overlay is None:
+            overlay = QtWidgets.QLabel(self._display_overlay_parent())
+            overlay.setObjectName("TileTruthOverlay")
+            overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            overlay.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            overlay.setStyleSheet(
+                "QLabel#TileTruthOverlay {"
+                "background: rgba(8, 18, 24, 220); color: #a5f3fc;"
+                "border: 1px solid #22d3ee; border-radius: 3px; padding: 5px;"
+                "font-family: monospace; font-size: 10px; }"
+            )
+            self._tile_truth_overlay = overlay
+        self._tile_truth_overlay.setText(text)
+        self._tile_truth_overlay.adjustSize()
+        parent_width = max(1, int(self._display_overlay_parent().width()))
+        self._tile_truth_overlay.setMaximumWidth(max(120, parent_width - 20))
+        self._tile_truth_overlay.move(10, 40)
+        self._tile_truth_overlay.show()
+        self._tile_truth_overlay.raise_()
+
+    def tileTruthOverlayText(self) -> str:
+        overlay = getattr(self, "_tile_truth_overlay", None)
+        return "" if overlay is None or not overlay.isVisible() else str(overlay.text())
 
     def setRoiInfoRows(self, rows):
         rows = tuple(rows or ())

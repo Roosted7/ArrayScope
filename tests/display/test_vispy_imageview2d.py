@@ -3322,3 +3322,36 @@ def test_vispy_montage_tile_overlays_have_vispy_placeholder_visuals(qt_app):
         assert all(not visual.visible for visual in view._vispy_overlay_visuals)
     finally:
         view.close()
+
+
+def test_vispy_tile_truth_overlay_uses_shared_hud_above_canvas(qt_app):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        view.setTileTruthOverlayRows(
+            (
+                {
+                    "tile": 2,
+                    "target_source": 8,
+                    "acknowledged_source": 8,
+                    "drawable": True,
+                    "target_texture_kind": "complex_rg32f",
+                    "acknowledged_texture_kind": "complex_rg32f",
+                    "target_channel": "complex",
+                    "target_complex_mapping": ("phase_color", "abs", "mapped"),
+                    "target_lod": {"level": 0},
+                    "acknowledged_lod": {"level": 1},
+                    "target_semantic_generation": "('sem', 8)",
+                    "acknowledged_semantic_generation": "('sem', 8)",
+                    "levels_generation": 11,
+                },
+            )
+        )
+
+        assert view._tile_truth_overlay.parentWidget() is view._display_container
+        assert not view._tile_truth_overlay.isHidden()
+        assert "slot   2  src 8 -> 8  DRAW" in view._tile_truth_overlay.text()
+        assert "lod 0 -> 1" in view._tile_truth_overlay.text()
+    finally:
+        view.close()

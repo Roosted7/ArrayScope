@@ -191,10 +191,27 @@ def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -
         complex_mapping = source.complex_mapping
         lod = source.lod
     presentation = getattr(payload, "presentation_identity", None)
+    typed_target = target if isinstance(target, TileIdentity) else None
     return {
         "tile": int(tile_number),
         "target_identity": None if target is None else repr(target),
         "acknowledged_identity": None if acknowledged is None else repr(acknowledged),
+        "target_source": None if typed_target is None else int(typed_target.source_index),
+        "acknowledged_source": None if identity is None else int(identity.source_index),
+        "target_texture_kind": None if typed_target is None else typed_target.texture_kind.value,
+        "acknowledged_texture_kind": None if identity is None else identity.texture_kind.value,
+        "target_channel": None if typed_target is None else str(typed_target.channel),
+        "acknowledged_channel": None if identity is None else str(identity.channel),
+        "target_complex_mapping": None if typed_target is None else typed_target.complex_mapping,
+        "acknowledged_complex_mapping": None if identity is None else identity.complex_mapping,
+        "target_semantic_generation": (
+            None if typed_target is None else repr(typed_target.semantic_generation)
+        ),
+        "acknowledged_semantic_generation": (
+            None if identity is None else repr(identity.semantic_generation)
+        ),
+        "target_lod": None if typed_target is None else _lod_record(typed_target.lod),
+        "acknowledged_lod": None if identity is None else _lod_record(identity.lod),
         "texture_kind": texture_kind,
         "real_plane_identity": None if real_plane is None else repr(real_plane),
         "imag_plane_identity": None if imag_plane is None else repr(imag_plane),
@@ -207,6 +224,14 @@ def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -
         else int(presentation.levels_generation),
         "drawable": acknowledged_identity_satisfies_target(acknowledged, target),
         "placeholder": bool(target is not None and not acknowledged_identity_satisfies_target(acknowledged, target)),
+    }
+
+
+def _lod_record(lod: TileLodIdentity) -> dict[str, int]:
+    return {
+        "level": int(lod.level),
+        "factor": int(lod.factor),
+        "gutter": int(lod.gutter),
     }
 
 

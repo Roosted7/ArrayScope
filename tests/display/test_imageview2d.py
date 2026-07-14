@@ -253,6 +253,43 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     view.close()
 
 
+def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
+    from arrayscope.display.imageview2d import ImageView2D
+    from pyqtgraph.Qt import QtCore
+
+    view = ImageView2D()
+    try:
+        view.setTileTruthOverlayRows(
+            (
+                {
+                    "tile": 4,
+                    "target_source": 17,
+                    "acknowledged_source": None,
+                    "drawable": False,
+                    "target_texture_kind": "complex_rg32f",
+                    "acknowledged_texture_kind": None,
+                    "target_channel": "real",
+                    "target_complex_mapping": ("scalar", "real", "mapped"),
+                    "target_lod": {"level": 0},
+                    "acknowledged_lod": None,
+                    "target_semantic_generation": "('sem', 2)",
+                    "acknowledged_semantic_generation": None,
+                    "levels_generation": 7,
+                },
+            )
+        )
+
+        assert not view._tile_truth_overlay.isHidden()
+        assert "slot   4  src 17 -> None  LOAD" in view._tile_truth_overlay.text()
+        assert "channel real  map scalar/real/mapped" in view._tile_truth_overlay.text()
+        assert view._tile_truth_overlay.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        view.setTileTruthOverlayRows(())
+        assert view._tile_truth_overlay.isHidden()
+    finally:
+        view.close()
+
+
 def test_update_image_data_fast_preserves_levels_and_view_range(qt_app, monkeypatch):
     from arrayscope.display.imageview2d import ImageView2D
 

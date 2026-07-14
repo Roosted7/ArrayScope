@@ -268,12 +268,24 @@ class WindowMenuMixin:
         set_action_icon(diagnostics_action, "monitor_heart")
         diagnostics_action.triggered.connect(self.open_diagnostics_dialog)
         developer_menu.addAction(diagnostics_action)
+        tile_truth_action = QtGui.QAction("Tile truth overlay", self, checkable=True)
+        tile_truth_action.setToolTip(
+            "Overlay lifecycle target and backend-acknowledged tile identities on the image."
+        )
+        tile_truth_action.toggled.connect(self._set_tile_truth_overlay_enabled)
+        developer_menu.addAction(tile_truth_action)
         verify_icons_action = QtGui.QAction("Verify icons", self)
         set_action_icon(verify_icons_action, "warning")
         verify_icons_action.triggered.connect(self.verify_icons)
         developer_menu.addAction(verify_icons_action)
         self._developer_menu = developer_menu
         self._diagnostics_action = diagnostics_action
+        self._tile_truth_overlay_action = tile_truth_action
+
+    def _set_tile_truth_overlay_enabled(self, enabled: bool) -> None:
+        setter = getattr(getattr(self, "renderer", None), "set_tile_truth_overlay_enabled", None)
+        if callable(setter):
+            setter(bool(enabled))
 
 
     def _sync_performance_actions(self):

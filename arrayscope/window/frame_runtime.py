@@ -39,6 +39,23 @@ MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION = 0.35
 
 
 class FrameRuntimeMixin:
+    def set_tile_truth_overlay_enabled(self, enabled: bool) -> None:
+        self._tile_truth_overlay_enabled = bool(enabled)
+        self._refresh_tile_truth_overlay()
+
+    def _refresh_tile_truth_overlay(self) -> None:
+        setter = getattr(self.win.img_view, "setTileTruthOverlayRows", None)
+        if not callable(setter):
+            return
+        if not bool(getattr(self, "_tile_truth_overlay_enabled", False)):
+            setter(())
+            return
+        session = getattr(self, "_frame_session", None)
+        if session is None or not self._frame_session_is_current(session):
+            setter(())
+            return
+        setter(session.diagnostic_tile_identity_rows(limit=12))
+
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_frame_session", None)
         # Not the shared predicate: on_slow callbacks capture only the session
@@ -470,6 +487,7 @@ class FrameRuntimeMixin:
             print(f"[arrayscope] STALL TILE PROBE: {row}", file=sys.stderr, flush=True)
 
     def _update_montage_tile_overlays_for_plan(self, plan, tile_states, viewport_rect) -> None:
+        FrameRuntimeMixin._refresh_tile_truth_overlay(self)
         if not hasattr(self.win.img_view, "setMontageTileOverlays"):
             return
         session = getattr(self, "_frame_session", None)
