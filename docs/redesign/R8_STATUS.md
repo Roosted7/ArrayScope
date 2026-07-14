@@ -275,3 +275,40 @@ reported zero drawn acknowledgement/target mismatches. The per-tile truth
 overlay was enabled. Screenshots are `/tmp/r8c-realistic-pyqtgraph.png` and
 `/tmp/r8c-realistic-vispy.png` (ephemeral local evidence, not repository
 artifacts).
+
+## 2026-07-14 R8C stop checkpoint: VisPy resize fight
+
+Work stopped after two rejected hypotheses, as required by the R8 workflow.
+The report is a real Wayland-only VisPy resize fight: during a manual main
+window resize, the outer window widely jumps back toward older geometry.
+PyQtGraph did not show the same top-level fight in the user's comparison,
+although its missing/stuck-tile convergence remains a separate open gate.
+
+1. **Rejected: the VisPy canvas or camera feeds a stale size back into the
+   main window.** A real Wayland event trace recorded the top-level
+   `QWindow`, main widget, `VisPySurface`, display container, Qt viewport, and
+   VisPy native canvas. The top-level window jumped first; the container,
+   viewport, and native canvas then followed the accepted top-level size
+   exactly. No child canvas resize preceded or requested the outer jump.
+2. **Rejected: an active strong-Wayland canvas-preservation correction fights
+   the user resize.** A second real Wayland trace recorded every
+   `CanvasPreserveController` event. No preservation transaction started and
+   no correction, strong constraint, or nudge ran. Instead, each oscillation
+   was preceded by `canvas_preserver.cancel()` while the window repeatedly
+   returned to the saved `982x706` viewport geometry.
+
+The probe used a centered six-tile synthetic fixture with
+FFT -> FFTShift -> iFFT and the persisted VisPy/strong-Wayland settings. It
+was run onscreen; no offscreen rendering evidence is used. Representative
+outer-window transitions were `1135x1013 -> 1441x907 -> 600x800 ->
+1441x953`, followed by repeated returns toward `1441x907` while the compositor
+accepted intermediate drag sizes. The saved viewport session at reproduction
+time named viewport shape `706x982`, which matches the repeatedly restored
+canvas extent.
+
+Next single hypothesis after this checkpoint: an unreleased viewport-
+continuity transaction treats every VisPy resize as an incomplete layout
+restore and calls `resize_to_dockless_viewport_shape()` again. Instrument only
+the continuity transaction generation/flags and the restore call sites; do
+not change camera, rendering, scheduling, or canvas-preservation policy until
+that call chain is proven.
