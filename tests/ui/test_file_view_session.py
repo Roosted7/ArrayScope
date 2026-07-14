@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -492,7 +493,7 @@ def test_restored_montage_viewport_schedules_retarget_after_set_range(qt_app, mo
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     window.isVisible = lambda: True
     window.view_state = SimpleNamespace(montage_axis=2)
-    window._montage_session = SimpleNamespace(plan=object(), display_committed=False)
+    window._frame_session = SimpleNamespace(plan=object(), display_committed=False)
     window._current_montage_geometry = None
     window.img_view = SimpleNamespace(
         _viewport_applying=False,
@@ -537,7 +538,7 @@ def test_restored_montage_auto_range_reopens_as_user_camera(qt_app, monkeypatch)
     controller = SimpleNamespace(mode=None, last_auto_view_range=None)
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     window.view_state = SimpleNamespace(montage_axis=2)
-    window._montage_session = SimpleNamespace(plan=object(), display_committed=False)
+    window._frame_session = SimpleNamespace(plan=object(), display_committed=False)
     window._current_montage_geometry = None
     window.img_view = SimpleNamespace(
         _viewport_applying=False,
@@ -575,7 +576,7 @@ def test_restored_viewport_continuity_survives_pending_viewport_shape(qt_app, mo
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     window.isVisible = lambda: True
     window.view_state = SimpleNamespace(montage_axis=2)
-    window._montage_session = SimpleNamespace(plan=object(), display_committed=False)
+    window._frame_session = SimpleNamespace(plan=object(), display_committed=False)
     window._current_montage_geometry = None
     window.img_view = SimpleNamespace(
         _viewport_applying=False,
@@ -626,7 +627,7 @@ def test_restored_viewport_shape_retry_reapplies_range_after_continuity_release(
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     window.isVisible = lambda: True
     window.view_state = SimpleNamespace(montage_axis=2)
-    window._montage_session = SimpleNamespace(plan=object(), display_committed=True)
+    window._frame_session = SimpleNamespace(plan=object(), display_committed=True)
     window._current_montage_geometry = None
     window.img_view = SimpleNamespace(
         _viewport_applying=False,
@@ -724,17 +725,77 @@ def test_applied_viewport_continuity_does_not_lock_future_resize(qt_app):
     restored_viewport = ViewportSession(
         mode="user",
         view_range=((10.0, 200.0), (-50.0, 80.0)),
+        viewport_shape=(120, 180),
         montage_columns=3,
     )
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     tx = _restore_transaction(viewport=restored_viewport)
     tx.range_applied = True
+    tx.shape_settled = True
     tx.released = False
     window._viewport_continuity = tx
+    window._viewport_continuity_shape_matches = lambda _shape: False
 
     assert window._pending_viewport_continuity_range() is None
     assert window._pending_viewport_continuity_columns() is None
     assert window._active_viewport_continuity_range() is None
+
+
+def test_montage_viewport_continuity_readiness_uses_canonical_frame_session(qt_app):
+    window = _FakeFileSessionWindow(
+        "unused.npy",
+        np.zeros((4, 5, 6), dtype=np.float32),
+        None,
+    )
+    window.view_state = SimpleNamespace(montage_axis=2)
+    window._frame_session = SimpleNamespace(plan=object())
+
+    assert window._viewport_continuity_ready()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
+    qtbot,
+    backend,
+):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.core.view_session import ViewportSession
+    from arrayscope.window import ArrayScopeWindow
+
+    _clear_arrayscope_settings()
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
+    window = ArrayScopeWindow(np.zeros((12, 10, 8), dtype=np.float32))
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        qtbot.waitUntil(window.isVisible, timeout=10_000)
+        viewport = window.img_view.graphicsView.viewport()
+        view_range = window.img_view.getView().viewRange()
+        tx = ViewportContinuityTransaction(
+            reason="settings-restore",
+            viewport=ViewportSession(
+                mode="user",
+                view_range=(tuple(view_range[0]), tuple(view_range[1])),
+                viewport_shape=(int(viewport.height()), int(viewport.width())),
+            ),
+        )
+        tx.shape_settled = True
+        window._viewport_continuity = tx
+
+        window.resize(max(window.minimumWidth(), window.width() - 40), window.height())
+
+        qtbot.waitUntil(lambda: tx.released, timeout=10_000)
+    finally:
+        window.close()
+        settings.setValue(
+            "image_rendering_backend",
+            ImageRenderingBackendChoice.PYQTGRAPH.value,
+        )
+        settings.sync()
 
 
 def test_programmatic_range_change_does_not_release_viewport_continuity(qt_app, monkeypatch):
@@ -813,7 +874,7 @@ def test_preview_first_montage_range_change_schedules_viewport_retarget(qt_app, 
         _note_viewport_interaction=lambda _reason: None,
         _update_display_group_title=lambda: None,
         _committed_display_frame=None,
-        _montage_session=SimpleNamespace(display_committed=True),
+        _frame_session=SimpleNamespace(display_committed=True),
         _schedule_frame_viewport_update=lambda: scheduled.append("montage"),
         view_state=SimpleNamespace(montage_axis=2),
     )
@@ -887,7 +948,7 @@ def test_restored_montage_viewport_waits_for_plan_not_tile_completion(qt_app, mo
     single_shots = []
     window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
     window.view_state = SimpleNamespace(montage_axis=2)
-    window._montage_session = SimpleNamespace(plan=None, display_committed=False)
+    window._frame_session = SimpleNamespace(plan=None, display_committed=False)
     window._current_montage_geometry = None
     window.img_view = SimpleNamespace(
         _viewport_applying=False,
@@ -908,7 +969,7 @@ def test_restored_montage_viewport_waits_for_plan_not_tile_completion(qt_app, mo
     assert view.ranges == []
     assert single_shots == []
 
-    window._montage_session.plan = object()
+    window._frame_session.plan = object()
     window._schedule_viewport_continuity_when_ready()
 
     assert len(single_shots) == 1

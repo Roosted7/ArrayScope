@@ -109,7 +109,7 @@ class FileViewSessionMixin:
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is not None:
             plan = getattr(self, "_current_montage_plan", None)
             if plan is None:
-                plan = getattr(getattr(self, "_montage_session", None), "plan", None)
+                plan = getattr(getattr(self, "_frame_session", None), "plan", None)
             columns = getattr(plan, "columns", None)
             if columns is not None:
                 montage_columns = max(1, int(columns))
@@ -208,7 +208,11 @@ class FileViewSessionMixin:
         tx = self._viewport_continuity_transaction()
         if tx is None or tx.released or tx.view_range is None:
             return None
-        if tx.range_applied and self._viewport_continuity_shape_settled():
+        # A settled restore remains consumed after a later user resize changes
+        # the live viewport shape. Layout transitions that must re-establish
+        # the saved shape explicitly reopen the transaction by clearing
+        # ``shape_settled`` in the shape-restore path.
+        if tx.range_applied and tx.shape_settled:
             return None
         return tx.view_range
 
@@ -499,7 +503,7 @@ class FileViewSessionMixin:
                 return False
             is_current = getattr(self, "_is_committed_display_frame_current", None)
             return bool(not callable(is_current) or is_current(frame))
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if session is None:
             return False
         return getattr(session, "plan", None) is not None

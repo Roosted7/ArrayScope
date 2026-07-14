@@ -517,6 +517,14 @@ class ArrayScopeWindow(
             self._montage_viewport_update_pending = False
             self.retarget_montage_viewport()
     def resizeEvent(self, event):
+        # A top-level resize after the saved shape has settled is new user
+        # intent. Release it before QMainWindow relays the resize into child
+        # viewports; otherwise the child viewport callback can reopen the
+        # continuity transaction and force the outer window back to the saved
+        # shape. Programmatic continuity resizes enter with shape_settled=False.
+        tx = self._viewport_continuity_transaction()
+        if tx is not None and not tx.released and tx.shape_settled:
+            self._release_viewport_continuity()
         super().resizeEvent(event)
         self._note_viewport_interaction("resize")
         if hasattr(self, "dimension_strip"):
