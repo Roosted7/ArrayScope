@@ -312,3 +312,66 @@ restore and calls `resize_to_dockless_viewport_shape()` again. Instrument only
 the continuity transaction generation/flags and the restore call sites; do
 not change camera, rendering, scheduling, or canvas-preservation policy until
 that call chain is proven.
+
+## 2026-07-14 R8C stop checkpoint: hidden first-commit tiles
+
+The first resize-correction smoke was invalid despite reporting six physically
+drawn tiles. Its live camera covered only one tile (`x=-3..13`,
+`y=-0.68..12.68`) while the six-tile montage covered `32x25`. The session had
+planned against a `493x447` viewport, the settled viewport was `619x741`, and
+no viewport correction remained pending. Backend visibility counters alone
+therefore did not prove visible framebuffer coverage.
+
+Those six tiles were not prefetch. The session's intended fitted camera made
+all six part of `visible_tile_numbers`; the live camera failed to apply that
+intent, so visible-lane work became wasted from the user's perspective.
+
+Two narrowly separated findings followed:
+
+1. **Insufficient by itself: notify a montage resize while `image is None`.**
+   The shared `ArrayScopeGraphicsView.resizeEvent()` dropped every resize
+   before the first tiled image commit. Forwarding that resize updated the
+   session viewport but did not restore the camera.
+2. **Confirmed cause: the same programmatic resize demoted AUTO to USER.**
+   `QGraphicsView` emitted a range change before the semantic resize handler,
+   converting `AUTO_UNTOUCHED` into `USER` around the predecessor one-tile
+   range. Signal-blocking the complete no-image resize transaction preserves
+   AUTO intent and lets the renderer retarget against the settled viewport.
+
+Commit `305aa69` contains only that shared production fix and two
+backend-parametric regressions. The original immediate, centered synthetic
+FFT -> FFTShift -> iFFT Wayland smoke was repeated on PyQtGraph and VisPy.
+Both settled with six visible/drawn tiles, a session viewport of `619x741`,
+and a full-montage camera. Screenshots are
+`/tmp/r8-resize-pyqtgraph.png` and `/tmp/r8-resize-vispy.png` (ephemeral local
+evidence, not repository artifacts).
+
+### Newly exposed convergence stop
+
+Modernizing the broader interaction tests exposed a separate ADR 0042
+violation: increasing an already-committed montage source set while manually
+zoomed calls the legacy visible-fraction "autofit rescue". An experiment that
+disabled that rescue only for a committed manual camera preserved the camera,
+but uncovered a lost-work state and is not ready to commit:
+
+- committed geometry and the current plan both named sources `0..19`;
+- the manual camera and session range agreed;
+- visible tiles were `{0, 1, 5, 6}`;
+- pending tiles were `{6, 7, 11, 12}`;
+- tile 6 remained a loading placeholder;
+- loading tiles, active requests, attached stage requests, viewport
+  continuations, and deferred-stage obligations were all empty;
+- `visible_plan_complete()` remained false after ten seconds.
+
+The illegal auto-fit was masking this convergence failure by expanding the
+visible plan and taking a different work path. Do not change scheduling or
+admission policy. The next single hypothesis must trace how
+`retarget_index_window()` leaves pending tile 6 without a materialization
+owner after the hot/deferred stage decision. Prove the missing ownership
+handoff with a focused real-pipeline regression before changing code.
+
+The marathon worktree contains a useful but unported content-extent contract:
+`setViewportContentExtent()` returns whether the extent changed and
+`refreshViewportContentExtentIntent()` reapplies AUTO/FIT only after backend
+acknowledgement. Port tests before considering any of that code; it is not an
+explanation for the ownerless pending tile above.
