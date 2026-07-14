@@ -17,7 +17,7 @@ from arrayscope.display.model.tile_identity import (
     complex_mapping_identity,
     tile_truth_record,
 )
-from arrayscope.display.montage import MontageTileState
+from arrayscope.display.montage import MontageTileState, make_montage_plan
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
@@ -25,6 +25,8 @@ from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
 )
 from arrayscope.display.slice_engine import complex_to_rgb
+from arrayscope.render.lod import texture_source_for_rendered
+from arrayscope.window.frame_session import FrameSession
 
 
 class _Texture2D:
@@ -135,6 +137,85 @@ def _transition_fixture():
     mixed = dict(first)
     mixed[0] = successors[0]
     return first, successors, targets, mixed
+
+
+def _session_for_dtype(dtype, *, channel: ChannelMode, shader_display: bool) -> FrameSession:
+    state = ViewState.from_shape((4, 4, 1)).with_channel(channel)
+    state = state.with_montage_axis(2, columns=1, indices=(0,), text=":")
+    plan = make_montage_plan(state, axis=2, indices=(0,), tile_shape=(4, 4), columns=1)
+    session = FrameSession(
+        session_id=1,
+        key=("complex-target-kind",),
+        render_generation=1,
+        level_key=None,
+        level_expected_indices=(0,),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(4, 4),
+        view_range=((0.0, 4.0), (0.0, 4.0)),
+        output_dtype=np.dtype(dtype),
+        rgb=channel == ChannelMode.COMPLEX,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+        shader_display=bool(shader_display),
+    )
+    return session
+
+
+def test_real_view_of_complex_source_targets_complex_shader_texture():
+    session = _session_for_dtype(np.complex64, channel=ChannelMode.REAL, shader_display=True)
+    tile = session.plan.tiles[0]
+    target = session.tile_target_identity(tile, lod_level=0)
+    mapping = ShaderMapping(
+        component=ShaderComponent.REAL,
+        display_mode=ShaderDisplayMode.SCALAR,
+    )
+    payload_identity = session.tile_payload_identity(
+        tile,
+        texture_data=_complex_plane(0),
+        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+        shader_mapping=mapping,
+        lod=TileLodIdentity(),
+        quality="exact",
+    )
+
+    assert target.texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert target.complex_mapping == ("scalar", "real", "mapped")
+    assert payload_identity.satisfies_target(target)
+
+
+def test_cpu_complex_view_targets_the_rgb_texture_it_physically_draws():
+    session = _session_for_dtype(np.complex64, channel=ChannelMode.COMPLEX, shader_display=False)
+    target = session.tile_target_identity(session.plan.tiles[0], lod_level=0)
+
+    assert target.texture_kind == TexturePlaneKind.RGB8
+    assert target.complex_mapping == ("phase_color", "abs", "mapped")
+
+
+def test_cpu_complex_rendered_tile_reports_rgb_physical_texture_kind():
+    rendered = type(
+        "Rendered",
+        (),
+        {
+            "image": np.zeros((4, 4, 3), dtype=np.uint8),
+            "semantic_data": _complex_plane(0),
+            "histogram_data": np.ones((4, 4), dtype=np.float32),
+            "texture_kind": TexturePlaneKind.COMPLEX_RG32F,
+        },
+    )()
+
+    source, _histogram, kind = texture_source_for_rendered(rendered, shader_display=False)
+
+    assert source.shape == (4, 4, 3)
+    assert kind == TexturePlaneKind.RGB8
 
 
 def _assert_truth_record(targets, acknowledged, payloads):

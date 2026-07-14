@@ -477,6 +477,7 @@ class FrameSession:
     loading_tiles: set[int]
     skipped_tiles: set[int]
     pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
+    shader_display: bool = False
     active_tile_requests: set[int] = field(default_factory=set)
     stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
     tile_states: list[MontageTileState] = field(default_factory=list)
@@ -1281,7 +1282,6 @@ class FrameSession:
         tile_number = int(tile_number)
         base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
         mapping = getattr(rendered, "shader_mapping", None)
-        texture_kind = getattr(rendered, "texture_kind", None)
         exact_image = np.asarray(rendered.image)
         exact_histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
         exact_level_data = None if getattr(rendered, "level_data", None) is None else np.asarray(rendered.level_data)
@@ -1290,7 +1290,7 @@ class FrameSession:
         semantic = exact_image if semantic is None else np.asarray(semantic)
         semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
         semantic_histogram = exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
-        texture_data, texture_histogram, lod = self._texture_for_rendered_tile(rendered)
+        texture_data, texture_histogram, lod, texture_kind = self._texture_for_rendered_tile(rendered)
         texture_data = _debug_lod_pass_texture(texture_data, quality="exact")
         display_image = np.asarray(texture_data)
         display_histogram = None if texture_histogram is None else np.asarray(texture_histogram)
@@ -1414,10 +1414,10 @@ class FrameSession:
                 base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
                 previous = by_base.get(base_source_id)
                 if previous is None:
-                    texture_data, _texture_histogram, lod = self._texture_for_rendered_tile(rendered)
+                    texture_data, _texture_histogram, lod, texture_kind = self._texture_for_rendered_tile(rendered)
                     source_id = self._payload_source_id(
                         base_source_id,
-                        texture_kind=getattr(rendered, "texture_kind", None),
+                        texture_kind=texture_kind,
                         lod=lod,
                     )
                     previous = by_source.get(source_id)
@@ -1479,11 +1479,14 @@ class FrameSession:
 
         view_state = tile.view_state
         channel = getattr(getattr(view_state, "channel", None), "value", getattr(view_state, "channel", "real"))
-        texture_kind = (
-            TexturePlaneKind.COMPLEX_RG32F
-            if str(channel) == "complex"
-            else TexturePlaneKind.SCALAR_R32F
-        )
+        source_is_complex = np.issubdtype(np.dtype(self.output_dtype), np.complexfloating)
+        shader_display = bool(getattr(self, "shader_display", False))
+        if shader_display and source_is_complex:
+            texture_kind = TexturePlaneKind.COMPLEX_RG32F
+        elif str(channel) == "complex":
+            texture_kind = TexturePlaneKind.RGB8
+        else:
+            texture_kind = TexturePlaneKind.SCALAR_R32F
         mapping = (
             ("phase_color", "abs", "mapped")
             if str(channel) == "complex"
@@ -1773,13 +1776,21 @@ class FrameSession:
     ) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
         return render_lod.resident_texture_for_rendered_tile(self, rendered, source=source, histogram=histogram)
 
-    def _texture_for_rendered_tile(self, rendered: RenderedTile) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
-        source, histogram, _texture_kind = self._texture_source_for(rendered)
+    def _texture_for_rendered_tile(
+        self,
+        rendered: RenderedTile,
+    ) -> tuple[np.ndarray, np.ndarray | None, LodInfo, TexturePlaneKind | None]:
+        source, histogram, texture_kind = self._texture_source_for(rendered)
         if self._resident_lod_active():
-            return self._resident_texture_for_rendered_tile(rendered, source=source, histogram=histogram)
+            texture, texture_histogram, lod = self._resident_texture_for_rendered_tile(
+                rendered,
+                source=source,
+                histogram=histogram,
+            )
+            return texture, texture_histogram, lod, texture_kind
         source_shape = tuple(int(value) for value in source.shape[:2])
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-        return source, histogram, lod
+        return source, histogram, lod, texture_kind
 
     def _paced_pending_presentation_followup(
         self,

@@ -483,7 +483,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             prioritize=True,
         )
         shader_display = viewport_plan.shader_display
-        output_dtype = np.uint8 if view_state.channel == ChannelMode.COMPLEX and not shader_display else getattr(document.base_data, "dtype", np.dtype(float))
+        output_dtype = getattr(
+            getattr(self.win, "data", None),
+            "dtype",
+            getattr(document.base_data, "dtype", np.dtype(float)),
+        )
         single_estimate = estimate_display_image_bytes(
             tile_shape,
             output_dtype,
@@ -645,6 +649,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             loading_tiles=set(),
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             pending_tiles=list(pending_tiles),
+            shader_display=bool(shader_display),
             stage_fan_in=montage_commit.stage_fan_in_state(stage_plan),
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=(
@@ -674,7 +679,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
         )
-        session.shader_display = bool(shader_display)
         stage_planning_deferred = bool(
             defer_stage_planning
             or (missing_tiles and not queue_native_missing_tiles)

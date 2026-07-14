@@ -103,6 +103,15 @@ def texture_source_for_rendered(
         source = np.asarray(rendered.semantic_data)
     else:
         source = np.asarray(rendered.image)
+        if not bool(shader_display):
+            if source.ndim >= 3 and source.shape[-1] in (3, 4):
+                texture_kind = TexturePlaneKind.RGB8
+            elif np.iscomplexobj(source) or (
+                source.ndim >= 3 and source.shape[-1] == 2
+            ):
+                texture_kind = TexturePlaneKind.COMPLEX_RG32F
+            else:
+                texture_kind = TexturePlaneKind.SCALAR_R32F
     histogram = None if rendered.histogram_data is None else np.asarray(rendered.histogram_data)
     return source, histogram, texture_kind
 
