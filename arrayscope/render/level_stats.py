@@ -253,6 +253,11 @@ class LevelStatsService:
         return False
 
     def _queue_montage_level_refinement(self, session, rendered) -> None:
+        if bool(getattr(session, "shader_display", False)):
+            # Shader first pixels use payload-prepared rough evidence. Final
+            # refinement belongs exclusively to the statistics-only semantic
+            # evidence owner, including sources absent from display payloads.
+            return
         quality = _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
         if quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
             return
@@ -313,6 +318,48 @@ class LevelStatsService:
         if not payloads:
             return 0
         return self._queue_montage_level_stats_for_payloads(session, payloads)
+
+    def _admit_first_pass_level_evidence(self, session, rendered, *, quality: str) -> bool:
+        """Merge worker-prepared rough evidence for the one physical first pass."""
+
+        if not bool(getattr(session, "shader_display", False)):
+            return False
+        if not session.note_first_pass_quality(quality):
+            return False
+        evidence_quality = (
+            LevelEvidenceQuality.ROUGH_PREVIEW
+            if str(quality) == "preview"
+            else LevelEvidenceQuality.ROUGH_TARGET
+        )
+        return bool(
+            self._update_montage_level_bounds_from_prepared(
+                session.level_key,
+                rendered,
+                expected_indices=self._montage_level_expected_indices(session),
+                require_refined=False,
+                evidence_quality=evidence_quality,
+            )
+        )
+
+    def _first_pass_level_evidence_complete(self, session) -> bool:
+        if not bool(getattr(session, "shader_display", False)):
+            return False
+        if not session.first_pass_pixels_presented():
+            return False
+        expected = {
+            int(tile.source_index)
+            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        }
+        summary = self._montage_level_tracker().summary_for(session.level_key)
+        covered = set() if summary is None else set(int(source) for source in summary.source_indices)
+        return bool(expected and expected <= covered)
+
+    @staticmethod
+    def _first_pass_rough_evidence_closed(session) -> bool:
+        return bool(
+            getattr(session, "shader_display", False)
+            and getattr(session, "first_pass_histogram_published", False)
+        )
 
     def _queue_montage_final_level_refinements(self, session) -> None:
         """Queue settled final/target payloads for refined stats.
@@ -453,6 +500,11 @@ class LevelStatsService:
     def _schedule_semantic_level_evidence(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
+        if bool(getattr(session, "shader_display", False)):
+            if not bool(getattr(session, "first_pass_histogram_published", False)):
+                return
+            if not _montage_side_work_visible_settled(self, session):
+                return
         target = self._ensure_semantic_level_evidence_target(session)
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
@@ -526,6 +578,15 @@ class LevelStatsService:
                 progress.blocking_reason = "waiting-semantic-sources"
             self._maybe_publish_after_level_evidence(current, processed=int(merged))
             self._schedule_semantic_level_evidence(current)
+            if (
+                len(progress.covered_sources) >= target.target_population
+                and _montage_side_work_visible_settled(self, current)
+            ):
+                # Completion is the atomic refined levels+histogram edge.
+                # Request it directly from the guarded worker completion;
+                # there is no later payload transition guaranteed to wake the
+                # presentation gate.
+                self._request_level_metadata_presentation(current)
 
         def stale():
             if release(session):
@@ -558,6 +619,12 @@ class LevelStatsService:
             progress.blocking_reason = "kernel-admission"
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
+        if self._first_pass_rough_evidence_closed(session):
+            getattr(session, "pending_level_tiles", deque()).clear()
+            getattr(session, "pending_level_sources", set()).clear()
+            session.level_scan_remaining_tiles = 0
+            self._schedule_semantic_level_evidence(session)
+            return
         if (
             not getattr(session, "pending_level_tiles", None)
             and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
@@ -662,6 +729,11 @@ class LevelStatsService:
                     rendered = _rendered_tile_from_previous_payload(tile, payload)
             if rendered is None:
                 continue
+            if bool(getattr(session, "shader_display", False)):
+                payload_quality = str(getattr(rendered, "quality", "exact") or "exact")
+                first_pass_quality = getattr(session, "first_pass_quality", None)
+                if first_pass_quality is not None and payload_quality != first_pass_quality:
+                    continue
             source_index = int(rendered.tile.source_index)
             quality = _rendered_level_evidence_quality_for_session(
                 session,

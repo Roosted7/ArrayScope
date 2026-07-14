@@ -320,6 +320,16 @@ class FramePipelineEffects:
         tile = self._tile_for_step(step)
         if tile is None or not self._session_is_current(intent):
             return False
+        if (
+            bool(getattr(self.session, "shader_display", False))
+            and getattr(self.session, "first_pass_quality", None) == "preview"
+            and not bool(getattr(self.session, "first_pass_histogram_published", False))
+            and step.rung in (Rung.DESIRED, Rung.EXACT)
+        ):
+            # The preview pass is one coherent evidence/display phase.  Do not
+            # let target work race its final physical acknowledgement and
+            # rough histogram publication.
+            return False
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         if self._step_evaluates_reduced_display_payload(step, tile):
@@ -1201,12 +1211,7 @@ class FramePipelineEffects:
             session.tile_compute_direct += 1
             session.tile_compute_direct_ms += eval_ms
             session.tile_compute_direct_max_ms = max(float(session.tile_compute_direct_max_ms), eval_ms)
-        self.renderer._update_montage_level_bounds_from_rendered(
-            session.level_key,
-            rendered,
-            expected_indices=self.renderer._montage_level_expected_indices(session),
-        )
-        self.renderer._queue_montage_level_refinement(session, rendered)
+        self.renderer._admit_first_pass_level_evidence(session, rendered, quality="exact")
         session.mark_materialized(rendered)
         session.lifecycle.task_released(int(tile.montage_index), reason="completed")
         session.dirty_tiles.append(int(tile.montage_index))
@@ -1239,6 +1244,19 @@ class FramePipelineEffects:
                 continue
             admitted_any = True
             session._ensure_floor_payloads((tile_number,))
+            display_payload = session.display_tile_payloads.get(int(tile_number))
+            if display_payload is not None:
+                rendered = self.renderer._rendered_tile_for_current_payload(
+                    session,
+                    int(tile_number),
+                    display_payload,
+                )
+                if rendered is not None:
+                    self.renderer._admit_first_pass_level_evidence(
+                        session,
+                        rendered,
+                        quality=quality,
+                    )
             pending_upserted = int(tile_number) in session.pending_payload_upserts
             preview_upserted = bool(
                 is_preview
@@ -1397,6 +1415,45 @@ class FramePipelineEffects:
                 ):
                     session.applied_level_source = current_level_source
                     session.begin_level_presentation_update(current_levels)
+            elif requested_levels is None:
+                # Shader levels are one global physical uniform, but the
+                # payload identities crossing this transaction must name the
+                # same acknowledged generation. Register the provisional
+                # source before building the delta, then rebind the current
+                # wrappers without rebuilding or re-uploading pixels.
+                current_level_source = renderer._montage_level_source_for_session(
+                    session,
+                    allow_partial=not bool(
+                        getattr(session, "first_pass_histogram_published", False)
+                    ),
+                )
+                if bool(getattr(session, "first_pass_histogram_published", False)):
+                    current_summary = renderer._montage_level_tracker().summary_for(
+                        session.level_key
+                    )
+                    if not bool(getattr(current_summary, "refined", False)):
+                        current_level_source = None
+                current_levels = normalize_bounds(
+                    getattr(current_level_source, "levels", None)
+                )
+                if (
+                    current_level_source is not None
+                    and current_levels is not None
+                    and getattr(current_level_source, "semantic_key", None) == session.level_key
+                    and (
+                        getattr(session.level_generation, "semantic_key", None) != session.level_key
+                        or not levels_match(
+                            getattr(session.level_generation, "target_levels", None),
+                            current_levels,
+                        )
+                    )
+                ):
+                    session.begin_level_presentation_update(
+                        current_levels,
+                        source=current_level_source,
+                    )
+                if current_levels is not None:
+                    session.bind_payloads_to_level_generation()
             limits = tile_layer_upsert_limits(renderer, session)
             if cpu_successor_ready:
                 # One complete CPU presentation transaction replaces the
@@ -1553,6 +1610,10 @@ class FramePipelineEffects:
             metadata_can_advance = bool(
                 first_display_commit
                 or semantic_level_supersession
+                or (
+                    bool(getattr(session, "shader_display", False))
+                    and not bool(getattr(session, "first_pass_histogram_published", False))
+                )
                 or self._side_work_visible_settled()
             )
             level_metadata_improved = bool(
@@ -1572,7 +1633,18 @@ class FramePipelineEffects:
             # only publish left the histogram panel empty until an unrelated
             # action (index change, channel toggle) forced a fresh first
             # commit (field defect 2026-07).
-            publish_histogram_plot = bool(first_display_commit or level_metadata_improved)
+            first_pass_complete = renderer._first_pass_level_evidence_complete(session)
+            publish_first_pass_histogram = bool(
+                first_pass_complete
+                and not bool(getattr(session, "first_pass_histogram_published", False))
+            )
+            publish_refined_histogram = bool(
+                level_metadata_improved
+                and bool(getattr(level_stats, "refined", False))
+            )
+            publish_histogram_plot = bool(
+                publish_first_pass_histogram or publish_refined_histogram
+            )
             publish_metadata = publish_auto_metadata or publish_histogram_plot or level_metadata_improved
             # Instrumentation: record why a commit did/did not (re)apply level
             # metadata, so the levels/histogram-stranding path is observable from
@@ -1741,7 +1813,16 @@ class FramePipelineEffects:
                 return
             renderer._last_montage_commit_outcome = "backend-applied"
             session._atomic_prepared_transaction = None
-            self._acknowledge_and_publish(tile_delta, tile_state, rendered_geometry, active_payloads, commit_start=commit_start)
+            self._acknowledge_and_publish(
+                tile_delta,
+                tile_state,
+                rendered_geometry,
+                active_payloads,
+                commit_start=commit_start,
+                first_pass_histogram_published=bool(
+                    publish_first_pass_histogram and histogram_plot_data is not None
+                ),
+            )
         finally:
             _finish_presentation_commit(renderer)
 
@@ -1939,7 +2020,16 @@ class FramePipelineEffects:
         renderer.win.img_view.setImageStale(False)
         return True
 
-    def _acknowledge_and_publish(self, tile_delta, tile_state, geometry, active_payloads, *, commit_start: float) -> None:
+    def _acknowledge_and_publish(
+        self,
+        tile_delta,
+        tile_state,
+        geometry,
+        active_payloads,
+        *,
+        commit_start: float,
+        first_pass_histogram_published: bool,
+    ) -> None:
         renderer = self.renderer
         session = self.session
         report = getattr(renderer._display_committer(), "last_tile_commit_report", None)
@@ -2004,6 +2094,21 @@ class FramePipelineEffects:
             )
         if active_payloads:
             renderer._queue_montage_level_stats_for_payloads(session, active_payloads)
+        first_pass_publication_transition = bool(
+            first_pass_histogram_published
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        )
+        if first_pass_publication_transition:
+            session.first_pass_histogram_published = True
+        elif (
+            renderer._first_pass_level_evidence_complete(session)
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        ):
+            # The final first-pass acknowledgement makes the rough histogram
+            # eligible.  Preserve that metadata-only obligation before the
+            # preview transition can replan target quality.
+            session.flush_pending = True
+            session.final_commit_pending = True
         session.display_committed = bool(session.lifecycle.presented_tiles)
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         if semantic_progress is not None and (
@@ -2051,6 +2156,8 @@ class FramePipelineEffects:
             commit_start=commit_start,
             preview_transition=preview_transition,
         )
+        if first_pass_publication_transition:
+            renderer.request_montage_replan(session)
 
     def _finish_commit(self, report, tile_state, *, commit_start: float, preview_transition: bool) -> None:
         renderer = self.renderer

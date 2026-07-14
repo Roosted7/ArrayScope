@@ -135,6 +135,8 @@ def test_semantic_owner_rejects_superseded_generation_results():
         level_key=("levels", "predecessor"),
     )
     service, kernel = _service(predecessor)
+    publications = []
+    predecessor.pipeline.effects.request_presentation = lambda: publications.append("predecessor")
     service._schedule_semantic_level_evidence(predecessor)
     old_task = kernel.tasks.pop(0)
 
@@ -143,6 +145,7 @@ def test_semantic_owner_rejects_superseded_generation_results():
         session_id=2,
         level_key=("levels", "successor"),
     )
+    successor.pipeline.effects.request_presentation = lambda: publications.append("successor")
     service._frame_session = successor
     service.win.operation_evaluator.set_document(successor.document)
     service._schedule_semantic_level_evidence(successor)
@@ -154,6 +157,7 @@ def test_semantic_owner_rejects_superseded_generation_results():
 
     assert service._montage_level_tracker().summary_for(successor.level_key).rank == LevelSourceRank.NONE
     assert predecessor.semantic_level_evidence_progress.inflight_generation is None
+    assert publications == []
 
     while kernel.tasks:
         kernel.run_next()

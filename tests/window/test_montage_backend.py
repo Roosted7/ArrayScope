@@ -755,6 +755,45 @@ def test_montage_level_metadata_publishes_when_evidence_quality_improves():
     assert Window()._should_publish_montage_level_metadata(session, stats) is True
 
 
+def test_vispy_first_pass_level_metadata_publishes_on_rough_coverage_growth():
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
+    from arrayscope.window.frame_controller import FrameControllerMixin
+
+    class Window(FrameControllerMixin):
+        def __init__(self):
+            self.win = self
+
+    level_key = ("levels", "first-pass-growth")
+    session = SimpleNamespace(
+        level_key=level_key,
+        rendered_tiles={},
+        display_tile_payloads={0: object()},
+        shader_display=True,
+        first_pass_histogram_published=False,
+        applied_level_source=LevelSource(
+            levels=(100.0, 200.0),
+            histogram_range=(100.0, 200.0),
+            rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+            source_count=1,
+            expected_count=3,
+            semantic_key=level_key,
+            evidence_quality=int(LevelEvidenceQuality.ROUGH_PREVIEW),
+        ),
+    )
+    stats = MontageLevelStats(
+        bounds=(100.0, 500.0),
+        source_indices=frozenset({0, 1}),
+        expected_indices=frozenset({0, 1, 2}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+    assert Window()._should_publish_montage_level_metadata(session, stats) is True
+    session.first_pass_histogram_published = True
+    assert Window()._should_publish_montage_level_metadata(session, stats) is False
+
+
 def test_display_tile_payload_retains_prepared_level_stats_for_reuse():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import TileLevelStats

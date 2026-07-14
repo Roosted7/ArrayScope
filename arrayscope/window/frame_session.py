@@ -543,6 +543,8 @@ class FrameSession:
     level_evidence_generation: object | None = None
     semantic_level_evidence_target: SemanticLevelEvidenceTarget | None = None
     semantic_level_evidence_progress: SemanticLevelEvidenceProgress | None = None
+    first_pass_quality: str | None = None
+    first_pass_histogram_published: bool = False
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
     pending_refined_level_sources: set[int] = field(default_factory=set)
     tile_compute_cache_hits: int = 0
@@ -679,6 +681,33 @@ class FrameSession:
 
     def onscreen_target_settled(self) -> bool:
         return not self.onscreen_target_unsettled_tiles()
+
+    def note_first_pass_quality(self, quality: str) -> bool:
+        """Latch the one display quality allowed to contribute rough evidence."""
+
+        quality = str(quality or "exact")
+        if self.first_pass_quality is None:
+            self.first_pass_quality = quality
+        return self.first_pass_quality == quality
+
+    def first_pass_pixels_presented(self) -> bool:
+        """Whether every planned source is acknowledged at the latched quality."""
+
+        quality = self.first_pass_quality
+        tiles = tuple(getattr(self.plan, "tiles", ()) or ())
+        if quality is None or not tiles:
+            return False
+        for offset, tile in enumerate(tiles):
+            tile_number = int(getattr(tile, "montage_index", offset))
+            payload = self.display_tile_payloads.get(tile_number)
+            if (
+                payload is None
+                or int(getattr(payload, "source_index", -1)) != int(tile.source_index)
+                or str(getattr(payload, "quality", "exact") or "exact") != quality
+                or tile_number not in self.lifecycle.presented_tiles
+            ):
+                return False
+        return True
 
     @property
     def level_revision(self) -> int:
@@ -980,6 +1009,8 @@ class FrameSession:
         self.level_evidence_inflight = False
         self.level_evidence_generation = None
         self.invalidate_semantic_level_evidence()
+        self.first_pass_quality = None
+        self.first_pass_histogram_published = False
         # The evidence scan indexed the OLD window's level key; restart the
         # counters so the new key's evidence is armed from scratch (the
         # renderer re-marks the scan whenever a commit parks on evidence).
@@ -1151,7 +1182,7 @@ class FrameSession:
             )
             self._level_update_pending = not bool(snapshot.settled)
 
-    def begin_level_presentation_update(self, levels) -> bool:
+    def begin_level_presentation_update(self, levels, *, source=None) -> bool:
         """Start or continue a progressive level generation.
 
         Histogram drags emit an immediate preview followed by a finish signal
@@ -1167,7 +1198,7 @@ class FrameSession:
         needs_work = ProgressiveTileLevelConvergence().begin(
             self.level_generation,
             levels,
-            source=self.applied_level_source,
+            source=self.applied_level_source if source is None else source,
             active_tiles=self.level_generation.active_tiles,
         )
         self._level_update_pending = bool(needs_work)
@@ -1651,6 +1682,23 @@ class FrameSession:
             scale=getattr(shader_mapping, "scale", None),
             lut_identity=getattr(shader_mapping, "lut_identity", None),
         )
+
+    def bind_payloads_to_level_generation(self) -> int:
+        """Bind current wrappers to the uniform generation they will expose."""
+
+        rebound = 0
+        for tile_number in tuple(self.display_tile_payloads):
+            payload = self.display_tile_payloads.get(tile_number)
+            if payload is None:
+                continue
+            identity = self.tile_presentation_identity(payload.shader_mapping)
+            if payload.presentation_identity == identity:
+                continue
+            payload = replace(payload, presentation_identity=identity)
+            self.display_tile_payloads[tile_number] = payload
+            self.lifecycle.remember_presentable(tile_number, payload)
+            rebound += 1
+        return int(rebound)
 
     def _tile_identity(
         self,

@@ -1533,9 +1533,16 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._settle_montage_visible_plan_if_complete(session)
         # Montage level phasing: rough -> hold -> refined. Refined evidence is
         # queued after visible settlement and admitted through the kernel.
-        self._queue_montage_current_level_evidence(session)
-        self._queue_montage_final_level_refinements(session)
-        self._schedule_montage_refined_level_stats(session)
+        if bool(getattr(session, "shader_display", False)):
+            # Payload evidence has already closed the rough pass. The
+            # statistics-only semantic owner now refines the full population;
+            # target display payloads must not enter a second rough/refinement
+            # owner.
+            self._schedule_semantic_level_evidence(session)
+        else:
+            self._queue_montage_current_level_evidence(session)
+            self._queue_montage_final_level_refinements(session)
+            self._schedule_montage_refined_level_stats(session)
         return True
 
     def _settle_montage_visible_plan_if_complete(self, session) -> bool:
@@ -1604,6 +1611,16 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if int(stats.rank) > applied_rank:
             return True
         if int(getattr(stats, "evidence_quality", 0) or 0) > int(getattr(applied, "evidence_quality", 0) or 0):
+            return True
+        if (
+            bool(getattr(session, "shader_display", False))
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+            and len(getattr(stats, "source_indices", ()) or ())
+            > int(getattr(applied, "source_count", 0) or 0)
+        ):
+            # First-pass shader levels intentionally track bounded coverage
+            # growth. Histogram plotting remains coalesced until the physical
+            # pass is complete.
             return True
         # Coverage growth inside one rank is intentionally coalesced. A
         # 60-source fill otherwise rebuilds the histogram plot after every
