@@ -375,3 +375,44 @@ The marathon worktree contains a useful but unported content-extent contract:
 `refreshViewportContentExtentIntent()` reapplies AUTO/FIT only after backend
 acknowledgement. Port tests before considering any of that code; it is not an
 explanation for the ownerless pending tile above.
+
+## 2026-07-14 R8C stop checkpoint: onscreen completion asymmetry
+
+The apparent ownerless tile above was a scope mismatch, not a missing
+materialization handoff. `FramePlan.active_region_ids` correctly admitted only
+the physically onscreen tiles, while `visible_plan_complete()` incorrectly
+required the broader coverage ring to settle. Commit `359f618` changes only
+that completion predicate to use the existing `onscreen_target_settled()`
+contract. Its focused invariant and the complete frame-session file are green
+(61 tests). No admission, prefetch, queue, or scheduling policy changed.
+
+The read-only `redesign-r8-marathon` comparison contains the same stale
+`visible_plan_complete()` predicate, so there is no completion fix to port. It
+does contain a narrower prefetch-busy check based on onscreen settlement; keep
+that as a later salvage-matrix candidate, not as part of this truth slice.
+
+The committed-manual-camera experiment was then repeated onscreen on the real
+Wayland session for both backends. VisPy converged and preserved the camera;
+PyQtGraph did not. Two hypotheses were insufficient to explain the full
+PyQtGraph asymmetry, so work stops here before another experiment:
+
+1. **Partially confirmed, insufficient: coverage-ring completion was the
+   blocker.** The focused lifecycle invariant is fixed, and the VisPy path now
+   converges. PyQtGraph still timed out.
+2. **Confirmed geometry defect, insufficient as the full explanation:
+   boundary-only tiles were classified onscreen.** With camera range ending at
+   `y=3`, tile 5 begins exactly at `y=3` and has zero visible area, yet the
+   inclusive montage intersection named active regions `(0, 5)`. A focused
+   planner regression proves that zero-area edge contact must not be active;
+   the strict-intersection change passes the 75-test planner, montage, and
+   frame-session slice. The real PyQtGraph interaction still timed out, while
+   VisPy passed.
+
+The last pre-change PyQtGraph probe recorded
+`onscreen_target_unsettled_tiles() == (5,)`, no stale levels, active regions
+`(0, 5)`, coverage `{0, 1, 5, 6}`, and a camera of approximately
+`x=-0.212..2.212, y=0..3`. The next investigation must first record the same
+minimal tuple after strict intersection: active ids, target-unsettled ids,
+backend acknowledged ids, committed geometry identity, and plan geometry
+identity. Do not modify admission or scheduling. If the only remaining failure
+is committed-geometry publication, test that ownership boundary before code.
