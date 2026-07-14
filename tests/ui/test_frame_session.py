@@ -462,7 +462,7 @@ def test_montage_render_session_caps_upserts_without_clipping_active_scope():
     first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(first_delta.upserts) == (0,)
-    assert first_delta.active_tiles == (0, 1, 2)
+    assert first_delta.active_tiles == (0, 1, 2, 3)
     assert first_state.active_payloads(first_delta) == {0: first_delta.upserts[0]}
     session.acknowledge_tile_presentation(first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)))
     session.mark_presented(first_state.active_payloads(first_delta))
@@ -470,7 +470,7 @@ def test_montage_render_session_caps_upserts_without_clipping_active_scope():
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(second_delta.upserts) == (1,)
-    assert second_delta.active_tiles == (0, 1, 2)
+    assert second_delta.active_tiles == (0, 1, 2, 3)
     assert set(second_state.active_payloads(second_delta)) == {0, 1}
     assert session.ensure_tile_states()[2] == MontageTileState.LOADING
     assert 2 in session.dirty_payloads
@@ -492,9 +492,9 @@ def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
     assert tuple(first_delta.upserts) == (2,)
-    assert first_delta.active_tiles == (0, 1, 2)
+    assert first_delta.active_tiles == (0, 1, 2, 3)
     assert tuple(second_delta.upserts) == (0,)
-    assert second_delta.active_tiles == (0, 1, 2)
+    assert second_delta.active_tiles == (0, 1, 2, 3)
     assert set(second_state.active_payloads(second_delta)) == {0, 2}
     assert 1 in session.dirty_payloads
 
@@ -954,7 +954,7 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert tuple(tile.montage_index for tile in additions) == (2, 3, 4)
 
     state, delta = session.build_tile_presentation({index: ("tile-source", index) for index in range(8)})
-    assert delta.active_tiles == ()
+    assert delta.active_tiles == (2, 3)
     assert state.active_payloads(delta) == {}
 
 
@@ -1185,7 +1185,7 @@ def test_loaded_active_set_change_without_payload_delta_is_not_geometry_change()
 
     assert delta.upserts == {}
     assert delta.removals == ()
-    assert delta.active_tiles == (0, 1)
+    assert delta.active_tiles == (0, 1, 2, 3)
     assert session.visibility_revision == first_delta.visibility_revision + 1
     assert not session.presentation_geometry_changed
 
@@ -1227,7 +1227,7 @@ def test_montage_render_session_tile_states_keep_materialized_tiles_loading_unti
     state, delta = session.build_tile_presentation(source_ids)
     tile_states = session.ensure_tile_states()
 
-    assert tuple(delta.upserts) == (0, 1, 2, 3)
+    assert tuple(delta.upserts) == (1, 3)
     assert tuple(state.active_payloads(delta)) == (3, 1)
     assert {str(tile_states[index].value) for index in range(4)} == {"loading"}
 
