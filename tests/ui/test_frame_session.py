@@ -513,6 +513,7 @@ def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_ack
     state, delta = session.build_tile_presentation({0: ("tile", 0)})
     session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=state.active_payloads(delta)))
     session.mark_presented(state.active_payloads(delta))
+    session.note_committed()
 
     assert session.is_complete()
 
@@ -1211,6 +1212,7 @@ def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
         TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)),
     )
     session.mark_presented(first_state.active_payloads(first_delta))
+    session.note_committed()
     assert session.is_complete()
 
 
