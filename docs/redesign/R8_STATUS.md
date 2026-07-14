@@ -416,3 +416,46 @@ minimal tuple after strict intersection: active ids, target-unsettled ids,
 backend acknowledged ids, committed geometry identity, and plan geometry
 identity. Do not modify admission or scheduling. If the only remaining failure
 is committed-geometry publication, test that ownership boundary before code.
+
+## 2026-07-14 R8C stop checkpoint: semantic level evidence has no owner
+
+The strict-intersection probe reduced the physical active set to `(0,)`.
+PyQtGraph then reported no onscreen unsettled tiles and the correct exact scalar
+acknowledgement for tile 0, while the committed geometry remained the
+predecessor `0..4` and the session plan named `0..19`. The last commit outcome
+was `level-evidence-wait`, not a tile materialization or backend-ack wait.
+
+The evidence tracker was exhausted but incomplete:
+
+- pending level tiles: empty;
+- scan remaining: zero;
+- evidence worker in flight: false;
+- rank: `MONTAGE_VISIBLE_SUBSET`;
+- sampled sources: `{0, 1, 2, 5, 6, 10}`.
+
+ADR 0032 requires montage levels and histograms to describe the semantic index
+population, not only current canvas pixels. Advancing the `0..19` committed
+geometry with this partial range would therefore render tile 0 with the wrong
+semantic level generation. Keeping the predecessor is truthful but violates
+convergence because no current work owner can produce evidence for the other
+sources.
+
+Two test-first hypotheses did not close the end-to-end gate:
+
+1. **Valid invariant, insufficient:** CPU atomic successor readiness now has a
+   focused regression requiring only `onscreen_tile_numbers()`, rather than the
+   coverage ring. The helper test passes, but the real PyQtGraph transition
+   still parks on semantic level evidence.
+2. **Valid gate, insufficient:** the marathon worktree's narrower montage
+   prefetch busy check allows coverage-only backlog once the onscreen target is
+   settled. Its focused test passes, but the real raw-data transition schedules
+   no additional semantic evidence and still has the identical six-source
+   tracker state after ten seconds.
+
+These production experiments remain uncommitted. Do not extend the prefetch or
+admission policy next. First prove why the existing montage prefetch walk has no
+candidate/stage owner for this raw-data semantic population, and decide whether
+full-range level evidence belongs to a dedicated bounded histogram lane rather
+than display-tile prefetch. The marathon branch has no implementation for that
+missing-source evidence owner; its histogram changes only move aggregation of
+already-collected per-source samples off the GUI thread.
