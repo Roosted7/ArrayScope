@@ -1409,9 +1409,17 @@ class FrameSession:
             if rendered is None:
                 continue
             tile_number = int(tile_number)
+            base_source_id = source_ids.get(
+                tile_number,
+                ("rendered_tile", tile_number, id(rendered.image)),
+            )
             previous = self.display_tile_payloads.get(tile_number)
+            if (
+                previous is not None
+                and _base_source_id(previous.source_id) != base_source_id
+            ):
+                previous = None
             if previous is None:
-                base_source_id = source_ids.get(tile_number, ("rendered_tile", tile_number, id(rendered.image)))
                 previous = by_base.get(base_source_id)
                 if previous is None:
                     texture_data, _texture_histogram, lod, texture_kind = self._texture_for_rendered_tile(rendered)
@@ -1431,6 +1439,14 @@ class FrameSession:
                     previous,
                     tile_number=tile_number,
                     source_index=int(rendered.tile.source_index),
+                    tile_identity=self.tile_payload_identity(
+                        rendered.tile,
+                        texture_data=previous.texture_data,
+                        texture_kind=previous.texture_kind,
+                        shader_mapping=previous.shader_mapping,
+                        lod=previous.lod,
+                        quality=previous.quality,
+                    ),
                 )
             self.display_tile_payloads[tile_number] = payload
             self.record_tile_payload(payload)

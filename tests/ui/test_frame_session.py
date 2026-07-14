@@ -752,6 +752,85 @@ def test_exact_payload_seeds_from_previous_session_without_materialization():
     assert second is first
 
 
+def test_retargeted_seed_rebuilds_typed_identity_for_current_source():
+    original = _session()
+    image = np.full((2, 2), 3.0, dtype=np.float32)
+    original.mark_materialized(
+        RenderedTile(
+            original.plan.tiles[0],
+            image,
+            image,
+            0.0,
+            image.shape,
+            image.nbytes,
+        )
+    )
+    stale_wrapper = original.snapshot_display_tile_payloads(
+        {0: ("tile-source", 3)}
+    )[0]
+    assert stale_wrapper.tile_identity.source_index == 0
+
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(
+        2,
+        indices=(3,),
+        text="3",
+    )
+    plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=(3,),
+        tile_shape=(2, 2),
+        columns=1,
+    )
+    current = FrameSession(
+        session_id=2,
+        key="key",
+        render_generation=2,
+        level_key="levels",
+        level_expected_indices=(3,),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={
+            0: RenderedTile(
+                plan.tiles[0],
+                image,
+                image,
+                0.0,
+                image.shape,
+                image.nbytes,
+            )
+        },
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        pending_tiles=[],
+    )
+
+    current.seed_display_tile_payloads(
+        {0: stale_wrapper},
+        {0: ("tile-source", 3)},
+    )
+
+    seeded = current.display_tile_payloads[0]
+    target = current.tile_target_identity(plan.tiles[0], lod_level=0)
+    assert seeded.source_index == 3
+    assert seeded.tile_identity.source_index == 3
+    assert seeded.tile_identity.semantic_key == target.semantic_key
+    assert seeded.tile_identity.real_plane.pointer == int(
+        seeded.texture_data.__array_interface__["data"][0]
+    )
+    assert 0 in current.pending_payload_upserts
+
+
 def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
     session = _zoomed_out_session(dtype=np.complex64, rgb=True)
     real = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
@@ -1715,7 +1794,7 @@ def test_seeded_payloads_only_confirm_when_backend_identity_matches():
         pending_tiles=[],
     )
     payload = state.payloads[2]
-    shifted.lifecycle.backend_presented_snapshot({0: payload.source_id})
+    shifted.lifecycle.backend_presented_snapshot({0: payload.tile_identity})
 
     shifted.seed_display_tile_payloads(
         state.payloads,
