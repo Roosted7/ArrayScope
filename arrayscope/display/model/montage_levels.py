@@ -426,10 +426,12 @@ def provisional_tile_level_stats(
 def tile_level_stats_with_quality(
     stats: TileLevelStats,
     quality: LevelEvidenceQuality | int | str,
+    *,
+    source_index: int,
 ) -> TileLevelStats:
     quality = _coerce_evidence_quality(quality)
     return TileLevelStats(
-        source_index=int(stats.source_index),
+        source_index=int(source_index),
         bounds=stats.bounds,
         sample=np.asarray(stats.sample),
         refined=bool(quality >= LevelEvidenceQuality.REFINED),

@@ -454,10 +454,7 @@ class ArrayScopeWindow(
         # only this drain knob plus commit batch bounds and kernel lane quotas.
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
-            decision = governor.decide_bridge_drain(
-                interactive=interactive,
-                busy_state=busy,
-            )
+            decision = governor.decide_bridge_drain(interactive=interactive)
             bridge.set_max_items_per_drain(decision.batch_limit)
             bridge.set_budget_ms(decision.budget_ms)
         # Montage prefetch asks the governor for a per-run tile budget in

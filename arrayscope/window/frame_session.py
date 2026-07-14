@@ -2418,7 +2418,6 @@ class FrameSession:
             tuple(all_candidate_upserts),
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
-            max_free=max_free_retargets,
             item_free_fn=(
                 (lambda tile: bool(item_free_upsert_fn(all_candidate_upserts[int(tile)])))
                 if item_free_upsert_fn is not None

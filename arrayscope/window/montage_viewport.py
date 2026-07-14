@@ -388,7 +388,7 @@ def _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, geomet
     return None
 
 
-def montage_session_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
+def frame_session_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
     """Stable render-session identity, excluding transient viewport coverage."""
 
     if viewport_plan.axis is None:
@@ -419,7 +419,7 @@ def montage_session_key(document_key, view_state, viewport_plan: MontageViewport
 def montage_tile_semantic_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
     """Identity of one montage tile's TEXELS, shared across index windows.
 
-    ``montage_session_key`` includes the sibling-index selection
+    ``frame_session_key`` includes the sibling-index selection
     (``all_indices``) and layout gap — correct for session identity, but
     they change WHICH tiles exist, never what a given source index contains.
     Keying pyramid floors/previews by the session key made every index-window

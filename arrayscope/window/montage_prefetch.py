@@ -36,7 +36,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_interaction", "viewport interaction active"),))
     if _busy(window, session):
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
-    if not window._montage_session_is_current(session):
+    if not window._frame_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
         return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
