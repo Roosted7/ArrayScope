@@ -14,6 +14,7 @@ from arrayscope.kernel import (
     Priority,
     Supersession,
     TaskSpec,
+    UNRANKED_SCHEDULING_RANK,
     WorkItem,
     complete_inline_work as _complete_inline_work,
 )
@@ -1080,6 +1081,7 @@ class LevelStatsService:
                     fn=evaluate,
                     lane=WorkLane.VISIBLE_MATERIALIZATION,
                     priority=Priority.VISIBLE_IMAGE,
+                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence", session.key), generation),
                     reusable=True,
@@ -1178,6 +1180,7 @@ class LevelStatsService:
                     fn=lambda: True,
                     lane=WorkLane.VISIBLE_MATERIALIZATION,
                     priority=Priority.VISIBLE_IMAGE,
+                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence-continuation", session.key), generation),
                     pass_token=False,

@@ -44,6 +44,11 @@ VISIBLE_LANES = frozenset(
     }
 )
 
+# Spatial ranks are ordinal tile positions and therefore start at zero. Work
+# explicitly known not to produce a tile can use this floor; control tasks
+# keep the default rank because they may be the producer of the ranked work.
+UNRANKED_SCHEDULING_RANK = 1_000_000
+
 
 class Priority(IntEnum):
     """Execution priority *within* the ready set. Lower runs first.
@@ -120,7 +125,10 @@ class TaskSpec:
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(str(self.lane)))
         object.__setattr__(self, "priority", Priority(int(self.priority)))
-        object.__setattr__(self, "scheduling_rank", max(0, int(self.scheduling_rank or 0)))
+        scheduling_rank = int(self.scheduling_rank)
+        if scheduling_rank < 0:
+            raise ValueError("scheduling_rank must be non-negative")
+        object.__setattr__(self, "scheduling_rank", scheduling_rank)
         object.__setattr__(self, "scope", str(self.scope))
         object.__setattr__(self, "deps", tuple(self.deps or ()))
         object.__setattr__(self, "deadline_ns", max(0, int(self.deadline_ns or 0)))
@@ -234,6 +242,7 @@ __all__ = [
     "Supersession",
     "TaskOutcome",
     "TaskSpec",
+    "UNRANKED_SCHEDULING_RANK",
     "VISIBLE_LANES",
     "WorkItem",
     "complete_inline_work",

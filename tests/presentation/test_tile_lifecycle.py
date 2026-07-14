@@ -466,6 +466,26 @@ def test_full_tile_story(lc):
     }
 
 
+def test_repeated_identical_presentation_confirmation_is_not_a_new_ack(monkeypatch, lc):
+    """A no-op commit must not manufacture another backend-ack edge."""
+
+    from arrayscope.presentation import tile_lifecycle
+
+    events = []
+    monkeypatch.setattr(
+        tile_lifecycle,
+        "emit_trace",
+        lambda kind, **fields: events.append((kind, fields)),
+    )
+
+    assert lc.acknowledge_presented(2, "payload-v1", "exact", 0)
+    assert not lc.acknowledge_presented(2, "payload-v1", "exact", 0)
+
+    acknowledgements = [fields for kind, fields in events if kind == "backend_ack"]
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["identity"] == "payload-v1"
+
+
 # -- event views: load intent, requests, skip, stage bindings ----------
 
 

@@ -801,16 +801,31 @@ class TileLifecycle:
         payload_identity: object,
         quality: str = "exact",
         level: int | None = None,
-    ) -> None:
+    ) -> bool:
         """Record backend-acknowledged presentation metadata for one tile."""
 
         rec = self.record(tile_number)
+        normalized_quality = str(quality or "exact")
+        normalized_level = None if level is None else int(level)
+        if (
+            rec.presentation is Presentation.PRESENTED
+            and rec.presented_source_id == payload_identity
+            and rec.backend_source_id == payload_identity
+            and rec.presented_quality == normalized_quality
+            and rec.presented_level == normalized_level
+        ):
+            # A commit report may repeat the backend's complete active set even
+            # when it accepted no upserts.  That is confirmation of existing
+            # physical truth, not a new acknowledgement edge.  Keeping this
+            # transition idempotent prevents diagnostics from turning no-op
+            # presentation polls into thousands of fictitious backend acks.
+            return False
         self._unpark(rec)
         rec.presentation = Presentation.PRESENTED
         rec.presented_source_id = payload_identity
         rec.backend_source_id = payload_identity
-        rec.presented_quality = str(quality or "exact")
-        rec.presented_level = None if level is None else int(level)
+        rec.presented_quality = normalized_quality
+        rec.presented_level = normalized_level
         self._presented.add(rec.tile_number)
         if rec.semantic is Semantic.EVALUATED:
             self._load_cleared(rec)
@@ -824,6 +839,7 @@ class TileLifecycle:
             accepted=True,
         )
         _trace_lifecycle(rec, "presented", identity=payload_identity)
+        return True
 
     def may_remove_visible(self, tile_number: int, *, memory_pressure: bool = False) -> bool:
         """Whether a visible tile may be physically removed right now."""

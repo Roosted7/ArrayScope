@@ -729,7 +729,8 @@ class VisPyImageView2D(ImageViewShell):
                 pass
             _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
             self._record_tile_layer_stats(stats)
-            self._request_vispy_tile_layer_redraw()
+            if not (data_unchanged and not levels_changed and not mapping_changed):
+                self._request_vispy_tile_layer_redraw()
 
             # Histogram, levels, geometry, and viewport are separate concerns.
             # Cached visible-tile switches must not repaint the PyQtGraph

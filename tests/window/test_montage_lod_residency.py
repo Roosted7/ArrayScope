@@ -3153,6 +3153,65 @@ def test_stale_rung_drop_releases_its_admitted_active_claim_after_retarget():
     assert session._test_replan_requested is True
 
 
+def test_presentation_gate_does_not_treat_revision_metadata_as_backlog():
+    """A settled session must not re-commit merely because revisions are nonzero."""
+
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(
+        flush_pending=False,
+        final_commit_pending=False,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        backend_identity_mismatch_tiles=lambda: (),
+    )
+    renderer = SimpleNamespace(_montage_gate_last_backlog=("previous",))
+    effects = FramePipelineEffects(renderer, session)
+    requests = []
+    effects.request_presentation = lambda: requests.append(True)
+
+    effects._rearm_if_backlog()
+
+    assert requests == []
+    assert renderer._montage_gate_last_backlog is None
+
+
+def test_presentation_gate_rearms_completed_first_pass_publication():
+    """Complete rough evidence is an explicit metadata commit obligation."""
+
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(
+        first_pass_quality="preview",
+        first_pass_histogram_published=False,
+        flush_pending=False,
+        final_commit_pending=False,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+        backend_identity_mismatch_tiles=lambda: (),
+        level_revision=1,
+        level_presentation_snapshot=lambda: SimpleNamespace(stale_count=0),
+        display_tile_payloads={},
+        rendered_tiles={},
+    )
+    renderer = SimpleNamespace(
+        _montage_gate_last_backlog=None,
+        _first_pass_level_evidence_complete=lambda _session: True,
+    )
+    effects = FramePipelineEffects(renderer, session)
+    requests = []
+    effects.request_presentation = lambda: requests.append(True)
+
+    effects._rearm_if_backlog()
+
+    assert requests == [True]
+
+
 def test_stale_commit_batch_releases_admitted_active_claim_after_key_retarget():
     """A completion between session key mutation and pipeline replan must drop."""
 

@@ -157,3 +157,37 @@ violations). Touched suites: 209 passed, 2 skipped; compileall and Ruff
 clean. The churn detector validated against three real traces: pre-V2
 pathological (6 violations, worst 5,521), post-V2 (still fires at 398),
 and the healthy raw-phase trace (clean).
+
+## Resolution after review integration — Codex 2026-07-14
+
+The five review commits were rebased into `main` without a merge commit. The
+review then directly changed the next production slice:
+
+- Stage materialization now inherits the best canonical rank of its consuming
+  tiles; visible level-evidence tasks use an explicit non-tile rank floor.
+  Negative ranks raise instead of silently becoming rank zero.
+- Repeated confirmation of an unchanged presented identity is idempotent and
+  emits no fictitious backend-ack edge. Level evidence is queued only for
+  backend-accepted payload transitions, not the full active set on every
+  report. A settled revision is no longer mistaken for presentation backlog,
+  and no-op tiled commits no longer arm a physical-draw obligation.
+- Stall dumps honor `ARRAYSCOPE_STALL_DUMP_DIR`, then the test worker's
+  `ARRAYSCOPE_ARTIFACT_DIR`, before falling back to the platform temp
+  directory. Parallel tests therefore keep evidence without polluting
+  `/tmp`.
+
+The exact six-tile synthetic repro no longer stalls in its FFT phase. Its
+worst identical acknowledgement count fell **411 → 10 per identity**, and
+backend-complete commits for the formerly wedged session fell **443 → 1**.
+The complete non-canonical workflow now reaches all later scroll/zoom phases
+with **zero stall events**. It still exits nonzero because the tiny dataset
+does not meet the canonical workflow's presentation-continuity and
+full-grid-cap gates; those gate failures are recorded separately and are not
+being relabeled as idle-loop regressions.
+
+**Rejected approach / recurrence note:** making *every* unranked `TaskSpec`
+default to the rank floor stranded VisPy startup after fallback pixels:
+control-plane frame-admission work is itself the producer of ranked tile work.
+The accepted boundary is explicit: tile-producing control tasks retain rank
+zero, stages inherit consumers, and genuinely non-tile evidence receives the
+floor. Do not restore a global default floor.

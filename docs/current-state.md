@@ -1,6 +1,8 @@
 # Current state
 
-**Snapshot:** `main`, 2026-07-14, after redesign merge `59a5525d`.
+**Snapshot:** `main`, 2026-07-14, after linear redesign/review rebase.
+**[Codex 2026-07-14 — history correction]** No redesign integration merge
+remains; completed queue and review commits are a single linear sequence.
 **[Codex 2026-07-14 — post-V4 update]** The redesign execution record and
 performance rules remain in [docs/redesign/README.md](redesign/README.md);
 the live product ordering has returned to [docs/roadmap.md](roadmap.md).
@@ -36,7 +38,7 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    50 ms callback, 16 ms heartbeat, and 15 ms warm-input commitments; FFT
    scroll remains the primary throughput target. Follow the measured
    P-program in the roadmap.
-2. **The broad suite is red.** The final pre-merge non-GPU run reported
+2. **The broad suite is red.** The final pre-integration non-GPU run reported
    42 failures and 2 teardown errors; 41 failures reproduced serially.
    Stale deleted-owner assertions coexist with real coalescer, levels,
    viewport/ROI, cache-rebind, and transition behavior debt.

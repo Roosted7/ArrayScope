@@ -3520,3 +3520,18 @@ def test_close_cancels_queued_histogram_refresh(qt_app, monkeypatch):
     qt_app.processEvents()
 
     assert calls == []
+
+
+def test_noop_tile_layer_timing_does_not_arm_physical_draw(qt_app):
+    """A skipped tiled commit is not a new frame waiting to be painted."""
+
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    try:
+        view._start_upload_timing("tile_layer")
+        view._finish_upload_timing()
+
+        assert not view.presentationDrawPending()
+    finally:
+        view.close()

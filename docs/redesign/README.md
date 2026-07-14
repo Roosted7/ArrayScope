@@ -1,6 +1,12 @@
 # Redesign — course and queue
 
-**Date:** 2026-07-14. **Status:** V0–V4 merged to `main`.
+**Date:** 2026-07-14. **Status:** V0–V4 and review hardening are linear on `main`.
+**[Codex 2026-07-14 — linear-history correction]** The temporary V4 and
+review integration merges were removed by rebase. The redesign, V4 closure,
+and adversarial-review commits now form one merge-free sequence on `main`.
+Older execution-record wording below that said “merged” is corrected where it
+affected the live status; the recorded pre-integration validation numbers are
+unchanged.
 **[Codex 2026-07-14 — post-V4 ownership update]** This file remains the
 execution/evidence record for the redesign performance program. With V4
 complete, `docs/roadmap.md` again owns the product queue. Everything that
@@ -57,7 +63,7 @@ real hardware:
 | V1 | **Black tiles.** One owner for "which tiles must render": admission, completion, and evidence scoping all read the same set (fix dossier B1+B2, including the level-evidence deadlock). Delete the tests that pin the narrowed predicates | Harness scenario: one-index scroll with a boundary-landing tile settles fully on real Wayland, both backends; no black tile, no parked evidence pass; `trace_verify` clean |
 | V2 | **Priority order.** One ranker. Per-tile viewport distance becomes part of kernel ordering (or per-tile rung interleaving); delete the other two rankers (fix dossier A1–A4) | Harness scenario: cold montage load + fast scroll paints center-out, proven from the recorded commit/ack trace, not a unit sort |
 | V3 | **Loud non-convergence.** Any tile unsettled with no work in flight for >2 s emits the `stall` trace event with the owner-chain snapshot and a visible diagnostic (tracing-pipeline T2; this failure class has recurred ~5×) | Injecting a stranded tile produces the diagnostic + ring-buffer dump |
-| V4 | **Done 2026-07-14.** Merged `redesign` → `main` at `59a5525d`; the branch was 123 commits ahead at merge | `main` runs the fixed viewer; roadmap (X5…) resumes |
+| V4 | **Done 2026-07-14.** Rebased the completed redesign linearly onto `main`; no merge commit remains | `main` runs the fixed viewer; roadmap (X5…) resumes |
 | P1… | **Performance program to the bars above**, one measured cause at a time against the frozen T1 baseline, drawing from [marathon-salvage.md](marathon-salvage.md) Tiers 2–3 (order given there: prefetch-busy, level_source, viewport intent, histogram aggregation, coalesced drain, cadence throttle, stage-cache snapshot, governor policy, admission batching, gate pacing, slot relocation) | Each P-step: one cause, before/after trace + benchmark numbers in the commit; bars trend green |
 
 A step is done only when its harness scenario passes **on a real display**.
@@ -108,7 +114,8 @@ acceptance.
 > production restore regression; do not widen the harness tolerance.
 
 > **[Codex 2026-07-14 — T1 complete; frozen real-Wayland baseline]** Landed
-> the production-session workflow harness, checked-in 59 MB NIfTI session
+> the production-session workflow harness, local git-ignored 59 MB NIfTI data
+> plus the checked-in JSON session fixture,
 > fixture, `PanelSession`, latency-oriented GUI GC policy, divisible mean
 > fast path, read-only callback/bridge instrumentation, and the schema-v1
 > trace bus plus `--trace` / `trace_latency`. The bus is one flat stream with
@@ -226,7 +233,9 @@ acceptance.
 > continuation idle, emits one schema-v1 `stall` event containing the required
 > tile IDs, lifecycle rows, queue/evidence counts, stage ownership, and commit
 > flags. It dumps the bounded trace tail to
-> `/tmp/arrayscope-stall-<session>-<count>.trace.jsonl`, stores that path in
+> `arrayscope-stall-<session>-<count>.trace.jsonl` under
+> `ARRAYSCOPE_STALL_DUMP_DIR`, the configured test artifact directory, or the
+> platform temp directory (in that order), stores that path in
 > diagnostics state, and shows a persistent status-bar error with the path.
 > When no JSONL sink was requested, the watchdog activates only the bounded
 > 8 MiB ring so production stalls still have evidence. `trace_verify` now
@@ -252,13 +261,13 @@ acceptance.
 > read the deleted flat `window._montage_session`, the intentionally
 > superseded exclusive boundary-intersection expectation, and unresolved
 > coalescer, levels, viewport/ROI, cache-rebind, and transition behavior.
-> Those failures remain explicit post-merge product/test debt; merging V4
+> Those failures remain explicit post-integration product/test debt; V4
 > certifies the named visible-truth fixes, not a broadly green test suite.
-> Do not later cite this merge as evidence that the full suite passed.
+> Do not later cite V4 integration as evidence that the full suite passed.
 
-> **[Codex 2026-07-14 — V4 complete]** `redesign` merged into `main` as
-> `59a5525d` with no conflicts; `main` had no commits outside the redesign
-> history. V0–V4 are closed. The next redesign-derived work is the measured
+> **[Codex 2026-07-14 — V4 complete; linear-history correction]** The
+> completed redesign and V4 closure were rebased directly onto `main`; the
+> temporary merge commit is intentionally absent. V0–V4 are closed. The next redesign-derived work is the measured
 > P-program, while the live product ordering is again maintained in
 > `docs/roadmap.md`.
 
@@ -331,8 +340,8 @@ counters. V1 and V2 each add their scenario before their fix.
 
 ## Environment & commands
 
-- Python: `~/miniconda3/envs/arrayscope/bin/python` (host conda env; the
-  Cowork sandbox cannot load PyQt6 — GUI/GPU work runs on the host).
+- Python: `~/miniconda3/envs/arrayscope/bin/python` (host conda env with
+  **PySide6**; GUI/GPU work runs on the host).
 - **Full suite** (~35 s):
   `~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
 - **Fast Qt-free loop:** `… -m pytest tests/kernel tests/render tests/presentation -q -n 0`

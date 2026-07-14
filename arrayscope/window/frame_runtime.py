@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -500,7 +501,13 @@ class FrameRuntimeMixin:
             stalled_ms=float(stalled_for * 1000.0),
             owner_chain=owner_chain,
         )
-        dump_path = Path(tempfile.gettempdir()) / (
+        dump_directory = Path(
+            os.environ.get("ARRAYSCOPE_STALL_DUMP_DIR")
+            or os.environ.get("ARRAYSCOPE_ARTIFACT_DIR")
+            or tempfile.gettempdir()
+        )
+        dump_directory.mkdir(parents=True, exist_ok=True)
+        dump_path = dump_directory / (
             f"arrayscope-stall-{int(session.session_id)}-"
             f"{int(getattr(self, '_montage_stall_assertions', 0))}.trace.jsonl"
         )

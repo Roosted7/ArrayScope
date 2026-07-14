@@ -931,7 +931,7 @@ def test_refined_evidence_resumes_parked_first_commit_with_dirty_payloads():
 
 
 def test_first_cpu_level_scan_continuation_uses_visible_lane():
-    from arrayscope.kernel import Lane, Priority
+    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
     from arrayscope.render.level_stats import LevelStatsService
 
     submitted = []
@@ -967,6 +967,7 @@ def test_first_cpu_level_scan_continuation_uses_visible_lane():
     spec, _callbacks = submitted[0]
     assert spec.lane == Lane.VISIBLE_MATERIALIZATION
     assert spec.priority == Priority.VISIBLE_IMAGE
+    assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
 
 
 def test_auto_small_scalar_montage_uses_tile_layer():

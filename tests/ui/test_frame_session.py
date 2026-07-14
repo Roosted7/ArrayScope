@@ -80,6 +80,20 @@ def test_montage_render_session_returns_pending_tiles_in_order():
     assert session.next_tile().source_index == 1
 
 
+def test_stage_materialization_inherits_best_consumer_tile_rank():
+    from arrayscope.kernel import UNRANKED_SCHEDULING_RANK
+    from arrayscope.window.frame_effects import _stage_consumer_scheduling_rank
+
+    session = _session()
+    session.stage_fan_in.tile_stage_keys = {2: "shared-stage", 3: "shared-stage"}
+
+    assert _stage_consumer_scheduling_rank(session, "shared-stage") == 2
+    assert (
+        _stage_consumer_scheduling_rank(session, "unbound-stage")
+        == UNRANKED_SCHEDULING_RANK
+    )
+
+
 def test_first_pass_physical_completion_uses_required_tiles():
     session = _session()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
@@ -2053,6 +2067,8 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
     from pyqtgraph.Qt import QtWidgets
 
     monkeypatch.setattr(frame_runtime, "perf_counter", lambda: 12.1)
+    dump_directory = tmp_path / "stall-dumps"
+    monkeypatch.setenv("ARRAYSCOPE_STALL_DUMP_DIR", str(dump_directory))
 
     class Completions:
         @staticmethod
@@ -2134,6 +2150,7 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
 
     dump_path = Path(renderer._montage_watchdog_last_trace_path)
     try:
+        assert dump_path.parent == dump_directory
         rows = [json.loads(line) for line in dump_path.read_text().splitlines()]
         stall = next(row for row in rows if row.get("kind") == "stall")
         assert stall["session_id"] == session_id

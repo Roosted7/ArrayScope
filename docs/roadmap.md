@@ -13,10 +13,11 @@ ADR 0050/0051 and the archived
 
 ## Now — measured performance and suite truth (post-redesign)
 
-> **[Codex 2026-07-14 — post-V4 roadmap update]** R1–R7 and V0–V4 merged
-> to `main` at `59a5525d`. The fixed viewer passed the V1/V2 real-Wayland
+> **[Codex 2026-07-14 — post-V4 roadmap update; linear-history correction]**
+> R1–R7 and V0–V4 are rebased linearly onto `main`; no integration merge
+> remains. The fixed viewer passed the V1/V2 real-Wayland
 > pixel/trace scenarios on both backends and the V3 loud-stall injection.
-> The final pre-merge non-GPU suite remained red at 42 failures and 2
+> The final pre-integration non-GPU suite remained red at 42 failures and 2
 > teardown errors; this is tracked work, not a green-suite claim.
 
 Proceed with the redesign P-program one measured cause at a time against

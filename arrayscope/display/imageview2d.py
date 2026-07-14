@@ -478,10 +478,15 @@ class ImageViewShell(QtWidgets.QWidget):
             return
         visible_changed = bool(
             int(timing["visible_bytes"]) > 0
+            or int(timing["tile_layer_items_created"]) > 0
+            or int(timing["tile_layer_items_updated"]) > 0
+            or int(timing["tile_layer_image_replacements"]) > 0
+            or int(timing["tile_layer_existing_items_shown"]) > 0
+            or int(timing["tile_layer_relocated_tiles"]) > 0
             or int(timing["tile_layer_texture_uploads"]) > 0
             or int(timing["tile_layer_vertex_uploads"]) > 0
             or int(timing["tile_layer_level_updates"]) > 0
-            or str(timing["mode"]) in {"full", "fast", "tile_layer", "vispy_full", "vispy_fast", "vispy_tile_layer"}
+            or str(timing["mode"]) in {"full", "fast", "vispy_full", "vispy_fast"}
         )
         upload_timing = ImageUploadTiming(
             total_ms=(perf_counter() - float(timing["start"])) * 1000.0,

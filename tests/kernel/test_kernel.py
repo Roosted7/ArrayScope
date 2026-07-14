@@ -26,6 +26,7 @@ from arrayscope.kernel import (
     TaskOutcome,
     TaskSpec,
     ThreadWorkerBackend,
+    UNRANKED_SCHEDULING_RANK,
 )
 from arrayscope.operations.cancellation import EvaluationCancelled
 
@@ -163,6 +164,36 @@ def test_spatial_rank_orders_visible_tiles_across_quality_priorities():
     backend.run_all()
 
     assert ran == ["center-exact", "edge-floor"]
+
+
+def test_unranked_visible_work_does_not_preempt_ranked_tiles():
+    kernel, backend = make_manual()
+    ran = []
+    kernel.submit(
+        TaskSpec(
+            key="unranked-stage",
+            fn=lambda: ran.append("unranked-stage"),
+            priority=Priority.INTERACTIVE,
+            scheduling_rank=UNRANKED_SCHEDULING_RANK,
+        )
+    )
+    kernel.submit(
+        TaskSpec(
+            key="edge-tile",
+            fn=lambda: ran.append("edge-tile"),
+            priority=Priority.VISIBLE_IMAGE,
+            scheduling_rank=8,
+        )
+    )
+
+    backend.run_all()
+
+    assert ran == ["edge-tile", "unranked-stage"]
+
+
+def test_negative_scheduling_rank_is_rejected():
+    with pytest.raises(ValueError, match="scheduling_rank must be non-negative"):
+        TaskSpec(key="bad-rank", fn=lambda: None, scheduling_rank=-1)
 
 
 def test_visible_lanes_run_before_optional_lanes_regardless_of_priority():

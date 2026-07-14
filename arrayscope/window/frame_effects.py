@@ -1039,6 +1039,7 @@ class FramePipelineEffects:
         """
 
         session = self.session
+        first_pass_publication_pending = self._first_pass_publication_pending()
         level_pending = bool(session.has_pending_level_update())
         level_stale = 0
         if level_pending:
@@ -1074,9 +1075,18 @@ class FramePipelineEffects:
             tuple(sorted(int(tile) for tile in tuple(getattr(session, "pending_removals", ()) or ()))),
             level_pending,
             level_stale,
+            first_pass_publication_pending,
             int(getattr(session, "level_revision", 0) or 0),
             len(tuple(_call(session, "backend_identity_mismatch_tiles") or ())),
             obligation_identities,
+        )
+
+    def _first_pass_publication_pending(self) -> bool:
+        session = self.session
+        return bool(
+            getattr(session, "first_pass_quality", None) is not None
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+            and _call(self.renderer, "_first_pass_level_evidence_complete", session)
         )
 
     def _rearm_if_backlog(self) -> None:
@@ -1089,10 +1099,21 @@ class FramePipelineEffects:
         wedge, counted here as a bug report (ADR 0051: rescues hide bugs).
         """
 
-        signature = self._backlog_signature()
-        if not any(signature):
+        session = self.session
+        has_backlog = bool(
+            getattr(session, "flush_pending", False)
+            or getattr(session, "final_commit_pending", False)
+            or getattr(session, "dirty_payloads", ())
+            or getattr(session, "pending_payload_upserts", ())
+            or getattr(session, "pending_removals", ())
+            or session.has_pending_level_update()
+            or self._first_pass_publication_pending()
+            or _call(session, "backend_identity_mismatch_tiles")
+        )
+        if not has_backlog:
             self.renderer._montage_gate_last_backlog = None
             return
+        signature = self._backlog_signature()
         previous = getattr(self.renderer, "_montage_gate_last_backlog", None)
         self.renderer._montage_gate_last_backlog = signature
         if previous == signature:
@@ -2036,8 +2057,9 @@ class FramePipelineEffects:
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         _call(renderer, "_refresh_tile_truth_overlay")
         retained_start = perf_counter()
+        accepted_payloads = accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)
         renderer._retained_tiled_payload_store().remember_acknowledged(
-            accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)
+            accepted_payloads
         )
         renderer._last_montage_tile_retained_store_ms = (perf_counter() - retained_start) * 1000.0
         state_start = perf_counter()
@@ -2074,7 +2096,13 @@ class FramePipelineEffects:
                 int(getattr(renderer, "_montage_display_owned_pending_released", 0) or 0)
                 + int(released_display_pending)
             )
-        if active_payloads:
+        if accepted_payloads:
+            # Evidence quality can advance only after the backend accepts the
+            # payload. Scan the current active population at that transition
+            # so a bounded final batch can close coherent first-pass evidence.
+            # Re-scanning it on reports with *no* accepted upserts created the
+            # idle level-stats -> presentation feedback loop caught by
+            # trace_verify.
             renderer._queue_montage_level_stats_for_payloads(session, active_payloads)
         first_pass_publication_transition = bool(
             first_pass_histogram_published
@@ -2944,6 +2972,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
         if request is None or request.key in session.stage_fan_in.active_requests:
             continue
         session.stage_fan_in.active_requests.add(request.key)
+        scheduling_rank = _stage_consumer_scheduling_rank(session, request.key)
 
         def evaluate(token, request=request, plan=plan):
             context = renderer.win._evaluation_context(ComputeLane.STAGE, token)
@@ -2999,6 +3028,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
                 fn=evaluate,
                 lane=WorkLane.STAGE_MATERIALIZATION,
                 priority=Priority.VISIBLE_IMAGE,
+                scheduling_rank=scheduling_rank,
                 scope=f"montage:{session.key!r}",
                 supersession=Supersession(
                     ("montage-stage", request.key),
@@ -3021,6 +3051,29 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
                 int(getattr(renderer, "_montage_stage_admission_declined", 0) or 0) + 1
             )
             renderer.request_montage_replan(session)
+
+
+def _stage_consumer_scheduling_rank(session, stage_key) -> int:
+    """Return the best canonical tile rank among one stage's consumers."""
+
+    from arrayscope.kernel import UNRANKED_SCHEDULING_RANK
+
+    consumers = {
+        int(tile_number)
+        for tile_number, bound_key in dict(session.stage_fan_in.tile_stage_keys).items()
+        if bound_key == stage_key
+    }
+    if not consumers:
+        return int(UNRANKED_SCHEDULING_RANK)
+    ordered = session._prioritized_tile_numbers(range(len(tuple(session.plan.tiles))))
+    ranks = {
+        int(tile_number): int(rank)
+        for rank, tile_number in enumerate(ordered)
+    }
+    return min(
+        (ranks[tile_number] for tile_number in consumers if tile_number in ranks),
+        default=int(UNRANKED_SCHEDULING_RANK),
+    )
 
 
 def enqueue_stage_dependent_tiles(session, tile_numbers) -> int:
