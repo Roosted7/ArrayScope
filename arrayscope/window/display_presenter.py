@@ -446,7 +446,28 @@ class DisplayPresentationMixin:
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_frame_viewport_update)
             self._frame_viewport_update_timer = timer
-        timer.start(0 if delay_ms is None else max(0, int(delay_ms)))
+        delay_ms = 0 if delay_ms is None else max(0, int(delay_ms))
+        timer.start(delay_ms)
+
+    def _schedule_interactive_montage_viewport_update(self) -> None:
+        timer = getattr(self, "_interactive_montage_viewport_timer", None)
+        if timer is None:
+            from pyqtgraph.Qt import QtCore
+
+            # Timer category: UI cosmetic. Camera motion is already visible;
+            # this bounds only the derived LOD/visibility replan cadence.
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_interactive_montage_viewport_update)
+            self._interactive_montage_viewport_timer = timer
+        if timer.isActive():
+            return
+        timer.start(16)
+
+    def _run_interactive_montage_viewport_update(self) -> None:
+        scheduler = getattr(self, "retarget_montage_viewport", None)
+        if callable(scheduler):
+            scheduler()
 
     def _run_frame_viewport_update(self) -> None:
         frame = getattr(self.win, "_committed_display_frame", None)

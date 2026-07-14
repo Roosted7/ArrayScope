@@ -1,4 +1,8 @@
+from types import SimpleNamespace
+
 import numpy as np
+
+from pyqtgraph.Qt import QtCore
 
 from arrayscope.core.scheduler import FrameTarget
 from arrayscope.core.view_state import ViewState
@@ -17,6 +21,7 @@ from arrayscope.display.model.frame import (
     TiledValueSource,
 )
 from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
+from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.display.model.commit import (
     CommitKind,
     DisplayPayload,
@@ -24,6 +29,44 @@ from arrayscope.display.model.commit import (
     PresentationInput,
     RenderRequestContext,
 )
+
+
+class _FakeTimer:
+    def __init__(self, _parent):
+        self.timeout = self
+        self.active = False
+        self.remaining_ms = -1
+        self.starts = []
+
+    def setSingleShot(self, _single_shot):
+        pass
+
+    def connect(self, _callback):
+        pass
+
+    def isActive(self):
+        return self.active
+
+    def remainingTime(self):
+        return self.remaining_ms
+
+    def start(self, delay_ms):
+        self.active = True
+        self.remaining_ms = int(delay_ms)
+        self.starts.append(int(delay_ms))
+
+
+def test_interactive_viewport_update_is_cadenced_not_debounced(monkeypatch):
+    monkeypatch.setattr(QtCore, "QTimer", _FakeTimer)
+
+    presenter = SimpleNamespace()
+    presenter._run_interactive_montage_viewport_update = lambda: None
+
+    DisplayPresentationMixin._schedule_interactive_montage_viewport_update(presenter)
+    timer = presenter._interactive_montage_viewport_timer
+    DisplayPresentationMixin._schedule_interactive_montage_viewport_update(presenter)
+
+    assert timer.starts == [16]
 
 
 def _geometry(shape=(2, 2)):

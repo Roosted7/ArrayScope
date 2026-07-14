@@ -861,11 +861,12 @@ def test_programmatic_range_change_does_not_release_viewport_continuity(qt_app, 
     from arrayscope.window.viewport_bridge import ViewportBridge
 
     released = []
+    title_updates = []
     owner = SimpleNamespace(
         img_view=SimpleNamespace(_viewport_applying=False),
         _release_viewport_continuity=lambda: released.append(True),
         _note_viewport_interaction=lambda _reason: None,
-        _update_display_group_title=lambda: None,
+        _update_display_group_title=lambda: title_updates.append(True),
         view_state=SimpleNamespace(montage_axis=None),
     )
     monkeypatch.setattr(
@@ -878,6 +879,7 @@ def test_programmatic_range_change_does_not_release_viewport_continuity(qt_app, 
     ViewportBridge(owner).on_view_range_changed()
 
     assert released == []
+    assert title_updates == []
 
 
 def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app, monkeypatch):
@@ -902,7 +904,7 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
                 ),
                 value_source=SimpleNamespace(payloads={}),
             ),
-        _schedule_frame_viewport_update=lambda: scheduled.append("frame"),
+        _schedule_frame_viewport_update=lambda *, delay_ms=None: scheduled.append(("frame", delay_ms)),
         view_state=SimpleNamespace(montage_axis=None),
     )
     monkeypatch.setattr(
@@ -914,16 +916,16 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
     owner.win = owner
     ViewportBridge(owner).on_view_range_changed()
 
-    assert scheduled == ["frame"]
+    assert scheduled == [("frame", 0)]
 
 
-def test_preview_first_montage_range_change_schedules_viewport_retarget(qt_app, monkeypatch):
+def test_uncommitted_preview_range_does_not_retarget_viewport(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
 
     import arrayscope.window.viewport_bridge as viewport_bridge
     from arrayscope.window.viewport_bridge import ViewportBridge
 
-    scheduled = []
+    retargeted = []
     owner = SimpleNamespace(
         img_view=SimpleNamespace(_viewport_applying=False),
         _release_viewport_continuity=lambda: None,
@@ -931,7 +933,7 @@ def test_preview_first_montage_range_change_schedules_viewport_retarget(qt_app, 
         _update_display_group_title=lambda: None,
         _committed_display_frame=None,
         _frame_session=SimpleNamespace(display_committed=True),
-        _schedule_frame_viewport_update=lambda: scheduled.append("montage"),
+        retarget_montage_viewport=lambda: retargeted.append(True),
         view_state=SimpleNamespace(montage_axis=2),
     )
     monkeypatch.setattr(
@@ -943,7 +945,44 @@ def test_preview_first_montage_range_change_schedules_viewport_retarget(qt_app, 
     owner.win = owner
     ViewportBridge(owner).on_view_range_changed()
 
-    assert scheduled == ["montage"]
+    assert retargeted == []
+
+
+def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    scheduled = []
+    image_view = SimpleNamespace(
+        _viewport_applying=False,
+        _viewport_wheel_range_pending=True,
+    )
+    owner = SimpleNamespace(
+        img_view=image_view,
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _committed_display_frame=SimpleNamespace(
+            scene=object(),
+            value_source=SimpleNamespace(payloads={}),
+        ),
+        _frame_session=SimpleNamespace(display_committed=True),
+        _schedule_interactive_montage_viewport_update=lambda: scheduled.append(16),
+        retarget_montage_viewport=lambda: None,
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    owner.win = owner
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert scheduled == [16]
+    assert not image_view._viewport_wheel_range_pending
 
 
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):

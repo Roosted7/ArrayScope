@@ -293,6 +293,7 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
         {
             ("arrayscope/display/histogram_controller.py", "HistogramLevelPreviewController.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/display/histogram_controller.py", "HistogramDisplayController.__init__", "QTimer", "UI cosmetic"): 2,
+            ("arrayscope/display/imageview2d.py", "ImageViewShell.eventFilter", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action.PaintProbe.eventFilter", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D.setupUI", "QTimer", "UI cosmetic"): 1,
@@ -316,6 +317,7 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ("arrayscope/ui/toasts.py", "show_status_action", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/window/canvas_preserve.py", "CanvasPreserveController._single_shot", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/window/display_presenter.py", "DisplayPresentationMixin._schedule_frame_viewport_update", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/window/display_presenter.py", "DisplayPresentationMixin._schedule_interactive_montage_viewport_update", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_shape_restore", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._restore_viewport_continuity_shape_step", "singleShot", "UI cosmetic"): 2,
             ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_when_ready", "singleShot", "UI cosmetic"): 1,

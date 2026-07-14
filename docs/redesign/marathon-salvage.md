@@ -92,6 +92,12 @@ Ordered by confidence:
 12. **LOD-plan cadence throttle + synchronous `setTitle` removal**
     (`display_presenter.py`, `viewport_bridge.py`) — 16 ms replan cadence
     during interaction; setTitle was 20–35 ms on the wheel path.
+    **[Codex 2026-07-14 — re-derived and landed as P6]** The accepted cadence
+    is input-only and reads committed-frame truth. It has a dedicated timer;
+    programmatic replay and pipeline continuation remain immediate after three
+    broader variants broke V1 or VisPy V2. Two traces cut kernel submissions
+    39–50% and bridge drains 61–65% with neutral two-run first-ack midpoint;
+    the separate 7/60 presentation deadlock remains open.
 13. **Stage-cache lock-free resident snapshot + cancellation tokens +
     `peek_many`** (`stage_cache.py`, `evaluator.py`, `effects.py`) — GUI
     planning probes never block behind worker mutation; superseded ROI/tile

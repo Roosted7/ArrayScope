@@ -37,6 +37,10 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
 6. Aggregate histogram sampling is derived on kernel workers behind tracker
    revision/source guards; prepared atomic tile transactions expire when the
    global level revision changes.
+7. Real wheel/pan input paces committed-frame viewport replans at 16 ms without
+   delaying camera motion, programmatic camera replay, or pipeline
+   continuation; range signals no longer synchronously relayout the display
+   group title.
 
 ## Known open work
 
@@ -55,6 +59,11 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    real VisPy V2 pixel gate in three capacity-wake variants. The unchanged
    per-completion bridge remains production truth until the pipeline refill
    contract is redesigned with a real-display proof.
+5. **The presentation deadlock survives P6.** Viewport cadence removes 39–50%
+   of kernel submissions in the frozen workflow, but the FFT phase still ends
+   at 7/60 presented and 53 dirty with no work in flight. Do not attribute
+   that gate failure to viewport planning or re-couple semantic continuation
+   to the gesture timer.
 
 ## Material risks
 

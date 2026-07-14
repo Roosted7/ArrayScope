@@ -65,6 +65,15 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > failed designs are recorded in the redesign README. The active measured
 > cause is now LOD-plan cadence plus synchronous-title removal.
 
+> **[Codex 2026-07-14 — P6 result]** Wheel/pan-derived replans now have a
+> committed-frame-only 16 ms cadence, separate from programmatic replay and
+> pipeline continuation; range input no longer performs synchronous title
+> layout. Two real traces cut kernel submissions 39–50% and bridge drains
+> 61–65%, with a +0.8% two-run first-ack midpoint. The V1/V2 physical matrix
+> and 873 focused/broad tests pass. The 7/60 deadlock remains unchanged. The
+> active measured cause is now the stage-cache resident snapshot,
+> cancellation tokens, and `peek_many`.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

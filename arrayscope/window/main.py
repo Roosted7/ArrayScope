@@ -557,6 +557,10 @@ class ArrayScopeWindow(
             # after resizing, so the dims-area height must be settled (the
             # relayout early-returns when geometry is unchanged).
             self.dimension_strip._run_scheduled_relayout()
+        renderer = getattr(self, "renderer", None)
+        update_title = getattr(renderer, "_update_display_group_title", None)
+        if callable(update_title):
+            update_title()
 
     def _on_sync_facet_toggled(self, facet, enabled):
         controller = getattr(self, "sync_controller", None)

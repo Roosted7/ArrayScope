@@ -384,6 +384,39 @@ acceptance.
 > P6 (LOD-plan cadence and synchronous-title removal) is next; it must be
 > measured on the unchanged completion bridge.
 
+> **[Codex 2026-07-14 — P6 complete; input-only viewport cadence]** Camera
+> motion remains immediate, while committed-scene LOD/visibility replans from
+> real wheel/pan gestures now run at most once per 16 ms. The cadence has its
+> own receiver-bound timer and never paces programmatic camera replay or the
+> pipeline's semantic viewport-continuation gate. Range changes no longer call
+> `QGroupBox.setTitle`; display-mode and resize owners update that cosmetic
+> text instead. The deterministic range-bridge test pins synchronous title
+> updates at **1 → 0 per range signal**, and a timer model proves repeated
+> gesture signals do not restart the cadence as a quiet-period debounce.
+>
+> **[Codex 2026-07-14 — P6 measured result / bar boundary]** Two frozen
+> real-Wayland workflow traces reduced kernel submissions from the P4
+> baseline's **1,001 to 606 / 504** (39–50%) and bridge drains from **741 to
+> 289 / 261** (61–65%); total trace events fell **60,939 → 58,137 / 57,560**.
+> Input-to-first-ack was **6,717.5 ms** at P4 versus **7,415.1 / 6,127.2 ms**
+> after P6 (two-run midpoint **6,771.1 ms**, +0.8%), so no latency win is
+> claimed. Bridge max changed **53.02 → 51.66 / 52.71 ms**, while p95 worsened
+> **4.28 → 6.98 / 9.37 ms**. The same FFT phase still freezes at **7/60
+> presented, 53 dirty, no work in flight**; P6 reduces redundant planning but
+> does not fix the presentation deadlock or satisfy the performance bars.
+>
+> **[Codex 2026-07-14 — P6 regression record / accepted boundary]** Three
+> broader variants were rejected. Pacing every range replay delayed V1's
+> programmatic boundary reveal on both backends. Reusing the existing frame-
+> viewport timer paced the pipeline continuation and stranded all 36 VisPy V2
+> targets at preview quality. Treating an uncommitted preview session as
+> viewport truth then made VisPy V2 order-dependent (isolated pass, failure
+> after the other three physical cases). The accepted design derives tiled
+> viewport work only from `_committed_display_frame`, and its separate gesture
+> timer leaves semantic wakes untouched. Focused/broad coverage is **873
+> passed** and the sequential V1/V2 real-Wayland matrix is **4 passed**. P7
+> (stage-cache snapshot, cancellation, and `peek_many`) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

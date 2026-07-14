@@ -2517,6 +2517,17 @@ class ImageViewShell(QtWidgets.QWidget):
         if (
             obj is self.graphicsView.viewport()
             and event.type() == QtCore.QEvent.Type.Wheel
+            and not self.viewport_controller.is_fit_locked()
+        ):
+            # QApplication.mouseButtons() is empty for wheel input by the time
+            # sigRangeChanged runs. Carry this one synchronous input identity
+            # across the ViewBox range signal so only real gesture bursts—not
+            # programmatic camera replay—receive the 16 ms LOD-plan cadence.
+            self._viewport_wheel_range_pending = True
+            QtCore.QTimer.singleShot(0, self, self._clear_viewport_wheel_range_pending)
+        if (
+            obj is self.graphicsView.viewport()
+            and event.type() == QtCore.QEvent.Type.Wheel
             and self.viewport_controller.is_fit_locked()
         ):
             self._show_fit_mode_interaction_reminder()
@@ -2539,6 +2550,9 @@ class ImageViewShell(QtWidgets.QWidget):
         ):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
+
+    def _clear_viewport_wheel_range_pending(self) -> None:
+        self._viewport_wheel_range_pending = False
 
     def _notify_viewport_content_resized(self, **kwargs) -> None:
         # This runs inside a C++ resizeEvent override; an escaping exception
