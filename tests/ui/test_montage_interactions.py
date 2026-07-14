@@ -297,6 +297,107 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
         win.close()
 
 
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, backend):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
+    win = ArrayScopeWindow(np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8))
+    qtbot.addWidget(win)
+    try:
+        win.show()
+        win.operation_coordinator.load_operations(
+            (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+        )
+        win._set_document(win.operation_coordinator.document)
+        win._coerce_channel_for_current_dtype()
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2,
+                columns=3,
+                indices=tuple(range(1, 7)),
+                text="1:7",
+            )
+        )
+        win.update_image_view()
+        win.resize(1200, 820)
+
+        qtbot.waitUntil(
+            lambda: (
+                win.renderer._frame_session is not None
+                and win.renderer._frame_session.visible_plan_complete()
+            ),
+            timeout=10_000,
+        )
+
+        def committed_plan_is_fitted():
+            session = win.renderer._frame_session
+            height, width = tuple(int(value) for value in session.plan.display_shape[:2])
+            view_range = win.img_view.getView().viewRange()
+            return bool(
+                view_range[0][0] <= 0.0
+                and view_range[0][1] >= float(width)
+                and view_range[1][0] <= 0.0
+                and view_range[1][1] >= float(height)
+            )
+
+        qtbot.waitUntil(committed_plan_is_fitted, timeout=10_000)
+        session = win.renderer._frame_session
+        viewport = win.img_view.graphicsView.viewport()
+        assert tuple(session.viewport_shape) == (viewport.height(), viewport.width())
+    finally:
+        win.close()
+        settings.setValue("image_rendering_backend", "pyqtgraph")
+        settings.sync()
+
+
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_montage_viewport_resize_is_not_dropped_before_first_image_commit(
+    qtbot,
+    backend,
+):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
+    win = ArrayScopeWindow(np.zeros((12, 10, 8), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2,
+                columns=3,
+                indices=tuple(range(1, 7)),
+                text="1:7",
+            )
+        )
+        win.img_view.image = None
+        notifications = []
+        win._on_image_viewport_resized = lambda **kwargs: notifications.append(kwargs)
+
+        win.img_view.graphicsView.resizeEvent(
+            QtGui.QResizeEvent(QtCore.QSize(741, 619), QtCore.QSize(447, 493))
+        )
+
+        assert len(notifications) == 1
+        assert notifications[0]["previous_viewport_size"] is not None
+        assert notifications[0]["base_view_range"] is not None
+    finally:
+        win.close()
+        settings.setValue("image_rendering_backend", "pyqtgraph")
+        settings.sync()
+
+
 def test_montage_tile_count_increase_auto_adjusts_when_near_auto(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets

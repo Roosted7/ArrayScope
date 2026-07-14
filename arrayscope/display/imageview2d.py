@@ -84,7 +84,7 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
 
     def resizeEvent(self, event):
         owner = getattr(self, "_arrayscope_owner", None)
-        if owner is None or getattr(owner, "image", None) is None:
+        if owner is None:
             super().resizeEvent(event)
             return
         base_view_range = owner.view.viewRange()
@@ -92,6 +92,26 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
         focus_fn = getattr(owner.window(), "_current_montage_resize_focus", None)
         if callable(focus_fn):
             resize_focus = focus_fn(base_view_range)
+        if getattr(owner, "image", None) is None:
+            blocker = QtCore.QSignalBlocker(owner.view)
+            try:
+                super().resizeEvent(event)
+                if owner._viewport_resize_owned_by_parent():
+                    previous_viewport_size = _previous_viewport_size_from_resize_event(
+                        owner.graphicsView.viewport().size(),
+                        event,
+                        fallback=owner.viewport_controller.last_viewport_size,
+                    )
+                    owner._notify_viewport_content_resized(
+                        previous_viewport_size=previous_viewport_size,
+                        base_view_range=base_view_range,
+                        resize_focus=resize_focus,
+                    )
+                    owner._remember_accepted_view_range()
+                    owner._sync_backend_camera_to_view()
+            finally:
+                blocker.unblock()
+            return
         blocker = QtCore.QSignalBlocker(owner.view)
         try:
             super().resizeEvent(event)
