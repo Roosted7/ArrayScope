@@ -1,131 +1,129 @@
-# Redesign plans — kernel, pipeline, LOD ladder
+# Redesign — course and queue
 
-**Date:** 2026-07-07. **Branch:** `redesign` (worktree `.worktrees/redesign`).
-**Decision record:** [ADR 0053](../decisions/0053-execution-kernel-and-modular-pipeline.md).
-**Source of truth for priority:** this README's table; `docs/roadmap.md`
-defers to it while the redesign is in flight.
+**Date:** 2026-07-14. **Branch:** `redesign`.
+**This file is the single source of truth for what happens next.**
+`docs/roadmap.md` defers to it. Everything that used to live in this
+directory is history in [archive/](archive/) — read it for evidence, never
+for direction.
 
-## What already landed on `redesign`
+## Where we are
 
-- `arrayscope/kernel/` — the execution kernel (scheduler, workers,
-  completions, Qt bridge), 33 tests. Priorities/dependencies/staleness are
-  now real at execution level.
-- **R1 kernel adoption** — app submissions now share one `Kernel` and one
-  `QtKernelBridge`; WorkGraph is deleted; `window/evaluation_controller.py`
-  is an import-only surface over `arrayscope/kernel/eval_adapter.py`.
-  Validation: 1696 passed / 3 skipped in the full non-GPU suite at `-n 16`;
-  GPU harness 6 passed. The vispy/resident FFT preview wedge reproduced and
-  remains in [known-red.md](known-red.md) for R2/R3.
-- `arrayscope/render/` — typed stage contracts, the unified LOD ladder
-  (pure planner), and the kernel-backed `MontagePipeline` now driving the
-  live montage path through evaluation effects, stage dependencies, commit
-  batches, lifecycle acknowledgement, and backend presentation.
-- **R2 pipeline integration** — `frame_renderer.py` is 1,888 lines; clusters
-  B/C/E are deleted or extracted, stage fan-in is kernel-dependency based,
-  the watchdog is diagnostics-only (`stall_assertions`), and the FFT
-  transform-preview GPU harness scenario is covered.
-- Lane/priority vocabulary canonicalized in the kernel (legacy modules are
-  compat aliases).
-- Plan-time viewport content extent (fixes the fit-unlock regression,
-  bisected to 2995d039).
-- Hygiene deletions: kill switches, ADR 0051 P3 fallbacks, `tmp_probes/`
-  (3 keepers now in `tools/probes/`).
+The architecture rewrite (R1–R7) landed: one kernel, one pipeline, one
+lifecycle machine, `frame_renderer.py` deleted. That part worked and stays.
 
-## Plan queue (execute in order)
+The certification program that followed (R8A–R8D) is **closed**. Not because
+its gates passed — because the gates stopped measuring the product. It
+produced real fixes, but its later fixes narrowed internal predicates
+(coverage ring → onscreen → strict intersection → physical targets) until
+the counters said "converged" while the screen showed black tiles and
+wrong-order rendering. The post-mortem is in
+[retro-2026-07.md](retro-2026-07.md); the R8 logs are in the archive.
 
-| Plan | What | Size | Blocked by |
-|---|---|---|---|
-| [R2](r2-pipeline-integration.md) | MontagePipeline live: port evaluation/commit effects, dissolve frame_renderer clusters B/C/E | Done | R1 |
-| [R3](r3-lod-ladder-adoption.md) | Ladder replaces montage_lod planning; one pyramid store; ops once per rung; PyQtGraph parity via capabilities | Landed; evidence gates pending | R2 |
-| [R4](r4-timer-and-governor-audit.md) | Every QTimer justified or deleted; governor shrinks to telemetry + two knobs | Implementation pass landed; evidence gates pending | R2 |
-| [R5](r5-test-and-docs-truth-pass.md) | Delete wrong-path tests; docs/current-state truth pass; known-red ledger emptied | M | R3–R4 |
+## What is broken right now (user-visible)
 
-A plan is done only when its exit gate passes and the source code it
-replaces is DELETED. "Both paths work" is not done — old remnants subtly
-guide us back to the wrong path.
+1. **Persistent black tiles** — tiles that stay black indefinitely while the
+   system reports completion. Root-cause dossier:
+   [black-tiles-and-priority.md](black-tiles-and-priority.md) §B.
+2. **Priority rendering order** — tiles do not fill center-out / visible-first.
+   Dossier §A. (The "fix" in e6665315 changed one of three drifted rankers
+   and was verified only by an isolated sort-order unit test.)
+3. **Silently dead code paths** — `window/montage_prefetch.py` still imports
+   the deleted `frame_renderer` module inside `except Exception`, so
+   interaction-awareness and the retained-preview admission path have been
+   off since R7, with no test failure. Dossier §C.
 
-## Ground rules (read before ANY plan)
+## Performance bars (restored from R2/R4/R8D — commitments, not history)
 
-1. **Thomas's bar:** the GUI event loop never hangs noticeably. Interaction
-   outranks all speculation. Any synchronous GUI-thread step >50 ms is a
-   bug; pan/scrub heartbeat max gap target ~16 ms.
-2. **GUI thread is a gateway** (ADR 0053): submit, drain, apply bounded
-   commits, update widgets. Evaluation/reduction/stats/planning are kernel
-   tasks. New timers are forbidden except anti-hang fallbacks or UI
-   cosmetics — justify in a comment or don't merge.
-3. **One owner per state.** Tile state: `TileLifecycle`. Quality
-   progression: `LodLadder`. Execution + staleness: the kernel. If you need
-   a new collection, you are probably duplicating one of them — stop.
-4. **Backends branch on capabilities, never names.** Both backends stay
-   first-class; VisPy exploits GPU residency/uniforms, PyQtGraph gets
-   bounded CPU equivalents.
-5. **Test bar:** Qt-free suites (core, operations, presentation, kernel,
-   render) green at every commit. window/display breakage allowed ONLY with
-   a [known-red.md](known-red.md) entry naming the fixing/deleting step.
-6. **Delete aggressively, with the replacement.** Port commits delete the
-   old methods AND their pacing tests. Never leave a compatibility shim.
-7. **One cluster per commit; measure after each.** Commit messages: what +
-   why + numbers (suite counts, before/after timings).
-8. **Exit gates are hard and immutable.** A plan is not done while its
-   gate fails; never edit a gate to match a result (this happened once —
-   see the R2b section of the R2 plan — and cost a full stabilization
-   pass).
-9. **No symptom patches.** Clamping workers/batches, adding pacing, or
-   editing a harness because "it reduces the symptom" requires a written
-   root-cause note first. The R2 freezes were a per-completion commit
-   storm, camera-key churn, deps-as-ordering, and per-tile-native FFT
-   floors — none of which worker clamps could fix.
-10. **Deps are not ordering; cameras are not identity.** Kernel deps
-    fail-propagate (data dependencies only); viewport keys never belong in
-    task keys or supersession values
-    (`test_camera_only_retarget_never_invalidates_rung_work` pins this).
-11. **Payload semantics ride payload metadata** (`quality`,
-    `texture_kind`, levels) — never dtype/shape sniffing in a backend.
+Closing R8 closed its *bureaucracy*, not its goals. These bars are the
+product promise and stay binding until met, verified by the harness on
+real hardware:
 
-## Environment & commands (unchanged mechanics, new locations)
+- GUI callbacks < **50 ms**, always; event-loop heartbeat gap ≤ **16 ms**
+  during fills and scrub; warm scrub input ≤ **15 ms**.
+- Settled-idle CPU **0%**.
+- **#1 throughput target:** fast montage index scroll on FFT data is
+  ~**4 fps** today vs ~17 fps scalar (2026-07-09 measurement, realistic
+  human scroll rate). Bring FFT scroll toward the scalar rate.
+- Once a baseline is frozen (T1), benchmark deltas stay within ±10% unless
+  a P-step improves them.
+
+## The queue (execute in order)
+
+| Step | What | Done when |
+|---|---|---|
+| V0 | Repair the dead imports in `montage_prefetch.py`; add an import-health guard (import every `arrayscope` module; forbid `except`-swallowed imports) | Guard test exists and fails on a re-broken import |
+| T1 | **Measurement foundation.** Port the marathon benchmark harness ([marathon-salvage.md](marathon-salvage.md) Tier 1: profile-tool certification phases + session fixture + PanelSession + `gui_gc` + instrumentation) and land the trace-event spine ([tracing-pipeline.md](tracing-pipeline.md) T1) | Certification report + trace file produced on this branch, both backends; frozen baseline recorded |
+| V1 | **Black tiles.** One owner for "which tiles must render": admission, completion, and evidence scoping all read the same set (fix dossier B1+B2, including the level-evidence deadlock). Delete the tests that pin the narrowed predicates | Harness scenario: one-index scroll with a boundary-landing tile settles fully on real Wayland, both backends; no black tile, no parked evidence pass; `trace_verify` clean |
+| V2 | **Priority order.** One ranker. Per-tile viewport distance becomes part of kernel ordering (or per-tile rung interleaving); delete the other two rankers (fix dossier A1–A4) | Harness scenario: cold montage load + fast scroll paints center-out, proven from the recorded commit/ack trace, not a unit sort |
+| V3 | **Loud non-convergence.** Any tile unsettled with no work in flight for >2 s emits the `stall` trace event with the owner-chain snapshot and a visible diagnostic (tracing-pipeline T2; this failure class has recurred ~5×) | Injecting a stranded tile produces the diagnostic + ring-buffer dump |
+| V4 | Merge `redesign` → `main`. The branch is 116 commits adrift; every week unmerged is risk | `main` runs the fixed viewer; roadmap (X5…) resumes |
+| P1… | **Performance program to the bars above**, one measured cause at a time against the frozen T1 baseline, drawing from [marathon-salvage.md](marathon-salvage.md) Tiers 2–3 (order given there: prefetch-busy, level_source, viewport intent, histogram aggregation, coalesced drain, cadence throttle, stage-cache snapshot, governor policy, admission batching, gate pacing, slot relocation) | Each P-step: one cause, before/after trace + benchmark numbers in the commit; bars trend green |
+
+A step is done only when its harness scenario passes **on a real display**.
+Counters, lifecycle diagnostics, and unit tests are debugging aids, not
+acceptance.
+
+## The visible-truth harness (the only gate)
+
+One scripted scenario runner on real Wayland, assembled from pieces that
+exist: the **marathon profile-tool certification harness** (T1 port — ~30
+named gates, event-loop probe, presentation-continuity probe, portable
+session fixture), `tests/gpu_interaction/` (real-display pixel
+assertions), `tools/probes/`, the per-tile truth overlay
+(`display/tile_truth_overlay.py`), and the **trace pipeline**
+([tracing-pipeline.md](tracing-pipeline.md)): every harness run records a
+trace; `trace_verify` proves invariants, `trace_latency` attributes every
+millisecond. Each scenario drives the real app, waits on settlement, and
+asserts **pixels / per-tile content / trace invariants**, not internal
+counters. V1 and V2 each add their scenario before their fix.
+
+## Ground rules (all seven — the old eleven collapsed into these)
+
+1. **Pixels are the gate.** A claim of "fixed" requires the harness scenario
+   green on real hardware. An offscreen or unit pass is never acceptance.
+2. **Fix by deleting a duplicate, not by adding a gate.** If a fix adds a
+   predicate, a generation, or a new set, it is probably wrong. One owner per
+   decision: one ranker, one visible set, one completion predicate.
+3. **GUI thread never hangs.** Synchronous GUI-thread step >50 ms is a bug;
+   pan/scrub heartbeat target ~16 ms.
+4. **Tests pin user-visible behavior.** A test that pins an implementation
+   detail (upload counts, internal predicate scoping) may be deleted when it
+   blocks a user-visible fix — say so in the commit message.
+5. **No silent fallbacks.** `except Exception` around an import or a lookup
+   that turns a missing symbol into a default is forbidden; broken must be
+   loud.
+6. **Bounded sessions.** End every working session with the app visibly
+   better or the change reverted. Update this README's queue and nothing
+   else; new process documents require Thomas's explicit ask.
+7. **Backends: VisPy is the certification bar on Linux.** PyQtGraph keeps
+   truth tests (right pixels) but no longer blocks on performance/upload
+   gates. (Proposed course change — Thomas to confirm; revert to
+   both-first-class by deleting this rule. [Thomas 2026-07-14: both are first-class, but PyQtGraph is ment for GPU headless/remote work. Lets give it 2x the perf allowance of VisPy!]).
+
+## Environment & commands
 
 - Python: `~/miniconda3/envs/arrayscope/bin/python` (host conda env; the
-  Cowork sandbox cannot load PyQt6 — GUI/GPU work runs on the host, e.g.
-  via Desktop Commander).
-- **Full suite** (~35 s, parallel):
-  `cd ~/projects/ArrayScope/.worktrees/redesign && ~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
-  Known parallel-only flakes (pass alone; ignore unless newly consistent):
-  `test_selecting_fft_workers_updates_settings`,
-  `test_compute_policy_configures_stage_and_montage_lanes`,
-  teardown of `test_montage_ready_display_payloads_commit_immediately`.
-- **Kernel/render suites only** (fast TDD loop, no Qt):
-  `… -m pytest tests/kernel tests/render tests/presentation -q -n 0`
-- **GPU harness** (~20 s, real hardware, asserts `stall_assertions==0`):
-  `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
-- **Workflow benchmark:**
-  `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-quality-policy {resident|native-only} [--jsonl FILE]`
-  `STALL ASSERTION` on stderr must stay 0.
-  R2 evidence is saved as
-  `tests/artifacts/r2-profile-montage-workflow-{pyqtgraph,vispy}-{resident,native-only}.jsonl`.
-- **Probes:** `tools/probes/` (`verify_scrub_fastpath.py`,
-  `profile_cached_rebuild.py` — ONSCREEN, tell Thomas hands-off,
-  `verify_stale.py`).
-- **No fixed sleeps for waiting.** Foreground `start_process` + blocking
-  `read_process_output`; sentinel-line waits for >2 min jobs; >3× historical
-  runtime = hung.
-- **PROBE TRAP:** `with_montage_axis(axis, text=...)` does NOT set the index
-  window — pass `indices=range(...)`.
+  Cowork sandbox cannot load PyQt6 — GUI/GPU work runs on the host).
+- **Full suite** (~35 s):
+  `~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
+- **Fast Qt-free loop:** `… -m pytest tests/kernel tests/render tests/presentation -q -n 0`
+- **GPU harness:** `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
+- **Workflow benchmark:** `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-quality-policy resident`
+  (`native-only` does NOT exercise the LOD ladder).
+- Known parallel-only flakes (pass alone): `test_selecting_fft_workers_updates_settings`,
+  `test_compute_policy_configures_stage_and_montage_lanes`, teardown of
+  `test_montage_ready_display_payloads_commit_immediately`.
 
 ## Debugging gotchas (carried over, still true)
 
-- `print()` in app code is swallowed under pytest/Qt — append to a /tmp
-  file. py-spy can't keep up with 3.14 — use cProfile or JSONL diagnostics.
+- `print()` in app code is swallowed under pytest/Qt — append to a /tmp file.
+  py-spy can't keep up with 3.14 — use cProfile or JSONL diagnostics.
 - JSONL wedge evidence lives in the STATIC TAIL of the file.
 - `pkill -f "pytest tests"` in a DC shell kills the shell itself.
 - VisPy offscreen `canvas.render()` needs int-rounded `physical_size`;
   `QTimer.singleShot` needs the 3-arg receiver form.
-- Committing from a Cowork sandbox: delete stale `*.lock` under `.git`
-  first.
-
-## Definition of done (every plan)
-
-1. Suites per rule 5; GPU harness green incl. `stall_assertions==0`.
-2. The replaced code is deleted; grep proves no references remain.
-3. Numbers in the commit message; ADR 0053 status table updated.
-4. Claude memory updated (`arrayscope-lod-residency` note: queue position,
-   tip, new gotchas).
+- Real rendering/visual/Wayland claims must never use
+  `QT_QPA_PLATFORM=offscreen`.
+- `with_montage_axis(axis, text=...)` does NOT set the index window — pass
+  `indices=range(...)`.
+- Committing from a Cowork sandbox: delete stale `*.lock` under `.git` first.

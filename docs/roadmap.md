@@ -11,24 +11,23 @@ sync/one cache core) completed 2026-07-02 — see git history and ADR
 ADR 0050/0051 and the archived
 [lod-remaining-work plans](archive/plans/lod-remaining-work/README.md).
 
-## Now — the redesign (ADR 0053)
+## Now — finish the redesign visibly (2026-07 course reset)
 
 **One queue, owned by [`docs/redesign/README.md`](redesign/README.md).**
 
-The kernel (`arrayscope/kernel/`), R1 app adoption, the modular pipeline
-nucleus and unified LOD ladder (`arrayscope/render/`), the vocabulary
-canonicalization, and the first hygiene deletions are landed on the
-`redesign` branch. Remaining, in order:
+The R1–R7 architecture is landed; the R8 certification program is closed
+(see [`docs/redesign/retro-2026-07.md`](redesign/retro-2026-07.md)) — its
+**performance bars remain binding** and are restated in the redesign
+README. Remaining, in order: V0 dead-import repair → T1 measurement
+foundation (marathon benchmark-harness salvage + trace-event spine) →
+V1 black tiles → V2 priority order → V3 loud non-convergence → V4 merge to
+`main` → P-steps (performance program to the bars, salvaging marathon
+ideas per [`docs/redesign/marathon-salvage.md`](redesign/marathon-salvage.md)).
+Acceptance for every step is a visible-truth harness scenario on a real
+display.
 
-| plan | delivers |
-|---|---|
-| R2 | MontagePipeline live; frame_renderer clusters B/C/E dissolved |
-| R3 | LOD ladder adoption; montage_lod deleted; ops once per rung; PyQtGraph parity decision |
-| R4 | timer/governor audit implementation landed; idle/scrub/benchmark evidence pending |
-| R5 | test pruning + docs truth pass; known-red ledger emptied |
-
-Do not start items below this line while a redesign plan is open — they all
-get cheaper after it.
+Do not start items below this line while a V-step is open — they all get
+cheaper after the merge.
 
 ## Next — evidence gates (X5, after the redesign)
 
