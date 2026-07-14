@@ -89,6 +89,34 @@ def test_first_pass_physical_completion_is_scoped_to_onscreen_targets():
     assert session.first_pass_pixels_presented()
 
 
+def test_preview_first_pass_accepts_compatible_exact_overlap():
+    """Exact retained sources are better first-pass pixels, not blockers."""
+
+    session = _session()
+    session.first_pass_quality = "preview"
+    _present_exact_tiles(session, 0, 1, 2, 3)
+    tile = session.plan.tiles[3]
+    image = np.ones((2, 2), dtype=np.float32)
+    preview = DisplayTilePayload(
+        tile_number=3,
+        source_index=int(tile.source_index),
+        image=image,
+        histogram_data=image,
+        source_id=("tile", int(tile.source_index), "preview"),
+        quality="preview",
+        lod=LodInfo(level=2, factor=4, source_shape=image.shape, texture_shape=image.shape),
+    )
+    session.display_tile_payloads[3] = preview
+    session.record_tile_payload(preview)
+    session.lifecycle.commit_emitted({3: preview})
+    session.lifecycle.backend_ack({3: preview})
+    session.tile_presentation_state = TilePresentationState(
+        {**session.tile_presentation_state.payloads, 3: preview}
+    )
+
+    assert session.first_pass_pixels_presented()
+
+
 def test_montage_render_session_retarget_changes_next_pending_tile():
     session = _session()
     session.view_range = ((0.0, 12.0), (0.0, 4.0))

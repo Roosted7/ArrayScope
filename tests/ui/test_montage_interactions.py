@@ -1265,6 +1265,227 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
         settings.sync()
 
 
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_one_index_source_window_retarget_remaps_59_without_black_frame(
+    qtbot,
+    monkeypatch,
+    backend,
+):
+    """R8C.1: a 100:160 -> 101:161 shift is one placement transaction."""
+
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+    from arrayscope.display.backends import surface_for_view
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+
+    data = np.empty((6, 8, 161), dtype=np.float32)
+    for source_index in range(data.shape[2]):
+        data[..., source_index] = float(source_index)
+
+    win = ArrayScopeWindow(data)
+    win.resize(1200, 700)
+    win.show()
+    qtbot.addWidget(win)
+    try:
+        if image_view_backend_capabilities(win.img_view).name != backend:
+            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        initial_indices = tuple(range(100, 160))
+        target_indices = tuple(range(101, 161))
+        initial = win.view_state.with_montage_axis(
+            2,
+            columns=10,
+            indices=initial_indices,
+            text="100:160",
+        )
+        win._set_view_state(initial)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: bool(
+                win.renderer._frame_session is not None
+                and win.renderer._frame_session.visible_plan_complete()
+                and len(_visible_backend_acknowledgements(win, backend)) == 60
+            ),
+            timeout=20_000,
+        )
+        win.img_view.setLevels(-1.0, 200.0)
+        qtbot.waitUntil(
+            lambda: not win.renderer._frame_session.has_stale_level_presentations(),
+            timeout=10_000,
+        )
+
+        surface = surface_for_view(win.img_view)
+        original_invalidate = surface.invalidate_tiled_presentation
+        original_present = surface.present_tiled
+        observations = []
+        reports = []
+        tracking = {"active": False}
+
+        def record_physical(phase):
+            if not tracking["active"]:
+                return
+            acknowledgements = _visible_backend_acknowledgements(win, backend)
+            compatible = 0
+            incompatible = 0
+            for tile_number, identity in acknowledgements.items():
+                expected_source = target_indices[int(tile_number)]
+                if int(getattr(identity, "source_index", -1)) == expected_source:
+                    compatible += 1
+                else:
+                    incompatible += 1
+            observation = (str(phase), len(acknowledgements), compatible, incompatible)
+            if not observations or observations[-1] != observation:
+                observations.append(observation)
+
+        def invalidate(reason):
+            result = original_invalidate(reason)
+            record_physical(f"invalidate:{reason}")
+            return result
+
+        def present(presentation):
+            report = original_present(presentation)
+            if tracking["active"]:
+                reports.append(report)
+                record_physical("present")
+            return report
+
+        monkeypatch.setattr(surface, "invalidate_tiled_presentation", invalidate)
+        monkeypatch.setattr(surface, "present_tiled", present)
+
+        evaluations_before = int(win.operation_evaluator.image_evaluations)
+        tracking["active"] = True
+        shifted = win.view_state.with_montage_axis(
+            2,
+            columns=10,
+            indices=target_indices,
+            text="101:161",
+        )
+        win._set_view_state(shifted)
+        win.update_image_view()
+
+        try:
+            qtbot.waitUntil(
+                lambda: bool(
+                    tuple(
+                        int(tile.source_index)
+                        for tile in win.renderer._frame_session.plan.tiles
+                    )
+                    == target_indices
+                    and win.renderer._frame_session.visible_plan_complete()
+                    and len(_visible_backend_acknowledgements(win, backend)) == 60
+                ),
+                timeout=20_000,
+            )
+        except Exception:
+            stalled = win.renderer._frame_session
+            pytest.fail(
+                repr(
+                    {
+                        "plan": tuple(int(tile.source_index) for tile in stalled.plan.tiles),
+                        "complete": stalled.visible_plan_complete(),
+                        "acknowledged": len(_visible_backend_acknowledgements(win, backend)),
+                        "dirty": tuple(stalled.dirty_payloads),
+                        "upserts": tuple(stalled.pending_payload_upserts),
+                        "removals": tuple(stalled.pending_removals),
+                        "source_window": stalled.source_window_changed_pending,
+                        "atomic_reject": getattr(stalled, "_atomic_fast_reject_reason", None),
+                        "unsettled": stalled.onscreen_target_unsettled_tiles(),
+                        "first_pass": (
+                            stalled.first_pass_quality,
+                            stalled.first_pass_histogram_published,
+                            stalled.first_pass_pixels_presented(),
+                        ),
+                        "ladder_states": getattr(stalled.pipeline, "last_plan_states", None),
+                        "ladder_steps": getattr(stalled.pipeline, "last_plan_steps", None),
+                        "rung_pending": tuple(stalled.pending_rung_materializations),
+                        "active": tuple(stalled.active_tile_requests),
+                        "identity_rows": stalled.diagnostic_tile_identity_rows(
+                            limit=4,
+                            include_all_visible=False,
+                        ),
+                        "observations": observations,
+                        "report_count": len(reports),
+                    }
+                )
+            )
+        current = win.renderer._frame_session
+
+        assert current.tile_compute_cache_hits >= 59
+        assert int(win.operation_evaluator.image_evaluations) - evaluations_before <= 1
+        upload_reports = tuple(
+            (
+                int(report.texture_uploads),
+                tuple(sorted(report.committed_upserts or ())),
+                int(report.resident_rebinds),
+                int(report.relocated_tiles),
+                int(report.texture_upload_bytes),
+                (
+                    None
+                    if not report.presented_identities
+                    else (
+                        getattr(report.presented_identities.get(59), "quality", None),
+                        getattr(getattr(report.presented_identities.get(59), "lod", None), "level", None),
+                    )
+                ),
+            )
+            for report in reports
+            if int(report.texture_uploads)
+        )
+        assert sum(count for count, *_rest in upload_reports) <= 1, upload_reports
+        assert observations
+        assert min(compatible for _phase, _visible, compatible, _bad in observations) >= 59, observations
+        assert max(60 - compatible for _phase, _visible, compatible, _bad in observations) <= 1, observations
+        assert all(incompatible == 0 for _phase, _visible, _compatible, incompatible in observations), observations
+
+        acknowledgements = _visible_backend_acknowledgements(win, backend)
+        assert len(acknowledgements) == 60
+        for tile_number, acknowledged_identity in acknowledgements.items():
+            lifecycle = current.lifecycle.peek(int(tile_number))
+            assert lifecycle is not None and lifecycle.target is not None
+            assert acknowledged_identity_satisfies_target(
+                acknowledged_identity,
+                lifecycle.target.identity,
+            )
+
+        assert current.plan.geometry.indices == target_indices
+        tile = current.plan.tiles[0]
+        context = win.display_geometry.context_for_view_point(tile.x0 + 1, tile.y0 + 1)
+        assert context is not None
+        assert context.context_text.endswith("d2=101")
+        assert win.renderer._hover_value_from_display(context.mapping) == pytest.approx(101.0)
+
+        frame = win._committed_display_frame
+        assert frame.value_source.payloads[0].source_index == 101
+        assert frame.value_source.value_at(context.mapping) == pytest.approx(101.0)
+        roi = RoiSelection(
+            "source-window-roi",
+            "Source window ROI",
+            RoiGeometry(
+                RoiKind.RECTANGLE,
+                rect=(float(tile.x0), float(tile.y0), 2.0, 2.0),
+            ),
+        )
+        roi_values = win._committed_tiled_roi_values((roi,), collect_histograms=False)
+        assert roi_values is not None
+        assert roi_values[0][roi.id][1].mean == pytest.approx(101.0)
+    finally:
+        win.close()
+        settings.setValue(
+            "image_rendering_backend",
+            ImageRenderingBackendChoice.PYQTGRAPH.value,
+        )
+        settings.sync()
+
+
 def test_large_complex_montage_auto_uses_tile_layer(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

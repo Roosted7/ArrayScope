@@ -2500,7 +2500,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     assert session.deferred_missing_tiles == (new_plan.tiles[1],)
     assert session.retained_stage_decision == "deferred-interaction"
     assert submitted_stage_plans == [(new_plan.tiles[1],)]
-    assert win.surface.invalidations == ["frame-index-window-retarget"]
+    assert win.surface.invalidations == []
     assert win.commits == 1
     assert win.pipeline_retargets == 1
 

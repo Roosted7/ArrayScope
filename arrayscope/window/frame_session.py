@@ -690,6 +690,24 @@ class FrameSession:
             self.first_pass_quality = quality
         return self.first_pass_quality == quality
 
+    def first_pass_accepts_quality(self, quality: str) -> bool:
+        """Whether a current payload proves its slot for the latched pass.
+
+        A preview pass may reuse an already committed exact source without
+        downgrading it.  That exact payload is stronger physical evidence than
+        the preview obligation and must not hold the pass open forever.
+        """
+
+        first_pass = self.first_pass_quality
+        payload_quality = str(quality or "exact")
+        return bool(
+            first_pass is not None
+            and (
+                payload_quality == str(first_pass)
+                or (str(first_pass) == "preview" and payload_quality == "exact")
+            )
+        )
+
     def first_pass_pixels_presented(self) -> bool:
         """Whether every physical onscreen target is acknowledged at the latched quality."""
 
@@ -709,7 +727,9 @@ class FrameSession:
             if (
                 payload is None
                 or int(getattr(payload, "source_index", -1)) != int(tile.source_index)
-                or str(getattr(payload, "quality", "exact") or "exact") != quality
+                or not self.first_pass_accepts_quality(
+                    str(getattr(payload, "quality", "exact") or "exact")
+                )
                 or tile_number not in self.lifecycle.presented_tiles
             ):
                 return False

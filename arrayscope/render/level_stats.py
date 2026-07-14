@@ -741,7 +741,10 @@ class LevelStatsService:
             if bool(getattr(session, "shader_display", False)):
                 payload_quality = str(getattr(rendered, "quality", "exact") or "exact")
                 first_pass_quality = getattr(session, "first_pass_quality", None)
-                if first_pass_quality is not None and payload_quality != first_pass_quality:
+                if (
+                    first_pass_quality is not None
+                    and not session.first_pass_accepts_quality(payload_quality)
+                ):
                     continue
             source_index = int(rendered.tile.source_index)
             quality = _rendered_level_evidence_quality_for_session(

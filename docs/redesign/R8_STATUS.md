@@ -23,10 +23,12 @@ chronological investigation is preserved in
   counters are allowed.
 
 Typed target/acknowledgement compatibility and distinct scalar, complex, and RGB
-texture storage remain landed. New user-visible evidence reopens certification:
-VisPy can physically draw first-pass complex tiles before a valid rough level
-generation is applied, and source-window retargets discard compatible committed
-overlap instead of remapping it by semantic source identity.
+texture storage remain landed. Deterministic first-pixel phasing now applies a
+rough acknowledged level generation before the first VisPy draw and scopes pass
+completion to physical onscreen targets; real Wayland certification remains
+open. Source-window continuity is also still open: compatible overlap now
+survives the deterministic one-index transition, but the VisPy entering source
+still consumes two uploads instead of the required maximum of one.
 
 ## Permanent R8 invariants
 
@@ -88,6 +90,38 @@ Diagnostics expose the target population, covered source count/sample, pending
 batches, in-flight generation, configured source/pixel bounds, and the precise
 blocking reason.
 
+## 2026-07-14 source-window stop checkpoint
+
+The deterministic `100:160 -> 101:161` test now proves the core placement
+transaction on both backends: at least 59 semantic sources remap, no
+incompatible source is exposed, no full-black interval occurs, and the frame
+settles with current typed identities. PyQtGraph meets the evaluation/upload
+budget. VisPy preserves all 59 compatible pixels and performs at most one
+display evaluation, but fails the final work gate with exactly two physical
+uploads for the entering source:
+
+- a 4-byte acknowledged fallback at LOD 4 in the initial remap transaction;
+- a 192-byte acknowledged exact payload at LOD 0 in the successor transaction.
+
+Two bounded upload-elision hypotheses were rejected and removed. Suppressing a
+preview ladder rung was too late because the initial presentation builder had
+already selected the retained floor. Marking the entering cached result for a
+direct target presentation did not alter that initial selection either. No
+speculative branch from either experiment remains.
+
+The confirmed mechanisms retained at this checkpoint are source-identity
+remapping without whole-surface invalidation, unconditional ladder rearming for
+an unsettled retained fallback, and first-pass completion accepting compatible
+already-exact overlap as stronger evidence than the latched preview pass. The
+remaining root boundary is the initial presentation LOD selector: when a
+one-source entering edge already has retained exact/native materialization and
+compatible overlap exists, placement and LOD selection must produce one
+demanded-or-better upload rather than floor-then-exact.
+
+Per the stopping rule, production investigation stops at this reproducible
+checkpoint. Reverse, larger-overlap, non-overlap, and rapidly superseded shift
+certification remains pending until the one-index VisPy work gate is green.
+
 ## R8C.4 committed manual-camera policy
 
 The ADR 0042 guard landed separately after R8C.3. Auto-fit rescue no longer
@@ -127,10 +161,10 @@ stash and were not bundled into R8C.3 or the camera guard.
 
 ## Next bounded slice
 
-Close R8B.2 first-pixel level phasing and R8C.1 source-window continuity with
-deterministic tests before production changes. After those tests fail, inspect
-the marathon worktree read-only only for source remapping, physical residency
-identity, session generation, emitted-versus-acknowledged semantics, atomic
-successor presentation, and first-pass level/histogram phasing. UI/app baseline
-cleanup and generic R8D optimization remain deferred until both user-visible
-failures are closed.
+Resume from the failing one-index VisPy upload assertion and change only the
+initial presentation LOD-selection boundary described above. Do not add another
+ladder-side or post-commit exception. Once that gate is green, add reverse,
+larger-overlap, non-overlap, and rapidly superseded shift tests before further
+production work. Real Wayland inspection, comparative work counts/timings, the
+enhanced workflow benchmark, UI/app cleanup, and generic R8D optimization all
+remain deferred.

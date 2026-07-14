@@ -965,13 +965,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._frame_session_id = session_id
         setup_start = perf_counter()
         model_start = perf_counter()
-        # Index-window retargeting mutates this session in place.  The backend
-        # mappings still name the predecessor window until the successor
-        # commit acknowledges its bindings, so make the target change an
-        # atomic visibility boundary just like a FrameSession replacement.
-        surface_for_view(self.win.img_view).invalidate_tiled_presentation(
-            "frame-index-window-retarget"
-        )
         stats = session.retarget_index_window(
             session_id=session_id,
             key=session_key,
@@ -1081,7 +1074,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
             else:
                 montage_commit.submit_stage_tasks(self, session, hot_stage_plan["stage_requests"])
-            self.retarget_frame_pipeline(session)
+        # Retained/floor cache hits can be valid first pixels without satisfying
+        # the successor target.  They produce no ``missing_tiles`` entry, so
+        # index-window retargeting must always give the ladder one chance to
+        # admit the exact/desired follow-up for any unsettled target.
+        self.retarget_frame_pipeline(session)
         return True
 
     def _resolve_montage_tiles_from_cache(
