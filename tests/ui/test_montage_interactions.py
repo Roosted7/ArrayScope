@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
@@ -77,13 +78,51 @@ def _visible_backend_acknowledgements(win, backend):
 
 
 def _assert_view_contains_applied_montage_plan(win):
-    plan = win._montage_session.plan
+    plan = win.renderer._frame_session.plan
     height, width = tuple(int(value) for value in plan.display_shape[:2])
     view_range = win.img_view.getView().viewRange()
     assert view_range[0][0] <= 0.0
     assert view_range[0][1] >= float(width)
     assert view_range[1][0] <= 0.0
     assert view_range[1][1] >= float(height)
+
+
+def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
+    try:
+        qtbot.waitUntil(
+            lambda: (
+                win.renderer._frame_session is not None
+                and win.renderer._frame_session.visible_plan_complete()
+                and win.display_geometry.montage
+                == win.renderer._frame_session.plan.geometry
+                and (
+                    expected_indices is None
+                    or win.renderer._frame_session.plan.geometry.indices
+                    == tuple(expected_indices)
+                )
+            ),
+            timeout=10_000,
+        )
+    except QtBotTimeoutError:
+        session = win.renderer._frame_session
+        level_stats = win.renderer._montage_level_stats_for_session(session)
+        pytest.fail(
+            "committed session geometry did not converge: "
+            f"active={session.frame_plan.active_region_ids!r}, "
+            f"unsettled={session.onscreen_target_unsettled_tiles()!r}, "
+            f"backend_ack={session.lifecycle.backend_presented_identities!r}, "
+            f"geometry_matches={win.display_geometry.montage == session.plan.geometry!r}, "
+            f"committed_indices={win.display_geometry.montage.indices!r}, "
+            f"plan_indices={session.plan.geometry.indices!r}, "
+            f"commit_outcome={win.renderer._last_montage_commit_outcome!r}, "
+            f"display_committed={session.display_committed!r}, "
+            f"level_rank={level_stats.rank!r}, "
+            f"level_sources={level_stats.source_indices!r}, "
+            f"semantic_evidence={session.semantic_level_evidence_diagnostics()!r}, "
+            f"kernel={win.kernel.diagnostics()!r}, "
+            f"stage_cache={win.operation_evaluator.stage_cache_diagnostics()!r}"
+        )
+    return win.renderer._frame_session
 
 
 def _assert_committed_tile_value(win, tile, value):
@@ -247,10 +286,17 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
         win.close()
 
 
-def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qtbot):
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qtbot, backend):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
     from arrayscope.window import ArrayScopeWindow
 
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
     data = np.zeros((2, 3, 20), dtype=np.float32)
     for index in range(data.shape[2]):
         data[:, :, index] = index
@@ -260,19 +306,47 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":"))
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(5))
         win.img_view.getView().setRange(xRange=(0, 2), yRange=(0, 3), padding=0)
+        qtbot.waitUntil(lambda: win.img_view.viewport_controller.mode.value == "user", timeout=10_000)
         before = win.img_view.getView().viewRange()
 
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":"))
         win.render(reason="test-montage-more-tiles")
-        _process_events(qtbot, count=80)
+        session = _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(20))
 
         view_range = win.img_view.getView().viewRange()
         assert view_range[0] == pytest.approx(before[0], abs=0.03)
         assert view_range[1] == pytest.approx(before[1], abs=0.03)
+        try:
+            qtbot.waitUntil(
+                lambda: win.renderer._montage_level_stats_for_session(session).rank.name
+                == "MONTAGE_SAMPLED_FULL",
+                timeout=10_000,
+            )
+        except QtBotTimeoutError:
+            pytest.fail(
+                "semantic evidence did not converge after geometry commit: "
+                f"evidence={session.semantic_level_evidence_diagnostics()!r}, "
+                f"kernel={win.kernel.diagnostics()!r}, "
+                f"busy={win._scheduler_busy_state()!r}, "
+                f"governor={win.resource_governor.diagnostics().lane_decisions!r}"
+            )
+        level_stats = win.renderer._montage_level_stats_for_session(session)
+        assert level_stats.rank.name == "MONTAGE_SAMPLED_FULL"
+        assert level_stats.source_indices == frozenset(range(20))
+        active = set(int(tile) for tile in session.frame_plan.active_region_ids)
+        assert active == {0}
+        backend_visible = _visible_backend_acknowledgements(win, backend)
+        assert active <= set(backend_visible)
+        for tile_number, identity in backend_visible.items():
+            lifecycle = session.lifecycle.peek(int(tile_number))
+            assert lifecycle is not None and lifecycle.target is not None
+            assert acknowledged_identity_satisfies_target(identity, lifecycle.target.identity)
     finally:
         win.close()
+        settings.setValue("image_rendering_backend", "pyqtgraph")
+        settings.sync()
 
 
 def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot):

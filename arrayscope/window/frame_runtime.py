@@ -884,6 +884,15 @@ class FrameRuntimeMixin:
         view = self.win.img_view.getView()
         before_range = _copy_view_range(view.viewRange())
         auto_like = _viewport_controller_auto_active_for_range(viewport_controller, before_range)
+        current_session = getattr(self, "_frame_session", None)
+        camera_on_current_montage = bool(
+            current_session is not None
+            and bool(getattr(current_session, "display_committed", False))
+            and getattr(current_session, "montage_axis", None)
+            == getattr(self.win.view_state, "montage_axis", None)
+        )
+        if camera_on_current_montage and not auto_like:
+            return False
         visible_count = _visible_montage_tile_count(montage, before_range)
         can_auto_adjust = _should_auto_fit_montage_view(
             before_range,
