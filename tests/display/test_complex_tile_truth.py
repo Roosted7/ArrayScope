@@ -387,6 +387,8 @@ def test_pyqtgraph_adversarial_complex_fixture_draws_cpu_reference(qt_app):
             assert payload.texture_kind == TexturePlaneKind.RGB8
             expected = rgb_display_for_levels(payload.image, payload.histogram_data, levels)
             np.testing.assert_array_equal(np.asarray(state.item.image), expected)
+            if tile_number == 4:
+                assert not np.any(np.asarray(state.item.image))
     finally:
         view.close()
 
@@ -419,6 +421,9 @@ def test_vispy_adversarial_complex_fixture_uploads_cpu_reference_planes():
         )
         assert reference.shape == (4, 4, 4)
         assert np.all(reference[..., 3] == 255)
+        if payload.source_index == 4:
+            assert not np.any(uploaded)
+            assert not np.any(reference[..., :3])
 
 
 def _assert_truth_record(
