@@ -8,7 +8,7 @@ import numpy as np
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
-from arrayscope.display.montage import make_montage_plan
+from arrayscope.display.montage import MontageTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey
 from arrayscope.operations.evaluator import OperationEvaluator
@@ -462,6 +462,24 @@ def test_tile_lod_states_ignores_stale_presented_payload_after_slot_retarget():
     assert len(states) == 1
     assert states[0].presented_level is None
     assert states[0].resident_levels == ()
+
+
+def test_tile_lod_states_prioritizes_screen_distance_in_landscape_viewport():
+    session = _session()
+    session.plan = SimpleNamespace(
+        tiles=(
+            MontageTile(0, 0, 0, 0, 69, 4, 2, 2, None),
+            MontageTile(1, 1, 0, 1, 49, 8, 2, 2, None),
+        )
+    )
+    session.view_range = ((0.0, 100.0), (0.0, 10.0))
+    session.visible_tile_numbers = frozenset({0, 1})
+    session.skipped_tiles = set()
+    session.active_tile_requests = set()
+
+    states = effects.tile_lod_states(session, _demand(0))
+
+    assert tuple(state.tile_number for state in states) == (0, 1)
 
 
 def test_tile_lod_states_does_not_treat_resident_level_as_committable_behind_preview():

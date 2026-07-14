@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 
 from tests.ui.helpers import clear_arrayscope_settings, process_events
 
@@ -131,6 +132,40 @@ def test_interaction_stop_edge_replans_deferred_native_montage_quality(qtbot, mo
         assert calls == ["replan"]
     finally:
         win.close()
+
+
+def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    first_pipeline = SimpleNamespace(
+        counters=SimpleNamespace(interactive_native_deferred=40),
+    )
+    second_pipeline = SimpleNamespace(
+        counters=SimpleNamespace(interactive_native_deferred=1),
+    )
+    first_session = SimpleNamespace(
+        session_id=1,
+        pipeline=first_pipeline,
+        _interactive_residency_deferred=False,
+    )
+    second_session = SimpleNamespace(
+        session_id=2,
+        pipeline=second_pipeline,
+        _interactive_residency_deferred=False,
+    )
+    replanned = []
+    owner = SimpleNamespace(
+        _frame_session=first_session,
+        _frame_session_is_current=lambda candidate: candidate is owner._frame_session,
+        retarget_frame_pipeline=lambda session, **_kwargs: replanned.append(session),
+    )
+    owner.win = owner
+
+    assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
+    owner._frame_session = second_session
+
+    assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
+    assert replanned == [first_session, second_session]
 
 
 def test_runtime_diagnostics_lists_kernel_bridge_drain_channel(qtbot):

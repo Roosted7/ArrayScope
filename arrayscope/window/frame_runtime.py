@@ -356,13 +356,21 @@ class FrameRuntimeMixin:
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
         residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
+        deferred_generation = (
+            int(getattr(session, "session_id", 0) or 0),
+            id(pipeline),
+            deferred,
+        )
+        if not residency_deferred and deferred <= 0:
+            return False
         if (
             not residency_deferred
-            and deferred <= int(getattr(self, "_montage_native_deferred_replanned", 0) or 0)
+            and deferred_generation
+            == getattr(self, "_montage_native_deferred_replanned", None)
         ):
             return False
         session._interactive_residency_deferred = False
-        self._montage_native_deferred_replanned = deferred
+        self._montage_native_deferred_replanned = deferred_generation
         self.retarget_frame_pipeline(session, force_commit=residency_deferred)
         return True
 

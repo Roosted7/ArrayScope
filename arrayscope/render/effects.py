@@ -526,7 +526,12 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         allow_preview = bool((blank and not target_quality_available) or visible_missing_count >= 2)
         ranked.append(
             (
-                _tile_priority_rank(tile, focus=focus, visible=tile_number in visible_numbers),
+                _tile_priority_rank(
+                    tile,
+                    focus=focus,
+                    visible=tile_number in visible_numbers,
+                    view_range=getattr(session, "view_range", None),
+                ),
                 TileLodState(
                     tile_number=tile_number,
                     resident_levels=tuple(sorted(resident_levels)),
@@ -556,12 +561,18 @@ def _viewport_focus(view_range) -> tuple[float, float] | None:
         return None
 
 
-def _tile_priority_rank(tile, *, focus, visible: bool) -> tuple:
+def _tile_priority_rank(tile, *, focus, visible: bool, view_range=None) -> tuple:
     if focus is None:
         return (0 if visible else 1, 0.0, int(tile.montage_index))
     center_x = float(getattr(tile, "x0", 0)) + float(getattr(tile, "width", 0)) / 2.0
     center_y = float(getattr(tile, "y0", 0)) + float(getattr(tile, "height", 0)) / 2.0
-    distance = (center_x - focus[0]) ** 2 + (center_y - focus[1]) ** 2
+    try:
+        (x0, x1), (y0, y1) = view_range
+        span_x = max(1.0, abs(float(x1) - float(x0)))
+        span_y = max(1.0, abs(float(y1) - float(y0)))
+    except Exception:
+        span_x = span_y = 1.0
+    distance = ((center_x - focus[0]) / span_x) ** 2 + ((center_y - focus[1]) / span_y) ** 2
     return (0 if visible else 1, float(distance), int(tile.montage_index))
 
 
