@@ -630,6 +630,9 @@ def test_vispy_gpu_mapped_complex_display_image_renders_color(qt_app):
         assert int(center.max()) > 32
         assert float(center.mean()) > 5.0
         assert len(np.unique(center.reshape((-1, 3))[:: max(1, len(center.reshape((-1, 3))) // 512)], axis=0)) > 4
+        applied_lut = np.asarray(view._last_vispy_tiled_shader_mapping.lut_data)
+        chroma = applied_lut.max(axis=1).astype(np.int16) - applied_lut.min(axis=1).astype(np.int16)
+        assert float(np.percentile(chroma, 90.0)) > 32.0
     finally:
         view.close()
 

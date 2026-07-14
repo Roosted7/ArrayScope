@@ -44,7 +44,13 @@ from arrayscope.display.backends.vispy.gpu_mapped_visual import (
     _contiguous_scalar,
     _normalize_levels,
 )
-from arrayscope.display.shader_mapping import TexturePlaneKind, common_shader_mapping, shader_mapping_with_lut
+from arrayscope.display.shader_mapping import (
+    ShaderDisplayMode,
+    TexturePlaneKind,
+    common_shader_mapping,
+    default_phase_lut,
+    shader_mapping_with_lut,
+)
 from arrayscope.display.viewport import ViewportPolicy, coerce_viewport_policy
 
 if TYPE_CHECKING:
@@ -364,6 +370,30 @@ class VisPyImageView2D(ImageViewShell):
         self._request_vispy_canvas_update()
 
     def _display_shader_mapping(self, mapping):
+        display_mode = getattr(
+            getattr(mapping, "display_mode", None),
+            "value",
+            getattr(mapping, "display_mode", None),
+        )
+        if display_mode == ShaderDisplayMode.PHASE_COLOR.value:
+            explicit_lut = getattr(mapping, "lut_data", None)
+            if explicit_lut is not None:
+                return shader_mapping_with_lut(
+                    mapping,
+                    explicit_lut,
+                    lut_identity=getattr(mapping, "lut_identity", None),
+                )
+            # A bare phase-color mapping means the canonical cyclic phase LUT.
+            # ImageView2D starts with a scalar grayscale LUT; treating that as
+            # explicit phase presentation silently turned acknowledged complex
+            # textures grayscale until the outer window happened to switch the
+            # colormap family.
+            if getattr(self, "_display_colormap", None) is None:
+                return shader_mapping_with_lut(
+                    mapping,
+                    default_phase_lut(),
+                    lut_identity=("default-phase",),
+                )
         return shader_mapping_with_lut(
             mapping,
             self.displayColorMapLookupTable(),

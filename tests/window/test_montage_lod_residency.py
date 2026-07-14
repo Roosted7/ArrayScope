@@ -8,6 +8,7 @@ import numpy as np
 
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.display.shader_mapping import TexturePlaneKind
@@ -257,7 +258,7 @@ def test_visible_replacement_retains_presented_payload_until_acknowledged():
         presented_tiles=frozenset({0}),
         committed_upserts=frozenset({0}),
         delta_key=(delta.base_revision, delta.target_revision),
-        presented_identities={0: old_payload.source_id},
+        presented_identities={0: tile_ack_identity(old_payload)},
     )
     session.acknowledge_tile_presentation(delta, report)
     assert session.lifecycle.record(0).presentation is Presentation.PRESENTED
@@ -1196,7 +1197,7 @@ def test_backend_reported_identities_drive_convergence():
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
     _state, delta = session.build_tile_presentation({})
     current_identity = {
-        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+        int(tile): tile_ack_identity(payload) for tile, payload in dict(delta.upserts).items()
     }
     # Backend says tile 1's slot still shows some OLD identity.
     report = TileCommitReport(
@@ -1265,7 +1266,7 @@ def test_settled_mismatch_is_queryable_for_followup_commit():
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
     _state, delta = session.build_tile_presentation({})
     current_identity = {
-        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+        int(tile): tile_ack_identity(payload) for tile, payload in dict(delta.upserts).items()
     }
     report = TileCommitReport(
         presented_tiles=(0, 1),
@@ -1302,7 +1303,7 @@ def test_inherited_identities_heal_on_a_rebuilt_session():
     # Fresh session, fresh machine: only the inherited map knows slot 1 is
     # stale.  (The renderer copies this dict across replacement.)
     backend_truth = {
-        int(tile): payload.source_id for tile, payload in dict(delta.upserts).items()
+        int(tile): tile_ack_identity(payload) for tile, payload in dict(delta.upserts).items()
     }
     backend_truth[1] = ("previous-session-level", 5)
     session.lifecycle.backend_presented_snapshot(backend_truth)
@@ -1322,7 +1323,7 @@ def test_resigned_pair_stops_convergence_but_new_result_rearms():
 
     session = _session(pyramid=PyramidCache(max_bytes=1 << 24), count=2)
     _state, delta = session.build_tile_presentation({})
-    wanted = dict(delta.upserts)[1].source_id
+    wanted = tile_ack_identity(dict(delta.upserts)[1])
     rec = session.lifecycle.record(1)
     rec.resigned.add((wanted, ("stuck", 6)))
     session.lifecycle.backend_presented_snapshot({1: ("stuck", 6)})
@@ -1403,11 +1404,16 @@ def test_mark_presented_rejects_backend_active_tile_with_stale_identity():
     session.mark_presented((0, 1))
     assert session.lifecycle.presented_tiles == frozenset({0, 1})
 
-    old_identity = session.display_tile_payloads[1].source_id
-    session.display_tile_payloads[1] = dc_replace(session.display_tile_payloads[1], source_id=("fresh", 1))
+    old_identity = tile_ack_identity(session.display_tile_payloads[1])
+    fresh_identity = dc_replace(old_identity, semantic_generation=("fresh", 1))
+    session.display_tile_payloads[1] = dc_replace(
+        session.display_tile_payloads[1],
+        source_id=("fresh", 1),
+        tile_identity=fresh_identity,
+    )
     session.dirty_payloads.clear()
     session.lifecycle.backend_presented_snapshot({
-        0: session.display_tile_payloads[0].source_id,
+        0: tile_ack_identity(session.display_tile_payloads[0]),
         1: old_identity,
     })
 

@@ -257,6 +257,19 @@ def test_backend_confirmed_current_payload_rehydrates_active_state():
     assert 0 not in session.dirty_payloads
 
 
+def test_tile_presentation_delta_carries_lifecycle_owned_typed_targets():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.full((2, 2), 7.0, dtype=np.float32)
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+
+    _state, delta = session.build_tile_presentation({0: ("tile", 0)})
+
+    assert set(delta.target_identities) == set(delta.active_tiles)
+    assert delta.upserts[0].tile_identity.satisfies_target(delta.target_identities[0])
+    assert delta.target_identities[0].texture_kind.value == "scalar_r32f"
+
+
 def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     session = _session()
     session.pending_tiles.clear()

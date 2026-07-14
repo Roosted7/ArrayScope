@@ -24,6 +24,7 @@ from arrayscope.display.shader_mapping import (
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 
@@ -595,6 +596,7 @@ class TextureAtlasPool:
             else tuple(sorted(payload_map))
         )
         active_set = set(active_tiles)
+        target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
         removed_tiles = {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())}
         expected_source_ids = {
             int(tile): source_id
@@ -605,6 +607,11 @@ class TextureAtlasPool:
             (int(tile), payload_map[int(tile)])
             for tile in active_tiles
             if int(tile) in payload_map
+            and acknowledged_identity_satisfies_target(
+                getattr(payload_map[int(tile)], "tile_identity", None)
+                or payload_map[int(tile)].source_id,
+                target_identities.get(int(tile)),
+            )
         )
         storage_mode = (
             _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
@@ -630,6 +637,13 @@ class TextureAtlasPool:
                 and _resident_source_matches_expected(
                     self.source_ids[self.tile_resident_keys[int(tile)]],
                     expected_source_ids.get(int(tile)),
+                )
+                and acknowledged_identity_satisfies_target(
+                    self.acknowledged_identities.get(
+                        self.tile_resident_keys[int(tile)],
+                        self.source_ids[self.tile_resident_keys[int(tile)]],
+                    ),
+                    target_identities.get(int(tile)),
                 )
             }
         )
@@ -810,6 +824,21 @@ class TextureAtlasPool:
             )
         )
         presented_set = set(presented_tiles)
+        for tile in active_set - presented_set:
+            resident_key = self.tile_resident_keys.get(int(tile))
+            acknowledged = (
+                None
+                if resident_key is None
+                else self.acknowledged_identities.get(
+                    resident_key,
+                    self.source_ids.get(resident_key),
+                )
+            )
+            if not acknowledged_identity_satisfies_target(
+                acknowledged,
+                target_identities.get(int(tile)),
+            ):
+                self._clear_tile_mapping(int(tile))
         # A bounded commit may include only the first few replacement
         # payloads while many active tiles still have a valid older LOD
         # mapping.  Absence from this commit's payload map is not a removal:

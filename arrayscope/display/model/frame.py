@@ -262,6 +262,7 @@ class TilePresentationDelta:
     planned_tiles: tuple[int, ...] = ()
     near_tiles: tuple[int, ...] = ()
     near_tile_source_ids: Mapping[int, object] = field(default_factory=dict)
+    target_identities: Mapping[int, TileIdentity] = field(default_factory=dict)
     force_refresh: bool = False
     clear_reason: str = ""
 
@@ -277,6 +278,11 @@ class TilePresentationDelta:
         planned = _unique_int_tuple(self.planned_tiles, "planned_tiles")
         near = _unique_int_tuple(self.near_tiles, "near_tiles")
         near_sources = {int(key): value for key, value in dict(self.near_tile_source_ids or {}).items()}
+        target_identities = {
+            int(key): value for key, value in dict(self.target_identities or {}).items()
+        }
+        if any(not isinstance(value, TileIdentity) for value in target_identities.values()):
+            raise TypeError("tile delta target identities must be TileIdentity instances")
         object.__setattr__(self, "structure_revision", int(self.structure_revision))
         object.__setattr__(self, "payload_revision", int(self.payload_revision))
         object.__setattr__(self, "visibility_revision", int(self.visibility_revision))
@@ -296,6 +302,7 @@ class TilePresentationDelta:
         object.__setattr__(self, "planned_tiles", planned)
         object.__setattr__(self, "near_tiles", near)
         object.__setattr__(self, "near_tile_source_ids", near_sources)
+        object.__setattr__(self, "target_identities", target_identities)
         object.__setattr__(self, "force_refresh", bool(self.force_refresh))
         object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))
 

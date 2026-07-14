@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -51,8 +51,11 @@ class TileIdentity:
     semantic_generation: object
     lod: TileLodIdentity = TileLodIdentity()
     quality: str = "exact"
-    real_plane: ArrayPlaneIdentity | None = None
-    imag_plane: ArrayPlaneIdentity | None = None
+    # Physical upload-plane provenance is diagnostic evidence, not pixel
+    # semantics: equal source pixels may be copied into a different buffer or
+    # rebound from existing residency without changing what the tile means.
+    real_plane: ArrayPlaneIdentity | None = field(default=None, compare=False, hash=False)
+    imag_plane: ArrayPlaneIdentity | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_index", int(self.source_index))
@@ -153,6 +156,60 @@ def tile_ack_identity(payload) -> object:
     return identity if identity is not None else getattr(payload, "source_id", None)
 
 
+def acknowledged_identity_satisfies_target(acknowledged, target) -> bool:
+    """Return whether backend truth is safe to draw for a typed target.
+
+    A missing target means the caller is outside the R8A typed contract and is
+    intentionally left unchanged.  Once a typed target exists, opaque legacy
+    source ids are never sufficient evidence.
+    """
+
+    if target is None:
+        return True
+    return bool(
+        isinstance(acknowledged, TileIdentity)
+        and isinstance(target, TileIdentity)
+        and acknowledged.satisfies_target(target)
+    )
+
+
+def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -> dict[str, object]:
+    """Build one compact, JSON-friendly R8A tile truth record."""
+
+    identity = acknowledged if isinstance(acknowledged, TileIdentity) else None
+    source = identity if identity is not None else getattr(payload, "tile_identity", None)
+    if source is None:
+        texture_kind = None
+        real_plane = None
+        imag_plane = None
+        complex_mapping = None
+        lod = None
+    else:
+        texture_kind = source.texture_kind.value
+        real_plane = source.real_plane
+        imag_plane = source.imag_plane
+        complex_mapping = source.complex_mapping
+        lod = source.lod
+    presentation = getattr(payload, "presentation_identity", None)
+    return {
+        "tile": int(tile_number),
+        "target_identity": None if target is None else repr(target),
+        "acknowledged_identity": None if acknowledged is None else repr(acknowledged),
+        "texture_kind": texture_kind,
+        "real_plane_identity": None if real_plane is None else repr(real_plane),
+        "imag_plane_identity": None if imag_plane is None else repr(imag_plane),
+        "complex_mapping": complex_mapping,
+        "lod": None
+        if lod is None
+        else {"level": int(lod.level), "factor": int(lod.factor), "gutter": int(lod.gutter)},
+        "levels_generation": None
+        if presentation is None
+        else int(presentation.levels_generation),
+        "drawable": acknowledged_identity_satisfies_target(acknowledged, target),
+        "placeholder": bool(target is not None and not acknowledged_identity_satisfies_target(acknowledged, target)),
+    }
+
+
 def _array_plane_identity(values: np.ndarray, component: str) -> ArrayPlaneIdentity:
     array = np.asarray(values)
     return ArrayPlaneIdentity(
@@ -170,6 +227,8 @@ __all__ = [
     "TileLodIdentity",
     "TilePresentationIdentity",
     "array_plane_identities",
+    "acknowledged_identity_satisfies_target",
     "complex_mapping_identity",
     "tile_ack_identity",
+    "tile_truth_record",
 ]

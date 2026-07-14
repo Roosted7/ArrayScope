@@ -1792,6 +1792,7 @@ def test_tile_presentation_admission_uses_backend_cost_function():
 
 def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
     from arrayscope.display.model.frame import TileCommitReport
+    from arrayscope.display.model.tile_identity import tile_ack_identity
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
     from arrayscope.window.frame_session import FrameSession
 
@@ -1851,7 +1852,9 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
             presented_tiles=frozenset(delta.upserts),
             committed_upserts=frozenset(delta.upserts),
             delta_key=(delta.base_revision, delta.target_revision),
-            presented_identities={tile: payload.source_id for tile, payload in delta.upserts.items()},
+                presented_identities={
+                    tile: tile_ack_identity(payload) for tile, payload in delta.upserts.items()
+                },
         ),
     )
     session.mark_presented(tuple(delta.upserts))

@@ -39,6 +39,7 @@ from arrayscope.display.model.tile_identity import (
     array_plane_identities,
     complex_mapping_identity,
     tile_ack_identity,
+    tile_truth_record,
 )
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import (
@@ -1495,6 +1496,18 @@ class FrameSession:
             quality="exact",
         )
 
+    def tile_target_identities(self, tile_numbers) -> dict[int, TileIdentity]:
+        """Return lifecycle-owned typed targets for a presentation scope."""
+
+        targets: dict[int, TileIdentity] = {}
+        for tile_number in tuple(tile_numbers or ()):
+            index = int(tile_number)
+            record = self.lifecycle.peek(index)
+            identity = None if record is None or record.target is None else record.target.identity
+            if identity is not None:
+                targets[index] = identity
+        return targets
+
     def tile_payload_identity(
         self,
         tile: MontageTile,
@@ -1919,6 +1932,7 @@ class FrameSession:
             planned_tiles=planned,
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
+            target_identities=self.tile_target_identities(active),
         )
         return previous_state.apply_delta(delta), delta
 
@@ -2430,7 +2444,7 @@ class FrameSession:
             if (
                 shown_identity is not None
                 and rec is not None
-                and (payload.source_id, shown_identity) in rec.resigned
+                and (tile_ack_identity(payload), shown_identity) in rec.resigned
             ):
                 # The lifecycle already bounded retries for exactly this
                 # wanted/shown pair. Coverage admission must not reopen that
@@ -2653,6 +2667,7 @@ class FrameSession:
             planned_tiles=planned,
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
+            target_identities=self.tile_target_identities(active),
             force_refresh=force_refresh,
             clear_reason=clear_reason,
         )
@@ -2764,6 +2779,7 @@ class FrameSession:
             planned_tiles=planned,
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
+            target_identities=self.tile_target_identities(planned),
         )
         return previous_state.apply_delta(delta), delta
 
@@ -2995,6 +3011,12 @@ class FrameSession:
                         resident_levels.append(max(int(value) for value in level_xy))
             rows.append(
                 {
+                    **tile_truth_record(
+                        tile_number=tile_number,
+                        target=None if rec is None or rec.target is None else rec.target.identity,
+                        acknowledged=backend_identity,
+                        payload=desired,
+                    ),
                     "tile": tile_number,
                     "source_index": source_index,
                     "semantic_source": _diag_identity(semantic_source),
@@ -3596,11 +3618,12 @@ def _force_unpresented_upsert(session, tile_number: int, *, previous_payloads, b
     shown_map = dict(backend_identities or {})
     if shown_map:
         shown = shown_map.get(tile_number)
-        if shown == payload.source_id:
+        payload_identity = tile_ack_identity(payload)
+        if shown == payload_identity:
             return False
         if shown is not None:
             rec = session.lifecycle.peek(tile_number)
-            if rec is not None and (payload.source_id, shown) in rec.resigned:
+            if rec is not None and (payload_identity, shown) in rec.resigned:
                 return False
         return True
     return previous is None

@@ -13,6 +13,7 @@ from pyqtgraph.Qt import QtGui
 
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
+from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.tile_layout import tile_layout_map, tile_layout_regions
@@ -230,11 +231,28 @@ class MontageTileLayer:
             for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
             if int(tile) in tile_payloads
         } if tile_delta is not None else set()
+        target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
+        drawable_payloads = {
+            int(tile): payload
+            for tile, payload in tile_payloads.items()
+            if acknowledged_identity_satisfies_target(
+                getattr(payload, "tile_identity", None) or payload.source_id,
+                target_identities.get(int(tile)),
+            )
+        }
         active = {
             int(tile)
             for tile in requested_active
             if int(tile) in self._states and bool(getattr(self._states[int(tile)], "visible", False))
+            and acknowledged_identity_satisfies_target(
+                self._states[int(tile)].acknowledged_identity,
+                target_identities.get(int(tile)),
+            )
         }
+        for tile in requested_active - active:
+            state = self._states.get(int(tile))
+            if state is not None and bool(getattr(state, "visible", False)):
+                self._hide_tile(int(tile))
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         cold_deadline_ms = None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
@@ -269,7 +287,7 @@ class MontageTileLayer:
         committed_upserts: set[int] = set()
         tile_order = _direct_tile_order(
             layout,
-            tile_payloads,
+            drawable_payloads,
             tile_delta,
             self._states,
             tile_states=states,
@@ -298,7 +316,7 @@ class MontageTileLayer:
         preclaim_specs = _direct_preclaim_specs(
             layout,
             tile_order,
-            tile_payloads,
+            drawable_payloads,
             states=states,
             tile_source_ids=tile_source_ids,
         )
@@ -336,7 +354,7 @@ class MontageTileLayer:
             state_value = "loaded"
             if states and tile_number < len(states):
                 state_value = str(getattr(states[tile_number], "value", states[tile_number]))
-            payload = None if state_value == "skipped" else tile_payloads.get(int(tile_number))
+            payload = None if state_value == "skipped" else drawable_payloads.get(int(tile_number))
             if payload is None:
                 self._hide_tile(tile_number)
                 continue
@@ -493,14 +511,9 @@ class MontageTileLayer:
                     self.layer_owner.add_tile_item(tile_number, item_state.item)
                 self._states[int(tile_number)] = item_state
 
-            item_state.item.setVisible(True)
             self._touch_resident_state(item_state)
             item_state.item.setPos(float(world_x), float(world_y))
             _apply_item_lod_scale(item_state, scale_x, scale_y)
-            if int(tile_number) not in active:
-                visible_items += 1
-            active.add(int(tile_number))
-
             if should_upload:
                 previous_source_id = item_state.source_array_id
                 updated, windowed = self._set_tile_data(
@@ -554,6 +567,7 @@ class MontageTileLayer:
                     items_skipped += 1
                 if int(tile_number) in requested_upserts:
                     committed_upserts.add(int(tile_number))
+
             else:
                 items_skipped += 1
                 if not levels_changed:
@@ -566,6 +580,18 @@ class MontageTileLayer:
                 relocated_tiles += int(geometry_changed or reused_source)
                 if int(tile_number) in requested_upserts:
                     committed_upserts.add(int(tile_number))
+
+            if acknowledged_identity_satisfies_target(
+                item_state.acknowledged_identity,
+                target_identities.get(int(tile_number)),
+            ):
+                item_state.item.setVisible(True)
+                item_state.visible = True
+                if int(tile_number) not in active:
+                    visible_items += 1
+                active.add(int(tile_number))
+            else:
+                self._hide_tile(int(tile_number))
 
         for tile_number in tuple(self._states):
             if int(tile_number) not in active:
@@ -581,7 +607,7 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=int(visible_items),
             presented_tiles=tuple(int(tile) for tile in sorted(active)),
-            presented_identities=_direct_presented_identities(self._states, tile_payloads),
+            presented_identities=_direct_presented_identities(self._states, drawable_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             updated_tiles=tuple(int(tile) for tile in updated_tiles),
             items_created=int(items_created),

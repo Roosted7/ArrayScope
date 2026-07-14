@@ -39,9 +39,11 @@ from arrayscope.display.model.tile_identity import (
     TileIdentity,
     TileLodIdentity,
     TilePresentationIdentity,
+    acknowledged_identity_satisfies_target,
     array_plane_identities,
     complex_mapping_identity,
     tile_ack_identity,
+    tile_truth_record,
 )
 
 __all__ = [
@@ -73,7 +75,9 @@ __all__ = [
     "TileLevelStats",
     "TiledValueSource",
     "montage_level_key",
+    "acknowledged_identity_satisfies_target",
     "array_plane_identities",
     "complex_mapping_identity",
     "tile_ack_identity",
+    "tile_truth_record",
 ]
