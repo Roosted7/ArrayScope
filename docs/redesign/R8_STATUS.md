@@ -28,6 +28,19 @@ Both hypotheses were confirmed; neither experiment was reverted.
 - `500bcdc1` restores R7 frame API coherence needed to run the viewer path.
 - `44b77892` adds typed tile target and backend-acknowledgement identities.
 - `6228a4f9` aligns the diagnostics snapshot with its ledger field contract.
+- `257e5be2` enforces typed target/acknowledgement truth immediately before
+  either backend draws a tile.
+- `bc8b7477` removes the stale paced-admission keyword that crashed the live
+  presentation gate.
+- `adf81fd4` attaches the live presentation effects before level side work can
+  schedule a commit.
+- `b49f67c3` aligns predicted and acknowledged texture kinds with the storage
+  each backend physically draws. Scalar source data uses scalar storage;
+  scalar components of complex source data use RG32F only with an explicit
+  complex component shader mode.
+- `db2aaa3f` adds the six-pattern adversarial complex fixture.
+- `a78adbf` adds the opt-in, backend-neutral tile truth HUD sourced directly
+  from lifecycle diagnostic rows.
 
 The current R8A slice adds the pre-draw truth firewall:
 
@@ -92,10 +105,36 @@ viewport drift and were deliberately not repaired here:
 Changing those policies would violate the R8A truth-first scope. The direct
 real-backend standalone smoke above is the current visual and semantic gate.
 
-## Remaining R8A work
+## R8B checkpoint after reverted experiment
+
+The committed adversarial fixture now covers constant-magnitude phase ramp,
+constant-phase magnitude ramp, real-only, imaginary-only, zeros, and a known
+complex source signature. PyQtGraph's accepted RGB pixels match the CPU
+reference; VisPy's accepted RG32F uploads match the exact real/imag planes.
+Committed-value tests verify native complex data and exact magnitude values,
+and the same truth HUD is exercised on both backend surfaces.
+
+One uncommitted full-`ArrayScopeWindow` synthetic test was attempted and then
+removed on 2026-07-14. Both PyQtGraph and VisPy timed out waiting for
+`visible_plan_complete()` plus zero visible presentation obligations. This is
+the already recorded R7 active-viewport/full-window settlement limitation, not
+evidence that the six-pattern backend fixture failed. The VisPy offscreen run
+also lacked a supported `QOpenGLWidget`, so exact framebuffer sampling remains
+a real-hardware gate.
+
+Per the R8 working rule, work stopped here after that reverted experiment. The
+next hypothesis must address full-window convergence/settlement as an R8C
+truth-and-convergence slice; the benchmark and scheduling/throughput policy
+remain untouched.
+
+## Remaining R8 work
 
 - Exercise the typed firewall through the full ArrayScopeWindow real-file path
   once the existing R7 active-viewport harness contract is repaired in its own
   scoped slice.
-- Add the broader R8B adversarial complex patterns and transition matrix only
-  after this R8A slice is committed and remains green.
+- Run exact selected-pixel framebuffer comparison for the six-pattern fixture
+  on real OpenGL hardware for VisPy.
+- Repair full-window settlement from lifecycle evidence before using that
+  harness for the R8B hover/ROI and R8C transition gates.
+- Add the R8C semantic/quality/presentation/viewport transition matrix only
+  after the full-window convergence gate is green.
