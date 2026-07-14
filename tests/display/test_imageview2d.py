@@ -259,10 +259,15 @@ def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
 
     view = ImageView2D()
     try:
+        view.resize(400, 300)
+        view.setImage(np.zeros((4, 4), dtype=np.float32))
+        view.show()
+        qt_app.processEvents()
         view.setTileTruthOverlayRows(
             (
                 {
                     "tile": 4,
+                    "tile_rect": (0, 0, 4, 4),
                     "target_source": 17,
                     "acknowledged_source": None,
                     "drawable": False,
@@ -279,13 +284,16 @@ def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
             )
         )
 
-        assert not view._tile_truth_overlay.isHidden()
-        assert "slot   4  src 17 -> None  LOAD" in view._tile_truth_overlay.text()
-        assert "channel real  map scalar/real/mapped" in view._tile_truth_overlay.text()
-        assert view._tile_truth_overlay.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layer = view._tile_truth_overlay_layer
+        assert len(layer.labels) == 1
+        assert not layer.labels[0].isHidden()
+        assert "slot 4  LOAD" in layer.labels[0].text()
+        assert "src 17 -> None" in layer.labels[0].text()
+        assert "real  scalar/real/mapped" in layer.labels[0].text()
+        assert layer.labels[0].testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         view.setTileTruthOverlayRows(())
-        assert view._tile_truth_overlay.isHidden()
+        assert layer.labels[0].isHidden()
     finally:
         view.close()
 

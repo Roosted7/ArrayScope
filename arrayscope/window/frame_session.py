@@ -2952,7 +2952,12 @@ class FrameSession:
             mismatched.append(int(tile_number))
         return tuple(sorted(mismatched))
 
-    def diagnostic_tile_identity_rows(self, *, limit: int = 20) -> tuple[dict[str, object], ...]:
+    def diagnostic_tile_identity_rows(
+        self,
+        *,
+        limit: int = 20,
+        include_all_visible: bool = False,
+    ) -> tuple[dict[str, object], ...]:
         """Focused per-slot truth table for montage identity stalls."""
 
         plan_tiles = {
@@ -2986,7 +2991,11 @@ class FrameSession:
                 suspect.add(int(tile_number))
             elif payload is None and state_payload is not None and identity == tile_ack_identity(state_payload):
                 suspect.add(int(tile_number))
-        ordered = self._prioritized_tile_numbers(tuple(suspect)) if suspect else ()
+        ordered = (
+            self._prioritized_tile_numbers(tuple(visible))
+            if include_all_visible
+            else (self._prioritized_tile_numbers(tuple(suspect)) if suspect else ())
+        )
         if not ordered:
             ordered = tuple(sorted(visible))[: max(0, int(limit))]
         rows = []

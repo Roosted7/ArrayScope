@@ -21,39 +21,6 @@ class MontageTileOverlay:
     text: str
 
 
-def tile_truth_overlay_text(rows) -> str:
-    """Format lifecycle-owned tile truth as a compact diagnostic HUD."""
-
-    rows = tuple(rows or ())
-    if not rows:
-        return ""
-    lines = ["R8 TILE TRUTH  target -> acknowledged"]
-    for row in rows:
-        target_lod = row.get("target_lod") or {}
-        acknowledged_lod = row.get("acknowledged_lod") or {}
-        mapping = row.get("acknowledged_complex_mapping") or row.get("target_complex_mapping")
-        mapping_text = "/".join(str(value) for value in tuple(mapping or ())) or "-"
-        state = "DRAW" if bool(row.get("drawable")) else "LOAD"
-        lines.extend(
-            (
-                (
-                    f"slot {int(row.get('tile', -1)):>3}  src {row.get('target_source')} -> "
-                    f"{row.get('acknowledged_source')}  {state}"
-                ),
-                (
-                    f"  tex {row.get('target_texture_kind')} -> {row.get('acknowledged_texture_kind')}  "
-                    f"channel {row.get('target_channel')}  map {mapping_text}"
-                ),
-                (
-                    f"  lod {target_lod.get('level')} -> {acknowledged_lod.get('level')}  "
-                    f"sem {row.get('target_semantic_generation')} -> "
-                    f"{row.get('acknowledged_semantic_generation')}  levels {row.get('levels_generation')}"
-                ),
-            )
-        )
-    return "\n".join(lines)
-
-
 class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
     def __init__(self):
         super().__init__()

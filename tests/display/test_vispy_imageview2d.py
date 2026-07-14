@@ -3324,15 +3324,19 @@ def test_vispy_montage_tile_overlays_have_vispy_placeholder_visuals(qt_app):
         view.close()
 
 
-def test_vispy_tile_truth_overlay_uses_shared_hud_above_canvas(qt_app):
+def test_vispy_tile_truth_overlay_positions_label_on_its_tile_above_canvas(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
     try:
+        view.resize(400, 300)
+        view.show()
+        qt_app.processEvents()
         view.setTileTruthOverlayRows(
             (
                 {
                     "tile": 2,
+                    "tile_rect": (0, 0, 1, 1),
                     "target_source": 8,
                     "acknowledged_source": 8,
                     "drawable": True,
@@ -3349,9 +3353,13 @@ def test_vispy_tile_truth_overlay_uses_shared_hud_above_canvas(qt_app):
             )
         )
 
-        assert view._tile_truth_overlay.parentWidget() is view._display_container
-        assert not view._tile_truth_overlay.isHidden()
-        assert "slot   2  src 8 -> 8  DRAW" in view._tile_truth_overlay.text()
-        assert "lod 0 -> 1" in view._tile_truth_overlay.text()
+        layer = view._tile_truth_overlay_layer
+        assert layer.parent is view._display_container
+        assert len(layer.labels) == 1
+        assert layer.labels[0].parentWidget() is view._display_container
+        assert not layer.labels[0].isHidden()
+        assert "slot 2  DRAW" in layer.labels[0].text()
+        assert "src 8 -> 8" in layer.labels[0].text()
+        assert "lod 0 -> 1" in layer.labels[0].text()
     finally:
         view.close()

@@ -213,8 +213,8 @@ def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -
         "target_lod": None if typed_target is None else _lod_record(typed_target.lod),
         "acknowledged_lod": None if identity is None else _lod_record(identity.lod),
         "texture_kind": texture_kind,
-        "real_plane_identity": None if real_plane is None else repr(real_plane),
-        "imag_plane_identity": None if imag_plane is None else repr(imag_plane),
+        "real_plane_identity": _plane_record(real_plane),
+        "imag_plane_identity": _plane_record(imag_plane),
         "complex_mapping": complex_mapping,
         "lod": None
         if lod is None
@@ -232,6 +232,18 @@ def _lod_record(lod: TileLodIdentity) -> dict[str, int]:
         "level": int(lod.level),
         "factor": int(lod.factor),
         "gutter": int(lod.gutter),
+    }
+
+
+def _plane_record(plane: ArrayPlaneIdentity | None) -> dict[str, object] | None:
+    if plane is None:
+        return None
+    return {
+        "component": str(plane.component),
+        "pointer": int(plane.pointer),
+        "shape": tuple(int(value) for value in plane.shape),
+        "strides": tuple(int(value) for value in plane.strides),
+        "dtype": str(plane.dtype),
     }
 
 

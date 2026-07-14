@@ -54,7 +54,30 @@ class FrameRuntimeMixin:
         if session is None or not self._frame_session_is_current(session):
             setter(())
             return
-        setter(session.diagnostic_tile_identity_rows(limit=12))
+        tiles = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        }
+        rows = []
+        for row in session.diagnostic_tile_identity_rows(
+            limit=max(1, len(tiles)),
+            include_all_visible=True,
+        ):
+            tile = tiles.get(int(row.get("tile", -1)))
+            if tile is None:
+                continue
+            rows.append(
+                {
+                    **row,
+                    "tile_rect": (
+                        int(tile.x0),
+                        int(tile.y0),
+                        int(tile.width),
+                        int(tile.height),
+                    ),
+                }
+            )
+        setter(tuple(rows))
 
     def _on_montage_tile_slow(self, session_id):
         session = getattr(self, "_frame_session", None)

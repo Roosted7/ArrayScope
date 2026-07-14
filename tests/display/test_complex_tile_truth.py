@@ -24,7 +24,7 @@ from arrayscope.display.model.tile_identity import (
     tile_truth_record,
 )
 from arrayscope.display.montage import MontageTileState, make_montage_plan
-from arrayscope.display.overlays import tile_truth_overlay_text
+from arrayscope.display.tile_truth_overlay import tile_truth_overlay_text
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
@@ -412,6 +412,8 @@ def _assert_truth_record(targets, acknowledged, payloads):
     assert rows[0]["texture_kind"] == "complex_rg32f"
     assert rows[0]["real_plane_identity"] is not None
     assert rows[0]["imag_plane_identity"] is not None
+    assert rows[0]["real_plane_identity"]["pointer"] > 0
+    assert rows[0]["imag_plane_identity"]["pointer"] > 0
     assert rows[0]["complex_mapping"] == ("phase_color", "abs", "mapped")
     assert rows[0]["lod"] == {"level": 0, "factor": 1, "gutter": 0}
     assert rows[0]["levels_generation"] == 9
@@ -426,9 +428,11 @@ def _assert_truth_record(targets, acknowledged, payloads):
     assert all(row["target_identity"] is not None for row in rows)
     assert all(row["placeholder"] is True for row in rows[1:])
     overlay = tile_truth_overlay_text(rows)
-    assert "slot   0  src 3 -> 3  DRAW" in overlay
+    assert "slot 0  DRAW" in overlay
+    assert "src 3 -> 3" in overlay
     assert "tex complex_rg32f -> complex_rg32f" in overlay
-    assert "channel complex  map phase_color/abs/mapped" in overlay
+    assert "planes r 0x" in overlay
+    assert "complex  phase_color/abs/mapped" in overlay
     assert "lod 0 -> 0" in overlay
     assert "levels 9" in overlay
 

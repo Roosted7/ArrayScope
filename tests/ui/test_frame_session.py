@@ -1221,6 +1221,35 @@ def test_montage_overlay_refresh_caches_empty_and_repeated_state():
     assert image_view.calls == 1
 
 
+def test_tile_truth_overlay_rows_include_each_plan_tile_rectangle():
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    class ImageView:
+        def __init__(self):
+            self.rows = ()
+
+        def setTileTruthOverlayRows(self, rows):
+            self.rows = tuple(rows or ())
+
+    session = _session()
+    image_view = ImageView()
+    owner = SimpleNamespace(
+        img_view=image_view,
+        _frame_session=session,
+        _tile_truth_overlay_enabled=True,
+        _frame_session_is_current=lambda candidate: candidate is session,
+    )
+    owner.win = owner
+
+    FrameRuntimeMixin._refresh_tile_truth_overlay(owner)
+
+    expected = {
+        int(tile.montage_index): (int(tile.x0), int(tile.y0), int(tile.width), int(tile.height))
+        for tile in session.plan.tiles
+    }
+    assert {int(row["tile"]): row["tile_rect"] for row in image_view.rows} == expected
+
+
 def test_montage_loading_state_does_not_create_per_tile_scene_overlays():
     from arrayscope.window.frame_controller import FrameControllerMixin
 

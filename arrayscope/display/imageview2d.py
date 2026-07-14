@@ -44,7 +44,8 @@ from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_hit_test import RoiHitIndex
-from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem, tile_truth_overlay_text
+from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
+from arrayscope.display.tile_truth_overlay import TileTruthOverlayLayer
 from arrayscope.display.profile_marker import ProfileMarkerOwner
 from arrayscope.display.pointer_interaction import QtPointerInteractionDriver
 from arrayscope.display.roi_items import (
@@ -212,8 +213,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._interaction_visual_profile_part: str | None = None
         self._montage_tile_overlay_item = None
         self._montage_tile_overlay_items = []
-        self._tile_truth_overlay = None
-        self._tile_truth_overlay_rows = ()
+        self._tile_truth_overlay_layer = None
         self._roi_counter = 0
         self._freehand_spacing = 1.0
         self.viewport_controller = ViewportController()
@@ -1200,6 +1200,9 @@ class ImageViewShell(QtWidgets.QWidget):
         self._last_surface_reset_reason = str(reason)
         self.reset_tiled_residency(reason)
         self.clearMontageTileOverlays()
+        layer = getattr(self, "_tile_truth_overlay_layer", None)
+        if layer is not None:
+            layer.clear()
         overlay = getattr(self, "_evaluation_overlay", None)
         if overlay is not None:
             overlay.hide()
@@ -1224,6 +1227,9 @@ class ImageViewShell(QtWidgets.QWidget):
                 pass
             self._interaction_application = None
         self.clearMontageTileOverlays()
+        layer = getattr(self, "_tile_truth_overlay_layer", None)
+        if layer is not None:
+            layer.clear()
 
     def updateImageDataFast(
         self,
@@ -1929,38 +1935,49 @@ class ImageViewShell(QtWidgets.QWidget):
         return 0 if item is None else int(item.overlay_count)
 
     def setTileTruthOverlayRows(self, rows) -> None:
-        """Show an opt-in backend-neutral HUD sourced from lifecycle truth."""
+        """Attach one lifecycle truth label to each visible montage tile."""
 
         rows = tuple(rows or ())
-        self._tile_truth_overlay_rows = rows
-        text = tile_truth_overlay_text(rows)
-        if not text:
-            if self._tile_truth_overlay is not None:
-                self._tile_truth_overlay.hide()
+        if not rows and self._tile_truth_overlay_layer is None:
             return
-        if self._tile_truth_overlay is None:
-            overlay = QtWidgets.QLabel(self._display_overlay_parent())
-            overlay.setObjectName("TileTruthOverlay")
-            overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            overlay.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-            overlay.setStyleSheet(
-                "QLabel#TileTruthOverlay {"
-                "background: rgba(8, 18, 24, 220); color: #a5f3fc;"
-                "border: 1px solid #22d3ee; border-radius: 3px; padding: 5px;"
-                "font-family: monospace; font-size: 10px; }"
+        layer = self._ensure_tile_truth_overlay_layer()
+        layer.set_rows(rows)
+
+    def _ensure_tile_truth_overlay_layer(self) -> TileTruthOverlayLayer:
+        layer = self._tile_truth_overlay_layer
+        if layer is None:
+            layer = TileTruthOverlayLayer(
+                self._display_overlay_parent(),
+                self._tile_truth_overlay_screen_rect,
             )
-            self._tile_truth_overlay = overlay
-        self._tile_truth_overlay.setText(text)
-        self._tile_truth_overlay.adjustSize()
-        parent_width = max(1, int(self._display_overlay_parent().width()))
-        self._tile_truth_overlay.setMaximumWidth(max(120, parent_width - 20))
-        self._tile_truth_overlay.move(10, 40)
-        self._tile_truth_overlay.show()
-        self._tile_truth_overlay.raise_()
+            self._tile_truth_overlay_layer = layer
+        return layer
+
+    def _tile_truth_overlay_screen_rect(
+        self,
+        tile_rect: tuple[float, float, float, float],
+    ) -> QtCore.QRect:
+        x, y, width, height = tile_rect
+        top_left = self._map_scene_to_display_overlay(
+            self.view.mapViewToScene(QtCore.QPointF(x, y))
+        )
+        bottom_right = self._map_scene_to_display_overlay(
+            self.view.mapViewToScene(QtCore.QPointF(x + width, y + height))
+        )
+        left = min(int(top_left.x()), int(bottom_right.x()))
+        top = min(int(top_left.y()), int(bottom_right.y()))
+        right = max(int(top_left.x()), int(bottom_right.x()))
+        bottom = max(int(top_left.y()), int(bottom_right.y()))
+        return QtCore.QRect(left, top, max(1, right - left), max(1, bottom - top))
+
+    def _position_tile_truth_overlays(self) -> None:
+        layer = self._tile_truth_overlay_layer
+        if layer is not None:
+            layer.reposition()
 
     def tileTruthOverlayText(self) -> str:
-        overlay = getattr(self, "_tile_truth_overlay", None)
-        return "" if overlay is None or not overlay.isVisible() else str(overlay.text())
+        layer = self._tile_truth_overlay_layer
+        return "" if layer is None else layer.visible_text()
 
     def setRoiInfoRows(self, rows):
         rows = tuple(rows or ())
@@ -2421,6 +2438,8 @@ class ImageViewShell(QtWidgets.QWidget):
             self.viewport_controller.note_user_range_changed(self.view.viewRange())
             self._enforce_viewport_constraints()
         self._sync_profile_marker_visibility()
+        if self._tile_truth_overlay_layer is not None:
+            self._position_tile_truth_overlays()
 
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
@@ -2716,6 +2735,8 @@ class ImageViewShell(QtWidgets.QWidget):
     def resizeEvent(self, event):
         """On resize, if in 'fit' mode keep the image fully visible."""
         super().resizeEvent(event)
+        if self._tile_truth_overlay_layer is not None:
+            self._position_tile_truth_overlays()
 
 
 class ImageView2D(ImageViewShell):
