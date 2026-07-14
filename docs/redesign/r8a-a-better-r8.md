@@ -1,114 +1,114 @@
 # A better R8 sequence
 
+## Current gate order
 
-## R8A — Viewer truth firewall
+- **R8A pixel truth:** complete.
+- **R8B complex truth:** complete.
+- **R8C.1 semantic transitions:** complete.
+- **R8C.2 viewport/convergence boundaries:** complete.
+- **R8C.3 semantic level-evidence ownership:** active.
+- **R8C.4 committed manual-camera policy:** blocked on R8C.3.
+- **R8C final transition certification:** pending.
+- **Marathon salvage audit:** deferred until all R8C gates pass.
+- **R8D performance work:** blocked.
 
-Do not begin with performance.
+Truth remains the first priority, followed by convergence, responsiveness,
+throughput, and cleanup. No later gate may weaken an earlier one.
 
-Introduce one typed, inspectable identity for every tile target and acknowledgement. Avoid tuples assembled differently in multiple modules.
+## R8A — Viewer truth firewall — complete
 
-Conceptually it should contain:
-
-```
-document_generation
-operation_key
-source_index
-image_axes
-axis_flips
-channel
-complex_mapping
-texture_kind
-semantic_generation
-lod
-```
-
-Presentation state such as levels/LUT should be a separate typed key, with backend capabilities defining whether it can change without new pixels.
-
-Every backend acknowledgement must return the exact identity it physically accepted. Immediately before drawing:
+Every tile target and backend acknowledgement carries one typed semantic
+identity. Presentation state such as levels/LUT remains separate from source
+pixels. Immediately before drawing:
 
 `acknowledged identity == committed target identity`
 
-If that is false, draw a placeholder.
+An explicitly proven compatible lower-quality fallback is also valid. Any
+other tile is a loading placeholder. Scalar, complex RG32F, and display-ready
+RGB storage are distinct, and incompatible scalar/complex transitions cannot
+mix inside a committed frame.
 
-Also forbid a committed complex frame from mixing incompatible texture kinds or complex mappings. A scalar-to-complex or complex-mode transition should be frame-atomic.
+## R8B — Synthetic complex truth — complete
 
-## R8B — Synthetic complex truth tests
+The deterministic adversarial fixture covers constant-magnitude phase ramps,
+constant-phase magnitude ramps, real-only values, imaginary-only values,
+zeros, and known source-index signatures. PyQtGraph and VisPy are checked for
+texture kind, real/imag plane identity, complex mapping, values, LOD, levels
+generation, and backend acknowledgement. The per-tile truth overlay reports
+the same facts at each tile's screen position.
 
-Use a tiny, deterministic 4–8 tile dataset before the real NIfTI workflow:
-
-constant magnitude with a phase ramp;
-constant phase with a magnitude ramp;
-real-only values;
-imaginary-only values;
-zeros;
-known source-index signatures.
-
-For both backends, verify:
-
-every tile uses the expected texture kind;
-GPU/display samples agree with a CPU reference at selected pixels;
-magnitude and phase are correct;
-hover and ROI inspection return native values;
-scalar → complex → scalar transitions never mix generations;
-out-of-order completions produce placeholders, not stale values.
-
-Add a debug overlay showing, per tile:
-
-```
-slot
-target source
-acknowledged source
-texture kind
-channel/complex mode
-LOD
-semantic generation
-levels generation
-```
-
-That would likely make the screenshot defect obvious in a single run.
+The earlier orange-background complex-rendering failure is resolved. Scalar to
+complex to scalar transitions and out-of-order completions use placeholders
+instead of stale pixels.
 
 ## R8C — Transition and convergence
 
-Test semantic transitions separately from quality transitions.
+Semantic transitions—operation, source population, channel, axes, and complex
+mode—are atomic. Quality transitions for the same semantic source may refine
+progressively and monotonically.
 
-Semantic transitions—operation, source window, channel, axes, complex mode—must commit atomically.
+### R8C.1 — Semantic transitions — complete
 
-Quality transitions—same source and semantics, better LOD—may be progressive and monotonic.
-
-Tests should prove:
+Certified invariants:
 
 - no stale source appears in a new slot;
-- no new labels describe old pixels;
-- no compatible tile becomes blank;
-- incompatible tiles become placeholders;
-- every ready target eventually presents without another user event;
-- out-of-order completion cannot clear an obligation;
-- settlement means zero remaining visible obligations.
+- labels and values describe the acknowledged pixels;
+- incompatible successors become placeholders;
+- compatible lower-quality fallbacks are explicit;
+- out-of-order completion cannot clear a current obligation.
 
-## R8D — Performance
+### R8C.2 — Viewport and convergence boundaries — complete
 
-Only after R8A–C are green should the benchmark be frozen.
+The physical onscreen set gates visible completion. Coverage-ring and
+boundary-only tiles do not masquerade as visible obligations. First-commit
+resize intent and later user resize ownership are preserved consistently across
+PyQtGraph and VisPy.
 
-Freeze:
+### R8C.3 — Semantic level-evidence ownership — active
 
-- fixture;
-- window geometry;
-- stage definitions;
-- event-loop pumping;
-- metrics;
-- pass/fail thresholds;
-- baseline commit.
+Certification invariant:
 
-Then optimize one measured cause at a time.
+> Semantic level and histogram evidence has one explicit, bounded owner
+> independent of tile visibility and texture residency. Offscreen sources
+> required for semantic statistics are evidence work, never visible tile work
+> or generic prefetch.
 
-The throughput design should favor:
+The owner must:
 
-- fan-in of worker completions by frame generation;
-- one edge-triggered GUI wake rather than one signal per tile;
-- building an immutable transaction once;
-- offscreen preparation;
-- a cheap final swap;
-- no O(tile-count) reconstruction for a one-tile update;
-- no adaptive controller that interprets a fixed page-rebuild cost as a per-tile cost.
+- cover the complete expected semantic source population;
+- perform bounded, observable evidence work without texture upload;
+- reuse immutable per-source evidence behind generation guards;
+- publish one truthful levels/histogram generation;
+- wake a parked presentation exactly when evidence becomes sufficient;
+- converge without another user action;
+- leave visible admission, generic prefetch, and LOD policy unchanged.
 
-Keep the hard 50 ms callback bar and decide once what the 16 ms target means—maximum, p95, or interaction-only p95. Do not change that interpretation during optimization.
+### R8C.4 — Committed manual-camera policy — blocked on R8C.3
+
+Once a montage camera is committed as manual, source-population growth must not
+silently auto-fit it. The stronger two-backend transition cannot be certified
+until PyQtGraph can obtain full semantic level evidence for the successor.
+
+### R8C final transition certification — pending
+
+Certification requires the centered synthetic fixture, the real fixture
+standalone, back-to-back semantic transitions, and the relevant broad test
+slice on both backends. Acceptance is zero unsafe visible pixels, zero orange
+background failures, correct levels/histogram generation, and reliable
+convergence.
+
+### Marathon salvage audit — deferred
+
+Only after every R8C gate passes, compare the marathon worktree for session
+generation, physical residency identity, source remapping,
+emitted/acknowledged semantics, atomic successor presentation, and physical
+draw completion. Add salvage tests before porting code. Do not import its
+throughput or scheduling experiments during R8C.
+
+## R8D — Performance — blocked
+
+Do not freeze or optimize the benchmark until R8A–R8C final certification is
+green. Then freeze the fixture, window geometry, stage definitions, event-loop
+pumping, metrics, thresholds, and baseline commit before optimizing one
+measured cause at a time. Keep the hard 50 ms callback gate and define the
+16 ms target once before using it.
