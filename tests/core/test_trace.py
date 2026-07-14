@@ -218,3 +218,43 @@ def test_trace_latency_reports_finish_outcomes(tmp_path):
     summary = analyze_trace_latency(path)
 
     assert summary["kernel_finish_outcomes"] == {"completed": 2, "superseded": 1}
+
+
+def test_trace_verify_flags_acknowledgement_churn_livelock(tmp_path):
+    """The watchdog (V3) sees deadlocks; identical-ack churn is the livelock signal."""
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = [
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 2,
+            "source_index": 7,
+            "target_level": 0,
+            "sequence": 1,
+        }
+    ]
+    rows.extend(
+        {
+            "kind": "backend_ack",
+            "tile": 2,
+            "source_index": 7,
+            "level": 0,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 2 + offset,
+        }
+        for offset in range(30)
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    result = verify_trace(path)
+    assert not result["ok"]
+    churn = [v for v in result["violations"] if v["invariant"] == "no_acknowledgement_churn"]
+    assert churn and churn[0]["tile"] == 2 and churn[0]["identical_acks"] == 30
+
+    # The same trace passes with the check disabled or a higher limit.
+    assert verify_trace(path, max_identical_acks=0)["ok"]
+    assert verify_trace(path, max_identical_acks=50)["ok"]

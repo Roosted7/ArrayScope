@@ -89,3 +89,71 @@ place to look.
 - End-to-end: synthetic runs confirm the friendly fixture error and the
   named post-visible stall; the raw phase still settles and records
   milestones as before.
+
+---
+
+# Addendum: adversarial review of V2/V3 (same day)
+
+Scope: 81b55850 ("Carry canonical tile priority into execution") and
+5cd0e8a9 ("Make stranded tile ownership loud"), reviewed on this branch
+after rebasing onto them.
+
+## What holds up
+
+- V2 is the dossier fix executed properly: `tile_priority_key()` is the one
+  ranker; the two duplicate formulas are deleted; the ladder path now reads
+  the live `tile_priority_context` owner (closing the stale-`view_range`
+  hazard, dossier A3); the ordinal rank rides `RungStep` →
+  `TaskSpec.scheduling_rank` → the kernel heap. A synthetic offscreen
+  cold-load first-ack order contained both grid-center tiles in the first
+  four acks (weak positive; real-display evidence is the committed gate).
+- V3 rightly deletes the silent `release_idle_evaluation_claims()` repair,
+  runs always-on (armed from three frame_controller sites, not the dialog),
+  and the injected-stall regression covers event, dump, and diagnostic.
+- The V2/V3 `frame_effects` rework cut the idle churn ~14× on the synthetic
+  repro (5,521 → 398 identical acks per tile). Real improvement.
+
+## New findings
+
+1. **Priority inversion surface: `scheduling_rank` sorts before `priority`,
+   and every non-pipeline task defaults to rank 0.** Level-evidence work
+   (`render/level_stats.py:1081,1179`, VISIBLE_MATERIALIZATION lane) and
+   stage materialization (`window/frame_effects.py:3000`,
+   STAGE_MATERIALIZATION lane) now execute ahead of every tile with
+   rank ≥ 1 at any priority — before V2, priority ordered them. Evidence
+   admission is gated on visible settlement so its window is small, but
+   per-tile stage work carrying rank 0 competes directly with ranked rungs
+   during scroll — exactly where the 4 fps FFT target lives. Recommend:
+   non-tile visible-lane submissions get an explicit rank floor (or stages
+   inherit their consuming tile's rank), pinned by a kernel test.
+2. **The livelock is still live, and V3 cannot see it.** On the synthetic
+   FFT repro the presentation layer still re-acknowledges identical exact
+   payloads (~398 per tile) and `physical_drawn` never closes; the run
+   contains **zero `stall` events** because the watchdog early-returns
+   while `_montage_presentation_gate_armed` is set and
+   `required_target_unsettled_tiles()` is empty. V3 detects deadlock
+   (nothing happening), not livelock (the same thing happening forever).
+   Complement added on this branch: `trace_verify` now flags
+   `no_acknowledgement_churn` when any identity is re-acked more than
+   `--max-identical-acks` (default 25) times — it fires on both the old
+   (5,521) and new (398) churn traces and passes healthy scenario traces.
+3. **Real watchdog firings pollute `/tmp` during test runs.** The injected
+   V3 test cleans up its dump, but incidental ≥2 s stalls inside other
+   offscreen UI tests each wrote an up-to-8 MB
+   `/tmp/arrayscope-stall-<session>-<n>.trace.jsonl`. Two per suite run
+   observed. Recommend a configurable dump directory (or suite-level
+   TMPDIR) and possibly a dump-size cap; also note those incidental stalls
+   are themselves evidence worth triaging.
+4. Nit: `TaskSpec.__post_init__` clamps `scheduling_rank` with
+   `max(0, int(rank))`, so an accidental negative rank silently becomes the
+   *best* rank instead of an error.
+
+## Validation
+
+Rebased cleanly onto 5cd0e8a9 (conflicts in `trace_verify.py` /
+`test_trace.py` resolved keeping both sides' invariants; V3's stall-only
+fixture gained a lifecycle event since lifecycle-free traces are now
+violations). Touched suites: 209 passed, 2 skipped; compileall and Ruff
+clean. The churn detector validated against three real traces: pre-V2
+pathological (6 violations, worst 5,521), post-V2 (still fires at 398),
+and the healthy raw-phase trace (clean).

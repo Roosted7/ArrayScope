@@ -7,18 +7,35 @@ import json
 from pathlib import Path
 
 
-def verify_trace(path: str | Path, *, expect_targets: int | None = None) -> dict[str, object]:
+MAX_IDENTICAL_ACKS = 25
+
+
+def verify_trace(
+    path: str | Path,
+    *,
+    expect_targets: int | None = None,
+    max_identical_acks: int = MAX_IDENTICAL_ACKS,
+) -> dict[str, object]:
     """Replay lifecycle scope and prove every final target reached exact ack.
 
     ``expect_targets`` guards against vacuous passes: a trace whose lifecycle
     edges were never emitted (renamed event kind, broken emitter, wrong file)
     replays as an empty scope and would otherwise verify clean.  Scenario
     harnesses know their tile count and must pass it.
+
+    ``max_identical_acks`` catches livelock: the stall watchdog (V3) sees
+    deadlocks — nothing happening — but a presentation loop re-acknowledging
+    the same payload forever keeps its gate armed and stays invisible to it.
+    A healthy tile acknowledges an identity once, maybe a handful of times
+    across level rebinding; hundreds of identical accepted acks mean the
+    presentation layer is spinning (observed: ~5,500 identical acks per tile
+    per minute at idle).
     """
 
     targets: dict[int, dict[str, object]] = {}
     acknowledgements: dict[int, dict[str, object]] = {}
     first_ack_sequences: dict[int, int] = {}
+    identical_ack_counts: dict[tuple[object, ...], int] = {}
     stalls: list[dict[str, object]] = []
     lifecycle_events = 0
     event_count = 0
@@ -50,6 +67,13 @@ def verify_trace(path: str | Path, *, expect_targets: int | None = None) -> dict
             continue
         if kind != "backend_ack" or not bool(event.get("accepted", False)):
             continue
+        ack_signature = (
+            event.get("tile"),
+            event.get("source_index"),
+            event.get("level"),
+            event.get("quality"),
+        )
+        identical_ack_counts[ack_signature] = identical_ack_counts.get(ack_signature, 0) + 1
         tile = int(event.get("tile", -1))
         target = targets.get(tile)
         if target is None:
@@ -98,6 +122,22 @@ def verify_trace(path: str | Path, *, expect_targets: int | None = None) -> dict
                 "observed": len(targets),
             }
         )
+    if max_identical_acks > 0:
+        violations.extend(
+            {
+                "invariant": "no_acknowledgement_churn",
+                "tile": signature[0],
+                "source_index": signature[1],
+                "level": signature[2],
+                "quality": signature[3],
+                "identical_acks": count,
+                "limit": int(max_identical_acks),
+            }
+            for signature, count in sorted(
+                identical_ack_counts.items(), key=lambda item: -item[1]
+            )
+            if count > int(max_identical_acks)
+        )
     return {
         "ok": not violations,
         "event_count": event_count,
@@ -122,8 +162,18 @@ def main(argv=None) -> int:
         default=None,
         help="Exact final required-target count; guards against vacuously clean traces",
     )
+    parser.add_argument(
+        "--max-identical-acks",
+        type=int,
+        default=MAX_IDENTICAL_ACKS,
+        help="Identical accepted acks per identity before flagging livelock churn; 0 disables",
+    )
     args = parser.parse_args(argv)
-    result = verify_trace(args.trace, expect_targets=args.expect_targets)
+    result = verify_trace(
+        args.trace,
+        expect_targets=args.expect_targets,
+        max_identical_acks=args.max_identical_acks,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if bool(result["ok"]) else 1
 
