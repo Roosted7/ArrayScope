@@ -135,6 +135,14 @@ def test_profile_transform_pipeline_uses_fft_shift_ifft_sequence():
     assert tuple(operation.axis for operation in operations) == (2, 2, 2)
 
 
+def test_profile_capped_montage_uses_center_slices():
+    from arrayscope.tools.profile_montage_workflow import _montage_indices
+
+    assert _montage_indices(30, max_tiles=6) == (12, 13, 14, 15, 16, 17)
+    assert _montage_indices(5, max_tiles=6) == (0, 1, 2, 3, 4)
+    assert _montage_indices(5, max_tiles=None) == (0, 1, 2, 3, 4)
+
+
 def test_profile_fit_stretch_pulse_uses_window_fit_command():
     from arrayscope.tools.profile_montage_workflow import _pulse_fit_stretch
 
@@ -426,7 +434,10 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: not session.level_presentation_snapshot().settled
-    win = SimpleNamespace(img_view=FakeImageView(), _montage_session=session)
+    win = SimpleNamespace(
+        img_view=FakeImageView(),
+        renderer=SimpleNamespace(_frame_session=session),
+    )
 
     class FakeApp:
         def __init__(self):
@@ -477,7 +488,7 @@ def test_profile_montage_level_state_uses_session_snapshot():
     level_generation.tile_values = {0: (0.0, 1.0), 1: (2.0, 8.0), 2: (2.0, 8.0)}
     level_generation.set_active_tiles((0, 1, 2))
     session = SimpleNamespace(level_generation=level_generation, level_presentation_snapshot=lambda: snapshot)
-    win = SimpleNamespace(_montage_session=session)
+    win = SimpleNamespace(renderer=SimpleNamespace(_frame_session=session))
 
     state = _montage_level_presentation_state(win)
 
@@ -573,7 +584,10 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: False
-    win = SimpleNamespace(img_view=image_view, _montage_session=session)
+    win = SimpleNamespace(
+        img_view=image_view,
+        renderer=SimpleNamespace(_frame_session=session),
+    )
     app = FakeApp(image_view)
 
     result = _wait_for_montage_complete(
@@ -620,7 +634,10 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
         def vispyPresentationDiagnostics(self):
             return {}
 
-    win = SimpleNamespace(img_view=FakeImageView(), _montage_session=session)
+    win = SimpleNamespace(
+        img_view=FakeImageView(),
+        renderer=SimpleNamespace(_frame_session=session),
+    )
 
     state = _montage_visibility_state(win, mode="vispy_tile_layer")
 

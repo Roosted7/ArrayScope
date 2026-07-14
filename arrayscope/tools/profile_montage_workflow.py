@@ -86,7 +86,7 @@ def run_profile_montage_workflow(
             raise ValueError(f"profile workflow requires at least 3 dimensions, got shape {np.shape(data)}")
         montage_axis = 2
         tile_count = int(np.shape(data)[montage_axis])
-        indices = tuple(range(tile_count if max_tiles is None else min(tile_count, max(1, int(max_tiles)))))
+        indices = _montage_indices(tile_count, max_tiles=max_tiles)
         columns = _default_columns(len(indices)) if columns is None else max(1, int(columns))
         base = _base_record(
             run_id=run_id,
@@ -472,6 +472,20 @@ def _montage_stall_signature(session):
     )
 
 
+def _current_frame_session(win):
+    renderer = getattr(win, "renderer", None)
+    return None if renderer is None else getattr(renderer, "_frame_session", None)
+
+
+def _montage_indices(tile_count: int, *, max_tiles: int | None) -> tuple[int, ...]:
+    tile_count = max(0, int(tile_count))
+    if max_tiles is None or int(max_tiles) >= tile_count:
+        return tuple(range(tile_count))
+    count = min(tile_count, max(1, int(max_tiles)))
+    start = max(0, (tile_count - count) // 2)
+    return tuple(range(start, start + count))
+
+
 def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_grace_s: float = 2.5) -> bool:
     """Pump the loop up to budget_s; return whether the montage settled.
 
@@ -486,7 +500,7 @@ def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_
     last_sig = None
     while perf_counter() < deadline:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-        session = getattr(win, "_montage_session", None)
+        session = _current_frame_session(win)
         if _montage_settled(session):
             return True
         sig = _montage_stall_signature(session)
@@ -780,7 +794,7 @@ def _run_phase(
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
-    phase_session = getattr(win, "_montage_session", None)
+    phase_session = _current_frame_session(win)
     preview_floor_session_id = None if phase_session is None else int(getattr(phase_session, "session_id", -1) or -1)
     preview_floor_count_start = 0 if phase_session is None else int(
         getattr(phase_session, "lod_preview_presentations", 0) or 0
@@ -862,7 +876,7 @@ def _wait_for_montage_complete(
     stalled = False
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
-        session = getattr(win, "_montage_session", None)
+        session = _current_frame_session(win)
         mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
         level_state = _montage_level_presentation_state(win)
         final_level_state = level_state
@@ -1022,21 +1036,18 @@ def _wait_for_montage_complete(
             }
         time.sleep(0.005)
     snapshot = win.collect_runtime_diagnostics()
-    session = getattr(win, "_montage_session", None)
+    session = _current_frame_session(win)
     fan_in = None if session is None else getattr(session, "stage_fan_in", None)
     lifecycle_counts = {}
-    ledger_counts = {}
     active_samples = ()
     if session is not None:
         lifecycle = getattr(session, "lifecycle", None)
         if lifecycle is not None:
-            lifecycle_counts = dict(getattr(lifecycle, "counters", lambda: {})() or {})
-        ledger_snapshot = getattr(session, "tile_ledger_snapshot", lambda: None)()
-        if ledger_snapshot is not None:
-            ledger_counts = dict(getattr(ledger_snapshot, "counts", {}) or {})
+            lifecycle_snapshot = getattr(lifecycle, "snapshot", lambda: None)()
+            lifecycle_counts = dict(getattr(lifecycle_snapshot, "counts", {}) or {})
         samples = []
         for tile_number in tuple(sorted(getattr(session, "active_tile_requests", ()) or ()))[:4]:
-            row = getattr(getattr(session, "tile_ledger", None), "row", lambda _tile: None)(int(tile_number))
+            row = None if lifecycle is None else lifecycle.peek(int(tile_number))
             task_claim = None if row is None else getattr(row, "task_claim", None)
             claim = None if lifecycle is None else lifecycle.evaluation_claim_for(int(tile_number))
             samples.append(
@@ -1087,7 +1098,6 @@ def _wait_for_montage_complete(
         f"level_stale={final_level_state.get('stale_tiles', 0)} "
         f"level_values={final_level_state.get('active_level_value_count', 0)}"
         f" lifecycle={lifecycle_counts}"
-        f" ledger={ledger_counts}"
         f" active_samples={active_samples}"
     )
 
@@ -1095,7 +1105,7 @@ def _wait_for_montage_complete(
 def _montage_level_presentation_state(win) -> dict[str, object]:
     """Return semantic completion for the current level generation."""
 
-    session = getattr(win, "_montage_session", None)
+    session = _current_frame_session(win)
     if session is None:
         return {
             "settled": True,
@@ -1385,7 +1395,7 @@ def _vispy_tile_presentation_draw_count(win) -> int:
 
 
 def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, object]:
-    session = getattr(win, "_montage_session", None)
+    session = _current_frame_session(win)
     if mode is None:
         mode = str(getattr(win.img_view, "montageDisplayMode", lambda: "")())
     if session is None:
