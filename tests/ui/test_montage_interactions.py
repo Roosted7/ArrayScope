@@ -297,17 +297,24 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
     settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", backend)
     settings.sync()
-    data = np.zeros((2, 3, 20), dtype=np.float32)
-    for index in range(data.shape[2]):
-        data[:, :, index] = index
+    source_plane = np.linspace(0.0, 1.0, 384 * 640, dtype=np.float32).reshape(384, 640)
+    data = source_plane[:, :, None] + np.arange(20, dtype=np.float32)[None, None, :]
     win = ArrayScopeWindow(data)
+    win.resize(1200, 820)
+    win.show()
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        qtbot.waitUntil(
+            lambda: (
+                win.img_view.graphicsView.viewport().width() >= 600
+                and win.img_view.graphicsView.viewport().height() >= 400
+            ),
+            timeout=10_000,
+        )
         win._set_view_state(win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":"))
         win.render(reason="test-montage")
         _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(5))
-        win.img_view.getView().setRange(xRange=(0, 2), yRange=(0, 3), padding=0)
+        win.img_view.getView().setRange(xRange=(0, 320), yRange=(0, 384), padding=0)
         qtbot.waitUntil(lambda: win.img_view.viewport_controller.mode.value == "user", timeout=10_000)
         before = win.img_view.getView().viewRange()
 

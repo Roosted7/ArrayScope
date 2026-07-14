@@ -1201,9 +1201,9 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
 
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
-    assert limits["max_free_retargets"] == 24
+    assert limits["max_free_retargets"] == 12
     assert "max_item_free_upserts" not in limits
-    assert limits["pace_resident_retargets"] is False
+    assert limits["pace_resident_retargets"] is True
 
 
 def test_vispy_atomic_source_marker_ignores_lod_but_not_source_index():
