@@ -7,13 +7,20 @@ import json
 from pathlib import Path
 
 
-def verify_trace(path: str | Path) -> dict[str, object]:
-    """Replay lifecycle scope and prove every final target reached exact ack."""
+def verify_trace(path: str | Path, *, expect_targets: int | None = None) -> dict[str, object]:
+    """Replay lifecycle scope and prove every final target reached exact ack.
+
+    ``expect_targets`` guards against vacuous passes: a trace whose lifecycle
+    edges were never emitted (renamed event kind, broken emitter, wrong file)
+    replays as an empty scope and would otherwise verify clean.  Scenario
+    harnesses know their tile count and must pass it.
+    """
 
     targets: dict[int, dict[str, object]] = {}
     acknowledgements: dict[int, dict[str, object]] = {}
     first_ack_sequences: dict[int, int] = {}
     stalls: list[dict[str, object]] = []
+    lifecycle_events = 0
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -25,6 +32,7 @@ def verify_trace(path: str | Path) -> dict[str, object]:
             stalls.append(event)
             continue
         if kind == "lifecycle":
+            lifecycle_events += 1
             edge = str(event.get("edge", ""))
             tile = int(event.get("tile", -1))
             if edge == "target_required":
@@ -62,14 +70,15 @@ def verify_trace(path: str | Path) -> dict[str, object]:
             first_ack_sequences.setdefault(tile, int(event.get("sequence", 0) or 0))
 
     missing = tuple(sorted(set(targets).difference(acknowledgements)))
-    violations = tuple(
+    violations = [
         {
             "invariant": "final_required_target_acknowledged",
             "tile": tile,
             "target": targets[tile],
         }
         for tile in missing
-    ) + tuple(
+    ]
+    violations.extend(
         {
             "invariant": "no_stall_events",
             "session_id": event.get("session_id"),
@@ -77,15 +86,28 @@ def verify_trace(path: str | Path) -> dict[str, object]:
         }
         for event in stalls
     )
+    if event_count == 0:
+        violations.append({"invariant": "trace_not_empty"})
+    elif lifecycle_events == 0:
+        violations.append({"invariant": "lifecycle_events_present"})
+    if expect_targets is not None and len(targets) != int(expect_targets):
+        violations.append(
+            {
+                "invariant": "required_target_count",
+                "expected": int(expect_targets),
+                "observed": len(targets),
+            }
+        )
     return {
         "ok": not violations,
         "event_count": event_count,
+        "lifecycle_events": lifecycle_events,
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(
             tile for tile, _sequence in sorted(first_ack_sequences.items(), key=lambda item: item[1])
         ),
-        "violations": violations,
+        "violations": tuple(violations),
     }
 
 
@@ -94,8 +116,14 @@ def main(argv=None) -> int:
         description="Verify final visible-tile invariants in an ArrayScope trace"
     )
     parser.add_argument("trace")
+    parser.add_argument(
+        "--expect-targets",
+        type=int,
+        default=None,
+        help="Exact final required-target count; guards against vacuously clean traces",
+    )
     args = parser.parse_args(argv)
-    result = verify_trace(args.trace)
+    result = verify_trace(args.trace, expect_targets=args.expect_targets)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if bool(result["ok"]) else 1
 

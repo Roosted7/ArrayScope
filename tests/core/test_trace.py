@@ -126,24 +126,95 @@ def test_trace_verify_rejects_loud_stall_event(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace
 
     path = tmp_path / "trace.jsonl"
-    path.write_text(
-        json.dumps(
-            {
-                "kind": "stall",
-                "session_id": 9,
-                "owner_chain": {"required_unsettled": [4]},
-                "sequence": 1,
-            }
-        )
-        + "\n"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 4,
+            "source_index": 4,
+            "target_level": 0,
+            "sequence": 1,
+        },
+        {
+            "kind": "stall",
+            "session_id": 9,
+            "owner_chain": {"required_unsettled": [4]},
+            "sequence": 2,
+        },
     )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
     result = verify_trace(path)
     assert not result["ok"]
-    assert result["violations"] == (
+    assert {
+        "invariant": "no_stall_events",
+        "session_id": 9,
+        "owner_chain": {"required_unsettled": [4]},
+    } in result["violations"]
+
+
+def test_trace_verify_rejects_empty_and_lifecycle_free_traces(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    result = verify_trace(empty)
+    assert not result["ok"]
+    assert result["violations"][0]["invariant"] == "trace_not_empty"
+
+    no_lifecycle = tmp_path / "no_lifecycle.jsonl"
+    no_lifecycle.write_text(
+        json.dumps({"kind": "backend_ack", "tile": 0, "accepted": True, "sequence": 1}) + "\n"
+    )
+    result = verify_trace(no_lifecycle)
+    assert not result["ok"]
+    assert result["violations"][0]["invariant"] == "lifecycle_events_present"
+
+
+def test_trace_verify_enforces_expected_target_count(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
         {
-            "invariant": "no_stall_events",
-            "session_id": 9,
-            "owner_chain": {"required_unsettled": [4]},
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 1,
+            "source_index": 9,
+            "target_level": 0,
+            "sequence": 1,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 1,
+            "source_index": 9,
+            "level": 0,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 2,
         },
     )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    assert verify_trace(path, expect_targets=1)["ok"]
+
+    mismatched = verify_trace(path, expect_targets=36)
+    assert not mismatched["ok"]
+    assert mismatched["violations"][0]["invariant"] == "required_target_count"
+    assert mismatched["violations"][0]["observed"] == 1
+
+
+def test_trace_latency_reports_finish_outcomes(tmp_path):
+    from arrayscope.tools.trace_latency import analyze_trace_latency
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {"kind": "kernel_finish", "task_seq": 1, "ts_ns": 1, "outcome": "completed"},
+        {"kind": "kernel_finish", "task_seq": 2, "ts_ns": 2, "outcome": "superseded"},
+        {"kind": "kernel_finish", "task_seq": 3, "ts_ns": 3, "outcome": "completed"},
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    summary = analyze_trace_latency(path)
+
+    assert summary["kernel_finish_outcomes"] == {"completed": 2, "superseded": 1}

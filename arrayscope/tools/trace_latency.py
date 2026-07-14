@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from bisect import bisect_left
 from collections import Counter
 from pathlib import Path
 
@@ -51,12 +52,18 @@ def analyze_trace_latency(path: str | Path) -> dict[str, object]:
         if event.get("kind") != "input" or event.get("action") != "phase_start":
             continue
         start_ns = int(event["ts_ns"])
-        first_ack = next((value for value in acknowledgements if value >= start_ns), None)
-        if first_ack is not None:
-            input_to_ack_ms.append((first_ack - start_ns) / 1_000_000.0)
+        index = bisect_left(acknowledgements, start_ns)
+        if index < len(acknowledgements):
+            input_to_ack_ms.append((acknowledgements[index] - start_ns) / 1_000_000.0)
+    outcomes = Counter(
+        str(event.get("outcome", "unknown"))
+        for event in events
+        if event.get("kind") == "kernel_finish"
+    )
     return {
         "event_count": len(events),
         "event_kinds": dict(sorted(counts.items())),
+        "kernel_finish_outcomes": dict(sorted(outcomes.items())),
         "kernel_queue_ms": _distribution(queue_ms),
         "kernel_run_ms": _distribution(run_ms),
         "bridge_drain_ms": _distribution(drains),
