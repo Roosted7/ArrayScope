@@ -1879,7 +1879,6 @@ class FrameSession:
                 if resident_retargets and not pace_resident_retargets
                 else None
             ),
-            max_free=max_free_retargets,
             item_free_fn=(
                 (lambda tile: bool(item_free_upsert_fn(payloads[int(tile)])))
                 if item_free_upsert_fn is not None
