@@ -1266,3 +1266,94 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
         assert (backend, "raw_full_tiled_montage") in phases
         assert (backend, "fft_full_tiled_montage") in phases
     assert jsonl.exists()
+
+
+def test_session_fixture_shape_mismatch_raises_actionable_error(tmp_path):
+    import numpy as np
+    from arrayscope.core.view_session import (
+        loads_session,
+        metadata_for_file,
+        save_session_file,
+        settings_key_for_metadata,
+    )
+    from arrayscope.tools.profile_montage_workflow import (
+        DEFAULT_SESSION_FIXTURE,
+        _install_profile_session_fixture,
+    )
+
+    class _Settings:
+        def fileName(self):
+            return str(tmp_path / "settings" / "profile.conf")
+
+        def setValue(self, key, value):
+            pass
+
+        def sync(self):
+            pass
+
+    with pytest.raises(ValueError) as excinfo:
+        _install_profile_session_fixture(
+            None,
+            data_path=Path("small.npy"),
+            data=np.zeros((64, 64, 12), dtype=np.float32),
+            session_fixture=DEFAULT_SESSION_FIXTURE,
+            settings=_Settings(),
+            loads_session=loads_session,
+            metadata_for_file=metadata_for_file,
+            save_session_file=save_session_file,
+            settings_key_for_metadata=settings_key_for_metadata,
+        )
+
+    message = str(excinfo.value)
+    assert "does not fit dataset shape" in message
+    assert "--session-fixture ''" in message
+
+
+def test_post_visible_gate_blockers_names_stuck_completion_gates():
+    from arrayscope.tools.profile_montage_workflow import _post_visible_gate_blockers
+
+    # Progress states never report blockers.
+    assert not _post_visible_gate_blockers(
+        fully_visible=False,
+        requested_grid_visible=False,
+        physical_drawn=False,
+        presentation_ready=False,
+        work_in_flight=False,
+        dirty_payloads=False,
+    )
+    assert not _post_visible_gate_blockers(
+        fully_visible=True,
+        requested_grid_visible=True,
+        physical_drawn=False,
+        presentation_ready=True,
+        work_in_flight=True,
+        dirty_payloads=False,
+    )
+    assert not _post_visible_gate_blockers(
+        fully_visible=True,
+        requested_grid_visible=True,
+        physical_drawn=False,
+        presentation_ready=True,
+        work_in_flight=False,
+        dirty_payloads=True,
+    )
+
+    # A visible frame with nothing in flight names exactly the stuck gates.
+    assert _post_visible_gate_blockers(
+        fully_visible=True,
+        requested_grid_visible=True,
+        physical_drawn=False,
+        presentation_ready=False,
+        work_in_flight=False,
+        dirty_payloads=False,
+    ) == ("physical_drawn", "presentation_settled")
+
+    # A fully unblocked frame reports nothing (the loop returns success).
+    assert not _post_visible_gate_blockers(
+        fully_visible=True,
+        requested_grid_visible=True,
+        physical_drawn=True,
+        presentation_ready=True,
+        work_in_flight=False,
+        dirty_payloads=False,
+    )

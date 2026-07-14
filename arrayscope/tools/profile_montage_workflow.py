@@ -2918,6 +2918,38 @@ def _levels_histogram_state(win) -> dict[str, object]:
     }
 
 
+def _post_visible_gate_blockers(
+    *,
+    fully_visible: bool,
+    requested_grid_visible: bool,
+    physical_drawn: bool,
+    presentation_ready: bool,
+    work_in_flight: bool,
+    dirty_payloads: bool,
+) -> tuple[str, ...]:
+    """Name the completion gates a fully visible montage is still blocked on.
+
+    Returns () while the montage is not yet fully visible, while real work is
+    in flight, or while commit batches are still draining — those states are
+    progress, not a stall.  A non-empty result that persists means the frame
+    looks done but a completion gate can never close (e.g. the presentation
+    layer re-committing forever, or level settlement deadlocked with an
+    exhausted evidence tracker): the wait must bail with this diagnosis
+    instead of burning the full phase timeout.
+    """
+
+    if not fully_visible or work_in_flight or dirty_payloads:
+        return ()
+    blockers = []
+    if not requested_grid_visible:
+        blockers.append("requested_grid_visible")
+    if not physical_drawn:
+        blockers.append("physical_drawn")
+    if not presentation_ready:
+        blockers.append("presentation_settled")
+    return tuple(blockers)
+
+
 def _wait_for_montage_complete(
     app,
     QtCore,
@@ -2965,6 +2997,8 @@ def _wait_for_montage_complete(
     stall_last_sig = None
     stall_grace_s = 4.0
     stalled = False
+    post_visible_since = None
+    post_visible_blockers: tuple[str, ...] = ()
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_frame_session", None)
@@ -3226,6 +3260,23 @@ def _wait_for_montage_complete(
                 "vispy_tile_presentation_draw_count": _vispy_tile_presentation_draw_count(win),
                 "waited_for_vispy_draw_after_complete": bool(vispy_tiled),
             }
+        blockers = _post_visible_gate_blockers(
+            fully_visible=fully_visible,
+            requested_grid_visible=requested_grid_visible,
+            physical_drawn=physical_drawn,
+            presentation_ready=presentation_ready,
+            work_in_flight=_montage_work_in_flight(session),
+            dirty_payloads=bool(getattr(session, "dirty_payloads", None)),
+        )
+        if blockers:
+            if post_visible_since is None:
+                post_visible_since = time.monotonic()
+            elif time.monotonic() - post_visible_since >= stall_grace_s:
+                stalled = True
+                post_visible_blockers = blockers
+                break
+        else:
+            post_visible_since = None
         time.sleep(0.005)
     snapshot = win.collect_runtime_diagnostics()
     presentation_diagnostics = getattr(win.img_view, "presentation_diagnostics", lambda: {})()
@@ -3262,11 +3313,18 @@ def _wait_for_montage_complete(
                 }
             )
         active_samples = tuple(samples)
-    _stall_prefix = (
-        f"STALL GUARD: montage frozen (no work in flight) after {stall_grace_s:.1f}s: "
-        if stalled
-        else "timed out waiting for montage completion: "
-    )
+    if post_visible_blockers:
+        _stall_prefix = (
+            "STALL GUARD: montage fully visible but completion gates "
+            f"{list(post_visible_blockers)} stayed blocked with no work in "
+            f"flight for {stall_grace_s:.1f}s: "
+        )
+    elif stalled:
+        _stall_prefix = (
+            f"STALL GUARD: montage frozen (no work in flight) after {stall_grace_s:.1f}s: "
+        )
+    else:
+        _stall_prefix = "timed out waiting for montage completion: "
     raise TimeoutError(
         _stall_prefix
         + f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
@@ -3885,7 +3943,16 @@ def _install_profile_session_fixture(
     path = Path(session_fixture)
     if not path.exists():
         raise FileNotFoundError(f"profile session fixture not found: {path}")
-    template = loads_session(path.read_text(encoding="utf-8"), np.shape(data))
+    try:
+        template = loads_session(path.read_text(encoding="utf-8"), np.shape(data))
+    except ValueError as exc:
+        raise ValueError(
+            f"profile session fixture {path} does not fit dataset shape "
+            f"{np.shape(data)} ({exc}). The checked-in fixture pins the "
+            "canonical 336x336x272 dataset's view (montage window 106:166). "
+            "For other datasets pass --session-fixture '' to disable the "
+            "restore, or provide a fixture saved from a compatible session."
+        ) from exc
     metadata = metadata_for_file(data_path, data=data)
     session = replace(template, metadata=metadata)
     config_dir = Path(settings.fileName()).parent
