@@ -361,6 +361,7 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
         pending_removals=set(),
         flush_pending=False,
         final_commit_pending=False,
+        required_target_settled=lambda: True,
         visible_plan_complete=lambda: True,
     )
     win = Window(session)
@@ -794,7 +795,7 @@ def test_vispy_first_pass_level_metadata_publishes_on_rough_coverage_growth():
     assert Window()._should_publish_montage_level_metadata(session, stats) is False
 
 
-def test_first_pass_rough_evidence_completion_uses_physical_onscreen_scope():
+def test_first_pass_rough_evidence_completion_uses_required_scope():
     from arrayscope.render.level_stats import LevelStatsService
 
     tiles = tuple(
@@ -809,10 +810,10 @@ def test_first_pass_rough_evidence_completion_uses_physical_onscreen_scope():
     )
     session = SimpleNamespace(
         shader_display=True,
-        level_key=("levels", "onscreen-first-pass"),
+        level_key=("levels", "required-first-pass"),
         plan=SimpleNamespace(tiles=tiles),
         first_pass_pixels_presented=lambda: True,
-        onscreen_tile_numbers=lambda: (0, 1),
+        required_tile_numbers=lambda: (0, 1),
     )
 
     assert LevelStatsService._first_pass_level_evidence_complete(service, session)

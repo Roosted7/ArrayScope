@@ -665,22 +665,16 @@ class FrameSession:
                 self.dirty_payloads[int(tile_number)] = None
         return tuple(rearmed)
 
-    def onscreen_tile_numbers(self) -> tuple[int, ...]:
-        """Canonical physical viewport set; coverage remains a separate ring."""
+    def required_tile_numbers(self) -> tuple[int, ...]:
+        """The one set that admission, evidence, and completion must render."""
 
-        active = tuple(
-            int(tile)
-            for tile in tuple(getattr(getattr(self, "frame_plan", None), "active_region_ids", ()) or ())
-        )
-        if active:
-            return tuple(dict.fromkeys(active))
         return tuple(sorted(int(tile) for tile in self.visible_tile_numbers))
 
-    def onscreen_target_unsettled_tiles(self) -> tuple[int, ...]:
-        return self.lifecycle.target_unsettled_tiles(self.onscreen_tile_numbers())
+    def required_target_unsettled_tiles(self) -> tuple[int, ...]:
+        return self.lifecycle.target_unsettled_tiles(self.required_tile_numbers())
 
-    def onscreen_target_settled(self) -> bool:
-        return not self.onscreen_target_unsettled_tiles()
+    def required_target_settled(self) -> bool:
+        return not self.required_target_unsettled_tiles()
 
     def note_first_pass_quality(self, quality: str) -> bool:
         """Latch the one display quality allowed to contribute rough evidence."""
@@ -709,14 +703,14 @@ class FrameSession:
         )
 
     def first_pass_pixels_presented(self) -> bool:
-        """Whether every physical onscreen target is acknowledged at the latched quality."""
+        """Whether every required target is acknowledged at the latched quality."""
 
         quality = self.first_pass_quality
         plan_tiles = {
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(tuple(getattr(self.plan, "tiles", ()) or ()))
         }
-        tile_numbers = tuple(self.onscreen_tile_numbers())
+        tile_numbers = tuple(self.required_tile_numbers())
         if quality is None or not tile_numbers:
             return False
         for tile_number in tile_numbers:
@@ -2694,9 +2688,9 @@ class FrameSession:
             for tile, payload in upserts.items()
             if int(tile) in active_set
         }
-        onscreen = set(self.onscreen_tile_numbers())
-        onscreen_unsettled = set(self.lifecycle.target_unsettled_tiles(onscreen))
-        if self.display_committed and onscreen_unsettled:
+        required = set(self.required_tile_numbers())
+        required_unsettled = set(self.lifecycle.target_unsettled_tiles(required))
+        if self.display_committed and required_unsettled:
             # Coverage-ring payloads remain drawn/retained, but they may not
             # consume a backend transaction while an actual on-screen target
             # is unfinished. Otherwise a small zoom target shared an 8-item
@@ -2705,14 +2699,14 @@ class FrameSession:
             all_candidate_upserts = {
                 int(tile): payload
                 for tile, payload in all_candidate_upserts.items()
-                if int(tile) in onscreen
+                if int(tile) in required
             }
             cold_upserts = {
                 int(tile): payload
                 for tile, payload in cold_upserts.items()
-                if int(tile) in onscreen
+                if int(tile) in required
             }
-            resident_retarget_tiles.intersection_update(onscreen)
+            resident_retarget_tiles.intersection_update(required)
         coverage_upserts = {
             int(tile): payload
             for tile, payload in all_candidate_upserts.items()
@@ -3427,7 +3421,7 @@ class FrameSession:
     def visible_plan_complete(self) -> bool:
         if self.has_stale_level_presentations():
             return False
-        return self.onscreen_target_settled()
+        return self.required_target_settled()
 
     def visible_first_pixels_presented(self) -> bool:
         return self.lifecycle.visible_first_pixels_presented()

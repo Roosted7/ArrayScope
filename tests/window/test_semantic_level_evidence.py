@@ -105,7 +105,7 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     target = session.semantic_level_evidence_target
     progress = session.semantic_level_evidence_progress
 
-    assert session.onscreen_tile_numbers() == (0,)
+    assert session.required_tile_numbers() == (0,)
     assert tuple(tile.montage_index for tile in session.visible_tiles) == (0,)
     assert session.lifecycle.snapshot().visible_tiles == 1
     assert summary.rank == LevelSourceRank.MONTAGE_SAMPLED_FULL

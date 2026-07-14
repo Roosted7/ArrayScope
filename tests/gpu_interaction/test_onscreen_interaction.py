@@ -17,6 +17,114 @@ pytestmark = pytest.mark.gpu_interaction
 MAX_INTERACTION_GAP_MS = 50.0
 
 
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
+    backend, tmp_path
+):
+    """V1: a tile touching the viewport boundary remains a render obligation."""
+
+    import numpy as np
+
+    from arrayscope.app.qt_binding import prefer_pyside6
+    from arrayscope.core.trace import close_trace, configure_trace
+    from arrayscope.tools.trace_verify import verify_trace
+
+    prefer_pyside6()
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.launch import _create_window
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from tests.gpu_interaction.conftest import Harness, TILE
+
+    trace_path = tmp_path / f"v1-boundary-{backend}.trace.jsonl"
+    app = pg.mkQApp()
+    app.setOrganizationName("ArrayScope")
+    app.setApplicationName("ArrayScope")
+    settings = QtCore.QSettings()
+    previous_backend = settings.value("image_rendering_backend")
+    settings.setValue("image_rendering_backend", backend)
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+    configure_trace(trace_path)
+
+    count = 37
+    frames = np.repeat(np.arange(count, dtype=np.float32), TILE * TILE)
+    data = frames.reshape(count, TILE, TILE).transpose(1, 2, 0).copy()
+    app, win = _create_window(data, title=f"gpu-harness-v1-{backend}")
+    try:
+        if image_view_backend_capabilities(win.img_view).name != backend:
+            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        h = Harness(app, win)
+        initial = tuple(range(36))
+        shifted = tuple(range(1, 37))
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2, columns=6, indices=initial, text="0:36"
+            )
+        )
+        win.render(reason="gpu-harness-v1-initial")
+        assert h.wait_settled(timeout=20.0)
+        win.img_view.setLevels(0.0, 36.0)
+        assert h.wait_settled(timeout=20.0)
+
+        tiles = h.session.plan.tiles
+        boundary_tile = tiles[5]
+        height, width = h.session.plan.display_shape
+        view = win.img_view.getView()
+        view.setRange(
+            xRange=(0.0, float(boundary_tile.x0)),
+            yRange=(0.0, float(height)),
+            padding=0,
+        )
+        assert h.wait_settled(timeout=20.0)
+        assert int(boundary_tile.montage_index) in h.session.required_tile_numbers()
+
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2, columns=6, indices=shifted, text="1:37"
+            )
+        )
+        win.render(reason="gpu-harness-v1-one-index-boundary")
+        assert h.wait_settled(timeout=20.0)
+        assert h.session.required_target_settled()
+        assert not h.session.required_target_unsettled_tiles()
+        assert not (
+            h.session.lifecycle.parked_tiles
+            & set(h.session.required_tile_numbers())
+        )
+        boundary_row = h.session.lifecycle.row(int(boundary_tile.montage_index))
+        assert boundary_row.target_settled
+
+        # Revealing the boundary column must require no new materialization:
+        # its exact pixels were already an obligation at the landing edge.
+        view.setRange(
+            xRange=(0.0, float(width)),
+            yRange=(0.0, float(height)),
+            padding=0,
+        )
+        app.processEvents()
+        means = h.tile_means()
+        expected = [255.0 * value / 36.0 for value in shifted]
+        assert all(means[index] > means[index - 1] + 1.0 for index in range(1, 36)), means
+        assert max(abs(actual - wanted) for actual, wanted in zip(means, expected)) <= 12.0, means
+        h.assert_lifecycle_settled()
+    finally:
+        win.close()
+        for _ in range(50):
+            app.processEvents()
+        close_trace()
+        if previous_backend is None:
+            settings.remove("image_rendering_backend")
+        else:
+            settings.setValue("image_rendering_backend", previous_backend)
+        settings.sync()
+
+    verification = verify_trace(trace_path)
+    assert verification["ok"], verification
+    assert verification["required_targets"] == 36
+
+
 def test_montage_presents_every_tile_with_its_own_content(montage_window):
     h = montage_window
     h.fit_view()

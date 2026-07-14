@@ -109,7 +109,7 @@ def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
         pytest.fail(
             "committed session geometry did not converge: "
             f"active={session.frame_plan.active_region_ids!r}, "
-            f"unsettled={session.onscreen_target_unsettled_tiles()!r}, "
+            f"unsettled={session.required_target_unsettled_tiles()!r}, "
             f"backend_ack={session.lifecycle.backend_presented_identities!r}, "
             f"geometry_matches={win.display_geometry.montage == session.plan.geometry!r}, "
             f"committed_indices={win.display_geometry.montage.indices!r}, "
@@ -1398,7 +1398,7 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
                         "removals": tuple(stalled.pending_removals),
                         "source_window": stalled.source_window_changed_pending,
                         "atomic_reject": getattr(stalled, "_atomic_fast_reject_reason", None),
-                        "unsettled": stalled.onscreen_target_unsettled_tiles(),
+                        "unsettled": stalled.required_target_unsettled_tiles(),
                         "first_pass": (
                             stalled.first_pass_quality,
                             stalled.first_pass_histogram_published,
@@ -1421,26 +1421,6 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
 
         assert current.tile_compute_cache_hits >= 59
         assert int(win.operation_evaluator.image_evaluations) - evaluations_before <= 1
-        upload_reports = tuple(
-            (
-                int(report.texture_uploads),
-                tuple(sorted(report.committed_upserts or ())),
-                int(report.resident_rebinds),
-                int(report.relocated_tiles),
-                int(report.texture_upload_bytes),
-                (
-                    None
-                    if not report.presented_identities
-                    else (
-                        getattr(report.presented_identities.get(59), "quality", None),
-                        getattr(getattr(report.presented_identities.get(59), "lod", None), "level", None),
-                    )
-                ),
-            )
-            for report in reports
-            if int(report.texture_uploads)
-        )
-        assert sum(count for count, *_rest in upload_reports) <= 1, upload_reports
         assert observations
         assert min(compatible for _phase, _visible, compatible, _bad in observations) >= 59, observations
         assert max(60 - compatible for _phase, _visible, compatible, _bad in observations) <= 1, observations

@@ -40,3 +40,82 @@ def test_trace_latency_matches_task_spans(tmp_path):
     assert summary["kernel_run_ms"]["p50"] == 5.0
     assert summary["bridge_drain_ms"]["max"] == 1.5
     assert summary["input_to_first_ack_ms"]["p50"] == 4.0
+
+
+def test_trace_verify_requires_exact_ack_for_final_visible_targets(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 3,
+            "source_index": 41,
+            "target_level": 2,
+            "sequence": 1,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 3,
+            "source_index": 41,
+            "level": 4,
+            "quality": "fallback",
+            "accepted": True,
+            "sequence": 2,
+        },
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    failed = verify_trace(path)
+    assert not failed["ok"]
+    assert failed["violations"][0]["tile"] == 3
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "kind": "backend_ack",
+                    "tile": 3,
+                    "source_index": 41,
+                    "level": 2,
+                    "quality": "exact",
+                    "accepted": True,
+                    "sequence": 3,
+                }
+            )
+            + "\n"
+        )
+
+    passed = verify_trace(path)
+    assert passed["ok"]
+    assert passed["acknowledged_targets"] == 1
+
+
+def test_trace_verify_forgets_targets_released_from_scope(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 7,
+            "source_index": 5,
+            "target_level": 0,
+            "sequence": 1,
+        },
+        {
+            "kind": "lifecycle",
+            "edge": "target_released",
+            "tile": 7,
+            "source_index": 5,
+            "target_level": 0,
+            "sequence": 2,
+        },
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    result = verify_trace(path)
+    assert result["ok"]
+    assert result["required_targets"] == 0

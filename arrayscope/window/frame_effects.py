@@ -2354,12 +2354,10 @@ class FramePipelineEffects:
         session = self.session
         from arrayscope.window.frame_runtime import _interactive_active
 
-        onscreen_settled = getattr(session, "onscreen_target_settled", None)
-        pixels_settled = (
-            bool(onscreen_settled())
-            if callable(onscreen_settled)
-            else bool(session.visible_plan_complete())
-        )
+        required_settled = getattr(session, "required_target_settled", None)
+        if not callable(required_settled):
+            raise RuntimeError("live frame session has no required-tile owner")
+        pixels_settled = bool(required_settled())
         return bool(
             self._session_is_current()
             and not _interactive_active(self.renderer)

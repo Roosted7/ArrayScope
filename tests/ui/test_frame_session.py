@@ -80,9 +80,11 @@ def test_montage_render_session_returns_pending_tiles_in_order():
     assert session.next_tile().source_index == 1
 
 
-def test_first_pass_physical_completion_is_scoped_to_onscreen_targets():
+def test_first_pass_physical_completion_uses_required_tiles():
     session = _session()
-    session.frame_plan = SimpleNamespace(active_region_ids=(0, 1))
+    session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
+    session.visible_tile_numbers = frozenset({0, 1})
+    session.sync_lifecycle_scope()
     session.first_pass_quality = "exact"
     _present_exact_tiles(session, 0, 1)
 
@@ -595,7 +597,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     assert session.visible_plan_complete()
 
 
-def test_montage_render_session_visible_plan_is_gated_by_onscreen_not_coverage_ring():
+def test_montage_render_session_uses_one_required_set_despite_frame_plan_drift():
     session = _session()
     session.pending_tiles.clear()
     session.loading_tiles.clear()
@@ -618,8 +620,13 @@ def test_montage_render_session_visible_plan_is_gated_by_onscreen_not_coverage_r
     assert session.frame_plan.active_region_ids == (0,)
     _present_exact_tiles(session, 0)
 
-    assert session.onscreen_target_settled()
-    assert not session.lifecycle.visible_target_settled()
+    assert session.required_tile_numbers() == (0, 1)
+    assert not session.required_target_settled()
+    assert not session.visible_plan_complete()
+
+    _present_exact_tiles(session, 1)
+
+    assert session.required_target_settled()
     assert session.visible_plan_complete()
 
 

@@ -93,7 +93,7 @@ class Harness:
 
     @property
     def session(self):
-        return self.win.renderer._montage_session
+        return self.win.renderer._frame_session
 
     @property
     def lifecycle(self):
@@ -101,16 +101,7 @@ class Harness:
 
     def settled(self) -> bool:
         s = self.session
-        if s is None:
-            return False
-        return (
-            not s.loading_tiles
-            and not len(s.pending_tiles)
-            and not s.flush_pending
-            and not s.final_commit_pending
-            and not s.lifecycle.evaluating_tiles
-            and len(s.lifecycle.presented_tiles) >= len(s.plan.tiles)
-        )
+        return bool(s is not None and s.visible_plan_complete())
 
     def assert_lifecycle_settled(self) -> None:
         s = self.session

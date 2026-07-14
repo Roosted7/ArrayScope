@@ -436,6 +436,7 @@ class TileLifecycle:
             rec.failed_reason = ""
             rec.task_claim = None
             rec.stage_producer_key = None
+            _trace_lifecycle(rec, "target_required")
             if previous_source is not None and previous_source != target.source_index:
                 # A slot may be retargeted hundreds of times during a fast
                 # montage scrub.  Presentable payloads are first-pixel
@@ -471,6 +472,7 @@ class TileLifecycle:
             )
             rec.task_claim = None
             rec.stage_producer_key = None
+            _trace_lifecycle(rec, "target_released")
 
     def fallback_ready(self, tile_number: int, payload: TilePayloadRef | object) -> None:
         ref = _coerce_payload_ref(payload)

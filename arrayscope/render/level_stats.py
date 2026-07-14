@@ -352,8 +352,10 @@ class LevelStatsService:
                 tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
             )
         }
-        onscreen = getattr(session, "onscreen_tile_numbers", None)
-        tile_numbers = tuple(onscreen()) if callable(onscreen) else tuple(plan_tiles)
+        required = getattr(session, "required_tile_numbers", None)
+        if not callable(required):
+            raise RuntimeError("live frame session has no required-tile owner")
+        tile_numbers = tuple(required())
         expected = {
             int(plan_tiles[int(tile_number)].source_index)
             for tile_number in tile_numbers
@@ -1447,11 +1449,10 @@ class LevelStatsService:
 def _montage_side_work_visible_settled(renderer, session) -> bool:
     kernel = getattr(getattr(renderer, "win", None), "kernel", None)
     pixels_settled = False
-    lifecycle = getattr(session, "lifecycle", None)
-    if lifecycle is not None and hasattr(lifecycle, "visible_target_settled"):
-        pixels_settled = bool(lifecycle.visible_target_settled())
-    else:
-        pixels_settled = bool(getattr(session, "visible_plan_complete", lambda: False)())
+    required_settled = getattr(session, "required_target_settled", None)
+    if not callable(required_settled):
+        raise RuntimeError("live frame session has no required-tile owner")
+    pixels_settled = bool(required_settled())
     return bool(
         kernel is not None
         and int(getattr(kernel, "visible_backlog", 0) or 0) <= 0

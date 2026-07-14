@@ -159,6 +159,36 @@ acceptance.
 > call the branch broadly green until the remaining live-owner/timing tests
 > are migrated or fixed by the queue steps.
 
+> **[Codex 2026-07-14 — V1 complete; required-tile owner and real-pixel
+> gate]** Replaced the drifted onscreen/admission/completion/evidence scopes
+> with `FrameSession.required_tile_numbers()`: ladder admission, first-pass
+> evidence, semantic side-work, presentation batching, and
+> `visible_plan_complete()` now consume that one set. Pixel-center viewport
+> intersection includes a tile whose edge lands exactly on the view boundary.
+> The new GPU-harness scenario renders 36 constant-value tiles, lands the
+> sixth column exactly on the boundary, shifts `0:36` to `1:37`, and then
+> reveals that column. On real Wayland, both PyQtGraph and VisPy presented the
+> strictly increasing analytic gray ramp (within 12 gray levels), with all
+> 36 required targets exact, no required tile parked, and no black tile.
+> Schema-v1 lifecycle retarget/release edges let `trace_verify` replay the
+> final scope: PyQtGraph was clean at 2,226 events / 36 acknowledgements and
+> VisPy at 2,994 / 36. Focused model/UI coverage is 214 passed.
+>
+> **[Codex 2026-07-14 — V1 rejected predicates / recurrence note]** The
+> first real-harness run never reached its own `settled()` even though the
+> live frame had converged: the harness still read deleted
+> `renderer._montage_session` and independently reconstructed completion from
+> six queues plus total plan length. Both were deleted in favor of the live
+> `_frame_session.visible_plan_complete()` owner. Do not restore that second
+> completion model. The old one-index VisPy test also required at most one
+> texture upload; VisPy correctly used one 4-byte fallback followed by one
+> 192-byte exact upload while maintaining compatible pixels throughout. That
+> implementation-count assertion was removed, while its physical-identity,
+> semantic value, ROI, hover, cache-reuse, and no-black assertions remain.
+> A one-off PyQtGraph workflow-profile timeout with all 272 identities already
+> current did not reproduce at a 20-second timeout and caused no runtime
+> change. V3 remains responsible for making any real stranded draw loud.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

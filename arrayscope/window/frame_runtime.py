@@ -186,17 +186,12 @@ class FrameRuntimeMixin:
 
     def _lod_admission_scope(self, session, intent: RenderIntent) -> LodAdmissionScope:
         frame_plan = getattr(session, "frame_plan", None)
-        onscreen_tiles = getattr(session, "onscreen_tile_numbers", None)
-        visible_source = (
-            tuple(onscreen_tiles())
-            if bool(getattr(session, "display_committed", False)) and callable(onscreen_tiles)
-            else tuple(getattr(session, "visible_tile_numbers", ()) or ())
-        )
-        visible = frozenset(int(tile) for tile in visible_source)
-        # Session visibility intentionally retains a coverage ring so camera
-        # motion never reveals black edges. It is not visible admission:
-        # FramePlan.active is the canonical on-screen set, while coverage and
-        # near tiles remain lower-priority retained/speculative work.
+        required_tiles = getattr(session, "required_tile_numbers", None)
+        if not callable(required_tiles):
+            raise RuntimeError("live frame session has no required-tile owner")
+        visible = frozenset(int(tile) for tile in required_tiles())
+        # Coverage and near tiles remain lower-priority retained/speculative
+        # work. They never redefine the required set above.
         coverage = set(
             int(tile)
             for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())

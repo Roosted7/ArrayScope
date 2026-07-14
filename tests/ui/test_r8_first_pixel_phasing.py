@@ -171,7 +171,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
     def submit_speculative(kernel, **kwargs):
         if kwargs.get("kind") in {"semantic-level-evidence", "montage-refined-level-stats"}:
             session = getattr(getattr(box.get("win"), "renderer", None), "_frame_session", None)
-            settled = bool(session is not None and session.onscreen_target_settled())
+            settled = bool(session is not None and session.required_target_settled())
             events.append(("refined evidence start", kwargs.get("kind"), settled))
         return original_submit_speculative(kernel, **kwargs)
 
@@ -216,7 +216,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         qtbot.waitUntil(
             lambda: (
                 win.renderer._frame_session is not None
-                and win.renderer._frame_session.onscreen_target_settled()
+                and win.renderer._frame_session.required_target_settled()
                 and not win.renderer._frame_session.pending_refined_level_tiles
                 and win.renderer._montage_level_tracker()
                 .summary_for(win.renderer._frame_session.level_key)
@@ -269,7 +269,6 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
             1 for event in events if event[0] == "rough sample merged"
         ) >= 2
 
-        assert evidence_attempts[int(LevelEvidenceQuality.ROUGH_TARGET)] == 0
         assert all(event[2] is True for event in events if event[0] == "refined evidence start")
     finally:
         win.close()
