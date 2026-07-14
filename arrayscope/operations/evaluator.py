@@ -55,6 +55,47 @@ class EvaluationResult:
     compute_path: str = "direct"
 
 
+@dataclass(frozen=True)
+class LevelEvidenceSourceResult:
+    """Statistics-only result for one semantic montage source."""
+
+    source_index: int
+    stats: object | None
+    sampled_pixels: int
+    slab_shape: tuple[int, ...]
+    slab_nbytes: int
+    region_plan: object | None = None
+
+
+@dataclass(frozen=True)
+class LevelEvidenceBatchResult:
+    """Bounded evidence result with no display or presentation payloads."""
+
+    sources: tuple[LevelEvidenceSourceResult, ...]
+    pixel_limit: int
+    elapsed_ms: float
+
+    @property
+    def source_indices(self) -> tuple[int, ...]:
+        return tuple(int(source.source_index) for source in self.sources)
+
+    @property
+    def source_count(self) -> int:
+        return len(self.sources)
+
+    @property
+    def requested_pixels(self) -> int:
+        return sum(int(source.sampled_pixels) for source in self.sources)
+
+    @property
+    def max_source_pixels(self) -> int:
+        return max((int(source.sampled_pixels) for source in self.sources), default=0)
+
+    @property
+    def slab_nbytes(self) -> int:
+        return sum(int(source.slab_nbytes) for source in self.sources)
+
+
 @dataclass
 class OperationEvaluator:
     document: ArrayDocument
@@ -449,6 +490,28 @@ class OperationEvaluator:
             evaluation_context=evaluation_context,
         )
 
+    def level_evidence(
+        self,
+        view_state,
+        source_indices,
+        *,
+        pixel_limit: int,
+        cancellation_token=None,
+        evaluation_context=None,
+        document=None,
+    ) -> LevelEvidenceBatchResult:
+        document = self.document if document is None else document
+        return evaluate_level_evidence_snapshot(
+            document,
+            view_state,
+            source_indices,
+            pixel_limit=int(pixel_limit),
+            cancellation_token=cancellation_token,
+            stage_cache=self._stage_cache,
+            stage_document_key=stage_document_key(document),
+            evaluation_context=evaluation_context,
+        )
+
     def store_display_tile_result(self, view_state, colormap_lut, result: EvaluationResult, *, document=None, shader_display: bool = False):
         key = self.display_tile_key(
             view_state,
@@ -801,6 +864,67 @@ def evaluate_image_snapshot(
     )
 
 
+def evaluate_level_evidence_snapshot(
+    document,
+    view_state,
+    source_indices,
+    *,
+    pixel_limit: int,
+    cancellation_token=None,
+    stage_cache=None,
+    stage_document_key=None,
+    evaluation_context=None,
+) -> LevelEvidenceBatchResult:
+    """Evaluate bounded semantic level evidence without display construction.
+
+    Each source is requested through the normal slab planner.  Raw documents
+    therefore read only the sparse image sample, while operation-backed
+    documents retain their declared region expansion and can reuse the normal
+    stage cache when an operation couples the montage axis.
+    """
+
+    montage_axis = getattr(view_state, "montage_axis", None)
+    if montage_axis is None:
+        raise ValueError("montage_axis must be set for semantic level evidence")
+    pixel_limit = max(1, int(pixel_limit))
+    sources = tuple(int(source) for source in source_indices)
+    start = perf_counter()
+    results = []
+    for source_index in sources:
+        _check_cancelled(cancellation_token)
+        tile_state = view_state.tile_state_for_slice(int(montage_axis), int(source_index))
+        sample_state = _bounded_level_evidence_state(tile_state, pixel_limit=pixel_limit)
+        request = request_for_image(sample_state)
+        plan = plan_slab(document, request)
+        slab = evaluate_slab_from_plan(
+            document,
+            request,
+            plan,
+            stage_cache=stage_cache,
+            document_key=stage_document_key,
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+        )
+        _check_cancelled(cancellation_token)
+        values = _semantic_level_values(np.asarray(slab), sample_state)
+        stats = sample_tile_level_stats(values, int(source_index), refined=True)
+        results.append(
+            LevelEvidenceSourceResult(
+                source_index=int(source_index),
+                stats=stats,
+                sampled_pixels=int(np.asarray(values).size),
+                slab_shape=tuple(int(size) for size in np.shape(slab)),
+                slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
+                region_plan=plan.region_plan,
+            )
+        )
+    return LevelEvidenceBatchResult(
+        sources=tuple(results),
+        pixel_limit=pixel_limit,
+        elapsed_ms=(perf_counter() - start) * 1000.0,
+    )
+
+
 def evaluate_line_snapshot(document, view_state, *, stage_cache=None, stage_document_key=None, cancellation_token=None, evaluation_context=None) -> EvaluationResult:
     request = request_for_line(view_state)
     plan = plan_slab(document, request)
@@ -885,6 +1009,82 @@ def evaluate_export_frame_snapshot(
         slab_nbytes=int(getattr(slab, "nbytes", plan.estimated_nbytes or 0)),
         region_plan=plan.region_plan,
     )
+
+
+def _bounded_level_evidence_state(view_state, *, pixel_limit: int):
+    """Return a tile state whose image-axis cross product is pixel bounded."""
+
+    image_axes = tuple(int(axis) for axis in (getattr(view_state, "image_axes", None) or ()))
+    if len(image_axes) != 2:
+        raise ValueError("semantic montage evidence requires exactly two image axes")
+    first_axis, second_axis = image_axes
+    first_pool = _level_evidence_axis_pool(view_state, first_axis)
+    second_pool = _level_evidence_axis_pool(view_state, second_axis)
+    first_count, second_count = _bounded_grid_shape(
+        len(first_pool),
+        len(second_pool),
+        limit=max(1, int(pixel_limit)),
+    )
+    state = view_state.with_axis_range(
+        first_axis,
+        _even_pool_sample(first_pool, first_count),
+        text="semantic-level-evidence",
+    )
+    return state.with_axis_range(
+        second_axis,
+        _even_pool_sample(second_pool, second_count),
+        text="semantic-level-evidence",
+    )
+
+
+def _level_evidence_axis_pool(view_state, axis: int) -> tuple[int, ...]:
+    existing = tuple(getattr(view_state, "axis_range_indices", ()) or ())
+    selected = existing[int(axis)] if int(axis) < len(existing) else None
+    if selected is not None:
+        return tuple(int(index) for index in selected)
+    shape = tuple(int(size) for size in getattr(view_state, "shape", ()))
+    return tuple(range(int(shape[int(axis)])))
+
+
+def _bounded_grid_shape(first_size: int, second_size: int, *, limit: int) -> tuple[int, int]:
+    first_size = max(1, int(first_size))
+    second_size = max(1, int(second_size))
+    limit = max(1, int(limit))
+    if first_size * second_size <= limit:
+        return first_size, second_size
+    first_count = max(
+        1,
+        min(first_size, int(np.sqrt(float(limit) * float(first_size) / float(second_size)))),
+    )
+    second_count = max(1, min(second_size, limit // first_count))
+    while first_count < first_size and (first_count + 1) * second_count <= limit:
+        first_count += 1
+    while second_count < second_size and first_count * (second_count + 1) <= limit:
+        second_count += 1
+    return int(first_count), int(second_count)
+
+
+def _even_pool_sample(pool: tuple[int, ...], count: int) -> tuple[int, ...]:
+    if not pool:
+        return ()
+    count = max(1, min(int(count), len(pool)))
+    if count == len(pool):
+        return tuple(int(index) for index in pool)
+    offsets = np.linspace(0, len(pool) - 1, count, dtype=np.int64)
+    return tuple(int(pool[int(offset)]) for offset in offsets)
+
+
+def _semantic_level_values(slab: np.ndarray, view_state) -> np.ndarray:
+    channel = getattr(getattr(view_state, "channel", None), "value", getattr(view_state, "channel", "real"))
+    component = {
+        "imag": "imag",
+        "angle": "angle",
+        "abs": "abs",
+        "complex": "abs",
+    }.get(str(channel), "real")
+    values = extract_component(np.asarray(slab), component)
+    scale = getattr(getattr(view_state, "scale", None), "value", getattr(view_state, "scale", "linear"))
+    return np.asarray(apply_shader_scale(values, scale), dtype=np.float32)
 
 
 def _request_message(prefix, result: EvaluationResult):
