@@ -2,160 +2,152 @@
 
 Updated: 2026-07-14
 
-## Scope
+## Scope and stop condition
 
-This checkpoint covers only R8A viewer truth. It does not change scheduling,
-throughput policy, benchmark code, or LOD admission policy.
+This checkpoint covers R8 viewer truth and convergence only. Scheduling,
+throughput policy, and LOD admission remain out of scope. The work started from
+clean R7+UI commit `906e5c3c`; `.worktrees/redesign-r8-marathon` remains
+reference-only.
 
-The work started from clean R7+UI commit `906e5c3c`. The dirty
-`redesign-r8-marathon` worktree was inspected as reference only and was not
-modified.
+Work is stopped at the required two-hypothesis boundary. Two changes improved
+machine-checkable invariants but did **not** eliminate the visually observed
+wrong complex tiles:
 
-## Confirmed causes
+1. `b49f67c3` aligned predicted and acknowledged texture kinds with the
+   storage each backend physically draws.
+2. `09729a6` prevented retained wrappers from carrying a prior source's typed
+   tile identity after a semantic retarget.
 
-1. Tile lifecycle acceptance and backend reports used an opaque `source_id`.
-   That identity did not express document/operation/source/axes/flips/channel,
-   complex mapping, texture kind, semantic generation, or LOD, so incompatible
-   complex tiles could be retained as if current.
-2. VisPy replaced a bare `PHASE_COLOR` mapping's canonical cyclic LUT with the
-   image view's initial scalar grayscale LUT. The complex texture identity and
-   shader mode were correct, but the final presentation mapping was not.
-
-Both hypotheses were confirmed; neither experiment was reverted.
+Both causes were real and their focused regressions are green. Neither is a
+complete explanation for the orange complex-tile failure described below. No
+further rendering experiment should begin without treating that failure as a
+new hypothesis.
 
 ## Landed invariant slices
 
-- `500bcdc1` restores R7 frame API coherence needed to run the viewer path.
-- `44b77892` adds typed tile target and backend-acknowledgement identities.
-- `6228a4f9` aligns the diagnostics snapshot with its ledger field contract.
-- `257e5be2` enforces typed target/acknowledgement truth immediately before
-  either backend draws a tile.
-- `bc8b7477` removes the stale paced-admission keyword that crashed the live
+- `500bcdc1` restores the R7 frame API coherence needed to run the viewer.
+- `44b77892` introduces typed semantic tile target and acknowledgement
+  identities.
+- `257e5be2` enforces target/acknowledgement compatibility immediately before
+  either backend draws.
+- `bc8b7477` removes the stale paced-admission keyword that crashed the
   presentation gate.
-- `adf81fd4` attaches the live presentation effects before level side work can
+- `adf81fd4` attaches live presentation effects before level side work can
   schedule a commit.
-- `b49f67c3` aligns predicted and acknowledged texture kinds with the storage
-  each backend physically draws. Scalar source data uses scalar storage;
-  scalar components of complex source data use RG32F only with an explicit
-  complex component shader mode.
+- `b49f67c3` separates scalar storage, complex RG32F storage, and PyQtGraph's
+  physical RGB8 output.
 - `db2aaa3f` adds the six-pattern adversarial complex fixture.
-- `a78adbf` adds the opt-in, backend-neutral tile truth HUD sourced directly
-  from lifecycle diagnostic rows.
+- `b6ece11` replaces the rejected global truth HUD with a dedicated
+  `tile_truth_overlay.py` layer and one spatially attached label per visible
+  tile on both backends. Each label records target/acknowledged source,
+  texture kind, real/imag upload-plane identity, complex mapping, LOD,
+  semantic generation, levels generation, and DRAW/LOAD state.
+- `09729a6` rejects retained slot wrappers with the wrong semantic source and
+  rebuilds typed identity when a compatible wrapper is retargeted.
+- `687fa60` fixes the montage-prefetch completion callback to use the
+  canonical frame-session staleness guard and adds a real-orchestrator
+  completion-path regression plus a stale-name architecture guard.
+- `e759738` updates the profiling tool to read
+  `win.renderer._frame_session`, removes retired tile-ledger diagnostics, and
+  makes capped real-fixture runs select the center of axis 2.
 
-The current R8A slice adds the pre-draw truth firewall:
+## Green automated evidence
 
-- `TilePresentationDelta` carries lifecycle-owned typed targets for every
-  active tile.
-- PyQtGraph and VisPy draw only an acknowledged identity that satisfies that
-  target. An incompatible or opaque acknowledgement is hidden, exposing the
-  zero/loading placeholder beneath it.
-- Exact same-semantic content and explicitly compatible coarser LOD remain
-  valid progressive fallbacks. Presentation levels/LUT generation stays
-  separate from pixel identity.
-- Per-tile diagnostics record target identity, acknowledged identity, texture
-  kind, real/imag plane provenance, complex mapping, LOD, levels generation,
-  and drawable/placeholder state.
-- VisPy preserves the canonical phase LUT for a bare phase-color mapping and
-  still honors an explicit mapping LUT or an explicitly applied view colormap.
+Synthetic truth and transition coverage:
 
-## Evidence
+- The adversarial fixture covers constant-magnitude phase ramp,
+  constant-phase magnitude ramp, real-only, imaginary-only, zero, and a known
+  source signature.
+- PyQtGraph's complex RGB8 output matches the CPU reference.
+- VisPy's complex RG32F upload matches the exact real/imag planes.
+- Back-to-back semantic transitions on both backends hide unacknowledged
+  successors and expose placeholders until compatible acknowledgements arrive.
+- The retained-wrapper regression reproduces a source-3 wrapper carrying a
+  source-0 typed identity and proves the rebuilt identity, semantic key, and
+  upload-plane pointer match the current source.
 
-Synthetic complex fixture:
+Recent validation:
 
-- Four deterministic complex phase/magnitude tiles are presented, followed by
-  a back-to-back semantic source transition where only one successor is ready.
-- PyQtGraph and VisPy both present only tile 0; tiles 1-3 are placeholders.
-- After all successor payloads arrive, both backends present all four exact
-  typed identities.
-- `tests/display/test_complex_tile_truth.py` records and asserts all R8A truth
-  fields for each tile.
+- `tests/display`: 525 passed.
+- Focused retained identity and residency tests: 7 passed.
+- Complex synthetic fixture and transition tests: 4 passed.
+- Broad LOD-residency plus complex slice: 139 passed, with the known baseline
+  `test_retarget_index_window_demotes_misses_with_immediate_invalidation`
+  failure.
+- Prefetch completion, canonical guard, and ready-display focused tests:
+  3 passed.
+- Broad prefetch/architecture slice: 74 passed, with two unrelated existing
+  architecture-guard failures (retired profiler ledger text before `e759738`,
+  and a `QTimer.singleShot` allowlist count in `window/main.py`). The retired
+  profiler ledger failure is green after `e759738`.
+- Profiling-tool tests after the ownership update: 22 passed, 2 opt-in real
+  profiler smokes skipped.
 
-Real fixture standalone:
+## Failed visual certification
 
-- File: `/home/thomas/projects/UMC/scan2go/ClinicalScans/MrT/_WIPDelRec-tT2_20260223150234_14.nii`
-- Loaded shape/dtype: `(336, 336, 272)`, `float64`; smoke window: first eight
-  slices transformed with centered FFT, four tiles displayed at a time.
-- Session: Wayland, Python 3.14.6, PySide6 6.11.1, PyQtGraph 0.14.0,
-  VisPy 0.16.2, NumPy 2.5.1, NVIDIA RTX A2000 Laptop GPU, driver 610.43.03.
-- Typed partial transition: `presented=[0]`, placeholders `[1,2,3]` on both
-  backends; final transition: `presented=[0,1,2,3]` on both backends.
-- Visual inspection shows equivalent cyclic phase color and source layout in
-  `tests/artifacts/r8a-real-fixture-screens/pyqtgraph-complex-truth-final.png`
-  and `tests/artifacts/r8a-real-fixture-screens/vispy-complex-truth-final.png`.
+The 2026-07-14 real-display runs used the bundled NIfTI on Wayland with six
+tiles and a raw -> centered-FFT complex -> raw transition. Lifecycle
+diagnostics reported all six tiles complete and drawable with matching target
+and acknowledged source identities:
 
-Automated validation:
+- PyQtGraph: `scalar_r32f -> rgb8 -> scalar_r32f`.
+- VisPy: `scalar_r32f -> complex_rg32f -> scalar_r32f`.
 
-- `tests/display`: 515 passed.
-- R8A-relevant `tests/window` slice: 293 passed.
-- `tests/presentation` plus runtime diagnostics: 60 passed.
-- Focused FrameSession/diagnostics UI slice: 15 passed.
+Those counters are **not** acceptance evidence. Visual observation found:
 
-## Known validation limitation outside R8A
+- PyQtGraph retained wrongly rendered complex tiles.
+- VisPy flashed the same defect.
+- Empty background appeared as high-magnitude orange phase where it should be
+  black.
 
-The full profiling workflow is not acceptance evidence for this slice. After a
-narrow diagnostics-name repair, its R7 viewport harness materialized all eight
-tiles but timed out with `active_presented=0/0` and no pending/loading/dirty
-work. Three existing window tests describe the same out-of-scope scheduling or
-viewport drift and were deliberately not repaired here:
+The run also selected edge slices `0:6`, which are too empty for reliable
+visual comparison. That fixture choice is rejected. All future capped
+real-file checks must use slices centered on axis 2. For the bundled
+`(336, 336, 272)` file and six tiles, that means indices `133:139`.
 
-- `test_vispy_persistent_upsert_limits_use_governed_upload_limit`
-- `test_retarget_index_window_demotes_misses_with_immediate_invalidation`
-- `test_tile_presentation_limits_cap_resident_retarget_upserts`
+An earlier invocation of the real workflow with
+`QT_QPA_PLATFORM=offscreen` is invalid and discarded. Real rendering,
+framebuffer, visual, performance, Wayland, and GPU claims must never use the
+offscreen platform. Offscreen remains valid only for deterministic tests that
+do not claim real rendering behavior.
 
-Changing those policies would violate the R8A truth-first scope. The direct
-real-backend standalone smoke above is the current visual and semantic gate.
+## What the failure proves
 
-## R8B checkpoint after reverted experiment
+Typed lifecycle agreement is necessary but not sufficient. At least one of
+these statements can currently be false while a tile is marked DRAW:
 
-The committed adversarial fixture now covers constant-magnitude phase ramp,
-constant-phase magnitude ramp, real-only, imaginary-only, zeros, and a known
-complex source signature. PyQtGraph's accepted RGB pixels match the CPU
-reference; VisPy's accepted RG32F uploads match the exact real/imag planes.
-Committed-value tests verify native complex data and exact magnitude values,
-and the same truth HUD is exercised on both backend surfaces.
+- the bytes actually bound/drawn are the bytes whose plane identity was
+  acknowledged;
+- the backend's active texture interpretation matches the acknowledged
+  texture kind;
+- the active scalar/complex shader or CPU mapping matches the current source;
+- the active levels generation belongs to the same committed presentation;
+- backend acknowledgement occurs only after those physical and presentation
+  bindings are active.
 
-One uncommitted full-`ArrayScopeWindow` synthetic test was attempted and then
-removed on 2026-07-14. Both PyQtGraph and VisPy timed out waiting for
-`visible_plan_complete()` plus zero visible presentation obligations. This is
-the already recorded R7 active-viewport/full-window settlement limitation, not
-evidence that the six-pattern backend fixture failed. The VisPy offscreen run
-also lacked a supported `QOpenGLWidget`, so exact framebuffer sampling remains
-a real-hardware gate.
+In particular, scalar-only pixels must never be drawn through a complex
+viewing mapping. Scalar components derived from complex source data are valid
+only when the complex-storage shader explicitly selects the correct component.
 
-Per the R8 working rule, work stopped here after that reverted experiment. The
-next hypothesis must address full-window convergence/settlement as an R8C
-truth-and-convergence slice; the benchmark and scheduling/throughput policy
-remain untouched.
+## Next single hypothesis
 
-### Rejected overlay presentation
+Instrument the backend commit boundary—not the scheduler—with the smallest
+possible physical draw record per tile: actual bound texture kind and
+dtype/shape, real/imag upload-plane identities, active scalar/complex mapping
+mode, active levels generation, and the identity returned in the backend
+commit report. Reproduce on the centered six-slice fixture and compare the
+first wrong orange tile with a black tile before changing code.
 
-The first `a78adbf` overlay presentation is not accepted as the R8B debug
-overlay. It renders all lifecycle rows in one global HUD, so the identity is
-not spatially attached to the tile whose pixels it describes. That makes it
-too difficult to correlate a flash with one slot and fails the stated
-per-tile requirement. The lifecycle rows remain valid evidence, but the UI
-must be replaced by one overlay on each visible tile for both PyQtGraph and
-VisPy.
+If that record shows physical binding and acknowledgement diverge, fix only
+the acknowledgement timing/source. If they agree, reject that hypothesis and
+inspect the shared complex magnitude/levels mapping next. Do not optimize
+throughput or change scheduling policy during either step.
 
-Work stopped again at this checkpoint before changing the overlay. Two other
-confirmed issues are intentionally kept separate from that replacement:
+## Remaining R8 gates
 
-- `seed_display_tile_payloads()` retargets a reused wrapper's
-  `tile_number`/`source_index` without rebuilding its typed `tile_identity`.
-  A slot-3 payload can therefore carry acknowledged source 0 and is correctly
-  rejected forever by the truth firewall.
-- `montage_prefetch.py` still calls the removed
-  `_is_current_montage_session()` API from a completion callback; the
-  canonical method is `_is_current_frame_session()`.
-
-## Remaining R8 work
-
-- Exercise the typed firewall through the full ArrayScopeWindow real-file path
-  once the existing R7 active-viewport harness contract is repaired in its own
-  scoped slice.
-- Run exact selected-pixel framebuffer comparison for the six-pattern fixture
-  on real OpenGL hardware for VisPy.
-- Repair full-window settlement from lifecycle evidence before using that
-  harness for the R8B hover/ROI and R8C transition gates.
-- Add the R8C semantic/quality/presentation/viewport transition matrix only
-  after the full-window convergence gate is green.
+- Centered real-fixture standalone visual check on PyQtGraph and VisPy.
+- Centered raw -> complex -> raw back-to-back transition with no wrong flash.
+- Synthetic adversarial fixture and relevant broad slice after the eventual
+  cause fix.
+- Only then proceed through the R8C semantic/quality/presentation/viewport
+  matrix and R8D measurement work.
