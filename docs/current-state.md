@@ -1,10 +1,9 @@
 # Current state
 
-**Snapshot:** `redesign` branch, 2026-07-14 (post R1–R7 architecture, post
-R8 closure). The active queue and ground rules live in
-[docs/redesign/README.md](redesign/README.md); the July course reset and its
-rationale are in [docs/redesign/retro-2026-07.md](redesign/retro-2026-07.md).
-`main` (6fa5c758) holds the pre-redesign state.
+**Snapshot:** `main`, 2026-07-14, after redesign merge `59a5525d`.
+**[Codex 2026-07-14 — post-V4 update]** The redesign execution record and
+performance rules remain in [docs/redesign/README.md](redesign/README.md);
+the live product ordering has returned to [docs/roadmap.md](roadmap.md).
 
 ## Architecture (what the rewrite delivered, R1–R7)
 
@@ -19,21 +18,30 @@ rationale are in [docs/redesign/retro-2026-07.md](redesign/retro-2026-07.md).
   `RenderOrchestrator` (`window/render.py`) over
   `frame_controller/frame_session/frame_effects/frame_runtime`.
 
-## Known broken (user-visible) and in the queue
+## Viewer-truth fixes now on `main`
 
-1. **Persistent black tiles** — admission/completion/evidence scoping
-   disagree about which tiles must render; a stranded tile also deadlocks
-   the level-evidence pass. Dossier:
-   [redesign/black-tiles-and-priority.md](redesign/black-tiles-and-priority.md).
-2. **Priority rendering order** — per-tile viewport distance never reaches
-   kernel ordering; three drifted rankers. Same dossier.
-3. **Dead prefetch paths** — `montage_prefetch.py` silently imports the
-   deleted `frame_renderer` module.
-4. **Performance bars unmet** — GUI callback/heartbeat/warm-scrub bars and
-   the FFT-scroll throughput target (~4 fps vs ~17 fps scalar) are restated
-   in the redesign README and addressed by the P-steps after the merge;
-   measurement lands first (T1: marathon benchmark harness +
-   [tracing pipeline](redesign/tracing-pipeline.md)).
+1. Required-tile admission, completion, evidence, and presentation consume
+   the canonical `FrameSession.required_tile_numbers()` owner; the V1
+   one-index/boundary scenario has correct pixels on both backends.
+2. One canonical tile rank reaches kernel execution and progressive cold
+   presentation; the V2 disjoint-scroll scenario paints center-out.
+3. Dead prefetch imports and their silent broad-exception fallbacks are gone.
+4. A stranded required tile is no longer silent: after two idle seconds it
+   emits a `stall` owner-chain event, writes the bounded trace, and shows a
+   persistent diagnostic.
+
+## Known open work
+
+1. **Performance bars remain unmet.** The frozen T1 baseline exceeds the
+   50 ms callback, 16 ms heartbeat, and 15 ms warm-input commitments; FFT
+   scroll remains the primary throughput target. Follow the measured
+   P-program in the roadmap.
+2. **The broad suite is red.** The final pre-merge non-GPU run reported
+   42 failures and 2 teardown errors; 41 failures reproduced serially.
+   Stale deleted-owner assertions coexist with real coalescer, levels,
+   viewport/ROI, cache-rebind, and transition behavior debt.
+3. Hardware evidence remains Linux-only; the histogram adapter remains
+   sensitive to private PyQtGraph API.
 
 ## Material risks
 
@@ -42,12 +50,11 @@ rationale are in [docs/redesign/retro-2026-07.md](redesign/retro-2026-07.md).
    fields; the same fact (residency, visibility, priority) lives in several
    owners. Every fix that doesn't reduce owner count tends to create the
    next bug.
-2. **Acceptance gap.** Until the visible-truth harness exists, unit/offscreen
-   green does not imply the screen is right.
-3. **Branch divergence.** `redesign` is 116 commits ahead of `main`; merge
-   (V4) as soon as V1–V2 land.
-4. Hardware evidence remains Linux-only; the histogram adapter remains
-   sensitive to private PyQtGraph API.
+2. **Suite/acceptance split.** The visible-truth harness now exists and is
+   authoritative for pixels, but the broad offscreen suite must be brought
+   back to truth without reintroducing superseded ownership models.
+3. **Performance work can regress truth.** Every P-step therefore needs
+   before/after measurements plus the real-display pixel/trace gates.
 
 ## What is working well
 

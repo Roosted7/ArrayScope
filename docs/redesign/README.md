@@ -1,10 +1,11 @@
 # Redesign — course and queue
 
-**Date:** 2026-07-14. **Branch:** `redesign`.
-**This file is the single source of truth for what happens next.**
-`docs/roadmap.md` defers to it. Everything that used to live in this
-directory is history in [archive/](archive/) — read it for evidence, never
-for direction.
+**Date:** 2026-07-14. **Status:** V0–V4 merged to `main`.
+**[Codex 2026-07-14 — post-V4 ownership update]** This file remains the
+execution/evidence record for the redesign performance program. With V4
+complete, `docs/roadmap.md` again owns the product queue. Everything that
+used to live in this directory is history in [archive/](archive/) — read it
+for evidence, never for direction.
 
 ## Where we are
 
@@ -56,7 +57,7 @@ real hardware:
 | V1 | **Black tiles.** One owner for "which tiles must render": admission, completion, and evidence scoping all read the same set (fix dossier B1+B2, including the level-evidence deadlock). Delete the tests that pin the narrowed predicates | Harness scenario: one-index scroll with a boundary-landing tile settles fully on real Wayland, both backends; no black tile, no parked evidence pass; `trace_verify` clean |
 | V2 | **Priority order.** One ranker. Per-tile viewport distance becomes part of kernel ordering (or per-tile rung interleaving); delete the other two rankers (fix dossier A1–A4) | Harness scenario: cold montage load + fast scroll paints center-out, proven from the recorded commit/ack trace, not a unit sort |
 | V3 | **Loud non-convergence.** Any tile unsettled with no work in flight for >2 s emits the `stall` trace event with the owner-chain snapshot and a visible diagnostic (tracing-pipeline T2; this failure class has recurred ~5×) | Injecting a stranded tile produces the diagnostic + ring-buffer dump |
-| V4 | Merge `redesign` → `main`. At merge readiness the branch is 122 commits ahead; every week unmerged is risk | `main` runs the fixed viewer; roadmap (X5…) resumes |
+| V4 | **Done 2026-07-14.** Merged `redesign` → `main` at `59a5525d`; the branch was 123 commits ahead at merge | `main` runs the fixed viewer; roadmap (X5…) resumes |
 | P1… | **Performance program to the bars above**, one measured cause at a time against the frozen T1 baseline, drawing from [marathon-salvage.md](marathon-salvage.md) Tiers 2–3 (order given there: prefetch-busy, level_source, viewport intent, histogram aggregation, coalesced drain, cadence throttle, stage-cache snapshot, governor policy, admission batching, gate pacing, slot relocation) | Each P-step: one cause, before/after trace + benchmark numbers in the commit; bars trend green |
 
 A step is done only when its harness scenario passes **on a real display**.
@@ -254,6 +255,12 @@ acceptance.
 > Those failures remain explicit post-merge product/test debt; merging V4
 > certifies the named visible-truth fixes, not a broadly green test suite.
 > Do not later cite this merge as evidence that the full suite passed.
+
+> **[Codex 2026-07-14 — V4 complete]** `redesign` merged into `main` as
+> `59a5525d` with no conflicts; `main` had no commits outside the redesign
+> history. V0–V4 are closed. The next redesign-derived work is the measured
+> P-program, while the live product ordering is again maintained in
+> `docs/roadmap.md`.
 
 ## The visible-truth harness (the only gate)
 

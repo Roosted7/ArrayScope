@@ -11,23 +11,27 @@ sync/one cache core) completed 2026-07-02 — see git history and ADR
 ADR 0050/0051 and the archived
 [lod-remaining-work plans](archive/plans/lod-remaining-work/README.md).
 
-## Now — finish the redesign visibly (2026-07 course reset)
+## Now — measured performance and suite truth (post-redesign)
 
-**One queue, owned by [`docs/redesign/README.md`](redesign/README.md).**
+> **[Codex 2026-07-14 — post-V4 roadmap update]** R1–R7 and V0–V4 merged
+> to `main` at `59a5525d`. The fixed viewer passed the V1/V2 real-Wayland
+> pixel/trace scenarios on both backends and the V3 loud-stall injection.
+> The final pre-merge non-GPU suite remained red at 42 failures and 2
+> teardown errors; this is tracked work, not a green-suite claim.
 
-The R1–R7 architecture is landed; the R8 certification program is closed
-(see [`docs/redesign/retro-2026-07.md`](redesign/retro-2026-07.md)) — its
-**performance bars remain binding** and are restated in the redesign
-README. Remaining, in order: V0 dead-import repair → T1 measurement
-foundation (marathon benchmark-harness salvage + trace-event spine) →
-V1 black tiles → V2 priority order → V3 loud non-convergence → V4 merge to
-`main` → P-steps (performance program to the bars, salvaging marathon
-ideas per [`docs/redesign/marathon-salvage.md`](redesign/marathon-salvage.md)).
-Acceptance for every step is a visible-truth harness scenario on a real
-display.
+Proceed with the redesign P-program one measured cause at a time against
+the frozen T1 baseline, in the order recorded in
+[`docs/redesign/marathon-salvage.md`](redesign/marathon-salvage.md):
+prefetch-busy → committed `level_source` → viewport intent → background
+histogram aggregation → coalesced completion drain → cadence throttle →
+stage-cache snapshot/cancellation → governor policy → admission batching →
+gate pacing → slot relocation. Every P commit carries before/after trace and
+benchmark evidence; the real-display pixel/trace gates must stay green.
 
-Do not start items below this line while a V-step is open — they all get
-cheaper after the merge.
+In parallel only where it does not reorder a P-step, migrate stale tests to
+the canonical `window.renderer` / `FrameSession` owners and fix the remaining
+coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do
+not weaken user-visible assertions merely to make the suite green.
 
 ## Next — evidence gates (X5, after the redesign)
 
