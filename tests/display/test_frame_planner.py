@@ -94,6 +94,21 @@ def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
     assert plan.regions[1].source_index == 1
 
 
+def test_montage_excludes_tiles_that_only_touch_the_viewport_boundary():
+    state = ViewState.from_shape((10, 10, 6)).with_image_axes(0, 1).with_montage_axis(2, columns=3, indices=tuple(range(6)))
+
+    plan = FramePlanner().plan(
+        target=_target(),
+        view_state=state,
+        display_shape=(21, 32),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+        viewport_shape=(10, 10),
+        view_range=((0.0, 10.0), (0.0, 11.0)),
+    )
+
+    assert plan.active_region_ids == (0,)
+
+
 def test_camera_only_retarget_changes_active_regions_not_materialization_key():
     state = ViewState.from_shape((40, 60)).with_image_axes(0, 1)
     planner = FramePlanner(internal_tile_shape=(16, 16))

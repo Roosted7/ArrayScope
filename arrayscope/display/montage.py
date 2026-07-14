@@ -139,7 +139,7 @@ class MontagePlan:
         for tile in self.tiles:
             tile_x1 = tile.x0 + tile.width
             tile_y1 = tile.y0 + tile.height
-            if tile_x1 >= x0 and tile.x0 <= x1 and tile_y1 >= y0 and tile.y0 <= y1:
+            if tile_x1 > x0 and tile.x0 < x1 and tile_y1 > y0 and tile.y0 < y1:
                 visible.append(tile)
         return tuple(visible)
 
