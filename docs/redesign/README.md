@@ -189,6 +189,35 @@ acceptance.
 > current did not reproduce at a 20-second timeout and caused no runtime
 > change. V3 remains responsible for making any real stranded draw loud.
 
+> **[Codex 2026-07-14 — V2 complete; one ranker reaches the kernel and
+> pixels]** Deleted the independent resident-ladder and viewport-seeding
+> distance formulas. `display.model.tile_priority.tile_priority_key()` is now
+> the single ranker used by the native queue, one-shot presentation admission,
+> viewport seeding, prefetch, and resident ladder. Its ordinal rank rides each
+> rung into `TaskSpec.scheduling_rank`, ahead of rung priority in the kernel
+> ready heap, so a center refinement no longer queues behind an edge floor.
+> Fully cold source successors now present in bounded priority bands; an
+> already-compatible successor remains atomic so V1's no-black one-index
+> handoff is preserved. The real-Wayland 36-tile `0:36` → `36:72` scenario
+> passed on both backends with the correct analytic pixel ramp and 36 exact
+> final acknowledgements. The recorded first exact cohort contained at least
+> 6/8 canonical nearest tiles on PyQtGraph and 14/16 on VisPy (bounded worker
+> completion may permute two tiles); trace replay was clean at 2,762 and 9,031
+> events respectively.
+>
+> **[Codex 2026-07-14 — V2 rejected atomicity approach / recurrence note]**
+> Simply deleting CPU atomic successors made the cold trace progressive, but
+> regressed the established one-index contract: PyQtGraph discarded 59
+> compatible predecessor slots and rebuilt acknowledgements 12 → 25 → 37 →
+> 49 → 59 → 60. The accepted rule is semantic: atomicity preserves compatible
+> pixels; it is not a backend-wide or every-source-window rule. A disjoint
+> successor has zero compatible pixels and therefore streams center-out. Do
+> not restore first-display/full-successor atomic waits, and do not remove the
+> compatibility test to chase a prettier cold trace. Tests that asserted the
+> deleted CPU atomic readiness helper or forbade a presentable preview floor
+> were removed/migrated; pixel identity, one-index continuity, and trace order
+> are now the gates.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

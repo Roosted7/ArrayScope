@@ -90,6 +90,7 @@ def test_trace_verify_requires_exact_ack_for_final_visible_targets(tmp_path):
     passed = verify_trace(path)
     assert passed["ok"]
     assert passed["acknowledged_targets"] == 1
+    assert passed["acknowledgement_order"] == (3,)
 
 
 def test_trace_verify_forgets_targets_released_from_scope(tmp_path):

@@ -125,6 +125,118 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
     assert verification["required_targets"] == 36
 
 
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
+    """V2: final cold-scroll targets paint from viewport focus outward."""
+
+    import numpy as np
+
+    from arrayscope.app.qt_binding import prefer_pyside6
+    from arrayscope.core.trace import close_trace, configure_trace
+    from arrayscope.tools.trace_verify import verify_trace
+
+    prefer_pyside6()
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.launch import _create_window
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from arrayscope.display.model.tile_priority import prioritize_tiles
+    from tests.gpu_interaction.conftest import Harness, TILE
+
+    trace_path = tmp_path / f"v2-center-out-{backend}.trace.jsonl"
+    app = pg.mkQApp()
+    app.setOrganizationName("ArrayScope")
+    app.setApplicationName("ArrayScope")
+    settings = QtCore.QSettings()
+    previous_backend = settings.value("image_rendering_backend")
+    settings.setValue("image_rendering_backend", backend)
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+    configure_trace(trace_path)
+
+    count = 72
+    frames = np.repeat(np.arange(count, dtype=np.float32), TILE * TILE)
+    data = frames.reshape(count, TILE, TILE).transpose(1, 2, 0).copy()
+    app, win = _create_window(data, title=f"gpu-harness-v2-{backend}")
+    expected_order = ()
+    try:
+        if image_view_backend_capabilities(win.img_view).name != backend:
+            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        h = Harness(app, win)
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2, columns=6, indices=tuple(range(36)), text="0:36"
+            )
+        )
+        win.render(reason="gpu-harness-v2-initial")
+        assert h.wait_settled(timeout=20.0)
+        win.img_view.setLevels(0.0, 71.0)
+        h.fit_view()
+        assert h.wait_settled(timeout=20.0)
+
+        for start in (36,):
+            win._set_view_state(
+                win.view_state.with_montage_axis(
+                    2,
+                    columns=6,
+                    indices=tuple(range(start, start + 36)),
+                    text=f"{start}:{start + 36}",
+                )
+            )
+            win.render(reason="gpu-harness-v2-fast-scroll")
+            app.processEvents()
+
+        assert h.wait_settled(timeout=20.0)
+        assert h.session.required_target_settled()
+        expected_order = tuple(
+            int(tile.montage_index)
+            for tile in prioritize_tiles(
+                h.session.plan.tiles,
+                context=h.session.tile_priority_context(),
+            )
+        )
+        means = h.tile_means()
+        expected_values = [
+            means[0] + (means[-1] - means[0]) * offset / 35.0
+            for offset in range(36)
+        ]
+        assert all(
+            means[index] >= means[index - 1] - 1.0
+            for index in range(1, 36)
+        ), means
+        assert means[-1] - means[0] >= 100.0, means
+        assert max(
+            abs(actual - wanted)
+            for actual, wanted in zip(means, expected_values)
+        ) <= 12.0, means
+        h.assert_lifecycle_settled()
+    finally:
+        win.close()
+        for _ in range(50):
+            app.processEvents()
+        close_trace()
+        if previous_backend is None:
+            settings.remove("image_rendering_backend")
+        else:
+            settings.setValue("image_rendering_backend", previous_backend)
+        settings.sync()
+
+    verification = verify_trace(trace_path)
+    assert verification["ok"], verification
+    assert verification["required_targets"] == 36
+    # Worker completion may permute tiles inside the backend's bounded first
+    # exact commit; that first visible band must still be the nearest band.
+    actual_order = tuple(verification["acknowledgement_order"])
+    first_commit_size = 16 if backend == "vispy" else 8
+    expected_first = set(expected_order[:first_commit_size])
+    actual_first = set(actual_order[:first_commit_size])
+    assert len(actual_first & expected_first) >= first_commit_size - 2, (
+        actual_order,
+        expected_order,
+    )
+
+
 def test_montage_presents_every_tile_with_its_own_content(montage_window):
     h = montage_window
     h.fit_view()

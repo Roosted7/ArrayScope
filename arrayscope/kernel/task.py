@@ -106,6 +106,7 @@ class TaskSpec:
     fn: Callable[..., Any]
     lane: Lane = Lane.VISIBLE_MATERIALIZATION
     priority: Priority = Priority.VISIBLE_IMAGE
+    scheduling_rank: int = 0
     scope: str = "default"
     deps: tuple = ()
     supersession: Supersession | None = None
@@ -119,6 +120,7 @@ class TaskSpec:
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(str(self.lane)))
         object.__setattr__(self, "priority", Priority(int(self.priority)))
+        object.__setattr__(self, "scheduling_rank", max(0, int(self.scheduling_rank or 0)))
         object.__setattr__(self, "scope", str(self.scope))
         object.__setattr__(self, "deps", tuple(self.deps or ()))
         object.__setattr__(self, "deadline_ns", max(0, int(self.deadline_ns or 0)))

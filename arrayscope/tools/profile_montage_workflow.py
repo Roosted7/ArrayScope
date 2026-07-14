@@ -3322,7 +3322,6 @@ def _wait_for_montage_complete(
         f"evidence_scan={0 if session is None else int(getattr(session, 'level_scan_remaining_tiles', 0) or 0)} "
         f"evidence_inflight={False if session is None else bool(getattr(session, 'level_evidence_inflight', False))} "
         f"atomic_warm_pending={0 if session is None else len((getattr(session, '_atomic_warm_job', None) or {}).get('pending', ()))} "
-        f"cpu_atomic_pending={False if session is None else bool(getattr(session, '_cpu_atomic_successor_pending', False))}"
         f" pipeline_steps={(() if session is None else tuple(getattr(getattr(session, 'pipeline', None), 'last_plan_steps', ()) or ()))}"
         f" view_range={final_view_range!r}"
         f" plan_shape={None if final_plan is None else tuple(getattr(final_plan, 'display_shape', ()) or ())!r}"

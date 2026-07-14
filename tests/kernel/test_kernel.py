@@ -140,6 +140,31 @@ def test_priority_orders_real_execution():
     assert ran == ["interactive", "visible", "hover", "prefetch"]
 
 
+def test_spatial_rank_orders_visible_tiles_across_quality_priorities():
+    kernel, backend = make_manual()
+    ran = []
+    kernel.submit(
+        TaskSpec(
+            key="edge-floor",
+            fn=lambda: ran.append("edge-floor"),
+            priority=Priority.INTERACTIVE,
+            scheduling_rank=8,
+        )
+    )
+    kernel.submit(
+        TaskSpec(
+            key="center-exact",
+            fn=lambda: ran.append("center-exact"),
+            priority=Priority.VISIBLE_IMAGE,
+            scheduling_rank=0,
+        )
+    )
+
+    backend.run_all()
+
+    assert ran == ["center-exact", "edge-floor"]
+
+
 def test_visible_lanes_run_before_optional_lanes_regardless_of_priority():
     kernel, backend = make_manual()
     ran = []

@@ -214,14 +214,46 @@ class MontageTilePriorityQueue:
 
     def _priority_key(self, index: int) -> tuple[object, ...]:
         tile = self._tiles[int(index)]
-        band = _band_for_index(int(index), self.context)
-        return (
-            int(band),
-            _priority_focus_rank(int(index), self.context),
-            _distance_score(tile, self.context),
-            int(self._sequence.get(int(index), 0)),
-            int(index),
+        return tile_priority_key(
+            tile,
+            self.context,
+            sequence=int(self._sequence.get(int(index), 0)),
         )
+
+
+def tile_priority_key(
+    tile,
+    context: TilePriorityContext,
+    *,
+    sequence: int = 0,
+) -> tuple[object, ...]:
+    """The one viewport-distance rank used by queues, plans, and the kernel."""
+
+    index = _tile_index(tile)
+    return (
+        int(_band_for_index(index, context)),
+        _priority_focus_rank(index, context),
+        _distance_score(tile, context),
+        int(sequence),
+        int(index),
+    )
+
+
+def prioritize_tiles(tiles, *, context: TilePriorityContext) -> tuple[object, ...]:
+    """Return arbitrary tile objects in canonical viewport-priority order."""
+
+    values = () if tiles is None else tuple(tiles)
+    sequence = {_tile_index(tile): offset for offset, tile in enumerate(values)}
+    return tuple(
+        sorted(
+            values,
+            key=lambda tile: tile_priority_key(
+                tile,
+                context,
+                sequence=sequence[_tile_index(tile)],
+            ),
+        )
+    )
 
 def tile_numbers(tiles) -> tuple[int, ...]:
     return tuple(int(_tile_index(tile)) for tile in tuple(tiles or ()))
@@ -245,17 +277,13 @@ def prioritize_tile_numbers(tiles, *, plan_tiles, context: TilePriorityContext) 
     if not valid:
         return requested
 
-    distance_score = _distance_scorer(context)
-
     def priority_key(tile_number: int) -> tuple[object, ...]:
         index = int(tile_number)
         tile = plan_tiles[index]
-        return (
-            int(_band_for_index(index, context)),
-            _priority_focus_rank(index, context),
-            distance_score(tile),
-            int(sequence.get(index, 0)),
-            index,
+        return tile_priority_key(
+            tile,
+            context,
+            sequence=int(sequence.get(index, 0)),
         )
 
     ordered = sorted(valid, key=priority_key)

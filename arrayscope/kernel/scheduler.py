@@ -120,7 +120,7 @@ class Kernel:
         self._epoch = itertools.count(1)
         self._records: dict[int, _Record] = {}
         self._by_key: dict[object, int] = {}
-        self._ready: list[tuple[int, int, float, int]] = []  # (lane_rank, priority, deadline, seq)
+        self._ready: list[tuple[int, int, int, float, int]] = []
         self._parked_quota: list[int] = []
         self._dep_waiters: dict[object, set[int]] = {}
         # Keys whose newest instance completed non-stale. Satisfies deps.
@@ -197,6 +197,7 @@ class Kernel:
             key=spec.key,
             lane=str(spec.lane),
             priority=int(spec.priority),
+            scheduling_rank=int(spec.scheduling_rank),
             scopes=spec.scope_prefixes(),
             deps=tuple(spec.deps),
             visible=bool(spec.visible),
@@ -530,11 +531,14 @@ class Kernel:
         spec = record.spec
         deadline = float("inf") if spec.deadline_ns <= 0 else float(spec.deadline_ns)
         rank = 0 if spec.visible else 1
-        heapq.heappush(self._ready, (rank, int(spec.priority), deadline, record.seq))
+        heapq.heappush(
+            self._ready,
+            (rank, int(spec.scheduling_rank), int(spec.priority), deadline, record.seq),
+        )
 
     def _pop_ready_locked(self) -> _Record | None:
         while self._ready:
-            _rank, _priority, _deadline, seq = heapq.heappop(self._ready)
+            _rank, _scheduling_rank, _priority, _deadline, seq = heapq.heappop(self._ready)
             record = self._records.get(seq)
             if record is None or record.state != _QUEUED:
                 continue

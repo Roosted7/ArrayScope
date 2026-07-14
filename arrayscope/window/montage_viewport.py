@@ -9,6 +9,7 @@ import numpy as np
 from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.montage import montage_rect_for_viewport, optimal_montage_columns
+from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
 from arrayscope.display.viewport import view_ranges_near
 
 
@@ -40,10 +41,12 @@ class MontageViewportPlan:
             margin_tiles=max(0, int(margin_tiles)),
         )
         if prioritize:
-            return prioritize_montage_tiles(
+            return prioritize_tiles(
                 tiles,
-                view_range=((rect[0], rect[2]), (rect[1], rect[3])),
-                focus=self.priority_focus,
+                context=TilePriorityContext.from_tiles(
+                    view_range=((rect[0], rect[2]), (rect[1], rect[3])),
+                    focus=self.priority_focus,
+                ),
             )
         return tiles
 
@@ -53,10 +56,12 @@ class MontageViewportPlan:
             view_range=self.view_range,
             viewport_shape=self.viewport_shape,
         )
-        return prioritize_montage_tiles(
+        return prioritize_tiles(
             tiles,
-            view_range=((rect[0], rect[2]), (rect[1], rect[3])),
-            focus=self.priority_focus,
+            context=TilePriorityContext.from_tiles(
+                view_range=((rect[0], rect[2]), (rect[1], rect[3])),
+                focus=self.priority_focus,
+            ),
         )
 
 
@@ -103,49 +108,6 @@ def montage_viewport_intent(viewport_controller, view_range) -> MontageViewportI
         fit_locked=fit_locked,
         auto_active=auto_active,
     )
-
-
-def prioritize_montage_tiles(tiles, *, view_range, focus=None):
-    """Return tiles ordered from normalized viewport-focus distance outward."""
-
-    if tiles is None:
-        return ()
-    tiles = tuple(tiles)
-    if not tiles:
-        return ()
-    try:
-        x_range, y_range = view_range
-        x0, x1 = float(x_range[0]), float(x_range[1])
-        y0, y1 = float(y_range[0]), float(y_range[1])
-    except Exception:
-        try:
-            x0 = min(float(tile.x0) for tile in tiles)
-            y0 = min(float(tile.y0) for tile in tiles)
-            x1 = max(float(tile.x0 + tile.width) for tile in tiles)
-            y1 = max(float(tile.y0 + tile.height) for tile in tiles)
-        except Exception:
-            return tiles
-    span_x = max(1.0, abs(float(x1) - float(x0)))
-    span_y = max(1.0, abs(float(y1) - float(y0)))
-    if focus is None:
-        focus_x = (float(x0) + float(x1)) * 0.5
-        focus_y = (float(y0) + float(y1)) * 0.5
-    else:
-        try:
-            focus_x = float(focus[0])
-            focus_y = float(focus[1])
-        except (IndexError, KeyError, TypeError, ValueError):
-            focus_x = (float(x0) + float(x1)) * 0.5
-            focus_y = (float(y0) + float(y1)) * 0.5
-
-    def score(tile):
-        center_x = float(tile.x0) + float(tile.width) * 0.5
-        center_y = float(tile.y0) + float(tile.height) * 0.5
-        dx = (center_x - focus_x) / span_x
-        dy = (center_y - focus_y) / span_y
-        return (dx * dx + dy * dy, int(tile.montage_index))
-
-    return tuple(sorted(tiles, key=score))
 
 
 def effective_montage_columns(

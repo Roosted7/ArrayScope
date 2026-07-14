@@ -2302,26 +2302,6 @@ def test_tile_state_does_not_treat_orphan_reduced_residency_as_committable():
     assert states[0].resident_levels == ()
 
 
-def test_cpu_source_window_successor_plans_cold_edge_target_without_preview_detour():
-    session = _session(count=1)
-    session.shader_display = False
-    session.display_committed = True
-    session.source_window_changed_pending = True
-    session.rendered_tiles.clear()
-    session.dirty_payloads.pop(0, None)
-    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
-    demand = session.lod_policy_decision.demand
-
-    states = effects.tile_states(
-        _pipeline_intent_for(session), demand, _pipeline_scope_for(session)
-    )
-    steps = LodLadder().plan(states, demand)
-
-    assert len(states) == 1
-    assert states[0].allow_preview is False
-    assert tuple(step.rung for step in steps) == (Rung.DESIRED,)
-
-
 def test_preview_floor_commit_activates_every_planned_preview_tile_before_exact():
     pyramid = PyramidCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=4)
@@ -2886,7 +2866,6 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert session.display_tile_payloads[1].source_index == 3
     assert set(session.pending_payload_upserts) == {0, 1}
     assert session.source_window_changed_pending is True
-    assert not bool(getattr(session, "_cpu_atomic_successor_pending", False))
 
 
 def test_resident_only_remap_discards_stale_rendered_slot_owner():

@@ -48,7 +48,7 @@ def _session(data=None):
         columns=3,
         viewport_shape=(100, 100),
     )
-    return SimpleNamespace(
+    session = SimpleNamespace(
         document=document,
         view_state=state,
         plan=plan,
@@ -65,6 +65,13 @@ def _session(data=None):
         pyramid_cache=None,
         tile_semantic_source_id=lambda source_index: ("semantic", int(source_index)),
     )
+    from arrayscope.display.model.tile_priority import TilePriorityContext
+
+    session.tile_priority_context = lambda: TilePriorityContext.from_tiles(
+        view_range=getattr(session, "view_range", None),
+        visible_tiles=getattr(session, "visible_tile_numbers", ()),
+    )
+    return session
 
 
 def _assert_optional_array_equal(left, right):
@@ -619,7 +626,7 @@ def test_pipeline_effects_tile_states_exposes_ready_unacknowledged_fallback():
     assert state.ready_quality == "fallback"
 
 
-def test_cpu_auto_first_commit_plans_target_without_unpresentable_preview_floor():
+def test_cpu_auto_first_commit_allows_progressive_preview_floor():
     from arrayscope.window.frame_effects import FramePipelineEffects
 
     session = _session()
@@ -635,7 +642,7 @@ def test_cpu_auto_first_commit_plans_target_without_unpresentable_preview_floor(
     )
 
     assert states
-    assert all(not state.allow_preview for state in states)
+    assert all(state.allow_preview for state in states)
 
 
 def test_presentation_commit_replays_extent_camera_retarget_after_guard_release():

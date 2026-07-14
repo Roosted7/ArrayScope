@@ -23,13 +23,12 @@ def _plan_with_columns(columns):
 
 
 def test_montage_tile_priority_orders_from_viewport_center_outward():
-    from arrayscope.window.montage_viewport import prioritize_montage_tiles
+    from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
 
     plan = _plan()
-    ordered = prioritize_montage_tiles(
+    ordered = prioritize_tiles(
         plan.tiles,
-        view_range=((0, 32), (0, 32)),
-        focus=None,
+        context=TilePriorityContext.from_tiles(view_range=((0, 32), (0, 32))),
     )
 
     assert ordered[0].montage_index == 4
@@ -37,13 +36,14 @@ def test_montage_tile_priority_orders_from_viewport_center_outward():
 
 
 def test_montage_tile_priority_normalizes_by_viewport_aspect():
-    from arrayscope.window.montage_viewport import prioritize_montage_tiles
+    from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
 
     plan = _plan()
-    ordered = prioritize_montage_tiles(
+    ordered = prioritize_tiles(
         plan.tiles,
-        view_range=((10, 20), (0, 32)),
-        focus=(15, 16),
+        context=TilePriorityContext.from_tiles(
+            view_range=((10, 20), (0, 32)), focus=(15, 16)
+        ),
     )
     first_indices = [tile.montage_index for tile in ordered[:3]]
 
@@ -53,13 +53,14 @@ def test_montage_tile_priority_normalizes_by_viewport_aspect():
 def test_montage_tile_priority_accepts_array_inputs_and_invalid_focus():
     import numpy as np
 
-    from arrayscope.window.montage_viewport import prioritize_montage_tiles
+    from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
 
     plan = _plan()
-    ordered = prioritize_montage_tiles(
+    ordered = prioritize_tiles(
         np.asarray(plan.tiles, dtype=object),
-        view_range=((0, 32), (0, 32)),
-        focus=("not-a-number", 16),
+        context=TilePriorityContext.from_tiles(
+            view_range=((0, 32), (0, 32)), focus=("not-a-number", 16)
+        ),
     )
 
     assert ordered[0].montage_index == 4

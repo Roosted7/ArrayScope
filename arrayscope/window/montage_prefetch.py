@@ -232,9 +232,9 @@ def _candidate_tiles(session):
         return ()
     # Plan order is row-major, which would prefetch from the plan's corner;
     # speculate on the tiles nearest the viewport/focus instead.
-    context_builder = getattr(session, "_tile_priority_context", None)
-    if context_builder is None:
-        return candidates
+    context_builder = getattr(session, "tile_priority_context", None)
+    if not callable(context_builder):
+        raise RuntimeError("live frame session has no tile-priority owner")
     return MontageTilePriorityQueue(candidates, context=context_builder()).ordered_tiles()
 
 

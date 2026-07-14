@@ -303,6 +303,7 @@ class FramePipeline:
             fn=self.effects.evaluate_rung(intent, step),
             lane=step.lane,
             priority=step.priority,
+            scheduling_rank=int(step.scheduling_rank),
             scope=self._scope(intent.semantic_key),
             deps=self.effects.rung_deps(intent, step),
             # Latest-only per tile+rung: a *demand/level* change replaces the

@@ -74,6 +74,7 @@ class TileLodState:
     allow_preview: bool = True
     target_quality_available: bool = False
     exact_requested: bool = False  # inspection or user demanded native
+    scheduling_rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class RungStep:
     lane: Lane
     priority: Priority
     reason: str
+    scheduling_rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,7 @@ class LodLadder:
                     reason=(
                         "retained floor commit" if state.floor_available else "cold floor fill"
                     ),
+                    scheduling_rank=int(state.scheduling_rank),
                 )
             )
 
@@ -197,6 +200,7 @@ class LodLadder:
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     reason="preview rung (reduced-input display)",
+                    scheduling_rank=int(state.scheduling_rank),
                 )
             )
 
@@ -229,6 +233,7 @@ class LodLadder:
                         else Priority.HOVER
                     ),
                     reason=str(demand.reason or "desired display level"),
+                    scheduling_rank=int(state.scheduling_rank),
                 )
             )
 
@@ -244,6 +249,7 @@ class LodLadder:
                     lane=Lane.VISIBLE_MATERIALIZATION,
                     priority=Priority.VISIBLE_IMAGE if desired == 0 else Priority.HOVER,
                     reason="exact/native rung",
+                    scheduling_rank=int(state.scheduling_rank),
                 )
             )
 
@@ -279,6 +285,7 @@ class LodLadder:
                 lane=Lane.VISIBLE_MATERIALIZATION,
                 priority=Priority.VISIBLE_IMAGE,
                 reason="native-only policy",
+                scheduling_rank=int(state.scheduling_rank),
             ),
         )
 

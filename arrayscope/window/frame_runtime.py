@@ -15,6 +15,7 @@ from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work a
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import MontageTileState, montage_rect_for_viewport
+from arrayscope.display.model.tile_priority import prioritize_tiles
 from arrayscope.display.viewport import ViewportMode, view_ranges_near
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.pyramid import PyramidCache
@@ -27,7 +28,7 @@ from arrayscope.ui.toasts import show_revert_action
 from arrayscope.render import lod as render_lod
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import FramePipelineEffects
-from arrayscope.window.montage_viewport import prioritize_montage_tiles, square_montage_fit_view_range
+from arrayscope.window.montage_viewport import square_montage_fit_view_range
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
     montage_work_token_is_current as _montage_work_token_is_current,
@@ -199,19 +200,6 @@ class FrameRuntimeMixin:
         coverage.update(visible)
         coverage.update(int(tile) for tile in tuple(getattr(session, "loading_tiles", ()) or ()))
         coverage.update(int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ()))
-        if (
-            not bool(getattr(session, "shader_display", False))
-            and (
-                bool(getattr(session, "_cpu_atomic_successor_pending", False))
-                or bool(getattr(session, "source_window_changed_pending", False))
-            )
-        ):
-            # A CPU source-window handoff is one indivisible presentation.
-            # FramePlan.active is normally the admission scope, but the
-            # atomic successor must materialize every tile in the session's
-            # zero-margin visible coverage. Excluding an edge tile here left
-            # the successor permanently waiting with no pending producer.
-            visible = frozenset((*visible, *coverage))
         near = tuple(getattr(frame_plan, "near_region_ids", ()) or ())
         if not near:
             near = (
@@ -1056,10 +1044,9 @@ class FrameRuntimeMixin:
             if index not in pending:
                 newly_pending.append(tile)
                 pending.add(index)
-        for tile in prioritize_montage_tiles(
+        for tile in prioritize_tiles(
             newly_pending,
-            view_range=((rect[0], rect[2]), (rect[1], rect[3])),
-            focus=_montage_priority_focus(self, session.view_range),
+            context=session.tile_priority_context(),
         ):
             _enqueue_session_pending_tile(session, tile)
         if newly_pending:

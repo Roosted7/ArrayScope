@@ -22,6 +22,7 @@ from arrayscope.display.model.montage_levels import (
     tile_level_stats_with_quality,
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
@@ -453,14 +454,13 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
     if tile_numbers is None and scope is not None:
         tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
     allowed = None if tile_numbers is None else {int(value) for value in tuple(tile_numbers)}
-    ranked: list[tuple[tuple, TileLodState]] = []
+    states: list[TileLodState] = []
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
     visible_numbers = set(getattr(session, "visible_tile_numbers", ()) or ())
     skipped_numbers = set(getattr(session, "skipped_tiles", ()) or ())
     active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
     presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
-    focus = _viewport_focus(getattr(session, "view_range", None))
     preview_cache = getattr(session, "pyramid_cache", None)
     for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
         tile_number = int(tile.montage_index)
@@ -524,56 +524,33 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         blank = payload is None and not resident_levels
         visible_missing_count = int(getattr(scope, "visible_missing_count", 0) or 0)
         allow_preview = bool((blank and not target_quality_available) or visible_missing_count >= 2)
-        ranked.append(
-            (
-                _tile_priority_rank(
-                    tile,
-                    focus=focus,
-                    visible=tile_number in visible_numbers,
-                    view_range=getattr(session, "view_range", None),
-                ),
-                TileLodState(
-                    tile_number=tile_number,
-                    resident_levels=tuple(sorted(resident_levels)),
-                    presented_level=presented_level,
-                    ready_level=ready_level,
-                    ready_quality=ready_quality,
-                    presented_quality=presented_quality,
-                    current_presentation_quality=presented_quality,
-                    allow_preview=allow_preview,
-                    target_quality_available=target_quality_available,
-                    floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
-                ),
+        states.append(
+            TileLodState(
+                tile_number=tile_number,
+                resident_levels=tuple(sorted(resident_levels)),
+                presented_level=presented_level,
+                ready_level=ready_level,
+                ready_quality=ready_quality,
+                presented_quality=presented_quality,
+                current_presentation_quality=presented_quality,
+                allow_preview=allow_preview,
+                target_quality_available=target_quality_available,
+                floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
             )
         )
-    # Priority order is part of the contract: the ladder preserves this
-    # order inside each rung and the kernel executes FIFO within equal
-    # priority, so visible tiles fill center-out before off-screen tiles.
-    ranked.sort(key=lambda item: item[0])
-    return tuple(state for _rank, state in ranked)
-
-
-def _viewport_focus(view_range) -> tuple[float, float] | None:
-    try:
-        (x0, x1), (y0, y1) = view_range
-        return ((float(x0) + float(x1)) / 2.0, (float(y0) + float(y1)) / 2.0)
-    except Exception:
-        return None
-
-
-def _tile_priority_rank(tile, *, focus, visible: bool, view_range=None) -> tuple:
-    if focus is None:
-        return (0 if visible else 1, 0.0, int(tile.montage_index))
-    center_x = float(getattr(tile, "x0", 0)) + float(getattr(tile, "width", 0)) / 2.0
-    center_y = float(getattr(tile, "y0", 0)) + float(getattr(tile, "height", 0)) / 2.0
-    try:
-        (x0, x1), (y0, y1) = view_range
-        span_x = max(1.0, abs(float(x1) - float(x0)))
-        span_y = max(1.0, abs(float(y1) - float(y0)))
-    except Exception:
-        span_x = span_y = 1.0
-    distance = ((center_x - focus[0]) / span_x) ** 2 + ((center_y - focus[1]) / span_y) ** 2
-    return (0 if visible else 1, float(distance), int(tile.montage_index))
+    context_owner = getattr(session, "tile_priority_context", None)
+    if not callable(context_owner):
+        raise RuntimeError("live frame session has no tile-priority owner")
+    ordered_numbers = prioritize_tile_numbers(
+        (state.tile_number for state in states),
+        plan_tiles=tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()),
+        context=context_owner(),
+    )
+    by_number = {int(state.tile_number): state for state in states}
+    return tuple(
+        replace(by_number[int(tile_number)], scheduling_rank=rank)
+        for rank, tile_number in enumerate(ordered_numbers)
+    )
 
 
 def rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:

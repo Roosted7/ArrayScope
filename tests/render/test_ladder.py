@@ -141,3 +141,13 @@ def test_cross_tile_floor_first_fill_ordering():
         (Rung.DESIRED, 0),
         (Rung.DESIRED, 1),
     ]
+
+
+def test_ladder_carries_canonical_tile_rank_across_every_rung():
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    steps = ladder.plan_tile(
+        TileLodState(tile_number=7, scheduling_rank=3),
+        demand(1),
+    )
+
+    assert {step.scheduling_rank for step in steps} == {3}

@@ -299,21 +299,15 @@ class FramePipelineEffects:
                 else state
                 for state in states
             )
-        cpu_atomic_successor = bool(
+        if (
             not bool(getattr(self.session, "shader_display", False))
-            and (
-                not bool(getattr(self.session, "display_committed", False))
-                or bool(getattr(self.session, "_cpu_atomic_successor_pending", False))
-                or bool(getattr(self.session, "source_window_changed_pending", False))
-            )
-        )
-        if cpu_atomic_successor:
-            # PyQtGraph has one CPU-windowed scene and cannot expose a partial
-            # successor. A floor/preview for the one cold edge tile is not
-            # presentable while the other 59 slots still belong to the old
-            # source window; planning it also defers the DESIRED rung that can
-            # actually complete the atomic replacement. Plan the demanded
-            # payload directly for first display and every source-window swap.
+            and bool(getattr(self.session, "source_window_changed_pending", False))
+            and _compatible_successor_payload_count(self.session) > 0
+        ):
+            # Preserve an already-compatible predecessor (notably a one-index
+            # shift) until its few cold replacements are ready. A fully cold
+            # successor has no compatible pixels to preserve and streams in
+            # canonical priority order instead.
             return tuple(replace(state, allow_preview=False) for state in states)
         return states
 
@@ -778,7 +772,6 @@ class FramePipelineEffects:
         if (
             not bool(image_view_backend_capabilities(self.renderer.win.img_view).shader_windowing)
             and bool(getattr(self.session, "display_committed", False))
-            and not bool(getattr(self.session, "_cpu_atomic_successor_pending", False))
         ):
             # Timer category: UI cosmetic. A short one-shot coalescer lets
             # several completed CPU-windowed tiles share one scene rebuild.
@@ -1327,6 +1320,11 @@ class FramePipelineEffects:
             ) + int(bool(fast_drain))
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
+            cpu_atomic_successor = bool(
+                cpu_backend
+                and bool(getattr(session, "source_window_changed_pending", False))
+                and _compatible_successor_payload_count(session) > 0
+            )
             predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
             predecessor_source = getattr(predecessor_frame, "value_source", None)
             shader_successor_candidate = bool(
@@ -1340,23 +1338,9 @@ class FramePipelineEffects:
                 and bool(getattr(session, "source_window_changed_pending", False))
                 and isinstance(predecessor_source, TiledValueSource)
                 and bool(getattr(predecessor_source, "payloads", None))
+                and _compatible_successor_payload_count(session) > 0
             )
-            if cpu_backend and (
-                not bool(getattr(session, "display_committed", False))
-                or bool(getattr(session, "_layout_geometry_changed_pending", False))
-                or bool(getattr(session, "source_window_changed_pending", False))
-            ):
-                session._cpu_atomic_successor_pending = True
-            elif not cpu_backend:
-                session._cpu_atomic_successor_pending = False
-            if cpu_backend and bool(getattr(session, "_cpu_atomic_successor_pending", False)):
-                # Atomic readiness is payload readiness, not merely native
-                # evaluation readiness. Build current wrappers for every
-                # rendered visible tile before querying the transaction. The
-                # old order queried first, returned early, and then waited for
-                # a builder that was only reachable after the query succeeded
-                # (all native results present, one wrapper built, N-1 tiles
-                # permanently dirty with no work in flight).
+            if cpu_atomic_successor:
                 lod_factor = int(session._selected_lod_factor())
                 for tile_number in tuple(getattr(session, "visible_tile_numbers", ()) or ()):
                     rendered = session.rendered_tiles.get(int(tile_number))
@@ -1367,25 +1351,15 @@ class FramePipelineEffects:
                             tile_source_ids,
                             lod_factor=lod_factor,
                         )
-            cpu_successor_ready = bool(
-                cpu_backend
-                and getattr(session, "_cpu_atomic_successor_pending", False)
-                and _cpu_successor_payloads_ready(session)
-            )
-            if cpu_backend and bool(getattr(session, "_cpu_atomic_successor_pending", False)) and not cpu_successor_ready:
-                # The CPU backend cannot change levels in a shader and its
-                # physical montage is one scene item. Keep the complete
-                # predecessor intact until the successor has every visible
-                # exact payload. Building a capped delta here advances the
-                # lifecycle to TARGET_EMITTED even though no atomic frame may
-                # be shown, and is the source of full -> subset -> full
-                # flashes during viewport/fit transitions.
-                session.final_commit_pending = False
-                session.flush_pending = False
-                renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                renderer._last_montage_commit_outcome = "cpu-atomic-successor-wait"
-                renderer.request_montage_replan(session)
-                return
+                if not _cpu_successor_payloads_ready(session):
+                    session.final_commit_pending = False
+                    session.flush_pending = False
+                    renderer._last_montage_tile_payload_build_ms = (
+                        perf_counter() - payload_start
+                    ) * 1000.0
+                    renderer._last_montage_commit_outcome = "cpu-compatible-successor-wait"
+                    renderer.request_montage_replan(session)
+                    return
             requested_levels = session_requested_levels(session)
             if cpu_backend and requested_levels is None:
                 # Automatic widget synchronization is deliberately silent: it
@@ -1464,12 +1438,7 @@ class FramePipelineEffects:
                 if current_levels is not None:
                     session.bind_payloads_to_level_generation()
             limits = tile_layer_upsert_limits(renderer, session)
-            if cpu_successor_ready:
-                # One complete CPU presentation transaction replaces the
-                # retained predecessor. Capping this final swap exposes a
-                # subset between two otherwise complete montage frames.
-                limits = {}
-            elif shader_source_successor:
+            if cpu_atomic_successor or shader_source_successor:
                 # Hidden warming bounds GPU uploads; the eventual source-slot
                 # handoff itself is one complete transaction and must not be
                 # built once under the upload cap and then rebuilt unbounded.
@@ -1731,7 +1700,7 @@ class FramePipelineEffects:
             if warm_levels is None:
                 warm_levels = normalize_bounds(renderer.win.img_view.getLevels())
             cpu_backend = not bool(capabilities.shader_windowing)
-            atomic_successor = bool(cpu_backend or shader_source_successor)
+            atomic_successor = bool(cpu_atomic_successor or shader_source_successor)
             resident_predicate = getattr(renderer.win.img_view, "tiledPayloadResident", None)
             cold_gpu_successor = bool(
                 not cpu_backend
@@ -1774,15 +1743,19 @@ class FramePipelineEffects:
             ):
                 session._atomic_prepared_transaction = {
                     "session_id": int(getattr(session, "session_id", 0) or 0),
-                    "marker_kind": "cpu" if cpu_backend else "shader-source",
+                    "marker_kind": (
+                        "cpu-compatible" if cpu_atomic_successor else "shader-source"
+                    ),
                     "base_tile_state": base_tile_state,
                     "tile_state": tile_state,
                     "tile_delta": tile_delta,
                     "payload_markers": {
                         int(tile): (
-                            _cpu_transaction_payload_marker(payload)
-                            if cpu_backend
-                            else _shader_source_transaction_payload_marker(payload)
+                            (
+                                _cpu_transaction_payload_marker(payload)
+                                if cpu_atomic_successor
+                                else _shader_source_transaction_payload_marker(payload)
+                            )
                         )
                         for tile, payload in active_payloads.items()
                     },
@@ -2132,17 +2105,6 @@ class FramePipelineEffects:
             reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
             if callable(reconcile_quotas):
                 reconcile_quotas(refresh_telemetry=False)
-        if (
-            bool(getattr(session, "_cpu_atomic_successor_pending", False))
-            and session.lifecycle.visible_first_pixels_presented()
-            and not session.backend_identity_mismatch_tiles()
-        ):
-            # Atomic successor means coverage-complete first pixels, not
-            # target-LOD completion. Keeping the latch until every refinement
-            # finished made the first acknowledged preview block its own exact
-            # upgrade forever (one-tile and montage startup both reproduced
-            # this as a physically visible preview with no committed frame).
-            session._cpu_atomic_successor_pending = False
         if session.visible_plan_complete():
             session.source_window_changed_pending = False
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
@@ -3148,64 +3110,36 @@ def session_requested_levels(session) -> tuple[float, float] | None:
     return normalize_bounds(getattr(session, "user_levels_override", None))
 
 
-def _cpu_successor_payloads_ready(session) -> bool:
-    """Whether a CPU-windowed successor can replace its predecessor at once.
-
-    A retained predecessor is presentation evidence, not materialization for
-    the successor. Every payload must belong to the current visible source
-    mapping, but a complete preview-quality frame is valid first pixels: the
-    refined-level gate separately guarantees correct CPU windowing, and later
-    exact tiles replace previews without clearing them. Skipped tiles are not
-    visible obligations.
-    """
-
-    planned = set(int(tile) for tile in getattr(session, "visible_tile_numbers", ()) or ())
-    planned.difference_update(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
-    if not planned:
-        return False
-    sync_scope = getattr(session, "sync_lifecycle_scope", None)
-    if callable(sync_scope):
-        sync_scope()
+def _compatible_successor_payload_count(session) -> int:
     plan_tiles = {
         int(tile.montage_index): tile
         for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
     }
-    lifecycle = getattr(session, "lifecycle", None)
-    payloads = getattr(session, "display_tile_payloads", {})
-    for tile_number in planned:
-        tile = plan_tiles.get(int(tile_number))
-        record = (
-            lifecycle.peek(int(tile_number))
-            if lifecycle is not None and hasattr(lifecycle, "peek")
-            else None
-        )
-        target_ref = None if record is None else record.target_payload
-        payload = (
-            getattr(target_ref, "payload", None)
-            if target_ref is not None
-            else payloads.get(int(tile_number))
-        )
-        if tile is None or payload is None:
-            return False
-        if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
-            return False
-        semantic_source_id = session.tile_semantic_source_id(int(tile.source_index))
-        payload_source_id = getattr(payload, "source_id", None)
-        source_matches = bool(
-            payload_source_id == semantic_source_id
-            or _base_source_id(payload_source_id) == semantic_source_id
-        )
-        lifecycle_matches = bool(
-            target_ref is not None
-            or (
-                lifecycle is not None
-                and hasattr(lifecycle, "payload_is_current")
-                and lifecycle.payload_is_current(int(tile_number), payload)
-            )
-        )
-        if not (source_matches or lifecycle_matches):
-            return False
-    return True
+    return sum(
+        1
+        for tile_number, payload in dict(
+            getattr(session, "display_tile_payloads", {}) or {}
+        ).items()
+        if int(tile_number) in plan_tiles
+        and int(getattr(payload, "source_index", -1))
+        == int(plan_tiles[int(tile_number)].source_index)
+    )
+
+
+def _cpu_successor_payloads_ready(session) -> bool:
+    required = set(int(tile) for tile in session.required_tile_numbers())
+    required.difference_update(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
+    plan_tiles = {
+        int(tile.montage_index): tile
+        for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    }
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    return bool(required) and all(
+        int(tile_number) in payloads
+        and int(getattr(payloads[int(tile_number)], "source_index", -1))
+        == int(plan_tiles[int(tile_number)].source_index)
+        for tile_number in required
+    )
 
 
 def _cpu_transaction_payload_marker(payload) -> tuple:
@@ -3244,11 +3178,13 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
         return False
     markers = dict(prepared.get("payload_markers", {}) or {})
     payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
-    marker_fn = (
-        _shader_source_transaction_payload_marker
-        if prepared.get("marker_kind") == "shader-source"
-        else _cpu_transaction_payload_marker
-    )
+    marker_kind = prepared.get("marker_kind")
+    if marker_kind == "shader-source":
+        marker_fn = _shader_source_transaction_payload_marker
+    elif marker_kind == "cpu-compatible":
+        marker_fn = _cpu_transaction_payload_marker
+    else:
+        return False
     return bool(markers) and all(
         int(tile) in payloads
         and marker_fn(payloads[int(tile)]) == marker

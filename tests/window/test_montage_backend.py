@@ -1147,6 +1147,8 @@ def test_visible_tile_classifier_respects_native_queue_policy():
             self.replans += 1
 
     def session_for(policy, decision):
+        from arrayscope.display.model.tile_priority import TilePriorityContext
+
         state = ViewState.from_shape((64, 64, 4)).with_montage_axis(
             2,
             columns=4,
@@ -1163,7 +1165,7 @@ def test_visible_tile_classifier_respects_native_queue_policy():
             if int(tile.montage_index) not in set(pending_tile_numbers()):
                 pending.append(tile)
 
-        return SimpleNamespace(
+        session = SimpleNamespace(
             plan=plan,
             view_range=((0.0, float(plan.display_shape[1])), (0.0, float(plan.display_shape[0]))),
             viewport_shape=(128, 128),
@@ -1176,6 +1178,13 @@ def test_visible_tile_classifier_respects_native_queue_policy():
             lod_policy_mode=policy,
             lod_policy_decision=decision,
         )
+        session.tile_priority_context = lambda: TilePriorityContext.from_tiles(
+            view_range=session.view_range,
+            visible_tiles=tuple(
+                int(tile.montage_index) for tile in session.plan.tiles
+            ),
+        )
+        return session
 
     coarse_resident = session_for(
         LOD_POLICY_RESIDENT,
@@ -3245,70 +3254,6 @@ def test_auto_large_rgb_montage_uses_tile_layer():
     assert decision.backend == "tile_layer"
 
 
-def test_cpu_successor_requires_every_visible_current_payload():
-    from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.window.frame_effects import _cpu_successor_payloads_ready
-
-    image = np.ones((2, 2), dtype=np.float32)
-    tiles = (
-        SimpleNamespace(montage_index=0, source_index=10),
-        SimpleNamespace(montage_index=1, source_index=11),
-    )
-
-    def payload(tile_number, source_index, *, quality="exact"):
-        return DisplayTilePayload(
-            tile_number,
-            source_index,
-            image,
-            image,
-            ("semantic", source_index),
-            quality=quality,
-        )
-
-    session = SimpleNamespace(
-        visible_tile_numbers=frozenset({0, 1}),
-        skipped_tiles=set(),
-        plan=SimpleNamespace(tiles=tiles),
-        display_tile_payloads={
-            0: payload(0, 10),
-            1: payload(1, 11),
-        },
-        tile_semantic_source_id=lambda source_index: ("semantic", source_index),
-        lifecycle=SimpleNamespace(payload_is_current=lambda *_args: False),
-    )
-
-    assert _cpu_successor_payloads_ready(session)
-
-    session.display_tile_payloads.pop(1)
-    assert not _cpu_successor_payloads_ready(session)
-
-    session.display_tile_payloads[1] = payload(1, 11, quality="preview")
-    assert _cpu_successor_payloads_ready(session)
-
-    session.display_tile_payloads[1] = payload(1, 99)
-    assert not _cpu_successor_payloads_ready(session)
-
-
-def test_cpu_successor_excludes_skipped_visible_tiles_from_atomic_obligation():
-    from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.window.frame_effects import _cpu_successor_payloads_ready
-
-    image = np.ones((2, 2), dtype=np.float32)
-    tile = SimpleNamespace(montage_index=0, source_index=10)
-    payload = DisplayTilePayload(0, 10, image, image, ("semantic", 10))
-    session = SimpleNamespace(
-        visible_tile_numbers=frozenset({0, 1}),
-        skipped_tiles={1},
-        plan=SimpleNamespace(tiles=(tile, SimpleNamespace(montage_index=1, source_index=11))),
-        display_tile_payloads={0: payload},
-        tile_semantic_source_id=lambda source_index: ("semantic", source_index),
-        lifecycle=SimpleNamespace(payload_is_current=lambda *_args: False),
-    )
-
-    assert _cpu_successor_payloads_ready(session)
-
-
-
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
     from arrayscope.display.geometry import MontageGeometry
@@ -3339,6 +3284,9 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
             raise AssertionError("loading-only first commit must not reach backend")
 
         def request_montage_replan(self, _session):
+            return None
+
+        def _montage_level_source_for_session(self, _session, *, allow_partial=False):
             return None
 
     geometry = MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0)

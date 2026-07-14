@@ -33,6 +33,8 @@ from arrayscope.display.model.presentation_generation import (
 from arrayscope.display.model.tile_priority import (
     MontageTilePriorityQueue,
     TilePriorityContext,
+    prioritize_tiles,
+    tile_priority_key,
 )
 from arrayscope.display.model.tile_identity import (
     ArrayPlaneIdentity,
@@ -72,6 +74,8 @@ __all__ = [
     "TilePresentationIdentity",
     "TilePresentationState",
     "TilePriorityContext",
+    "prioritize_tiles",
+    "tile_priority_key",
     "TileLevelStats",
     "TiledValueSource",
     "montage_level_key",

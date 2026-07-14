@@ -744,7 +744,7 @@ class FrameSession:
         pending = tuple(self.pending_tiles or ())
         self.pending_tiles = MontageTilePriorityQueue(
             pending,
-            context_provider=self._tile_priority_context,
+            context_provider=self.tile_priority_context,
         )
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
@@ -2043,7 +2043,7 @@ class FrameSession:
             for tile, payload in payloads.items()
             if payload.source_id in self.acknowledged_source_ids
         }
-        admission = TileAdmissionQueue(self._tile_priority_context()).admit(
+        admission = TileAdmissionQueue(self.tile_priority_context()).admit(
             tuple(payloads),
             retained=(),
             free_fn=(
@@ -2433,7 +2433,7 @@ class FrameSession:
                 )
             )
         )
-        priority_context = self._tile_priority_context()
+        priority_context = self.tile_priority_context()
         if correctness_priority_tiles:
             priority_context = replace(
                 priority_context,
@@ -3579,7 +3579,7 @@ class FrameSession:
             pending = tuple(self.pending_tiles or ())
         self.pending_tiles = MontageTilePriorityQueue(
             tuple(remap(tile) for tile in pending),
-            context_provider=self._tile_priority_context,
+            context_provider=self.tile_priority_context,
         )
     def retarget_tile_priority(
         self,
@@ -3616,7 +3616,7 @@ class FrameSession:
         )
         # Every ordering consumer (pending queue, per-commit upsert admission,
         # prefetch candidates) reads this one
-        # context through _tile_priority_context; retargets are the only
+        # context through tile_priority_context; retargets are the only
         # writer, and queues resolve it live via their context provider.
         # Rebuilding the context ad hoc per consumer let different stages of
         # the pipeline order the same fill around different anchors.
@@ -3625,7 +3625,7 @@ class FrameSession:
         self.priority_retargeted_tiles = len(self.pending_tiles)
         return int(self.priority_retargeted_tiles)
 
-    def _tile_priority_context(self) -> TilePriorityContext:
+    def tile_priority_context(self) -> TilePriorityContext:
         """The session's single effective ordering context.
 
         Updated only by :meth:`retarget_tile_priority`; built lazily before
@@ -3707,7 +3707,7 @@ class FrameSession:
         return prioritize_tile_numbers(
             tiles,
             plan_tiles=tuple(getattr(self.plan, "tiles", ()) or ()),
-            context=self._tile_priority_context(),
+            context=self.tile_priority_context(),
         )
 
     def _ensure_pending_priority_queue(self, *, context: TilePriorityContext | None = None) -> None:
@@ -3716,7 +3716,7 @@ class FrameSession:
             return
         self.pending_tiles = MontageTilePriorityQueue(
             tuple(self.pending_tiles or ()),
-            context_provider=self._tile_priority_context,
+            context_provider=self.tile_priority_context,
         )
 
 

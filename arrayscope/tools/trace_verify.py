@@ -12,6 +12,7 @@ def verify_trace(path: str | Path) -> dict[str, object]:
 
     targets: dict[int, dict[str, object]] = {}
     acknowledgements: dict[int, dict[str, object]] = {}
+    first_ack_sequences: dict[int, int] = {}
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -29,9 +30,11 @@ def verify_trace(path: str | Path) -> dict[str, object]:
                     "sequence": int(event.get("sequence", 0) or 0),
                 }
                 acknowledgements.pop(tile, None)
+                first_ack_sequences.pop(tile, None)
             elif edge == "target_released":
                 targets.pop(tile, None)
                 acknowledgements.pop(tile, None)
+                first_ack_sequences.pop(tile, None)
             continue
         if kind != "backend_ack" or not bool(event.get("accepted", False)):
             continue
@@ -52,6 +55,7 @@ def verify_trace(path: str | Path) -> dict[str, object]:
         )
         if source_matches and quality not in {"fallback", "preview", ""} and level_matches:
             acknowledgements[tile] = event
+            first_ack_sequences.setdefault(tile, int(event.get("sequence", 0) or 0))
 
     missing = tuple(sorted(set(targets).difference(acknowledgements)))
     violations = tuple(
@@ -67,6 +71,9 @@ def verify_trace(path: str | Path) -> dict[str, object]:
         "event_count": event_count,
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
+        "acknowledgement_order": tuple(
+            tile for tile, _sequence in sorted(first_ack_sequences.items(), key=lambda item: item[1])
+        ),
         "violations": violations,
     }
 
