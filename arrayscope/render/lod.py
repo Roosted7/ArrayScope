@@ -950,6 +950,17 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             shader_mapping=getattr(metadata, "shader_mapping", None),
             level_data=getattr(metadata, "level_data", None),
             level_stats=getattr(metadata, "level_stats", None),
+            tile_identity=session.tile_payload_identity(
+                session.plan.tiles[int(tile_number)],
+                texture_data=np.asarray(plane),
+                texture_kind=texture_kind,
+                shader_mapping=getattr(metadata, "shader_mapping", None),
+                lod=lod,
+                quality=str(getattr(metadata, "quality", "preview") or "preview"),
+            ),
+            presentation_identity=session.tile_presentation_identity(
+                getattr(metadata, "shader_mapping", None)
+            ),
         )
         session.display_tile_payloads[tile_number] = payload
         session.record_tile_payload(payload)

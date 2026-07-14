@@ -224,6 +224,7 @@ class TextureAtlasPool:
         self.resident_tiles: dict[object, set[int]] = {}
         self.tile_uvs: dict[int, tuple[float, float, float, float]] = {}
         self.source_ids: dict[object, object] = {}
+        self.acknowledged_identities: dict[object, object] = {}
         self.last_used: dict[object, int] = {}
         self.active_resident_keys: set[object] = set()
         # Keys whose tile(s) now present a different residency class (ADR
@@ -257,7 +258,7 @@ class TextureAtlasPool:
         """
 
         return {
-            int(tile): self.source_ids.get(key)
+            int(tile): self.acknowledged_identities.get(key, self.source_ids.get(key))
             for tile, key in self.tile_resident_keys.items()
             if key in self.source_ids
         }
@@ -353,6 +354,7 @@ class TextureAtlasPool:
             self.resident_tiles.clear()
             self.tile_uvs.clear()
             self.source_ids.clear()
+            self.acknowledged_identities.clear()
             self.last_used.clear()
             self.active_resident_keys.clear()
             self.superseded_keys.clear()
@@ -481,6 +483,7 @@ class TextureAtlasPool:
                 page._free_slots.append(slot)
                 self.resident_slots.pop(key, None)
                 self.source_ids.pop(key, None)
+                self.acknowledged_identities.pop(key, None)
                 self.last_used.pop(key, None)
                 self.superseded_keys.discard(key)
                 self.eviction_count += 1
@@ -775,6 +778,7 @@ class TextureAtlasPool:
             if (scalar is not None or color is not None) and page.mipmap_levels:
                 page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
+            self.acknowledged_identities[resident_key] = getattr(payload, "tile_identity", None) or payload.source_id
             updated += 1
 
         payload_presented_tiles = tuple(
@@ -1033,6 +1037,7 @@ class TextureAtlasPool:
             if (scalar is not None or color is not None) and page.mipmap_levels:
                 page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
+            self.acknowledged_identities[resident_key] = getattr(payload, "tile_identity", None) or payload.source_id
             self._touch(resident_key)
             updated += 1
 
@@ -1130,6 +1135,7 @@ class TextureAtlasPool:
         self._discard_tile_mappings_for_resident_key(victim)
         self.resident_slots.pop(victim, None)
         self.source_ids.pop(victim, None)
+        self.acknowledged_identities.pop(victim, None)
         self.last_used.pop(victim, None)
         if victim in self.superseded_keys:
             self.superseded_reclaimed_count += 1

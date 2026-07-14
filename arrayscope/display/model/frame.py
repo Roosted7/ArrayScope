@@ -11,6 +11,7 @@ from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
+from arrayscope.display.model.tile_identity import TileIdentity, TilePresentationIdentity
 
 
 def array_value_at(data, y_i: int, x_i: int):
@@ -43,6 +44,8 @@ class DisplayTilePayload:
     level_stats: object | None = None
     rgb_windowed_levels: tuple[float, float] | None = None
     quality: str = "exact"
+    tile_identity: TileIdentity | None = None
+    presentation_identity: TilePresentationIdentity | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")

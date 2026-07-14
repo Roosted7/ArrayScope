@@ -36,6 +36,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Iterable, Iterator, Mapping
 
+from arrayscope.display.model.tile_identity import TileIdentity
+
 
 class Semantic(str, Enum):
     UNPLANNED = "unplanned"
@@ -94,6 +96,7 @@ class TilePayloadRef:
     source_index: int
     texture_kind: object = None
     shader_mapping_key: object = None
+    identity: TileIdentity | None = None
     payload: object = None
 
     def __post_init__(self) -> None:
@@ -110,7 +113,17 @@ class TilePayloadRef:
     def is_target_quality(self) -> bool:
         return self.quality == "exact"
 
+    @property
+    def acknowledged_identity(self) -> object:
+        return self.identity if self.identity is not None else self.source_id
+
     def satisfies_target(self, target: "TileTarget") -> bool:
+        if self.identity is not None or target.identity is not None:
+            return bool(
+                self.identity is not None
+                and target.identity is not None
+                and self.identity.satisfies_target(target.identity)
+            )
         return bool(
             self.is_target_quality
             and int(self.source_index) == int(target.source_index)
@@ -126,6 +139,7 @@ class TileTarget:
     lod_level: int = 0
     quality: str = "exact"
     visible: bool = True
+    identity: TileIdentity | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tile_number", int(self.tile_number))
@@ -338,6 +352,10 @@ class TileRecord:
         payload = self.presentable_payloads.get(source_id)
         if payload is not None:
             return payload_ref_from_display_payload(payload)
+        for candidate in self.presentable_payloads.values():
+            ref = payload_ref_from_display_payload(candidate)
+            if ref.acknowledged_identity == source_id:
+                return ref
         if self.target is None:
             return None
         return TilePayloadRef(
@@ -518,7 +536,7 @@ class TileLifecycle:
             rec.presentable_payloads[ref.source_id] = _stored_payload(ref)
             rec.presented_quality = "preview" if ref.quality == "fallback" else ref.quality
             rec.presented_level = ref.lod_level
-            self.upsert_emitted(tile_number, ref.source_id)
+            self.upsert_emitted(tile_number, ref.acknowledged_identity)
 
     def backend_ack(
         self,
@@ -537,7 +555,7 @@ class TileLifecycle:
             if _payload_refs_match(self.record(tile)._payload_for_identity(self.record(tile).emitted_source_id), ref)
         }
         merged_backend = dict(self.backend_presented_identities)
-        merged_backend.update({tile: ref.source_id for tile, ref in backend_refs.items()})
+        merged_backend.update({tile: ref.acknowledged_identity for tile, ref in backend_refs.items()})
         confirmed = self.commit_acknowledged(
             emitted_tiles=tuple(accepted_refs),
             accepted_tiles=tuple(metadata_accepted),
@@ -1462,6 +1480,7 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
         source_index=int(getattr(payload, "source_index", -1)),
         texture_kind=None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
         shader_mapping_key=None if shader_mapping is None else getattr(shader_mapping, "identity_key", shader_mapping),
+        identity=getattr(payload, "tile_identity", None),
         payload=payload,
     )
 
@@ -1536,4 +1555,5 @@ def _payload_refs_match(left: TilePayloadRef | None, right: TilePayloadRef | Non
         and left.source_index == right.source_index
         and left.texture_kind == right.texture_kind
         and left.shader_mapping_key == right.shader_mapping_key
+        and left.identity == right.identity
     )

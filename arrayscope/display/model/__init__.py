@@ -34,9 +34,19 @@ from arrayscope.display.model.tile_priority import (
     MontageTilePriorityQueue,
     TilePriorityContext,
 )
+from arrayscope.display.model.tile_identity import (
+    ArrayPlaneIdentity,
+    TileIdentity,
+    TileLodIdentity,
+    TilePresentationIdentity,
+    array_plane_identities,
+    complex_mapping_identity,
+    tile_ack_identity,
+)
 
 __all__ = [
     "CommitKind",
+    "ArrayPlaneIdentity",
     "CommitPlan",
     "CommittedDisplayFrame",
     "DisplayFrameKey",
@@ -55,9 +65,15 @@ __all__ = [
     "PresentationInput",
     "RenderRequestContext",
     "TilePresentationDelta",
+    "TileIdentity",
+    "TileLodIdentity",
+    "TilePresentationIdentity",
     "TilePresentationState",
     "TilePriorityContext",
     "TileLevelStats",
     "TiledValueSource",
     "montage_level_key",
+    "array_plane_identities",
+    "complex_mapping_identity",
+    "tile_ack_identity",
 ]

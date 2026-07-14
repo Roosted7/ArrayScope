@@ -14,6 +14,7 @@ from arrayscope.core.runtime_diagnostics import (
 )
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.regions import region_text
@@ -437,7 +438,7 @@ def _backend_stale_identities(session) -> int:
     stale = 0
     for tile_number, shown_identity in identities.items():
         current = payloads.get(int(tile_number))
-        if current is not None and current.source_id != shown_identity:
+        if current is not None and tile_ack_identity(current) != shown_identity:
             stale += 1
     return stale
 

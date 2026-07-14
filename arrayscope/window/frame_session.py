@@ -32,6 +32,14 @@ from arrayscope.display.model.presentation_generation import (
     levels_match,
 )
 from arrayscope.display.model.tile_admission import TileAdmissionQueue
+from arrayscope.display.model.tile_identity import (
+    TileIdentity,
+    TileLodIdentity,
+    TilePresentationIdentity,
+    array_plane_identities,
+    complex_mapping_identity,
+    tile_ack_identity,
+)
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import (
     ClaimOwner,
@@ -705,6 +713,7 @@ class FrameSession:
                 source_index=source_index,
                 semantic_source_id=self.tile_semantic_source_id(source_index),
                 lod_level=target_level,
+                identity=self.tile_target_identity(tile, lod_level=target_level),
             )
         target_signature = tuple(
             (tile, target.source_index, target.semantic_source_id, target.lod_level)
@@ -1198,7 +1207,7 @@ class FrameSession:
             target_lod_presented = _payload_is_reduced_target(payload)
             if index not in self.rendered_tiles and not preview_presented and not target_lod_presented:
                 continue
-            if shown_identities and payload is not None and shown_identities.get(index) != payload.source_id:
+            if shown_identities and payload is not None and shown_identities.get(index) != tile_ack_identity(payload):
                 # Backend-active is not the same as current-presented.  PyQtGraph
                 # can keep an item visible while it still holds the previous
                 # payload identity; treating that as presented made scrolls settle
@@ -1214,7 +1223,7 @@ class FrameSession:
                 self.lifecycle.remember_presentable(index, self.display_tile_payloads[index])
                 self.lifecycle.acknowledge_presented(
                     index,
-                    self.display_tile_payloads[index].source_id,
+                    tile_ack_identity(self.display_tile_payloads[index]),
                     str(getattr(self.display_tile_payloads[index], "quality", "exact") or "exact"),
                     int(getattr(getattr(self.display_tile_payloads[index], "lod", None), "level", 0) or 0),
                 )
@@ -1335,6 +1344,15 @@ class FrameSession:
             shader_mapping=mapping,
             level_data=exact_level_data,
             level_stats=level_stats,
+            tile_identity=self.tile_payload_identity(
+                rendered.tile,
+                texture_data=texture_data,
+                texture_kind=texture_kind,
+                shader_mapping=mapping,
+                lod=lod,
+                quality="exact",
+            ),
+            presentation_identity=self.tile_presentation_identity(mapping),
         )
         self.display_tile_payloads[tile_number] = payload
         self.lifecycle.remember_presentable(tile_number, payload)
@@ -1417,7 +1435,7 @@ class FrameSession:
             self.acknowledged_source_ids.add(payload.source_id)
             backend_confirms_payload = (
                 tile_number in backend_identities
-                and backend_identities.get(tile_number) == payload.source_id
+                and backend_identities.get(tile_number) == tile_ack_identity(payload)
             )
             if backend_confirms_payload:
                 if seeded_state.get(tile_number) is not payload:
@@ -1452,6 +1470,113 @@ class FrameSession:
             int(lod.factor),
             int(lod.level),
             int(lod.gutter),
+        )
+
+    def tile_target_identity(self, tile: MontageTile, *, lod_level: int) -> TileIdentity:
+        """Typed requested identity, independent of viewport and levels/LUT."""
+
+        view_state = tile.view_state
+        channel = getattr(getattr(view_state, "channel", None), "value", getattr(view_state, "channel", "real"))
+        texture_kind = (
+            TexturePlaneKind.COMPLEX_RG32F
+            if str(channel) == "complex"
+            else TexturePlaneKind.SCALAR_R32F
+        )
+        mapping = (
+            ("phase_color", "abs", "mapped")
+            if str(channel) == "complex"
+            else ("scalar", str(channel), "mapped")
+        )
+        return self._tile_identity(
+            tile,
+            texture_kind=texture_kind,
+            complex_mapping=mapping,
+            lod=TileLodIdentity(level=lod_level, factor=1 << max(0, int(lod_level))),
+            quality="exact",
+        )
+
+    def tile_payload_identity(
+        self,
+        tile: MontageTile,
+        *,
+        texture_data,
+        texture_kind,
+        shader_mapping,
+        lod,
+        quality: str,
+    ) -> TileIdentity:
+        texture_values = np.asarray(texture_data)
+        if texture_kind is None:
+            if np.iscomplexobj(texture_values) or (
+                texture_values.ndim >= 3 and texture_values.shape[-1] == 2
+            ):
+                texture_kind = TexturePlaneKind.COMPLEX_RG32F
+            elif texture_values.ndim >= 3 and texture_values.shape[-1] in (3, 4):
+                texture_kind = TexturePlaneKind.RGB8
+            else:
+                texture_kind = TexturePlaneKind.SCALAR_R32F
+        lod_identity = TileLodIdentity(
+            level=int(getattr(lod, "level", 0) or 0),
+            factor=int(getattr(lod, "factor", 1) or 1),
+            gutter=int(getattr(lod, "gutter", 0) or 0),
+        )
+        real_plane, imag_plane = array_plane_identities(texture_values)
+        mapping_identity = complex_mapping_identity(shader_mapping)
+        if mapping_identity is None:
+            mapping_identity = self.tile_target_identity(tile, lod_level=lod_identity.level).complex_mapping
+        return self._tile_identity(
+            tile,
+            texture_kind=texture_kind,
+            complex_mapping=mapping_identity,
+            lod=lod_identity,
+            quality=quality,
+            real_plane=real_plane,
+            imag_plane=imag_plane,
+        )
+
+    def tile_presentation_identity(self, shader_mapping) -> TilePresentationIdentity:
+        levels = getattr(getattr(self, "level_generation", None), "target_levels", None)
+        return TilePresentationIdentity(
+            levels_generation=int(getattr(self, "level_revision", 0) or 0),
+            levels=levels,
+            scale=getattr(shader_mapping, "scale", None),
+            lut_identity=getattr(shader_mapping, "lut_identity", None),
+        )
+
+    def _tile_identity(
+        self,
+        tile: MontageTile,
+        *,
+        texture_kind,
+        complex_mapping,
+        lod: TileLodIdentity,
+        quality: str,
+        real_plane=None,
+        imag_plane=None,
+    ) -> TileIdentity:
+        document = self.document
+        base_data = getattr(document, "base_data", None)
+        view_state = tile.view_state
+        semantic_generation = (
+            tuple(int(value) for value in getattr(view_state, "shape", ())),
+            tuple(int(value) for value in getattr(view_state, "slice_indices", ())),
+            tuple(getattr(view_state, "axis_range_indices", ()) or ()),
+            tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
+        )
+        return TileIdentity(
+            document_generation=(id(base_data), int(getattr(document, "revision", 0) or 0)),
+            operation_key=tuple(getattr(document, "steps", ()) or ()),
+            source_index=int(tile.source_index),
+            image_axes=tuple(int(axis) for axis in getattr(view_state, "image_axes", ()) or ()),
+            axis_flips=tuple(bool(value) for value in getattr(view_state, "axis_flipped", ()) or ()),
+            channel=getattr(view_state, "channel", "real"),
+            complex_mapping=complex_mapping,
+            texture_kind=texture_kind,
+            semantic_generation=semantic_generation,
+            lod=lod,
+            quality=quality,
+            real_plane=real_plane,
+            imag_plane=imag_plane,
         )
 
     def _selected_lod_factor(self) -> int:
@@ -1967,7 +2092,7 @@ class FrameSession:
                 current = self.display_tile_payloads.get(int(tile_number))
                 if current is None:
                     continue
-                if backend_identities.get(int(tile_number)) != current.source_id:
+                if backend_identities.get(int(tile_number)) != tile_ack_identity(current):
                     continue
                 if previous_payloads.get(int(tile_number)) is current:
                     continue
@@ -1999,7 +2124,7 @@ class FrameSession:
                 current = self.display_tile_payloads.get(int(tile_number))
                 if current is None:
                     continue
-                if backend_identities.get(int(tile_number)) != current.source_id:
+                if backend_identities.get(int(tile_number)) != tile_ack_identity(current):
                     continue
                 if previous_payloads.get(int(tile_number)) is not current:
                     if retained_payloads is None:
@@ -2041,11 +2166,12 @@ class FrameSession:
                         self.pending_payload_upserts[int(tile_number)] = None
                         stale_drawn.append(int(tile_number))
                     continue
-                if current is None or current.source_id == shown_identity:
+                current_identity = None if current is None else tile_ack_identity(current)
+                if current is None or current_identity == shown_identity:
                     self._identity_retry_attempts.pop(int(tile_number), None)
                     continue
                 rec = self.lifecycle.peek(int(tile_number))
-                if rec is not None and (current.source_id, shown_identity) in rec.resigned:
+                if rec is not None and (current_identity, shown_identity) in rec.resigned:
                     # P2: the machine resigned exactly this (wanted, shown)
                     # pair after bounded identity rejections — the backend
                     # would not converge; re-presenting would reopen the loop
@@ -2054,7 +2180,7 @@ class FrameSession:
                     # slots) is a legitimate repair and proceeds below.
                     self._identity_retry_attempts.pop(int(tile_number), None)
                     continue
-                pair = (shown_identity, current.source_id)
+                pair = (shown_identity, current_identity)
                 prior_pair, attempts = self._identity_retry_attempts.get(int(tile_number), (None, 0))
                 if prior_pair != pair:
                     attempts = 0
@@ -2070,7 +2196,7 @@ class FrameSession:
                 current = self.display_tile_payloads.get(int(tile_number))
                 if current is None or current is acknowledged:
                     continue
-                if current.source_id != acknowledged.source_id:
+                if tile_ack_identity(current) != tile_ack_identity(acknowledged):
                     if int(tile_number) not in planned_numbers or self.lifecycle.may_remove_visible(int(tile_number)):
                         self.lifecycle.presentation_discarded(int(tile_number))
                         stale_identity_removals.add(int(tile_number))
@@ -2707,7 +2833,7 @@ class FrameSession:
                 self.lifecycle.remember_presentable(int(tile_number), payload)
                 self.lifecycle.acknowledge_presented(
                     int(tile_number),
-                    payload.source_id,
+                    tile_ack_identity(payload),
                     str(getattr(payload, "quality", "exact") or "exact"),
                     int(getattr(getattr(payload, "lod", None), "level", 0) or 0),
                 )
@@ -2772,7 +2898,7 @@ class FrameSession:
                 current is not None
                 and tile is not None
                 and int(getattr(current, "source_index", -1)) != int(tile.source_index)
-                and shown_identity == getattr(current, "source_id", None)
+                and shown_identity == tile_ack_identity(current)
             ):
                 mismatched.append(int(tile_number))
                 continue
@@ -2782,16 +2908,17 @@ class FrameSession:
                     acknowledged is not None
                     and tile is not None
                     and int(getattr(acknowledged, "source_index", -1)) != int(tile.source_index)
-                    and shown_identity == getattr(acknowledged, "source_id", None)
+                    and shown_identity == tile_ack_identity(acknowledged)
                 ):
                     mismatched.append(int(tile_number))
                 continue
-            if current is None or current.source_id == shown_identity:
+            current_identity = None if current is None else tile_ack_identity(current)
+            if current is None or current_identity == shown_identity:
                 continue
             rec = self.lifecycle.peek(int(tile_number))
-            if rec is not None and (current.source_id, shown_identity) in rec.resigned:
+            if rec is not None and (current_identity, shown_identity) in rec.resigned:
                 continue
-            pair = (shown_identity, current.source_id)
+            pair = (shown_identity, current_identity)
             prior_pair, attempts = self._identity_retry_attempts.get(int(tile_number), (None, 0))
             if prior_pair == pair and attempts >= 3:
                 continue
@@ -2828,9 +2955,9 @@ class FrameSession:
         for tile_number, identity in backend.items():
             payload = desired_payloads.get(int(tile_number))
             state_payload = state_payloads.get(int(tile_number))
-            if payload is not None and identity != payload.source_id:
+            if payload is not None and identity != tile_ack_identity(payload):
                 suspect.add(int(tile_number))
-            elif payload is None and state_payload is not None and identity == getattr(state_payload, "source_id", None):
+            elif payload is None and state_payload is not None and identity == tile_ack_identity(state_payload):
                 suspect.add(int(tile_number))
         ordered = self._prioritized_tile_numbers(tuple(suspect)) if suspect else ()
         if not ordered:
@@ -2888,10 +3015,10 @@ class FrameSession:
                         state_payload is not None and source_index is not None and state_source_index == source_index
                     ),
                     "backend_matches_desired": bool(
-                        desired is not None and backend_identity == getattr(desired, "source_id", None)
+                        desired is not None and backend_identity == tile_ack_identity(desired)
                     ),
                     "backend_matches_state": bool(
-                        state_payload is not None and backend_identity == getattr(state_payload, "source_id", None)
+                        state_payload is not None and backend_identity == tile_ack_identity(state_payload)
                     ),
                     "evaluation_claim_source_index": evaluation_claim_source_index,
                     "evaluation_claim_rung": None if evaluation_claim is None else int(getattr(evaluation_claim, "rung", -1)),
@@ -3112,7 +3239,7 @@ class FrameSession:
             return not backend
         if int(getattr(payload, "source_index", -1)) != int(tile.source_index):
             return False
-        if backend and backend.get(index) != getattr(payload, "source_id", None):
+        if backend and backend.get(index) != tile_ack_identity(payload):
             return False
         return True
 

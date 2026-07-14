@@ -21,6 +21,7 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
     tile_level_stats_with_quality,
 )
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
@@ -481,7 +482,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         payload_current = False
         if payload is not None and int(getattr(payload, "source_index", -1)) == int(tile.source_index):
             if backend_identities:
-                payload_current = backend_identities.get(tile_number) == getattr(payload, "source_id", None)
+                payload_current = backend_identities.get(tile_number) == tile_ack_identity(payload)
             else:
                 payload_current = tile_number in presented_numbers
         if not payload_current:
@@ -755,7 +756,7 @@ def presented_preview_payload(session, tile_number: int):
     if payload is None or str(getattr(payload, "quality", "exact")) != "preview":
         return None
     backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
-    if backend_identities and backend_identities.get(tile_number) != getattr(payload, "source_id", None):
+    if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(payload):
         return None
     return payload
 

@@ -130,6 +130,7 @@ class TileLayerItemState:
     # Image-pixel → world-texel scale for LOD-reduced payloads (ADR 0050
     # phase 3): (1.0, 1.0) means native and an identity item transform.
     lod_scale: tuple[float, float] = (1.0, 1.0)
+    acknowledged_identity: object = None
 
 
 class MontageTileLayer:
@@ -514,6 +515,7 @@ class MontageTileLayer:
                     rgb_already_windowed=payload_rgb_already_windowed,
                 )
                 item_state.world_rect = world_rect
+                item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
                 items_updated += int(updated)
                 if updated:
                     updated_tiles.append(int(tile_number))
@@ -785,6 +787,7 @@ class MontageTileLayer:
                 )
                 if updated:
                     updated_tiles.append(int(tile_number))
+                item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
             else:
                 items_skipped += 1
             item_state.item.setVisible(False)
@@ -1173,6 +1176,7 @@ class MontageTileLayer:
         state.hist_source = None
         state.display_cache = None
         state.source_array_id = 0
+        state.acknowledged_identity = None
         state.histogram_array_id = None
 
 
@@ -1242,9 +1246,9 @@ def _direct_presented_identities(
         if payload is not None:
             expected = _direct_payload_source_id(payload.source_id, payload)
             if state.source_array_id == expected:
-                identities[tile_number] = payload.source_id
+                identities[tile_number] = state.acknowledged_identity or payload.source_id
                 continue
-        identities[tile_number] = state.source_array_id
+        identities[tile_number] = state.acknowledged_identity or state.source_array_id
     return identities
 
 
