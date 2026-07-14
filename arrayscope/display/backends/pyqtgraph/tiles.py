@@ -173,7 +173,7 @@ class MontageTileLayer:
         rows: dict[int, dict[str, object]] = {}
         for tile_number, state in self._states.items():
             image = getattr(state.item, "image", None)
-            if not state.visible or image is None:
+            if not _state_is_physically_visible(state) or image is None:
                 continue
             values = np.asarray(image)
             if values.ndim >= 3 and values.shape[-1] in (3, 4):
@@ -313,7 +313,6 @@ class MontageTileLayer:
         cold_tiles_committed = 0
         update_start = perf_counter()
         levels = (float(levels[0]), float(levels[1]))
-        visible_items = len(active)
         items_created = 0
         items_updated = 0
         items_skipped = 0
@@ -632,8 +631,6 @@ class MontageTileLayer:
             ):
                 item_state.item.setVisible(True)
                 item_state.visible = True
-                if int(tile_number) not in active:
-                    visible_items += 1
                 active.add(int(tile_number))
             else:
                 self._hide_tile(int(tile_number))
@@ -648,10 +645,17 @@ class MontageTileLayer:
         )
         resident_items = self._resident_count()
         resident_bytes = int(self._resident_bytes)
+        physically_presented = tuple(
+            sorted(
+                int(state.tile_number)
+                for state in self._states.values()
+                if _state_is_physically_visible(state)
+            )
+        )
 
         return TileLayerUpdateStats(
-            visible_items=int(visible_items),
-            presented_tiles=tuple(int(tile) for tile in sorted(active)),
+            visible_items=len(physically_presented),
+            presented_tiles=physically_presented,
             presented_identities=_direct_presented_identities(self._states, drawable_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             updated_tiles=tuple(int(tile) for tile in updated_tiles),
@@ -667,7 +671,7 @@ class MontageTileLayer:
             storage_evictions=int(storage_evictions),
             cpu_shadow_bytes=int(resident_bytes),
             budget_bytes=int(tile_residency_budget_bytes or 0),
-            warm_resident_items=max(0, int(resident_items) - int(visible_items)),
+            warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
             level_updates=int(level_updates),
             level_update_processed_items=int(level_updates),
             upload_ms=(perf_counter() - update_start) * 1000.0,
@@ -684,7 +688,6 @@ class MontageTileLayer:
         levels = (float(levels[0]), float(levels[1]))
         image_array = None if image is None else np.asarray(image)
         hist_array = None if histogram_data is None else np.asarray(histogram_data)
-        visible_items = 0
         items_updated = 0
         items_skipped = 0
         rgb_window_tiles = 0
@@ -693,7 +696,6 @@ class MontageTileLayer:
         for state in tuple(self._states.values()):
             if not state.visible:
                 continue
-            visible_items += 1
             updated, windowed = self._update_tile_levels(state, levels, image=image_array, histogram_data=hist_array)
             processed += 1
             items_updated += int(updated)
@@ -702,9 +704,16 @@ class MontageTileLayer:
                 items_skipped += 1
         self._prune_rgb_source_cache()
         resident_items = self._resident_count()
+        physically_presented = tuple(
+            sorted(
+                int(state.tile_number)
+                for state in self._states.values()
+                if _state_is_physically_visible(state)
+            )
+        )
         return TileLayerUpdateStats(
-            visible_items=visible_items,
-            presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
+            visible_items=len(physically_presented),
+            presented_tiles=physically_presented,
             presented_identities=_direct_presented_identities(self._states),
             items_updated=items_updated,
             items_skipped=items_skipped,
@@ -713,7 +722,7 @@ class MontageTileLayer:
             resident_items=int(resident_items),
             storage_capacity=int(resident_items),
             cpu_shadow_bytes=int(self._resident_bytes),
-            warm_resident_items=max(0, int(resident_items) - int(visible_items)),
+            warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
             level_update_processed_items=processed,
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
@@ -733,7 +742,11 @@ class MontageTileLayer:
 
         if not payloads:
             resident_items = self._resident_count()
-            visible_items = len(self._states)
+            visible_items = sum(
+                1
+                for state in self._states.values()
+                if _state_is_physically_visible(state)
+            )
             return TileLayerUpdateStats(
                 resident_items=int(resident_items),
                 storage_capacity=int(resident_items),
@@ -878,10 +891,16 @@ class MontageTileLayer:
             active_tiles={int(tile) for tile, state in self._states.items() if state.visible},
         )
         resident_items = self._resident_count()
-        visible_items = sum(1 for state in self._states.values() if bool(state.visible))
+        physically_presented = tuple(
+            sorted(
+                int(state.tile_number)
+                for state in self._states.values()
+                if _state_is_physically_visible(state)
+            )
+        )
         return TileLayerUpdateStats(
-            visible_items=int(visible_items),
-            presented_tiles=tuple(sorted(int(state.tile_number) for state in self._states.values() if state.visible)),
+            visible_items=len(physically_presented),
+            presented_tiles=physically_presented,
             presented_identities=_direct_presented_identities(self._states, payloads),
             updated_tiles=tuple(updated_tiles),
             items_created=int(items_created),
@@ -901,7 +920,7 @@ class MontageTileLayer:
                     if key in self._states_by_source_key
                 )
             ),
-            warm_resident_items=max(0, int(resident_items) - int(visible_items)),
+            warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
             upload_ms=(perf_counter() - start) * 1000.0 if items_updated or items_created else 0.0,
         )
 
@@ -1310,7 +1329,7 @@ def _direct_presented_identities(
     payloads = dict(payloads or {})
     identities: dict[int, object] = {}
     for state in tuple(dict(states).values()):
-        if not bool(getattr(state, "visible", False)) or state.source_array_id == 0:
+        if not _state_is_physically_visible(state) or state.source_array_id == 0:
             continue
         tile_number = int(state.tile_number)
         payload = payloads.get(tile_number)
@@ -1321,6 +1340,14 @@ def _direct_presented_identities(
                 continue
         identities[tile_number] = state.acknowledged_identity or state.source_array_id
     return identities
+
+
+def _state_is_physically_visible(state: TileLayerItemState) -> bool:
+    return bool(
+        getattr(state, "visible", False)
+        and getattr(state, "item", None) is not None
+        and state.item.isVisible()
+    )
 
 
 def _direct_state_key(

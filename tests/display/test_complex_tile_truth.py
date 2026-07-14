@@ -524,6 +524,30 @@ def test_pyqtgraph_complex_semantic_transition_hides_unacknowledged_tiles(qt_app
         view.close()
 
 
+def test_pyqtgraph_report_excludes_state_mirror_when_image_item_is_hidden(qt_app):
+    payloads = _adversarial_payloads(shader_display=False)
+    view = ImageView2D()
+    try:
+        view.setTiledPresentation(
+            geometry=_adversarial_geometry(),
+            tile_state=TilePresentationState(payloads, revision=1),
+            tile_delta=_adversarial_delta(payloads),
+            histogramPlotData=None,
+            levels=(0.0, 900.0),
+            histogramRange=(0.0, 900.0),
+        )
+        hidden = view._montage_tile_layer.states[5]
+        hidden.item.setVisible(False)
+        hidden.visible = True
+
+        report = view._montage_tile_layer.update_levels((0.0, 900.0))
+
+        assert 5 not in report.presented_tiles
+        assert 5 not in report.presented_identities
+    finally:
+        view.close()
+
+
 def test_vispy_complex_semantic_transition_hides_unacknowledged_tiles():
     first, successors, targets, mixed = _transition_fixture(shader_display=True)
     pool = TextureAtlasPool(_Gloo(), max_texture_size=32)

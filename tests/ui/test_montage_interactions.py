@@ -51,6 +51,31 @@ def _display_levels(win):
     return tuple(float(value) for value in win.img_view.getLevels())
 
 
+def _visible_backend_acknowledgements(win, backend):
+    if backend == "pyqtgraph":
+        return {
+            int(tile_number): state.acknowledged_identity
+            for tile_number, state in win.img_view._montage_tile_layer.states.items()
+            if state.visible and state.item.isVisible()
+        }
+    layer = win.img_view._vispy_gpu_montage_layer
+    pool = layer._pool
+    drawn = {}
+    for page_index, payloads in enumerate(layer._page_payloads_by_index):
+        if (
+            page_index >= len(layer._visuals_by_page)
+            or not layer._visuals_by_page[page_index].visible
+        ):
+            continue
+        for tile_number in payloads:
+            resident_key = pool.tile_resident_keys.get(int(tile_number))
+            if resident_key is not None:
+                drawn[int(tile_number)] = pool.acknowledged_identities.get(
+                    resident_key
+                )
+    return drawn
+
+
 def _assert_view_contains_applied_montage_plan(win):
     plan = win._montage_session.plan
     height, width = tuple(int(value) for value in plan.display_shape[:2])
@@ -857,48 +882,134 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.close()
 
 
-def test_semantic_montage_transition_never_leaves_old_tiles_visible(qtbot):
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize(
+    "transition",
+    ("operation", "channel-real", "complex-mode", "axes"),
+)
+def test_semantic_montage_transition_never_leaves_old_tiles_visible(
+    qtbot,
+    backend,
+    transition,
+):
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.core.view_state import ChannelMode
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
     from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
     from arrayscope.window import ArrayScopeWindow
 
-    data = np.arange(12 * 10 * 6, dtype=np.float32).reshape(12, 10, 6)
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
+    data = np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
+        if image_view_backend_capabilities(win.img_view).name != backend:
+            pytest.skip(f"{backend} backend unavailable in this Qt environment")
         _process_events(qtbot)
-        state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text=":")
+        if transition != "operation":
+            win.operation_coordinator.load_operations(
+                (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+            )
+            win._set_document(win.operation_coordinator.document)
+            win._coerce_channel_for_current_dtype()
+            if transition == "complex-mode":
+                win._set_view_state(win.view_state.with_channel(ChannelMode.ABS))
+        state = win.view_state.with_montage_axis(
+            2,
+            columns=3,
+            indices=tuple(range(1, 7)),
+            text="1:7",
+        )
         win._set_view_state(state)
         win.update_image_view()
         qtbot.waitUntil(
-            lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
+            lambda: bool(
+                getattr(win.renderer._frame_session, "display_committed", False)
+                and win.renderer._frame_session.visible_plan_complete()
+            ),
             timeout=10_000,
         )
-        assert any(tile.visible for tile in win.img_view._montage_tile_layer.states.values())
+        assert set(_visible_backend_acknowledgements(win, backend)) == set(range(6))
         previous = win.renderer._frame_session
 
-        win.operation_coordinator.load_operations(
-            (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
-        )
-        win._set_document(win.operation_coordinator.document)
-        win._coerce_channel_for_current_dtype()
+        if transition == "operation":
+            win.operation_coordinator.load_operations(
+                (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+            )
+            win._set_document(win.operation_coordinator.document)
+            win._coerce_channel_for_current_dtype()
+        elif transition == "channel-real":
+            win._set_view_state(win.view_state.with_channel(ChannelMode.REAL))
+        elif transition == "complex-mode":
+            win._set_view_state(win.view_state.with_channel(ChannelMode.COMPLEX))
+        else:
+            win._set_view_state(win.view_state.transposed_image_axes())
         win.update_image_view()
 
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not previous,
+            timeout=10_000,
+        )
         current = win.renderer._frame_session
-        assert current is not previous
         assert current.semantic_key != previous.semantic_key
-        for tile_number, tile_state in win.img_view._montage_tile_layer.states.items():
-            if not tile_state.visible or not tile_state.item.isVisible():
-                continue
+        for tile_number, acknowledged_identity in _visible_backend_acknowledgements(
+            win,
+            backend,
+        ).items():
             lifecycle = current.lifecycle.peek(int(tile_number))
             assert lifecycle is not None and lifecycle.target is not None
             assert acknowledged_identity_satisfies_target(
-                tile_state.acknowledged_identity,
+                acknowledged_identity,
                 lifecycle.target.identity,
+            )
+
+        qtbot.waitUntil(current.visible_plan_complete, timeout=10_000)
+        final_acknowledgements = _visible_backend_acknowledgements(win, backend)
+        assert set(final_acknowledgements) == set(current.visible_tile_numbers), {
+            "physical": set(final_acknowledgements),
+            "visible_targets": set(current.visible_tile_numbers),
+            "lifecycle_presented": set(current.lifecycle.presented_tiles),
+            "backend_identities": set(
+                current.lifecycle.backend_presented_identities
+            ),
+            "rows": current.diagnostic_tile_identity_rows(
+                limit=len(current.visible_tile_numbers),
+                include_all_visible=True,
+            ),
+        }
+        rows = {
+            int(row["tile"]): row
+            for row in current.diagnostic_tile_identity_rows(
+                limit=len(current.visible_tile_numbers),
+                include_all_visible=True,
+            )
+        }
+        for tile_number, acknowledged_identity in final_acknowledgements.items():
+            lifecycle = current.lifecycle.peek(int(tile_number))
+            assert lifecycle is not None and lifecycle.target is not None
+            assert acknowledged_identity_satisfies_target(
+                acknowledged_identity,
+                lifecycle.target.identity,
+            )
+            assert rows[tile_number]["drawable"] is True
+            assert rows[tile_number]["target_source"] == acknowledged_identity.source_index
+            assert (
+                rows[tile_number]["acknowledged_source"]
+                == acknowledged_identity.source_index
             )
     finally:
         win.close()
+        settings.setValue(
+            "image_rendering_backend",
+            ImageRenderingBackendChoice.PYQTGRAPH.value,
+        )
+        settings.sync()
 
 
 @pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
@@ -915,21 +1026,6 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
     settings.setValue("image_rendering_backend", backend)
     settings.sync()
 
-    def visible_acknowledgements(view):
-        if backend == "pyqtgraph":
-            return {
-                int(tile_number): state.acknowledged_identity
-                for tile_number, state in view._montage_tile_layer.states.items()
-                if state.visible and state.item.isVisible()
-            }
-        layer = view._vispy_gpu_montage_layer
-        pool = layer._pool
-        return {
-            int(tile_number): pool.acknowledged_identities.get(resident_key)
-            for tile_number, resident_key in pool.tile_resident_keys.items()
-            if layer._visuals_by_page[int(pool.tile_slots[int(tile_number)][0])].visible
-        }
-
     data = np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
@@ -944,7 +1040,7 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
             lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
             timeout=10_000,
         )
-        assert visible_acknowledgements(win.img_view)
+        assert _visible_backend_acknowledgements(win, backend)
         previous = win.renderer._frame_session
         previous_semantic_key = previous.semantic_key
 
@@ -968,7 +1064,10 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
         current = win.renderer._frame_session
         assert current is previous
         assert current.semantic_key == previous_semantic_key
-        for tile_number, acknowledged_identity in visible_acknowledgements(win.img_view).items():
+        for tile_number, acknowledged_identity in _visible_backend_acknowledgements(
+            win,
+            backend,
+        ).items():
             lifecycle = current.lifecycle.peek(int(tile_number))
             assert lifecycle is not None and lifecycle.target is not None
             assert acknowledged_identity_satisfies_target(
