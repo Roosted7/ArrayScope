@@ -74,6 +74,14 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > active measured cause is now the stage-cache resident snapshot,
 > cancellation tokens, and `peek_many`.
 
+> **[Codex 2026-07-14 — P7 result]** Hot stage reuse no longer acquires the
+> mutation lock, preview-floor probes batch 60 potential cache locks into one,
+> and cancelled render results stop between evaluation/reduction boundaries.
+> The deterministic lock-contention regression, 1,297 broad tests, and all
+> four physical gates pass. The workflow sample stayed within the ±10% latency
+> guard but did not improve the 7/60 deadlock. The active measured cause is now
+> governor lane policy.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

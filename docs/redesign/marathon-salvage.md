@@ -102,6 +102,12 @@ Ordered by confidence:
     `peek_many`** (`stage_cache.py`, `evaluator.py`, `effects.py`) — GUI
     planning probes never block behind worker mutation; superseded ROI/tile
     work aborts between projections.
+    **[Codex 2026-07-14 — re-derived and landed as P7]** Mutation publishes a
+    lock-free resident snapshot, floor residency uses one batch cache lock,
+    and render cancellation is checked between expensive result-shaping
+    boundaries. Deterministic concurrency coverage proves the GUI read can
+    complete while mutation holds the cache lock; the frozen workflow did not
+    expose a throughput improvement and retains the 7/60 deadlock.
 14. **Governor lane policy** — 1 montage worker during gesture / park
     prefetch+inspection during visible work / seed first lane decision at
     desired value / bridge-drain clamp to one completion per visible-work

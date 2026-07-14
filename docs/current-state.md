@@ -41,6 +41,10 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    delaying camera motion, programmatic camera replay, or pipeline
    continuation; range signals no longer synchronously relayout the display
    group title.
+8. GUI stage-reuse planning reads a published resident snapshot without the
+   worker mutation lock; pyramid floor probes use one batch lookup, and
+   superseded render results check cancellation between expensive shaping
+   boundaries.
 
 ## Known open work
 

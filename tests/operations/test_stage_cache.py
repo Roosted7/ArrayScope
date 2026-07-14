@@ -102,6 +102,46 @@ def test_stage_cache_get_containing_returns_broader_region():
     assert cache.diagnostics().hits == 1
 
 
+def test_stage_cache_resident_snapshot_does_not_wait_for_mutation_lock():
+    import threading
+
+    cache = StageCache(max_bytes=1024, max_entries=4)
+    full = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.ALL)))
+    point = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.POINT, 2)))
+    key_full = StageKey(("doc",), ("fft",), full, "float32", (4, 5))
+    key_point = StageKey(("doc",), ("fft",), point, "float32", (4, 5))
+    value = StageValue(np.zeros((4, 5), dtype=np.float32), full, 1, 80, "high")
+    cache.put(key_full, value)
+    completed = threading.Event()
+    observed = []
+
+    def read_snapshot():
+        observed.append((cache.resident_items(), cache.peek_containing_resident(key_point)))
+        completed.set()
+
+    with cache._lock:
+        reader = threading.Thread(target=read_snapshot)
+        reader.start()
+        assert completed.wait(timeout=5.0)
+    reader.join(timeout=5.0)
+
+    assert observed == [(((key_full, value),), value)]
+
+
+def test_stage_cache_snapshot_tracks_eviction_and_clear():
+    cache = StageCache(max_bytes=64, max_entries=2)
+    first = _value(np.arange(4), priority="low")
+    second = _value(np.arange(4), priority="highest")
+    cache.put(_key("first"), first)
+    cache.put(_key("second"), second)
+
+    cache.resize(max_bytes=20)
+    assert cache.resident_items() == ((_key("second"), second),)
+
+    cache.clear()
+    assert cache.resident_items() == ()
+
+
 def test_stage_cache_retention_score_prefers_hot_visible_expensive_stage():
     cache = StageCache(max_bytes=40, max_entries=4)
     cheap_prefetch = StageValue(

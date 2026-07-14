@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
@@ -118,6 +119,37 @@ def test_evaluate_target_tile_level_zero_returns_native_tile_payload():
     assert result.slab_shape == (4, 6)
     assert result.value.level_stats is not None
     assert result.value.level_stats.source_index == tile.source_index
+
+
+def test_native_tile_discards_result_cancelled_after_evaluation(monkeypatch):
+    from arrayscope.operations.cancellation import EvaluationCancelled
+
+    session = _session()
+    tile = session.plan.tiles[1]
+    evaluator = OperationEvaluator(session.document)
+    token = SimpleNamespace(cancelled=False)
+    evaluate_image_snapshot = effects.evaluate_image_snapshot
+
+    def cancel_after_evaluation(*args, **kwargs):
+        result = evaluate_image_snapshot(*args, **kwargs)
+        token.cancelled = True
+        return result
+
+    monkeypatch.setattr(effects, "evaluate_image_snapshot", cancel_after_evaluation)
+
+    with pytest.raises(EvaluationCancelled):
+        effects.evaluate_target_tile(
+            session,
+            tile,
+            level=0,
+            demand=_demand(0),
+            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+            stage_cache=evaluator.stage_cache,
+            stage_materializer=evaluator.stage_materializer,
+            cancellation_token=token,
+            shader_display=False,
+            evaluation_context=None,
+        )
 
 
 def test_evaluate_target_tile_level_zero_uses_cached_stage_without_waiting_binding(monkeypatch):
@@ -558,6 +590,16 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
     )
     session.pyramid_cache.admit(preview_key, np.ones((2, 3), dtype=np.float32))
     session.preview_floor_cache = lambda: session.pyramid_cache
+    peek_many_calls = []
+    peek_many = session.pyramid_cache.peek_many
+    session.pyramid_cache.peek_many = lambda keys: (
+        peek_many_calls.append(tuple(keys)) or peek_many(keys)
+    )
+
+    def unexpected_single_peek(_key):
+        raise AssertionError("tile LOD planning must batch floor probes")
+
+    session.pyramid_cache.peek = unexpected_single_peek
 
     state = {
         state.tile_number: state
@@ -568,6 +610,7 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
     # evidence. Lifecycle acknowledgements are the ladder's resident truth.
     assert state.resident_levels == ()
     assert state.floor_available is True
+    assert peek_many_calls == [(preview_key,)]
 
 
 def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():

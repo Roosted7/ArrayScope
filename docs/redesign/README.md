@@ -417,6 +417,31 @@ acceptance.
 > passed** and the sequential V1/V2 real-Wayland matrix is **4 passed**. P7
 > (stage-cache snapshot, cancellation, and `peek_many`) is next.
 
+> **[Codex 2026-07-14 — P7 complete; cache reads cannot block viewport
+> planning]** `StageCache` mutation now publishes a resident tuple after every
+> store/eviction/resize/clear. GUI hot-fan-in and containing-region probes read
+> that tuple without acquiring the cache mutation lock or changing LRU/
+> counters. `BoundedCache.peek_many()` and `PyramidCache.peek_many()` collapse
+> a frame's preview-floor residency scan from up to one lock acquisition per
+> tile (**60 → 1** in the frozen fixture). Render evaluation now checks its
+> cancellation token before work and after slab/evaluation/reduction
+> boundaries, so a superseded result cannot proceed into level statistics or
+> presentation assembly.
+>
+> **[Codex 2026-07-14 — P7 proof and performance boundary]** The concurrency
+> regression holds the stage-cache mutation lock while a second thread
+> completes both resident probes, proving **1 potentially blocking lock → 0**;
+> snapshot eviction and clear semantics, batch peeks, and post-evaluation
+> cancellation are separately pinned. Broad core/operations/render/display/
+> window coverage is **1,297 passed**, and the sequential real-Wayland V1/V2
+> matrix is **4 passed**. The frozen workflow still freezes at **7/60
+> presented, 53 dirty**. Its trace recorded **580 kernel submissions, 286
+> bridge drains, 59,328 events, 53.22 ms max bridge drain**, and **7,353.3 ms
+> input-to-first-ack** (+8.6% versus P6's two-run midpoint, inside the ±10%
+> guard). This run does not demonstrate cache contention, so P7 claims the
+> deterministic non-blocking bound—not workflow throughput. P8 (governor lane
+> policy) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

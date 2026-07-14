@@ -140,6 +140,11 @@ class PyramidCache:
 
         return self._cache.peek(key)
 
+    def peek_many(self, keys) -> dict[PyramidLevelKey, np.ndarray]:
+        """Snapshot several resident levels with one cache-lock acquisition."""
+
+        return self._cache.peek_many(keys)
+
     def admit(self, key: PyramidLevelKey, array) -> np.ndarray:
         """Admit a completed level and clear its pending claim."""
 
@@ -264,4 +269,3 @@ def preview_level_for_tile_shape(tile_shape, *, target_edge: int = 48, min_level
     while (edge >> (level + 1)) >= max(1, int(target_edge)) and level < int(max_level):
         level += 1
     return max(int(min_level), level)
-

@@ -52,6 +52,13 @@ from arrayscope.render.ladder import TileLodState
 from arrayscope.render import lod as render_lod
 
 
+def _check_render_cancelled(token) -> None:
+    if token is not None and bool(getattr(token, "cancelled", False)):
+        from arrayscope.operations.cancellation import EvaluationCancelled
+
+        raise EvaluationCancelled()
+
+
 def _evaluate_native_tile_result(
     session,
     tile,
@@ -68,6 +75,7 @@ def _evaluate_native_tile_result(
     ``self.win`` are explicit keyword arguments.
     """
 
+    _check_render_cancelled(cancellation_token)
     start = perf_counter()
     tile_number = int(tile.montage_index)
     stage_key = session.stage_fan_in.tile_stage_keys.get(tile_number)
@@ -122,6 +130,7 @@ def _evaluate_native_tile_result(
                 cancellation_token=cancellation_token,
                 evaluation_context=evaluation_context,
             )
+            _check_render_cancelled(cancellation_token)
             if bool(getattr(session, "shader_display", False)):
                 display_image = make_shader_image_from_slab(
                     slab,
@@ -140,6 +149,7 @@ def _evaluate_native_tile_result(
                 tile,
                 refined=not bool(getattr(session, "shader_display", False)),
             )
+            _check_render_cancelled(cancellation_token)
             from arrayscope.operations.evaluator import EvaluationResult
 
             return EvaluationResult(
@@ -162,7 +172,8 @@ def _evaluate_native_tile_result(
         stage_document_key=stage_document_key(session.document),
         evaluation_context=evaluation_context,
     )
-    return replace(
+    _check_render_cancelled(cancellation_token)
+    result = replace(
         result,
         value=attach_montage_tile_level_stats(
             result.value,
@@ -170,6 +181,8 @@ def _evaluate_native_tile_result(
             refined=not bool(getattr(session, "shader_display", False)),
         ),
     )
+    _check_render_cancelled(cancellation_token)
+    return result
 
 
 def evaluate_target_tile(
@@ -231,6 +244,7 @@ def evaluate_preview_tile(
 ):
     """Evaluate a display-only payload for a cold tile."""
 
+    _check_render_cancelled(cancellation_token)
     if not can_evaluate_preview(session, tile):
         return None
     level = preview_evaluation_level(session, demand) if level is None else int(level)
@@ -255,6 +269,7 @@ def evaluate_preview_tile(
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
     )
+    _check_render_cancelled(cancellation_token)
     preview_document = ArrayDocument(
         reduced_base,
         steps=session.document.steps,
@@ -270,6 +285,7 @@ def evaluate_preview_tile(
         provisional_histogram=True,
         evaluation_context=evaluation_context,
     )
+    _check_render_cancelled(cancellation_token)
     value = replace(
         result.value,
         semantic_data=None,
@@ -462,7 +478,27 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
     presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
     preview_cache = getattr(session, "pyramid_cache", None)
-    for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
+    plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    floor_keys = {}
+    if preview_cache is not None and demand is not None:
+        for tile in plan_tiles:
+            tile_number = int(tile.montage_index)
+            if allowed is not None and tile_number not in allowed:
+                continue
+            floor_keys[tile_number] = preview_claim_key(
+                session,
+                tile,
+                demand=demand,
+                semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+                shader_display=bool(getattr(session, "shader_display", False)),
+            )
+    peek_many = getattr(preview_cache, "peek_many", None)
+    resident_floor_keys = (
+        set(peek_many(tuple(floor_keys.values())))
+        if callable(peek_many) and floor_keys
+        else set()
+    )
+    for tile in plan_tiles:
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
             continue
@@ -535,7 +571,11 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
                 current_presentation_quality=presented_quality,
                 allow_preview=allow_preview,
                 target_quality_available=target_quality_available,
-                floor_available=_floor_available(session, tile, demand, preview_cache=preview_cache),
+                floor_available=(
+                    floor_keys.get(tile_number) in resident_floor_keys
+                    if callable(peek_many)
+                    else _floor_available(session, tile, demand, preview_cache=preview_cache)
+                ),
             )
         )
     context_owner = getattr(session, "tile_priority_context", None)
@@ -543,7 +583,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         raise RuntimeError("live frame session has no tile-priority owner")
     ordered_numbers = prioritize_tile_numbers(
         (state.tile_number for state in states),
-        plan_tiles=tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()),
+        plan_tiles=plan_tiles,
         context=context_owner(),
     )
     by_number = {int(state.tile_number): state for state in states}
@@ -1106,9 +1146,11 @@ def _evaluate_tile_native_output_preview(
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
     )
+    _check_render_cancelled(cancellation_token)
     reduced_data = reduce_display_payload_axes(result.value.data, factor_xy)
     histogram = getattr(result.value, "histogram_data", None)
     reduced_histogram = None if histogram is None else reduce_display_payload_axes(histogram, factor_xy)
+    _check_render_cancelled(cancellation_token)
     value = replace(
         result.value,
         data=reduced_data,
@@ -1140,6 +1182,7 @@ def _evaluate_tile_native_output_preview(
         shader_display=bool(shader_display),
     )
     reduced_histogram = _preview_display_histogram(rendered, source, texture_kind, reduced_histogram)
+    _check_render_cancelled(cancellation_token)
     return (
         key,
         np.asarray(source),

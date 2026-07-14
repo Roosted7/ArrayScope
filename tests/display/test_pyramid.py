@@ -183,6 +183,20 @@ class TestPyramidCache:
         assert cache.misses == 1
         assert cache.hits == 1
 
+    def test_peek_many_returns_resident_levels_without_counting(self):
+        cache = PyramidCache(max_bytes=1 << 20)
+        first = _key(tile=0)
+        second = _key(tile=1)
+        first_value = cache.admit(first, np.ones((4, 4), dtype=np.float32))
+        second_value = cache.admit(second, np.full((4, 4), 2.0, dtype=np.float32))
+
+        observed = cache.peek_many((second, _key(tile=9), first))
+
+        assert observed.keys() == {second, first}
+        assert observed[first] is first_value
+        assert observed[second] is second_value
+        assert cache.hits == 0 and cache.misses == 0
+
     def test_bytes_accounting_and_bounded_eviction(self):
         item = np.ones((8, 8), dtype=np.float32)
         cache = PyramidCache(max_bytes=int(item.nbytes * 2))

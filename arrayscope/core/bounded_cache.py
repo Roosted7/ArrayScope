@@ -60,6 +60,17 @@ class BoundedCache:
 
         return self.get(key, touch=False, count=False)
 
+    def peek_many(self, keys) -> dict:
+        """Read several keys under one lock without touching cache state."""
+
+        requested = tuple(keys or ())
+        with self.lock:
+            return {
+                key: self._items[key][0]
+                for key in requested
+                if key in self._items
+            }
+
     def note_hit(self) -> None:
         with self.lock:
             self.hits += 1

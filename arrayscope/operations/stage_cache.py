@@ -83,6 +83,9 @@ class StageCache:
         self.last_lookup_hit = None
         self._access_counter = 0
         self._in_flight: dict[StageKey, _InFlightStageCompute] = {}
+        # Worker mutation publishes an immutable tuple for latency-critical
+        # GUI reuse probes. Readers never wait behind insertion or eviction.
+        self._resident_snapshot: tuple[tuple[StageKey, StageValue], ...] = ()
         self.compute_claims = 0
         self.compute_wait_reuses = 0
 
@@ -169,8 +172,21 @@ class StageCache:
         running per-tile planning on the GUI thread.
         """
 
-        with self._lock:
-            return tuple((key, value) for key, value in self._cache.items())
+        return self._resident_snapshot
+
+    def peek_containing_resident(self, key: StageKey) -> StageValue | None:
+        """Lock-free containment probe that does not mutate LRU or counters."""
+
+        for candidate_key, value in self._resident_snapshot:
+            if (
+                candidate_key.document_key == key.document_key
+                and candidate_key.operation_prefix == key.operation_prefix
+                and candidate_key.dtype == key.dtype
+                and tuple(candidate_key.shape) == tuple(key.shape)
+                and region_contains(value.region, key.region, key.shape)
+            ):
+                return value
+        return None
 
     def begin_compute(self, key: StageKey) -> bool:
         """Claim the in-flight computation for ``key``.
@@ -242,15 +258,20 @@ class StageCache:
             self._access_counter += 1
             object.__setattr__(value, "last_access_counter", self._access_counter)
             self._cache.put(key, value, nbytes=nbytes)
+            self._resident_snapshot = self._cache.items()
             self.stores += 1
             self.last_store = _key_summary(key)
             return True
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
+        with self._lock:
+            self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
+            self._resident_snapshot = self._cache.items()
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
+            self._resident_snapshot = ()
 
     def clear_counters(self) -> None:
         with self._lock:

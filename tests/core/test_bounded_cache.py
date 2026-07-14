@@ -53,6 +53,19 @@ def test_peek_does_not_touch_recency_or_counters():
     assert "a" not in cache
 
 
+def test_peek_many_reads_one_snapshot_without_touching_state():
+    cache = BoundedCache(max_entries=3)
+    cache.put("a", 1)
+    cache.put("b", 2)
+
+    assert cache.peek_many(("b", "missing", "a")) == {"b": 2, "a": 1}
+    assert cache.hits == 0 and cache.misses == 0
+
+    cache.put("c", 3)
+    cache.put("d", 4)
+    assert "a" not in cache
+
+
 def test_resize_evicts_to_new_budget():
     cache = BoundedCache(max_entries=8)
     for index in range(5):
