@@ -2948,7 +2948,7 @@ def test_partial_index_window_derives_reuse_map_from_payload_identity():
 
 
 def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
-    """A miss must remove stale pixels; only current-source payloads may show."""
+    """A miss exposes no predecessor payload after surface invalidation."""
 
     session = _session(count=2)
     old_sources = {0: ("src", 0), 1: ("src", 1)}
@@ -2988,8 +2988,19 @@ def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
     # Lifecycle semantic axis demoted (no longer evaluated).
     assert not session.lifecycle.evaluating_tiles
 
-    _state, replacement_delta = session.build_tile_presentation({0: ("src", 5), 1: ("src", 6)})
-    assert replacement_delta.removals == (0, 1)
+    replacement_state, replacement_delta = session.build_tile_presentation(
+        {0: ("src", 5), 1: ("src", 6)}
+    )
+    # The frame controller invalidates physical mappings atomically before it
+    # calls retarget_index_window.  The lifecycle must therefore publish only
+    # current targets and placeholders here; synthesizing a second backend
+    # removal obligation would duplicate surface ownership.
+    assert replacement_delta.removals == ()
+    assert replacement_state.active_payloads(replacement_delta) == {}
+    assert {
+        tile: identity.source_index
+        for tile, identity in replacement_delta.target_identities.items()
+    } == {0: 5, 1: 6}
     assert not session.visible_plan_complete()
 
 
