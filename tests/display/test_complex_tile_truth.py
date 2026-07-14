@@ -8,7 +8,13 @@ from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backends.vispy.tiles import TextureAtlasPool
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.image_upload import rgb_display_for_levels
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    TilePresentationDelta,
+    TilePresentationState,
+    TiledValueSource,
+)
 from arrayscope.display.model.tile_identity import (
     TileIdentity,
     TileLodIdentity,
@@ -23,6 +29,8 @@ from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
     ShaderMapping,
     TexturePlaneKind,
+    cpu_display_rgba,
+    pack_texture_data,
 )
 from arrayscope.display.slice_engine import complex_to_rgb
 from arrayscope.render.lod import texture_source_for_rendered
@@ -53,6 +61,75 @@ def _complex_plane(source_index: int) -> np.ndarray:
     magnitude = np.float32(source_index + 1) + xx.astype(np.float32) / 4.0
     phase = np.float32(source_index) * (np.pi / 4.0) + yy.astype(np.float32) * (np.pi / 8.0)
     return np.asarray(magnitude * np.exp(1j * phase), dtype=np.complex64)
+
+
+def _adversarial_complex_planes() -> tuple[tuple[str, np.ndarray], ...]:
+    yy, xx = np.mgrid[:4, :4]
+    phase_ramp = np.linspace(-np.pi, np.pi, 16, dtype=np.float32).reshape(4, 4)
+    magnitude_ramp = np.linspace(0.25, 4.0, 16, dtype=np.float32).reshape(4, 4)
+    signature = (600.0 + yy * 10.0 + xx) + 1j * (-600.0 - yy * 10.0 - xx)
+    return (
+        ("constant-magnitude-phase-ramp", np.asarray(2.0 * np.exp(1j * phase_ramp), dtype=np.complex64)),
+        (
+            "constant-phase-magnitude-ramp",
+            np.asarray(magnitude_ramp * np.exp(1j * np.float32(np.pi / 4.0)), dtype=np.complex64),
+        ),
+        ("real-only", np.asarray(30.0 + yy * 4.0 + xx, dtype=np.complex64)),
+        ("imaginary-only", np.asarray(1j * (40.0 + yy * 4.0 + xx), dtype=np.complex64)),
+        ("zeros", np.zeros((4, 4), dtype=np.complex64)),
+        ("source-signature", np.asarray(signature, dtype=np.complex64)),
+    )
+
+
+def _adversarial_payloads(*, shader_display: bool) -> dict[int, DisplayTilePayload]:
+    payloads = {}
+    for tile_number, (_name, plane) in enumerate(_adversarial_complex_planes()):
+        rgb, magnitude = complex_to_rgb(plane)
+        kind = TexturePlaneKind.COMPLEX_RG32F if shader_display else TexturePlaneKind.RGB8
+        identity = replace(
+            _target(tile_number),
+            texture_kind=kind,
+            real_plane=array_plane_identities(plane)[0],
+            imag_plane=array_plane_identities(plane)[1],
+        )
+        payloads[tile_number] = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=tile_number,
+            image=rgb,
+            histogram_data=magnitude,
+            source_id=("adversarial-complex", tile_number),
+            texture_data=plane if shader_display else rgb,
+            texture_kind=kind,
+            semantic_data=plane,
+            semantic_histogram_data=magnitude,
+            shader_mapping=_MAPPING,
+            tile_identity=identity,
+            presentation_identity=TilePresentationIdentity(
+                levels_generation=17,
+                levels=(0.0, 900.0),
+                scale="linear",
+                lut_identity="phase",
+            ),
+        )
+    return payloads
+
+
+def _adversarial_geometry() -> DisplayGeometry:
+    source_indices = tuple(range(len(_adversarial_complex_planes())))
+    state = ViewState.from_shape((4, 4, len(source_indices))).with_channel(ChannelMode.COMPLEX)
+    state = state.with_montage_axis(2, columns=3, indices=source_indices, text=":")
+    return DisplayGeometry(
+        view_state=state,
+        display_shape=(9, 14),
+        montage=MontageGeometry(
+            indices=source_indices,
+            tile_shape=(4, 4),
+            columns=3,
+            rows=2,
+            gap=1,
+        ),
+        montage_tile_states=(MontageTileState.LOADED,) * len(source_indices),
+    )
 
 
 def _target(source_index: int) -> TileIdentity:
@@ -127,6 +204,24 @@ def _delta(*, upserts, targets, base_revision: int) -> TilePresentationDelta:
         active_tiles=(0, 1, 2, 3),
         planned_tiles=(0, 1, 2, 3),
         target_identities=targets,
+    )
+
+
+def _adversarial_delta(payloads: dict[int, DisplayTilePayload]) -> TilePresentationDelta:
+    tiles = tuple(sorted(payloads))
+    return TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=17,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        target_revision=1,
+        upserts=payloads,
+        active_tiles=tiles,
+        planned_tiles=tiles,
+        target_identities={tile: payloads[tile].tile_identity for tile in tiles},
     )
 
 
@@ -216,6 +311,90 @@ def test_cpu_complex_rendered_tile_reports_rgb_physical_texture_kind():
 
     assert source.shape == (4, 4, 3)
     assert kind == TexturePlaneKind.RGB8
+
+
+def test_adversarial_complex_fixture_preserves_native_values_and_source_signatures():
+    patterns = dict(_adversarial_complex_planes())
+
+    np.testing.assert_allclose(np.abs(patterns["constant-magnitude-phase-ramp"]), 2.0, rtol=1e-6)
+    assert np.unique(np.round(np.angle(patterns["constant-magnitude-phase-ramp"]), 5)).size >= 15
+    np.testing.assert_allclose(
+        np.angle(patterns["constant-phase-magnitude-ramp"]),
+        np.pi / 4.0,
+        rtol=1e-6,
+    )
+    assert np.unique(np.abs(patterns["constant-phase-magnitude-ramp"])).size == 16
+    np.testing.assert_array_equal(np.imag(patterns["real-only"]), 0.0)
+    np.testing.assert_array_equal(np.real(patterns["imaginary-only"]), 0.0)
+    np.testing.assert_array_equal(patterns["zeros"], 0.0)
+    assert patterns["source-signature"][2, 3] == np.complex64(623.0 - 623.0j)
+
+    payloads = _adversarial_payloads(shader_display=True)
+    values = TiledValueSource(payloads)
+    mapping = type("Mapping", (), {"tile_number": 5, "local_y": 2, "local_x": 3})()
+    assert values.value_at(mapping) == np.abs(np.complex64(623.0 - 623.0j))
+    semantic, magnitude, source = values.tile_region(
+        type("Tile", (), {"montage_index": 5})(),
+        (slice(2, 3), slice(3, 4)),
+    )
+    np.testing.assert_array_equal(semantic, np.asarray([[623.0 - 623.0j]], dtype=np.complex64))
+    np.testing.assert_allclose(magnitude, np.abs(semantic), rtol=1e-6)
+    assert source == "committed_tile_payload"
+
+
+def test_pyqtgraph_adversarial_complex_fixture_draws_cpu_reference(qt_app):
+    payloads = _adversarial_payloads(shader_display=False)
+    levels = (0.0, 900.0)
+    view = ImageView2D()
+    try:
+        report = view.setTiledPresentation(
+            geometry=_adversarial_geometry(),
+            tile_state=TilePresentationState(payloads, revision=1),
+            tile_delta=_adversarial_delta(payloads),
+            histogramPlotData=None,
+            levels=levels,
+            histogramRange=levels,
+        )
+
+        assert report.presented_tiles == frozenset(payloads)
+        for tile_number, payload in payloads.items():
+            state = view._montage_tile_layer.states[tile_number]
+            assert state.acknowledged_identity == payload.tile_identity
+            assert payload.texture_kind == TexturePlaneKind.RGB8
+            expected = rgb_display_for_levels(payload.image, payload.histogram_data, levels)
+            np.testing.assert_array_equal(np.asarray(state.item.image), expected)
+    finally:
+        view.close()
+
+
+def test_vispy_adversarial_complex_fixture_uploads_cpu_reference_planes():
+    payloads = _adversarial_payloads(shader_display=True)
+    pool = TextureAtlasPool(_Gloo(), max_texture_size=64)
+
+    _uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=len(payloads),
+        tile_delta=_adversarial_delta(payloads),
+    )
+
+    assert stats.presented_tiles == tuple(payloads)
+    assert stats.presented_identities == {
+        tile: payload.tile_identity for tile, payload in payloads.items()
+    }
+    assert len(pool.scalar_texture.updates) == len(payloads)
+    for (uploaded, _offset, copy), payload in zip(pool.scalar_texture.updates, payloads.values(), strict=True):
+        assert copy
+        assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
+        np.testing.assert_array_equal(uploaded, pack_texture_data(payload.semantic_data, payload.texture_kind))
+        reference = cpu_display_rgba(
+            payload.semantic_data,
+            replace(payload.shader_mapping, levels=(0.0, 900.0)),
+        )
+        assert reference.shape == (4, 4, 4)
+        assert np.all(reference[..., 3] == 255)
 
 
 def _assert_truth_record(targets, acknowledged, payloads):
