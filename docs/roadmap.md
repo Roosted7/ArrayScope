@@ -49,6 +49,15 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > so P3 carries no performance credit and the stall remains open. The active
 > measured cause is now background histogram aggregation.
 
+> **[Codex 2026-07-14 — P4 result]** Aggregate histogram sampling is now
+> revision-guarded kernel work; its deterministic 60-tile selector is 9.8×
+> faster and the real trace moves up to 36.6 ms per aggregate off the GUI
+> thread. Prepared atomic transactions now include level revision, closing a
+> stale-level identity defect exposed by the new wake. Broad display/window
+> coverage is 840 passed and both physical gates remain green. The unrelated
+> 7/60 presentation stall persists. The active measured cause is now the
+> coalesced kernel completion drain.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

@@ -174,6 +174,115 @@ def test_montage_source_level_cache_reuses_overlapping_selection_and_keeps_refin
     assert cached.bounds == (10.0, 20.0)
 
 
+def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService
+
+    class DeferredKernel:
+        visible_backlog = 0
+
+        def __init__(self):
+            self.submissions = []
+
+        def submit_speculative_batch(self, **kwargs):
+            self.submissions.append(kwargs)
+            return object()
+
+        def finish(self):
+            submission = self.submissions.pop(0)
+            submission["on_done"](submission["fn"]())
+
+    requested = []
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=3,
+        level_key=("levels", "aggregate"),
+        display_committed=True,
+        histogram_aggregate_inflight=False,
+        histogram_aggregate_generation=None,
+        pending_level_tiles=deque(),
+        level_scan_remaining_tiles=0,
+        semantic_level_evidence_progress=None,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+        flush_pending=True,
+        final_commit_pending=True,
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(
+                request_presentation=lambda: requested.append("presentation")
+            )
+        ),
+        required_target_settled=lambda: True,
+    )
+
+    class Window(LevelStatsService):
+        def __init__(self):
+            self.win = self
+            self.kernel = DeferredKernel()
+            self._frame_session = session
+            self._tracker = MontageLevelTracker()
+
+        def _frame_session_is_current(self, current):
+            return current is self._frame_session
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+    win = Window()
+    win._tracker.ensure_expected(session.level_key, (0, 1))
+    for source_index in (0, 1):
+        values = np.asarray([source_index * 2.0, source_index * 2.0 + 1.0], dtype=np.float32)
+        win._tracker.update_from_stats(
+            session.level_key,
+            TileLevelStats(source_index, (float(values[0]), float(values[-1])), values),
+            aggregate=False,
+        )
+
+    assert win._montage_histogram_plot_data_for_session(session) is None
+    assert session.histogram_aggregate_inflight
+    assert len(win.kernel.submissions) == 1
+    assert win._montage_histogram_plot_data_for_session(session) is None
+    assert len(win.kernel.submissions) == 1
+
+    win.kernel.finish()
+
+    assert not session.histogram_aggregate_inflight
+    assert requested == ["presentation"]
+    assert np.array_equal(
+        win._montage_histogram_plot_data_for_session(session),
+        np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
+    )
+
+
+def test_prepared_atomic_transaction_expires_when_level_generation_changes():
+    from arrayscope.window.frame_effects import (
+        _prepared_atomic_transaction_current,
+        _shader_source_transaction_payload_marker,
+    )
+
+    payload = SimpleNamespace(source_id=("source", 0), source_index=0)
+    session = SimpleNamespace(
+        session_id=7,
+        level_generation=SimpleNamespace(revision=3),
+        tile_presentation_state=SimpleNamespace(revision=11),
+        visible_tile_numbers=(0,),
+        skipped_tiles=(),
+        display_tile_payloads={0: payload},
+    )
+    prepared = {
+        "session_id": 7,
+        "level_revision": 3,
+        "marker_kind": "shader-source",
+        "tile_delta": SimpleNamespace(base_revision=11, active_tiles=(0,)),
+        "payload_markers": {0: _shader_source_transaction_payload_marker(payload)},
+    }
+
+    assert _prepared_atomic_transaction_current(session, prepared)
+    session.level_generation.revision = 4
+    assert not _prepared_atomic_transaction_current(session, prepared)
+
+
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     import arrayscope.render.level_stats as level_stats

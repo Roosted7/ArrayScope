@@ -1764,6 +1764,10 @@ class FramePipelineEffects:
             ):
                 session._atomic_prepared_transaction = {
                     "session_id": int(getattr(session, "session_id", 0) or 0),
+                    "level_revision": int(
+                        getattr(getattr(session, "level_generation", None), "revision", 0)
+                        or 0
+                    ),
                     "marker_kind": (
                         "cpu-compatible" if cpu_atomic_successor else "shader-source"
                     ),
@@ -3219,6 +3223,10 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
     if not isinstance(prepared, dict):
         return False
     if int(prepared.get("session_id", -1)) != int(getattr(session, "session_id", -2)):
+        return False
+    if int(prepared.get("level_revision", -1)) != int(
+        getattr(getattr(session, "level_generation", None), "revision", -2)
+    ):
         return False
     delta = prepared.get("tile_delta")
     if delta is None or int(getattr(delta, "base_revision", -1)) != int(

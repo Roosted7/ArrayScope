@@ -371,6 +371,7 @@ class ArrayScopeWindow(
             or getattr(session, "active_tile_requests", None)
             or getattr(session, "pending_level_tiles", None)
             or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            or bool(getattr(session, "histogram_aggregate_inflight", False))
             or (
                 semantic_progress is not None
                 and (

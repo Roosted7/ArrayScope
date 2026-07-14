@@ -541,6 +541,8 @@ class FrameSession:
     level_scan_remaining_tiles: int = 0
     level_evidence_inflight: bool = False
     level_evidence_generation: object | None = None
+    histogram_aggregate_inflight: bool = False
+    histogram_aggregate_generation: object | None = None
     semantic_level_evidence_target: SemanticLevelEvidenceTarget | None = None
     semantic_level_evidence_progress: SemanticLevelEvidenceProgress | None = None
     first_pass_quality: str | None = None
@@ -1028,6 +1030,8 @@ class FrameSession:
         # work and strands all level presentations stale.
         self.level_evidence_inflight = False
         self.level_evidence_generation = None
+        self.histogram_aggregate_inflight = False
+        self.histogram_aggregate_generation = None
         self.invalidate_semantic_level_evidence()
         self.first_pass_quality = None
         self.first_pass_histogram_published = False

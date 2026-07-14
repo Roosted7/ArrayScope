@@ -85,6 +85,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
         level_scan_remaining_tiles=0 if session is None else int(getattr(session, "level_scan_remaining_tiles", 0) or 0),
+        histogram_aggregate_inflight=(
+            False
+            if session is None
+            else bool(getattr(session, "histogram_aggregate_inflight", False))
+        ),
         semantic_evidence_target_population=int(semantic_evidence["target_population"]),
         semantic_evidence_covered_sources=tuple(semantic_evidence["covered_sources"]),
         semantic_evidence_covered_source_count=int(semantic_evidence["covered_source_count"]),

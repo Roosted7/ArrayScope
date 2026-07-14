@@ -326,6 +326,42 @@ acceptance.
 > `tests/artifacts/redesign-p3-2026-07-14/{before,after}` directories. P4
 > (background histogram aggregation) is next.
 
+> **[Codex 2026-07-14 — P4 complete; histogram aggregation leaves the GUI
+> transaction]** The Qt-owned `MontageLevelTracker` now exposes a guarded
+> `(revision, expected sources, covered sources, samples)` snapshot; bounded
+> sample aggregation runs as explicit kernel work and installs only if every
+> identity still matches. The presentation path consumes current cached data
+> or schedules it—it never derives the aggregate inside a tile commit. The
+> conceptual-stride selector was also changed from one full-vector filter per
+> tile to arithmetic intersections. On the deterministic 60×8192-source
+> workload, identical output measured **2.433 → 0.248 ms median** (9.8×) and
+> **3.719 → 0.280 ms max**. The real-Wayland trace records **24** completed
+> aggregate jobs, with **36.64 ms max / 2.46 ms median** worker runtime; that
+> work no longer occupies a GUI callback.
+>
+> **[Codex 2026-07-14 — P4 regression record / accepted fix]** The first
+> completion design delegated to the generic evidence wake and stranded the
+> VisPy first-pixel phasing scenario after six preview acknowledgements. An
+> unconditional wake then exposed a second invariant violation: an atomic
+> delta prepared at rough level revision 1 was reused with refined uniforms,
+> crossing payload levels **254.54:1860.67** with backend levels
+> **250.00:1860.67**. The accepted path makes prepared atomic transactions
+> level-revision-aware before issuing the histogram wake. The exact phasing
+> regression now passes; focused coverage is **222 passed, 2 skipped** and
+> broad `tests/display tests/window` is **840 passed**. That broad run also
+> migrated the remaining test that still expected V1's deleted exclusive
+> boundary predicate; the boundary tile is again pinned as required.
+>
+> **[Codex 2026-07-14 — P4 overall-bar boundary / open issue]** P4 does not
+> receive credit for the separate presentation deadlock. The canonical
+> workflow remains at **7/60 active, 53 dirty, no work in flight**. Relative
+> to the unmodified P3 trace, input-to-first-ack changed **6811.6 → 6717.5
+> ms**, bridge-drain max **54.38 → 53.02 ms**, and total events
+> **59,500 → 60,939**; the phase still aborts before a report is written.
+> Physical V1/V2 gates remain green on both backends (**4 passed**). Do not
+> move histogram work back to Qt to chase this unrelated stall. P5 (coalesced
+> completion drain) is next.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

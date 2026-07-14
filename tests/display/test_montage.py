@@ -44,7 +44,10 @@ def test_montage_plan_visible_tiles_intersect_view_range():
 
     visible = plan.tiles_intersecting(((4.0, 8.0), (0.0, 2.0)), margin_tiles=0)
 
-    assert tuple(tile.source_index for tile in visible) == (1,)
+    # Tile 2 begins exactly at x=8. Pixel-center geometry makes that boundary
+    # sample visible, so it belongs to the same required set as admission and
+    # completion (V1); excluding it recreated the persistent-black-tile bug.
+    assert tuple(tile.source_index for tile in visible) == (1, 2)
 
 
 def test_montage_plan_empty_view_range_does_not_fallback_to_tile_zero():

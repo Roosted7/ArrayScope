@@ -67,6 +67,12 @@ profile tool (5,639 vs 2,788 lines). The scroll/zoompan phase work from
     `montage_levels.py`) — binning off the GUI thread behind
     `(key, session, level_key, revision)` guards, plus the arithmetic
     sample-selection fix (was 50–60 ms GUI stalls).
+    **[Codex 2026-07-14 — re-derived and landed as P4]** Revision/source
+    snapshots now feed explicit kernel tasks; arithmetic selection is 9.8×
+    faster on the pinned 60-tile workload, and real aggregate jobs up to
+    36.6 ms no longer run in Qt commits. The new wake also required atomic
+    transaction validity to include level revision. The independent 7/60
+    presentation stall remains open; do not attribute it to aggregation.
 
 ## Tier 3 — performance program (P-steps): valuable, re-derive with fresh measurements
 

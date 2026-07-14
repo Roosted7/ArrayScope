@@ -328,6 +328,7 @@ class FrameRuntimeMixin:
             or getattr(session.stage_fan_in, "tile_stage_keys", None)
             or getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_payload_upserts", None)
+            or bool(getattr(session, "histogram_aggregate_inflight", False))
         )
         if unsettled:
             self._ensure_montage_watchdog()
@@ -409,6 +410,7 @@ class FrameRuntimeMixin:
         level_evidence = len(getattr(session, "pending_level_tiles", ()) or ()) + int(
             getattr(session, "level_scan_remaining_tiles", 0) or 0
         )
+        level_evidence += int(bool(getattr(session, "histogram_aggregate_inflight", False)))
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         if semantic_progress is not None:
             level_evidence += int(semantic_progress.pending_batches)

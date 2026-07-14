@@ -296,6 +296,7 @@ def run_profile_montage_workflow(
                     f"user_levels={None if session is None else getattr(session, 'user_levels_override', None)} "
                     f"evidence={0 if session is None else len(getattr(session, 'pending_level_tiles', ()) or ())}/"
                     f"{False if session is None else bool(getattr(session, 'level_evidence_inflight', False))} "
+                    f"histogram_aggregate={False if session is None else bool(getattr(session, 'histogram_aggregate_inflight', False))} "
                     f"level_decision={getattr(win.renderer, '_last_montage_level_decision', None)!r} "
                     f"level_summary={level_summary!r} "
                     f"gate_armed={bool(getattr(win.renderer, '_montage_presentation_gate_armed', False))} "
@@ -2181,6 +2182,7 @@ def _montage_work_in_flight(session) -> bool:
         getattr(session, "active_tile_requests", None)
         or getattr(session, "pending_rung_materializations", None)
         or bool(getattr(session, "level_evidence_inflight", False))
+        or bool(getattr(session, "histogram_aggregate_inflight", False))
         or (fan is not None and getattr(fan, "active_requests", None))
     )
 
@@ -3379,6 +3381,7 @@ def _wait_for_montage_complete(
         f"evidence_refined={0 if session is None else len(getattr(session, 'pending_refined_level_tiles', ()) or ())} "
         f"evidence_scan={0 if session is None else int(getattr(session, 'level_scan_remaining_tiles', 0) or 0)} "
         f"evidence_inflight={False if session is None else bool(getattr(session, 'level_evidence_inflight', False))} "
+        f"histogram_aggregate={False if session is None else bool(getattr(session, 'histogram_aggregate_inflight', False))} "
         f"atomic_warm_pending={0 if session is None else len((getattr(session, '_atomic_warm_job', None) or {}).get('pending', ()))} "
         f" pipeline_steps={(() if session is None else tuple(getattr(getattr(session, 'pipeline', None), 'last_plan_steps', ()) or ()))}"
         f" view_range={final_view_range!r}"

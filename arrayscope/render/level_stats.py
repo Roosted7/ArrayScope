@@ -25,6 +25,7 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
     MontageLevelTracker,
     REFINED_TILE_SAMPLE_LIMIT,
+    aggregate_histogram_samples,
     montage_level_key,
     provisional_tile_level_stats,
     sample_tile_level_stats,
@@ -144,7 +145,7 @@ class LevelStatsService:
         evidence_quality: LevelEvidenceQuality | int | str | None = None,
     ) -> None:
         if expected_indices is None:
-            previous_stats = self._montage_level_tracker().stats_for(level_key)
+            previous_stats = self._montage_level_tracker().summary_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
@@ -212,7 +213,7 @@ class LevelStatsService:
         """Merge already-prepared level evidence without sampling source pixels."""
 
         if expected_indices is None:
-            previous_stats = self._montage_level_tracker().stats_for(level_key)
+            previous_stats = self._montage_level_tracker().summary_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
         tracker = self._montage_level_tracker()
         tracker.ensure_expected(level_key, expected_indices)
@@ -425,12 +426,125 @@ class LevelStatsService:
 
     def _montage_histogram_plot_data_for_session(self, session, *, allow_partial: bool = False):
         tracker = self._montage_level_tracker()
-        stats = tracker.stats_for(session.level_key)
+        stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
         if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
             return None
-        return tracker.histogram_data_for_stats(stats)
+        cached = tracker.cached_histogram_data(session.level_key)
+        if cached is not None:
+            return cached
+        self._schedule_montage_histogram_aggregate(session)
+        return None
+
+    def _schedule_montage_histogram_aggregate(self, session) -> bool:
+        """Derive a bounded aggregate without blocking the GUI commit path."""
+
+        if bool(getattr(session, "histogram_aggregate_inflight", False)):
+            return True
+        tracker = self._montage_level_tracker()
+        snapshot = tracker.histogram_aggregate_snapshot(session.level_key)
+        if snapshot is None:
+            return False
+        revision, expected, sources, samples = snapshot
+        generation = (
+            session.key,
+            int(session.session_id),
+            session.level_key,
+            int(revision),
+            sources,
+        )
+        session.histogram_aggregate_inflight = True
+        session.histogram_aggregate_generation = generation
+
+        def release(current) -> bool:
+            if getattr(current, "histogram_aggregate_generation", None) != generation:
+                return False
+            current.histogram_aggregate_inflight = False
+            current.histogram_aggregate_generation = None
+            return True
+
+        def done(sample):
+            current = getattr(self, "_frame_session", None)
+            release(session)
+            if current is not session or not self._frame_session_is_current(current):
+                return
+            if not tracker.install_histogram_aggregate(
+                current.level_key,
+                revision=revision,
+                expected_indices=expected,
+                source_indices=sources,
+                sample=sample,
+            ):
+                self._schedule_montage_histogram_aggregate(current)
+                return
+            self._publish_first_cpu_histogram(current)
+            # Aggregate readiness is a new presentation progress dimension.
+            # The preceding evidence callback may have deliberately withheld
+            # its wake while this worker owned the histogram, so replay the
+            # parked metadata obligation even when no tile collection changed.
+            current.flush_pending = True
+            current.final_commit_pending = True
+            self._montage_gate_last_backlog = None
+            pipeline = getattr(current, "pipeline", None)
+            effects = None if pipeline is None else getattr(pipeline, "effects", None)
+            request_presentation = (
+                None if effects is None else getattr(effects, "request_presentation", None)
+            )
+            if not callable(request_presentation):
+                raise RuntimeError("live frame session has no presentation effect gate")
+            request_presentation()
+
+        def stale():
+            current = getattr(self, "_frame_session", None)
+            release(session)
+            if current is session and self._frame_session_is_current(current):
+                self._schedule_montage_histogram_aggregate(current)
+
+        def failed(exc):
+            stale()
+            handle_ui_exception("montage histogram aggregate", exc)
+
+        task_key = ("montage_histogram_aggregate", generation)
+        visible_dependency = not bool(getattr(session, "display_committed", False))
+        if visible_dependency:
+            handle = self.win.kernel.submit(
+                TaskSpec(
+                    key=task_key,
+                    fn=lambda samples=samples: aggregate_histogram_samples(samples),
+                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    priority=Priority.VISIBLE_IMAGE,
+                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    scope=f"montage:{session.key!r}:histogram",
+                    supersession=Supersession(
+                        ("montage-histogram-aggregate", session.key),
+                        generation,
+                    ),
+                    reusable=True,
+                    pass_token=False,
+                ),
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+            )
+        else:
+            handle = self.win.kernel.submit_speculative_batch(
+                kind="montage-histogram-aggregate",
+                scope=f"montage:{session.key!r}:histogram",
+                generation=generation,
+                key=task_key,
+                fn=lambda samples=samples: aggregate_histogram_samples(samples),
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+                priority=Priority.HISTOGRAM,
+                lane=WorkLane.HISTOGRAM_REFINEMENT,
+                max_items=max(1, len(samples)),
+            )
+        if handle is None:
+            release(session)
+            return False
+        return True
 
     def _montage_level_tracker(self) -> MontageLevelTracker:
         tracker = getattr(self, "_montage_level_tracker_instance", None)
@@ -1233,6 +1347,7 @@ class LevelStatsService:
         evidence_remaining = bool(
             pending
             or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            or bool(getattr(session, "histogram_aggregate_inflight", False))
             or semantic_remaining
         )
         flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))

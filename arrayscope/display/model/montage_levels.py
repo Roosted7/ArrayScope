@@ -229,6 +229,71 @@ class MontageLevelTracker:
             return None
         return np.asarray(stats.sample, dtype=np.float32)
 
+    def histogram_aggregate_snapshot(
+        self,
+        key: object,
+    ) -> tuple[int, frozenset[int], frozenset[int], tuple[np.ndarray, ...]] | None:
+        """Return read-only inputs for worker-side aggregate sampling."""
+
+        summary = self.summary_for(key)
+        if summary is None or not summary.source_indices:
+            return None
+        expected = self._expected.get(key, frozenset())
+        by_source = self._tiles.get(key, {})
+        samples = tuple(
+            np.asarray(by_source[index].sample, dtype=np.float32).reshape(-1)
+            for index in sorted(summary.source_indices)
+            if index in by_source
+        )
+        return (
+            int(self._revisions.get(key, 0)),
+            expected,
+            summary.source_indices,
+            samples,
+        )
+
+    def cached_histogram_data(self, key: object) -> np.ndarray | None:
+        """Return a current aggregate without deriving one on the caller."""
+
+        summary = self.summary_for(key)
+        if summary is None or not summary.source_indices:
+            return None
+        cached = self._sample_accumulators.get(key)
+        if cached is None or cached[0] != summary.expected_indices or cached[1] != summary.source_indices:
+            return None
+        sample = cached[2]
+        if sample is None or np.asarray(sample).size == 0:
+            return None
+        return np.asarray(sample, dtype=np.float32)
+
+    def install_histogram_aggregate(
+        self,
+        key: object,
+        *,
+        revision: int,
+        expected_indices: frozenset[int],
+        source_indices: frozenset[int],
+        sample: np.ndarray | None,
+    ) -> bool:
+        """Install a derived aggregate only for the exact live snapshot."""
+
+        if int(self._revisions.get(key, 0)) != int(revision):
+            return False
+        summary = self.summary_for(key)
+        if (
+            summary is None
+            or summary.expected_indices != expected_indices
+            or summary.source_indices != source_indices
+        ):
+            return False
+        self._sample_accumulators[key] = (
+            expected_indices,
+            source_indices,
+            None if sample is None else np.asarray(sample, dtype=np.float32),
+        )
+        self._aggregate_cache.pop(key, None)
+        return True
+
     def stats_for(self, key: object) -> MontageLevelStats | None:
         expected = self._expected.get(key)
         if expected is None:
@@ -520,7 +585,11 @@ def _union_tile_bounds(stats: Iterable[TileLevelStats]) -> tuple[float, float] |
 
 
 def _aggregate_samples(samples: tuple[np.ndarray, ...], limit: int) -> np.ndarray | None:
-    non_empty = [np.asarray(sample, dtype=np.float32).reshape(-1) for sample in samples if np.asarray(sample).size]
+    non_empty = []
+    for sample in samples:
+        values = np.asarray(sample, dtype=np.float32).reshape(-1)
+        if values.size:
+            non_empty.append(values)
     if not non_empty:
         return None
     limit = max(1, int(limit))
@@ -528,16 +597,30 @@ def _aggregate_samples(samples: tuple[np.ndarray, ...], limit: int) -> np.ndarra
     if total <= limit:
         return np.concatenate(non_empty)
     step = max(1, int(math.ceil(total / limit)))
-    conceptual = np.arange(0, total, step, dtype=np.int64)[:limit]
     selected = []
     offset = 0
     for sample in non_empty:
         end = offset + int(sample.size)
-        local = conceptual[(conceptual >= offset) & (conceptual < end)] - offset
+        # Conceptual selections are k * step. Intersect that progression with
+        # this tile arithmetically instead of allocating/filtering the full
+        # aggregate index vector once for every tile.
+        first_k = (offset + step - 1) // step
+        stop_k = min((end + step - 1) // step, limit)
+        local = (
+            np.arange(first_k, stop_k, dtype=np.int64) * step - offset
+            if first_k < stop_k
+            else np.asarray((), dtype=np.int64)
+        )
         if local.size:
             selected.append(sample[local])
         offset = end
     return np.concatenate(selected) if selected else None
+
+
+def aggregate_histogram_samples(samples: tuple[np.ndarray, ...]) -> np.ndarray | None:
+    """Build the bounded montage histogram sample on a worker thread."""
+
+    return _aggregate_samples(tuple(samples or ()), AGGREGATE_SAMPLE_LIMIT)
 
 
 def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit: int) -> np.ndarray:

@@ -95,6 +95,7 @@ class MontageRuntimeDiagnostics:
     pending_removals: int = 0
     pending_level_tiles: int = 0
     level_scan_remaining_tiles: int = 0
+    histogram_aggregate_inflight: bool = False
     semantic_evidence_target_population: int = 0
     semantic_evidence_covered_sources: tuple[int, ...] = ()
     semantic_evidence_covered_source_count: int = 0
@@ -668,6 +669,7 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
         or int(getattr(montage, "loading_tiles", 0) or 0)
         or int(getattr(montage, "pending_level_tiles", 0) or 0)
         or int(getattr(montage, "level_scan_remaining_tiles", 0) or 0)
+        or bool(getattr(montage, "histogram_aggregate_inflight", False))
         or int(getattr(montage, "semantic_evidence_pending_batches", 0) or 0)
         or getattr(montage, "semantic_evidence_inflight_generation", None) is not None
         or int(getattr(montage, "attached_stage_requests", 0) or 0)

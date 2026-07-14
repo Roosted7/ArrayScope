@@ -34,6 +34,9 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
 5. Acknowledged montage extent changes replay AUTO/FIT camera intent against
    successor geometry; backend bounds changes no longer become USER input,
    and an actual USER camera is preserved.
+6. Aggregate histogram sampling is derived on kernel workers behind tracker
+   revision/source guards; prepared atomic tile transactions expire when the
+   global level revision changes.
 
 ## Known open work
 

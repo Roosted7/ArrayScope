@@ -11,6 +11,7 @@ from arrayscope.display.model.montage_levels import (
     REFINED_TILE_SAMPLE_LIMIT,
     MontageLevelTracker,
     TileLevelStats,
+    _aggregate_samples,
 )
 from arrayscope.display.planning import LevelSourceRank
 
@@ -67,6 +68,57 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
     assert sample is not None
     assert sample.size <= AGGREGATE_SAMPLE_LIMIT
     assert np.array_equal(sample[:5], np.asarray([0, 4, 8, 12, 16], dtype=np.float32))
+
+
+def test_aggregate_sample_cap_preserves_conceptual_stride_across_many_tiles():
+    samples = tuple(
+        np.arange(index * 10_000, (index + 1) * 10_000, dtype=np.float32)
+        for index in range(12)
+    )
+
+    sample = _aggregate_samples(samples, 65_536)
+    expected = np.arange(0, 120_000, 2, dtype=np.float32)[:65_536]
+
+    assert np.array_equal(sample, expected)
+
+
+def test_histogram_aggregate_install_rejects_superseded_tracker_revision():
+    tracker = MontageLevelTracker()
+    key = "scope"
+    tracker.ensure_expected(key, (0, 1))
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(0, (0.0, 1.0), np.asarray([0.0, 1.0], dtype=np.float32)),
+        aggregate=False,
+    )
+    revision, expected, sources, samples = tracker.histogram_aggregate_snapshot(key)
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(1, (2.0, 3.0), np.asarray([2.0, 3.0], dtype=np.float32)),
+        aggregate=False,
+    )
+
+    assert not tracker.install_histogram_aggregate(
+        key,
+        revision=revision,
+        expected_indices=expected,
+        source_indices=sources,
+        sample=np.concatenate(samples),
+    )
+    assert tracker.cached_histogram_data(key) is None
+
+    revision, expected, sources, samples = tracker.histogram_aggregate_snapshot(key)
+    assert tracker.install_histogram_aggregate(
+        key,
+        revision=revision,
+        expected_indices=expected,
+        source_indices=sources,
+        sample=np.concatenate(samples),
+    )
+    assert np.array_equal(
+        tracker.cached_histogram_data(key),
+        np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
+    )
 
 
 def test_montage_level_tracker_records_provisional_then_refined_samples():
