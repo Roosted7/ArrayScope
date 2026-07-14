@@ -12,6 +12,7 @@ from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
 from arrayscope.core.gui_callback_budget import default_gui_callback_budget_decision
+from arrayscope.core.gui_gc import configure_gui_gc_latency
 from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
 from arrayscope.core.view_state import ChannelMode, ViewState
@@ -66,6 +67,7 @@ class ArrayScopeWindow(
             widget.setFont(font)
 
     def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None, axes=None):
+        configure_gui_gc_latency()
         super(ArrayScopeWindow, self).__init__()
         self.renderer = RenderOrchestrator(self)
         self.resize(600,800)

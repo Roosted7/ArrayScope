@@ -10,6 +10,7 @@ from arrayscope.core.roi import RoiSelection
 from arrayscope.core.roi_store import RoiStore
 from arrayscope.core.view_session import (
     FileViewSession,
+    PanelSession,
     ViewportSession,
     canonical_file_exists,
     load_session_file,
@@ -86,6 +87,16 @@ class FileViewSessionMixin:
             viewport=self._current_viewport_session(),
             rois=tuple(getattr(getattr(self, "roi_store", None), "selections", ()) or ()),
             selected_roi_id=getattr(getattr(self, "roi_store", None), "selected_id", None),
+            panels=PanelSession(
+                operation_visible=bool(
+                    hasattr(self, "operation_dock") and self.operation_dock.isVisible()
+                ),
+                inspection_visible=bool(
+                    hasattr(self, "inspection_dock") and self.inspection_dock.isVisible()
+                ),
+                window_size=(int(self.width()), int(self.height())),
+                window_maximized=bool(self.isMaximized()),
+            ),
         )
 
     def _current_viewport_session(self):
@@ -166,6 +177,7 @@ class FileViewSessionMixin:
             self._set_view_state(session.recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
             self._apply_display_settings(session.recipe.display)
             self._restore_roi_session(session.rois, selected_id=session.selected_roi_id)
+            self._pending_file_session_panels = session.panels
             self._begin_viewport_continuity(
                 reason="file-session-restore",
                 viewport=session.viewport,
@@ -277,8 +289,24 @@ class FileViewSessionMixin:
             return
         layout_manager = getattr(self, "layout_manager", None)
         resize = getattr(layout_manager, "resize_to_dockless_viewport_shape", None)
+        resized = False
         if callable(resize):
-            resize(viewport_shape)
+            resized = bool(resize(viewport_shape))
+        if resized and attempts > 1:
+            # A resize can produce a transient matching viewport before Qt has
+            # completed the child-layout pass.  In particular, VisPy's stacked
+            # native canvas settles one event turn after the outer window.  Do
+            # not let that same-turn match release the continuity transaction.
+            Qt.QtCore.QTimer.singleShot(
+                FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
+                self,
+                lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: self._restore_viewport_continuity_shape_step(
+                    shape,
+                    attempts=attempts,
+                    generation=generation,
+                ),
+            )
+            return
         if attempts <= 1 or self._viewport_continuity_shape_matches(viewport_shape):
             tx.shape_settled = True
             self._viewport_continuity_shape_generation = None
@@ -320,6 +348,33 @@ class FileViewSessionMixin:
             restore = None
         if restore is not None and restore.profile_visible:
             self._profile_dock_user_visible = True
+        panels = getattr(self, "_pending_file_session_panels", None)
+        if panels is None:
+            return
+        self._pending_file_session_panels = None
+        if panels.window_maximized is not None:
+            if bool(panels.window_maximized):
+                self.showMaximized()
+            else:
+                self.showNormal()
+                if panels.window_size is not None:
+                    self.resize(int(panels.window_size[0]), int(panels.window_size[1]))
+        if hasattr(self, "operation_dock"):
+            self._operation_dock_user_visible = bool(panels.operation_visible)
+            self.layout_manager.set_managed_dock_visible(
+                self.operation_dock,
+                bool(panels.operation_visible),
+                reason="file-session-restore",
+                preserve_canvas=False,
+            )
+        if hasattr(self, "inspection_dock"):
+            self._inspection_dock_user_visible = bool(panels.inspection_visible)
+            self.layout_manager.set_managed_dock_visible(
+                self.inspection_dock,
+                bool(panels.inspection_visible),
+                reason="file-session-restore",
+                preserve_canvas=False,
+            )
 
     def _snapshot_file_session_defaults(self):
         return {

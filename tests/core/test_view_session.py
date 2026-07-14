@@ -7,6 +7,7 @@ def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
     from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe
     from arrayscope.core.view_session import (
         FileViewSession,
+        PanelSession,
         ViewportSession,
         dumps_session,
         loads_session,
@@ -33,6 +34,12 @@ def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
         viewport=ViewportSession(mode="user", view_range=((1.0, 3.0), (2.0, 4.0)), viewport_shape=(240, 320)),
         rois=(RoiSelection("roi-7", "ROI 7", RoiGeometry(RoiKind.RECTANGLE, rect=(1.0, 2.0, 3.0, 4.0))),),
         selected_roi_id="roi-7",
+        panels=PanelSession(
+            operation_visible=False,
+            inspection_visible=True,
+            window_size=(1400, 900),
+            window_maximized=False,
+        ),
     )
 
     text = dumps_session(session)
@@ -44,6 +51,12 @@ def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
     assert loaded.rois[0].id == "roi-7"
     assert loaded.rois[0].geometry.rect == (1.0, 2.0, 3.0, 4.0)
     assert loaded.selected_roi_id == "roi-7"
+    assert loaded.panels == PanelSession(
+        operation_visible=False,
+        inspection_visible=True,
+        window_size=(1400, 900),
+        window_maximized=False,
+    )
 
 
 def test_file_view_session_metadata_mismatch_rejects_shape(tmp_path):

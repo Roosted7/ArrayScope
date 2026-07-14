@@ -946,11 +946,19 @@ def reduce_nd_axis_mean(values: np.ndarray, axis: int, factor: int) -> np.ndarra
         source = values.astype(np.complex64, copy=False)
     else:
         source = values.astype(np.float32, copy=False)
-    sums = np.add.reduceat(source, starts, axis=axis, dtype=source.dtype)
-    counts = np.diff(np.append(starts, length)).astype(np.float32)
-    shape = [1] * sums.ndim
-    shape[axis] = len(starts)
-    reduced = sums / counts.reshape(shape)
+    if length % int(factor) == 0:
+        # Tiles are normally power-of-two aligned. Reshape lets NumPy reduce
+        # contiguous blocks directly; non-divisible edges retain the exact
+        # reduceat/count path below.
+        block_shape = list(source.shape)
+        block_shape[axis : axis + 1] = [length // int(factor), int(factor)]
+        reduced = source.reshape(block_shape).mean(axis=axis + 1, dtype=source.dtype)
+    else:
+        sums = np.add.reduceat(source, starts, axis=axis, dtype=source.dtype)
+        counts = np.diff(np.append(starts, length)).astype(np.float32)
+        shape = [1] * sums.ndim
+        shape[axis] = len(starts)
+        reduced = sums / counts.reshape(shape)
     if np.issubdtype(values.dtype, np.integer):
         info = np.iinfo(values.dtype)
         return np.clip(np.rint(reduced), info.min, info.max).astype(values.dtype)

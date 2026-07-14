@@ -1025,6 +1025,25 @@ def test_montage_live_layout_reflow_skips_autofit_helper():
     assert not FrameControllerMixin._maybe_auto_fit_montage_tiles(window, geometry)
 
 
+def test_child_layout_resize_reopens_authoritative_viewport_shape_restore():
+    from types import SimpleNamespace
+
+    from arrayscope.window.frame_controller import FrameControllerMixin
+
+    calls = []
+    window = SimpleNamespace(
+        _closing=False,
+        _viewport_continuity_shape_target=lambda: (739, 1247),
+        _restore_viewport_continuity_shape_after_layout=lambda: calls.append("restore"),
+        _active_viewport_continuity_range=lambda: None,
+    )
+    window.win = window
+
+    FrameControllerMixin._on_image_viewport_resized(window)
+
+    assert calls == ["restore"]
+
+
 def test_active_viewport_continuity_skips_autofit_helper():
     from types import SimpleNamespace
 

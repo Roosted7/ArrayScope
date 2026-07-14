@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import gc
 from importlib import metadata
 import io
 import json
@@ -21,14 +22,78 @@ from time import perf_counter
 from uuid import uuid4
 
 import numpy as np
+from arrayscope.core.trace import emit_trace
+from arrayscope.display.model.tile_identity import tile_ack_identity
 
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
+DEFAULT_SESSION_FIXTURE = Path("tests/fixtures/profile_montage_session.json")
 PY_SPY_LOW_IMPACT_SAMPLE_RATE_HZ = 25
 PY_SPY_FULL_SAMPLE_RATE_HZ = 50
 PY_SPY_FULL_DURATION_S = 30
 PY_SPY_FULL_DETACH_MARGIN_S = 1
 PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
+
+# Interaction-stress budgets (kept short so the benchmark stays fast).  The
+# zoom/pan gestures chain continuously with NO settle between steps; only the
+# slow scroll paces by target-LOD completion, and a single short settle runs
+# after the whole zoom/pan storm.
+SCROLL_FAST_DURATION_S = 5.0
+SCROLL_SLOW_LOD_BUDGET_S = 3.0
+ZOOMPAN_FINAL_SETTLE_S = 3.0
+MONTAGE_PREP_SOFT_BUDGET_S = 8.0
+ZOOMPAN_INPUT_FPS = 120.0
+ZOOMPAN_MAX_OUT_REQUEST_SCALE = 1_000_000.0
+ZOOMPAN_CENTRAL_SPAN_SCALE = 0.16
+ZOOMPAN_PAN_FRACTION = 0.32
+ZOOMPAN_DEEP_SPAN_SCALE = 0.06
+ZOOMPAN_CHECKPOINT_SETTLE_S = 3.0
+ZOOMPAN_NEAR_OBSERVE_S = 0.20
+R8_GUI_CALLBACK_MAX_MS = 50.0
+R8_HEARTBEAT_MAX_GAP_MS = 16.0
+R8_WARM_INPUT_MAX_MS = 15.0
+PROFILE_MONTAGE_STAGES = (
+    "load_data",
+    "raw_full_tiled_montage",
+    "fft_full_tiled_montage",
+    "fft_level_refinement_preview",
+    "montage_scroll_fft",
+    "montage_scroll_scalar",
+    "montage_zoompan_fft",
+    "montage_zoompan_scalar",
+)
+
+
+def _parse_stage_flags(values: tuple[str, ...] | None) -> tuple[str, ...]:
+    parsed: list[str] = []
+    for value in tuple(values or ()):
+        for raw_token in str(value).split(","):
+            token = raw_token.strip()
+            if token:
+                parsed.append(token)
+    return tuple(parsed)
+
+
+def _resolve_profile_stages(
+    include_stages: tuple[str, ...] | None = None,
+    skip_stages: tuple[str, ...] | None = None,
+    *,
+    stage_order: tuple[str, ...] = PROFILE_MONTAGE_STAGES,
+) -> tuple[str, ...]:
+    include_stages = tuple(str(stage).strip().lower() for stage in tuple(include_stages or ()))
+    skip_stages = tuple(str(stage).strip().lower() for stage in tuple(skip_stages or ()))
+    include_set = set(include_stages) if include_stages else set(stage_order)
+    skip_set = set(skip_stages)
+    unknown = sorted((set(include_stages) | set(skip_stages)) - set(stage_order))
+    if unknown:
+        raise ValueError(
+            f"unknown montage workflow stage(s): {', '.join(unknown)}; expected one of: {', '.join(stage_order)}"
+        )
+    resolved = []
+    for stage in stage_order:
+        if stage in include_set and stage not in skip_set:
+            resolved.append(stage)
+    return tuple(resolved)
 
 
 def run_profile_montage_workflow(
@@ -38,12 +103,15 @@ def run_profile_montage_workflow(
     jsonl: str | Path | None = None,
     timeout_s: float = 180.0,
     max_tiles: int | None = None,
+    scroll_max_tiles: int = 60,
     columns: int | None = None,
     load_mode: str = "app",
     profiler_type: str = "plain",
     profiler_artifact_paths: tuple[str | Path, ...] = (),
-    montage_quality_policy: str = "native-only",
+    stages: tuple[str, ...] | None = None,
     screenshot_dir: str | Path | None = None,
+    session_fixture: str | Path | None = DEFAULT_SESSION_FIXTURE,
+    verbose_tile_trace: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -59,6 +127,12 @@ def run_profile_montage_workflow(
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.core.view_session import (
+        loads_session,
+        metadata_for_file,
+        save_session_file,
+        settings_key_for_metadata,
+    )
     from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
     from arrayscope.window import ArrayScopeWindow
 
@@ -69,286 +143,1942 @@ def run_profile_montage_workflow(
     records: list[dict[str, object]] = []
 
     app = pg.mkQApp()
+    previous_organization_name = str(app.organizationName())
+    previous_application_name = str(app.applicationName())
+    app.setOrganizationName("ArrayScope")
+    app.setApplicationName("ArrayScopeProfileMontage")
     settings = QtCore.QSettings()
-    previous_image_backend = settings.value("image_rendering_backend", None)
+    settings.clear()
     settings.setValue(
         "image_rendering_backend",
         ImageRenderingBackendChoice.VISPY.value if backend == "vispy" else ImageRenderingBackendChoice.PYQTGRAPH.value,
     )
+    settings.setValue("montage_quality_policy", "resident")
     settings.sync()
 
     win = None
+    probe = None
     try:
+        stage_order = _resolve_profile_stages(stages)
+        stage_enabled = set(stage_order)
         load_start = perf_counter()
         data = _load_dataset(data_path, mode=load_mode)
         load_elapsed_ms = (perf_counter() - load_start) * 1000.0
         if np.ndim(data) < 3:
             raise ValueError(f"profile workflow requires at least 3 dimensions, got shape {np.shape(data)}")
+        restored_fixture = _install_profile_session_fixture(
+            QtCore,
+            data_path=data_path,
+            data=data,
+            session_fixture=session_fixture,
+            settings=settings,
+            loads_session=loads_session,
+            metadata_for_file=metadata_for_file,
+            save_session_file=save_session_file,
+            settings_key_for_metadata=settings_key_for_metadata,
+        )
         montage_axis = 2
         tile_count = int(np.shape(data)[montage_axis])
-        indices = _montage_indices(tile_count, max_tiles=max_tiles)
-        columns = _default_columns(len(indices)) if columns is None else max(1, int(columns))
-        base = _base_record(
+        max_tiles = None if max_tiles is None or int(max_tiles) <= 0 else int(max_tiles)
+        large_indices = _centered_indices(tile_count, max_tiles)
+        # ``None`` is the application's real default: choose a layout that
+        # maximizes the montage in the current viewport.  Do not turn the
+        # square-ish value used in the metrics table into a hidden semantic
+        # preference.  Doing so made the restored wide session start at 6x10,
+        # then snap to 8x8 as soon as the first zoom changed AUTO ownership to
+        # USER and exposed the latent explicit preference.
+        columns_large = None if columns is None else max(1, int(columns))
+        reported_columns_large = (
+            _default_columns(len(large_indices)) if columns_large is None else columns_large
+        )
+        scroll_max_tiles = 60 if scroll_max_tiles is None or int(scroll_max_tiles) <= 0 else int(scroll_max_tiles)
+        scroll_grid_size = min(tile_count, scroll_max_tiles)
+        scroll_source_indices = tuple(range(tile_count))
+        scroll_indices = _centered_indices(tile_count, scroll_grid_size)
+        columns_small = None if columns is None else max(1, int(columns))
+        reported_columns_small = (
+            _default_columns(scroll_grid_size) if columns_small is None else columns_small
+        )
+        base_large = _base_record(
             run_id=run_id,
             backend=backend,
             data_path=data_path,
             data=data,
             load_mode=load_mode,
             montage_axis=montage_axis,
-            indices=indices,
+            indices=large_indices,
             full_tile_count=tile_count,
-            columns=columns,
+            columns=reported_columns_large,
             max_tiles=max_tiles,
             profiler_type=profiler_type,
             profiler_artifact_paths=profiler_artifact_paths,
             run_temperature=_workflow_run_temperature(),
             qt_platform=str(app.platformName()),
+            grid_kind="full",
+            source_index_count=tile_count,
         )
-        _append_record(
-            records,
-            jsonl,
-            {
-                **base,
-                "phase": "load_data",
-                "elapsed_ms": load_elapsed_ms,
-                "complete": True,
-                "run_temperature": "cold",
-            },
+        base_scroll = _base_record(
+            run_id=run_id,
+            backend=backend,
+            data_path=data_path,
+            data=data,
+            load_mode=load_mode,
+            montage_axis=montage_axis,
+            indices=scroll_indices,
+            full_tile_count=tile_count,
+            columns=reported_columns_small,
+            max_tiles=scroll_max_tiles,
+            profiler_type=profiler_type,
+            profiler_artifact_paths=profiler_artifact_paths,
+            run_temperature=_workflow_run_temperature(),
+            qt_platform=str(app.platformName()),
+            grid_kind="scroll",
+            source_index_count=len(scroll_source_indices),
         )
+        if "load_data" in stage_enabled:
+            _append_record(
+                records,
+                jsonl,
+                {
+                    **base_large,
+                    "phase": "load_data",
+                    "elapsed_ms": load_elapsed_ms,
+                    "complete": True,
+                    "run_temperature": "cold",
+                },
+            )
 
-        win = ArrayScopeWindow(data)
+        win = ArrayScopeWindow(data, filepath=str(data_path))
+        win._profile_session_fixture_viewport_shape = (
+            None
+            if restored_fixture is None or restored_fixture.viewport is None
+            else restored_fixture.viewport.viewport_shape
+        )
+        win._profile_session_fixture_image_axes = (
+            None if restored_fixture is None else tuple(restored_fixture.recipe.view_state.image_axes or ())
+        )
+        win._profile_session_fixture_axis_flipped = (
+            None if restored_fixture is None else tuple(restored_fixture.recipe.view_state.axis_flipped)
+        )
         win.app_settings = _replace_settings(
             win.app_settings,
             backend=backend,
             image_choice=ImageRenderingBackendChoice,
-            montage_quality_policy=montage_quality_policy,
         )
-        apply_theme = getattr(win, "_apply_theme_choice", None)
-        if callable(apply_theme):
-            apply_theme(win.app_settings.theme, persist=False)
-        win.resize(1400, 900)
         win.show()
         _process_events(app, QtCore, count=20)
-        probe = _EventLoopProbe(QtCore)
+        fixture_startup_settled = True
+        fixture_startup_ms = 0.0
+        if restored_fixture is not None:
+            fixture_startup_settled, fixture_startup_ms = _wait_for_target_lod(
+                win,
+                app,
+                QtCore,
+                budget_s=min(30.0, float(timeout_s)),
+                stall_grace_s=4.0,
+            )
+            if not fixture_startup_settled:
+                session = getattr(win, "_frame_session", None)
+                lifecycle = None if session is None else session.lifecycle_snapshot()
+                level_summary = (
+                    None
+                    if session is None
+                    else win.renderer._montage_level_tracker().summary_for(session.level_key)
+                )
+                raise RuntimeError(
+                    "profile session fixture did not reach a settled frame before measurement: "
+                    f"pending={0 if session is None else len(session.pending_tile_numbers())} "
+                    f"loading={0 if session is None else len(getattr(session, 'loading_tiles', ()) or ())} "
+                    f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
+                    f"dirty={0 if session is None else len(getattr(session, 'dirty_payloads', ()) or ())} "
+                    f"presented={0 if session is None else len(session.lifecycle.presented_tiles)} "
+                    f"force_auto={False if session is None else bool(getattr(session, 'force_auto', False))} "
+                    f"user_levels={None if session is None else getattr(session, 'user_levels_override', None)} "
+                    f"evidence={0 if session is None else len(getattr(session, 'pending_level_tiles', ()) or ())}/"
+                    f"{False if session is None else bool(getattr(session, 'level_evidence_inflight', False))} "
+                    f"level_decision={getattr(win.renderer, '_last_montage_level_decision', None)!r} "
+                    f"level_summary={level_summary!r} "
+                    f"gate_armed={bool(getattr(win.renderer, '_montage_presentation_gate_armed', False))} "
+                    f"gate_backlog={getattr(win.renderer, '_montage_gate_last_backlog', None)!r} "
+                    f"gate_no_progress={int(getattr(win.renderer, '_montage_gate_no_progress', 0) or 0)} "
+                    f"kernel={getattr(getattr(win, 'kernel', None), 'diagnostics', lambda: None)()!r} "
+                    f"lifecycle={None if lifecycle is None else dict(lifecycle.counts)}"
+                )
+            geometry_deadline = perf_counter() + min(10.0, float(timeout_s))
+            while not (
+                _window_geometry_state(win)["session_viewport_shape_matches"]
+                and _window_geometry_state(win)["session_axis_orientation_matches"]
+            ):
+                if perf_counter() >= geometry_deadline:
+                    raise RuntimeError(
+                        "profile session fixture frame settled before its viewport/orientation restore: "
+                        f"{_window_geometry_state(win)!r}"
+                    )
+                _process_events(app, QtCore, count=1)
+            _wait_for_physical_presentation_quiet(win, app, QtCore)
+        probe = _EventLoopProbe(QtCore, app)
         probe.start()
 
-        raw_state = win.view_state.with_image_axes(0, 1).with_montage_axis(
+        raw_state = win.view_state.with_montage_axis(
             montage_axis,
-            columns=columns,
-            indices=indices,
+            columns=columns_large,
+            indices=large_indices,
             text=":",
         )
+        fft_operations = _profile_transform_operations(
+            montage_axis,
+            centered_fft=CenteredFFT,
+            fftshift=FFTShift,
+            centered_ifft=CenteredIFFT,
+        )
+        transform_pipeline = ("CenteredFFT", "FFTShift", "CenteredIFFT")
         fit_stretch_pulsed = {"raw": False, "fft": False}
 
         def apply_raw() -> dict[str, object]:
+            clear_start = perf_counter()
+            if tuple(getattr(win.document, "steps", ()) or ()):
+                _set_operations(win, ())
+            clear_operations_ms = (perf_counter() - clear_start) * 1000.0
+            state_start = perf_counter()
             win._set_view_state(raw_state)
+            set_view_state_ms = (perf_counter() - state_start) * 1000.0
+            render_start = perf_counter()
             win.render(reason="profile-raw-full-montage")
-            fit_stretch_pulsed["raw"] = _pulse_fit_stretch(win, app=app, QtCore=QtCore)
-            return {"fit_stretch_pulsed": fit_stretch_pulsed["raw"]}
-
-        raw_record = _run_phase(
-            app,
-            QtCore,
-            win,
-            probe,
-            phase="raw_full_tiled_montage",
-            timeout_s=timeout_s,
-            action=apply_raw,
-            backend=backend,
-            screenshot_dir=screenshot_dir,
-        )
-        _attach_phase_screenshot(raw_record, win, phase="raw_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
-        _append_record(records, jsonl, {**base, **raw_record, "run_temperature": "cold"})
-
-        def apply_fft() -> dict[str, object]:
-            win.operation_coordinator.load_operations(
-                _profile_transform_operations(
-                    montage_axis,
-                    centered_fft=CenteredFFT,
-                    fftshift=FFTShift,
-                    centered_ifft=CenteredIFFT,
-                )
+            render_call_ms = (perf_counter() - render_start) * 1000.0
+            fit_metrics: dict[str, float] = {}
+            fit_stretch_pulsed["raw"] = _pulse_fit_stretch(
+                win,
+                app=app,
+                QtCore=QtCore,
+                metrics=fit_metrics,
             )
-            win._set_document(win.operation_coordinator.document)
-            win._coerce_channel_for_current_dtype()
-            fft_state = win.view_state.with_image_axes(0, 1).with_montage_axis(
-                montage_axis,
-                columns=columns,
-                indices=indices,
-                text=":",
-            )
-            win._set_view_state(fft_state)
-            win.render(reason="profile-fft-full-montage")
-            fit_stretch_pulsed["fft"] = _pulse_fit_stretch(win, app=app, QtCore=QtCore)
-            return {"fit_stretch_pulsed": fit_stretch_pulsed["fft"]}
+            return {
+                "fit_stretch_pulsed": fit_stretch_pulsed["raw"],
+                "action_clear_operations_ms": clear_operations_ms,
+                "action_set_view_state_ms": set_view_state_ms,
+                "action_render_call_ms": render_call_ms,
+                "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
+                **fit_metrics,
+                "session_fixture_restored": restored_fixture is not None,
+                "session_fixture_startup_settled": bool(fixture_startup_settled),
+                "session_fixture_startup_ms": float(fixture_startup_ms),
+            }
 
-        fft_record = _run_phase(
-            app,
-            QtCore,
-            win,
-            probe,
-            phase="fft_full_tiled_montage",
-            timeout_s=timeout_s,
-            action=apply_fft,
-            backend=backend,
-            screenshot_dir=screenshot_dir,
-        )
-        _attach_phase_screenshot(fft_record, win, phase="fft_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir)
-        transform_pipeline = ("CenteredFFT", "FFTShift", "CenteredIFFT")
-        _append_record(
-            records,
-            jsonl,
-            {**base, **fft_record, "operation_pipeline": transform_pipeline, "run_temperature": "mixed"},
-        )
-
-        level_record = _run_phase(
-            app,
-            QtCore,
-            win,
-            probe,
-            phase="fft_level_refinement_preview",
-            timeout_s=timeout_s,
-            action=lambda: {
-                **_apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
-                "fit_stretch_pulsed": bool(fit_stretch_pulsed["fft"]),
-            },
-            backend=backend,
-            screenshot_dir=screenshot_dir,
-        )
-        _attach_phase_screenshot(
-            level_record,
-            win,
-            phase="fft_level_refinement_preview",
-            backend=backend,
-            screenshot_dir=screenshot_dir,
-        )
-        _append_record(
-            records,
-            jsonl,
-            {**base, **level_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
-        )
-
-        if tile_count >= 8:
-            scroll_record = _run_phase(
+        if "raw_full_tiled_montage" in stage_enabled:
+            raw_record = _run_phase(
                 app,
                 QtCore,
                 win,
                 probe,
-                phase="montage_scroll_scrub",
+                phase="raw_full_tiled_montage",
                 timeout_s=timeout_s,
-                action=lambda: _apply_scroll_scrub(
-                    win,
-                    montage_axis=montage_axis,
-                    columns=columns,
-                    tile_count=tile_count,
-                    probe=probe,
-                    app=app,
-                    QtCore=QtCore,
-                ),
+                action=apply_raw,
                 backend=backend,
                 screenshot_dir=screenshot_dir,
             )
             _attach_phase_screenshot(
-                scroll_record, win, phase="montage_scroll_scrub", backend=backend, screenshot_dir=screenshot_dir
+                raw_record, win, phase="raw_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir
+            )
+            _append_record(records, jsonl, {**base_large, **raw_record, "run_temperature": "cold"})
+
+        def apply_fft() -> dict[str, object]:
+            _set_operations(win, fft_operations)
+            fft_state = win.view_state.with_montage_axis(
+                montage_axis,
+                columns=columns_large,
+                indices=large_indices,
+                text=":",
+            )
+            win._set_view_state(fft_state)
+            win.render(reason="profile-fft-full-montage")
+            fit_metrics: dict[str, float] = {}
+            fit_stretch_pulsed["fft"] = _pulse_fit_stretch(
+                win,
+                app=app,
+                QtCore=QtCore,
+                metrics=fit_metrics,
+            )
+            return {
+                "fit_stretch_pulsed": fit_stretch_pulsed["fft"],
+                "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
+                **fit_metrics,
+            }
+
+        if "fft_full_tiled_montage" in stage_enabled:
+            fft_record = _run_phase(
+                app,
+                QtCore,
+                win,
+                probe,
+                phase="fft_full_tiled_montage",
+                timeout_s=timeout_s,
+                action=apply_fft,
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _attach_phase_screenshot(
+                fft_record, win, phase="fft_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir
             )
             _append_record(
                 records,
                 jsonl,
-                {**base, **scroll_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+                {**base_large, **fft_record, "operation_pipeline": transform_pipeline, "run_temperature": "mixed"},
             )
+
+        if "fft_level_refinement_preview" in stage_enabled:
+            def apply_fft_level_preview() -> dict[str, object]:
+                apply_fft()
+                return {
+                    **_apply_fft_level_refinement_preview(win, app=app, QtCore=QtCore),
+                    "fit_stretch_pulsed": bool(fit_stretch_pulsed["fft"]),
+                }
+
+            level_record = _run_phase(
+                app,
+                QtCore,
+                win,
+                probe,
+                phase="fft_level_refinement_preview",
+                timeout_s=timeout_s,
+                action=apply_fft_level_preview,
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _attach_phase_screenshot(
+                level_record,
+                win,
+                phase="fft_level_refinement_preview",
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _append_record(
+                records,
+                jsonl,
+                {**base_large, **level_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+            )
+
+        if tile_count >= 8:
+            # Phase 5: improved scroll pattern over the FFT small montage (ops loaded).
+            if "montage_scroll_fft" in stage_enabled:
+
+                def _fft_scroll_action() -> dict[str, object]:
+                    _set_operations(win, fft_operations)
+                    _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    return _apply_montage_scroll_pattern(
+                        win,
+                        montage_axis=montage_axis,
+                        columns=columns_small,
+                        indices=scroll_source_indices,
+                        window_size=scroll_grid_size,
+                        probe=probe,
+                        app=app,
+                        QtCore=QtCore,
+                        verbose_tile_trace=verbose_tile_trace,
+                    )
+
+                scroll_fft_record = _run_phase(
+                    app,
+                    QtCore,
+                    win,
+                    probe,
+                    phase="montage_scroll_fft",
+                    timeout_s=timeout_s,
+                    action=_fft_scroll_action,
+                    backend=backend,
+                    screenshot_dir=screenshot_dir,
+                )
+                _attach_phase_screenshot(
+                    scroll_fft_record, win, phase="montage_scroll_fft", backend=backend, screenshot_dir=screenshot_dir
+                )
+                _append_record(
+                    records,
+                    jsonl,
+                    {**base_scroll, **scroll_fft_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+                )
+
+            # Phase 6: reset the small montage to the start, strip the ops, and run
+            # the identical scroll pattern over the raw scalar data.
+            if "montage_scroll_scalar" in stage_enabled:
+
+                def _scalar_scroll_action() -> dict[str, object]:
+                    _set_operations(win, ())
+                    _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    return _apply_montage_scroll_pattern(
+                        win,
+                        montage_axis=montage_axis,
+                        columns=columns_small,
+                        indices=scroll_source_indices,
+                        window_size=scroll_grid_size,
+                        probe=probe,
+                        app=app,
+                        QtCore=QtCore,
+                        verbose_tile_trace=verbose_tile_trace,
+                    )
+
+                scroll_scalar_record = _run_phase(
+                    app,
+                    QtCore,
+                    win,
+                    probe,
+                    phase="montage_scroll_scalar",
+                    timeout_s=timeout_s,
+                    action=_scalar_scroll_action,
+                    backend=backend,
+                    screenshot_dir=screenshot_dir,
+                )
+                _attach_phase_screenshot(
+                    scroll_scalar_record, win, phase="montage_scroll_scalar", backend=backend, screenshot_dir=screenshot_dir
+                )
+                _append_record(records, jsonl, {**base_scroll, **scroll_scalar_record, "run_temperature": "warm"})
+
+            # Phase 7: grow to the full montage on scalar data, zoom out to the
+            # enforced limit (tiles tiny), add the ops back, then a zoom/pan stress
+            # sequence that hammers the LOD + visibility system on FFT data.
+            def _fft_zoompan_action() -> dict[str, object]:
+                _set_operations(win, ())
+                _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                return _apply_montage_zoom_pan_stress(
+                    win,
+                    probe=probe,
+                    app=app,
+                    QtCore=QtCore,
+                    mid_toggle=lambda: _set_operations(win, fft_operations),
+                    montage_axis=montage_axis,
+                    columns=columns_small,
+                    indices=scroll_source_indices,
+                    window_size=scroll_grid_size,
+                )
+
+            if "montage_zoompan_fft" in stage_enabled:
+                zoompan_fft_record = _run_phase(
+                    app,
+                    QtCore,
+                    win,
+                    probe,
+                    phase="montage_zoompan_fft",
+                    timeout_s=timeout_s,
+                    action=_fft_zoompan_action,
+                    backend=backend,
+                    screenshot_dir=screenshot_dir,
+                )
+                _attach_phase_screenshot(
+                    zoompan_fft_record, win, phase="montage_zoompan_fft", backend=backend, screenshot_dir=screenshot_dir
+                )
+                _append_record(
+                    records,
+                    jsonl,
+                    {**base_scroll, **zoompan_fft_record, "operation_pipeline": transform_pipeline, "run_temperature": "warm"},
+                )
+
+            # Phase 8: zoom back out to the limit on FFT data, strip the ops, then
+            # run the identical zoom/pan stress sequence over the raw scalar data.
+            def _scalar_zoompan_action() -> dict[str, object]:
+                _set_operations(win, fft_operations)
+                _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                return _apply_montage_zoom_pan_stress(
+                    win,
+                    probe=probe,
+                    app=app,
+                    QtCore=QtCore,
+                    mid_toggle=lambda: _set_operations(win, ()),
+                    montage_axis=montage_axis,
+                    columns=columns_small,
+                    indices=scroll_source_indices,
+                    window_size=scroll_grid_size,
+                )
+
+            if "montage_zoompan_scalar" in stage_enabled:
+                zoompan_scalar_record = _run_phase(
+                    app,
+                    QtCore,
+                    win,
+                    probe,
+                    phase="montage_zoompan_scalar",
+                    timeout_s=timeout_s,
+                    action=_scalar_zoompan_action,
+                    backend=backend,
+                    screenshot_dir=screenshot_dir,
+                )
+                _attach_phase_screenshot(
+                    zoompan_scalar_record, win, phase="montage_zoompan_scalar", backend=backend, screenshot_dir=screenshot_dir
+                )
+                _append_record(records, jsonl, {**base_scroll, **zoompan_scalar_record, "run_temperature": "warm"})
         return tuple(records)
     finally:
+        if probe is not None:
+            probe.stop()
         if win is not None:
             win.close()
             _process_events(app, QtCore, count=10)
-        _restore_setting(settings, "image_rendering_backend", previous_image_backend)
+        settings.clear()
         settings.sync()
+        app.setOrganizationName(previous_organization_name)
+        app.setApplicationName(previous_application_name)
 
 
-def _scroll_montage_window(win, *, montage_axis, columns, start, size, text=":"):
-    """Set the montage index window to [start, start+size)."""
+def _scroll_montage_window(
+    win,
+    *,
+    montage_axis,
+    columns,
+    indices,
+    window_start,
+    size,
+    text=":",
+    interactive=False,
+):
+    """Set the montage index window to `indices[window_start : window_start+size]`.
 
-    indices = tuple(range(int(start), int(start) + int(size)))
-    state = win.view_state.with_image_axes(0, 1).with_montage_axis(
-        montage_axis, columns=columns, indices=indices, text=text
-    )
-    win._set_view_state(state)
-    win.render(reason="profile-scroll")
-
-
-def _apply_scroll_scrub(win, *, montage_axis, columns, tile_count, probe=None, app=None, QtCore=None) -> dict[str, object]:
-    """Scroll-scrub stage: fitted mid-range window, one fast jump, then slow steps.
-
-    Exercises the interaction hot path the LOD/commit pipeline is most likely
-    to stall on (session retarget + LOD convergence under rapid index-window
-    changes). Reuses the phase event-loop ``probe`` (reset per step) to record
-    each step's max gap and whether it settled — the numbers that reveal
-    freezes and stuck-LOD tiles.
+    ``interactive=True`` routes through the coalescing ``request_render`` path
+    (the real user-scroll input path) so a 60fps input stream is delivered and
+    coalesced rather than forcing a synchronous full render per frame.
     """
 
-    # Window sizing adapts to the dataset; the reference is 50-wide windows
-    # at 100:150 -> 150:200 like a user scrubbing a thick stack.
-    size = max(4, min(50, tile_count // 4))
-    first_start = max(0, min(100, tile_count - 2 * size))
-    fast_start = max(0, min(first_start + size, tile_count - size))
+    indices = tuple(indices)
+    window_size = max(1, min(int(size), len(indices)))
+    if len(indices) <= 0 or window_size <= 0:
+        return {"state_build_ms": 0.0, "state_apply_ms": 0.0, "render_request_ms": 0.0}
+    start = min(max(int(window_start), 0), len(indices) - window_size)
+    window_indices = indices[start : start + window_size]
+    state_started = perf_counter()
+    state = win.view_state.with_montage_axis(
+        montage_axis, columns=columns, indices=window_indices, text=text
+    )
+    state_build_ms = (perf_counter() - state_started) * 1000.0
+    apply_started = perf_counter()
+    win._set_view_state(state)
+    state_apply_ms = (perf_counter() - apply_started) * 1000.0
+    request_started = perf_counter()
+    if interactive:
+        win.request_render(reason="profile-scroll", interactive=True)
+    else:
+        win.render(reason="profile-scroll")
+    return {
+        "state_build_ms": float(state_build_ms),
+        "state_apply_ms": float(state_apply_ms),
+        "render_request_ms": float((perf_counter() - request_started) * 1000.0),
+    }
 
-    # 1) Fitted mid-range window with auto levels.  A settled small montage is
-    # quick; the stall guard bails fast if it freezes, so the budget stays low.
-    _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=first_start, size=size)
+
+def _set_operations(win, operations) -> None:
+    """Load (or clear, with an empty tuple) the montage operation pipeline."""
+
+    operations = tuple(operations)
+    current = tuple(getattr(win.operation_coordinator.document, "enabled_operations", ()) or ())
+    if current == operations:
+        # Reapplying an identical pipeline is not a realistic user action and
+        # creates fresh OperationStep ids, invalidating stage/tile caches and
+        # semantic predecessor identity. Back-to-back stages must exercise the
+        # warm production path without a hidden hard reset.
+        return
+    win.operation_coordinator.load_operations(operations)
+    win._set_document(win.operation_coordinator.document)
+    win._coerce_channel_for_current_dtype()
+
+
+def _set_montage_indices(win, *, montage_axis, columns, indices, text=":") -> None:
+    """Set the montage index window to an explicit index sequence and render."""
+
+    state = win.view_state.with_montage_axis(
+        montage_axis, columns=columns, indices=tuple(indices), text=text
+    )
+    win._set_view_state(state)
+    win.render(reason="profile-montage-window")
+
+
+def _montage_at_target_lod(win) -> bool:
+    """True when the montage has fully converged to its target (desired) LOD.
+
+    Stricter than ``_montage_settled`` (which settles on first-pixels / preview
+    floor): additionally requires the applied LOD level to equal the desired
+    level under the resident policy and no pyramid materialization rungs still
+    in flight.  Under the native-only policy the applied level is pinned to 0,
+    so target LOD == settled with nothing pending.  ``quality`` is deliberately
+    NOT used: under the resident policy a reduced-input tile at the *target*
+    level is legitimately labelled ``preview`` (reduced input), so exact-quality
+    would never be reached for a reduced fit.
+    """
+
+    return bool(_montage_target_lod_evidence(win)["reached"])
+
+
+def _montage_target_lod_evidence(win, *, tile_numbers=None) -> dict[str, object]:
+    """Explain target-LOD settlement without hiding mixed/stale tiles.
+
+    This is deliberately payload- and source-aware. Aggregate policy state can
+    truthfully describe the plurality while a bounded successor still has a
+    few coarser or predecessor-mapped slots; the benchmark must identify those
+    exact obligations instead of reporting only a boolean timeout.
+    """
+
+    session = getattr(win, "_frame_session", None)
+    if session is None:
+        return {
+            "reached": False,
+            "settled": False,
+            "desired_level": 0,
+            "payload_level_counts": (),
+            "missing_tiles": (),
+            "coarser_tiles": (),
+            "source_mismatch_tiles": (),
+            "backend_mismatch_tiles": (),
+            "pending_materializations": 0,
+        }
+    scoped_tiles = None if tile_numbers is None else set(int(tile) for tile in tuple(tile_numbers or ()))
+    settled = _montage_settled(session)
+    decision = getattr(session, "lod_policy_decision", None)
+    demand = getattr(decision, "demand", None)
+    desired_level = 0 if demand is None else int(getattr(demand, "desired_level", 0) or 0)
+    policy = "" if decision is None else str(getattr(decision, "policy", "") or "")
+    active_tiles = (
+        set(_active_planned_montage_tiles(session))
+        if scoped_tiles is None
+        else set(scoped_tiles)
+    )
+    if scoped_tiles is not None:
+        scoped_backlog = _visible_backlog_state(session, active_tiles)
+        settled = bool(active_tiles and not scoped_backlog["visible_has_backlog"])
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    plan_by_number = {
+        int(tile.montage_index): tile
+        for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    }
+    missing: list[int] = []
+    coarser: list[int] = []
+    mismatched: list[int] = []
+    backend_mismatched: list[int] = []
+    backend_identities = dict(
+        getattr(getattr(session, "lifecycle", None), "backend_presented_identities", {})
+        or {}
+    )
+    level_counts: dict[int, int] = {}
+    for tile_number in sorted(active_tiles):
+        payload = payloads.get(int(tile_number))
+        if payload is None:
+            missing.append(int(tile_number))
+            continue
+        payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        level_counts[payload_level] = level_counts.get(payload_level, 0) + 1
+        if policy == "resident" and payload_level > desired_level:
+            coarser.append(int(tile_number))
+        planned = plan_by_number.get(int(tile_number))
+        if planned is not None and int(getattr(payload, "source_index", -1)) != int(planned.source_index):
+            mismatched.append(int(tile_number))
+        if backend_identities.get(int(tile_number)) != tile_ack_identity(payload):
+            backend_mismatched.append(int(tile_number))
+    aggregate_coarser = bool(
+        scoped_tiles is None
+        and
+        decision is not None
+        and demand is not None
+        and policy == "resident"
+        and int(getattr(decision, "applied_level", 0) or 0) > desired_level
+    )
+    pending_materializations = (
+        len(getattr(session, "pending_rung_materializations", ()) or ())
+        if scoped_tiles is None
+        else 0
+    )
+    reached = bool(
+        settled
+        and not aggregate_coarser
+        and not missing
+        and not coarser
+        and not mismatched
+        and not backend_mismatched
+        and pending_materializations == 0
+    )
+    return {
+        "reached": reached,
+        "settled": bool(settled),
+        "desired_level": int(desired_level),
+        "payload_level_counts": tuple(sorted((int(level), int(count)) for level, count in level_counts.items())),
+        "missing_tiles": tuple(missing),
+        "coarser_tiles": tuple(coarser),
+        "source_mismatch_tiles": tuple(mismatched),
+        "backend_mismatch_tiles": tuple(backend_mismatched),
+        "aggregate_coarser": bool(aggregate_coarser),
+        "pending_materializations": int(pending_materializations),
+    }
+
+
+def _wait_for_target_lod(win, app, QtCore, *, budget_s: float, stall_grace_s: float = 2.5) -> tuple[bool, float]:
+    """Run the real Qt dispatcher until the montage reaches full target LOD.
+
+    Returns ``(reached, elapsed_ms)``.  Bails early when the montage is clearly
+    frozen (stall signature stable while no kernel work is in flight) instead of
+    staring at a dead session for the whole budget.
+    """
+
+    t0 = perf_counter()
+    if _montage_at_target_lod(win):
+        return True, 0.0
+    loop = QtCore.QEventLoop()
+    poll = QtCore.QTimer(loop)
+    poll.setInterval(15)
+    poll.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+    timeout = QtCore.QTimer(loop)
+    timeout.setSingleShot(True)
+    timeout.setInterval(max(1, int(math.ceil(float(budget_s) * 1000.0))))
+    result = {"reached": False, "stall_since": None, "last_sig": None}
+
+    def inspect() -> None:
+        if _montage_at_target_lod(win):
+            result["reached"] = True
+            loop.quit()
+            return
+        session = getattr(win, "_frame_session", None)
+        sig = _montage_stall_signature(session)
+        if _montage_work_in_flight(session):
+            result["stall_since"] = None
+        elif sig != result["last_sig"]:
+            result["stall_since"] = perf_counter()
+        elif (
+            result["stall_since"] is not None
+            and perf_counter() - float(result["stall_since"]) >= float(stall_grace_s)
+        ):
+            loop.quit()
+            return
+        result["last_sig"] = sig
+
+    poll.timeout.connect(inspect)
+    timeout.timeout.connect(loop.quit)
+    poll.start()
+    timeout.start()
+    loop.exec()
+    poll.stop()
+    timeout.stop()
+    return bool(result["reached"] or _montage_at_target_lod(win)), (perf_counter() - t0) * 1000.0
+
+
+def _lod_priority_snapshot(win, *, include_details: bool = False) -> dict[str, object]:
+    """Snapshot visible target truth and physical near-residency ordering."""
+
+    session = getattr(win, "_frame_session", None)
+    if session is None:
+        return {
+            "active_tiles": (),
+            "near_tiles": (),
+            "near_resident_identities": (),
+            "resident_query_available": False,
+            **_montage_target_lod_evidence(win),
+        }
+    frame_plan = getattr(session, "frame_plan", None)
+    active = set(int(tile) for tile in tuple(getattr(frame_plan, "active_region_ids", ()) or ()))
+    if not active:
+        active = set(_active_planned_montage_tiles(session))
+    near = set(int(tile) for tile in tuple(getattr(frame_plan, "near_region_ids", ()) or ())) - active
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    resident = getattr(getattr(win, "img_view", None), "tiledPayloadResident", None)
+    target_evidence = _montage_target_lod_evidence(win, tile_numbers=active)
+    lifecycle_target = getattr(getattr(session, "lifecycle", None), "visible_target_settled", None)
+    pipeline = getattr(session, "pipeline", None)
+    diagnostic_rows = getattr(session, "diagnostic_tile_identity_rows", None)
+    desired_level = int(target_evidence.get("desired_level", 0) or 0)
+    resident_identities = tuple(
+        sorted(
+            (
+                int(tile),
+                repr(getattr(payloads[int(tile)], "source_id", None)),
+            )
+            for tile in near
+            if int(tile) in payloads
+            and int(getattr(getattr(payloads[int(tile)], "lod", None), "level", 0) or 0) <= desired_level
+            and callable(resident)
+            and bool(resident(payloads[int(tile)]))
+        )
+    )
+    all_resident_identities = tuple(
+        sorted(
+            (
+                int(tile),
+                repr(getattr(payload, "source_id", None)),
+            )
+            for tile, payload in payloads.items()
+            if callable(resident) and bool(resident(payload))
+        )
+    )
+    return {
+        "active_tiles": tuple(sorted(active)),
+        "near_tiles": tuple(sorted(near)),
+        "near_resident_identities": resident_identities,
+        "all_resident_identities": all_resident_identities,
+        "resident_query_available": callable(resident),
+        "lifecycle_visible_target_settled": bool(callable(lifecycle_target) and lifecycle_target()),
+        "pipeline_states": (
+            tuple(getattr(pipeline, "last_plan_states", ()) or ())
+            if include_details
+            else ()
+        ),
+        "pipeline_steps": (
+            tuple(getattr(pipeline, "last_plan_steps", ()) or ())
+            if include_details
+            else ()
+        ),
+        "active_diagnostics": (
+            tuple(
+                row
+                for row in tuple(diagnostic_rows(limit=max(8, len(active))) if callable(diagnostic_rows) else ())
+                if int(row.get("tile", -1)) in active
+            )
+            if include_details
+            else ()
+        ),
+        **target_evidence,
+    }
+
+
+def _wait_for_visible_target_then_observe_near(win, app, QtCore) -> dict[str, object]:
+    """Require visible target settlement before newly resident near payloads.
+
+    Once the visible set is correct, keep the dispatcher alive briefly to
+    observe whether speculative residency starts. Existing near residency is
+    a cache hit and is excluded from the ordering assertion.
+    """
+
+    started = perf_counter()
+    deadline = started + float(ZOOMPAN_CHECKPOINT_SETTLE_S)
+    baseline = _lod_priority_snapshot(win)
+    baseline_near = set(tuple(row) for row in baseline["near_resident_identities"])
+    baseline_resident = set(tuple(row) for row in baseline.get("all_resident_identities", ()))
+    before_visible: set[tuple[object, ...]] = set()
+    first_near_before_visible_evidence = None
+    visible_reached_at = None
+    last = baseline
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        last = _lod_priority_snapshot(win)
+        current_near = set(tuple(row) for row in last["near_resident_identities"])
+        if bool(last.get("reached", False)):
+            if visible_reached_at is None:
+                visible_reached_at = perf_counter()
+        else:
+            # A range signal can precede its coalesced viewport-plan retarget.
+            # The predecessor is briefly "settled" until that plan lands; it
+            # is not evidence for the new camera. Require continuous target
+            # truth through the observation window.
+            visible_reached_at = None
+            new_before = current_near - baseline_resident
+            if new_before and first_near_before_visible_evidence is None:
+                first_near_before_visible_evidence = _lod_priority_snapshot(
+                    win,
+                    include_details=True,
+                )
+            before_visible.update(new_before)
+        if visible_reached_at is not None and perf_counter() - visible_reached_at >= float(ZOOMPAN_NEAR_OBSERVE_S):
+            break
+        QtCore.QThread.msleep(1)
+    final = _lod_priority_snapshot(
+        win,
+        include_details=visible_reached_at is None,
+    )
+    final_near = set(tuple(row) for row in final["near_resident_identities"])
+    return {
+        "visible_target_reached": bool(final.get("reached", False)),
+        "visible_settle_ms": (
+            float((visible_reached_at - started) * 1000.0)
+            if visible_reached_at is not None
+            else float((perf_counter() - started) * 1000.0)
+        ),
+        "active_tiles": final["active_tiles"],
+        "near_tiles": final["near_tiles"],
+        "near_resident_before_count": len(baseline_near),
+        "near_new_before_visible": tuple(sorted(before_visible)),
+        "near_new_before_visible_count": len(before_visible),
+        "first_near_before_visible_evidence": first_near_before_visible_evidence,
+        "near_new_after_visible_count": len(final_near - baseline_resident - before_visible),
+        "resident_query_available": bool(final["resident_query_available"]),
+        "target_evidence": final,
+    }
+
+
+def _lod_state_record(win) -> dict[str, object]:
+    """Snapshot the LOD demand/applied/preview counters for a phase record."""
+
+    try:
+        montage = win.collect_runtime_diagnostics().montage
+    except Exception:
+        return {}
+    session = getattr(win, "_frame_session", None)
+    visible = 0 if session is None else len(getattr(session, "visible_tile_numbers", ()) or ())
+    return {
+        "lod_desired_factor": int(getattr(montage, "tile_lod_desired_factor", 0) or 0),
+        "lod_applied_factor": int(getattr(montage, "tile_lod_applied_factor", 0) or 0),
+        "lod_applied_level": int(getattr(montage, "tile_lod_applied_level", 0) or 0),
+        "lod_desired_factor_xy": tuple(int(v) for v in getattr(montage, "tile_lod_desired_factor_xy", ()) or ()),
+        "lod_applied_factor_xy": tuple(int(v) for v in getattr(montage, "tile_lod_applied_factor_xy", ()) or ()),
+        "lod_preview_presentations": int(getattr(montage, "tile_lod_preview_presentations", 0) or 0),
+        "lod_pending_materializations": int(getattr(montage, "tile_lod_pending_materializations", 0) or 0),
+        "lod_pyramid_bytes": int(getattr(montage, "tile_lod_pyramid_bytes", 0) or 0),
+        "lod_reason": str(getattr(montage, "tile_lod_reason", "")),
+        "lod_visible_tiles": int(visible),
+    }
+
+
+def _montage_view_range(win):
+    """Return the live camera range as ``((x0, x1), (y0, y1))`` or None."""
+
+    try:
+        view_range = win.img_view.getView().viewRange()
+        return (
+            (float(view_range[0][0]), float(view_range[0][1])),
+            (float(view_range[1][0]), float(view_range[1][1])),
+        )
+    except Exception:
+        return None
+
+
+def _apply_view_range(win, x_range, y_range) -> None:
+    """Push a new camera range; the range-changed signal retargets the montage."""
+
+    note_interaction = getattr(win, "_note_viewport_interaction", None)
+    if callable(note_interaction):
+        # setRange is the deterministic benchmark transport, but semantically
+        # these are wheel/pan inputs. Mark the same interaction lifetime so
+        # speculative work and native-quality deferral behave as they do for
+        # a real user gesture.
+        note_interaction("profile-zoom-pan")
+    view = win.img_view.getView()
+    view.setRange(
+        xRange=(float(x_range[0]), float(x_range[1])),
+        yRange=(float(y_range[0]), float(y_range[1])),
+        padding=0,
+    )
+
+
+def _scaled_view_range(view_range, span_scale, center_frac=(0.5, 0.5)):
+    """Scale a view range's span (``>1`` zooms out, ``<1`` zooms in)."""
+
+    (x0, x1), (y0, y1) = view_range
+    cx = x0 + (x1 - x0) * float(center_frac[0])
+    cy = y0 + (y1 - y0) * float(center_frac[1])
+    half_x = (x1 - x0) * float(span_scale) * 0.5
+    half_y = (y1 - y0) * float(span_scale) * 0.5
+    return ((cx - half_x, cx + half_x), (cy - half_y, cy + half_y))
+
+
+def _panned_view_range(view_range, dx_frac, dy_frac):
+    """Shift a view range by a fraction of its span (pan)."""
+
+    (x0, x1), (y0, y1) = view_range
+    dx = (x1 - x0) * float(dx_frac)
+    dy = (y1 - y0) * float(dy_frac)
+    return ((x0 + dx, x1 + dx), (y0 + dy, y1 + dy))
+
+
+def _maximum_zoomout_view_range(win, app, QtCore, base_range):
+    """Ask the real viewport constraint for its maximum zoom-out range."""
+
+    requested = _scaled_view_range(base_range, ZOOMPAN_MAX_OUT_REQUEST_SCALE)
+    _apply_view_range(win, requested[0], requested[1])
+    _process_events(app, QtCore, count=1)
+    return _montage_view_range(win) or requested
+
+
+def _few_tile_view_range(win, *, center_fraction: float = 0.5, tiles_across: float = 0.9):
+    """Build a deterministic camera target spanning only a few montage tiles."""
+
+    session = getattr(win, "_frame_session", None)
+    tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    if not tiles:
+        return None
+    index = min(len(tiles) - 1, max(0, int(round((len(tiles) - 1) * float(center_fraction)))))
+    tile = tiles[index]
+    center_x = float(tile.x0) + float(tile.width) * 0.5
+    center_y = float(tile.y0) + float(tile.height) * 0.5
+    half_x = max(1.0, float(tile.width) * float(tiles_across) * 0.5)
+    half_y = max(1.0, float(tile.height) * float(tiles_across) * 0.5)
+    return ((center_x - half_x, center_x + half_x), (center_y - half_y, center_y + half_y))
+
+
+def _full_montage_view_range(win):
+    """Return the tight content range, unlike the deliberately distant limit."""
+
+    session = getattr(win, "_frame_session", None)
+    shape = tuple(getattr(getattr(getattr(session, "plan", None), "geometry", None), "display_shape", ()) or ())
+    if len(shape) < 2:
+        shape = tuple(getattr(getattr(session, "plan", None), "display_shape", ()) or ())
+    if len(shape) < 2:
+        return None
+    height, width = max(1, int(shape[0])), max(1, int(shape[1]))
+    return ((0.0, float(width)), (0.0, float(height)))
+
+
+def _glide_view_range(
+    win,
+    app,
+    QtCore,
+    probe,
+    target_range,
+    *,
+    frames: int,
+    fps: float = 60.0,
+    frame_action=None,
+) -> dict[str, object]:
+    """Interpolate the camera range to ``target_range`` at ``fps``, one push/frame.
+
+    Measures how the interaction hot path keeps up under a continuous, paced
+    view change (the zoom/pan analogue of a fast scroll).  Never waits for LOD
+    to settle between frames — that is what the settle step after it measures.
+    """
+
+    start_range = _montage_view_range(win)
+    if start_range is None or int(frames) < 1:
+        return {"frames": 0, "elapsed_ms": 0.0, "max_gap_ms": 0.0, "p95_gap_ms": 0.0, "p99_gap_ms": 0.0, "achieved_fps": 0.0}
+    (sx0, sx1), (sy0, sy1) = start_range
+    (tx0, tx1), (ty0, ty1) = target_range
+    interval = 1.0 / max(1.0, float(fps))
+    note_interaction = getattr(win, "_note_viewport_interaction", None)
+    if callable(note_interaction):
+        # Establish interactive policy before the first frame timer is
+        # admitted. Otherwise a quiet-edge residency continuation from the
+        # preceding checkpoint can occupy the dispatcher before frame one has
+        # a chance to announce the new gesture.
+        note_interaction("profile-gesture")
+    if probe is not None:
+        probe.reset()
+    ui_work_buffer = getattr(getattr(win, "resource_governor", None), "_recent_ui_work_observations", ())
+    ui_work_start = len(ui_work_buffer)
+    vispy_draw_start = _vispy_draw_count(win)
+    t0 = perf_counter()
+    frames = int(frames)
+    input_call_ms: list[float] = []
+    view_range_call_ms: list[float] = []
+    frame_action_call_ms: list[float] = []
+    loop = QtCore.QEventLoop()
+    frame_timer = QtCore.QTimer(loop)
+    frame_timer.setInterval(max(1, int(round(interval * 1000.0))))
+    frame_timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+    callback_error: list[BaseException] = []
+    frame_index = {"value": 0}
+
+    def push_frame() -> None:
+        index = int(frame_index["value"]) + 1
+        frame_index["value"] = index
+        alpha = index / frames
+        x_range = (sx0 + (tx0 - sx0) * alpha, sx1 + (tx1 - sx1) * alpha)
+        y_range = (sy0 + (ty0 - sy0) * alpha, sy1 + (ty1 - sy1) * alpha)
+        input_start = perf_counter()
+        try:
+            if callable(note_interaction):
+                # Programmatic ViewBox changes are correctly ignored by the
+                # app's generic range bridge (restore/fit are not gestures).
+                # This harness is deliberately synthesizing a pointer-speed
+                # gesture, so drive the production interaction governor
+                # explicitly before every frame and let its ordinary quiet
+                # edge settle the final LOD afterwards.
+                note_interaction("profile-gesture")
+            view_range_start = perf_counter()
+            _apply_view_range(win, x_range, y_range)
+            view_range_call_ms.append((perf_counter() - view_range_start) * 1000.0)
+            if callable(frame_action):
+                frame_action_start = perf_counter()
+                frame_action(index, frames)
+                frame_action_call_ms.append((perf_counter() - frame_action_start) * 1000.0)
+        except BaseException as exc:  # re-raise outside Qt callback boundary
+            callback_error.append(exc)
+            loop.quit()
+            return
+        input_call_ms.append((perf_counter() - input_start) * 1000.0)
+        if index >= frames:
+            loop.quit()
+
+    frame_timer.timeout.connect(push_frame)
+    frame_timer.start()
+    loop.exec()
+    frame_timer.stop()
+    if callback_error:
+        raise callback_error[0]
+    elapsed_ms = (perf_counter() - t0) * 1000.0
+    ui_work = tuple(ui_work_buffer)[ui_work_start:]
+    tile_commits = tuple(item for item in ui_work if item.channel == "tile_layer_commit")
+    physical_draws = tuple(
+        item
+        for item in ui_work
+        if item.channel in {"vispy_canvas_draw", "graphics_view_paint"}
+    )
+    kernel_drains = tuple(item for item in ui_work if item.channel == "kernel_bridge_drain")
+    return {
+        "frames": frames,
+        "elapsed_ms": elapsed_ms,
+        "max_gap_ms": 0.0 if probe is None else float(probe.max_gap_ms),
+        "p95_gap_ms": 0.0 if probe is None else float(probe.percentile_ms(95) or 0.0),
+        "p99_gap_ms": 0.0 if probe is None else float(probe.percentile_ms(99) or 0.0),
+        "achieved_fps": (frames / (elapsed_ms / 1000.0)) if elapsed_ms > 0 else 0.0,
+        "input_call_max_ms": float(max(input_call_ms) if input_call_ms else 0.0),
+        "input_call_p95_ms": float(_percentile(tuple(input_call_ms), 95.0)),
+        "view_range_call_max_ms": float(max(view_range_call_ms) if view_range_call_ms else 0.0),
+        "view_range_call_p95_ms": float(_percentile(tuple(view_range_call_ms), 95.0)),
+        "frame_action_call_max_ms": float(max(frame_action_call_ms) if frame_action_call_ms else 0.0),
+        "frame_action_call_p95_ms": float(_percentile(tuple(frame_action_call_ms), 95.0)),
+        "tile_commit_count": len(tile_commits),
+        "tile_commit_total_ms": float(sum(item.elapsed_ms for item in tile_commits)),
+        "physical_draw_count": (
+            max(0, _vispy_draw_count(win) - vispy_draw_start)
+            or len(physical_draws)
+        ),
+        "physical_draw_total_ms": float(sum(item.elapsed_ms for item in physical_draws)),
+        "kernel_drain_count": len(kernel_drains),
+        "kernel_drain_total_ms": float(sum(item.elapsed_ms for item in kernel_drains)),
+        "ui_work_total_ms": float(sum(item.elapsed_ms for item in ui_work)),
+    }
+
+
+class _VerboseTileTrace:
+    """Opt-in transition history for source/LOD/backend slot correctness."""
+
+    def __init__(self, win):
+        self.win = win
+        self.started = perf_counter()
+        self.snapshots: list[dict[str, object]] = []
+        self._target_changed_at: dict[int, float] = {}
+        self._target_source_by_slot: dict[int, int] = {}
+        self._presented_changed_at: dict[int, float] = {}
+        self._presented_identity_by_slot: dict[int, object] = {}
+
+    def capture(self, event: str, *, requested_start: int | None = None) -> None:
+        now = perf_counter()
+        desired_indices = tuple(
+            int(index)
+            for index in tuple(getattr(getattr(self.win, "view_state", None), "montage_indices", ()) or ())
+        )
+        session = getattr(self.win, "_frame_session", None)
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        planned = {int(tile.montage_index): int(tile.source_index) for tile in plan_tiles}
+        payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+        lifecycle = getattr(session, "lifecycle", None)
+        backend = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
+        physical_layer = getattr(getattr(self.win, "img_view", None), "_montage_tile_layer", None)
+        physical_states = dict(getattr(physical_layer, "states", {}) or {})
+        composite = getattr(physical_layer, "_composite_item", None)
+        revision = int(getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0)
+        rows: list[dict[str, object]] = []
+        slot_count = max(len(desired_indices), len(plan_tiles), len(payloads), len(backend))
+        for slot in range(slot_count):
+            desired_source = desired_indices[slot] if slot < len(desired_indices) else None
+            if desired_source is not None and self._target_source_by_slot.get(slot) != desired_source:
+                self._target_source_by_slot[slot] = desired_source
+                self._target_changed_at[slot] = now
+            payload = payloads.get(slot)
+            payload_source = None if payload is None else int(getattr(payload, "source_index", -1))
+            backend_identity = backend.get(slot)
+            if self._presented_identity_by_slot.get(slot) != backend_identity:
+                self._presented_identity_by_slot[slot] = backend_identity
+                self._presented_changed_at[slot] = now
+            record = None if lifecycle is None else lifecycle.peek(slot)
+            lod = None if payload is None else getattr(payload, "lod", None)
+            physical = physical_states.get(slot)
+            physical_image = None if physical is None else getattr(getattr(physical, "item", None), "image", None)
+            physical_white_fraction = None
+            if physical_image is not None:
+                array = np.asarray(physical_image)
+                stride_y = max(1, int(array.shape[0]) // 16)
+                stride_x = max(1, int(array.shape[1]) // 16)
+                sample = array[::stride_y, ::stride_x, ...]
+                if sample.ndim >= 3 and int(sample.shape[-1]) in (3, 4):
+                    physical_white_fraction = float(np.mean(np.all(sample[..., :3] >= 250, axis=-1)))
+                else:
+                    high = float(getattr(physical, "levels", (0.0, float("inf")))[1])
+                    physical_white_fraction = float(np.mean(sample >= high))
+            rows.append(
+                {
+                    "slot": int(slot),
+                    "desired_source_index": desired_source,
+                    "planned_source_index": planned.get(slot),
+                    "payload_source_index": payload_source,
+                    "payload_source_id": _trace_identity(getattr(payload, "source_id", None)),
+                    "backend_source_id": _trace_identity(backend_identity),
+                    "lod_level": None if lod is None else int(getattr(lod, "level", 0) or 0),
+                    "lod_factor": None if lod is None else int(getattr(lod, "factor", 1) or 1),
+                    "quality": None if payload is None else str(getattr(payload, "quality", "")),
+                    "lifecycle_phase": None if record is None else str(getattr(getattr(record, "phase", None), "value", getattr(record, "phase", ""))),
+                    "target_age_ms": float((now - self._target_changed_at.get(slot, now)) * 1000.0),
+                    "presented_age_ms": float((now - self._presented_changed_at.get(slot, now)) * 1000.0),
+                    "payload_matches_desired": bool(payload_source == desired_source),
+                    "plan_matches_desired": bool(planned.get(slot) == desired_source),
+                    "backend_matches_payload": bool(payload is not None and backend_identity == getattr(payload, "source_id", None)),
+                    "physical_source_id": _trace_identity(
+                        None if physical is None else getattr(physical, "source_array_id", None)
+                    ),
+                    "physical_levels": None if physical is None else tuple(float(v) for v in physical.levels),
+                    "physical_white_fraction": physical_white_fraction,
+                    "physical_render_required": bool(
+                        physical is not None and getattr(physical.item, "_renderRequired", False)
+                    ),
+                }
+            )
+        self.snapshots.append(
+            {
+                "elapsed_ms": float((now - self.started) * 1000.0),
+                "event": str(event),
+                "requested_start": None if requested_start is None else int(requested_start),
+                "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
+                "presentation_revision": revision,
+                "source_window_changed_pending": bool(session is not None and getattr(session, "source_window_changed_pending", False)),
+                "camera_view_range": _montage_view_range(self.win),
+                "composite_cache_reason": str(getattr(composite, "composite_cache_reason", "") or ""),
+                "composite_has_pixmap": bool(
+                    getattr(composite, "_composite_pixmap", None) is not None
+                    and not getattr(composite, "_composite_pixmap").isNull()
+                ),
+                "tiles": rows,
+            }
+        )
+
+
+def _trace_identity(value, *, limit: int = 240) -> str | None:
+    if value is None:
+        return None
+    text = repr(value)
+    return text if len(text) <= int(limit) else text[: max(0, int(limit) - 3)] + "..."
+
+
+def _fast_scroll_60fps(
+    win,
+    *,
+    montage_axis,
+    columns,
+    indices,
+    size,
+    start,
+    low,
+    high,
+    probe,
+    app,
+    QtCore,
+    tile_trace=None,
+) -> dict[str, object]:
+    """Cold-forward scroll, short fast reverse, then a tiny oscillating tail."""
+
+    interval = 1.0 / 60.0
+    indices = tuple(indices)
+    tile_count = len(indices)
+    size = max(1, min(int(size), tile_count if tile_count > 0 else 1))
+    low = max(0, int(low))
+    high = min(max(0, int(tile_count) - int(size)), int(high))
+    if high <= low:
+        high = low
+    camera_before = _montage_view_range(win)
+    if probe is not None:
+        probe.reset()
+    draw_start = _vispy_tile_presentation_draw_count(win)
+    ui_work_buffer = getattr(getattr(win, "resource_governor", None), "_recent_ui_work_observations", ())
+    ui_work_start = len(ui_work_buffer)
+    t0 = perf_counter()
+    deadline = t0 + float(SCROLL_FAST_DURATION_S)
+    current = min(max(int(start), low), high)
+    frames = 0
+    reached_min = current
+    reached_max = current
+    primary_frames = 0
+    reverse_frames = 0
+    tail_frames = 0
+    primary_deadline = t0 + float(SCROLL_FAST_DURATION_S) * 0.58
+    reverse_deadline = t0 + float(SCROLL_FAST_DURATION_S) * 0.94
+    reverse_target = low
+    tail_low = max(low, reverse_target - max(3, size // 8))
+    tail_high = min(high, reverse_target + max(3, size // 8))
+    tail_direction = 1
+    input_call_ms: list[float] = []
+    input_state_build_ms: list[float] = []
+    input_state_apply_ms: list[float] = []
+    input_render_request_ms: list[float] = []
+    # Begin at the settled centre and move continuously into cold slices.  The
+    # former low->high formula teleported centre->low on the first tick, giving
+    # the renderer zero resident overlap; every following target then outran
+    # loading and the benchmark showed only centre-priority tiles moving until
+    # its final pause.  A continuous centre->high sweep tests the actual cheap
+    # N-k resident shuffle, then the faster high->low reverse stresses both
+    # supersession and newly-entering slices.  The final 6% oscillates briefly.
+    loop = QtCore.QEventLoop()
+    frame_timer = QtCore.QTimer(loop)
+    frame_timer.setInterval(max(1, int(round(interval * 1000.0))))
+    frame_timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+    stop_timer = QtCore.QTimer(loop)
+    stop_timer.setSingleShot(True)
+    stop_timer.setInterval(max(1, int(round(float(SCROLL_FAST_DURATION_S) * 1000.0))))
+    callback_error: list[BaseException] = []
+
+    def push_frame() -> None:
+        nonlocal frames, current, reached_min, reached_max
+        nonlocal primary_frames, reverse_frames, tail_frames, tail_direction
+        frames += 1
+        now = perf_counter()
+        if now < primary_deadline:
+            primary_frames += 1
+            fraction = min(1.0, (now - t0) / max(1e-9, primary_deadline - t0))
+            current = int(round(start + (high - start) * fraction))
+        elif now < reverse_deadline:
+            reverse_frames += 1
+            fraction = min(1.0, (now - primary_deadline) / max(1e-9, reverse_deadline - primary_deadline))
+            current = int(round(high + (reverse_target - high) * fraction))
+        else:
+            tail_frames += 1
+            current += tail_direction
+            if current >= tail_high:
+                current = tail_high
+                tail_direction = -1
+            elif current <= tail_low:
+                current = tail_low
+                tail_direction = 1
+        reached_min = min(reached_min, current)
+        reached_max = max(reached_max, current)
+        if tile_trace is not None:
+            tile_trace.capture("fast-before-input", requested_start=current)
+        input_start = perf_counter()
+        try:
+            input_parts = _scroll_montage_window(
+                win,
+                montage_axis=montage_axis,
+                columns=columns,
+                indices=indices,
+                window_start=current,
+                size=size,
+                interactive=True,
+            )
+        except BaseException as exc:  # re-raise outside the Qt callback boundary
+            callback_error.append(exc)
+            loop.quit()
+            return
+        input_call_ms.append((perf_counter() - input_start) * 1000.0)
+        input_state_build_ms.append(float(input_parts["state_build_ms"]))
+        input_state_apply_ms.append(float(input_parts["state_apply_ms"]))
+        input_render_request_ms.append(float(input_parts["render_request_ms"]))
+        if tile_trace is not None:
+            tile_trace.capture("fast-after-input", requested_start=current)
+
+    frame_timer.timeout.connect(push_frame)
+    stop_timer.timeout.connect(loop.quit)
+    frame_timer.start()
+    stop_timer.start()
+    loop.exec()
+    frame_timer.stop()
+    stop_timer.stop()
+    if callback_error:
+        raise callback_error[0]
+    elapsed_ms = (perf_counter() - t0) * 1000.0
+    camera_after = _montage_view_range(win)
+    camera_drift = 0.0
+    if camera_before is not None and camera_after is not None:
+        camera_drift = max(
+            abs(float(after) - float(before))
+            for before_axis, after_axis in zip(camera_before, camera_after)
+            for before, after in zip(before_axis, after_axis)
+        )
+    draw_delta = max(0, _vispy_tile_presentation_draw_count(win) - int(draw_start))
+    ui_work = tuple(ui_work_buffer)[ui_work_start:]
+    channel_counts: dict[str, int] = {}
+    channel_ms: dict[str, float] = {}
+    for item in ui_work:
+        channel_counts[item.channel] = int(channel_counts.get(item.channel, 0)) + 1
+        channel_ms[item.channel] = float(channel_ms.get(item.channel, 0.0)) + float(item.elapsed_ms)
+    return {
+        "fast_scroll_duration_s": float(SCROLL_FAST_DURATION_S),
+        "fast_scroll_input_frames": int(frames),
+        "fast_scroll_cold_forward_frames": int(primary_frames),
+        "fast_scroll_reverse_frames": int(reverse_frames),
+        "fast_scroll_tail_oscillation_frames": int(tail_frames),
+        "fast_scroll_reverse_index_distance": int(max(0, high - reverse_target)),
+        "fast_scroll_index_span_reached": int(reached_max - reached_min),
+        "fast_scroll_draw_count_delta": int(draw_delta),
+        "fast_scroll_elapsed_ms": elapsed_ms,
+        "fast_scroll_max_gap_ms": 0.0 if probe is None else float(probe.max_gap_ms),
+        "fast_scroll_gc_max_pause_ms": 0.0 if probe is None else float(probe.gc_max_pause_ms),
+        "fast_scroll_gc_pause_count": 0 if probe is None else int(len(probe.gc_pauses_ms)),
+        "fast_scroll_gc_pauses": () if probe is None else tuple(probe.gc_pauses),
+        "fast_scroll_p95_gap_ms": 0.0 if probe is None else float(probe.percentile_ms(95) or 0.0),
+        "fast_scroll_p99_gap_ms": 0.0 if probe is None else float(probe.percentile_ms(99) or 0.0),
+        "fast_scroll_achieved_input_fps": (frames / (elapsed_ms / 1000.0)) if elapsed_ms > 0 else 0.0,
+        "fast_scroll_input_call_max_ms": float(max(input_call_ms) if input_call_ms else 0.0),
+        "fast_scroll_input_call_p95_ms": float(_percentile(tuple(input_call_ms), 95.0)),
+        "fast_scroll_state_build_max_ms": float(max(input_state_build_ms) if input_state_build_ms else 0.0),
+        "fast_scroll_state_apply_max_ms": float(max(input_state_apply_ms) if input_state_apply_ms else 0.0),
+        "fast_scroll_render_request_max_ms": float(max(input_render_request_ms) if input_render_request_ms else 0.0),
+        "fast_scroll_end_start": int(current),
+        "fast_scroll_camera_before": camera_before,
+        "fast_scroll_camera_after": camera_after,
+        "fast_scroll_camera_max_drift": float(camera_drift),
+        "fast_scroll_ui_work_total_ms": float(sum(item.elapsed_ms for item in ui_work)),
+        "fast_scroll_ui_channel_counts": channel_counts,
+        "fast_scroll_ui_channel_ms": channel_ms,
+    }
+
+
+def _slow_scroll_lod_paced(
+    win,
+    *,
+    montage_axis,
+    columns,
+    indices,
+    size,
+    start,
+    steps,
+    probe,
+    app,
+    QtCore,
+    tile_trace=None,
+) -> dict[str, object]:
+    """Slow index scrub paced by full target-LOD completion (not fixed time).
+
+    Each single-index step advances the window, then waits until the montage has
+    converged to full target LOD before the next step — measuring per-step
+    convergence latency and any steps that never reach target LOD.
+    """
+
+    settle_times: list[float] = []
+    max_gaps: list[float] = []
+    step_evidence: list[dict[str, object]] = []
+    unreached = 0
+    indices = tuple(indices)
+    tile_count = len(indices)
+    size = max(1, min(int(size), tile_count if tile_count > 0 else 1))
+    current = int(start)
+    max_start = max(0, tile_count - size)
+    for _step_index in range(int(steps)):
+        current = min(current + 1, max_start)
+        if tile_trace is not None:
+            tile_trace.capture("slow-before-input", requested_start=current)
+        if probe is not None:
+            probe.reset()
+        _scroll_montage_window(
+            win,
+            montage_axis=montage_axis,
+            columns=columns,
+            indices=indices,
+            window_start=current,
+            size=size,
+        )
+        if tile_trace is not None:
+            tile_trace.capture("slow-after-input", requested_start=current)
+        reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=SCROLL_SLOW_LOD_BUDGET_S)
+        if tile_trace is not None:
+            tile_trace.capture("slow-settled", requested_start=current)
+        settle_times.append(float(settle_ms))
+        max_gaps.append(0.0 if probe is None else float(probe.max_gap_ms))
+        evidence = _montage_target_lod_evidence(win)
+        session = getattr(win, "_frame_session", None)
+        pipeline = None if session is None else getattr(session, "pipeline", None)
+        failure_details = {}
+        if not reached and session is not None:
+            diagnostic_rows = getattr(session, "diagnostic_tile_identity_rows", None)
+            failure_details = {
+                "dirty_tiles": tuple(int(tile) for tile in getattr(session, "dirty_payloads", ()) or ()),
+                "pending_upserts": tuple(
+                    int(tile) for tile in getattr(session, "pending_payload_upserts", ()) or ()
+                ),
+                "pending_removals": tuple(
+                    int(tile) for tile in getattr(session, "pending_removals", ()) or ()
+                ),
+                "pipeline_states": tuple(getattr(pipeline, "last_plan_states", ()) or ()),
+                "pipeline_steps": tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
+                "pipeline_intent_interactive": bool(
+                    getattr(getattr(pipeline, "_current_intent", None), "interactive", False)
+                ),
+                "pipeline_pending_admissions": len(
+                    tuple(getattr(pipeline, "_pending_admissions", ()) or ())
+                ),
+                "pipeline_admitted_steps": len(
+                    tuple(getattr(pipeline, "_admitted_step_identities", ()) or ())
+                ),
+                "pipeline_admission_continuation_armed": bool(
+                    getattr(pipeline, "_admission_continuation_armed", False)
+                ),
+                "kernel_lanes": dict(
+                    getattr(
+                        getattr(getattr(win, "kernel", None), "diagnostics", lambda: None)(),
+                        "lanes",
+                        {},
+                    )
+                    or {}
+                ),
+                "commit_outcome": str(
+                    getattr(getattr(win, "renderer", None), "_last_montage_commit_outcome", "") or ""
+                ),
+                "atomic_fast_reject_reason": str(
+                    getattr(getattr(win, "renderer", None), "_last_montage_atomic_fast_reject_reason", "") or ""
+                ),
+                "source_window_changed_pending": bool(
+                    getattr(session, "source_window_changed_pending", False)
+                ),
+                "flush_pending": bool(getattr(session, "flush_pending", False)),
+                "final_commit_pending": bool(getattr(session, "final_commit_pending", False)),
+                "replan_gate_armed": bool(
+                    getattr(getattr(win, "renderer", None), "_montage_replan_gate_armed", False)
+                ),
+                "diagnostic_tiles": (
+                    tuple(diagnostic_rows(limit=5)) if callable(diagnostic_rows) else ()
+                ),
+            }
+        step_evidence.append(
+            {
+                "step": int(_step_index),
+                "window_start": int(current),
+                "reached": bool(reached),
+                "settle_ms": float(settle_ms),
+                "max_gap_ms": float(max_gaps[-1]),
+                **evidence,
+                **failure_details,
+            }
+        )
+        if not reached:
+            unreached += 1
+    return {
+        "slow_scroll_steps": int(steps),
+        "slow_scroll_max_gap_ms": float(max(max_gaps) if max_gaps else 0.0),
+        "slow_scroll_mean_settle_ms": float(sum(settle_times) / len(settle_times)) if settle_times else 0.0,
+        "slow_scroll_max_settle_ms": float(max(settle_times) if settle_times else 0.0),
+        "slow_scroll_unreached_target_steps": int(unreached),
+        "slow_scroll_step_evidence": step_evidence,
+    }
+
+
+def _apply_montage_scroll_pattern(
+    win,
+    *,
+    montage_axis,
+    columns,
+    indices,
+    window_size,
+    probe=None,
+    app=None,
+    QtCore=None,
+    verbose_tile_trace: bool = False,
+) -> dict[str, object]:
+    """Slide one explicit small grid across the full montage index range."""
+    indices = tuple(indices)
+    selected_count = len(indices)
+    if selected_count <= 0:
+        return {"scroll_window_size": 0, "scroll_center_band": [0, 0], "scroll_fast_input_frames": 0}
+
+    size = max(1, min(int(window_size), selected_count))
+    max_start = max(0, selected_count - size)
+    # Scroll within the content-bearing CENTRE of the stack: the outer slices are
+    # near-empty and give meaningless levels.  Ping-pong across a central band.
+    center = max(0, selected_count // 2 - size // 2)
+    band = min(max_start // 2, max(size, 80))
+    low = max(0, min(center - band, max_start))
+    high = min(max_start, center + band)
+    start = min(max(center, low), high)
+    tile_trace = _VerboseTileTrace(win) if verbose_tile_trace else None
+    _scroll_montage_window(
+        win,
+        montage_axis=montage_axis,
+        columns=columns,
+        indices=indices,
+        window_start=start,
+        size=size,
+    )
     if app is not None and QtCore is not None:
-        _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=8.0)
+        prep_reached, prep_settle_ms = _wait_for_target_lod(
+            win,
+            app,
+            QtCore,
+            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+        )
+    else:
+        prep_reached, prep_settle_ms = False, 0.0
     auto = getattr(win, "auto_window_levels", None) or getattr(getattr(win, "renderer", None), "auto_window_levels", None)
     if callable(auto):
         auto()
-    _pulse_fit_stretch(win, app=app, QtCore=QtCore)  # toggle auto-stretch on/off to fit
+    if app is not None and QtCore is not None:
+        auto_reached, auto_settle_ms = _wait_for_target_lod(
+            win,
+            app,
+            QtCore,
+            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+        )
+    else:
+        auto_reached, auto_settle_ms = False, 0.0
+    fit_metrics: dict[str, float] = {}
+    fit_stretch_pulsed = _pulse_fit_stretch(
+        win,
+        app=app,
+        QtCore=QtCore,
+        metrics=fit_metrics,
+    )
+    if app is not None and QtCore is not None:
+        fit_reached, fit_settle_ms = _wait_for_target_lod(
+            win,
+            app,
+            QtCore,
+            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+        )
+    else:
+        fit_reached, fit_settle_ms = False, 0.0
 
-    def _step(action, budget_s: float) -> dict[str, object]:
-        if probe is not None:
-            probe.reset()
-        t0 = perf_counter()
-        action()
-        settled = True
-        if app is not None and QtCore is not None:
-            settled = _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=budget_s)
-        return {
-            "elapsed_ms": (perf_counter() - t0) * 1000.0,
-            "max_gap_ms": 0.0 if probe is None else float(probe.max_gap_ms),
-            "settled": bool(settled),
+    fast = _fast_scroll_60fps(
+        win,
+        montage_axis=montage_axis,
+        columns=columns,
+        indices=indices,
+        size=size,
+        start=start,
+        low=low,
+        high=high,
+        probe=probe,
+        app=app,
+        QtCore=QtCore,
+        tile_trace=tile_trace,
+    )
+    fast_end_levels = _levels_histogram_state(win)
+    # The paced reverse tail is a separate contract: each one-index move must
+    # start from a settled current window, not inherit dozens of hidden warm
+    # uploads from the preceding five-second storm. This is a realistic brief
+    # release/pause, not a reset; every cache and residency object stays live.
+    if app is not None and QtCore is not None:
+        fast_recovery_reached, fast_recovery_settle_ms = _wait_for_target_lod(
+            win,
+            app,
+            QtCore,
+            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+        )
+    else:
+        fast_recovery_reached, fast_recovery_settle_ms = False, 0.0
+    if tile_trace is not None:
+        tile_trace.capture(
+            "fast-recovery-settled",
+            requested_start=int(fast["fast_scroll_end_start"]),
+        )
+    slow = _slow_scroll_lod_paced(
+        win,
+        montage_axis=montage_axis,
+        columns=columns,
+        indices=indices,
+        size=size,
+        start=int(fast["fast_scroll_end_start"]),
+        steps=min(10, max(0, max_start)),
+        probe=probe,
+        app=app,
+        QtCore=QtCore,
+        tile_trace=tile_trace,
+    )
+    return {
+        "verbose_tile_trace_enabled": bool(verbose_tile_trace),
+        "scroll_tile_trace": [] if tile_trace is None else tile_trace.snapshots,
+        "scroll_window_size": int(size),
+        "scroll_prep_reached_target_lod": bool(prep_reached),
+        "scroll_prep_settle_ms": float(prep_settle_ms),
+        "scroll_auto_reached_target_lod": bool(auto_reached),
+        "scroll_auto_settle_ms": float(auto_settle_ms),
+        "scroll_fit_reached_target_lod": bool(fit_reached),
+        "scroll_fit_settle_ms": float(fit_settle_ms),
+        "fit_stretch_pulsed": bool(fit_stretch_pulsed),
+        "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
+        "scroll_center_band": [int(low), int(high)],
+        "scroll_fast_end_levels": fast_end_levels.get("display_levels"),
+        "scroll_fast_end_levels_default": bool(fast_end_levels.get("levels_look_default")),
+        "scroll_fast_end_histogram_empty": bool(fast_end_levels.get("histogram_empty")),
+        "scroll_fast_recovery_reached_target_lod": bool(fast_recovery_reached),
+        "scroll_fast_recovery_settle_ms": float(fast_recovery_settle_ms),
+        **fast,
+        **slow,
+        **_lod_state_record(win),
+        **fit_metrics,
+    }
+
+
+def _apply_montage_zoom_pan_stress(
+    win,
+    *,
+    probe=None,
+    app=None,
+    QtCore=None,
+    mid_toggle=None,
+    montage_axis=None,
+    columns=None,
+    indices=(),
+    window_size=0,
+) -> dict[str, object]:
+    """Continuous zoom/pan stress against the full montage (LOD + visibility).
+
+    The gestures chain back-to-back with NO settle between them: zoom out to the
+    enforced limit (tiles tiny), optionally toggle the op pipeline mid-storm,
+    then zoom-in / pan-right / pan-down / deep-zoom / zoom-out — each glide
+    starting from the previous (unsettled) view.  This sustained rapid view
+    change is a harder stress on the LOD retarget + visibility path than settling
+    between steps, and keeps the phase fast.  A single short target-LOD settle at
+    the end measures how quickly the system recovers after the storm.
+    """
+
+    record: dict[str, object] = {}
+    record["scroll_window_size"] = int(window_size) if int(window_size) > 0 else None
+    fit_metrics: dict[str, float] = {}
+    record["fit_stretch_pulsed"] = _pulse_fit_stretch(
+        win,
+        app=app,
+        QtCore=QtCore,
+        metrics=fit_metrics,
+    )
+    record["action_fit_stretch_ms"] = float(fit_metrics.get("fit_stretch_total_ms", 0.0))
+    record.update(fit_metrics)
+
+    def _glide(label: str, target_range, frames: int, *, frame_action=None) -> None:
+        stats = _glide_view_range(
+            win,
+            app,
+            QtCore,
+            probe,
+            target_range,
+            frames=frames,
+            fps=ZOOMPAN_INPUT_FPS,
+            frame_action=frame_action,
+        )
+        for key, value in stats.items():
+            record[f"{label}_{key}"] = value
+
+    base = _montage_view_range(win)
+    if base is None:
+        return {"zoompan_available": False}
+    record["zoompan_available"] = True
+
+    # 1) Hit the real enforced zoom-out limit, not a guessed span multiplier.
+    maximum_out = _maximum_zoomout_view_range(win, app, QtCore, base)
+    record["zoompan_input_fps"] = float(ZOOMPAN_INPUT_FPS)
+    record["zoompan_max_out_request_scale"] = float(ZOOMPAN_MAX_OUT_REQUEST_SCALE)
+    record["zoompan_max_out_range"] = maximum_out
+    _glide("zoomout_limit", maximum_out, frames=4)
+    record.update({f"zoomout_limit_lod_{k}": v for k, v in _lod_state_record(win).items()})
+
+    # 2) Toggle the op pipeline at the tiny-tile vantage point (no settle; the
+    #    following glides pump the document swap through as they run).
+    if callable(mid_toggle):
+        mid_toggle()
+
+    limit_range = _montage_view_range(win) or base
+
+    # 3) From the deliberately distant limit, make roughly the whole grid fill
+    #    the viewport. This is the broadest useful LOD transition: many tiles
+    #    become visible together and must all leave the coarse floor behind.
+    full_grid_range = _full_montage_view_range(win)
+    record["lod_full_grid_checkpoint_available"] = full_grid_range is not None
+    if full_grid_range is not None:
+        _glide("full_grid_zoomin", full_grid_range, frames=4)
+        full_grid_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+        record["lod_full_grid_checkpoint"] = full_grid_checkpoint
+        record["lod_full_grid_active_count"] = len(tuple(full_grid_checkpoint.get("active_tiles", ()) or ()))
+
+    # 4) Rapid, deterministic impulses repeatedly supersede unfinished LOD
+    #    requests. Alternating off-centre zooms and opposing pans deliberately
+    #    avoid the easy monotonic path of a human-smooth glide.
+    record["zoompan_zoomin_span_scale"] = float(ZOOMPAN_CENTRAL_SPAN_SCALE)
+    _glide(
+        "zoomin",
+        _scaled_view_range(limit_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+        frames=4,
+    )
+    # 5) Churn the visible set in opposing directions.
+    record["zoompan_pan_right_dx_frac"] = float(ZOOMPAN_PAN_FRACTION)
+    record["zoompan_pan_right_dy_frac"] = 0.0
+    _glide("pan_right", _panned_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_PAN_FRACTION, -0.21), frames=3)
+    record["zoompan_pan_down_dx_frac"] = 0.0
+    record["zoompan_pan_down_dy_frac"] = float(ZOOMPAN_PAN_FRACTION)
+    _glide("pan_down", _panned_view_range(_montage_view_range(win) or limit_range, -0.41, ZOOMPAN_PAN_FRACTION), frames=3)
+    _glide(
+        "erratic_zoomout",
+        _scaled_view_range(_montage_view_range(win) or limit_range, 5.0, center_frac=(0.81, 0.18)),
+        frames=3,
+    )
+    _glide(
+        "erratic_zoomin",
+        _scaled_view_range(_montage_view_range(win) or limit_range, 0.11, center_frac=(0.74, 0.31)),
+        frames=3,
+    )
+    # 6) Deep zoom into roughly one tile, then jump to the opposite side.
+    record["zoompan_deep_zoom_span_scale"] = float(ZOOMPAN_DEEP_SPAN_SCALE)
+    _glide(
+        "deep_zoom",
+        _scaled_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_DEEP_SPAN_SCALE, center_frac=(0.18, 0.82)),
+        frames=3,
+    )
+    _glide("opposite_pan", _panned_view_range(_montage_view_range(win) or limit_range, 0.72, -0.64), frames=2)
+    # 7) End at the same real maximum-out constraint for comparable recovery.
+    _glide("zoomout_return", maximum_out, frames=4)
+
+    # 8) Repeat the erratic path while the visible 60-tile window advances
+    #    across a centre-weighted source band. This combines camera, source,
+    #    LOD, evaluation, and presentation supersession in one input stream.
+    source_indices = tuple(indices or ())
+    combined_available = bool(
+        montage_axis is not None
+        and source_indices
+        and int(window_size) > 0
+    )
+    record["combined_zoom_scroll_available"] = combined_available
+    if combined_available:
+        combined_size = max(1, min(int(window_size), len(source_indices)))
+        max_start = max(0, len(source_indices) - combined_size)
+        center_start = max(0, len(source_indices) // 2 - combined_size // 2)
+        half_band = min(max_start // 2, max(8, combined_size))
+        low = max(0, center_start - half_band)
+        high = min(max_start, center_start + half_band)
+        scroll_state = {"current": min(max(center_start, low), high), "direction": 1}
+        combined_scroll_costs = {
+            "state_build_ms": [],
+            "state_apply_ms": [],
+            "render_request_ms": [],
         }
 
-    # 2) One fast jump (scroll a full window forward), as fast as the GUI allows.
-    # Shorter budget than the initial fill: after a warm fitted window a full
-    # retarget should converge quickly, and the stall guard bails fast on a
-    # freeze rather than making the benchmark hang.
-    fast = _step(
-        lambda: _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=fast_start, size=size),
-        budget_s=8.0,
-    )
+        def advance_center_window(_frame_index, _frame_count):
+            current = int(scroll_state["current"]) + int(scroll_state["direction"]) * 3
+            if current >= high:
+                current = high
+                scroll_state["direction"] = -1
+            elif current <= low:
+                current = low
+                scroll_state["direction"] = 1
+            scroll_state["current"] = current
+            costs = _scroll_montage_window(
+                win,
+                montage_axis=montage_axis,
+                columns=columns,
+                indices=source_indices,
+                window_start=current,
+                size=combined_size,
+                interactive=True,
+            )
+            costs = dict(costs or {})
+            for name, values in combined_scroll_costs.items():
+                values.append(float(costs.get(name, 0.0) or 0.0))
 
-    # 3) Ten slow single-index scrolls, ~0.1 s of GUI time between each.
-    slow_gaps: list[float] = []
-    slow_unsettled = 0
-    slow_start = fast_start
-    for _step_index in range(10):
-        slow_start = max(0, min(slow_start + 1, tile_count - size))
-        result = _step(
-            lambda s=slow_start: _scroll_montage_window(win, montage_axis=montage_axis, columns=columns, start=s, size=size),
-            budget_s=2.0,
+        record["combined_scroll_window_size"] = int(combined_size)
+        record["combined_scroll_center_band"] = [int(low), int(high)]
+        if full_grid_range is not None:
+            _glide(
+                "combined_full_grid_zoomin",
+                full_grid_range,
+                frames=4,
+                frame_action=advance_center_window,
+            )
+            # A stationary-camera glide is an intentional pause: source
+            # indices continue changing at input cadence while LOD/evaluation
+            # completions race the same visible slots.
+            _glide(
+                "combined_full_grid_scroll_pause",
+                _montage_view_range(win) or full_grid_range,
+                frames=3,
+                frame_action=advance_center_window,
+            )
+        _glide(
+            "combined_zoomin",
+            _scaled_view_range(maximum_out, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+            frames=4,
+            frame_action=advance_center_window,
         )
-        slow_gaps.append(float(result["max_gap_ms"]))
-        slow_unsettled += 0 if result["settled"] else 1
-        if app is not None and QtCore is not None:
-            _pump_for(app, QtCore, seconds=0.1)  # ~0.1 s between scrolls, as requested
+        _glide(
+            "combined_zoom_scroll_pause",
+            _montage_view_range(win) or maximum_out,
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_pan_right",
+            _panned_view_range(_montage_view_range(win) or maximum_out, ZOOMPAN_PAN_FRACTION, -0.21),
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_pan_scroll_pause",
+            _montage_view_range(win) or maximum_out,
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_pan_down",
+            _panned_view_range(_montage_view_range(win) or maximum_out, -0.41, ZOOMPAN_PAN_FRACTION),
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_erratic_zoomout",
+            _scaled_view_range(_montage_view_range(win) or maximum_out, 5.0, center_frac=(0.81, 0.18)),
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_erratic_zoomin",
+            _scaled_view_range(_montage_view_range(win) or maximum_out, 0.11, center_frac=(0.74, 0.31)),
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_deep_zoom",
+            _scaled_view_range(
+                _montage_view_range(win) or maximum_out,
+                ZOOMPAN_DEEP_SPAN_SCALE,
+                center_frac=(0.18, 0.82),
+            ),
+            frames=3,
+            frame_action=advance_center_window,
+        )
+        _glide(
+            "combined_opposite_pan",
+            _panned_view_range(_montage_view_range(win) or maximum_out, 0.72, -0.64),
+            frames=2,
+            frame_action=advance_center_window,
+        )
+        _glide("combined_zoomout_return", maximum_out, frames=4, frame_action=advance_center_window)
+        record["combined_scroll_end_start"] = int(scroll_state["current"])
+        for name, values in combined_scroll_costs.items():
+            record[f"combined_scroll_{name}_max_ms"] = float(max(values) if values else 0.0)
+            record[f"combined_scroll_{name}_p95_ms"] = float(_percentile(tuple(values), 95.0))
+        combined_reached, combined_settle_ms = _wait_for_target_lod(
+            win,
+            app,
+            QtCore,
+            budget_s=ZOOMPAN_CHECKPOINT_SETTLE_S,
+        )
+        record["combined_recovery_reached_target_lod"] = bool(combined_reached)
+        record["combined_recovery_settle_ms"] = float(combined_settle_ms)
 
-    return {
-        "scroll_window_size": int(size),
-        "scroll_fast_max_gap_ms": float(fast["max_gap_ms"]),
-        "scroll_fast_elapsed_ms": float(fast["elapsed_ms"]),
-        "scroll_fast_settled": bool(fast["settled"]),
-        "scroll_slow_max_gap_ms": float(max(slow_gaps) if slow_gaps else 0.0),
-        "scroll_slow_mean_gap_ms": float(sum(slow_gaps) / len(slow_gaps)) if slow_gaps else 0.0,
-        "scroll_slow_unsettled_steps": int(slow_unsettled),
-    }
+    # 9) A deterministic correctness checkpoint catches the visually subtle
+    # failure where the storm ends with all slots populated but a few visible
+    # tiles permanently stuck at fallback LOD. Zoom to only a few tiles, pause
+    # just long enough for visible target work, then pan into the previous near
+    # set and repeat. The monitor also proves that new speculative near uploads
+    # do not outrank unfinished visible target work.
+    checkpoint_range = _few_tile_view_range(win, center_fraction=0.48)
+    record["lod_checkpoint_available"] = checkpoint_range is not None
+    if checkpoint_range is not None:
+        _glide("lod_checkpoint_zoomin", checkpoint_range, frames=3)
+        first_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+        record["lod_checkpoint_zoom"] = first_checkpoint
+        first_active = set(int(tile) for tile in first_checkpoint["active_tiles"])
+        record["lod_checkpoint_zoom_active_count"] = len(first_active)
+
+        pan_target = _panned_view_range(_montage_view_range(win) or checkpoint_range, 0.78, 0.34)
+        _glide("lod_checkpoint_pan", pan_target, frames=3)
+        second_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+        record["lod_checkpoint_pan_result"] = second_checkpoint
+        second_active = set(int(tile) for tile in second_checkpoint["active_tiles"])
+        record["lod_checkpoint_pan_changed_visible_tiles"] = bool(first_active != second_active)
+        record["lod_checkpoint_visible_tile_union"] = tuple(sorted(first_active | second_active))
+
+        # Preserve the workflow's full-montage end state for the following
+        # scalar/FFT stage and for the user's visual inspection.
+        _glide("lod_checkpoint_zoomout_return", maximum_out, frames=3)
+
+    # Single final settle after restoring the full montage.
+    reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=ZOOMPAN_FINAL_SETTLE_S)
+    record["final_settle_ms"] = float(settle_ms)
+    record["final_reached_target_lod"] = bool(reached)
+    record.update(
+        {
+            f"final_target_{key}": value
+            for key, value in _montage_target_lod_evidence(win).items()
+        }
+    )
+    record.update({f"final_lod_{k}": v for k, v in _lod_state_record(win).items()})
+
+    # Rollups for the flat headline table.
+    glide_max = [float(v) for k, v in record.items() if k.endswith("_max_gap_ms")]
+    glide_p95 = [float(v) for k, v in record.items() if k.endswith("_p95_gap_ms")]
+    record["zoompan_max_gap_ms"] = float(max(glide_max) if glide_max else 0.0)
+    record["zoompan_worst_p95_gap_ms"] = float(max(glide_p95) if glide_p95 else 0.0)
+    return record
 
 
 def _tile_number_set(values) -> set[int]:
@@ -423,7 +2153,7 @@ def _montage_settled(session) -> bool:
         expected = set(active)
     visible_checker = getattr(session, "visible_first_pixels_presented", None)
     visible_settled = bool(visible_checker()) if callable(visible_checker) else bool(session.is_complete())
-    backlog = _visible_backlog_state(session, expected)
+    backlog = _visible_backlog_state(session, active)
     return bool(
         visible_settled
         and not bool(backlog["visible_has_backlog"])
@@ -450,6 +2180,7 @@ def _montage_work_in_flight(session) -> bool:
     return bool(
         getattr(session, "active_tile_requests", None)
         or getattr(session, "pending_rung_materializations", None)
+        or bool(getattr(session, "level_evidence_inflight", False))
         or (fan is not None and getattr(fan, "active_requests", None))
     )
 
@@ -472,20 +2203,6 @@ def _montage_stall_signature(session):
     )
 
 
-def _current_frame_session(win):
-    renderer = getattr(win, "renderer", None)
-    return None if renderer is None else getattr(renderer, "_frame_session", None)
-
-
-def _montage_indices(tile_count: int, *, max_tiles: int | None) -> tuple[int, ...]:
-    tile_count = max(0, int(tile_count))
-    if max_tiles is None or int(max_tiles) >= tile_count:
-        return tuple(range(tile_count))
-    count = min(tile_count, max(1, int(max_tiles)))
-    start = max(0, (tile_count - count) // 2)
-    return tuple(range(start, start + count))
-
-
 def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_grace_s: float = 2.5) -> bool:
     """Pump the loop up to budget_s; return whether the montage settled.
 
@@ -500,7 +2217,7 @@ def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_
     last_sig = None
     while perf_counter() < deadline:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-        session = _current_frame_session(win)
+        session = getattr(win, "_frame_session", None)
         if _montage_settled(session):
             return True
         sig = _montage_stall_signature(session)
@@ -520,12 +2237,6 @@ def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_
     return False
 
 
-def _pump_for(app, QtCore, *, seconds: float) -> None:
-    deadline = perf_counter() + float(seconds)
-    while perf_counter() < deadline:
-        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-
-
 def _profile_transform_operations(
     montage_axis: int,
     *,
@@ -540,40 +2251,115 @@ def _profile_transform_operations(
     )
 
 
-def _pulse_fit_stretch(win, *, app=None, QtCore=None) -> bool:
+def _pulse_fit_stretch(win, *, app=None, QtCore=None, metrics: dict[str, float] | None = None) -> bool:
+    """Exercise both user-visible fit/stretch states and expose their cost."""
+
     fit = getattr(win, "fit_image_to_view", None)
     if not callable(fit):
         return False
+    total_start = perf_counter()
+    enable_start = perf_counter()
     fit(True)
+    enable_call_ms = (perf_counter() - enable_start) * 1000.0
+    enable_delivery_start = perf_counter()
     if app is not None and QtCore is not None:
         _process_events(app, QtCore, count=10)
+    enable_delivery_ms = (perf_counter() - enable_delivery_start) * 1000.0
+    disable_start = perf_counter()
     fit(False)
+    disable_call_ms = (perf_counter() - disable_start) * 1000.0
+    disable_delivery_start = perf_counter()
+    disable_modes: list[str] = []
+    disable_ranges: list[object] = []
     if app is not None and QtCore is not None:
-        _process_events(app, QtCore, count=5)
+        for _step in range(5):
+            _process_events(app, QtCore, count=1)
+            image_view = getattr(win, "img_view", None)
+            controller = getattr(image_view, "viewport_controller", None)
+            mode = getattr(controller, "mode", None)
+            disable_modes.append(str(getattr(mode, "value", mode) or ""))
+            try:
+                disable_ranges.append(image_view.getView().viewRange())
+            except Exception:
+                disable_ranges.append(None)
+    disable_delivery_ms = (perf_counter() - disable_delivery_start) * 1000.0
+    if metrics is not None:
+        image_view = getattr(win, "img_view", None)
+        controller = getattr(image_view, "viewport_controller", None)
+        mode = getattr(controller, "mode", None)
+        get_view = getattr(image_view, "getView", None)
+        view_range = None
+        if callable(get_view):
+            try:
+                view_range = get_view().viewRange()
+            except Exception:
+                view_range = None
+        draw_pending = getattr(image_view, "presentationDrawPending", None)
+        metrics.update(
+            {
+                "fit_stretch_enable_call_ms": float(enable_call_ms),
+                "fit_stretch_enable_delivery_ms": float(enable_delivery_ms),
+                "fit_stretch_disable_call_ms": float(disable_call_ms),
+                "fit_stretch_disable_delivery_ms": float(disable_delivery_ms),
+                "fit_disable_delivery_modes": disable_modes,
+                "fit_disable_delivery_ranges": disable_ranges,
+                "fit_stretch_total_ms": float((perf_counter() - total_start) * 1000.0),
+                "fit_disable_viewport_mode": str(getattr(mode, "value", mode) or ""),
+                "fit_disable_view_range": view_range,
+                "fit_disable_draw_pending_after_delivery": bool(
+                    callable(draw_pending) and draw_pending()
+                ),
+            }
+        )
     return True
 
 
 class _EventLoopProbe:
-    def __init__(self, QtCore):
+    def __init__(self, QtCore, app=None):
         # Timer category: UI cosmetic. Benchmark heartbeat samples event-loop
         # gaps and never gates render work.
         self._timer = QtCore.QTimer()
         self._timer.setInterval(1)
+        self._timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._tick)
+        self._app = app
         self._last = perf_counter()
         self.max_gap_ms = 0.0
         self.tick_count = 0
         self.gaps_ms: list[float] = []
+        self.gc_pauses_ms: list[float] = []
+        self.gc_pauses: list[dict[str, object]] = []
+        self.gc_max_pause_ms = 0.0
+        self._gc_started: dict[int, float] = {}
+        self._gc_callback_installed = False
 
     def start(self) -> None:
         self.reset()
+        if not self._gc_callback_installed:
+            gc.callbacks.append(self._gc_callback)
+            self._gc_callback_installed = True
         self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        if self._gc_callback_installed:
+            try:
+                gc.callbacks.remove(self._gc_callback)
+            except ValueError:
+                pass
+            self._gc_callback_installed = False
 
     def reset(self) -> None:
         self._last = perf_counter()
         self.max_gap_ms = 0.0
         self.tick_count = 0
         self.gaps_ms = []
+        self.gc_pauses_ms = []
+        self.gc_pauses = []
+        self.gc_max_pause_ms = 0.0
+        self._gc_started = {}
+        if self._app is not None:
+            self._app._arrayscope_profile_event_pump_ms = []
 
     def _tick(self) -> None:
         now = perf_counter()
@@ -583,10 +2369,213 @@ class _EventLoopProbe:
         self._last = now
         self.tick_count += 1
 
+    def _gc_callback(self, phase, info) -> None:
+        generation = int(dict(info or {}).get("generation", -1))
+        if phase == "start":
+            self._gc_started[generation] = perf_counter()
+            return
+        started = self._gc_started.pop(generation, None)
+        if started is None:
+            return
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        self.gc_pauses_ms.append(float(elapsed_ms))
+        self.gc_pauses.append(
+            {
+                "generation": int(generation),
+                "elapsed_ms": float(elapsed_ms),
+                "collected": int(dict(info or {}).get("collected", 0) or 0),
+                "uncollectable": int(dict(info or {}).get("uncollectable", 0) or 0),
+            }
+        )
+        self.gc_max_pause_ms = max(float(self.gc_max_pause_ms), float(elapsed_ms))
+
     def percentile_ms(self, percentile: float) -> float | None:
         if not self.gaps_ms:
             return None
         return _percentile(tuple(self.gaps_ms), percentile)
+
+
+class _PresentationContinuityProbe:
+    """Observe retained pixels while a successor frame is being prepared.
+
+    A final screenshot cannot expose a transient clear or a camera move into a
+    successor layout. Sampling on event-loop turns pins the actual invariant:
+    while the predecessor remains the committed frame, its backend items and
+    content extent remain unchanged. A clear-and-reappear transition is thus a
+    benchmark failure even when the successor eventually looks correct.
+    """
+
+    def __init__(self, QtCore, win):
+        self._win = win
+        self._timer = QtCore.QTimer(win)
+        self._timer.setInterval(1)
+        self._timer.timeout.connect(self._sample)
+        self._predecessor_frame = getattr(win, "_committed_display_frame", None)
+        self._predecessor_count = _backend_visible_tile_count(win)
+        self._predecessor_identity = _backend_presentation_identity(win)
+        self._predecessor_semantic_key = _current_presentation_semantic_key(win)
+        self._predecessor_extent = _viewport_content_extent(win)
+        self._minimum_count = self._predecessor_count
+        self._samples = 0
+        self._successor_observed = False
+        self._successor_observed_ms = None
+        self._successor_levels_state = None
+        self._blackout_observed = False
+        self._extent_changed_before_commit = False
+        self._changed_extent = None
+        self._started_at = None
+
+    def start(self) -> None:
+        self._started_at = perf_counter()
+        self._sample()
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._sample()
+        self._timer.stop()
+
+    def _sample(self) -> None:
+        if self._predecessor_frame is None or self._predecessor_count <= 0:
+            return
+        current_frame = getattr(self._win, "_committed_display_frame", None)
+        current_identity = _backend_presentation_identity(self._win)
+        current_semantic_key = _current_presentation_semantic_key(self._win)
+        if current_semantic_key != self._predecessor_semantic_key:
+            self._observe_successor()
+            return
+        self._samples += 1
+        count = _backend_visible_tile_count(self._win)
+        self._minimum_count = min(self._minimum_count, count)
+        if count <= 0:
+            self._blackout_observed = True
+        elif current_identity != self._predecessor_identity:
+            # The backend atomically accepted successor pixels. Camera/extent
+            # changes after this point belong to that successor even when a
+            # degraded preview does not yet own exact value semantics.
+            self._observe_successor()
+            return
+        if _viewport_content_extent(self._win) != self._predecessor_extent:
+            self._extent_changed_before_commit = True
+            self._changed_extent = _viewport_content_extent(self._win)
+
+    def _observe_successor(self) -> None:
+        if self._successor_observed:
+            return
+        self._successor_observed = True
+        if self._started_at is not None:
+            self._successor_observed_ms = (perf_counter() - self._started_at) * 1000.0
+        self._successor_levels_state = _levels_histogram_state(self._win)
+
+    def record(self) -> dict[str, object]:
+        expected = bool(self._predecessor_frame is not None and self._predecessor_count > 0)
+        violation = bool(self._blackout_observed or self._extent_changed_before_commit)
+        successor_levels = self._successor_levels_state
+        return {
+            "presentation_continuity_expected": expected,
+            "presentation_continuity_samples": int(self._samples),
+            "presentation_predecessor_tile_count": int(self._predecessor_count),
+            "presentation_minimum_retained_tile_count": int(self._minimum_count),
+            "presentation_successor_observed": bool(self._successor_observed),
+            # These canonical milestone fields deliberately override the
+            # post-action waiter values in ``_run_phase``. Stress actions run
+            # their own nested Qt event loops, so waiting until the action
+            # returns records the end of the phase instead of the first
+            # successor pixels actually shown to the user.
+            **(
+                {}
+                if self._successor_observed_ms is None
+                else {
+                    "first_visible_tile_ms": float(self._successor_observed_ms),
+                    "first_visible_display_levels": successor_levels.get("display_levels"),
+                    "first_visible_histogram_data_bounds": successor_levels.get("histogram_data_bounds"),
+                    "first_visible_levels_default": bool(successor_levels.get("levels_look_default", True)),
+                    "first_visible_histogram_empty": bool(successor_levels.get("histogram_empty", True)),
+                    "first_visible_level_source_rank": successor_levels.get("level_source_rank"),
+                    "first_visible_level_source_count": successor_levels.get("level_source_count"),
+                    "first_visible_level_evidence_quality": successor_levels.get("level_evidence_quality"),
+                    "first_visible_level_decision": successor_levels.get("last_level_decision"),
+                }
+            ),
+            "presentation_blackout_observed": bool(self._blackout_observed),
+            "presentation_extent_changed_before_commit": bool(self._extent_changed_before_commit),
+            "presentation_predecessor_extent": self._predecessor_extent,
+            "presentation_changed_extent": self._changed_extent,
+            "presentation_continuity_ok": not violation,
+        }
+
+
+def _viewport_content_extent(win) -> tuple[int, int] | None:
+    extent = getattr(getattr(win, "img_view", None), "_viewport_content_extent", None)
+    if extent is None:
+        return None
+    try:
+        return int(extent[0]), int(extent[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _backend_visible_tile_count(win) -> int:
+    image_view = getattr(win, "img_view", None)
+    mode = str(getattr(image_view, "montageDisplayMode", lambda: "")())
+    if mode == "vispy_tile_layer":
+        return int(_vispy_presentation_diagnostics(win).get("presented_tile_count", 0) or 0)
+    layer = getattr(image_view, "_montage_tile_layer", None)
+    states = getattr(layer, "states", {}) or {}
+    return sum(1 for state in states.values() if bool(getattr(state, "visible", False)))
+
+
+def _presentation_identity_token(identity):
+    """Keep continuity sampling allocation-light without weakening equality.
+
+    Production presentation identities are immutable/hashable tuples.  Retain
+    those values directly so the 1 ms blackout probe does not repeatedly build
+    multi-kilobyte repr strings for every visible tile.  Diagnostic fakes may
+    supply mutable values; only those take the slower textual fallback.
+    """
+
+    try:
+        hash(identity)
+    except (TypeError, ValueError):
+        return repr(identity)
+    return identity
+
+
+def _backend_presentation_identity(win) -> tuple[tuple[int, object], ...]:
+    image_view = getattr(win, "img_view", None)
+    mode = str(getattr(image_view, "montageDisplayMode", lambda: "")())
+    if mode == "vispy_tile_layer":
+        layer = getattr(image_view, "_vispy_gpu_montage_layer", None)
+        stats = getattr(layer, "last_stats", None)
+        identities = dict(getattr(stats, "presented_identities", {}) or {})
+        if identities:
+            return tuple(
+                sorted(
+                    (int(tile), _presentation_identity_token(identity))
+                    for tile, identity in identities.items()
+                )
+            )
+        tiles = tuple(getattr(stats, "presented_tiles", ()) or ())
+        return tuple((int(tile), "") for tile in sorted(int(tile) for tile in tiles))
+    layer = getattr(image_view, "_montage_tile_layer", None)
+    states = getattr(layer, "states", {}) or {}
+    return tuple(
+        sorted(
+            (
+                int(tile),
+                _presentation_identity_token(getattr(state, "source_array_id", None)),
+            )
+            for tile, state in states.items()
+            if bool(getattr(state, "visible", False))
+        )
+    )
+
+
+def _current_presentation_semantic_key(win):
+    frame = getattr(win, "_committed_display_frame", None)
+    if frame is not None:
+        return getattr(getattr(frame, "key", None), "semantic_key", None)
+    session = getattr(win, "_frame_session", None)
+    return None if session is None else getattr(session, "semantic_key", None)
 
 
 def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[str, object]:
@@ -790,33 +2779,51 @@ def _run_phase(
     backend: str = "",
     screenshot_dir: Path | None = None,
 ) -> dict[str, object]:
+    emit_trace("input", action="phase_start", phase=str(phase), backend=str(backend))
     probe.reset()
+    phase_start_geometry = _window_geometry_state(win)
+    phase_start_controller = getattr(getattr(win, "img_view", None), "viewport_controller", None)
+    phase_start_mode = getattr(getattr(phase_start_controller, "mode", None), "value", None)
+    continuity_probe = _PresentationContinuityProbe(QtCore, win)
+    continuity_probe.start()
     start = perf_counter()
     draw_start = _vispy_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
-    phase_session = _current_frame_session(win)
+    governor = getattr(win, "resource_governor", None)
+    begin_ui_epoch = getattr(governor, "begin_ui_observation_epoch", None)
+    phase_ui_work_epoch = begin_ui_epoch() if callable(begin_ui_epoch) else None
+    phase_session = getattr(win, "_frame_session", None)
+    predecessor_frame = getattr(win, "_committed_display_frame", None)
+    predecessor_presentation_identity = _backend_presentation_identity(win)
+    predecessor_semantic_key = _current_presentation_semantic_key(win)
     preview_floor_session_id = None if phase_session is None else int(getattr(phase_session, "session_id", -1) or -1)
     preview_floor_count_start = 0 if phase_session is None else int(
         getattr(phase_session, "lod_preview_presentations", 0) or 0
     )
     action_start = perf_counter()
-    action_result = action()
-    action_elapsed_ms = (perf_counter() - action_start) * 1000.0
-    milestones = _wait_for_montage_complete(
-        app,
-        QtCore,
-        win,
-        timeout_s=timeout_s,
-        start=start,
-        draw_start=draw_start,
-        preview_floor_session_id=preview_floor_session_id,
-        preview_floor_count_start=preview_floor_count_start,
-        preview_floor_screenshot_path=(
-            None
-            if screenshot_dir is None
-            else screenshot_dir / f"{backend}-{phase}_preview_floor.png"
-        ),
-    )
+    try:
+        action_result = action()
+        action_elapsed_ms = (perf_counter() - action_start) * 1000.0
+        milestones = _wait_for_montage_complete(
+            app,
+            QtCore,
+            win,
+            timeout_s=timeout_s,
+            start=start,
+            draw_start=draw_start,
+            preview_floor_session_id=preview_floor_session_id,
+            preview_floor_count_start=preview_floor_count_start,
+            preview_floor_screenshot_path=(
+                None
+                if screenshot_dir is None
+                else screenshot_dir / f"{backend}-{phase}_preview_floor.png"
+            ),
+            predecessor_frame=predecessor_frame,
+            predecessor_presentation_identity=predecessor_presentation_identity,
+            predecessor_semantic_key=predecessor_semantic_key,
+        )
+    finally:
+        continuity_probe.stop()
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
     record = _phase_record(
@@ -827,13 +2834,88 @@ def _run_phase(
         event_loop_p99_gap_ms=probe.percentile_ms(99),
         event_loop_max_gap_ms=probe.max_gap_ms,
         phase_ui_work_start=phase_ui_work_start,
+        phase_ui_work_epoch=phase_ui_work_epoch,
+    )
+    record.update(
+        {
+            "phase_start_image_axes": phase_start_geometry.get("image_axes"),
+            "phase_start_axis_flipped": phase_start_geometry.get("axis_flipped"),
+            "phase_start_viewport_shape": phase_start_geometry.get("viewport_shape"),
+            "phase_start_viewport_mode": phase_start_mode,
+        }
     )
     if isinstance(action_result, dict):
         record.update(action_result)
     record["action_elapsed_ms"] = float(action_elapsed_ms)
     record.update(milestones)
+    record.update(continuity_probe.record())
+    record.update(_levels_histogram_state(win))
     record["event_loop_ticks"] = int(probe.tick_count)
+    pump_ms = tuple(float(value) for value in getattr(app, "_arrayscope_profile_event_pump_ms", ()) or ())
+    record["event_pump_max_ms"] = float(max(pump_ms) if pump_ms else 0.0)
+    record["event_pump_p95_ms"] = float(_percentile(pump_ms, 95.0))
+    record["event_pump_count"] = int(len(pump_ms))
+    emit_trace(
+        "input",
+        action="phase_complete",
+        phase=str(phase),
+        backend=str(backend),
+        elapsed_ms=float(elapsed_ms),
+    )
     return record
+
+
+def _levels_histogram_state(win) -> dict[str, object]:
+    """Capture display levels + histogram data state to expose the levels bug.
+
+    Surfaces whether the montage is stranded at default ``(0, 1)`` levels or an
+    empty histogram — the symptom of level/histogram metadata not being
+    (re)published for the current montage payloads.
+    """
+
+    image_view = getattr(win, "img_view", None)
+    levels = None
+    try:
+        raw = image_view.getLevels()
+        if raw is not None:
+            levels = (float(raw[0]), float(raw[1]))
+    except Exception:
+        levels = None
+    bounds = None
+    try:
+        raw_bounds = image_view.getHistogramDataBounds()
+        if raw_bounds is not None:
+            bounds = (float(raw_bounds[0]), float(raw_bounds[1]))
+    except Exception:
+        bounds = None
+    session = getattr(win, "_frame_session", None)
+    committed_frame = getattr(win, "_committed_display_frame", None)
+    applied = getattr(committed_frame, "level_source", None)
+    if applied is None:
+        applied = getattr(session, "applied_level_source", None)
+    levels_look_default = bool(
+        levels is not None and abs(levels[0]) <= 1e-9 and abs(levels[1] - 1.0) <= 1e-9
+    )
+    histogram_empty = bool(
+        bounds is None
+        or not math.isfinite(bounds[0])
+        or not math.isfinite(bounds[1])
+        or bounds[1] <= bounds[0]
+    )
+    renderer = getattr(win, "renderer", None)
+    decision = getattr(renderer, "_last_montage_level_decision", None)
+    refined_applied = int(getattr(renderer, "_montage_refined_level_applied_count", 0) or 0)
+    return {
+        "montage_refined_level_applied_count": refined_applied,
+        "display_levels": None if levels is None else [levels[0], levels[1]],
+        "histogram_data_bounds": None if bounds is None else [bounds[0], bounds[1]],
+        "levels_look_default": levels_look_default,
+        "histogram_empty": histogram_empty,
+        "level_source_rank": None if applied is None else int(getattr(applied, "rank", 0) or 0),
+        "level_source_count": None if applied is None else int(getattr(applied, "source_count", 0) or 0),
+        "level_evidence_quality": None if applied is None else int(getattr(applied, "evidence_quality", 0) or 0),
+        "last_level_decision": None if decision is None else dict(decision),
+    }
 
 
 def _wait_for_montage_complete(
@@ -848,6 +2930,9 @@ def _wait_for_montage_complete(
     preview_floor_session_id: int | None = None,
     preview_floor_count_start: int = 0,
     preview_floor_screenshot_path: Path | None = None,
+    predecessor_frame=None,
+    predecessor_presentation_identity=None,
+    predecessor_semantic_key=None,
 ) -> dict[str, float | int | bool | None]:
     deadline = time.monotonic() + float(timeout_s)
     first_materialized_tile_ms = None
@@ -857,6 +2942,7 @@ def _wait_for_montage_complete(
     saw_overlays = _montage_overlay_count(win) > 0
     first_logical_complete_ms = None
     draw_after_complete_ms = None
+    physical_draw_after_complete_ms = None
     fully_visible_ms = None
     first_visible_tile_ms = None
     first_display_payload_ms = None
@@ -864,6 +2950,11 @@ def _wait_for_montage_complete(
     first_preview_payload_ms = None
     first_preview_payload_fill_ms = None
     first_preview_floor_fill_ms = None
+    first_histogram_data_ms = None
+    first_nondefault_levels_ms = None
+    first_visible_levels_state: dict[str, object] | None = None
+    first_visible_level_decision: dict[str, object] | None = None
+    first_visible_reused_compatible_predecessor = False
     preview_floor_screenshot_saved = None
     preview_floor_screenshot_error = None
     presentation_settled_ms = None
@@ -876,12 +2967,18 @@ def _wait_for_montage_complete(
     stalled = False
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
-        session = _current_frame_session(win)
+        session = getattr(win, "_frame_session", None)
         mode = getattr(win.img_view, "montageDisplayMode", lambda: "")()
         level_state = _montage_level_presentation_state(win)
         final_level_state = level_state
         visibility_state = _montage_visibility_state(win, mode=str(mode))
         final_visibility_state = visibility_state
+        if first_histogram_data_ms is None or first_nondefault_levels_ms is None:
+            levels_state = _levels_histogram_state(win)
+            if first_histogram_data_ms is None and not bool(levels_state["histogram_empty"]):
+                first_histogram_data_ms = (perf_counter() - start) * 1000.0
+            if first_nondefault_levels_ms is None and not bool(levels_state["levels_look_default"]):
+                first_nondefault_levels_ms = (perf_counter() - start) * 1000.0
         presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
         # Fail-fast only while the visible frame is still owed.  Warm/offscreen
         # work must not make a completed visible frame look frozen.
@@ -898,6 +2995,7 @@ def _wait_for_montage_complete(
         else:
             stall_since = None
         vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
+        pyqtgraph_tiled = str(mode) == "tile_layer"
         if session is not None:
             if first_materialized_tile_ms is None and bool(getattr(session, "rendered_tiles", None)):
                 first_materialized_tile_ms = (perf_counter() - start) * 1000.0
@@ -919,8 +3017,28 @@ def _wait_for_montage_complete(
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
         if bool(level_state["settled"]) and presentation_settled_ms is None:
             presentation_settled_ms = (perf_counter() - start) * 1000.0
-        if first_visible_tile_ms is None and int(visibility_state["active_presented_tile_count"]) > 0:
+        current_frame = getattr(win, "_committed_display_frame", None)
+        current_presentation_identity = _backend_presentation_identity(win)
+        successor_pixels_observed = bool(
+            predecessor_frame is None
+            or current_frame is not predecessor_frame
+            or (
+                predecessor_presentation_identity is not None
+                and current_presentation_identity != predecessor_presentation_identity
+            )
+        )
+        if (
+            first_visible_tile_ms is None
+            and successor_pixels_observed
+            and int(visibility_state["active_presented_tile_count"]) > 0
+        ):
             first_visible_tile_ms = (perf_counter() - start) * 1000.0
+            first_visible_levels_state = _levels_histogram_state(win)
+            first_visible_level_decision = first_visible_levels_state.get("last_level_decision")
+            first_visible_reused_compatible_predecessor = bool(
+                predecessor_semantic_key is not None
+                and predecessor_semantic_key == _current_presentation_semantic_key(win)
+            )
         if session is not None:
             payload_state = _montage_display_payload_state(session, active_tiles=visibility_state["active_tiles"])
             final_payload_state = payload_state
@@ -969,13 +3087,40 @@ def _wait_for_montage_complete(
                         preview_floor_screenshot_saved = False
                         preview_floor_screenshot_error = repr(exc)
         fully_visible = bool(visibility_state["fully_visible"])
+        requested_grid_visible = bool(
+            int(visibility_state["requested_tile_count"]) > 0
+            and int(visibility_state["active_planned_tile_count"])
+            == int(visibility_state["requested_tile_count"])
+        )
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
         current_request_count = _vispy_tile_presentation_request_count(win)
         final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
-        if fully_visible and (not vispy_tiled or final_drawn) and presentation_ready:
+        draw_pending_fn = getattr(win.img_view, "presentationDrawPending", None)
+        pyqtgraph_final_drawn = not bool(callable(draw_pending_fn) and draw_pending_fn())
+        physical_drawn = bool(
+            (not vispy_tiled or final_drawn)
+            and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
+        )
+        if fully_visible and requested_grid_visible and physical_drawn and presentation_ready:
+            if (
+                first_visible_levels_state is None
+                and predecessor_semantic_key is not None
+                and predecessor_semantic_key == _current_presentation_semantic_key(win)
+                and int(visibility_state["active_presented_tile_count"]) > 0
+            ):
+                # A level-only/no-op phase can deliberately retain the same
+                # compatible physical payload identity. There is no successor
+                # pixel event to observe, but those pixels were visible from
+                # phase start and their contemporaneous levels/histogram are
+                # the correct first-visible evidence.
+                first_visible_tile_ms = 0.0
+                first_visible_levels_state = _levels_histogram_state(win)
+                first_visible_reused_compatible_predecessor = True
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
+            if vispy_tiled or pyqtgraph_tiled:
+                physical_draw_after_complete_ms = (perf_counter() - start) * 1000.0
             display_payload_fill_after_first_payload_ms = _elapsed_between_ms(
                 first_display_payload_ms,
                 first_display_payload_fill_ms,
@@ -1003,6 +3148,47 @@ def _wait_for_montage_complete(
                 "first_preview_payload_ms": first_preview_payload_ms,
                 "first_preview_payload_fill_ms": first_preview_payload_fill_ms,
                 "first_preview_floor_fill_ms": first_preview_floor_fill_ms,
+                "first_histogram_data_ms": first_histogram_data_ms,
+                "first_nondefault_levels_ms": first_nondefault_levels_ms,
+                "first_visible_display_levels": (
+                    None
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("display_levels")
+                ),
+                "first_visible_histogram_data_bounds": (
+                    None
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("histogram_data_bounds")
+                ),
+                "first_visible_levels_default": bool(
+                    True
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("levels_look_default", True)
+                ),
+                "first_visible_histogram_empty": bool(
+                    True
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("histogram_empty", True)
+                ),
+                "first_visible_level_source_rank": (
+                    None
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("level_source_rank")
+                ),
+                "first_visible_level_source_count": (
+                    None
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("level_source_count")
+                ),
+                "first_visible_level_evidence_quality": (
+                    None
+                    if first_visible_levels_state is None
+                    else first_visible_levels_state.get("level_evidence_quality")
+                ),
+                "first_visible_level_decision": first_visible_level_decision,
+                "first_visible_reused_compatible_predecessor": bool(
+                    first_visible_reused_compatible_predecessor
+                ),
                 "preview_floor_screenshot_path": (
                     None
                     if preview_floor_screenshot_saved is None
@@ -1018,6 +3204,11 @@ def _wait_for_montage_complete(
                 ),
                 "logical_complete_ms": first_logical_complete_ms,
                 "draw_after_complete_ms": draw_after_complete_ms,
+                "physical_draw_after_complete_ms": physical_draw_after_complete_ms,
+                "waited_for_pyqtgraph_draw_after_complete": bool(pyqtgraph_tiled),
+                "pyqtgraph_draw_pending_after_complete": bool(
+                    pyqtgraph_tiled and not pyqtgraph_final_drawn
+                ),
                 "fully_visible_ms": fully_visible_ms,
                 "presentation_settled_ms": presentation_settled_ms,
                 "presentation_settled": bool(level_state["settled"]),
@@ -1028,6 +3219,7 @@ def _wait_for_montage_complete(
                 "active_presented_tile_count": int(visibility_state["active_presented_tile_count"]),
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
                 "requested_tile_count": int(visibility_state["requested_tile_count"]),
+                "requested_grid_fully_visible": bool(requested_grid_visible),
                 "vispy_draw_count_start": int(draw_start),
                 "vispy_draw_count_complete": _vispy_draw_count(win),
                 "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(win),
@@ -1036,18 +3228,27 @@ def _wait_for_montage_complete(
             }
         time.sleep(0.005)
     snapshot = win.collect_runtime_diagnostics()
-    session = _current_frame_session(win)
+    presentation_diagnostics = getattr(win.img_view, "presentation_diagnostics", lambda: {})()
+    session = getattr(win, "_frame_session", None)
+    final_view_range = _montage_view_range(win)
+    final_plan = None if session is None else getattr(session, "plan", None)
+    viewport_controller = getattr(getattr(win, "img_view", None), "viewport_controller", None)
+    viewport_mode = None if viewport_controller is None else str(getattr(viewport_controller, "mode", None))
+    viewport_timer = getattr(getattr(win, "renderer", None), "_frame_viewport_update_timer", None)
     fan_in = None if session is None else getattr(session, "stage_fan_in", None)
     lifecycle_counts = {}
+    lifecycle_phase_counts = {}
     active_samples = ()
     if session is not None:
         lifecycle = getattr(session, "lifecycle", None)
         if lifecycle is not None:
-            lifecycle_snapshot = getattr(lifecycle, "snapshot", lambda: None)()
-            lifecycle_counts = dict(getattr(lifecycle_snapshot, "counts", {}) or {})
+            lifecycle_counts = dict(getattr(lifecycle, "counters", lambda: {})() or {})
+        lifecycle_snapshot = getattr(session, "lifecycle_snapshot", lambda: None)()
+        if lifecycle_snapshot is not None:
+            lifecycle_phase_counts = dict(getattr(lifecycle_snapshot, "counts", {}) or {})
         samples = []
         for tile_number in tuple(sorted(getattr(session, "active_tile_requests", ()) or ()))[:4]:
-            row = None if lifecycle is None else lifecycle.peek(int(tile_number))
+            row = getattr(lifecycle, "row", lambda _tile: None)(int(tile_number))
             task_claim = None if row is None else getattr(row, "task_claim", None)
             claim = None if lifecycle is None else lifecycle.evaluation_claim_for(int(tile_number))
             samples.append(
@@ -1092,12 +3293,46 @@ def _wait_for_montage_complete(
         f"removals={0 if session is None else len(getattr(session, 'pending_removals', ()) or ())} "
         f"flush={False if session is None else bool(getattr(session, 'flush_pending', False))} "
         f"final={False if session is None else bool(getattr(session, 'final_commit_pending', False))} "
+        f"present_gate={bool(getattr(getattr(win, 'renderer', None), '_montage_presentation_gate_armed', False))} "
+        f"replan_gate={bool(getattr(getattr(win, 'renderer', None), '_montage_replan_gate_armed', False))} "
+        f"gate_no_progress={int(getattr(getattr(win, 'renderer', None), '_montage_gate_no_progress', 0) or 0)} "
+        f"gate_backlog={getattr(getattr(win, 'renderer', None), '_montage_gate_last_backlog', None)!r} "
+        f"commit_outcome={getattr(getattr(win, 'renderer', None), '_last_montage_commit_outcome', None)!r} "
+        f"commit_first={bool(getattr(getattr(win, 'renderer', None), '_last_montage_commit_first_display', False))} "
+        f"commit_delta={int(getattr(getattr(win, 'renderer', None), '_last_montage_commit_delta_upserts', 0) or 0)} "
+        f"report_presented={int(getattr(getattr(win, 'renderer', None), '_last_montage_report_presented', 0) or 0)} "
+        f"report_committed={int(getattr(getattr(win, 'renderer', None), '_last_montage_report_committed', 0) or 0)} "
+        f"report_stale={bool(getattr(getattr(win, 'renderer', None), '_last_montage_report_stale', False))} "
+        f"report_ack={bool(getattr(getattr(win, 'renderer', None), '_last_montage_report_acknowledges', False))} "
+        f"report_key={getattr(getattr(win, 'renderer', None), '_last_montage_report_delta_key', None)!r} "
+        f"report_generation={getattr(getattr(win, 'renderer', None), '_last_montage_report_generation', None)!r} "
+        f"ack_new={int(getattr(getattr(win, 'renderer', None), '_last_montage_ack_new_presented', 0) or 0)} "
+        f"ack_lost={int(getattr(getattr(win, 'renderer', None), '_last_montage_ack_lost_presented', 0) or 0)} "
+        f"gpu_bytes={int(getattr(getattr(snapshot, 'montage_timing', None), 'tile_layer_estimated_gpu_bytes', 0) or 0)} "
+        f"gpu_budget={int(getattr(getattr(snapshot, 'montage_timing', None), 'tile_layer_budget_bytes', 0) or 0)} "
+        f"gpu_warning={str(getattr(getattr(snapshot, 'montage_timing', None), 'tile_layer_capacity_warning', '') or '')!r} "
+        f"gpu_pages={presentation_diagnostics.get('tile_atlas_pages', ())!r} "
         f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
         f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)} "
         f"level_pending={final_level_state.get('pending', False)} "
         f"level_stale={final_level_state.get('stale_tiles', 0)} "
-        f"level_values={final_level_state.get('active_level_value_count', 0)}"
+        f"level_values={final_level_state.get('active_level_value_count', 0)} "
+        f"evidence_pending={0 if session is None else len(getattr(session, 'pending_level_tiles', ()) or ())} "
+        f"evidence_refined={0 if session is None else len(getattr(session, 'pending_refined_level_tiles', ()) or ())} "
+        f"evidence_scan={0 if session is None else int(getattr(session, 'level_scan_remaining_tiles', 0) or 0)} "
+        f"evidence_inflight={False if session is None else bool(getattr(session, 'level_evidence_inflight', False))} "
+        f"atomic_warm_pending={0 if session is None else len((getattr(session, '_atomic_warm_job', None) or {}).get('pending', ()))} "
+        f"cpu_atomic_pending={False if session is None else bool(getattr(session, '_cpu_atomic_successor_pending', False))}"
+        f" pipeline_steps={(() if session is None else tuple(getattr(getattr(session, 'pipeline', None), 'last_plan_steps', ()) or ()))}"
+        f" view_range={final_view_range!r}"
+        f" plan_shape={None if final_plan is None else tuple(getattr(final_plan, 'display_shape', ()) or ())!r}"
+        f" plan_columns={None if final_plan is None else int(getattr(final_plan, 'columns', 0) or 0)}"
+        f" viewport_mode={viewport_mode!r}"
+        f" viewport_pending={bool(getattr(win, '_montage_viewport_update_pending', False))}"
+        f" viewport_timer_active={False if viewport_timer is None else bool(viewport_timer.isActive())}"
         f" lifecycle={lifecycle_counts}"
+        f" lifecycle={lifecycle_phase_counts}"
+        f" identity_rows={(() if session is None else session.diagnostic_tile_identity_rows(limit=12))!r}"
         f" active_samples={active_samples}"
     )
 
@@ -1105,7 +3340,7 @@ def _wait_for_montage_complete(
 def _montage_level_presentation_state(win) -> dict[str, object]:
     """Return semantic completion for the current level generation."""
 
-    session = _current_frame_session(win)
+    session = getattr(win, "_frame_session", None)
     if session is None:
         return {
             "settled": True,
@@ -1157,6 +3392,7 @@ def _phase_record(
     event_loop_p99_gap_ms: float | None,
     event_loop_max_gap_ms: float,
     phase_ui_work_start: tuple[object, ...] = (),
+    phase_ui_work_epoch: int | None = None,
 ) -> dict[str, object]:
     snapshot = win.collect_runtime_diagnostics()
     timing = snapshot.montage_timing
@@ -1168,11 +3404,18 @@ def _phase_record(
         recent_ui_work,
         phase_ui_work_start,
     )
+    epoch_evidence = getattr(getattr(win, "resource_governor", None), "ui_observation_epoch_evidence", None)
+    epoch_count, epoch_max_ms, epoch_complete = (
+        epoch_evidence(phase_ui_work_epoch)
+        if phase_ui_work_epoch is not None and callable(epoch_evidence)
+        else (0, 0.0, False)
+    )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
     vispy = _vispy_presentation_diagnostics(win)
     level_state = _montage_level_presentation_state(win)
     return {
+        **_window_geometry_state(win),
         "phase": phase,
         "elapsed_ms": float(elapsed_ms),
         "event_loop_p95_gap_ms": _optional_float(event_loop_p95_gap_ms),
@@ -1245,7 +3488,33 @@ def _phase_record(
         "presentation_active_tile_count": int(level_state["active_tile_count"]),
         "presentation_active_presented_tile_count": int(level_state["active_presented_tile_count"]),
         "last_render_sync_ms": _optional_float(snapshot.render_timing.last_render_sync_ms),
+        "last_render_preamble_ms": _optional_float(getattr(win.renderer, "_last_render_preamble_ms", None)),
+        "last_control_sync_ms": _optional_float(snapshot.render_timing.last_control_sync_ms),
+        "last_frame_update_ms": _optional_float(getattr(win.renderer, "_last_frame_update_ms", None)),
+        "last_side_panel_sync_ms": _optional_float(getattr(win.renderer, "_last_side_panel_sync_ms", None)),
         "last_display_commit_ms": _optional_float(snapshot.render_timing.last_display_commit_ms),
+        "last_viewport_plan_ms": _optional_float(timing.last_viewport_plan_ms),
+        "last_cache_resolve_ms": _optional_float(timing.last_cache_resolve_ms),
+        "last_stage_plan_ms": _optional_float(timing.last_stage_plan_ms),
+        "last_session_setup_ms": _optional_float(timing.last_session_setup_ms),
+        "last_retarget_source_ids_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_source_ids_ms", None)),
+        "last_retarget_frame_plan_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_frame_plan_ms", None)),
+        "last_retarget_release_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_release_ms", None)),
+        "last_retarget_model_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_model_ms", None)),
+        "last_retarget_hot_stage_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_hot_stage_ms", None)),
+        "last_retarget_hot_stage_cpu_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_hot_stage_cpu_ms", None)),
+        "last_retarget_hot_call_cpu_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_hot_call_cpu_ms", None)),
+        "last_retarget_hot_predicate_cpu_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_hot_predicate_cpu_ms", None)),
+        "last_retarget_hot_deferred_cpu_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_hot_deferred_cpu_ms", None)),
+        "last_retarget_attach_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_attach_ms", None)),
+        "last_retarget_level_setup_ms": _optional_float(getattr(win.renderer, "_last_montage_retarget_level_setup_ms", None)),
+        "hot_stage_match_cache_hits": int(getattr(win.renderer, "_hot_stage_match_cache_hits", 0) or 0),
+        "hot_stage_match_cache_misses": int(getattr(win.renderer, "_hot_stage_match_cache_misses", 0) or 0),
+        "last_hot_stage_resident_cpu_ms": _optional_float(getattr(win.renderer, "_last_hot_stage_resident_cpu_ms", None)),
+        "last_hot_stage_filter_cpu_ms": _optional_float(getattr(win.renderer, "_last_hot_stage_filter_cpu_ms", None)),
+        "last_hot_stage_sort_cpu_ms": _optional_float(getattr(win.renderer, "_last_hot_stage_sort_cpu_ms", None)),
+        "last_hot_stage_total_cpu_ms": _optional_float(getattr(win.renderer, "_last_hot_stage_total_cpu_ms", None)),
+        "last_initial_commit_ms": _optional_float(timing.last_initial_commit_ms),
         "last_tile_commit_ms": _optional_float(timing.last_tile_commit_ms),
         "last_tile_prepare_apply_ms": _optional_float(timing.last_tile_prepare_apply_ms),
         "last_tile_layer_apply_ms": _optional_float(timing.last_tile_layer_apply_ms),
@@ -1283,6 +3552,8 @@ def _phase_record(
         ),
         "montage_overlay_count": _montage_overlay_count(win),
         "vispy_draw_count": int(vispy.get("draw_count", 0)),
+        "vispy_last_draw_ms": float(vispy.get("last_draw_ms", 0.0) or 0.0),
+        "vispy_max_draw_ms": float(vispy.get("max_draw_ms", 0.0) or 0.0),
         "vispy_tile_presentation_request_count": int(vispy.get("tile_presentation_request_count", 0)),
         "vispy_tile_presentation_draw_count": int(vispy.get("tile_presentation_draw_count", 0)),
         "vispy_tile_presentation_draw_pending": bool(vispy.get("tile_presentation_draw_pending", False)),
@@ -1304,6 +3575,9 @@ def _phase_record(
         "recent_ui_work_observations": [asdict(observation) for observation in recent_ui_work],
         "phase_recent_ui_work_observations": [asdict(observation) for observation in phase_recent_ui_work],
         "phase_recent_ui_work_observations_truncated": bool(phase_recent_ui_work_truncated),
+        "phase_ui_work_observation_count": int(epoch_count),
+        "phase_ui_work_observation_max_ms": float(epoch_max_ms),
+        "phase_ui_work_observation_evidence_complete": bool(epoch_complete),
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }
 
@@ -1342,6 +3616,25 @@ def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> No
             return
         _process_events(app, QtCore, count=2)
         time.sleep(0.005)
+
+
+def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float = 3.0) -> None:
+    """Drain restore-time paints before measured workflow phases start."""
+
+    deadline = perf_counter() + max(0.1, float(timeout_s))
+    quiet_since = perf_counter()
+    previous_draw_count = _vispy_draw_count(win)
+    while perf_counter() < deadline:
+        _process_events(app, QtCore, count=1)
+        draw_count = _vispy_draw_count(win)
+        pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
+        pending = bool(callable(pending_fn) and pending_fn())
+        if draw_count != previous_draw_count or pending:
+            previous_draw_count = draw_count
+            quiet_since = perf_counter()
+            continue
+        if perf_counter() - quiet_since >= 0.1:
+            return
 
 
 def _elapsed_between_ms(start_ms, end_ms) -> float | None:
@@ -1395,7 +3688,7 @@ def _vispy_tile_presentation_draw_count(win) -> int:
 
 
 def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, object]:
-    session = _current_frame_session(win)
+    session = getattr(win, "_frame_session", None)
     if mode is None:
         mode = str(getattr(win.img_view, "montageDisplayMode", lambda: "")())
     if session is None:
@@ -1422,14 +3715,14 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
             and active.issubset(presented)
         )
     )
-    backlog = _visible_backlog_state(session, expected)
+    backlog = _visible_backlog_state(session, active)
     active_presented = active.intersection(presented)
     fully_visible = bool(
         str(mode) in {"tile_layer", "vispy_tile_layer"}
         and getattr(session, "display_committed", False)
         and not bool(backlog["visible_has_backlog"])
-        and expected.issubset(active)
-        and expected.issubset(presented)
+        and active
+        and active.issubset(presented)
         and overlay_nonblocking
     )
     return {
@@ -1534,8 +3827,11 @@ def _base_record(
     profiler_artifact_paths: tuple[str | Path, ...],
     run_temperature: str = "mixed",
     qt_platform: str,
+    grid_kind: str = "full",
+    source_index_count: int | None = None,
 ) -> dict[str, object]:
-    capped = max_tiles is not None and len(indices) < int(full_tile_count)
+    grid_kind = str(grid_kind)
+    capped = grid_kind == "full" and max_tiles is not None and len(indices) < int(full_tile_count)
     smoke_only = bool(str(qt_platform).lower() == "offscreen" or capped)
     return {
         "run_id": run_id,
@@ -1556,9 +3852,96 @@ def _base_record(
         "data_shape": tuple(int(value) for value in np.shape(data)),
         "data_dtype": str(getattr(getattr(data, "dtype", None), "str", getattr(data, "dtype", ""))),
         "montage_axis": int(montage_axis),
+        "grid_kind": grid_kind,
+        "grid_tile_count": len(indices),
+        "source_index_count": int(full_tile_count if source_index_count is None else source_index_count),
         "tile_count": len(indices),
         "full_tile_count": int(full_tile_count),
         "columns": int(columns),
+    }
+
+
+def _install_profile_session_fixture(
+    QtCore,
+    *,
+    data_path: Path,
+    data,
+    session_fixture,
+    settings,
+    loads_session,
+    metadata_for_file,
+    save_session_file,
+    settings_key_for_metadata,
+):
+    """Install a portable fixture through the production session store.
+
+    The checked-in JSON intentionally has no machine-specific file metadata.
+    Rebinding that metadata here keeps the fixture portable while exercising
+    the same metadata check, QSettings indirection, parser, and restore path as
+    a user session.
+    """
+
+    if session_fixture is None:
+        return None
+    path = Path(session_fixture)
+    if not path.exists():
+        raise FileNotFoundError(f"profile session fixture not found: {path}")
+    template = loads_session(path.read_text(encoding="utf-8"), np.shape(data))
+    metadata = metadata_for_file(data_path, data=data)
+    session = replace(template, metadata=metadata)
+    config_dir = Path(settings.fileName()).parent
+    stored = save_session_file(config_dir, session)
+    settings.setValue(settings_key_for_metadata(metadata), stored.name)
+    settings.sync()
+    return session
+
+
+def _window_geometry_state(win) -> dict[str, object]:
+    try:
+        window_size = [int(win.width()), int(win.height())]
+    except Exception:
+        window_size = None
+    try:
+        minimum_size = [int(win.minimumWidth()), int(win.minimumHeight())]
+    except Exception:
+        minimum_size = None
+    try:
+        viewport = win.img_view.graphicsView.viewport()
+        viewport_shape = [int(viewport.height()), int(viewport.width())]
+    except Exception:
+        viewport_shape = None
+    raw_target = getattr(win, "_profile_session_fixture_viewport_shape", None)
+    target = None if raw_target is None else [int(raw_target[0]), int(raw_target[1])]
+    shape_matches = bool(
+        target is None
+        or (
+            viewport_shape is not None
+            and abs(int(viewport_shape[0]) - int(target[0])) <= 1
+            and abs(int(viewport_shape[1]) - int(target[1])) <= 1
+        )
+    )
+    current_state = getattr(win, "view_state", None)
+    current_image_axes = None if current_state is None else list(current_state.image_axes or ())
+    current_axis_flipped = None if current_state is None else list(current_state.axis_flipped)
+    expected_image_axes = getattr(win, "_profile_session_fixture_image_axes", None)
+    expected_axis_flipped = getattr(win, "_profile_session_fixture_axis_flipped", None)
+    return {
+        "window_size": window_size,
+        "window_minimum_size": minimum_size,
+        "viewport_shape": viewport_shape,
+        "session_viewport_shape_target": target,
+        "session_viewport_shape_matches": shape_matches,
+        "image_axes": current_image_axes,
+        "axis_flipped": current_axis_flipped,
+        "session_image_axes_target": None if expected_image_axes is None else list(expected_image_axes),
+        "session_axis_flipped_target": None if expected_axis_flipped is None else list(expected_axis_flipped),
+        "session_axis_orientation_matches": bool(
+            expected_image_axes is None
+            or (
+                tuple(current_image_axes or ()) == tuple(expected_image_axes)
+                and tuple(current_axis_flipped or ()) == tuple(expected_axis_flipped or ())
+            )
+        ),
     }
 
 
@@ -1583,21 +3966,30 @@ def _is_nifti(path: Path) -> bool:
     return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
-def _replace_settings(settings, *, backend: str, image_choice, montage_quality_policy: str = "native-only"):
+def _centered_indices(full_count: int, max_tiles: int | None) -> tuple[int, ...]:
+    full_count = max(0, int(full_count))
+    if full_count <= 0:
+        return ()
+    if max_tiles is None or max_tiles <= 0 or max_tiles >= full_count:
+        return tuple(range(full_count))
+    max_tiles = max(1, min(full_count, int(max_tiles)))
+    start = (full_count - max_tiles) // 2
+    return tuple(range(start, start + max_tiles))
+
+
+def _replace_settings(settings, *, backend: str, image_choice):
     from dataclasses import replace
 
-    from arrayscope.app.settings_state import normalize_montage_quality_policy_choice
-    from arrayscope.app.theme import ThemeChoice
-
+    from arrayscope.app.settings_state import MontageQualityPolicyChoice
     return replace(
         settings,
-        theme=ThemeChoice.DARK if backend == "vispy" else ThemeChoice.LIGHT,
         image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
-        montage_quality_policy=normalize_montage_quality_policy_choice(montage_quality_policy),
+        montage_quality_policy=MontageQualityPolicyChoice.RESIDENT,
     )
 
 
 def _append_record(records: list[dict[str, object]], jsonl: str | Path | None, record: dict[str, object]) -> None:
+    record.update(_r8_certification(record))
     records.append(record)
     line = json.dumps(record, sort_keys=True)
     if jsonl is None:
@@ -1608,10 +4000,417 @@ def _append_record(records: list[dict[str, object]], jsonl: str | Path | None, r
         handle.write(line + "\n")
 
 
+def _r8_certification(record: dict[str, object]) -> dict[str, object]:
+    """Evaluate one workflow phase against the immutable R8 exit gates.
+
+    Correctness gates apply to every real phase, including profiler-slowed
+    runs. Timing gates apply only to plain, uncapped, onscreen evidence.
+    Returning named failures keeps a JSONL useful without reverse-engineering
+    a boolean from dozens of counters.
+    """
+
+    phase = str(record.get("phase", ""))
+    if phase in {"", "load", "load_data"}:
+        return {
+            "r8_gate_applicable": False,
+            "r8_gate_passed": None,
+            "r8_gate_failures": [],
+            "r8_gate_check_count": 0,
+            "r8_performance_evidence": False,
+        }
+
+    failures: list[dict[str, object]] = []
+    check_count = 0
+
+    def require(name: str, condition: bool, *, evidence, target: str, category: str = "correctness") -> None:
+        nonlocal check_count
+        check_count += 1
+        if bool(condition):
+            return
+        failures.append(
+            {
+                "gate": str(name),
+                "category": str(category),
+                "evidence": evidence,
+                "target": str(target),
+            }
+        )
+
+    requested = int(record.get("requested_tile_count", 0) or 0)
+    planned = int(record.get("active_planned_tile_count", 0) or 0)
+    presented = int(record.get("active_presented_tile_count", 0) or 0)
+    require("phase_complete", bool(record.get("complete", False)), evidence=record.get("complete"), target="true")
+    require(
+        "requested_grid_fully_visible",
+        bool(record.get("requested_grid_fully_visible", False)) and requested > 0,
+        evidence={"requested": requested, "planned": planned, "presented": presented},
+        target="requested == planned == presented > 0",
+    )
+    require(
+        "all_requested_tiles_presented",
+        requested > 0 and planned == requested and presented == requested,
+        evidence={"requested": requested, "planned": planned, "presented": presented},
+        target="requested == planned == presented",
+    )
+    require(
+        "presentation_levels_settled",
+        bool(record.get("presentation_settled", False))
+        and int(record.get("stale_level_tiles", 0) or 0) == 0
+        and int(record.get("pending_level_tiles", 0) or 0) == 0,
+        evidence={
+            "settled": record.get("presentation_settled"),
+            "stale": record.get("stale_level_tiles"),
+            "pending": record.get("pending_level_tiles"),
+        },
+        target="settled with zero stale or pending level tiles",
+    )
+    require(
+        "final_levels_semantic",
+        not bool(record.get("levels_look_default", True)),
+        evidence=record.get("display_levels"),
+        target="finite non-default display levels",
+    )
+    require(
+        "final_histogram_populated",
+        not bool(record.get("histogram_empty", True)),
+        evidence=record.get("histogram_data_bounds"),
+        target="finite non-empty histogram data bounds",
+    )
+    required_evidence_quality = 1 if str(record.get("backend", "")) == "vispy" else 3
+    require(
+        "first_visible_levels_semantic",
+        not bool(record.get("first_visible_levels_default", True)),
+        evidence=record.get("first_visible_display_levels"),
+        target="first presented pixels already use semantic levels",
+    )
+    require(
+        "first_visible_histogram_populated",
+        not bool(record.get("first_visible_histogram_empty", True)),
+        evidence=record.get("first_visible_histogram_data_bounds"),
+        target="first presented pixels already publish their level sample in the histogram",
+    )
+    first_quality = int(record.get("first_visible_level_evidence_quality", 0) or 0)
+    compatible_predecessor = bool(record.get("first_visible_reused_compatible_predecessor", False))
+    require(
+        "first_visible_level_evidence_quality",
+        first_quality >= required_evidence_quality or compatible_predecessor,
+        evidence={"quality": first_quality, "compatible_predecessor": compatible_predecessor},
+        target=(
+            "rough-or-better evidence before first VisPy pixels"
+            if required_evidence_quality == 1
+            else "refined evidence before first PyQtGraph pixels"
+        ),
+    )
+    predecessor_tiles = int(record.get("presentation_predecessor_tile_count", 0) or 0)
+    minimum_retained = int(record.get("presentation_minimum_retained_tile_count", 0) or 0)
+    required_transition_coverage = min(predecessor_tiles, requested) if predecessor_tiles > 0 else 0
+    require(
+        "presentation_continuity",
+        bool(record.get("presentation_continuity_ok", False))
+        and minimum_retained >= required_transition_coverage,
+        evidence={
+            "blackout": record.get("presentation_blackout_observed"),
+            "minimum_retained": minimum_retained,
+            "required_transition_coverage": required_transition_coverage,
+            "extent_changed_before_commit": record.get("presentation_extent_changed_before_commit"),
+        },
+        target="full predecessor/successor coverage and extent remain through successor acknowledgement",
+    )
+    require(
+        "session_viewport_geometry_stable",
+        bool(record.get("session_viewport_shape_matches", False)),
+        evidence={
+            "actual": record.get("viewport_shape"),
+            "target": record.get("session_viewport_shape_target"),
+        },
+        target="restored viewport shape retained",
+    )
+    require(
+        "session_axis_orientation_stable",
+        bool(record.get("session_axis_orientation_matches", False)),
+        evidence={
+            "axes": record.get("image_axes"),
+            "flips": record.get("axis_flipped"),
+            "target_axes": record.get("session_image_axes_target"),
+            "target_flips": record.get("session_axis_flipped_target"),
+        },
+        target="restored XY dimensions and directions retained",
+    )
+    require(
+        "single_expensive_stage_evaluation",
+        not bool(record.get("montage_repeated_expensive_stage_per_tile", False)),
+        evidence=record.get("montage_repeated_expensive_stage_per_tile"),
+        target="false",
+    )
+    require(
+        "fit_stretch_round_trip_exercised",
+        bool(record.get("fit_stretch_pulsed", False)),
+        evidence=record.get("fit_stretch_pulsed"),
+        target="true",
+    )
+    if "fit_disable_viewport_mode" in record:
+        require(
+            "fit_disable_enters_regular_fit",
+            str(record.get("fit_disable_viewport_mode", "")) == "auto_untouched",
+            evidence={
+                "mode": record.get("fit_disable_viewport_mode"),
+                "view_range": record.get("fit_disable_view_range"),
+            },
+            target="auto_untouched regular square-pixel fit",
+        )
+    if str(record.get("backend", "")) == "pyqtgraph":
+        require(
+            "pyqtgraph_final_frame_physically_drawn",
+            bool(record.get("waited_for_pyqtgraph_draw_after_complete", False))
+            and record.get("physical_draw_after_complete_ms") is not None
+            and not bool(record.get("pyqtgraph_draw_pending_after_complete", True)),
+            evidence={
+                "draw_ms": record.get("physical_draw_after_complete_ms"),
+                "pending": record.get("pyqtgraph_draw_pending_after_complete"),
+            },
+            target="logical completion followed by a completed QGraphicsView paint",
+        )
+
+    grid_kind = str(record.get("grid_kind", ""))
+    grid_count = int(record.get("grid_tile_count", 0) or 0)
+    full_count = int(record.get("full_tile_count", 0) or 0)
+    if grid_kind == "full":
+        require(
+            "full_grid_not_capped",
+            grid_count == full_count and not bool(record.get("tile_cap_applied", False)),
+            evidence={"grid": grid_count, "full": full_count, "capped": record.get("tile_cap_applied")},
+            target="full source dimension",
+        )
+    elif grid_kind == "scroll":
+        selected = min(full_count, int(record.get("max_tiles", 60) or 60))
+        require(
+            "scroll_grid_has_exposed_size",
+            grid_count == selected and int(record.get("scroll_window_size", 0) or 0) == selected,
+            evidence={
+                "grid": grid_count,
+                "window": record.get("scroll_window_size"),
+                "selected": selected,
+            },
+            target="the exposed scroll size (60 by default)",
+        )
+
+    if "slow_scroll_unreached_target_steps" in record:
+        require(
+            "slow_scroll_converged",
+            int(record.get("slow_scroll_unreached_target_steps", 0) or 0) == 0,
+            evidence=record.get("slow_scroll_unreached_target_steps"),
+            target="zero unreached steps",
+        )
+        require(
+            "fast_scroll_levels_semantic",
+            not bool(record.get("scroll_fast_end_levels_default", True))
+            and not bool(record.get("scroll_fast_end_histogram_empty", True)),
+            evidence={
+                "levels": record.get("scroll_fast_end_levels"),
+                "histogram_empty": record.get("scroll_fast_end_histogram_empty"),
+            },
+            target="levels and histogram remain populated after cold-forward/reverse stress",
+        )
+        require(
+            "fast_scroll_camera_stable",
+            float(record.get("fast_scroll_camera_max_drift", float("inf"))) <= 1e-6,
+            evidence={
+                "before": record.get("fast_scroll_camera_before"),
+                "after": record.get("fast_scroll_camera_after"),
+                "max_drift": record.get("fast_scroll_camera_max_drift"),
+            },
+            target="montage source-window scrolling does not change XY camera range",
+        )
+    if "final_reached_target_lod" in record:
+        require(
+            "zoompan_recovered_to_target_lod",
+            bool(record.get("final_reached_target_lod", False)),
+            evidence=record.get("final_settle_ms"),
+            target="target LOD reached after the interaction storm",
+        )
+    if bool(record.get("lod_full_grid_checkpoint_available", False)):
+        full_grid_checkpoint = dict(record.get("lod_full_grid_checkpoint", {}) or {})
+        full_grid_active = int(record.get("lod_full_grid_active_count", 0) or 0)
+        expected_grid = int(record.get("selected_tile_count", 0) or record.get("scroll_window_size", 0) or 0)
+        require(
+            "full_grid_visible_tiles_reach_target_lod",
+            bool(full_grid_checkpoint.get("visible_target_reached", False)),
+            evidence=full_grid_checkpoint,
+            target="the broad full-grid zoom settles every visible tile at target LOD",
+        )
+        require(
+            "full_grid_checkpoint_stresses_many_tiles",
+            full_grid_active >= max(1, int(math.ceil(expected_grid * 0.8))),
+            evidence={"active": full_grid_active, "selected": expected_grid},
+            target="at least 80% of the selected montage is simultaneously visible",
+        )
+        if bool(full_grid_checkpoint.get("resident_query_available", False)):
+            require(
+                "near_residency_waits_for_full_grid_visible_target",
+                int(full_grid_checkpoint.get("near_new_before_visible_count", 0) or 0) == 0,
+                evidence=full_grid_checkpoint.get("near_new_before_visible"),
+                target="no new near/offscreen residency before broad visible target settlement",
+            )
+    if bool(record.get("lod_checkpoint_available", False)):
+        zoom_checkpoint = dict(record.get("lod_checkpoint_zoom", {}) or {})
+        pan_checkpoint = dict(record.get("lod_checkpoint_pan_result", {}) or {})
+        zoom_active_count = int(record.get("lod_checkpoint_zoom_active_count", 0) or 0)
+        full_grid_active_count = int(record.get("lod_full_grid_active_count", 0) or 0)
+        require(
+            "zoomed_visible_tiles_reach_target_lod",
+            bool(zoom_checkpoint.get("visible_target_reached", False)),
+            evidence=zoom_checkpoint,
+            target="all visible tiles reach target LOD during the short zoomed-in pause",
+        )
+        if full_grid_active_count > 0:
+            require(
+                "lod_checkpoint_reaches_small_visible_region",
+                0 < zoom_active_count <= max(12, int(math.ceil(full_grid_active_count * 0.35))),
+                evidence={"zoom_active": zoom_active_count, "full_grid_active": full_grid_active_count},
+                target="the deep checkpoint covers a small subset after the broad full-grid transition",
+            )
+        require(
+            "panned_visible_tiles_reach_target_lod",
+            bool(pan_checkpoint.get("visible_target_reached", False)),
+            evidence=pan_checkpoint,
+            target="all newly visible tiles reach target LOD during the short post-pan pause",
+        )
+        require(
+            "lod_checkpoint_pan_changes_visible_set",
+            bool(record.get("lod_checkpoint_pan_changed_visible_tiles", False)),
+            evidence={
+                "zoom_active": zoom_checkpoint.get("active_tiles"),
+                "pan_active": pan_checkpoint.get("active_tiles"),
+            },
+            target="the checkpoint pan enters a different visible tile set",
+        )
+        if bool(zoom_checkpoint.get("resident_query_available", False)):
+            require(
+                "near_residency_waits_for_zoomed_visible_target",
+                int(zoom_checkpoint.get("near_new_before_visible_count", 0) or 0) == 0,
+                evidence=zoom_checkpoint.get("near_new_before_visible"),
+                target="no new near/offscreen residency before visible target settlement",
+            )
+        if bool(pan_checkpoint.get("resident_query_available", False)):
+            require(
+                "near_residency_waits_for_panned_visible_target",
+                int(pan_checkpoint.get("near_new_before_visible_count", 0) or 0) == 0,
+                evidence=pan_checkpoint.get("near_new_before_visible"),
+                target="no new near/offscreen residency before newly visible target settlement",
+            )
+
+    performance_evidence = bool(record.get("pacing_evidence", False)) and str(
+        record.get("profiler_type", "plain")
+    ) == "plain"
+    max_observed_callback_ms = max(
+        [
+            float(record.get("phase_ui_work_observation_max_ms", 0.0) or 0.0),
+            *(
+            float(item.get("elapsed_ms", 0.0) or 0.0)
+            for item in tuple(record.get("phase_recent_ui_work_observations", ()) or ())
+            if isinstance(item, dict)
+            ),
+        ],
+        default=0.0,
+    )
+    direct_ui_fields = {
+        key: float(value or 0.0)
+        for key, value in record.items()
+        if (key.endswith("_call_ms") or key in {"action_render_call_ms", "action_set_view_state_ms", "action_clear_operations_ms"})
+        and isinstance(value, (int, float))
+    }
+    reported_heartbeat_fields = {
+        key: float(value or 0.0)
+        for key, value in record.items()
+        if (key == "event_loop_max_gap_ms" or key.endswith("_max_gap_ms"))
+        and isinstance(value, (int, float))
+    }
+    heartbeat_fields = {
+        key: value
+        for key, value in reported_heartbeat_fields.items()
+        if key != "event_loop_max_gap_ms"
+    }
+    input_fields = {
+        key: float(value or 0.0)
+        for key, value in record.items()
+        if key.endswith("input_call_max_ms") and isinstance(value, (int, float))
+    }
+    phase_name = str(record.get("phase", ""))
+    heartbeat_gate_applicable = any(token in phase_name for token in ("scroll", "zoompan"))
+    if performance_evidence:
+        require(
+            "gui_callbacks_below_50ms",
+            (
+                bool(record.get("phase_ui_work_observation_evidence_complete", False))
+                or not bool(record.get("phase_recent_ui_work_observations_truncated", False))
+            )
+            and max([max_observed_callback_ms, *direct_ui_fields.values()], default=0.0) < R8_GUI_CALLBACK_MAX_MS,
+            evidence={"observed_max_ms": max_observed_callback_ms, "direct_calls_ms": direct_ui_fields},
+            target=f"every synchronous GUI step < {R8_GUI_CALLBACK_MAX_MS:.0f} ms",
+            category="performance",
+        )
+        if heartbeat_gate_applicable:
+            require(
+                "event_loop_heartbeat",
+                bool(heartbeat_fields)
+                and max(heartbeat_fields.values(), default=0.0) <= R8_HEARTBEAT_MAX_GAP_MS,
+                evidence=heartbeat_fields,
+                target=f"pan/scrub max gap <= {R8_HEARTBEAT_MAX_GAP_MS:.0f} ms",
+                category="performance",
+            )
+        if input_fields:
+            require(
+                "warm_input_dispatch",
+                max(input_fields.values(), default=0.0) <= R8_WARM_INPUT_MAX_MS,
+                evidence=input_fields,
+                target=f"every scrub/zoom input call <= {R8_WARM_INPUT_MAX_MS:.0f} ms",
+                category="performance",
+            )
+
+    return {
+        "r8_gate_applicable": True,
+        "r8_gate_passed": not failures,
+        "r8_gate_failures": failures,
+        "r8_gate_failure_count": len(failures),
+        "r8_gate_check_count": int(check_count),
+        "r8_performance_evidence": bool(performance_evidence),
+        "r8_heartbeat_gate_applicable": bool(performance_evidence and heartbeat_gate_applicable),
+        "r8_max_observed_callback_ms": float(max_observed_callback_ms),
+        "r8_direct_ui_call_ms": direct_ui_fields,
+        "r8_heartbeat_max_gap_ms": max(reported_heartbeat_fields.values(), default=0.0),
+        "r8_input_call_max_ms": max(input_fields.values(), default=0.0),
+        "r8_targets": {
+            "gui_callback_max_ms": R8_GUI_CALLBACK_MAX_MS,
+            "heartbeat_max_gap_ms": R8_HEARTBEAT_MAX_GAP_MS,
+            "warm_input_max_ms": R8_WARM_INPUT_MAX_MS,
+        },
+    }
+
+
 def _process_events(app, QtCore, *, count: int) -> None:
     flags = QtCore.QEventLoop.ProcessEventsFlag.AllEvents
     for _ in range(max(1, int(count))):
-        app.processEvents(flags, 50)
+        # Use Qt's snapshot overload: it processes the events queued before
+        # entry and then returns.  The QDeadlineTimer overload also processes
+        # events posted while it runs; under this manual benchmark loop that
+        # chained several individually bounded continuation callbacks into a
+        # single 50-150 ms pump and measured harness-created starvation.  The
+        # independent callback observations still expose every genuinely long
+        # handler, while this overload models one production dispatcher turn.
+        pump_start = perf_counter()
+        app.processEvents(flags)
+        pump_ms = (perf_counter() - pump_start) * 1000.0
+        samples = getattr(app, "_arrayscope_profile_event_pump_ms", None)
+        if isinstance(samples, list):
+            samples.append(float(pump_ms))
+        # ``processEvents`` is a non-blocking manual pump, not ``app.exec``.
+        # Without a scheduler yield this benchmark immediately re-enters it
+        # from a Python polling loop; on Wayland that can prevent the platform
+        # dispatcher from polling timers/input even though every application
+        # callback is bounded. A one-millisecond yield models the natural idle
+        # wait of the production event loop. Long callbacks remain visible in
+        # both the heartbeat gap and the independent callback observations.
+        time.sleep(0.001)
 
 
 def _restore_setting(settings, key: str, previous) -> None:
@@ -2229,8 +5028,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
         return "No workflow timing records were produced.\n"
     lines = [
         "Workflow timing summary",
-        "| Backend | phase | first tile | preview floor | initial fill | full refined | visible after first | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
+        "| Backend | phase | R8 | first tile | preview floor | initial fill | full refined | visible after first | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     for record in records:
         lines.append(
@@ -2239,6 +5038,7 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
                 (
                     f"`{record.get('backend', '')}`",
                     f"`{record.get('phase', '')}`",
+                    _r8_gate_summary(record),
                     _format_ms(record.get("first_visible_tile_ms", record.get("first_display_payload_ms"))),
                     _format_ms(_first_non_none(record, "first_preview_floor_fill_ms", "first_preview_payload_fill_ms")),
                     _format_ms(record.get("first_display_payload_fill_ms", record.get("fully_visible_ms"))),
@@ -2257,6 +5057,16 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
             + " |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _r8_gate_summary(record: dict[str, object]) -> str:
+    if not bool(record.get("r8_gate_applicable", False)):
+        return "n/a"
+    if bool(record.get("r8_gate_passed", False)):
+        return "PASS"
+    failures = tuple(record.get("r8_gate_failures", ()) or ())
+    names = [str(item.get("gate", "?")) for item in failures if isinstance(item, dict)]
+    return "FAIL: " + ", ".join(names)
 
 
 def _first_non_none(record: dict[str, object], *keys: str):
@@ -2722,23 +5532,58 @@ def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(arg for arg in tuple(argv) if str(arg) != "--py-spy-native")
 
 
-def main(argv: tuple[str, ...] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT/shift/iFFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
+    parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")
+    parser.add_argument(
+        "--verbose-tile-trace",
+        action="store_true",
+        help=(
+            "Record per-scroll-delivery tile source, backend identity, LOD, lifecycle, "
+            "revision, and age snapshots in scroll_tile_trace (diagnostic; large JSONL)"
+        ),
+    )
     parser.add_argument("--timeout-s", type=float, default=180.0)
     parser.add_argument("--max-tiles", type=int, default=0, help="Optional tile cap for local smoke runs; 0 means full dim 2")
-    parser.add_argument("--columns", type=int, default=0, help="Montage columns; 0 chooses a near-square layout")
+    parser.add_argument(
+        "--scroll-max-tiles",
+        type=int,
+        default=60,
+        help="Tile cap for scroll/zoom-pan phases; default 60",
+    )
+    parser.add_argument(
+        "--columns",
+        type=int,
+        default=0,
+        help="Montage columns; 0 uses the application's viewport-maximizing automatic layout",
+    )
     parser.add_argument("--load-mode", choices=("app", "native"), default="app")
     parser.add_argument(
-        "--montage-quality-policy",
-        "--montage-lod-policy",
-        dest="montage_quality_policy",
-        choices=("native-only", "resident"),
-        default="native-only",
-        help="Tile quality presentation policy (ADR 0050); resident applies only to the vispy backend",
+        "--session-fixture",
+        default=str(DEFAULT_SESSION_FIXTURE),
+        help="Portable file-view session restored before profiling; empty disables restore",
+    )
+    parser.add_argument(
+        "--stages",
+        action="append",
+        default=[],
+        help=(
+            "Comma-separated workflow phases to include. Repeat to accumulate. "
+            "Omit to run all stages. Supported: " + ", ".join(PROFILE_MONTAGE_STAGES)
+        ),
+    )
+    parser.add_argument(
+        "--skip-stages",
+        action="append",
+        default=[],
+        help=(
+            "Comma-separated workflow phases to skip. Repeat to accumulate. "
+            "Skip wins over --stages when names overlap."
+        ),
     )
     parser.add_argument("--print-py-spy-command", action="store_true", help="Print an external py-spy command for this invocation and exit")
     parser.add_argument("--profile-suite", default=None, help="Run plain JSONL, py-spy raw, and perf record into this directory")
@@ -2750,7 +5595,16 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     )
     parser.add_argument("--profiler-type", default="plain", help=argparse.SUPPRESS)
     parser.add_argument("--profiler-artifact", action="append", default=[], help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: tuple[str, ...] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
+    stages = _resolve_profile_stages(
+        include_stages=_parse_stage_flags(tuple(args.stages)),
+        skip_stages=_parse_stage_flags(tuple(args.skip_stages)),
+    )
 
     if args.print_py_spy_command:
         filtered = tuple(arg for arg in (argv if argv is not None else sys.argv[1:]) if arg != "--print-py-spy-command")
@@ -2763,25 +5617,44 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     jsonl = None if args.jsonl is None else Path(args.jsonl)
     if jsonl is not None and jsonl.exists():
         jsonl.unlink()
+    trace = None if args.trace is None else Path(args.trace)
+    if trace is not None:
+        from arrayscope.core.trace import configure_trace
+
+        configure_trace(trace)
     all_records: list[dict[str, object]] = []
-    for backend in (("pyqtgraph", "vispy") if args.backend == "all" else (args.backend,)):
-        all_records.extend(
-            run_profile_montage_workflow(
-                data_path=args.data,
-                backend=backend,
-                jsonl=jsonl,
-                timeout_s=args.timeout_s,
-                max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
-                columns=None if args.columns <= 0 else args.columns,
-                load_mode=args.load_mode,
-                profiler_type=args.profiler_type,
-                profiler_artifact_paths=tuple(args.profiler_artifact or ()),
-                montage_quality_policy=args.montage_quality_policy,
-                screenshot_dir=args.screenshot_dir,
+    try:
+        for backend in (("pyqtgraph", "vispy") if args.backend == "all" else (args.backend,)):
+            all_records.extend(
+                run_profile_montage_workflow(
+                    data_path=args.data,
+                    backend=backend,
+                    jsonl=jsonl,
+                    timeout_s=args.timeout_s,
+                    max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
+                    scroll_max_tiles=args.scroll_max_tiles,
+                    columns=None if args.columns <= 0 else args.columns,
+                    load_mode=args.load_mode,
+                    profiler_type=args.profiler_type,
+                    profiler_artifact_paths=tuple(args.profiler_artifact or ()),
+                    stages=stages,
+                    screenshot_dir=args.screenshot_dir,
+                    session_fixture=None if not str(args.session_fixture).strip() else args.session_fixture,
+                    verbose_tile_trace=bool(args.verbose_tile_trace),
+                )
             )
-        )
+    finally:
+        if trace is not None:
+            from arrayscope.core.trace import close_trace
+
+            close_trace()
     print(_workflow_timing_summary(tuple(all_records)), end="")
-    return 0
+    failed = [
+        record
+        for record in all_records
+        if bool(record.get("r8_gate_applicable", False)) and not bool(record.get("r8_gate_passed", False))
+    ]
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

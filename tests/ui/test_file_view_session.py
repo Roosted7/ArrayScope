@@ -21,6 +21,15 @@ class _FakeFileSessionWindow(FileViewSessionMixin):
         self.base_data = data
         self._settings = settings
 
+    def width(self):
+        return 800
+
+    def height(self):
+        return 600
+
+    def isMaximized(self):
+        return False
+
 
 def _restore_transaction(*, viewport=None, profile_visible=False):
     return ViewportContinuityTransaction(
@@ -657,6 +666,53 @@ def test_restored_viewport_shape_retry_reapplies_range_after_continuity_release(
     assert view.ranges == [((10.0, 20.0), (30.0, 40.0), 0)]
 
 
+def test_restored_viewport_shape_does_not_settle_in_same_turn_as_resize(qt_app, monkeypatch):
+    import arrayscope.window.file_view_session as file_view_session
+    from arrayscope.core.view_session import ViewportSession
+
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5, 6), dtype=np.float32), None)
+    window.isVisible = lambda: True
+    window._viewport_continuity = _restore_transaction(
+        viewport=ViewportSession(
+            mode="user",
+            view_range=None,
+            viewport_shape=(222, 333),
+        )
+    )
+    resize_results = iter((True, False))
+    window.layout_manager = SimpleNamespace(
+        resize_to_dockless_viewport_shape=lambda _shape: next(resize_results)
+    )
+    match_calls = []
+    monkeypatch.setattr(
+        window,
+        "_viewport_continuity_shape_matches",
+        lambda shape: match_calls.append(tuple(shape)) or True,
+    )
+    single_shots = []
+    monkeypatch.setattr(
+        file_view_session.Qt.QtCore.QTimer,
+        "singleShot",
+        lambda delay, receiver, callback: single_shots.append((delay, callback)),
+    )
+
+    window._restore_viewport_continuity_shape_step(
+        (222, 333),
+        attempts=3,
+        generation=window._viewport_continuity.generation,
+    )
+
+    assert not window._viewport_continuity.shape_settled
+    assert match_calls == []
+    assert len(single_shots) == 1
+
+    single_shots.pop()[1]()
+
+    assert window._viewport_continuity.shape_settled
+    assert window._viewport_continuity.released
+    assert match_calls == [(222, 333)]
+
+
 def test_viewport_continuity_reopens_shape_settle_after_dock_layout_change(qt_app, monkeypatch):
     import arrayscope.window.file_view_session as file_view_session
     from arrayscope.core.view_session import ViewportSession
@@ -986,3 +1042,4 @@ def test_file_session_persists_viewport_session_only(qt_app):
     window.roi_store = SimpleNamespace(selections=(), selected_id=None)
 
     assert window._current_file_view_session().viewport is None
+    assert window._current_file_view_session().panels.window_size == (800, 600)

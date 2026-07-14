@@ -93,6 +93,72 @@ acceptance.
 > freeze an honest baseline, and V1/V2 must migrate or delete tests that pin
 > superseded owners while preserving their user-visible assertions.
 
+> **[Codex 2026-07-14 — T1 rebase log after two failed real-display
+> starts]** The first ported-harness start rejected a fully presented,
+> fully refined 60-tile frame because the marathon harness compared backend
+> `TileIdentity` acknowledgements with semantic `source_id` values. Rebased
+> that check to the live `tile_ack_identity()` contract; no runtime predicate
+> was added. The second start then proved the marathon fixture itself was
+> branch-specific: at its saved `1400×940` Wayland window size the current UI
+> produces a `739×1247` image viewport, not the checkpoint's `753×1245`.
+> Re-froze the checked-in fixture to the current production-restored geometry
+> instead of porting the marathon's later viewport-continuity machinery. If
+> this geometry drifts again without an intentional UI change, treat it as a
+> production restore regression; do not widen the harness tolerance.
+
+> **[Codex 2026-07-14 — T1 complete; frozen real-Wayland baseline]** Landed
+> the production-session workflow harness, checked-in 59 MB NIfTI session
+> fixture, `PanelSession`, latency-oriented GUI GC policy, divisible mean
+> fast path, read-only callback/bridge instrumentation, and the schema-v1
+> trace bus plus `--trace` / `trace_latency`. The bus is one flat stream with
+> an 8 MiB bounded in-memory tail; optional JSONL is intentionally complete.
+> Visible Wayland runs used the production restore path at the exact
+> `1400×940` window / `739×1247` image viewport, and screenshots were
+> inspected with all 272 requested tiles visibly populated on both backends.
+> Local ignored artifacts are under
+> `tests/artifacts/redesign-t1-2026-07-14/`.
+>
+> | Frozen cold/raw baseline | PyQtGraph | VisPy |
+> |---|---:|---:|
+> | phase elapsed | 2840 ms | 3469 ms |
+> | event-loop max gap | 618 ms | 657 ms |
+> | first input → backend ack | 2692 ms | 808 ms max across captured phases |
+> | kernel queue p95 | 0.83 ms | 1.14 ms |
+> | kernel run p95 | 12.37 ms | 103.74 ms |
+> | largest observed GUI callback | 153.87 ms | 133.63 ms direct / 56.14 ms observed |
+>
+> These are failure baselines, not acceptance claims. PyQtGraph raw recorded
+> a presentation blackout. VisPy raw recorded missing rough level evidence;
+> VisPy FFT recorded both missing first-pixel evidence and a blackout. The
+> VisPy refinement phase passed its current gates, then FFT index scroll
+> timed out with 60/60 exact tiles presented, no materialization work in
+> flight, and draw acknowledgement stuck at `2457/2458`. The complete VisPy
+> trace contains 230,305 backend acknowledgements for this run; do not hide
+> that churn by sampling the trace. V1 owns the black transition and evidence
+> scope; V3 owns the stranded final-draw/non-convergence report.
+>
+> **[Codex 2026-07-14 — T1 rejected geometry approaches / recurrence
+> note]** A backend-specific fixture or wider viewport tolerance would have
+> certified two different sessions. The first production fix—merely refusing
+> to settle in the same callback that resized the outer window—was necessary
+> but insufficient: VisPy's child stack changed geometry after the transaction
+> had looked settled. The final fix keeps the saved viewport authoritative for
+> child-layout resize events while top-level user resize still releases it.
+> Regression coverage forbids same-turn settlement and requires a late child
+> layout change to reopen restoration. Both backends now reach the same exact
+> frozen geometry; do not reintroduce per-backend geometry in the harness.
+>
+> **[Codex 2026-07-14 — T1 validation boundary]** The post-T1 full parallel
+> non-GPU suite reported **47 failed, 1866 passed, 3 skipped, 2 teardown
+> errors**: the same failure count/classes as the V0 baseline, with 22 added
+> T1 tests passing. That run also exposed the already-stale timer allowlist;
+> it has since been updated for the bounded harness/restore timers and its
+> focused architecture guard passes. The focused T1 slice is **211 passed,
+> 2 skipped**, apart from the previously baseline-reproduced preview-first
+> viewport test. Compileall, F821/E9 lint, and `git diff --check` pass. Do not
+> call the branch broadly green until the remaining live-owner/timing tests
+> are migrated or fixed by the queue steps.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

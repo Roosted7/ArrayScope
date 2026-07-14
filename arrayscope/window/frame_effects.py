@@ -10,6 +10,7 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
+from arrayscope.core.trace import emit_trace
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.kernel import Lane as WorkLane, Priority, Supersession, TaskSpec, WorkItem, complete_inline_work
@@ -719,6 +720,14 @@ class FramePipelineEffects:
         inside bridge drains, multi-second event-loop gaps, and a visually
         all-at-once fill because paints never interleaved).
         """
+
+        emit_trace(
+            "commit_batch",
+            phase="admit",
+            session_id=int(getattr(self.session, "session_id", 0) or 0),
+            semantic_key=batch.semantic_key,
+            upserts=int(len(tuple(batch.upserts or ()))),
+        )
 
         if batch.semantic_key is not None and batch.semantic_key != getattr(self.session, "key", batch.semantic_key):
             stale_intent = _StaleBatchIntent(batch.semantic_key)
@@ -2171,6 +2180,18 @@ class FramePipelineEffects:
             session.flush_pending = True
         rearmed_parked = tuple(getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ())
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
+        emit_trace(
+            "commit_batch",
+            phase="backend_complete",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            revision=int(getattr(tile_state, "revision", 0) or 0),
+            elapsed_ms=float(renderer._last_montage_tile_commit_ms),
+            presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
+            committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
+            uploads=int(getattr(report, "texture_uploads", 0) or 0),
+            upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
+            resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
+        )
         complete_inline_work(
             renderer,
             WorkItem(

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Iterable, Iterator, Mapping
 
+from arrayscope.core.trace import emit_trace, trace_enabled
 from arrayscope.display.model.tile_identity import TileIdentity
 
 
@@ -477,6 +478,7 @@ class TileLifecycle:
         if rec.target is None or ref.source_index != rec.target.source_index:
             return
         rec.presentable_payloads[ref.source_id] = _stored_payload(ref)
+        _trace_lifecycle(rec, "fallback_ready", payload=ref)
 
     def target_ready(self, tile_number: int, payload: TilePayloadRef | object) -> None:
         ref = _coerce_payload_ref(payload)
@@ -487,6 +489,7 @@ class TileLifecycle:
         rec.task_claim = None
         rec.stage_producer_key = None
         self._stage_unbound(rec)
+        _trace_lifecycle(rec, "target_ready", payload=ref)
 
     def target_invalidated(self, tile_number: int) -> None:
         rec = self.record(tile_number)
@@ -502,6 +505,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.stage_key = stage_key
         rec.stage_producer_key = stage_producer_key
+        _trace_lifecycle(rec, "task_requested", stage_key=stage_key)
 
     def task_admitted(self, tile_number: int, task_key, *, stage_key=None, stage_producer_key=None) -> None:
         if task_key is None and stage_key is None:
@@ -510,12 +514,14 @@ class TileLifecycle:
         rec.task_claim = TileTaskClaim(task_key, stage_key)
         rec.stage_key = stage_key
         rec.stage_producer_key = stage_producer_key
+        _trace_lifecycle(rec, "task_admitted", task_key=task_key, stage_key=stage_key)
 
     def task_released(self, tile_number: int, *, reason: str = "") -> None:
         rec = self.record(tile_number)
         rec.task_claim = None
         rec.stage_producer_key = None
         rec.failed_reason = str(reason or "") if reason and reason not in {"stale", "dropped", "cancelled", "completed"} else ""
+        _trace_lifecycle(rec, "task_released", reason=str(reason or ""))
 
     def stage_waiting(self, tile_number: int, stage_key, producer_key) -> None:
         if stage_key is None or producer_key is None:
@@ -537,6 +543,7 @@ class TileLifecycle:
             rec.presented_quality = "preview" if ref.quality == "fallback" else ref.quality
             rec.presented_level = ref.lod_level
             self.upsert_emitted(tile_number, ref.acknowledged_identity)
+            _trace_lifecycle(rec, "commit_emitted", payload=ref)
 
     def backend_ack(
         self,
@@ -562,6 +569,22 @@ class TileLifecycle:
             active_scope=tuple(tile for tile, rec in self._records.items() if rec.active),
             presented_identities=merged_backend,
         )
+        for tile, ref in backend_refs.items():
+            emit_trace(
+                "backend_ack",
+                tile=int(tile),
+                source_index=int(ref.source_index),
+                identity=ref.acknowledged_identity,
+                quality=str(ref.quality),
+                level=int(ref.lod_level),
+                accepted=bool(tile in confirmed),
+            )
+            _trace_lifecycle(
+                self.record(tile),
+                "backend_ack",
+                payload=ref,
+                accepted=bool(tile in confirmed),
+            )
         return tuple(sorted(confirmed))
 
     def presentation_changes(self, *, max_items: int | None = None) -> tuple[TilePresentationCommand, ...]:
@@ -789,6 +812,16 @@ class TileLifecycle:
         self._presented.add(rec.tile_number)
         if rec.semantic is Semantic.EVALUATED:
             self._load_cleared(rec)
+        emit_trace(
+            "backend_ack",
+            tile=int(rec.tile_number),
+            source_index=None if rec.target is None else int(rec.target.source_index),
+            identity=payload_identity,
+            quality=str(rec.presented_quality),
+            level=rec.presented_level,
+            accepted=True,
+        )
+        _trace_lifecycle(rec, "presented", identity=payload_identity)
 
     def may_remove_visible(self, tile_number: int, *, memory_pressure: bool = False) -> bool:
         """Whether a visible tile may be physically removed right now."""
@@ -1041,6 +1074,7 @@ class TileLifecycle:
         entry = rec.levels.get(level_key)
         if entry is not None and entry.phase is LevelPhase.CLAIMED:
             entry.phase = LevelPhase.MATERIALIZING
+            _trace_lifecycle(rec, "level_materializing", level_key=level_key)
 
     def level_resident(self, tile_number: int, level_key) -> None:
         rec = self.record(tile_number)
@@ -1049,6 +1083,7 @@ class TileLifecycle:
             rec.levels[level_key] = _LevelEntry(LevelPhase.RESIDENT, ClaimOwner.INGEST)
         else:
             entry.phase = LevelPhase.RESIDENT
+        _trace_lifecycle(rec, "level_resident", level_key=level_key)
 
     def level_declined(self, tile_number: int, level_key) -> tuple[ReleaseClaim, ...]:
         rec = self.record(tile_number)
@@ -1556,4 +1591,25 @@ def _payload_refs_match(left: TilePayloadRef | None, right: TilePayloadRef | Non
         and left.texture_kind == right.texture_kind
         and left.shader_mapping_key == right.shader_mapping_key
         and left.identity == right.identity
+    )
+
+
+def _trace_lifecycle(rec: TileRecord, edge: str, *, payload=None, **fields) -> None:
+    if not trace_enabled():
+        return
+    target = rec.target
+    emit_trace(
+        "lifecycle",
+        edge=str(edge),
+        tile=int(rec.tile_number),
+        source_index=None if target is None else int(target.source_index),
+        target_level=None if target is None else int(target.lod_level),
+        semantic=str(rec.semantic.value),
+        presentation=str(rec.presentation.value),
+        presented_quality=str(rec.presented_quality or ""),
+        presented_level=rec.presented_level,
+        payload_source=None if payload is None else getattr(payload, "source_id", None),
+        payload_quality=None if payload is None else getattr(payload, "quality", None),
+        payload_level=None if payload is None else getattr(payload, "lod_level", None),
+        **fields,
     )

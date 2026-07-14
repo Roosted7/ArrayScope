@@ -3,11 +3,13 @@
 Command-line interface for arrayscope.
 """
 import argparse
+import atexit
 import numpy as np
 from pathlib import Path
 from arrayscope.app.launch import arrayscope
 from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
 from arrayscope.io.file_interpreters import consume_handoff_file, data_file_suffix, load_path
+from arrayscope.core.trace import close_trace, configure_trace
 
 
 _CLI_WINDOWS = []
@@ -129,8 +131,13 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
     parser.add_argument('--consume', action='store_true',
                         help='Delete the input file once loaded (for temporary handoff files '
                              'written by the Julia/MATLAB wrappers; best effort)')
+    parser.add_argument('--trace', default=None,
+                        help='Write structured render/kernel/presentation events to JSONL')
 
     args = parser.parse_args()
+    if args.trace:
+        configure_trace(args.trace)
+        atexit.register(close_trace)
     
     block_each = len(args.files) == 1
     needs_event_loop = False

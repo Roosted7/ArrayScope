@@ -288,6 +288,17 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     def _on_image_viewport_resized(self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None) -> None:
         if getattr(self.win, "_closing", False):
             return
+        continuity_shape = getattr(self.win, "_viewport_continuity_shape_target", lambda: None)()
+        if continuity_shape is not None:
+            # Child layouts can resize after an outer-window continuity resize
+            # has looked settled (the VisPy native canvas is one example).
+            # A genuine top-level user resize releases the transaction in the
+            # window's resizeEvent before this callback, so an extant target is
+            # still authoritative and must be restored instead of reflowed.
+            restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)
+            if callable(restore_viewport_shape):
+                restore_viewport_shape()
+            return
         active_continuity_range = getattr(self.win, "_active_viewport_continuity_range", lambda: None)()
         if active_continuity_range is not None:
             restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)

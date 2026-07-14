@@ -29,6 +29,7 @@ from time import monotonic, perf_counter_ns
 from typing import Any, Callable
 
 from arrayscope.kernel.completions import CompletionEvent, CompletionQueue
+from arrayscope.core.trace import emit_trace
 from arrayscope.kernel.task import (
     CancellationToken,
     Lane,
@@ -190,6 +191,21 @@ class Kernel:
             self._cond.notify_all()
         if wake:
             self._backend.wake()
+        emit_trace(
+            "kernel_submit",
+            task_seq=int(seq),
+            key=spec.key,
+            lane=str(spec.lane),
+            priority=int(spec.priority),
+            scopes=spec.scope_prefixes(),
+            deps=tuple(spec.deps),
+            visible=bool(spec.visible),
+            supersession=(
+                None
+                if spec.supersession is None
+                else (spec.supersession.family, spec.supersession.value)
+            ),
+        )
         return handle
 
     def submit_speculative_batch(
@@ -430,6 +446,13 @@ class Kernel:
         """Run one task function. Worker-thread entry; no lock held."""
 
         spec = record.spec
+        emit_trace(
+            "kernel_start",
+            task_seq=int(record.seq),
+            key=spec.key,
+            lane=str(spec.lane),
+            priority=int(spec.priority),
+        )
         with self._lock:
             self._lane(spec.lane).started += 1
         if record.token.cancelled:
@@ -484,6 +507,14 @@ class Kernel:
             self._forget_record_locked(record)
             self._deliver_locked(record, outcome, value=value, error=error)
             self._cond.notify_all()
+        emit_trace(
+            "kernel_finish",
+            task_seq=int(record.seq),
+            key=spec.key,
+            lane=str(spec.lane),
+            outcome=str(outcome.value),
+            error_type=None if error is None else type(error).__name__,
+        )
         if wake:
             self._backend.wake()
 

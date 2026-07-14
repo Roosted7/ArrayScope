@@ -1,0 +1,98 @@
+{
+  "metadata": {},
+  "panels": {
+    "inspection_visible": false,
+    "operation_visible": false,
+    "window_maximized": false,
+    "window_size": [1400, 940]
+  },
+  "recipe": {
+    "display": {
+      "aspect_mode": "square_pixels",
+      "channel": "real",
+      "colormap": null,
+      "levels": [0.0, 40168.55859375],
+      "live_profile": false,
+      "profile_visible": false,
+      "scale": "linear",
+      "window_mode": "relative"
+    },
+    "operations": [],
+    "version": 1,
+    "view_state": {
+      "axis_fftshifted": [false, false, false],
+      "axis_flipped": [false, true, true],
+      "axis_range_indices": [null, null, null],
+      "axis_range_text": [null, null, null],
+      "channel": "real",
+      "image_axes": [1, 0],
+      "line_axis": 0,
+      "montage_axis": 2,
+      "montage_columns": null,
+      "montage_indices": [
+        106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+        116, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+        126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
+        136, 137, 138, 139, 140, 141, 142, 143, 144, 145,
+        146, 147, 148, 149, 150, 151, 152, 153, 154, 155,
+        156, 157, 158, 159, 160, 161, 162, 163, 164, 165
+      ],
+      "montage_text": "106:166",
+      "scale": "linear",
+      "shape": [336, 336, 272],
+      "slice_indices": [168, 168, 190]
+    }
+  },
+  "rois": [
+    {
+      "color": [230, 60, 30],
+      "enabled": true,
+      "geometry": {
+        "closed": false,
+        "image_axes": [0, 1],
+        "kind": "rectangle",
+        "line_width": 1.0,
+        "points": [],
+        "rect": [195.73618870950122, 154.38897888114025, 168.01346774867557, 119.39393921062128]
+      },
+      "id": "roi-1",
+      "label": "Rectangle 1"
+    },
+    {
+      "color": [40, 120, 210],
+      "enabled": true,
+      "geometry": {
+        "closed": false,
+        "image_axes": [0, 1],
+        "kind": "line",
+        "line_width": 1.0,
+        "points": [[539.5332747654852, 115.13525029824541], [667.6006135088628, 710.7244748894068]],
+        "rect": null
+      },
+      "id": "roi-2",
+      "label": "Line 2"
+    },
+    {
+      "color": [40, 150, 90],
+      "enabled": true,
+      "geometry": {
+        "closed": false,
+        "image_axes": [0, 1],
+        "kind": "rectangle",
+        "line_width": 1.0,
+        "points": [],
+        "rect": [752.5544040239074, 1099.9278377407695, 394.3435927628716, -143.73743710514873]
+      },
+      "id": "roi-3",
+      "label": "Rectangle 3"
+    }
+  ],
+  "selected_roi_id": "roi-1",
+  "version": 1,
+  "viewport": {
+    "mode": "auto_untouched",
+    "montage_columns": 8,
+    "view_range": [[-877.0, 3572.0], [0.0, 2695.0]],
+    "viewport_shape": [739, 1247]
+  }
+}

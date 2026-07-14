@@ -19,9 +19,13 @@ gone (redesign plan R1).
 
 from __future__ import annotations
 
+from dataclasses import replace
+from time import perf_counter
+
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
+from arrayscope.core.trace import emit_trace
 from arrayscope.kernel.scheduler import Kernel
 from arrayscope.kernel.task import TaskOutcome
 
@@ -106,12 +110,19 @@ class QtKernelBridge(Qt.QtCore.QObject):
         )
         queue = self.kernel.completions
         processed = 0
+        worst_event_ms = 0.0
+        worst_event_key = None
         while processed < self._max_events_per_drain:
             event = queue.pop()
             if event is None:
                 break
             processed += 1
+            event_start = perf_counter()
             outcome = self.kernel.dispatch_event(event)
+            event_ms = (perf_counter() - event_start) * 1000.0
+            if event_ms > worst_event_ms:
+                worst_event_ms = float(event_ms)
+                worst_event_key = getattr(event.spec, "key", None)
             if outcome in (TaskOutcome.COMPLETED, TaskOutcome.FAILED, TaskOutcome.STALE_REUSED):
                 budget.record_item()
             if budget.should_yield():
@@ -123,7 +134,28 @@ class QtKernelBridge(Qt.QtCore.QObject):
                 None,
             )
             if callable(recorder):
-                recorder(budget.observation())
+                key_type, key_head = _diagnostic_key_identity(worst_event_key)
+                recorder(
+                    replace(
+                        budget.observation(),
+                        details=(
+                            f"worst_event_ms={worst_event_ms:.3f}",
+                            f"worst_event_key_type={key_type}",
+                            f"worst_event_key_head={key_head}",
+                        ),
+                    )
+                )
+        if processed:
+            emit_trace(
+                "bridge_drain",
+                events=int(processed),
+                work_items=int(budget.processed_items),
+                elapsed_ms=float(budget.elapsed_ms),
+                queue_remaining=int(len(queue)),
+                yielded=bool(budget.should_yield()),
+                worst_event_ms=float(worst_event_ms),
+                worst_event_key=worst_event_key,
+            )
         if processed:
             notifier = getattr(self.parent(), "_note_kernel_completion_drain", None)
             if callable(notifier):
@@ -167,6 +199,17 @@ class QtKernelBridge(Qt.QtCore.QObject):
             self._fallback_interval_ms = min(self._fallback_max_ms, self._fallback_interval_ms * 2)
         self._fallback_timer.setInterval(self._fallback_interval_ms)
         self._drain()
+
+
+def _diagnostic_key_identity(key) -> tuple[str, str]:
+    """Return bounded routing evidence without formatting semantic payloads."""
+
+    key_type = type(key).__name__
+    head = key[0] if isinstance(key, tuple) and key else key
+    head_text = str(head)
+    if len(head_text) > 80:
+        head_text = head_text[:77] + "..."
+    return key_type, head_text
 
 
 __all__ = ["QtKernelBridge"]

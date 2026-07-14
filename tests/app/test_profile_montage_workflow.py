@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +65,95 @@ def test_profile_suite_can_opt_into_cprofile_without_passing_flag_to_child(tmp_p
     assert "--include-cprofile" not in by_type["plain"]["command"]
 
 
+def test_profile_parser_stages_resolve_and_deconflict():
+    from arrayscope.tools.profile_montage_workflow import _parse_stage_flags, _resolve_profile_stages
+
+    stages = _resolve_profile_stages(
+        include_stages=_parse_stage_flags(("raw_full_tiled_montage,montage_zoompan_fft", "montage_zoompan_fft", "montage_scroll_scalar")),
+        skip_stages=_parse_stage_flags(("montage_zoompan_fft",)),
+    )
+    assert stages == ("raw_full_tiled_montage", "montage_scroll_scalar")
+
+
+def test_profile_stage_resolve_defaults_to_all():
+    from arrayscope.tools.profile_montage_workflow import _resolve_profile_stages, PROFILE_MONTAGE_STAGES
+
+    assert _resolve_profile_stages() == tuple(PROFILE_MONTAGE_STAGES)
+
+
+def test_profile_parser_unknown_stage_is_rejected():
+    from arrayscope.tools.profile_montage_workflow import _resolve_profile_stages
+
+    with pytest.raises(ValueError, match="unknown montage workflow stage"):
+        _resolve_profile_stages(include_stages=("not-a-phase",))
+
+
+def test_profile_suite_commands_preserve_stage_filter_flags(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(
+        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--stages", "raw_full_tiled_montage,montage_zoompan_fft", "--skip-stages", "montage_scroll_scalar"),
+        tmp_path,
+    )
+    for item in commands:
+        split = shlex.split(item["command"])
+        assert "--stages" in split
+        assert "raw_full_tiled_montage,montage_zoompan_fft" in split
+        assert "--skip-stages" in split
+        assert "montage_scroll_scalar" in split
+
+
+def test_profile_parser_default_scroll_window_and_custom_value():
+    from arrayscope.tools.profile_montage_workflow import DEFAULT_SESSION_FIXTURE, _build_parser
+
+    parser = _build_parser()
+    default_args = parser.parse_args(["--backend", "vispy"])
+    custom_args = parser.parse_args(
+        ["--backend", "vispy", "--scroll-max-tiles", "84", "--verbose-tile-trace"]
+    )
+
+    assert default_args.scroll_max_tiles == 60
+    assert custom_args.scroll_max_tiles == 84
+    assert default_args.verbose_tile_trace is False
+    assert custom_args.verbose_tile_trace is True
+    assert Path(default_args.session_fixture) == DEFAULT_SESSION_FIXTURE
+
+
+def test_profile_session_fixture_is_a_portable_production_session():
+    from arrayscope.core.view_session import loads_session
+    from arrayscope.tools.profile_montage_workflow import DEFAULT_SESSION_FIXTURE
+
+    session = loads_session(DEFAULT_SESSION_FIXTURE.read_text(encoding="utf-8"), (336, 336, 272))
+
+    assert session.metadata == {}
+    assert session.viewport is not None
+    assert session.viewport.viewport_shape == (739, 1247)
+    assert session.viewport.viewport_shape[1] / session.viewport.viewport_shape[0] > 1.6
+    assert session.viewport.montage_columns == 8
+    assert session.recipe.view_state.montage_indices == tuple(range(106, 166))
+    assert len(session.rois) == 3
+
+
+def test_profile_suite_commands_preserve_scroll_max_tiles(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
+
+    commands = profiler_suite_commands(
+        (
+            "--backend",
+            "vispy",
+            "--profile-suite",
+            str(tmp_path),
+            "--scroll-max-tiles",
+            "84",
+        ),
+        tmp_path,
+    )
+    for item in commands:
+        split = shlex.split(item["command"])
+        assert "--scroll-max-tiles" in split
+        assert "84" in split
+
+
 def test_profile_suite_splits_attribution_artifacts_for_all_backends(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
@@ -96,8 +186,8 @@ def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_
     assert "--profile-suite" not in by_type["plain"]["command"]
 
 
-def test_profile_workflow_forces_backend_specific_themes():
-    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice
+def test_profile_workflow_preserves_theme_while_forcing_backend_and_resident_policy():
+    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice, MontageQualityPolicyChoice
     from arrayscope.app.theme import ThemeChoice
     from arrayscope.tools.profile_montage_workflow import _replace_settings
 
@@ -112,8 +202,10 @@ def test_profile_workflow_forces_backend_specific_themes():
         image_choice=ImageRenderingBackendChoice,
     )
 
-    assert pyqtgraph.theme == ThemeChoice.LIGHT
-    assert vispy.theme == ThemeChoice.DARK
+    assert pyqtgraph.theme == ThemeChoice.SYSTEM
+    assert pyqtgraph.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
+    assert vispy.theme == ThemeChoice.SYSTEM
+    assert vispy.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
 
 
 def test_profile_transform_pipeline_uses_fft_shift_ifft_sequence():
@@ -135,23 +227,138 @@ def test_profile_transform_pipeline_uses_fft_shift_ifft_sequence():
     assert tuple(operation.axis for operation in operations) == (2, 2, 2)
 
 
-def test_profile_capped_montage_uses_center_slices():
-    from arrayscope.tools.profile_montage_workflow import _montage_indices
-
-    assert _montage_indices(30, max_tiles=6) == (12, 13, 14, 15, 16, 17)
-    assert _montage_indices(5, max_tiles=6) == (0, 1, 2, 3, 4)
-    assert _montage_indices(5, max_tiles=None) == (0, 1, 2, 3, 4)
-
-
-def test_profile_fit_stretch_pulse_uses_window_fit_command():
+def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
     from arrayscope.tools.profile_montage_workflow import _pulse_fit_stretch
 
     calls = []
+    metrics = {}
     win = SimpleNamespace(fit_image_to_view=lambda enabled: calls.append(bool(enabled)))
 
-    assert _pulse_fit_stretch(win) is True
+    assert _pulse_fit_stretch(win, metrics=metrics) is True
 
     assert calls == [True, False]
+    assert metrics["fit_stretch_total_ms"] >= 0.0
+    assert metrics["fit_stretch_enable_call_ms"] >= 0.0
+    assert metrics["fit_stretch_disable_call_ms"] >= 0.0
+
+
+def _passing_r8_phase_record(*, backend="vispy"):
+    evidence_quality = 1 if backend == "vispy" else 3
+    return {
+        "phase": "raw_full_tiled_montage",
+        "backend": backend,
+        "profiler_type": "plain",
+        "pacing_evidence": True,
+        "complete": True,
+        "requested_grid_fully_visible": True,
+        "requested_tile_count": 272,
+        "active_planned_tile_count": 272,
+        "active_presented_tile_count": 272,
+        "presentation_settled": True,
+        "stale_level_tiles": 0,
+        "pending_level_tiles": 0,
+        "display_levels": [-2.0, 8.0],
+        "levels_look_default": False,
+        "histogram_data_bounds": [-2.0, 8.0],
+        "histogram_empty": False,
+        "first_visible_display_levels": [-1.0, 7.0],
+        "first_visible_levels_default": False,
+        "first_visible_histogram_data_bounds": [-1.0, 7.0],
+        "first_visible_histogram_empty": False,
+        "first_visible_level_evidence_quality": evidence_quality,
+        "presentation_continuity_ok": True,
+        "presentation_blackout_observed": False,
+        "presentation_minimum_retained_tile_count": 100,
+        "presentation_extent_changed_before_commit": False,
+        "session_viewport_shape_matches": True,
+        "viewport_shape": [753, 1245],
+        "session_viewport_shape_target": [753, 1245],
+        "session_axis_orientation_matches": True,
+        "image_axes": [0, 1],
+        "axis_flipped": [False, True, False],
+        "session_image_axes_target": [0, 1],
+        "session_axis_flipped_target": [False, True, False],
+        "montage_repeated_expensive_stage_per_tile": False,
+        "fit_stretch_pulsed": True,
+        "fit_disable_viewport_mode": "auto_untouched",
+        "fit_disable_view_range": [[0.0, 1.0], [0.0, 1.0]],
+        "grid_kind": "full",
+        "grid_tile_count": 272,
+        "full_tile_count": 272,
+        "tile_cap_applied": False,
+        "phase_recent_ui_work_observations": [{"elapsed_ms": 7.0}],
+        "phase_recent_ui_work_observations_truncated": False,
+        "action_render_call_ms": 4.0,
+        "event_loop_max_gap_ms": 12.0,
+        "physical_draw_after_complete_ms": 20.0,
+        "waited_for_pyqtgraph_draw_after_complete": backend == "pyqtgraph",
+        "pyqtgraph_draw_pending_after_complete": False,
+    }
+
+
+def test_r8_certification_passes_complete_semantic_and_responsive_phase():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    result = _r8_certification(_passing_r8_phase_record())
+
+    assert result["r8_gate_applicable"] is True
+    assert result["r8_performance_evidence"] is True
+    assert result["r8_gate_passed"] is True
+    assert result["r8_gate_failures"] == []
+
+
+def test_r8_certification_names_first_pixel_and_latency_failures():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="pyqtgraph")
+    record.update(
+        phase="montage_zoompan_scalar",
+        first_visible_levels_default=True,
+        first_visible_histogram_empty=True,
+        first_visible_level_evidence_quality=1,
+        presentation_blackout_observed=True,
+        presentation_continuity_ok=False,
+        action_render_call_ms=71.0,
+        event_loop_max_gap_ms=90.0,
+    )
+
+    result = _r8_certification(record)
+    failed = {failure["gate"] for failure in result["r8_gate_failures"]}
+
+    assert result["r8_gate_passed"] is False
+    assert {
+        "first_visible_levels_semantic",
+        "first_visible_histogram_populated",
+        "first_visible_level_evidence_quality",
+        "presentation_continuity",
+        "gui_callbacks_below_50ms",
+        "event_loop_heartbeat",
+    }.issubset(failed)
+
+
+def test_r8_certification_reports_but_does_not_gate_cold_fill_heartbeat():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record()
+    record["event_loop_max_gap_ms"] = 90.0
+
+    result = _r8_certification(record)
+
+    assert result["r8_heartbeat_gate_applicable"] is False
+    assert result["r8_heartbeat_max_gap_ms"] == 90.0
+    assert result["r8_gate_passed"] is True
+
+
+def test_r8_certification_skips_timing_only_for_profiled_or_smoke_runs():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record()
+    record.update(profiler_type="cprofile", action_render_call_ms=500.0, event_loop_max_gap_ms=500.0)
+
+    result = _r8_certification(record)
+
+    assert result["r8_performance_evidence"] is False
+    assert result["r8_gate_passed"] is True
 
 
 def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatch):
@@ -394,6 +601,266 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
     assert hidden["profiler_artifact_paths"] == ["perf.data"]
 
 
+def test_profile_base_record_exposes_intentional_scroll_grid_as_pacing_evidence(monkeypatch):
+    import numpy as np
+    from arrayscope.tools.profile_montage_workflow import _base_record
+
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    record = _base_record(
+        run_id="run",
+        backend="vispy",
+        data_path=Path("data.nii"),
+        data=np.zeros((2, 3, 272), dtype=np.float32),
+        load_mode="native",
+        montage_axis=2,
+        indices=tuple(range(60)),
+        full_tile_count=272,
+        columns=8,
+        max_tiles=60,
+        profiler_type="plain",
+        profiler_artifact_paths=(),
+        qt_platform="wayland",
+        grid_kind="scroll",
+        source_index_count=272,
+    )
+
+    assert record["grid_kind"] == "scroll"
+    assert record["grid_tile_count"] == 60
+    assert record["source_index_count"] == 272
+    assert record["tile_cap_applied"] is False
+    assert record["smoke_only"] is False
+    assert record["pacing_evidence"] is True
+
+
+def test_centered_indices_selects_middle_of_full_axis():
+    from arrayscope.tools.profile_montage_workflow import _centered_indices
+
+    assert _centered_indices(10, 4) == (3, 4, 5, 6)
+    assert _centered_indices(10, 12) == (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+    assert _centered_indices(11, 5) == (3, 4, 5, 6, 7)
+
+
+def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camera_drift():
+    from arrayscope.tools.profile_montage_workflow import _PresentationContinuityProbe
+
+    class FakeTimer:
+        def __init__(self, _parent):
+            self.callback = None
+
+        def setInterval(self, _interval):
+            return None
+
+        @property
+        def timeout(self):
+            return SimpleNamespace(connect=lambda callback: setattr(self, "callback", callback))
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    predecessor = SimpleNamespace(key=SimpleNamespace(semantic_key="old"))
+    visible_state = SimpleNamespace(visible=True)
+    image_view = SimpleNamespace(
+        montageDisplayMode=lambda: "tile_layer",
+        _montage_tile_layer=SimpleNamespace(states={0: visible_state}),
+        _viewport_content_extent=(20, 40),
+    )
+    win = SimpleNamespace(img_view=image_view, _committed_display_frame=predecessor)
+    probe = _PresentationContinuityProbe(SimpleNamespace(QTimer=FakeTimer), win)
+
+    probe.start()
+    visible_state.visible = False
+    image_view._viewport_content_extent = (40, 20)
+    probe._sample()
+    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(semantic_key="new"))
+    probe.stop()
+
+    record = probe.record()
+    assert record["presentation_continuity_expected"] is True
+    assert record["presentation_blackout_observed"] is True
+    assert record["presentation_extent_changed_before_commit"] is True
+    assert record["presentation_continuity_ok"] is False
+
+
+def test_presentation_continuity_probe_accepts_atomic_successor_commit():
+    from arrayscope.tools.profile_montage_workflow import _PresentationContinuityProbe
+
+    class FakeTimer:
+        def __init__(self, _parent):
+            pass
+
+        def setInterval(self, _interval):
+            return None
+
+        @property
+        def timeout(self):
+            return SimpleNamespace(connect=lambda _callback: None)
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    predecessor = SimpleNamespace(key=SimpleNamespace(semantic_key="old"))
+    image_view = SimpleNamespace(
+        montageDisplayMode=lambda: "tile_layer",
+        _montage_tile_layer=SimpleNamespace(states={0: SimpleNamespace(visible=True)}),
+        _viewport_content_extent=(20, 40),
+        getLevels=lambda: (-2.0, 8.0),
+        getHistogramDataBounds=lambda: (-2.0, 8.0),
+    )
+    level_source = SimpleNamespace(rank=2, source_count=4, evidence_quality=1)
+    win = SimpleNamespace(
+        img_view=image_view,
+        _committed_display_frame=predecessor,
+        _frame_session=SimpleNamespace(applied_level_source=level_source),
+        renderer=SimpleNamespace(_last_montage_level_decision=None, _montage_refined_level_applied_count=0),
+    )
+    probe = _PresentationContinuityProbe(SimpleNamespace(QTimer=FakeTimer), win)
+
+    probe.start()
+    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(semantic_key="new"))
+    probe.stop()
+
+    record = probe.record()
+    assert record["presentation_successor_observed"] is True
+    assert record["first_visible_tile_ms"] >= 0.0
+    assert record["first_visible_display_levels"] == [-2.0, 8.0]
+    assert record["first_visible_histogram_data_bounds"] == [-2.0, 8.0]
+    assert record["first_visible_level_evidence_quality"] == 1
+    assert record["presentation_continuity_ok"] is True
+
+
+def test_montage_scroll_pattern_targets_selected_center_band(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    fake_calls = {"fast": {}, "slow": {}}
+
+    def fake_fast(win, **kwargs):
+        fake_calls["fast"] = kwargs
+        return {"fast_scroll_end_start": 2}
+
+    def fake_slow(win, **kwargs):
+        fake_calls["slow"] = kwargs
+        return {"slow_scroll_steps": 0}
+
+    class FakeViewState:
+        def with_image_axes(self, *args, **kwargs):
+            return self
+
+        def with_montage_axis(self, *args, **kwargs):
+            return ("state", tuple(kwargs["indices"]))
+
+    win = type(
+        "W",
+        (),
+        {
+            "view_state": FakeViewState(),
+            "_set_view_state": lambda self, state: None,
+            "render": lambda self, *args, **kwargs: None,
+        },
+    )()
+
+    def fake_lod_state(_win):
+        return {}
+
+    monkeypatch.setattr(workflow, "_fast_scroll_60fps", fake_fast)
+    monkeypatch.setattr(workflow, "_slow_scroll_lod_paced", fake_slow)
+    monkeypatch.setattr(workflow, "_lod_state_record", fake_lod_state)
+
+    record = workflow._apply_montage_scroll_pattern(
+        win,
+        montage_axis=2,
+        columns=3,
+        indices=tuple(range(20)),
+        window_size=8,
+        probe=None,
+        app=None,
+        QtCore=None,
+    )
+    assert record["scroll_window_size"] == fake_calls["fast"]["size"]
+    assert record["scroll_center_band"] == [fake_calls["fast"]["low"], fake_calls["fast"]["high"]]
+    selected_count = len(range(20))
+    window_size = 8
+    assert 0 <= fake_calls["fast"]["low"] <= fake_calls["fast"]["high"] <= selected_count - window_size
+    assert fake_calls["slow"].get("indices") == tuple(range(20))
+
+
+def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    def fake_montage_view_range(_win):
+        return ((-10.0, 10.0), (-20.0, 20.0))
+
+    def fake_glide(win, app, QtCore, probe, target_range, *, frames, fps=60.0, frame_action=None):
+        for frame in range(1, int(frames) + 1):
+            if callable(frame_action):
+                frame_action(frame, int(frames))
+        return {"frames": int(frames), "glide_frames": int(frames), "glide_fps": fps}
+
+    monkeypatch.setattr(workflow, "_montage_view_range", fake_montage_view_range)
+    monkeypatch.setattr(workflow, "_glide_view_range", fake_glide)
+    monkeypatch.setattr(
+        workflow,
+        "_maximum_zoomout_view_range",
+        lambda *_args: ((-200.0, 200.0), (-400.0, 400.0)),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_full_montage_view_range",
+        lambda *_args: ((0.0, 80.0), (0.0, 60.0)),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_wait_for_visible_target_then_observe_near",
+        lambda *_args: {
+            "visible_target_reached": True,
+            "active_tiles": tuple(range(60)),
+            "near_tiles": (),
+            "near_new_before_visible": (),
+            "near_new_before_visible_count": 0,
+            "resident_query_available": True,
+        },
+    )
+    monkeypatch.setattr(workflow, "_wait_for_target_lod", lambda *args, **kwargs: (True, 0.0))
+    scroll_calls = []
+    monkeypatch.setattr(workflow, "_scroll_montage_window", lambda *args, **kwargs: scroll_calls.append(kwargs))
+
+    record = workflow._apply_montage_zoom_pan_stress(
+        SimpleNamespace(),
+        probe=None,
+        app=object(),
+        QtCore=object(),
+        mid_toggle=None,
+        montage_axis=2,
+        columns=8,
+        indices=tuple(range(272)),
+        window_size=60,
+    )
+    assert record["zoompan_input_fps"] >= 120.0
+    assert record["zoompan_max_out_request_scale"] > 1000.0
+    assert tuple(record["zoompan_max_out_range"][0]) == (-200.0, 200.0)
+    assert 0.1 < record["zoompan_zoomin_span_scale"] <= 1.0
+    assert 0.3 <= record["zoompan_pan_right_dx_frac"] <= 0.5
+    assert 0.0 < record["zoompan_pan_down_dy_frac"] <= 0.5
+    assert 0.01 < record["zoompan_deep_zoom_span_scale"] < 0.2
+    assert record["erratic_zoomout_frames"] == 3
+    assert record["opposite_pan_frames"] == 2
+    assert record["combined_zoom_scroll_available"] is True
+    assert record["combined_scroll_window_size"] == 60
+    assert record["lod_full_grid_active_count"] == 60
+    assert record["full_grid_zoomin_frames"] == 4
+    assert record["combined_full_grid_scroll_pause_frames"] == 3
+    assert record["combined_zoom_scroll_pause_frames"] == 3
+    assert record["combined_pan_scroll_pause_frames"] == 3
+    assert scroll_calls
+    assert all(call["size"] == 60 and call["interactive"] is True for call in scroll_calls)
+    assert all(0 < call["window_start"] < 212 for call in scroll_calls)
+
+
 def test_profile_montage_completion_waits_for_level_generation_when_requested():
     from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
     from arrayscope.operations.stage_fanin import StageFanInState
@@ -403,6 +870,14 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         class QEventLoop:
             class ProcessEventsFlag:
                 AllEvents = object()
+
+        class Qt:
+            class TimerType:
+                PreciseTimer = object()
+
+        class QDeadlineTimer:
+            def __init__(self, *_args):
+                pass
 
     class FakeImageView:
         def montageDisplayMode(self):
@@ -434,10 +909,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: not session.level_presentation_snapshot().settled
-    win = SimpleNamespace(
-        img_view=FakeImageView(),
-        renderer=SimpleNamespace(_frame_session=session),
-    )
+    win = SimpleNamespace(img_view=FakeImageView(), _frame_session=session)
 
     class FakeApp:
         def __init__(self):
@@ -488,7 +960,7 @@ def test_profile_montage_level_state_uses_session_snapshot():
     level_generation.tile_values = {0: (0.0, 1.0), 1: (2.0, 8.0), 2: (2.0, 8.0)}
     level_generation.set_active_tiles((0, 1, 2))
     session = SimpleNamespace(level_generation=level_generation, level_presentation_snapshot=lambda: snapshot)
-    win = SimpleNamespace(renderer=SimpleNamespace(_frame_session=session))
+    win = SimpleNamespace(_frame_session=session)
 
     state = _montage_level_presentation_state(win)
 
@@ -521,6 +993,14 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         class QEventLoop:
             class ProcessEventsFlag:
                 AllEvents = object()
+
+        class Qt:
+            class TimerType:
+                PreciseTimer = object()
+
+        class QDeadlineTimer:
+            def __init__(self, *_args):
+                pass
 
     class FakeNative:
         def isVisible(self):
@@ -584,10 +1064,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: False
-    win = SimpleNamespace(
-        img_view=image_view,
-        renderer=SimpleNamespace(_frame_session=session),
-    )
+    win = SimpleNamespace(img_view=image_view, _frame_session=session)
     app = FakeApp(image_view)
 
     result = _wait_for_montage_complete(
@@ -634,16 +1111,52 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
         def vispyPresentationDiagnostics(self):
             return {}
 
-    win = SimpleNamespace(
-        img_view=FakeImageView(),
-        renderer=SimpleNamespace(_frame_session=session),
-    )
+    win = SimpleNamespace(img_view=FakeImageView(), _frame_session=session)
 
     state = _montage_visibility_state(win, mode="vispy_tile_layer")
 
     assert state["fully_visible"] is True
     assert state["visible_pending_tiles"] == 0
     assert state["active_presented_tile_count"] == 2
+
+
+def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger():
+    from arrayscope.operations.stage_fanin import StageFanInState
+    from arrayscope.tools.profile_montage_workflow import _montage_visibility_state
+
+    session = SimpleNamespace(
+        visible_tiles=tuple(SimpleNamespace(montage_index=index) for index in range(44)),
+        skipped_tiles=set(),
+        lifecycle=SimpleNamespace(presented_tiles=frozenset(range(44))),
+        display_committed=True,
+        level_expected_indices=tuple(range(60)),
+        pending_tiles=(SimpleNamespace(montage_index=58),),
+        loading_tiles=set(),
+        active_tile_requests=set(),
+        stage_fan_in=StageFanInState(),
+        final_commit_pending=False,
+        flush_pending=False,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=set(),
+    )
+
+    class FakeImageView:
+        def montageTileOverlayCount(self):
+            return 0
+
+        def vispyPresentationDiagnostics(self):
+            return {}
+
+    win = SimpleNamespace(img_view=FakeImageView(), _frame_session=session)
+
+    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+
+    assert state["fully_visible"] is True
+    assert state["active_presented_tile_count"] == 44
+    assert state["active_planned_tile_count"] == 44
+    assert state["requested_tile_count"] == 60
+    assert state["visible_pending_tiles"] == 0
 
 
 @pytest.mark.skipif(

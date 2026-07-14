@@ -33,12 +33,21 @@ class ViewportSession:
 
 
 @dataclass(frozen=True)
+class PanelSession:
+    operation_visible: bool = False
+    inspection_visible: bool = False
+    window_size: tuple[int, int] | None = None
+    window_maximized: bool | None = None
+
+
+@dataclass(frozen=True)
 class FileViewSession:
     metadata: dict[str, object]
     recipe: ViewRecipe
     viewport: ViewportSession | None = None
     rois: tuple[RoiSelection, ...] = ()
     selected_roi_id: str | None = None
+    panels: PanelSession | None = None
     version: int = VIEW_SESSION_VERSION
 
 
@@ -127,6 +136,7 @@ def session_to_mapping(session: FileViewSession) -> dict[str, object]:
         "viewport": None if session.viewport is None else viewport_to_mapping(session.viewport),
         "rois": [roi_to_mapping(roi) for roi in session.rois],
         "selected_roi_id": session.selected_roi_id,
+        "panels": None if session.panels is None else panel_session_to_mapping(session.panels),
     }
 
 
@@ -142,6 +152,11 @@ def session_from_mapping(mapping, base_shape) -> FileViewSession:
         viewport=None if viewport is None else viewport_from_mapping(viewport),
         rois=tuple(roi_from_mapping(item) for item in tuple(mapping.get("rois", ()) or ())),
         selected_roi_id=mapping.get("selected_roi_id"),
+        panels=(
+            None
+            if mapping.get("panels") is None
+            else panel_session_from_mapping(mapping.get("panels"))
+        ),
     )
 
 
@@ -192,6 +207,40 @@ def viewport_from_mapping(mapping) -> ViewportSession:
         view_range=normalized,
         viewport_shape=normalized_shape,
         montage_columns=normalized_columns,
+    )
+
+
+def panel_session_to_mapping(panels: PanelSession) -> dict[str, object]:
+    return {
+        "operation_visible": bool(panels.operation_visible),
+        "inspection_visible": bool(panels.inspection_visible),
+        "window_size": (
+            None
+            if panels.window_size is None
+            else [int(panels.window_size[0]), int(panels.window_size[1])]
+        ),
+        "window_maximized": panels.window_maximized,
+    }
+
+
+def panel_session_from_mapping(mapping) -> PanelSession:
+    if not isinstance(mapping, dict):
+        raise ValueError("session panels must be an object")
+    window_size = mapping.get("window_size")
+    normalized_size = None
+    if window_size is not None:
+        if not isinstance(window_size, (list, tuple)) or len(window_size) != 2:
+            raise ValueError("session panels.window_size must be [width, height]")
+        normalized_size = (
+            max(1, int(window_size[0])),
+            max(1, int(window_size[1])),
+        )
+    maximized = mapping.get("window_maximized")
+    return PanelSession(
+        operation_visible=bool(mapping.get("operation_visible", False)),
+        inspection_visible=bool(mapping.get("inspection_visible", False)),
+        window_size=normalized_size,
+        window_maximized=None if maximized is None else bool(maximized),
     )
 
 

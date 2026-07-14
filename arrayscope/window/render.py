@@ -8,6 +8,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.trace import emit_trace
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.core.window_levels import LevelSourceRank
@@ -970,19 +971,42 @@ class RenderOrchestrator(
 
     def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
         coordinator = getattr(self.win, "render_coordinator", None)
+        target_key = self._render_request_key()
         if coordinator is None:
-            self._advance_render_generation(f"request:{reason}")
+            generation = self._advance_render_generation(f"request:{reason}")
+            emit_trace(
+                "render_request",
+                reason=str(reason),
+                interactive=bool(interactive),
+                target_key=target_key,
+                render_generation=int(generation),
+                direct=True,
+            )
             self.render(reason=reason, force_autolevel=force_autolevel)
             return
-        target_key = self._render_request_key()
         if coordinator.has_equivalent_pending(
             reason=reason,
             force_autolevel=force_autolevel,
             interactive=interactive,
             target_key=target_key,
         ):
+            emit_trace(
+                "render_request",
+                reason=str(reason),
+                interactive=bool(interactive),
+                target_key=target_key,
+                coalesced=True,
+            )
             return
-        self._advance_render_generation(f"request:{reason}")
+        generation = self._advance_render_generation(f"request:{reason}")
+        emit_trace(
+            "render_request",
+            reason=str(reason),
+            interactive=bool(interactive),
+            target_key=target_key,
+            render_generation=int(generation),
+            coalesced=False,
+        )
         coordinator.request(
             reason=reason,
             force_autolevel=force_autolevel,

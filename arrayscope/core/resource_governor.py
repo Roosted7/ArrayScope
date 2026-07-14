@@ -145,6 +145,10 @@ class ResourceGovernor:
     _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
     _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=4096))
     _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=32))
+    _ui_observation_epoch: int = 0
+    _ui_observation_epoch_active: int = 0
+    _ui_observation_epoch_count: int = 0
+    _ui_observation_epoch_max_ms: float = 0.0
 
     def __post_init__(self) -> None:
         self.profile = normalize_memory_profile_choice(self.profile)
@@ -209,6 +213,7 @@ class ResourceGovernor:
             details=tuple(str(detail) for detail in details),
         )
         self._recent_ui_work_observations.append(observation)
+        self._note_ui_observation_epoch(observation.elapsed_ms)
         if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
             self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(channel)
@@ -216,6 +221,7 @@ class ResourceGovernor:
     def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
         diagnostics_only = _diagnostics_only_ui_observation(observation)
         self._recent_ui_work_observations.append(observation)
+        self._note_ui_observation_epoch(observation.elapsed_ms)
         if observation.over_warning:
             self._recent_over_warning_callbacks.append(observation)
         if diagnostics_only:
@@ -225,6 +231,32 @@ class ResourceGovernor:
         feedback_elapsed_ms = self._feedback_elapsed_ms(observation.channel, observation.elapsed_ms)
         self.latency_feedback.observe(observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
         self._pressure = self._pressure_with_ui(observation.channel)
+
+    def begin_ui_observation_epoch(self) -> int:
+        """Start constant-memory timing evidence for one diagnostic phase."""
+
+        self._ui_observation_epoch += 1
+        self._ui_observation_epoch_active = int(self._ui_observation_epoch)
+        self._ui_observation_epoch_count = 0
+        self._ui_observation_epoch_max_ms = 0.0
+        return int(self._ui_observation_epoch_active)
+
+    def ui_observation_epoch_evidence(self, epoch: int) -> tuple[int, float, bool]:
+        current = int(epoch) == int(self._ui_observation_epoch_active)
+        return (
+            int(self._ui_observation_epoch_count) if current else 0,
+            float(self._ui_observation_epoch_max_ms) if current else 0.0,
+            bool(current),
+        )
+
+    def _note_ui_observation_epoch(self, elapsed_ms: float) -> None:
+        if int(self._ui_observation_epoch_active) <= 0:
+            return
+        self._ui_observation_epoch_count += 1
+        self._ui_observation_epoch_max_ms = max(
+            float(self._ui_observation_epoch_max_ms),
+            max(0.0, float(elapsed_ms)),
+        )
 
     def decide_lane_workers(self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState) -> LaneWorkerDecision:
         lane = ComputeLane(lane)
