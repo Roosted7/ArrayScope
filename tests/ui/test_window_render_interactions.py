@@ -214,6 +214,44 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
         win.close()
 
 
+def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window import ArrayScopeWindow
+
+    data = np.arange(4 * 5 * 4, dtype=np.float32).reshape(4, 5, 4)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    observed = []
+    try:
+        _process_events(qtbot, count=20)
+        original = win.renderer._ensure_montage_level_stats
+
+        def observe_gate(level_key, *, expected_indices):
+            session = win._frame_session
+            pipeline = None if session is None else getattr(session, "pipeline", None)
+            observed.append(
+                pipeline is not None
+                and callable(getattr(getattr(pipeline, "effects", None), "request_presentation", None))
+            )
+            return original(level_key, expected_indices=expected_indices)
+
+        monkeypatch.setattr(win.renderer, "_ensure_montage_level_stats", observe_gate)
+        state = ViewState.from_shape(data.shape).with_montage_axis(
+            2,
+            columns=2,
+            indices=tuple(range(4)),
+            text=":",
+        )
+        win._set_view_state(state)
+        win.render(reason="test-live-frame-effect-gate")
+
+        qtbot.waitUntil(lambda: bool(observed), timeout=5000)
+        assert observed == [True]
+    finally:
+        win.close()
+
+
 def test_main_canvas_remains_embedded_in_window(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets

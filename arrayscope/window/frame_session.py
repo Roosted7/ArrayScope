@@ -514,6 +514,7 @@ class FrameSession:
     stage_planning_async: bool = False
     deferred_missing_tiles: tuple[MontageTile, ...] = ()
     frame_plan: object | None = None
+    pipeline: object | None = None
     tile_source_ids: dict[int, object] = field(default_factory=dict)
     display_tile_payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
     dirty_payloads: OrderedDict[int, None] = field(default_factory=OrderedDict)

@@ -699,6 +699,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             if inherited:
                 session.lifecycle.backend_presented_snapshot(inherited)
         self._frame_session = session
+        # A live session can receive cached/refined level evidence as soon as
+        # its level work is queued below.  Attach its one effects owner first
+        # so an immediate kernel completion cannot observe a current session
+        # without the presentation gate needed to publish that evidence.
+        self._frame_pipeline_for_session(session)
         # A viewport-update token armed for the dying session would make every
         # later apply_montage_viewport_retarget bail as stale — a dead
         # continuation (lost-wakeup class).  The new session's construction
