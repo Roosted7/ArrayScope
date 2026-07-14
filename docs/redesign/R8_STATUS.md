@@ -9,24 +9,37 @@ chronological investigation is preserved in
 
 ## Gate status
 
-- **R8A pixel truth:** complete.
-- **R8B complex truth:** complete.
-- **R8C.1 semantic transitions:** complete.
+- **R8A typed identity:** complete.
+- **R8B physical complex storage/mapping:** complete.
+- **R8B.2 first-pixel level truth:** reopened and active.
+- **R8C.1 semantic transitions:** reopened for source-window continuity.
 - **R8C.2 viewport/convergence boundaries:** complete.
-- **R8C.3 semantic level-evidence ownership:** complete.
+- **R8C.3 semantic evidence owner:** implementation landed; phasing
+  certification incomplete.
 - **R8C.4 committed manual-camera policy:** complete.
-- **R8C transition matrix:** complete for both backends on real Wayland.
-- **Full R8 certification:** pending the repository-wide UI/app exit gate.
-- **Marathon salvage audit:** deferred until the full R8 gate passes.
-- **R8D performance work:** blocked.
+- **R8C transition matrix:** incomplete.
+- **UI/app baseline cleanup:** deferred.
+- **R8D broad optimization:** blocked; measurement and deterministic work
+  counters are allowed.
 
-The earlier orange-background complex-rendering failure is resolved. Both
-backends enforce typed target/acknowledgement compatibility, distinguish scalar,
-complex, and RGB texture storage, and use placeholders when a current semantic
-target lacks compatible physical pixels. The synthetic adversarial complex
-fixture and scalar/complex back-to-back transitions are green.
+Typed target/acknowledgement compatibility and distinct scalar, complex, and RGB
+texture storage remain landed. New user-visible evidence reopens certification:
+VisPy can physically draw first-pass complex tiles before a valid rough level
+generation is applied, and source-window retargets discard compatible committed
+overlap instead of remapping it by semantic source identity.
 
-## R8C.3 semantic evidence owner
+## Permanent R8 invariants
+
+- A first physical VisPy tile must have a valid acknowledged level generation.
+- First-pass rough evidence updates shader levels while tiles arrive.
+- Rough histogram publication occurs at first-pass completion.
+- Later quality passes do not repeat rough sampling.
+- A source-window retarget preserves and remaps every compatible committed
+  source.
+- Placeholders are permitted only for targets with no compatible source.
+- One-index scrolling must not create a full-black frame.
+
+## R8C.3 semantic evidence owner — implementation landed, phasing incomplete
 
 `LevelStatsService` now owns one explicit semantic-evidence path independent of
 tile visibility, texture residency, and generic montage prefetch. `FrameSession`
@@ -56,6 +69,13 @@ Rendered payload evidence may seed the tracker, but visible-subset evidence can
 never satisfy full semantic completion. PyQtGraph retains predecessor geometry
 until refined CPU-window evidence covers the target population. VisPy may
 present valid rough evidence and continues to the same full refined population.
+
+The owner remains the canonical statistics-only path for refinement and missing
+semantic sources. R8B.2 must connect first-pass payload evidence to that same
+tracker before physical presentation, continuously apply rough VisPy levels as
+the first pass arrives, publish its rough histogram at first-pass completion,
+and start refined semantic evidence only after the final display pass. Already
+sampled sources must not be evaluated twice.
 
 The admission trace exposed two narrow liveness defects in the existing lane:
 blocking PyQtGraph evidence needed one histogram worker after visible work
@@ -107,8 +127,10 @@ stash and were not bundled into R8C.3 or the camera guard.
 
 ## Next bounded slice
 
-Keep R8D and the marathon salvage audit blocked. Reconcile the preserved
-canonical frame-session migration and unrelated UI/app baseline failures as a
-separate test-first slice, then rerun the full non-GPU exit gate. Do not weaken
-the R8 certification checklist or treat the focused R8C matrix as the full R8
-exit gate.
+Close R8B.2 first-pixel level phasing and R8C.1 source-window continuity with
+deterministic tests before production changes. After those tests fail, inspect
+the marathon worktree read-only only for source remapping, physical residency
+identity, session generation, emitted-versus-acknowledged semantics, atomic
+successor presentation, and first-pass level/histogram phasing. UI/app baseline
+cleanup and generic R8D optimization remain deferred until both user-visible
+failures are closed.
