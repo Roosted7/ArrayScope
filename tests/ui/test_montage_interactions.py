@@ -1587,11 +1587,20 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
         monkeypatch.setattr(win.img_view.imageItem, "setImage", fail_base_image_item_update)
         low, high = win.img_view.getHistogramDataBounds()
         win.img_view.histogram.setLevels((float(low) + float(high)) / 2.0, float(high))
-        qtbot.wait(50)
+        # Wait for the coalesced preview's actual tile-layer work. A fixed
+        # qWait races the 33 ms timer under xdist and makes the last timing
+        # channel depend on host load.
+        qtbot.waitUntil(
+            lambda: win.img_view.lastImageUploadTiming().tile_layer_visible_items > 0,
+            timeout=5000,
+        )
         win.img_view._on_histogram_level_change_finished()
 
         timing = win.img_view.lastImageUploadTiming()
-        assert timing.mode == "tile_layer"
+        # The coalesced preview and its bounded tile continuation have distinct
+        # timing channels, so either may be the last record. The semantic mode
+        # is the surface state, not whichever nested timing scope finished last.
+        assert win.img_view.montageDisplayMode() == "tile_layer"
         assert timing.tile_layer_visible_items > 0
         assert timing.tile_layer_items_updated <= timing.tile_layer_visible_items
         assert timing.tile_layer_texture_uploads == 0

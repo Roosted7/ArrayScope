@@ -232,6 +232,46 @@ def test_dirty_resident_payload_reuses_uploaded_source_when_source_id_matches():
     assert len(pool.scalar_texture.updates) == clean_texture_updates
 
 
+def test_atlas_consumes_ordered_upserts_before_active_grid_order():
+    """Backend storage mechanics must not replace presentation priority."""
+
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    initial = {index: payload(index, float(index)) for index in range(4)}
+    pool.update_payloads(
+        initial,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=4,
+    )
+    update_start = len(pool.scalar_texture.updates)
+    next_two = {
+        3: payload(3, 40.0),
+        2: payload(2, 30.0),
+    }
+    current = {**initial, 2: next_two[2], 3: next_two[3]}
+    delta = SimpleNamespace(
+        upserts=next_two,
+        active_tiles=(0, 1, 2, 3),
+        removals=(),
+        target_identities={},
+        near_tile_source_ids={},
+    )
+
+    _uvs, stats = pool.update_payloads(
+        current,
+        tile_shape=(2, 2),
+        dirty_tiles=(3, 2),
+        rgb_already_windowed=False,
+        reserve_count=4,
+        tile_delta=delta,
+    )
+
+    uploaded_values = [float(data[0, 0]) for data, _offset, _copy in pool.scalar_texture.updates[update_start:]]
+    assert uploaded_values == [40.0, 30.0]
+    assert stats.committed_upserts == (3, 2)
+
+
 def test_bounded_active_commit_retains_existing_presented_mappings():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     payloads = {index: payload(index, float(index)) for index in range(4)}
@@ -632,6 +672,73 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
         for texture in (page.scalar_texture, page.color_texture)
     ) == texture_updates
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
+
+
+def test_touched_atlas_page_repairs_stale_local_mapping_when_global_key_is_unchanged():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(5)),
+        tile_width=2,
+        tile_height=2,
+        columns=5,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 5)
+    mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+    )
+    payloads = {index: payload(index, float(index)) for index in range(5)}
+    delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=tuple(range(5)),
+        planned_tiles=tuple(range(5)),
+        near_tiles=(),
+        near_tile_source_ids={},
+        force_refresh=False,
+    )
+    first = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        shader_mapping=mapping,
+        tile_delta=delta,
+    )
+    assert first.page_count == 2
+    stale_visual = layer._visuals_by_page[1]
+    stale_visual.mappings = [
+        (
+            ShaderMapping().identity_key,
+            ShaderMapping(),
+        )
+    ]
+
+    replacement = payload(4, 40.0)
+    payloads[4] = replacement
+    repaired = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 4.0),
+        dirty_tiles=(4,),
+        rgb_already_windowed=False,
+        shader_mapping=mapping,
+        tile_delta=SimpleNamespace(**{**vars(delta), "upserts": {4: replacement}}),
+    )
+
+    assert repaired.shader_uniform_updates == 1
+    assert stale_visual.mappings[-1][0] == mapping.identity_key
+    assert stale_visual.mappings[-1][1] is mapping
 
 
 def test_clean_gpu_layer_update_reuses_page_bindings():

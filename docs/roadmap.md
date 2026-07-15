@@ -116,6 +116,22 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > event count with required-identity coverage and add framebuffer comparison
 > plus an injected wrong-uniform/page test before any further P9 throughput
 > experiment.
+>
+> **[Codex 2026-07-15 — P9 ordered-presentation checkpoint]** One semantic
+> focus now drives current-layout shared fanout, ordered deltas, VisPy physical
+> upload, and ordered acknowledgement. Real-display traces changed the stale
+> first FFT cohort to current centre-out order. Physical page evidence then
+> isolated the broken pixels to stale shader state rather than dtype/source
+> corruption: levels-only updates now update levels only, and touched atlas
+> pages synchronize their page-local mapping even when the layer-wide key is
+> unchanged. `/tmp/arrayscope-vispy-onscreen-page-fix` has 60 coherent preview
+> tiles and zero physical identity mismatches. Performance remains vetoed
+> (31.75 s scroll, 123 ms heartbeat, worst continuity 1/60), and the immediate
+> next slice is the separate 58-ready/2-presented zero-work settlement hole.
+> General framebuffer comparison follows that settlement fix. Consolidating
+> scalar and batch montage cache-key derivation is tracked separately; its
+> runtime parity fallback must remain until one canonical key owner replaces
+> both implementations.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining

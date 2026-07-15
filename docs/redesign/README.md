@@ -650,6 +650,40 @@ acceptance.
 > phasing is a universal pipeline gate; the accepted change owns only the
 > shared path that bypasses `FramePipeline`.
 
+> **[Codex 2026-07-15 — P9 canonical-order and VisPy page-truth slice]**
+> Priority now has one semantic owner: current-generation hover, otherwise
+> the current viewport centre. Backend hover/cache state cannot choose it.
+> Shared-transform fanout reprojects its layout-independent result through
+> the current montage layout before every bounded batch, and ordered upserts
+> remain ordered through VisPy upload and acknowledgement. The live first
+> cohort changed from stale-layout `[156,155,157,132,180,...]` to current
+> centre-out `[142,141,143,164,120,...]`. The transient psychedelic tiles
+> were correct complex planes drawn with stale uniforms: a levels-only update
+> replayed a cached scalar/REAL mapping, while a layer-wide mapping cache hid
+> a stale page-local mapping. Levels-only updates now change levels only, and
+> every touched atlas page synchronizes its physical shader mapping. The exact
+> real-display artifact `/tmp/arrayscope-vispy-onscreen-page-fix` shows all 60
+> preview-floor tiles coherent with physical component 2 / mapping mode 4 and
+> zero payload/backend/physical identity mismatches.
+>
+> **[Codex 2026-07-15 — remaining veto and rejected hypotheses]** This is a
+> pixel/order slice, not P9 completion or performance credit. The same run took
+> **31,751 ms**, missed one slow-scroll target, retained only **1/60** tiles at
+> the worst continuity sample, and reached a **123 ms** heartbeat maximum. A
+> separate hard run ended with 58 target-ready and only 2 target-presented
+> tiles despite zero work in flight. Forced extra complex copies and disabling
+> the two-quality shared preview are rejected: the complex atlas already owns
+> a defensive copy, and deterministic numeric tests prove shifted/flipped
+> shared preview values and source-index remapping against exact output.
+>
+> **[Codex 2026-07-15 — open key-owner coupling]** `evaluator.py` still owns
+> both scalar `montage_tile_key`/`cached_montage_tile` derivation and the
+> hoisted `montage_tile_key_batch` derivation. A runtime byte-parity check falls
+> back to the scalar path and counts `montage_key_batch_fallbacks`. Preserve
+> that guard, but consolidate the duplicated derivation behind one parity-
+> tested owner in a separate slice; silent drift here can turn a performance
+> shortcut into wrong cache identity.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

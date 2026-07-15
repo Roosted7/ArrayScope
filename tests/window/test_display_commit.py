@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,6 +18,33 @@ from arrayscope.display.model.commit import DisplayTiledPresentation
 
 
 _AUTO_REPORT = object()
+
+
+def test_commit_report_acceptance_preserves_delta_upsert_order():
+    presentation = _presentation()
+    sample = presentation.tile_delta.upserts[0]
+    upserts = {
+        tile: replace(
+            sample,
+            tile_number=tile,
+            source_index=tile,
+            source_id=("tile", tile),
+        )
+        for tile in (3, 1, 2)
+    }
+    delta = replace(
+        presentation.tile_delta,
+        upserts=upserts,
+        active_tiles=(1, 2, 3),
+        planned_tiles=(1, 2, 3),
+        near_tiles=(),
+    )
+    report = TileCommitReport(
+        presented_tiles=frozenset((1, 2, 3)),
+        committed_upserts=frozenset((1, 3)),
+    )
+
+    assert report.accepted_upserts_in_order(delta) == (3, 1)
 
 
 def _presentation():

@@ -946,20 +946,16 @@ class VisPyImageView2D(ImageViewShell):
     def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
         self._vispy_last_levels = levels
         if self._montage_display_mode == "vispy_tile_layer":
-            stats = self._update_vispy_tile_layer(
-                self.image,
-                histogram_data=self.histogramSource,
-                geometry=getattr(self, "_last_vispy_geometry", None),
-                levels=levels,
-                rgb_already_windowed=False,
-                dirty_tiles=(),
-                tile_source_ids=None,
-                tile_payloads=getattr(self, "_last_vispy_tile_payloads", None),
-                shader_mapping=getattr(self, "_last_vispy_tiled_shader_mapping", None),
-                tile_delta=None,
-                tile_residency_budget_bytes=0,
-                force_levels=True,
-            )
+            layer = getattr(self, "_vispy_gpu_montage_layer", None)
+            if layer is None:
+                return
+            # A level gesture owns only the level uniform. Replaying the
+            # separately cached frame mapping here let a stale scalar mapping
+            # overwrite an already-correct complex phase mapping during the
+            # full-montage -> scroll transition. The next payload commit then
+            # appeared to "heal" the psychedelic tiles. Preserve the physical
+            # layer's current mapping and update exactly the signal received.
+            stats = layer.set_presentation_uniforms(levels=levels)
             self._record_tile_layer_stats(stats)
             self._request_vispy_tile_layer_redraw()
             handler = getattr(self, "_level_presentation_change_handler", None)

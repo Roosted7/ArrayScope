@@ -13,7 +13,13 @@ from arrayscope.display.montage import MontageTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey
 from arrayscope.operations.evaluator import OperationEvaluator
-from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
+from arrayscope.operations.pipeline import (
+    ArrayDocument,
+    CenteredFFT,
+    CenteredIFFT,
+    FFTShift,
+    evaluate as evaluate_pipeline,
+)
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
@@ -396,6 +402,88 @@ def test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input():
     assert effects.can_evaluate_reduced_preview(session, tile) is True
     assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
     assert effects.shared_preview_is_useful(session, tile, _demand(1)) is True
+
+
+def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
+    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
+    session = _session(data)
+    operations = (
+        CenteredFFT(axis=2),
+        FFTShift(axis=2),
+        CenteredIFFT(axis=2),
+    )
+    session.document = ArrayDocument(data, operations=operations)
+    session.shader_display = True
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(1),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+    exact = evaluate_pipeline(data, operations)
+
+    assert len(rows) == 3
+    for tile_number, _key, plane, *_rest in rows:
+        np.testing.assert_allclose(
+            np.asarray(plane),
+            np.asarray(exact)[::4, ::4, int(tile_number)],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+
+def test_shared_fft_preview_maps_shifted_flipped_window_by_source_index():
+    data = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)
+    session = _session(data)
+    operations = (
+        CenteredFFT(axis=2),
+        FFTShift(axis=2),
+        CenteredIFFT(axis=2),
+    )
+    session.document = ArrayDocument(data, operations=operations)
+    session.view_state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_axis_flipped(2, True)
+        .with_montage_axis(2, columns=3, indices=(5, 6, 7), text="5:8")
+    )
+    session.plan = make_montage_plan(
+        session.view_state,
+        axis=2,
+        indices=(5, 6, 7),
+        tile_shape=(8, 10),
+        columns=3,
+        viewport_shape=(100, 100),
+    )
+    session.shader_display = True
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(1),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+    exact = evaluate_pipeline(data, operations)
+
+    assert [int(row[0]) for row in rows] == [0, 1, 2]
+    for row, source_index in zip(rows, (5, 6, 7), strict=True):
+        np.testing.assert_allclose(
+            np.asarray(row[2]),
+            np.asarray(exact)[::4, ::4, int(source_index)],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 def test_shared_complex_preview_rows_include_display_histogram():

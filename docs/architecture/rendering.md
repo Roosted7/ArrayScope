@@ -72,6 +72,16 @@ compatible physical representation, not levels/LUT. Level/window/LUT changes are
 updates, preferably shader/uniform updates where the backend supports them, and do not imply new
 source pixels.
 
+Presentation command order is semantic data, not a backend preference. The
+canonical flow is `montage_priority_focus` → `TilePriorityContext` /
+`tile_priority_key` → ordered materialized rows → ordered
+`TilePresentationDelta.upserts` → ordered backend work and acknowledgement.
+Shared-transform results are layout-independent, so each bounded fanout batch
+must project them through the current layout before admission. A backend may
+sort geometry keys, page indices, or unordered membership snapshots for stable
+mechanics; it may not sort or setify the ordered command collection. Backend
+hover state and cache iteration order never choose semantic priority.
+
 VisPy atlas residency is a data-keyed cache, not a mirror of the current viewport. `active_tiles`
 controls which retained tile mappings are visible; source identity, texture kind, LOD, tile shape,
 storage mode, budget eviction, reset/context loss, or teardown are the only valid reasons for texture
@@ -181,6 +191,11 @@ VisPy is the preferred backend for sustained large tiled rendering, pending smal
 platform validation. Its active visible commit should be a coherent GPU presentation transaction:
 admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
 invalidation are consistent.
+The layer-wide shader-mapping key is only a desired-state cache; each atlas
+page visual owns physical uniform state. Every touched/active page synchronizes
+that state, even when the layer-wide key is unchanged. A levels-only action
+updates levels only and must never replay cached component, display, LUT, or
+scale state.
 Its atlas/quad path uses frame-plan tile geometry for internally tiled single planes and montage
 geometry for montage presentations.
 

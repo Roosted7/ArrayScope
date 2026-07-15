@@ -4146,6 +4146,49 @@ def test_shared_transform_fanout_uses_canonical_viewport_priority():
     assert [identity[0] for identity in marker[-1]] == [2, 1, 0]
 
 
+def test_shared_transform_fanout_reprioritizes_materialized_rows_after_reflow():
+    session = _session(count=6, pyramid=PyramidCache(max_bytes=1 << 20))
+    tiles = tuple(
+        replace(
+            tile,
+            row=index // 3,
+            col=index % 3,
+            x0=(index % 3) * TILE,
+            y0=(index // 3) * TILE,
+        )
+        for index, tile in enumerate(session.plan.tiles)
+    )
+    session.plan = MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(2, 3),
+        columns=3,
+        rows=2,
+        gap=0,
+        tiles=tiles,
+    )
+    session.visible_tiles = tiles
+    session.view_range = ((0.0, 3.0 * TILE), (0.0, 2.0 * TILE))
+    session.retarget_tile_priority(
+        focus=(1.5 * TILE, 1.5 * TILE),
+        active_tiles=range(6),
+        near_tiles=range(6),
+        view_range=session.view_range,
+    )
+    stale_two_column_order = (3, 2, 4, 1, 5, 0)
+    rows = tuple((tile_number, "row") for tile_number in stale_two_column_order)
+
+    ordered = montage_commit._prioritize_shared_preview_rows(session, rows)
+    expected = prioritize_tile_numbers(
+        stale_two_column_order,
+        plan_tiles=tiles,
+        context=session.tile_priority_context(),
+    )
+
+    assert tuple(row[0] for row in ordered) == expected
+    assert tuple(row[0] for row in ordered) != stale_two_column_order
+
+
 def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod(monkeypatch):
     from types import SimpleNamespace
 

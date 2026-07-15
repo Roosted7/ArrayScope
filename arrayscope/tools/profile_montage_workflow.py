@@ -1253,6 +1253,16 @@ class _VerboseTileTrace:
         payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
         lifecycle = getattr(session, "lifecycle", None)
         backend = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
+        physical_rows_fn = getattr(
+            getattr(self.win, "img_view", None),
+            "tileTruthPhysicalRows",
+            None,
+        )
+        physical_rows = (
+            dict(physical_rows_fn() or {})
+            if callable(physical_rows_fn)
+            else {}
+        )
         physical_layer = getattr(getattr(self.win, "img_view", None), "_montage_tile_layer", None)
         physical_states = dict(getattr(physical_layer, "states", {}) or {})
         composite = getattr(physical_layer, "_composite_item", None)
@@ -1273,6 +1283,8 @@ class _VerboseTileTrace:
             record = None if lifecycle is None else lifecycle.peek(slot)
             lod = None if payload is None else getattr(payload, "lod", None)
             physical = physical_states.get(slot)
+            raw_physical_row = dict(physical_rows.get(slot) or {})
+            physical_row = _verbose_physical_row(raw_physical_row)
             physical_image = None if physical is None else getattr(getattr(physical, "item", None), "image", None)
             physical_white_fraction = None
             if physical_image is not None:
@@ -1301,7 +1313,18 @@ class _VerboseTileTrace:
                     "presented_age_ms": float((now - self._presented_changed_at.get(slot, now)) * 1000.0),
                     "payload_matches_desired": bool(payload_source == desired_source),
                     "plan_matches_desired": bool(planned.get(slot) == desired_source),
-                    "backend_matches_payload": bool(payload is not None and backend_identity == getattr(payload, "source_id", None)),
+                    "backend_matches_payload": bool(
+                        payload is not None
+                        and backend_identity == tile_ack_identity(payload)
+                    ),
+                    "physical_matches_payload": bool(
+                        payload is not None
+                        and raw_physical_row.get(
+                            "physical_acknowledged_identity"
+                        )
+                        == tile_ack_identity(payload)
+                    ),
+                    **physical_row,
                     "physical_source_id": _trace_identity(
                         None if physical is None else getattr(physical, "source_array_id", None)
                     ),
@@ -1336,6 +1359,32 @@ def _trace_identity(value, *, limit: int = 240) -> str | None:
         return None
     text = repr(value)
     return text if len(text) <= int(limit) else text[: max(0, int(limit) - 3)] + "..."
+
+
+def _verbose_physical_row(row) -> dict[str, object]:
+    """Return JSON-safe physical evidence for one backend tile slot."""
+
+    row = dict(row or {})
+    keep = (
+        "physical_page",
+        "physical_slot",
+        "physical_texture_kind",
+        "physical_storage_mode",
+        "physical_texture_dtype",
+        "physical_texture_shape",
+        "physical_real_plane_identity",
+        "physical_imag_plane_identity",
+        "physical_mapping_mode",
+        "physical_component_mode",
+        "physical_levels",
+        "physical_shader_mapping_key",
+    )
+    return {
+        **{key: row.get(key) for key in keep},
+        "physical_acknowledged_identity": _trace_identity(
+            row.get("physical_acknowledged_identity")
+        ),
+    }
 
 
 def _fast_scroll_60fps(
@@ -2926,6 +2975,7 @@ def _post_visible_gate_blockers(
     requested_grid_visible: bool,
     physical_drawn: bool,
     presentation_ready: bool,
+    target_settled: bool,
     work_in_flight: bool,
     dirty_payloads: bool,
 ) -> tuple[str, ...]:
@@ -2949,6 +2999,8 @@ def _post_visible_gate_blockers(
         blockers.append("physical_drawn")
     if not presentation_ready:
         blockers.append("presentation_settled")
+    if not target_settled:
+        blockers.append("required_target_settled")
     return tuple(blockers)
 
 
@@ -2993,6 +3045,7 @@ def _wait_for_montage_complete(
     preview_floor_screenshot_error = None
     preview_floor_physical_rows: list[dict[str, object]] = []
     presentation_settled_ms = None
+    target_settled_ms = None
     final_visibility_state: dict[str, object] = {}
     final_level_state: dict[str, object] = {}
     final_payload_state: dict[str, object] = {}
@@ -3017,6 +3070,11 @@ def _wait_for_montage_complete(
             if first_nondefault_levels_ms is None and not bool(levels_state["levels_look_default"]):
                 first_nondefault_levels_ms = (perf_counter() - start) * 1000.0
         presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
+        target_settled = bool(
+            session is not None
+            and callable(getattr(session, "required_target_settled", None))
+            and session.required_target_settled()
+        )
         # Fail-fast only while the visible frame is still owed.  Warm/offscreen
         # work must not make a completed visible frame look frozen.
         if not (bool(visibility_state["fully_visible"]) and presentation_ready) and not _montage_settled(session):
@@ -3054,6 +3112,8 @@ def _wait_for_montage_complete(
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
         if bool(level_state["settled"]) and presentation_settled_ms is None:
             presentation_settled_ms = (perf_counter() - start) * 1000.0
+        if target_settled and target_settled_ms is None:
+            target_settled_ms = (perf_counter() - start) * 1000.0
         current_frame = getattr(win, "_committed_display_frame", None)
         current_presentation_identity = _backend_presentation_identity(win)
         successor_pixels_observed = bool(
@@ -3141,7 +3201,13 @@ def _wait_for_montage_complete(
             (not vispy_tiled or final_drawn)
             and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
         )
-        if fully_visible and requested_grid_visible and physical_drawn and presentation_ready:
+        if (
+            fully_visible
+            and requested_grid_visible
+            and physical_drawn
+            and presentation_ready
+            and target_settled
+        ):
             if (
                 first_visible_levels_state is None
                 and predecessor_semantic_key is not None
@@ -3252,6 +3318,8 @@ def _wait_for_montage_complete(
                 "fully_visible_ms": fully_visible_ms,
                 "presentation_settled_ms": presentation_settled_ms,
                 "presentation_settled": bool(level_state["settled"]),
+                "required_target_settled_ms": target_settled_ms,
+                "required_target_settled": bool(target_settled),
                 "level_revision": int(level_state["revision"]),
                 "stale_level_tiles": int(level_state["stale_tiles"]),
                 "pending_level_tiles": int(level_state["pending_tiles"]),
@@ -3271,6 +3339,7 @@ def _wait_for_montage_complete(
             requested_grid_visible=requested_grid_visible,
             physical_drawn=physical_drawn,
             presentation_ready=presentation_ready,
+            target_settled=target_settled,
             work_in_flight=_montage_work_in_flight(session),
             dirty_payloads=bool(getattr(session, "dirty_payloads", None)),
         )
@@ -5145,7 +5214,14 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
                     _format_ms(record.get("first_visible_tile_ms", record.get("first_display_payload_ms"))),
                     _format_ms(_first_non_none(record, "first_preview_floor_fill_ms", "first_preview_payload_fill_ms")),
                     _format_ms(record.get("first_display_payload_fill_ms", record.get("fully_visible_ms"))),
-                    _format_ms(_first_non_none(record, "draw_after_complete_ms", "fully_visible_ms")),
+                    _format_ms(
+                        _first_non_none(
+                            record,
+                            "required_target_settled_ms",
+                            "draw_after_complete_ms",
+                            "fully_visible_ms",
+                        )
+                    ),
                     _format_ms(record.get("fully_visible_after_first_visible_tile_ms")),
                     _format_ms(record.get("elapsed_ms")),
                     _format_ms(record.get("event_loop_max_gap_ms")),

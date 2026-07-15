@@ -49,6 +49,35 @@ def test_preview_floor_physical_rows_preserve_page_shader_evidence():
     ]
 
 
+def test_verbose_physical_row_preserves_atlas_and_identity_evidence():
+    from arrayscope.tools.profile_montage_workflow import _verbose_physical_row
+
+    identity = ("document", 41, "level", 2)
+    row = _verbose_physical_row(
+        {
+            "physical_page": 3,
+            "physical_slot": 8,
+            "physical_texture_kind": "complex_rg32f",
+            "physical_storage_mode": "complex",
+            "physical_texture_dtype": "float32",
+            "physical_texture_shape": (84, 84, 2),
+            "physical_real_plane_identity": {"pointer": 1234},
+            "physical_imag_plane_identity": {"pointer": 1238},
+            "physical_mapping_mode": 4.0,
+            "physical_component_mode": 2.0,
+            "physical_levels": (0.0, 8.0),
+            "physical_shader_mapping_key": "phase",
+            "physical_acknowledged_identity": identity,
+        }
+    )
+
+    assert row["physical_page"] == 3
+    assert row["physical_slot"] == 8
+    assert row["physical_real_plane_identity"] == {"pointer": 1234}
+    assert row["physical_imag_plane_identity"] == {"pointer": 1238}
+    assert row["physical_acknowledged_identity"] == repr(identity)
+
+
 def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     from arrayscope.tools.profile_montage_workflow import py_spy_command
 
@@ -945,6 +974,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         pending_removals=set(),
         level_generation=level_generation,
         is_complete=lambda: False,
+        required_target_settled=lambda: True,
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: not session.level_presentation_snapshot().settled
@@ -1072,6 +1102,8 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         def vispyPresentationDiagnostics(self):
             return dict(self.diagnostics)
 
+    target_state = {"settled": False}
+
     class FakeApp:
         def __init__(self, image_view):
             self.image_view = image_view
@@ -1083,6 +1115,8 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
             if self.calls >= 2:
                 self.image_view.diagnostics["tile_presentation_draw_count"] = 4
                 self.image_view.diagnostics["tile_presentation_draw_pending"] = False
+            if self.calls >= 3:
+                target_state["settled"] = True
 
     image_view = FakeImageView()
     session = SimpleNamespace(
@@ -1100,6 +1134,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         pending_removals=set(),
         level_generation=PresentationGenerationTracker(),
         is_complete=lambda: True,
+        required_target_settled=lambda: target_state["settled"],
     )
     session.level_presentation_snapshot = lambda: session.level_generation.snapshot()
     session.has_pending_level_update = lambda: False
@@ -1115,11 +1150,12 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         draw_start=0,
     )
 
-    assert app.calls >= 2
+    assert app.calls >= 3
     assert result["active_presented_tile_count"] == 2
     assert result["active_planned_tile_count"] == 2
     assert result["fully_visible_ms"] is not None
     assert result["vispy_tile_presentation_draw_count"] == 4
+    assert result["required_target_settled"] is True
 
 
 def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
@@ -1357,6 +1393,7 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         requested_grid_visible=False,
         physical_drawn=False,
         presentation_ready=False,
+        target_settled=False,
         work_in_flight=False,
         dirty_payloads=False,
     )
@@ -1365,6 +1402,7 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         requested_grid_visible=True,
         physical_drawn=False,
         presentation_ready=True,
+        target_settled=False,
         work_in_flight=True,
         dirty_payloads=False,
     )
@@ -1373,6 +1411,7 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         requested_grid_visible=True,
         physical_drawn=False,
         presentation_ready=True,
+        target_settled=False,
         work_in_flight=False,
         dirty_payloads=True,
     )
@@ -1383,9 +1422,10 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         requested_grid_visible=True,
         physical_drawn=False,
         presentation_ready=False,
+        target_settled=False,
         work_in_flight=False,
         dirty_payloads=False,
-    ) == ("physical_drawn", "presentation_settled")
+    ) == ("physical_drawn", "presentation_settled", "required_target_settled")
 
     # A fully unblocked frame reports nothing (the loop returns success).
     assert not _post_visible_gate_blockers(
@@ -1393,6 +1433,7 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         requested_grid_visible=True,
         physical_drawn=True,
         presentation_ready=True,
+        target_settled=True,
         work_in_flight=False,
         dirty_payloads=False,
     )

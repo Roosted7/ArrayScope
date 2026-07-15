@@ -1076,24 +1076,62 @@ def test_montage_autofit_signature_ignores_layout_only_reflow():
 def test_montage_priority_focus_uses_semantic_hover_focus():
     from types import SimpleNamespace
 
-    from arrayscope.window.frame_controller import _montage_priority_focus
+    from arrayscope.window.montage_viewport import montage_priority_focus
 
-    window = SimpleNamespace(_last_image_hover_focus=(3.5, 4.25))
+    frame = SimpleNamespace(key=("frame", 7))
+    window = SimpleNamespace(
+        _committed_display_frame=frame,
+        _last_image_hover_focus=(3.5, 4.25),
+        _last_image_hover_focus_frame_key=frame.key,
+    )
     window.win = window
 
-    assert _montage_priority_focus(window, ((0.0, 10.0), (0.0, 10.0))) == (3.5, 4.25)
+    assert montage_priority_focus(window, ((0.0, 10.0), (0.0, 10.0))) == (3.5, 4.25)
 
 
 def test_montage_priority_focus_falls_back_to_nearest_center_tile():
     from types import SimpleNamespace
 
-    from arrayscope.window.frame_controller import _montage_priority_focus
+    from arrayscope.window.montage_viewport import montage_priority_focus
 
     plan = _plan_with_columns(3)
     window = SimpleNamespace(_frame_session=SimpleNamespace(plan=plan))
     window.win = window
 
-    assert _montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
+    assert montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
+
+
+def test_montage_priority_focus_ignores_backend_priority_policy():
+    from types import SimpleNamespace
+
+    from arrayscope.window.montage_viewport import montage_priority_focus
+
+    plan = _plan_with_columns(3)
+    backend_controller = SimpleNamespace(priority_focus=lambda _view_range: (19.0, 19.0))
+    window = SimpleNamespace(
+        _frame_session=SimpleNamespace(plan=plan),
+        img_view=SimpleNamespace(viewport_controller=backend_controller),
+    )
+    window.win = window
+
+    assert montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
+
+
+def test_montage_priority_focus_rejects_hover_from_previous_frame():
+    from types import SimpleNamespace
+
+    from arrayscope.window.montage_viewport import montage_priority_focus
+
+    plan = _plan_with_columns(3)
+    window = SimpleNamespace(
+        _committed_display_frame=SimpleNamespace(key=("frame", 8)),
+        _frame_session=SimpleNamespace(plan=plan),
+        _last_image_hover_focus=(19.0, 19.0),
+        _last_image_hover_focus_frame_key=("frame", 7),
+    )
+    window.win = window
+
+    assert montage_priority_focus(window, ((0.0, 20.0), (0.0, 20.0))) == (5.0, 5.0)
 
 
 def test_frame_session_key_excludes_effective_columns():

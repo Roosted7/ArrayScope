@@ -142,3 +142,15 @@ in flight.  That implementation was removed.  The accepted barrier is scoped
 to shared transforms, the path that bypasses the per-tile ladder and produced
 the recorded 100-presented/zero-work stall.  Do not reintroduce a generic
 pipeline barrier without a separate obligation and backend proof.
+
+**[Codex physical-trace update 2026-07-15]** Verbose workflow rows now capture
+physical atlas page/slot, real/imag plane identity, texture storage/dtype/shape,
+mapping/component/levels/shader key, and the physical acknowledged identity.
+Backend identity comparisons use the typed `tile_ack_identity(payload)` rather
+than comparing unrelated source identifiers. This evidence isolated a real
+failure to stale scalar and page-local uniforms while complex plane identities
+remained correct. Fault-shaped tests now prove that levels-only updates cannot
+replay a stale scalar mapping and that touching a stale atlas page repairs its
+local mapping even when the global key is unchanged. This strengthens trace
+diagnosis; it does not replace the still-missing general framebuffer-to-CPU
+oracle.

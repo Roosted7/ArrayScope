@@ -52,6 +52,13 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    pass closes. Recursive viewport continuation and synchronous VisPy draw
    acknowledgement now cross receiver-owned Qt turns; source/level
    convergence reaches the end of both backend workflows.
+10. **[Codex 2026-07-15 — P9 pixel/order update]** Montage priority is owned
+    by current semantic focus plus current layout, never by a backend cache.
+    Ordered presentation commands survive VisPy upload and acknowledgement.
+    Levels-only updates cannot replay stale mapping/component state, and every
+    touched atlas page synchronizes its own physical shader uniforms. The exact
+    60-tile real-display preview floor is coherent and its physical rows report
+    one complex phase mapping with zero identity mismatches.
 
 ## Known open work
 
@@ -92,12 +99,18 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    demand, while shared target work had no plan-wide physical coverage gate.
    The shared path now uses unique required-tile coverage and re-arms from the
    backend acknowledgement edge.  Real PyQtGraph raw and VisPy FFT-full runs
-   converge 272/272 with clean trace replay.  The transient wrong-pixel report
-   remains open because current trace/overlay evidence describes intended
-   identity, not framebuffer truth.  VisPy's initial FFT fill also remains
-   visibly out of order: its atlas path consumes active-grid order instead of
-   the ordered upsert command, and acknowledgement reporting loses order in a
-   set.  Convergence is not priority acceptance.
+   converge 272/272 with clean trace replay. The reported transient wrong
+   pixels and initial FFT order are now closed for the exact real workflow:
+   physical trace rows isolated stale scalar/page uniforms, and current-layout
+   order now reaches upload and acknowledgement. General framebuffer readback
+   remains an oracle gap, and convergence is still not accepted: one hard run
+   stranded 58 target-ready tiles with only 2 target-presented and no work in
+   flight.
+8. **[Codex 2026-07-15 — duplicate key-owner risk]** Scalar montage cache-key
+   derivation and its hoisted batch form remain separate implementations in
+   `evaluator.py`. Runtime byte-parity fallback is intentionally load-bearing
+   and observable as `montage_key_batch_fallbacks`; the next cache-owner slice
+   must consolidate them without weakening that parity regression.
 
 ## Material risks
 
@@ -112,11 +125,12 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    replay and real-display performance evidence.
 3. **Performance work can regress truth.** Every P-step therefore needs
    before/after measurements plus the real-display pixel/trace gates.
-4. **[Codex 2026-07-15 — oracle gap]** The preview-floor harness timestamp
-   still counts presentation events and can fire on an incomplete physical
-   grid.  Backend framebuffer-to-CPU comparison with fault injection is not
-   implemented yet; neither the trace nor tile overlay can close the reported
-   transient shader/atlas corruption on its own.
+4. **[Codex 2026-07-15 — oracle update]** The preview-floor harness now waits
+   for required-target settlement, and verbose trace rows include physical
+   page/slot, plane identities, texture dtype/shape, mapping/component, and
+   typed acknowledgement identity. Those rows isolated the stale VisPy shader
+   state. Backend framebuffer-to-CPU comparison with fault injection is still
+   not implemented, so general pixel acceptance remains a real-display gate.
 
 ## What is working well
 

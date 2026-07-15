@@ -16,6 +16,86 @@ from arrayscope.display.viewport import view_ranges_near
 MIN_VIEW_SPAN = 1e-9
 
 
+def montage_priority_focus(owner, view_range) -> tuple[float, float] | None:
+    """Return the one semantic attention point used by every render path.
+
+    Backends may report pointer mechanics, but they do not own scheduling
+    meaning.  A hover focus is valid only for the current committed frame;
+    otherwise priority starts at the montage tile nearest viewport center.
+    """
+
+    focus = getattr(owner, "_last_image_hover_focus", None)
+    if focus is not None:
+        try:
+            frame = getattr(owner.win, "_committed_display_frame", None)
+            if getattr(owner, "_last_image_hover_focus_frame_key", None) != getattr(
+                frame, "key", None
+            ):
+                raise ValueError("stored hover focus belongs to an older committed frame")
+            x = float(focus[0])
+            y = float(focus[1])
+            x_range, y_range = view_range
+            x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+            y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
+            if x < x0 or x > x1 or y < y0 or y > y1:
+                raise ValueError("stored hover focus is outside the current viewport")
+            return (x, y)
+        except Exception:
+            pass
+    try:
+        plan = getattr(getattr(owner, "_frame_session", None), "plan", None)
+        if plan is not None:
+            focus = _nearest_montage_tile_center(plan, view_range)
+            if focus is not None:
+                return focus
+        return _view_range_center(view_range)
+    except Exception:
+        return None
+
+
+def _view_range_center(view_range) -> tuple[float, float] | None:
+    try:
+        x_range, y_range = view_range
+        return (
+            (float(x_range[0]) + float(x_range[1])) * 0.5,
+            (float(y_range[0]) + float(y_range[1])) * 0.5,
+        )
+    except Exception:
+        return None
+
+
+def _nearest_montage_tile_center(plan, view_range) -> tuple[float, float] | None:
+    center = _view_range_center(view_range)
+    if center is None:
+        return None
+    tiles = getattr(plan, "tiles", ())
+    if not tiles:
+        return None
+    try:
+        tile_height, tile_width = (int(value) for value in plan.tile_shape[:2])
+        gap = max(0, int(plan.gap))
+        columns = max(1, int(plan.columns))
+        rows = max(1, int(plan.rows))
+        count = len(tiles)
+        stride_x = max(1, tile_width + gap)
+        stride_y = max(1, tile_height + gap)
+        col = int(round((float(center[0]) - float(tile_width) * 0.5) / float(stride_x)))
+        row = int(round((float(center[1]) - float(tile_height) * 0.5) / float(stride_y)))
+        row = max(0, min(rows - 1, row))
+        max_col = min(columns - 1, count - row * columns - 1)
+        if max_col < 0:
+            row = max(0, min((count - 1) // columns, rows - 1))
+            max_col = min(columns - 1, count - row * columns - 1)
+        col = max(0, min(max_col, col))
+        tile = tiles[row * columns + col]
+        return (
+            float(tile.x0) + float(tile.width) * 0.5,
+            float(tile.y0) + float(tile.height) * 0.5,
+        )
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class MontageViewportPlan:
     """Stable montage layout plus transient viewport scheduling state."""

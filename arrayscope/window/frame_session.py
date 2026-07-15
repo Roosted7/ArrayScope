@@ -3045,7 +3045,7 @@ class FrameSession:
         # Session mirrors consume the filtered report and never infer acceptance
         # from tile numbers alone.
         active_scope = {int(tile) for tile in tuple(getattr(delta, "active_tiles", ()) or ())}
-        report_accepted = report.accepted_upserts(delta)
+        report_accepted = report.accepted_upserts_in_order(delta)
         machine_accepted = self.lifecycle.commit_acknowledged(
             emitted_tiles=(int(tile) for tile in tuple(delta.upserts)),
             accepted_tiles=report_accepted,
@@ -3058,7 +3058,7 @@ class FrameSession:
             report = replace(report, committed_upserts=frozenset(machine_accepted))
         acknowledged = self.tile_presentation_state.acknowledge_delta(delta, report)
         self.tile_presentation_state = acknowledged
-        accepted_upserts = report.accepted_upserts(delta)
+        accepted_upserts = report.accepted_upserts_in_order(delta)
         # Remember acknowledged payload identities: re-presenting one is a
         # residency remap for the backend, so commit batching may treat it as
         # nearly free instead of charging full texture bytes (ADR 0050 —

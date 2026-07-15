@@ -243,6 +243,12 @@ class TileCommitReport:
             return set(self.committed_upserts.intersection(delta.upserts))
         return set(self.presented_tiles.intersection(delta.upserts))
 
+    def accepted_upserts_in_order(self, delta: "TilePresentationDelta") -> tuple[int, ...]:
+        """Accepted membership in the producer's presentation order."""
+
+        accepted = self.accepted_upserts(delta)
+        return tuple(int(tile) for tile in delta.upserts if int(tile) in accepted)
+
 
 @dataclass(frozen=True)
 class TilePresentationDelta:

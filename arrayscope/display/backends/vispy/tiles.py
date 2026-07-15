@@ -617,11 +617,24 @@ class TextureAtlasPool:
             for key, value in dict(getattr(tile_delta, "upserts", {}) or {}).items()
         }
         raw_active_tiles = None if tile_delta is None else getattr(tile_delta, "active_tiles", None)
-        active_tiles = (
-            tuple(int(tile) for tile in tuple(raw_active_tiles))
-            if raw_active_tiles is not None
-            else tuple(sorted(payload_map))
-        )
+        if raw_active_tiles is None:
+            declared_active = tuple(sorted(payload_map))
+            active_tiles = declared_active
+        else:
+            declared_active = tuple(int(tile) for tile in tuple(raw_active_tiles))
+            active_set = set(declared_active)
+            # ``upserts`` is an ordered presentation command produced by the
+            # canonical admission queue.  Active scope is membership only;
+            # iterating it first silently replaced center-out priority with
+            # montage-index order immediately before physical texture work.
+            active_tiles = tuple(
+                dict.fromkeys(
+                    (
+                        *(tile for tile in explicit_upserts if tile in active_set),
+                        *declared_active,
+                    )
+                )
+            )
         active_set = set(active_tiles)
         target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
         removed_tiles = {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())}
@@ -915,6 +928,9 @@ class TextureAtlasPool:
         self.lod_level_swaps_zero_upload += level_swaps_zero_upload
         self.lod_level_swaps_with_upload += level_swaps_with_upload
         uvs = self.tile_uvs
+        reported_presented_tiles = tuple(
+            tile for tile in declared_active if int(tile) in presented_set
+        )
         # Mipmap regens run at draw time (visual-side); stats report the
         # regens completed since the previous update, one commit behind.
         mipmap_updates_total = sum(int(getattr(page, "mipmap_updates", 0) or 0) for page in self.pages)
@@ -923,12 +939,12 @@ class TextureAtlasPool:
         mipmap_available = any(bool(getattr(page, "mipmap_ready", False)) for page in self.pages)
         elapsed = (perf_counter() - start) * 1000.0 if updated or rebuilt else 0.0
         return uvs, TileLayerUpdateStats(
-            visible_items=len(presented_tiles),
-            presented_tiles=presented_tiles,
+            visible_items=len(reported_presented_tiles),
+            presented_tiles=reported_presented_tiles,
             presented_identities=self.presented_identities(),
             committed_upserts=tuple(
                 int(tile)
-                for tile in sorted(explicit_upserts)
+                for tile in explicit_upserts
                 if int(tile) in presented_set
             ),
             resident_items=self.resident_count,
@@ -1507,7 +1523,11 @@ class GpuMontageLayer:
         levels = _normalize_levels(levels, self._levels)
         mapping_key = _mapping_identity_key(shader_mapping)
         layout_key = _layout_geometry_key(layout)
-        explicit_upserts = tuple(sorted(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})))
+        # Mapping order is the admission order.  Backends own storage, never
+        # presentation priority, so this must not be sorted by tile number.
+        explicit_upserts = tuple(
+            int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})
+        )
         removals = tuple(int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ()))
         raw_active_tiles = getattr(tile_delta, "active_tiles", None) if tile_delta is not None else None
         active_tiles = (
@@ -1646,10 +1666,15 @@ class GpuMontageLayer:
                 set_mipmap_page(page)
                 self._page_mipmap_pages[page_index] = page
                 changed_pages.add(int(page_index))
-            if mapping_changed:
-                if bool(visual.set_shader_mapping(shader_mapping)):
-                    mapping_updates += 1
-                    changed_pages.add(int(page_index))
+            # The layer-level key is only a desired-state cache; each atlas
+            # page owns a separate visual/uniform set. A page can retain an
+            # older mapping while hidden and later re-enter through a payload
+            # or geometry update even though the desired key itself did not
+            # change. Synchronize every touched page and let the page-local
+            # setter keep the common case a no-op.
+            if bool(visual.set_shader_mapping(shader_mapping)):
+                mapping_updates += 1
+                changed_pages.add(int(page_index))
             visible = page_index in active_pages
             if visible != self._page_visibility[page_index] or bool(getattr(visual, "visible", False)) != visible:
                 visual.visible = visible

@@ -21,7 +21,7 @@ from arrayscope.display.model.frame import TiledValueSource, display_tile_payloa
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.display.model.presentation_generation import levels_match
 from arrayscope.display.model.tile_identity import tile_ack_identity
-from arrayscope.display.model.tile_priority import prioritize_tiles
+from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import reduce_box_mean
@@ -979,7 +979,10 @@ class FramePipelineEffects:
                 return
             desired = int(getattr(demand, "desired_level", 0) or 0)
             quality = "exact" if int(level) <= desired else "preview"
-            pending_rows = list(tuple(rows))
+            pending_rows = {
+                int(row[0]): row
+                for row in tuple(rows)
+            }
 
             def admit_next() -> None:
                 if not self._session_is_current():
@@ -990,8 +993,29 @@ class FramePipelineEffects:
                         semantic_key=semantic_key,
                     )
                     return
-                batch = tuple(pending_rows[:8])
-                del pending_rows[: len(batch)]
+                # Shared-transform pixels are independent of montage layout,
+                # but their presentation order is not.  The window may have
+                # settled from (for example) 24 to 22 columns while the one
+                # whole-volume job was running.  Re-rank every bounded
+                # fan-out slice from the session's current canonical context;
+                # retaining the submission-time row order visibly filled two
+                # remote regions of the successor grid.
+                ordered_rows = _prioritize_shared_preview_rows(
+                    session,
+                    tuple(pending_rows.values()),
+                )
+                batch = tuple(ordered_rows[:8])
+                for row in batch:
+                    pending_rows.pop(int(row[0]), None)
+                context = session.tile_priority_context()
+                emit_trace(
+                    "shared_fanout_batch",
+                    level=int(level),
+                    quality=quality,
+                    columns=int(getattr(getattr(session, "plan", None), "columns", 0) or 0),
+                    focus=getattr(context, "focus", None),
+                    tiles=tuple(int(row[0]) for row in batch),
+                )
                 admitted = bool(
                     batch
                     and self._admit_reduced_display_payload(
@@ -2603,6 +2627,21 @@ def _shared_transform_marker(session, *, demand, level: int, tiles, shader_displ
         bool(shader_display),
         tile_identity,
     )
+
+
+def _prioritize_shared_preview_rows(session, rows) -> tuple:
+    """Project current session priority onto materialized shared rows."""
+
+    rows_by_tile = {
+        int(row[0]): row
+        for row in tuple(rows or ())
+    }
+    ordered = prioritize_tile_numbers(
+        tuple(rows_by_tile),
+        plan_tiles=tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()),
+        context=session.tile_priority_context(),
+    )
+    return tuple(rows_by_tile[int(tile)] for tile in ordered if int(tile) in rows_by_tile)
 
 
 def _commit_report_accepts_new_preview(session, report, tile_delta, tile_state) -> bool:

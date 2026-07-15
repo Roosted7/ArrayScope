@@ -717,6 +717,49 @@ def test_vispy_gpu_mapped_complex_level_change_updates_uniform_without_texture_u
         view.close()
 
 
+def test_vispy_complex_level_preview_cannot_replay_stale_scalar_mapping(qt_app):
+    from arrayscope.core.view_state import ChannelMode, ViewState
+    from arrayscope.display.shader_mapping import ShaderMapping
+    from arrayscope.display.slice_engine import make_shader_image_from_slab
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    class Request:
+        def __init__(self, view_state):
+            self.view_state = view_state
+            self.ranged_axes = ()
+
+    data = (np.arange(16, dtype=np.float32).reshape(4, 4) + 1j).astype(np.complex64)
+    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX)
+    display = make_shader_image_from_slab(data, Request(state))
+    view = VisPyImageView2D()
+    try:
+        _present_vispy_tiled(
+            view,
+            display.data,
+            histogramData=display.histogram_data,
+            levels=(0.0, 16.0),
+            histogramRange=(0.0, 16.0),
+            shader_mapping=display.shader_mapping,
+            texture_kind=display.texture_kind,
+            semantic_data=display.semantic_data,
+        )
+        visual = view._vispy_gpu_montage_layer._visuals_by_page[0]
+        expected_mapping_key = visual._shader_mapping_key
+        assert visual._component_mode == 2.0
+
+        # Model the stale cache observed in the real scalar -> FFT -> scroll
+        # workflow. A levels-only update must not replay this unrelated state.
+        view._last_vispy_tiled_shader_mapping = ShaderMapping()
+        view._apply_histogram_preview_levels((2.0, 8.0))
+
+        assert visual._shader_mapping_key == expected_mapping_key
+        assert visual._component_mode == 2.0
+        assert visual._levels == (2.0, 8.0)
+        assert view._vispy_gpu_montage_layer.last_stats.texture_uploads == 0
+    finally:
+        view.close()
+
+
 def test_gpu_mapped_visual_shader_supports_raw_complex_components():
     from arrayscope.display.backends.vispy.gpu_mapped_visual import GpuMappedImageVisual
 
