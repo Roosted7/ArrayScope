@@ -86,6 +86,18 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    described complex float32 payloads. The defect may predate P9. Physical
    atlas/page identity, retarget rebinding, and backend-specific pixel tests
    are the current blocker before more performance work.
+7. **[Codex 2026-07-15 — P9 shared-transform update]** The session-25
+   100-presented/zero-work stall was a producer hole, not proof of atlas
+   corruption: a finer acknowledged preview was excluded after coarsened
+   demand, while shared target work had no plan-wide physical coverage gate.
+   The shared path now uses unique required-tile coverage and re-arms from the
+   backend acknowledgement edge.  Real PyQtGraph raw and VisPy FFT-full runs
+   converge 272/272 with clean trace replay.  The transient wrong-pixel report
+   remains open because current trace/overlay evidence describes intended
+   identity, not framebuffer truth.  VisPy's initial FFT fill also remains
+   visibly out of order: its atlas path consumes active-grid order instead of
+   the ordered upsert command, and acknowledgement reporting loses order in a
+   set.  Convergence is not priority acceptance.
 
 ## Material risks
 
@@ -100,6 +112,11 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    replay and real-display performance evidence.
 3. **Performance work can regress truth.** Every P-step therefore needs
    before/after measurements plus the real-display pixel/trace gates.
+4. **[Codex 2026-07-15 — oracle gap]** The preview-floor harness timestamp
+   still counts presentation events and can fire on an incomplete physical
+   grid.  Backend framebuffer-to-CPU comparison with fault injection is not
+   implemented yet; neither the trace nor tile overlay can close the reported
+   transient shader/atlas corruption on its own.
 
 ## What is working well
 

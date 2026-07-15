@@ -684,6 +684,11 @@ class FrameSession:
     def required_target_settled(self) -> bool:
         return not self.required_target_unsettled_tiles()
 
+    def required_first_pixels_presented(self) -> bool:
+        """Whether the unique current required scope has physical coverage."""
+
+        return self.lifecycle.first_pixels_presented(self.required_tile_numbers())
+
     def note_first_pass_quality(self, quality: str) -> bool:
         """Latch the one display quality allowed to contribute rough evidence."""
 

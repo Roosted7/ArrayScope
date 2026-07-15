@@ -102,6 +102,20 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > correctness-first physical identity rebinding plus center-out/preview-order
 > proof on both backend cache implementations; no further scheduler tuning is
 > allowed until that gate is clean.
+>
+> **[Codex 2026-07-15 — P9 shared-transform checkpoint]** The zero-work
+> session-25 stall is closed at the shared-transform owner: retained finer
+> previews remain producers after a coarsening retarget, and target work waits
+> for unique required-tile physical coverage.  Real PyQtGraph raw and VisPy
+> FFT-full each converge 272/272 with clean trace replay, but performance gates
+> remain red and the trace cannot certify the user's transient wrong pixels.
+> The next single slice is the backend order boundary, not scheduler tuning:
+> VisPy currently receives ordered upserts but uploads by numeric active-grid
+> order, while the acknowledgement report setifies them.  Preserve command
+> order through physical work and its trace first; then replace the harness
+> event count with required-identity coverage and add framebuffer comparison
+> plus an injected wrong-uniform/page test before any further P9 throughput
+> experiment.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining

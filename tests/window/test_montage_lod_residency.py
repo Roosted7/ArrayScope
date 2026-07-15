@@ -3917,7 +3917,7 @@ def test_shared_target_waits_for_presented_preview_before_higher_quality():
     assert render_effects.shared_transform_target_level(session, demand) == desired
 
 
-def test_shared_target_upgrade_does_not_wait_for_unrelated_blank_tiles():
+def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
     session = _session(count=3, pyramid=PyramidCache(max_bytes=1 << 20))
     session.lod_preview_level = 4
     session.rendered_tiles.clear()
@@ -3961,6 +3961,98 @@ def test_shared_target_upgrade_does_not_wait_for_unrelated_blank_tiles():
 
     assert [int(tile.montage_index) for tile in preview_tiles] == [1, 2]
     assert [int(tile.montage_index) for tile in target_tiles] == [0]
+
+    session.shader_display = True
+    session.first_pass_quality = "preview"
+    session.first_pass_histogram_published = False
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    assert effects.shared_first_pass_barrier_pending(None)
+
+    for tile in session.plan.tiles[1:]:
+        source_id = session.tile_semantic_source_id(tile.source_index)
+        payload = replace(
+            preview,
+            tile_number=tile.montage_index,
+            source_index=tile.source_index,
+            source_id=source_id,
+        )
+        session.display_tile_payloads[int(tile.montage_index)] = payload
+        session.tile_presentation_state.payloads[int(tile.montage_index)] = payload
+    session.lifecycle.backend_presented_snapshot(
+        {
+            int(tile.montage_index): session.tile_semantic_source_id(tile.source_index)
+            for tile in session.plan.tiles
+        }
+    )
+    session.lifecycle.presentation_confirmed(tuple(range(3)))
+    assert effects.shared_first_pass_barrier_pending(None)
+
+    session.first_pass_histogram_published = True
+    assert not effects.shared_first_pass_barrier_pending(None)
+
+
+def test_shared_first_pass_barrier_uses_required_scope_not_retained_active_rows():
+    session = _session(count=3, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.shader_display = False
+    session.visible_tile_numbers = frozenset((0, 1))
+    for tile in session.plan.tiles[:2]:
+        source_id = session.tile_semantic_source_id(tile.source_index)
+        payload = DisplayTilePayload(
+            int(tile.montage_index),
+            int(tile.source_index),
+            np.ones((8, 8), dtype=np.float32),
+            None,
+            source_id,
+            lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(8, 8)),
+            quality="preview",
+        )
+        session.display_tile_payloads[int(tile.montage_index)] = payload
+        session.tile_presentation_state.payloads[int(tile.montage_index)] = payload
+    session.lifecycle.backend_presented_snapshot(
+        {
+            int(tile.montage_index): session.tile_semantic_source_id(tile.source_index)
+            for tile in session.plan.tiles[:2]
+        }
+    )
+    session.lifecycle.presentation_confirmed((0, 1))
+
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+
+    assert session.required_first_pixels_presented()
+    assert not session.visible_first_pixels_presented()
+    assert not effects.shared_first_pass_barrier_pending(None)
+
+
+def test_finer_presented_preview_remains_shared_target_candidate_after_zoom_out():
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    preview = DisplayTilePayload(
+        0,
+        0,
+        np.ones((8, 8), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=1, factor=2, source_shape=(TILE, TILE), texture_shape=(8, 8)),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = preview
+    session.tile_presentation_state.payloads[0] = preview
+    session.lifecycle.backend_presented_snapshot({0: source_id})
+    session.lifecycle.presentation_confirmed((0,))
+
+    candidates = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=2,
+            include_missing=False,
+            require_presented_preview=True,
+        )
+    )
+
+    assert candidates == (tile,)
 
 
 def test_shared_transform_kernel_key_uses_full_semantic_marker():

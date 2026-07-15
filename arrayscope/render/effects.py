@@ -742,7 +742,10 @@ def shared_transform_candidate_tiles(
     the cheap shared preview even while finer work is also possible elsewhere.
     ``require_presented_preview`` is the quality path: only upgrade tiles whose
     current preview is acknowledged on screen, so finer shared work cannot race
-    ahead of the first visible fill and leave black/pending slots behind.
+    ahead of the first visible fill and leave black/pending slots behind.  The
+    caller owns the plan-wide barrier; once it opens every acknowledged preview
+    remains a target candidate, including a retained preview finer than a newly
+    coarsened demand.  Quality is a semantic target fact, not just an LOD number.
     """
 
     target_level = int(level)
@@ -757,9 +760,7 @@ def shared_transform_candidate_tiles(
             payload = presented_preview_payload(session, tile_number)
             if payload is None:
                 continue
-            payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-            if payload_level > target_level:
-                yield candidate
+            yield candidate
             continue
         payload = getattr(session, "display_tile_payloads", {}).get(tile_number)
         if payload is None:

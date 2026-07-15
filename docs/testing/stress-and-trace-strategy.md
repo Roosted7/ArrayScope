@@ -90,3 +90,55 @@ only at ring 4.
   green by fixing those, never by loosening it.
 - **Real-display evidence is manual and Linux-only.** The rings above cannot
   claim pixels; keep ring 4 mandatory for acceptance.
+
+## Addendum (2026-07-15, review laws corrected by live validation)
+
+**[Codex correction 2026-07-15]** The review identified real oracle gaps, but
+its prescriptions are requirements, not evidence that those oracles already
+exist.  In particular, the tile overlay and trace remain intent/identity
+oracles; real framebuffer-to-CPU comparison is still missing.  The required
+coverage set is `FrameSession.required_tile_numbers()`, not every active
+lifecycle row: retained or near-viewport residency may legitimately be wider
+than the current viewport obligation.
+
+Three failure laws that session proved, now binding for oracle design:
+
+1. **A count is not coverage.** The preview-floor trigger counted 272
+   presentation *events* while only 158/272 unique tiles were physically
+   present. This is the third appearance of the same bug class (R8 visible
+   predicates, the harness floor counter, the P8 barrier). Any "complete"
+   predicate must cover the set of unique current required identities, never
+   an event counter or the wider active cache population — and its test must
+   include repeats, replacements, and retained active rows outside the scope.
+2. **Intent is not pixels.** The tile truth overlay and the trace both
+   report upload-intent (CPU-side identity, intended uniforms). A frame can
+   be visibly wrong while every label is truthful. Scenarios that accept a
+   frame must include framebuffer readback compared against a CPU-rendered
+   reference (generalize `assert_tile_identity_ramp` into
+   `assert_tile_matches_cpu_reference`), and each oracle needs a
+   fault-injection audit: deliberately break one uniform/mapping and assert
+   the oracle catches it. This is a required next testing slice, not a gate
+   satisfied by the current harness. An oracle that has never failed on an
+   injected fault is unproven.
+3. **Small fixtures skip regimes.** `preview_level = max(base, desired)`
+   means 64×64 fixtures never enter the two-stage preview path that 336×336
+   data exercises; a green 6×6 harness said nothing about the 272-tile
+   failure. Parametrize scenarios by *regime* (preview vs native-only,
+   shared-stage vs per-tile, reduced vs exact) and assert the regime was
+   actually entered — a scenario that silently ran in the wrong regime must
+   fail, not pass.
+
+And one workflow rule: **manual observation must become replayable
+evidence.** Run manual sessions with the trace on and periodic screenshots
+(flight-recorder mode; the ring buffer + stall dumps already exist); a
+human marks a timestamp when something looks wrong instead of describing
+it. The human is the rarest oracle — spend them on glancing and marking,
+never on hours of monitoring.
+
+**[Codex rejected generalization 2026-07-15]** Applying the physical preview
+barrier to every `FramePipeline` quality rung passed the focused suite and the
+VisPy workflow, but stranded 45/272 ordinary PyQtGraph raw tiles with no work
+in flight.  That implementation was removed.  The accepted barrier is scoped
+to shared transforms, the path that bypasses the per-tile ladder and produced
+the recorded 100-presented/zero-work stall.  Do not reintroduce a generic
+pipeline barrier without a separate obligation and backend proof.

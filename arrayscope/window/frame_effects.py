@@ -313,6 +313,27 @@ class FramePipelineEffects:
             return tuple(replace(state, allow_preview=False) for state in states)
         return states
 
+    def shared_first_pass_barrier_pending(self, scope: LodAdmissionScope | None) -> bool:
+        """Hold shared quality work behind acknowledged first-pass pixels.
+
+        Shared transforms sit outside ``FramePipeline`` because one evaluation
+        fans out to every tile.  Their planned/admitted rows therefore cannot
+        prove physical coverage; only the canonical lifecycle can open the
+        target pass.  Shader backends additionally wait for the first-pass
+        levels which give those pixels their intended meaning.
+        """
+
+        if not self._session_is_current():
+            return False
+        session = self.session
+        if not bool(session.required_first_pixels_presented()):
+            return True
+        return bool(
+            getattr(session, "shader_display", False)
+            and getattr(session, "first_pass_quality", None) == "preview"
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        )
+
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
         if tile is None or not self._session_is_current(intent):
@@ -862,7 +883,17 @@ class FramePipelineEffects:
                 priority=Priority.INTERACTIVE,
                 lane=WorkLane.DISPLAY_PREVIEW,
             )
-            if desired > 0:
+            # Materialized/admitted preview rows are not a completed first
+            # pass.  Wait until every required row is backend-acknowledged
+            # (and shader levels are published) before admitting the shared
+            # target.  The former per-tile candidate gate let the center
+            # refine while the outer preview was still black, then stranded
+            # retained finer fallbacks after a scroll/LOD retarget.
+            if (
+                desired > 0
+                and not preview_tiles
+                and not self.shared_first_pass_barrier_pending(scope)
+            ):
                 target_tiles = tuple(
                     render_effects.shared_transform_candidate_tiles(
                         session,
@@ -2099,7 +2130,7 @@ class FramePipelineEffects:
         acknowledge_start = perf_counter()
         committed_levels = normalize_bounds(renderer.win.img_view.getLevels())
         presented_before = set(session.lifecycle.presented_tiles)
-        first_pixels_before = bool(session.visible_first_pixels_presented())
+        first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         _call(renderer, "_refresh_tile_truth_overlay")
@@ -2113,7 +2144,7 @@ class FramePipelineEffects:
         presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
         session.mark_presented(presented_tiles)
         presented_after = set(session.lifecycle.presented_tiles)
-        first_pixels_presented = bool(session.visible_first_pixels_presented())
+        first_pixels_presented = bool(session.required_first_pixels_presented())
         first_pixel_transition = bool(
             first_pixels_presented and not first_pixels_before
         )
@@ -2189,6 +2220,11 @@ class FramePipelineEffects:
             reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
             if callable(reconcile_quotas):
                 reconcile_quotas(refresh_telemetry=False)
+        if first_pixel_transition:
+            # Physical first-pass closure is a planning edge.  No worker
+            # completion follows the backend acknowledgement, so the quality
+            # barrier needs an explicit receiver-owned replan wakeup.
+            renderer.request_montage_replan(session)
         if session.visible_plan_complete():
             session.source_window_changed_pending = False
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())

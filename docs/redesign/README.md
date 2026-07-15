@@ -610,6 +610,46 @@ acceptance.
 > in the linear branch history; broken pixels and center-out/preview ordering
 > remain ahead of trace calibration and further throughput experiments.
 
+> **[Codex 2026-07-15 — P9 shared-transform coverage slice]** The user's
+> session-25 stall signature `(25, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0)` was not
+> an atlas failure: its dump had 100 presented rows, 22 required exact targets
+> unsettled, and no producer.  After a coarsening retarget, those rows retained
+> acknowledged level-1 preview payloads while the target became level 2; the
+> shared-transform candidate selector rejected the finer retained preview and
+> therefore admitted neither preview nor target work.  A retained acknowledged
+> preview is now always a shared-target candidate.  Shared target admission
+> opens only after physical coverage of the unique
+> `required_tile_numbers()` set (plus first-pass shader evidence), and the
+> acknowledgement transition explicitly requests the otherwise-missing
+> replan.
+>
+> The focused lifecycle/render/session slice is **283 passed**.  Real Wayland
+> PyQtGraph raw again converges **272/272** and `trace_verify` is clean; its
+> acknowledgement order is center-out.  Real Wayland VisPy FFT full also
+> converges **272/272**, with clean trace replay and coherent final pixels in
+> the captured screenshot.  Its harness “preview floor” screenshot still
+> contains holes because that timestamp is driven by the cumulative
+> `lod_preview_presentations` event count.  This is evidence that the harness
+> oracle is wrong, not evidence that the physical barrier opened early; the
+> next bounded slice must replace that counter with required-identity coverage
+> and add a backend framebuffer reference oracle.  No performance credit is
+> claimed: PyQtGraph raw still fails callback/continuity gates and VisPy FFT
+> full took **20,310 ms** with a **726 ms** event-loop maximum.
+> **This does not accept VisPy priority order:** live observation still shows
+> a non-center-out initial FFT fill.  The trace revealed that the canonical
+> shared-preview order reaches the presentation delta, then VisPy iterates the
+> numeric active grid while uploading and its report converts acknowledgements
+> to a set.  Physical order and the order oracle are therefore both erased
+> after admission; that backend-boundary defect is the immediate next slice.
+>
+> **[Codex 2026-07-15 — rejected broad-barrier recurrence note]** A first
+> attempt generalized the physical barrier to every per-tile pipeline rung.
+> It passed 419 focused/offscreen tests and the VisPy run, then stranded
+> 45/272 ordinary PyQtGraph raw tiles with zero work in flight.  The generic
+> protocol/latch/test edits were removed.  Do not infer that shared-transform
+> phasing is a universal pipeline gate; the accepted change owns only the
+> shared path that bypasses `FramePipeline`.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

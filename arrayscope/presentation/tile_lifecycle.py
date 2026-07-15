@@ -608,6 +608,24 @@ class TileLifecycle:
         rows = tuple(rec for rec in self._records.values() if rec.active)
         return bool(not rows or all(_record_first_pixel_presented(rec) for rec in rows))
 
+    def first_pixels_presented(self, tile_numbers) -> bool:
+        """Return whether every tile in one required scope has a first pixel.
+
+        Active lifecycle rows may include retained or near-viewport residency.
+        Callers that own a narrower semantic obligation must name that set;
+        completion is coverage of those unique identities, never an event
+        count or an assertion about the wider active cache population.
+        """
+
+        required = tuple(dict.fromkeys(int(tile) for tile in tuple(tile_numbers or ())))
+        if not required:
+            return True
+        return all(
+            (record := self._records.get(tile_number)) is not None
+            and _record_first_pixel_presented(record)
+            for tile_number in required
+        )
+
     def visible_target_settled(self) -> bool:
         rows = tuple(rec for rec in self._records.values() if rec.active)
         return bool(not rows or all(_record_target_settled(rec) for rec in rows))

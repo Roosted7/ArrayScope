@@ -105,6 +105,15 @@ def test_first_pass_physical_completion_uses_required_tiles():
     assert session.first_pass_pixels_presented()
 
 
+def test_required_first_pixels_ignore_retained_active_rows_outside_viewport():
+    session = _session()
+    session.visible_tile_numbers = frozenset({0, 1})
+    _present_exact_tiles(session, 0, 1)
+
+    assert session.required_first_pixels_presented()
+    assert not session.visible_first_pixels_presented()
+
+
 def test_preview_first_pass_accepts_compatible_exact_overlap():
     """Exact retained sources are better first-pass pixels, not blockers."""
 
