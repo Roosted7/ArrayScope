@@ -3,6 +3,10 @@
 Proposals describe a concrete design that has not yet become an accepted architecture decision or active roadmap commitment.
 
 - [Axis information](axis-info.md): names, units, coordinates, spacing, and orientation. A first internal `AxisInfo` model exists, but broad IO/UI propagation remains incremental work.
+- [Tensor exploration engine — endpoint architecture](tensor-engine-endpoint.md): the
+  deadline-driven engine the G-program converges toward — resource-broker-as-kernel-evolution,
+  operation classes, frame-quality controller, precision tiers, adaptive compression,
+  renderer-protocol strategy. Direction record; the G-plan stays the executable program.
 - [GPU engine implementation plan (G-program)](gpu-engine-plan.md): staged route from the
   [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md) three-way
   view-tile/data-chunk/residency-page separation to a virtual, streamed, optionally

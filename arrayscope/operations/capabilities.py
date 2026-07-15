@@ -14,6 +14,27 @@ class OperationKind(Enum):
     RESHAPE = "reshape"
 
 
+class OperationClass(Enum):
+    """Execution class of an operation (tensor-engine endpoint proposal).
+
+    The class states what an operation *is*, so backends can decide where it
+    runs: coordinate metadata never materializes an array (a flip is an index
+    map), shader-on-read work happens at sampling time, derived-chunk compute
+    produces content-keyed chunks, reductions return small results, global
+    transforms are cost-model territory (CPU vs GPU), and opaque operations
+    always CPU-materialize. Nothing maps to DERIVED_CHUNK_COMPUTE yet — it
+    exists so LOD/smoothing kernels land in a named class, not a special
+    case.
+    """
+
+    COORDINATE_METADATA = "coordinate_metadata"
+    SHADER_ON_READ = "shader_on_read"
+    DERIVED_CHUNK_COMPUTE = "derived_chunk_compute"
+    REDUCTION = "reduction"
+    GLOBAL_TRANSFORM = "global_transform"
+    OPAQUE = "opaque"
+
+
 @dataclass(frozen=True)
 class OperationCapabilities:
     kind: OperationKind
@@ -168,6 +189,39 @@ def pipeline_windowable_display_axes(operations, base_shape, base_dtype=None, *,
         if callable(output_dtype):
             dtype = output_dtype(dtype)
     return tuple(candidates)
+
+
+def operation_execution_class(operation, base_shape, base_dtype=None) -> OperationClass:
+    """Execution class of one operation, derived from its capability kind.
+
+    Conservative by construction: anything without a capability declaration
+    is OPAQUE (CPU materialization). VIEW and RESHAPE steps are coordinate
+    metadata — they move or relabel samples without arithmetic, so a backend
+    may express them as index transforms instead of copies. ELEMENTWISE steps
+    are shader-on-read candidates; whether a given backend actually fuses
+    them stays a backend decision — the class only rules out *needing*
+    materialization. Only the declared kind is consulted (reshape steps
+    legitimately declare output-ndim axes, so full normalization against the
+    input shape is not applicable here).
+    """
+
+    capabilities = getattr(operation, "capabilities", None)
+    if not callable(capabilities):
+        return OperationClass.OPAQUE
+    try:
+        declared = capabilities(tuple(int(size) for size in base_shape), base_dtype)
+        kind = _normalize_kind(declared.kind)
+    except Exception:
+        return OperationClass.OPAQUE
+    if kind in (OperationKind.VIEW, OperationKind.RESHAPE):
+        return OperationClass.COORDINATE_METADATA
+    if kind is OperationKind.ELEMENTWISE:
+        return OperationClass.SHADER_ON_READ
+    if kind is OperationKind.REDUCTION:
+        return OperationClass.REDUCTION
+    if kind is OperationKind.TRANSFORM:
+        return OperationClass.GLOBAL_TRANSFORM
+    return OperationClass.OPAQUE
 
 
 def _normalize_kind(kind) -> OperationKind:
