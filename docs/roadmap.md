@@ -132,6 +132,17 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > scalar and batch montage cache-key derivation is tracked separately; its
 > runtime parity fallback must remain until one canonical key owner replaces
 > both implementations.
+>
+> **[Codex 2026-07-15 — P9 level-truth/admission checkpoint]** A real trace
+> proved the last settlement hole was a VisPy cache/physical-level split, not
+> repeated FFT evaluation: exactly one full-volume shared FFT stage was
+> submitted. Tiled commits now reassert levels when either public or physical
+> layer state disagrees with the command, even if the completed-command cache
+> matches. After this fix, the formerly rejected four-item minimum cohort no
+> longer livelocks and cuts real FFT refinement from 42.36 s to 8.39 s; trace
+> replay is clean. P9 remains active because the scripted scroll is 13.55 s,
+> continuity and heartbeat are red, and each source-window step still pays
+> for roughly seventeen bounded presentation transactions.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining

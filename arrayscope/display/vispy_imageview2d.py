@@ -646,7 +646,24 @@ class VisPyImageView2D(ImageViewShell):
             previous_histogram_key = getattr(self, "_last_vispy_tiled_histogram_key", None)
             previous_viewport_key = getattr(self, "_last_vispy_frame_viewport_key", None)
             structure_changed = structure_key != previous_structure_key
-            levels_changed = level_key != previous_levels_key
+            # The completed-transaction cache is an optimization hint, not
+            # physical truth. A programmatic/histogram level update can move
+            # both the public display state and the page uniforms between two
+            # tiled commits without rewriting this cache. Comparing only the
+            # cache then lets the next canonical presentation skip its level
+            # command and acknowledge a different physical window. Always
+            # include the current display and layer states in the no-op test.
+            display_level_key = _normalize_levels(self.getLevels(), level_key)
+            layer = getattr(self, "_vispy_gpu_montage_layer", None)
+            layer_level_key = _normalize_levels(
+                getattr(layer, "_levels", None),
+                level_key,
+            )
+            display_levels_changed = level_key != display_level_key
+            levels_changed = bool(
+                level_key != previous_levels_key
+                or level_key != layer_level_key
+            )
             mapping_changed = mapping_key != previous_mapping_key
             loading_only = _is_tiled_loading_only_commit(
                 montage_tile_payloads,
@@ -785,7 +802,7 @@ class VisPyImageView2D(ImageViewShell):
                     level_key,
                     histogramRange=histogramRange,
                 )
-            if levels_changed and not loading_only:
+            if (levels_changed or display_levels_changed) and not loading_only:
                 self._set_vispy_display_levels(level_key)
                 if not histogram_changed:
                     self._request_histogram_for_vispy(

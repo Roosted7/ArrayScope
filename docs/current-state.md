@@ -59,6 +59,13 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
     touched atlas page synchronizes its own physical shader uniforms. The exact
     60-tile real-display preview floor is coherent and its physical rows report
     one complex phase mapping with zero identity mismatches.
+11. **[Codex 2026-07-15 — P9 level/admission update]** VisPy tiled no-op
+    detection now consults public and physical layer levels as well as its
+    completed-command cache, so an intervening automatic level update cannot
+    make a later tiled command acknowledge stale physical uniforms. With that
+    correctness blocker removed, the persistent four-item minimum cohort is
+    safe under the byte cap and amortizes fixed transaction cost. The real
+    FFT trace submits one shared full-volume transform, not one FFT per tile.
 
 ## Known open work
 
@@ -70,7 +77,8 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    deleted-owner assertions and the real coalescer/levels/viewport/ROI/
    cache-rebind/transition regressions from the pre-integration run have been
    repaired or migrated to canonical owners. The final parallel non-GPU run
-   is **1,955 passed, 8 skipped**. Real-display GPU checks remain a separate
+   is **1,973 passed, 13 skipped** after the P9 level/admission checkpoint.
+   Real-display GPU checks remain a separate
    mandatory gate and are not implied by that number.
 3. Hardware evidence remains Linux-only; the histogram adapter remains
    sensitive to private PyQtGraph API.
@@ -111,6 +119,13 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    `evaluator.py`. Runtime byte-parity fallback is intentionally load-bearing
    and observable as `montage_key_batch_fallbacks`; the next cache-owner slice
    must consolidate them without weakening that parity regression.
+9. **[Codex 2026-07-15 — P9 performance remains open]** The accepted level-
+   truth plus four-item admission slice cuts the real VisPy FFT refinement to
+   8.39 s and scripted scroll to 13.55 s, with clean trace replay and no
+   acknowledgement-churn violation. It still fails presentation continuity,
+   the 16 ms heartbeat, and the 50 ms callback gate. Each scroll step still
+   drains about 60 remaps through roughly seventeen commits; this is the next
+   measured P9 surface, not permission to widen timeouts or hide continuity.
 
 ## Material risks
 

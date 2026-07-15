@@ -1436,7 +1436,7 @@ def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
     assert limits["max_upsert_bytes"] == 1024 * 1024
 
 
-def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_batch_limit():
+def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transaction_cost():
     from arrayscope.window import frame_effects as montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
@@ -1471,7 +1471,7 @@ def test_vispy_persistent_upsert_limits_use_texture_upload_cost_without_raising_
 
     limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert limits["max_upserts"] == 1
+    assert limits["max_upserts"] == 4
     assert limits["max_upsert_bytes"] == 1024 * 1024
     assert limits["upsert_cost_fn"](payload) == texture.nbytes
 
@@ -1808,7 +1808,7 @@ def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
 
     limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert limits["max_upserts"] == 1
+    assert limits["max_upserts"] == 4
     assert limits["max_upsert_bytes"] == 1024
 
 

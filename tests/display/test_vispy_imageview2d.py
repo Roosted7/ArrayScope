@@ -478,6 +478,45 @@ def test_scalar_level_preview_updates_clim_without_rgb_work(qt_app):
         view.close()
 
 
+def test_tiled_commit_reasserts_levels_when_transaction_cache_is_stale(qt_app):
+    """The backend command, not its completed-transaction cache, owns levels."""
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    data = np.linspace(0.0, 1.0, 32 * 32, dtype=np.float32).reshape(32, 32)
+    try:
+        _present_vispy_tiled(
+            view,
+            data,
+            histogramData=data,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+        )
+        assert view._last_vispy_tiled_levels_key == (0.0, 1.0)
+
+        # Model an automatic/histogram command arriving between tiled
+        # transactions. It correctly changes physical display state without
+        # pretending that a tiled transaction committed those levels.
+        view._apply_display_levels(0.2, 0.8, emit_user=False)
+        assert view.getLevels() == (0.2, 0.8)
+        assert view._vispy_gpu_montage_layer._levels == (0.2, 0.8)
+        assert view._last_vispy_tiled_levels_key == (0.0, 1.0)
+
+        _present_vispy_tiled(
+            view,
+            data,
+            histogramData=data,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+        )
+
+        assert view.getLevels() == (0.0, 1.0)
+        assert view._vispy_gpu_montage_layer._levels == (0.0, 1.0)
+    finally:
+        view.close()
+
+
 def test_vispy_histogram_drag_flushes_preview_without_debounce(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 

@@ -2088,6 +2088,10 @@ class FramePipelineEffects:
                 user_levels=requested_levels,
             )
         )
+        renderer._last_montage_decision_levels = normalize_bounds(decision.levels)
+        renderer._last_montage_decision_source_rank = int(
+            getattr(getattr(decision, "applied_level_source", None), "rank", 0) or 0
+        )
         set_image_start = perf_counter()
         backend_decision = renderer._montage_backend_decision_for_display(geometry, display_image.data)
         if backend_decision.backend != "tile_layer":
@@ -2153,6 +2157,7 @@ class FramePipelineEffects:
         )
         acknowledge_start = perf_counter()
         committed_levels = normalize_bounds(renderer.win.img_view.getLevels())
+        renderer._last_montage_physical_levels = committed_levels
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
@@ -2305,6 +2310,11 @@ class FramePipelineEffects:
             level_target=getattr(
                 getattr(session, "level_generation", None), "target_levels", None
             ),
+            decision_levels=getattr(renderer, "_last_montage_decision_levels", None),
+            decision_source_rank=int(
+                getattr(renderer, "_last_montage_decision_source_rank", 0) or 0
+            ),
+            physical_levels=getattr(renderer, "_last_montage_physical_levels", None),
             stale_level_tiles=tuple(
                 sorted(
                     getattr(
@@ -3741,6 +3751,14 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         # 4-8 uploads amortize full-plan/backend overhead while preserving the
         # callback target on the reference 60-tile workflow.
         batch_limit = min(8, max(4, int(batch_limit)))
+    else:
+        # A tiled VisPy transaction has a measured fixed cost even when one
+        # small texture is uploaded. Treating that entire transaction as the
+        # cost of one item makes feedback collapse an idle drain to one tile
+        # and repeats planning/presentation hundreds of times. The byte cap
+        # remains authoritative for large textures; four is only the minimum
+        # item cohort when the byte budget admits it.
+        batch_limit = max(4, int(batch_limit))
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     limits: dict[str, object] = {
@@ -3779,6 +3797,9 @@ def _reset_commit_timings(renderer) -> None:
     renderer._last_montage_atomic_prepared_reused = False
     renderer._last_montage_atomic_fast_built = False
     renderer._last_montage_atomic_fast_reject_reason = ""
+    renderer._last_montage_decision_levels = None
+    renderer._last_montage_decision_source_rank = 0
+    renderer._last_montage_physical_levels = None
     for name in (
         "_last_montage_tile_prepare_apply_ms",
         "_last_montage_tile_prepare_stats_ms",

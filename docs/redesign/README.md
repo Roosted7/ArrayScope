@@ -684,6 +684,38 @@ acceptance.
 > tested owner in a separate slice; silent drift here can turn a performance
 > shortcut into wrong cache identity.
 
+> **[Codex 2026-07-15 — P9 physical-level truth and admission checkpoint]**
+> The post-page-fix real trace exposed a second backend truth split. VisPy's
+> `_last_vispy_tiled_levels_key` described the last completed tiled command,
+> but an intervening automatic/histogram command could change both public
+> display levels and page uniforms without changing that cache. A subsequent
+> tiled transaction compared only the cache, skipped its level command, and
+> then acknowledged different physical levels. Tiled no-op detection now
+> compares the requested command with the completed-transaction cache, the
+> public display state, and the physical layer state. Commit traces record
+> level target, direct decision, and physical levels so this split stays
+> observable. A fault-shaped VisPy regression moves physical levels between
+> two tiled commits while leaving the cache stale, then requires the next
+> canonical command to restore both public and page-uniform state.
+>
+> With that correctness defect closed, the previously rejected four-item
+> persistent admission floor was retried. This is not the rejected design
+> silently returning: the earlier run improved the first stage to **8.69 s**
+> but then livelocked with **65,592 events**, 60 level-stale tiles, the same
+> four re-upserts, and **284-286** identical acknowledgements per tile, so the
+> floor was fully removed. The corrected real-Wayland retry reduced VisPy FFT
+> full refinement **42.36 s -> 23.75 s -> 8.39 s** across baseline, physical-
+> truth fix, and four-item floor. FFT scroll improved **41.51 s -> 26.63 s ->
+> 13.55 s**. Its 31,161-event trace has one shared FFT stage submission, clean
+> replay, no stall, and at most 16 identical acknowledgements per identity.
+> This earns a bounded P9 admission checkpoint, not P9 completion: continuity,
+> heartbeat, and GUI-callback gates remain red, and the scroll still executes
+> roughly seventeen bounded presentation commits per source-window step.
+> Focused backend coverage is **162 passed**; the full parallel non-GPU suite
+> is **1,973 passed, 13 skipped**. Compileall, F821/E9 lint, and diff checks
+> are clean. Real artifacts are under
+> `/tmp/arrayscope-vispy-level-{evidence,fix,batch-fix}`.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that
@@ -729,8 +761,9 @@ counters. V1 and V2 each add their scenario before their fix.
   `~/miniconda3/envs/arrayscope/bin/python -m pytest tests -q -n 16 --ignore=tests/gpu_interaction`
 - **Fast Qt-free loop:** `… -m pytest tests/kernel tests/render tests/presentation -q -n 0`
 - **GPU harness:** `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland … -m pytest tests/gpu_interaction -n 0`
-- **Workflow benchmark:** `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph} --montage-quality-policy resident`
-  (`native-only` does NOT exercise the LOD ladder).
+- **Workflow benchmark:** `… -m arrayscope.tools.profile_montage_workflow --backend {vispy|pyqtgraph}`
+  (resident LOD is the production default; the removed
+  `--montage-quality-policy resident` flag is stale and must not be copied).
 - Known parallel-only flakes (pass alone): `test_selecting_fft_workers_updates_settings`,
   `test_compute_policy_configures_stage_and_montage_lanes`, teardown of
   `test_montage_ready_display_payloads_commit_immediately`.
