@@ -119,7 +119,7 @@ def test_roi_overlay_panel_renders_structured_rows(qtbot):
 
     panel = MovableInfoPanel()
     qtbot.addWidget(panel)
-    panel.set_rows((("1", "rectangle", "n=36", "mean=4.2"), ("Lesion", "line", "n=25", "")))
+    panel.set_rows((("1", "rectangle", "n=36", "µ=4.2"), ("Lesion", "line", "n=25", "")))
     panel.show()
     text = panel.text()
     assert "n=36" in text

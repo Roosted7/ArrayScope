@@ -111,7 +111,7 @@ def test_hidden_inspection_panel_updates_overlay_without_dock_work(qtbot, monkey
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert win.img_view._roi_info_panel is not None
         assert "n=36" in win.img_view._roi_info_panel.text()
-        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+        assert "µ=184.5" in win.img_view._roi_info_panel.text()
     finally:
         win.close()
 
@@ -146,7 +146,7 @@ def test_hidden_single_image_timed_roi_refresh_updates_overlay(qtbot, monkeypatc
         assert getattr(win, "_inspection_stale", False)
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert "n=36" in win.img_view._roi_info_panel.text()
-        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+        assert "µ=184.5" in win.img_view._roi_info_panel.text()
     finally:
         win.close()
 
@@ -184,7 +184,7 @@ def test_hidden_roi_overlay_refreshes_when_tiled_frame_commits(qtbot, monkeypatc
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert win.img_view._roi_info_panel is not None
         assert "n=36" in win.img_view._roi_info_panel.text()
-        assert "mean=184.5" in win.img_view._roi_info_panel.text()
+        assert "µ=184.5" in win.img_view._roi_info_panel.text()
     finally:
         win.close()
 
@@ -222,7 +222,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         assert win.inspection_dock.roi_model.rowCount() == 0
         assert win.img_view._roi_info_panel is not None
         assert "n=9" in win.img_view._roi_info_panel.text()
-        assert "mean=18" in win.img_view._roi_info_panel.text()
+        assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
         qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)
@@ -268,7 +268,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
         _process_events(qtbot, count=20)
-        assert "mean=10" in win.img_view._roi_info_panel.text()
+        assert "µ=10" in win.img_view._roi_info_panel.text()
         truthful_text = win.img_view._roi_info_panel.text()
 
         second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
@@ -280,7 +280,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
 
         assert not win._montage_session.display_committed
         assert win.img_view._roi_info_panel.text() == truthful_text
-        assert "mean=0" not in win.img_view._roi_info_panel.text()
+        assert "µ=0" not in win.img_view._roi_info_panel.text()
     finally:
         win.close()
 
@@ -316,7 +316,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
 
         assert win.img_view._roi_info_panel is not None
         assert "n=9" in win.img_view._roi_info_panel.text()
-        assert "mean=18" in win.img_view._roi_info_panel.text()
+        assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
         qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)

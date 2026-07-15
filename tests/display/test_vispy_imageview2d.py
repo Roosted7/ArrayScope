@@ -3200,7 +3200,7 @@ def test_vispy_widget_overlays_are_parented_above_gl_surface(qt_app):
     try:
         view.setHudWidget(hud)
         view.setEvaluationOverlay(True, "Rendering")
-        view.setRoiInfoText("Rectangle 1: n=4 mean=1")
+        view.setRoiInfoText("Rectangle 1: n=4 µ=1")
 
         assert hud.parentWidget() is view._display_container
         assert view._evaluation_overlay.parentWidget() is view._display_container

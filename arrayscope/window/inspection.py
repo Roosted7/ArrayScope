@@ -758,7 +758,7 @@ class InspectionWorkflowMixin:
         rows = []
         for _roi_id, (selection, stats) in list(stats_by_roi.items())[:6]:
             kind = selection.geometry.kind.value.replace("_", " ")
-            mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f"mean={stats.mean:.4g}"
+            mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f"µ={stats.mean:.4g}"
             rows.append((selection.label, kind, f"n={stats.finite_count}", mean))
         self.img_view.setRoiInfoRows(rows)
 
