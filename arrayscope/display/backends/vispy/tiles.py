@@ -114,10 +114,18 @@ class _ChunkCommit:
 def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
     """Whether a payload may take the chunked-residency path (ADR 0055 G3b-2).
 
-    v1 gating: only exact, gutter-free payloads at native LOD (factor 1) whose
-    plane exactly spans the anchor rect and is strictly larger than one chunk.
-    Reduced-LOD previews (fractional plane/native mapping) and montage
-    payloads (no anchor) take the classic whole-tile path unchanged.
+    Gating: exact, gutter-free payloads whose plane spans the anchor rect at
+    the payload's LOD factor and is strictly larger than one chunk.  At
+    factor 1 the plane must equal the anchor extent.  At factor > 1
+    (ADR 0056 G5 slice 1: uniform plane-pixel pages) the plane must be
+    exactly the isotropic box reduction of the anchor extent —
+    ``ceil(extent / factor)`` per axis, the shape
+    :func:`arrayscope.display.pyramid.reduce_box_mean` produces — and the
+    payload's ``LodInfo`` must agree (``source_shape`` == anchor extent,
+    ``texture_shape`` == plane shape).  Anisotropic reductions (an axis
+    reduced by less than the scalar factor) and any payload whose
+    plane/native relation does not hold exactly fall back to the classic
+    whole-tile path — never guessed; montage payloads (no anchor) always do.
     """
 
     anchor = getattr(payload, "source_anchor", None)
@@ -126,10 +134,10 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
     if str(getattr(payload, "quality", "exact") or "exact") != "exact":
         return False
     lod = getattr(payload, "lod", None)
-    if lod is not None and (
-        int(getattr(lod, "factor", 1) or 1) != 1
-        or int(getattr(lod, "gutter", 0) or 0) != 0
-    ):
+    factor = 1 if lod is None else int(getattr(lod, "factor", 1) or 1)
+    if factor < 1:
+        return False
+    if lod is not None and int(getattr(lod, "gutter", 0) or 0) != 0:
         return False
     try:
         y0, y1, x0, x1 = (int(value) for value in anchor.source_rect)
@@ -138,8 +146,14 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
     if y0 < 0 or x0 < 0 or y1 <= y0 or x1 <= x0:
         return False
     plane_h, plane_w = _payload_class_shape(payload)
-    if (y1 - y0, x1 - x0) != (plane_h, plane_w):
+    native_h, native_w = (y1 - y0, x1 - x0)
+    if (plane_h, plane_w) != (-(-native_h // factor), -(-native_w // factor)):
         return False
+    if lod is not None and factor > 1:
+        if tuple(int(value) for value in lod.source_shape) != (native_h, native_w):
+            return False
+        if tuple(int(value) for value in lod.texture_shape) != (plane_h, plane_w):
+            return False
     chunk_h, chunk_w = ANCHORED_CHUNK_SHAPE
     if plane_h <= int(chunk_h) and plane_w <= int(chunk_w):
         return False
@@ -149,9 +163,25 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
 def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...]:
     """Origin-anchored chunk partition of an eligible payload plane.
 
-    Native chunk boundaries fall at integer multiples of the chunk shape;
-    interior chunks keep full-chunk rects (shift-invariant identity), chunks
-    clipped by the window edge carry the clipped rect.
+    Factor 1 (native): chunk boundaries fall at integer multiples of the
+    chunk shape in NATIVE source coordinates; interior chunks keep
+    full-chunk rects (shift-invariant identity), chunks clipped by the
+    window edge carry the clipped rect.
+
+    Factor > 1 (ADR 0056 G5 slice 1, uniform plane-pixel pages): the grid
+    runs over the payload PLANE from its origin — a chunk slot holds up to
+    ``ANCHORED_CHUNK_SHAPE`` *stored samples* at any LOD, so reduced planes
+    share the native planes' shape class.  Key rects stay NATIVE source
+    coordinates (anchor origin + plane rect scaled by the factor, clipped to
+    the anchor rect), and the key keeps the LOD triple, so an identical
+    plane revisited at the same LOD reuses every chunk.  HONEST LIMIT: a
+    ±1 NATIVE-pixel window shift RESAMPLES the reduced plane (reduction
+    bins are anchored to the window origin and move with it), so texels
+    genuinely differ and chunks must NOT be reused across such shifts —
+    this falls out automatically because the shifted anchor rect shifts
+    every native key rect.  True shift-reuse at factor > 1 needs
+    source-anchored reduction binning (a later ladder-migration slice; see
+    docs/proposals/gpu-engine-plan.md G5).
     """
 
     anchor = payload.source_anchor
@@ -166,17 +196,38 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
         if lod is None
         else (int(lod.factor), int(lod.level), int(lod.gutter))
     )
+    factor = 1 if lod is None else max(1, int(getattr(lod, "factor", 1) or 1))
     chunks: list[_PayloadChunk] = []
-    for cy in range((y0 // chunk_h) * chunk_h, y1, chunk_h):
-        ry0, ry1 = (max(cy, y0), min(cy + chunk_h, y1))
-        for cx in range((x0 // chunk_w) * chunk_w, x1, chunk_w):
-            rx0, rx1 = (max(cx, x0), min(cx + chunk_w, x1))
-            rect = (ry0, ry1, rx0, rx1)
+    if factor == 1:
+        for cy in range((y0 // chunk_h) * chunk_h, y1, chunk_h):
+            ry0, ry1 = (max(cy, y0), min(cy + chunk_h, y1))
+            for cx in range((x0 // chunk_w) * chunk_w, x1, chunk_w):
+                rx0, rx1 = (max(cx, x0), min(cx + chunk_w, x1))
+                rect = (ry0, ry1, rx0, rx1)
+                chunks.append(
+                    _PayloadChunk(
+                        key=("anchored-chunk", anchor.content_key, rect, kind, dtype, lod_key),
+                        rect=rect,
+                        plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
+                    )
+                )
+        return tuple(chunks)
+    plane_h, plane_w = _payload_class_shape(payload)
+    for py0 in range(0, plane_h, chunk_h):
+        py1 = min(py0 + chunk_h, plane_h)
+        for px0 in range(0, plane_w, chunk_w):
+            px1 = min(px0 + chunk_w, plane_w)
+            rect = (
+                y0 + py0 * factor,
+                min(y0 + py1 * factor, y1),
+                x0 + px0 * factor,
+                min(x0 + px1 * factor, x1),
+            )
             chunks.append(
                 _PayloadChunk(
                     key=("anchored-chunk", anchor.content_key, rect, kind, dtype, lod_key),
                     rect=rect,
-                    plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
+                    plane_rect=(py0, py1, px0, px1),
                 )
             )
     return tuple(chunks)
@@ -893,10 +944,13 @@ class TextureAtlasPool:
             region = world_regions.get(int(tile_number))
             if region is None or not _payload_chunked_eligible(payload):
                 continue
-            plane_h, plane_w = _payload_class_shape(payload)
-            if (int(region[3]), int(region[2])) != (plane_h, plane_w):
-                # World mapping must be 1:1 plane-pixel to world-unit; any
-                # mismatch falls back to the classic single-quad path.
+            ay0, ay1, ax0, ax1 = (int(value) for value in payload.source_anchor.source_rect)
+            if (int(region[3]), int(region[2])) != (ay1 - ay0, ax1 - ax0):
+                # The layout region must span the anchor's NATIVE extent
+                # (world == native units; a reduced plane pixel stretches by
+                # the LOD factor).  At factor 1 this is the classic 1:1
+                # plane-pixel-to-world-unit requirement; any mismatch falls
+                # back to the classic single-quad path.
                 continue
             chunk_plans[int(tile_number)] = _payload_chunk_plan(payload)
         active_chunk_keys: set[object] = set()
@@ -1891,10 +1945,20 @@ class TextureAtlasPool:
             page.mipmap_dirty = True
 
         # Draw parts: one UV-cropped quad per chunk. World rects tile the
-        # layout region exactly (adjacent chunks share edges — the plane maps
-        # 1:1 to world units at LOD factor 1); clipped chunks sample only the
-        # valid sub-region of their slot, never beyond it.
+        # layout region exactly — plane pixel ``p`` maps to world edge
+        # ``region + p * region_extent / plane_extent``, the SAME uniform
+        # stretch the classic single reduced quad applies, so visual
+        # placement is identical to the whole-tile presentation.  At factor 1
+        # the stretch is exactly 1 (region == plane); at factor > 1 with a
+        # factor-divisible extent it is exactly the LOD factor.  Adjacent
+        # chunks share the identical edge expression (bitwise-equal floats:
+        # the integer product ``p * extent`` is exact, so the shared division
+        # is too) — no gaps, no overlaps, and the last edge lands exactly on
+        # the region end.  Clipped chunks sample only the valid sub-region of
+        # their slot, never beyond it.
         region_x, region_y = (int(world_region[0]), int(world_region[1]))
+        region_w, region_h = (int(world_region[2]), int(world_region[3]))
+        plane_h, plane_w = _payload_class_shape(payload)
         chunk_h, chunk_w = page.tile_shape
         parts = []
         for chunk in chunks:
@@ -1906,10 +1970,10 @@ class TextureAtlasPool:
             parts.append(
                 TileDrawPart(
                     world_rect=(
-                        float(region_x + px0),
-                        float(region_y + py0),
-                        float(region_x + px1),
-                        float(region_y + py1),
+                        region_x + (px0 * region_w) / float(plane_w),
+                        region_y + (py0 * region_h) / float(plane_h),
+                        region_x + (px1 * region_w) / float(plane_w),
+                        region_y + (py1 * region_h) / float(plane_h),
                     ),
                     uv_rect=(
                         u0,

@@ -18,7 +18,9 @@ from arrayscope.display.backends.vispy.tiles import (
     _payload_chunk_plan,
     _payload_chunked_eligible,
 )
+from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+from arrayscope.display.pyramid import reduce_box_mean
 
 CHUNK = int(ANCHORED_CHUNK_SHAPE[0])
 HEIGHT = 2 * CHUNK
@@ -418,3 +420,430 @@ def test_layout_reset_clears_chunk_maps():
     assert not pool.tile_chunk_residency
     assert not pool.chunk_resident_tiles
     assert not pool._chunked_tile_keys
+
+
+# ---------------------------------------------------------------------------
+# ADR 0056 G5 slice 1: uniform plane-pixel pages across LODs (factor > 1)
+# ---------------------------------------------------------------------------
+#
+# A 256x256 chunk slot holds 256x256 STORED SAMPLES at any LOD (covering
+# 256*factor native samples per axis), so reduced planes share the native
+# planes' shape class instead of occupying one whole-plane slot per plane
+# size.  HONEST LIMIT: reduction bins are anchored to the window origin, so
+# a +-1 NATIVE-pixel window shift resamples the reduced plane — texels
+# genuinely differ and chunks must NOT survive such shifts (their native key
+# rects all move).  Only an identical revisit at the same LOD reuses chunks.
+
+R_FACTOR = 4
+R_LEVEL = 2
+R_HEIGHT = 6 * CHUNK  # native window height; divisible by R_FACTOR
+R_EXTENT = 8 * CHUNK  # native window width; divisible by R_FACTOR
+R_DATA_WIDTH = 9 * CHUNK
+R_PLANE_H = R_HEIGHT // R_FACTOR  # 384: one full + one clipped chunk row
+R_PLANE_W = R_EXTENT // R_FACTOR  # 512: two full chunk columns
+R_CONTENT_KEY = ("src-anchored", "doc-rev-0", "windowless-view-reduced")
+
+
+def _reduced_data():
+    return np.random.default_rng(7).random((R_HEIGHT, R_DATA_WIDTH), dtype=np.float32)
+
+
+def reduced_anchored_payload(
+    data,
+    start,
+    *,
+    factor=R_FACTOR,
+    level=R_LEVEL,
+    extent=R_EXTENT,
+    height=None,
+    content_key=R_CONTENT_KEY,
+    tile_number=0,
+    quality="exact",
+):
+    height = int(data.shape[0]) if height is None else int(height)
+    native = np.ascontiguousarray(data[:height, start : start + extent])
+    plane = np.asarray(reduce_box_mean(native, (factor, factor)))
+    lod = LodInfo(
+        level=level,
+        factor=factor,
+        source_shape=native.shape[:2],
+        texture_shape=plane.shape[:2],
+        gutter=0,
+    )
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=0,
+        image=plane,
+        histogram_data=None,
+        source_id=("window", start, extent, tile_number, "lod", factor),
+        quality=quality,
+        lod=lod,
+        source_anchor=PayloadSourceAnchor(
+            content_key=content_key,
+            source_rect=(0, height, start, start + extent),
+        ),
+    )
+
+
+def commit_anchored(pool, payloads, *, tile_shape):
+    """Commit anchored payloads with world regions spanning the NATIVE anchor
+    extent (world == native units; reduced plane pixels stretch by the LOD
+    factor), matching the live layout-region contract."""
+
+    regions = {}
+    for tile, payload in payloads.items():
+        anchor = payload.source_anchor
+        if anchor is None:
+            shape = payload.image.shape
+            regions[int(tile)] = (0, 0, int(shape[1]), int(shape[0]))
+        else:
+            y0, y1, x0, x1 = (int(value) for value in anchor.source_rect)
+            regions[int(tile)] = (0, 0, int(x1 - x0), int(y1 - y0))
+    _uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=tile_shape,
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=len(payloads),
+        tile_world_regions=regions,
+    )
+    return stats
+
+
+def test_reduced_plan_uniform_plane_pixel_chunks_with_native_scaled_keys():
+    data = _reduced_data()
+    payload = reduced_anchored_payload(data, 100)
+    assert _payload_chunked_eligible(payload)
+    plan = _payload_chunk_plan(payload)
+    # Plane 384x512: chunk rows [0,256),[256,384); columns [0,256),[256,512).
+    assert len(plan) == 4
+    plane_rects = {chunk.plane_rect for chunk in plan}
+    assert plane_rects == {
+        (0, 256, 0, 256),
+        (0, 256, 256, 512),
+        (256, 384, 0, 256),
+        (256, 384, 256, 512),
+    }
+    # Key rects are NATIVE source coordinates: anchor origin + plane rect
+    # scaled by the factor (y0 + py*factor, x0 + px*factor), clipped to the
+    # anchor rect.
+    rects = {chunk.rect for chunk in plan}
+    assert rects == {
+        (0, 1024, 100, 1124),
+        (0, 1024, 1124, 2148),
+        (1024, 1536, 100, 1124),
+        (1024, 1536, 1124, 2148),
+    }
+    # Keys fold content identity plus the LOD triple.
+    for chunk in plan:
+        assert chunk.key[0] == "anchored-chunk"
+        assert chunk.key[1] == R_CONTENT_KEY
+        assert chunk.key[5] == (R_FACTOR, R_LEVEL, 0)
+    # The plane tiles exactly: chunk plane rects cover every sample once.
+    covered = np.zeros((R_PLANE_H, R_PLANE_W), dtype=np.int32)
+    for chunk in plan:
+        py0, py1, px0, px1 = chunk.plane_rect
+        covered[py0:py1, px0:px1] += 1
+    assert covered.min() == 1 and covered.max() == 1
+
+
+def test_reduced_commit_revisit_reuse_and_honest_one_native_px_shift_limit():
+    data = _reduced_data()
+    pool = TextureAtlasPool(FakeGloo())
+
+    payload_a = reduced_anchored_payload(data, 100)
+    cold = commit_anchored(pool, {0: payload_a}, tile_shape=(R_HEIGHT, R_EXTENT))
+    assert cold.items_updated == 1
+    assert cold.presented_tiles == (0,)
+    chunks_a = set(pool.tile_chunk_residency[0])
+    assert len(chunks_a) == 4
+    assert pool.chunk_upload_count == 4
+    # Uniform plane-pixel slots: every chunk lives in the 256x256 shape
+    # class, all on one page.
+    placements = chunk_pages_and_slots(pool)
+    pages = {page for page, _slot in placements.values()}
+    assert len(pages) == 1
+    page = pool.pages[next(iter(pages))]
+    assert page.tile_shape == tuple(ANCHORED_CHUNK_SHAPE)
+    # Uploaded chunk content is byte-identical to the reduced plane.
+    plane_a = np.asarray(payload_a.image)
+    by_offset = {offset: content for offset, content in page.scalar_texture.uploads}
+    for chunk in _payload_chunk_plan(payload_a):
+        _page_i, slot = placements[chunk.key]
+        py0, py1, px0, px1 = chunk.plane_rect
+        assert np.array_equal(by_offset[page.offset_for_slot(slot)], plane_a[py0:py1, px0:px1])
+
+    # Identical revisit at the same LOD: identical keys, ZERO uploads.
+    revisit = commit_anchored(
+        pool,
+        {0: reduced_anchored_payload(data, 100)},
+        tile_shape=(R_HEIGHT, R_EXTENT),
+    )
+    assert pool.chunk_upload_count == 4
+    assert set(pool.tile_chunk_residency[0]) == chunks_a
+    assert revisit.items_updated == 0
+    assert revisit.items_skipped >= 1
+
+    # HONEST LIMIT: a 1-NATIVE-pixel shift resamples the reduced plane
+    # (reduction bins move with the window origin), so every chunk key
+    # changes and the full plane re-uploads — reuse here would show wrong
+    # texels.
+    payload_b = reduced_anchored_payload(data, 101)
+    assert not np.array_equal(np.asarray(payload_b.image), plane_a)
+    shifted = commit_anchored(pool, {0: payload_b}, tile_shape=(R_HEIGHT, R_EXTENT))
+    chunks_b = set(pool.tile_chunk_residency[0])
+    assert len(chunks_b) == 4
+    assert chunks_a & chunks_b == set(), (
+        "reduced-LOD chunks must not be reused across a native-pixel shift: "
+        "the reduction bins moved, so equal keys would alias different texels"
+    )
+    assert pool.chunk_upload_count == 8
+    assert shifted.items_updated == 1
+
+    # Scroll-back to the original window: the original chunks are still
+    # resident and byte-valid (same bins, same texels) — zero uploads.
+    back = commit_anchored(
+        pool,
+        {0: reduced_anchored_payload(data, 100)},
+        tile_shape=(R_HEIGHT, R_EXTENT),
+    )
+    assert pool.chunk_upload_count == 8
+    assert set(pool.tile_chunk_residency[0]) == chunks_a
+    assert back.items_updated == 0
+
+
+def test_mixed_factor_planes_share_chunk_shape_class_without_cross_eviction():
+    native_data = _data()
+    reduced_data = _reduced_data()
+    # Budgeted pool with headroom: mixed LODs must coexist, not thrash.
+    pool = TextureAtlasPool(FakeGloo(), budget_bytes=256 * 1024 * 1024)
+
+    native_payload = anchored_payload(native_data, 100, tile_number=0)
+    reduced_payload = reduced_anchored_payload(reduced_data, 100, tile_number=1)
+    stats = commit_anchored(
+        pool,
+        {0: native_payload, 1: reduced_payload},
+        tile_shape=(R_HEIGHT, R_EXTENT),
+    )
+    assert set(stats.presented_tiles) == {0, 1}
+    assert set(pool.tile_chunk_residency) == {0, 1}
+    assert len(pool.tile_chunk_residency[0]) == 10
+    assert len(pool.tile_chunk_residency[1]) == 4
+    # Both LODs' chunks live in the SAME 256x256 shape class.
+    slots = pool.resident_slots
+    chunk_pages = {
+        slots[key][0]
+        for keys in pool.tile_chunk_residency.values()
+        for key in keys
+    }
+    assert {pool.pages[index].tile_shape for index in chunk_pages} == {
+        tuple(ANCHORED_CHUNK_SHAPE)
+    }
+    assert pool.eviction_count == 0
+
+    # Re-presenting both again evicts nothing and uploads nothing.
+    uploads_before = pool.chunk_upload_count
+    commit_anchored(
+        pool,
+        {
+            0: anchored_payload(native_data, 100, tile_number=0),
+            1: reduced_anchored_payload(reduced_data, 100, tile_number=1),
+        },
+        tile_shape=(R_HEIGHT, R_EXTENT),
+    )
+    assert pool.chunk_upload_count == uploads_before
+    assert pool.eviction_count == 0
+
+
+def test_reduced_draw_parts_tile_layout_region_exactly():
+    data = _reduced_data()
+    pool = TextureAtlasPool(FakeGloo())
+    commit_anchored(
+        pool,
+        {0: reduced_anchored_payload(data, 100)},
+        tile_shape=(R_HEIGHT, R_EXTENT),
+    )
+    parts = pool.tile_draw_parts[0]
+    assert len(parts) == 4
+    # Divisible extents: each plane pixel spans exactly R_FACTOR world units,
+    # so world rects are the plane rects scaled by the factor.
+    plan = _payload_chunk_plan(reduced_anchored_payload(data, 100))
+    world_rects = sorted(part.world_rect for part in parts)
+    expected = sorted(
+        (
+            float(px0 * R_FACTOR),
+            float(py0 * R_FACTOR),
+            float(px1 * R_FACTOR),
+            float(py1 * R_FACTOR),
+        )
+        for py0, py1, px0, px1 in (chunk.plane_rect for chunk in plan)
+    )
+    assert world_rects == expected
+    # No gaps, no overlaps: areas sum to the region, edges land on the
+    # region boundary, and edge sets tile it.
+    area = sum(
+        (part.world_rect[2] - part.world_rect[0]) * (part.world_rect[3] - part.world_rect[1])
+        for part in parts
+    )
+    assert area == R_HEIGHT * R_EXTENT
+    xs = sorted({part.world_rect[0] for part in parts} | {part.world_rect[2] for part in parts})
+    ys = sorted({part.world_rect[1] for part in parts} | {part.world_rect[3] for part in parts})
+    assert xs == [0.0, 1024.0, float(R_EXTENT)]
+    assert ys == [0.0, 1024.0, float(R_HEIGHT)]
+    # Clipped chunks sample only the valid sub-window of their slot: the
+    # 128-row bottom chunks crop half the slot's v span.
+    page = pool.pages[next(iter({slot[0] for slot in chunk_pages_and_slots(pool).values()}))]
+    for part, chunk in zip(parts, plan):
+        py0, py1, px0, px1 = chunk.plane_rect
+        u0, v0, u1, v1 = page.uv_for_slot(
+            chunk_pages_and_slots(pool)[chunk.key][1]
+        )
+        assert part.uv_rect[0] == u0 and part.uv_rect[1] == v0
+        assert part.uv_rect[2] <= u1 and part.uv_rect[3] <= v1
+        assert part.uv_rect[2] - part.uv_rect[0] == (u1 - u0) * ((px1 - px0) / CHUNK)
+        assert part.uv_rect[3] - part.uv_rect[1] == (v1 - v0) * ((py1 - py0) / CHUNK)
+
+
+def test_reduced_non_divisible_extent_matches_single_quad_stretch():
+    """ceil-shaped planes (extent not divisible by the factor) stay eligible.
+
+    ``reduce_box_mean`` produces ``ceil(extent / factor)`` samples per axis
+    (the trailing partial box is averaged), and the classic single reduced
+    quad stretches that plane uniformly over the native region.  Chunk world
+    rects apply the SAME uniform stretch — identical placement, shared
+    edges, exact region coverage at the extremes.
+    """
+
+    data = _reduced_data()
+    height = R_HEIGHT - 2  # 1534 -> plane_h ceil(1534/4) = 384
+    extent = R_EXTENT - 2  # 2046 -> plane_w ceil(2046/4) = 512
+    payload = reduced_anchored_payload(data, 100, height=height, extent=extent)
+    assert np.asarray(payload.image).shape[:2] == (384, 512)
+    assert _payload_chunked_eligible(payload)
+    pool = TextureAtlasPool(FakeGloo())
+    stats = commit_anchored(pool, {0: payload}, tile_shape=(height, extent))
+    assert stats.presented_tiles == (0,)
+    assert len(pool.tile_chunk_residency[0]) == 4
+    parts = pool.tile_draw_parts[0]
+    xs = sorted({part.world_rect[0] for part in parts} | {part.world_rect[2] for part in parts})
+    ys = sorted({part.world_rect[1] for part in parts} | {part.world_rect[3] for part in parts})
+    # Uniform stretch: plane pixel p maps to p * extent / plane_extent, the
+    # same mapping the single quad applies to its texels.
+    assert xs == [0.0, (256 * extent) / 512.0, float(extent)]
+    assert ys == [0.0, (256 * height) / 384.0, float(height)]
+    # Adjacent chunks share their edge values bitwise: 2x2 parts produce
+    # exactly 3 distinct edges per axis, and the extremes land exactly on
+    # the region boundary.
+    assert len(xs) == 3 and len(ys) == 3
+    assert xs[-1] == float(extent) and ys[-1] == float(height)
+
+
+def test_reduced_ineligible_payloads_fall_back_to_classic():
+    data = _reduced_data()
+
+    # Anisotropic reduction (x by 4, y by 1): the scalar-factor ceil relation
+    # cannot hold on the unreduced axis -> classic path, never guessed.
+    native = np.ascontiguousarray(data[:, 100 : 100 + R_EXTENT])
+    aniso_plane = np.asarray(reduce_box_mean(native, (R_FACTOR, 1)))
+    aniso = DisplayTilePayload(
+        tile_number=0,
+        source_index=0,
+        image=aniso_plane,
+        histogram_data=None,
+        source_id=("window", 100, R_EXTENT, 0, "lod-aniso", R_FACTOR),
+        lod=LodInfo(
+            level=R_LEVEL,
+            factor=R_FACTOR,
+            source_shape=native.shape[:2],
+            texture_shape=aniso_plane.shape[:2],
+            gutter=0,
+        ),
+        source_anchor=PayloadSourceAnchor(
+            content_key=R_CONTENT_KEY, source_rect=(0, R_HEIGHT, 100, 100 + R_EXTENT)
+        ),
+    )
+    assert not _payload_chunked_eligible(aniso)
+
+    # LodInfo that disagrees with the anchor rect (source_shape lies about
+    # the native extent) -> classic path.
+    good = reduced_anchored_payload(data, 100)
+    lying_lod = LodInfo(
+        level=R_LEVEL,
+        factor=R_FACTOR,
+        source_shape=(R_HEIGHT - R_FACTOR, R_EXTENT),
+        texture_shape=np.asarray(good.image).shape[:2],
+        gutter=0,
+    )
+    lying = replace(good, lod=lying_lod)
+    assert not _payload_chunked_eligible(lying)
+
+    # Gutter payloads keep the classic path at any factor.
+    guttered = replace(
+        good,
+        lod=LodInfo(
+            level=R_LEVEL,
+            factor=R_FACTOR,
+            source_shape=(R_HEIGHT, R_EXTENT),
+            texture_shape=np.asarray(good.image).shape[:2],
+            gutter=1,
+        ),
+    )
+    assert not _payload_chunked_eligible(guttered)
+
+    # A floor-shaped plane (one row short of the ceil shape) is not the
+    # reducer's output for this rect -> classic path.
+    floor_plane = np.ascontiguousarray(np.asarray(good.image)[:-1, :])
+    floored = replace(
+        good,
+        image=floor_plane,
+        texture_data=floor_plane,
+        lod=LodInfo(
+            level=R_LEVEL,
+            factor=R_FACTOR,
+            source_shape=(R_HEIGHT, R_EXTENT),
+            texture_shape=floor_plane.shape[:2],
+            gutter=0,
+        ),
+    )
+    assert not _payload_chunked_eligible(floored)
+    pool = TextureAtlasPool(FakeGloo())
+    stats = commit_anchored(pool, {0: floored}, tile_shape=(R_HEIGHT, R_EXTENT))
+    assert stats.presented_tiles == (0,)
+    assert 0 in pool.tile_slots
+    assert 0 not in pool.tile_chunk_residency
+    assert 0 not in pool.tile_draw_parts
+
+
+def test_reduced_warm_payloads_make_visible_commit_upload_free():
+    data = _reduced_data()
+    other = np.random.default_rng(17).random((R_HEIGHT, R_DATA_WIDTH), dtype=np.float32)
+    plane_b_key = ("src-anchored", "doc-rev-0", "reduced-plane-1")
+    pool = TextureAtlasPool(FakeGloo())
+
+    payload_a = reduced_anchored_payload(data, 100)
+    commit_anchored(pool, {0: payload_a}, tile_shape=(R_HEIGHT, R_EXTENT))
+    chunks_a = set(pool.tile_chunk_residency[0])
+
+    warm_payload = replace(
+        reduced_anchored_payload(other, 100, content_key=plane_b_key),
+        source_id=("prefetch-warm", "reduced-plane-1"),
+    )
+    stats = pool.warm_payloads(
+        {0: warm_payload},
+        tile_shape=(R_HEIGHT, R_EXTENT),
+        rgb_already_windowed=False,
+    )
+    assert stats.items_updated == 1
+    assert stats.texture_uploads == 4
+    assert stats.storage_evictions == 0
+    # Warm chunks are pure residency: tile 0 still presents plane A.
+    assert set(pool.tile_chunk_residency[0]) == chunks_a
+
+    uploads_before = pool.chunk_upload_count
+    visible = commit_anchored(pool, {0: warm_payload}, tile_shape=(R_HEIGHT, R_EXTENT))
+    assert pool.chunk_upload_count == uploads_before
+    assert visible.texture_uploads == 0
+    assert visible.presented_tiles == (0,)
+    assert len(pool.tile_draw_parts[0]) == 4
+    # Plane A's chunks survived as warm residency.
+    assert all(key in pool.resident_slots for key in chunks_a)
