@@ -191,3 +191,63 @@ control-plane frame-admission work is itself the producer of ranked tile work.
 The accepted boundary is explicit: tile-producing control tasks retain rank
 zero, stages inherit consumers, and genuinely non-tile evidence receives the
 floor. Do not restore a global default floor.
+
+---
+
+# Addendum 2: review of the review-response, P1–P8 (2026-07-15)
+
+Scope: 72e1837a (review-response) through dfa53db3 (P8 evidence), reviewed
+on branch `review/p8-stress`.
+
+## Going well
+
+- **The feedback loop closed properly.** 72e1837a fixed the rank inversion
+  at the root (`UNRANKED_SCHEDULING_RANK` floor, stages inherit consuming
+  tile rank, negative ranks raise), and P8 then resolved the design tension
+  the right way: priority-before-rank restored in the kernel with the
+  plan-wide preview barrier carrying cross-rung ordering — pinned by two
+  kernel tests. The synthetic livelock went 5,521 → 398 → 1 identical acks.
+- **Honest rejection discipline held.** P1, P2, and P5 were measured,
+  failed their gates, and were reverted with the numbers recorded. The
+  churn detector and trace replay were used as acceptance instruments in
+  P8's own record.
+- **The full suite is green again** (1,955 passed / 8 skipped) without
+  weakening user-visible assertions.
+
+## Needs attention
+
+1. **Trace vocabulary gap (P9-blocking for replay):** idempotent
+   acknowledgement means a target satisfied by a retained compatible
+   payload emits *nothing*; whole-workflow replay reports 0/12 final acks
+   on a run the harness calls settled. Emit `target_satisfied_retained`
+   at the point `required_target_unsettled_tiles()` closes a tile without
+   a fresh backend ack; `verify_trace` on this branch already accepts it.
+2. **Mid-scroll transient wedge + identity aliasing:** the V3 watchdog
+   fired once during a synthetic scroll (recovered later); its probe row
+   shows tile 4 acknowledged with tile 7's identity and the *same physical
+   plane pointer*. Stall dump preserved. Retarget-under-churn identity
+   rebinding deserves a focused regression.
+3. **Synthetic convergence is nondeterministic** (stress-matrix runs flip
+   between pass and fail for identical inputs), **raw complex64 input
+   deadlocks PyQtGraph deterministically** (6/10 tiles stuck at
+   dirty/pending_upsert, `report_committed=0`), and tiny-montage level
+   settlement is racy. The canonical fixture converging is necessary, not
+   sufficient.
+4. **R8 gate calibration:** `full_grid_not_capped` and
+   `presentation_continuity` fail on capped/synthetic offscreen runs
+   regardless of convergence — fine for the canonical fixture, but the
+   harness should mark them n/a (not FAIL) when their preconditions
+   (uncapped run, fixture geometry) don't hold.
+
+## Shipped on this branch
+
+- `verify_trace`: retains acks across compatible retargets, accepts the
+  (future) `target_satisfied_retained` edge with sequence guards; tests for
+  both directions.
+- `tests/stress/test_synthetic_stress_matrix.py`: opt-in workflow × input-
+  class matrix with trace-replay oracles (found the complex64 deadlock and
+  the convergence nondeterminism on its first runs).
+- `docs/testing/stress-and-trace-strategy.md`: the drivers × oracles model,
+  the four cost-ordered rings, and the rules for new features (new input
+  class → matrix row; new behavior → trace event + oracle rule) and for
+  performance work (wasted-work counters as the early-warning channel).

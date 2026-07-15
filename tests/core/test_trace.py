@@ -258,3 +258,138 @@ def test_trace_verify_flags_acknowledgement_churn_livelock(tmp_path):
     # The same trace passes with the check disabled or a higher limit.
     assert verify_trace(path, max_identical_acks=0)["ok"]
     assert verify_trace(path, max_identical_acks=50)["ok"]
+
+
+def test_trace_verify_retains_ack_across_compatible_retarget(tmp_path):
+    """Idempotent backends do not re-ack a retarget the payload already satisfies."""
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 3,
+            "source_index": 41,
+            "target_level": 1,
+            "sequence": 1,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 3,
+            "source_index": 41,
+            "level": 0,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 2,
+        },
+        # Same identity re-required (e.g. a zoom/pan replan): no re-ack follows.
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 3,
+            "source_index": 41,
+            "target_level": 1,
+            "sequence": 3,
+        },
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    assert verify_trace(path, expect_targets=1)["ok"]
+
+
+def test_trace_verify_drops_ack_across_incompatible_retarget(tmp_path):
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 3,
+            "source_index": 41,
+            "target_level": 1,
+            "sequence": 1,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 3,
+            "source_index": 41,
+            "level": 0,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 2,
+        },
+        # The slot now names a different source: the old pixels cannot satisfy it.
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 3,
+            "source_index": 55,
+            "target_level": 1,
+            "sequence": 3,
+        },
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    result = verify_trace(path)
+    assert not result["ok"]
+    assert result["violations"][0]["invariant"] == "final_required_target_acknowledged"
+    assert result["violations"][0]["tile"] == 3
+
+
+def test_trace_verify_accepts_retained_satisfaction_edge(tmp_path):
+    """`target_satisfied_retained` closes a target without a fresh backend ack."""
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = (
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 6,
+            "source_index": 12,
+            "target_level": 2,
+            "sequence": 1,
+        },
+        {
+            "kind": "lifecycle",
+            "edge": "target_satisfied_retained",
+            "tile": 6,
+            "source_index": 12,
+            "level": 0,
+            "quality": "exact",
+            "sequence": 2,
+        },
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    assert verify_trace(path, expect_targets=1)["ok"]
+
+    # A retained edge that predates the current requirement does not count.
+    stale = tmp_path / "stale.jsonl"
+    stale.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {
+                    "kind": "lifecycle",
+                    "edge": "target_satisfied_retained",
+                    "tile": 6,
+                    "source_index": 12,
+                    "sequence": 1,
+                },
+                {
+                    "kind": "lifecycle",
+                    "edge": "target_required",
+                    "tile": 6,
+                    "source_index": 12,
+                    "target_level": 2,
+                    "sequence": 2,
+                },
+            )
+        )
+    )
+    assert not verify_trace(stale)["ok"]

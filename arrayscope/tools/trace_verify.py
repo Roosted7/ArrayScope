@@ -10,6 +10,18 @@ from pathlib import Path
 MAX_IDENTICAL_ACKS = 25
 
 
+def _ack_satisfies_target(ack: dict[str, object], target: dict[str, object]) -> bool:
+    if ack.get("source_index") != target.get("source_index"):
+        return False
+    level = ack.get("level")
+    target_level = target.get("target_level")
+    return (
+        level is not None
+        and target_level is not None
+        and int(level) <= int(target_level)
+    )
+
+
 def verify_trace(
     path: str | Path,
     *,
@@ -58,8 +70,28 @@ def verify_trace(
                     "target_level": event.get("target_level"),
                     "sequence": int(event.get("sequence", 0) or 0),
                 }
-                acknowledgements.pop(tile, None)
-                first_ack_sequences.pop(tile, None)
+                # Backend acknowledgement is idempotent: a retarget that a
+                # tile's committed payload already satisfies is deliberately
+                # not re-acknowledged.  Retain the prior ack exactly when it
+                # satisfies the new target; anything else must earn a fresh
+                # acknowledgement.
+                retained = acknowledgements.get(tile)
+                if retained is not None and not _ack_satisfies_target(retained, targets[tile]):
+                    acknowledgements.pop(tile, None)
+                    first_ack_sequences.pop(tile, None)
+            elif edge == "target_satisfied_retained":
+                # Production closed this target with an already-acknowledged
+                # compatible payload (idempotent backends do not re-upload or
+                # re-ack).  Contract: the emitter must only publish this edge
+                # for a payload whose source/level satisfy the current target.
+                target = targets.get(tile)
+                if target is not None and int(event.get("sequence", 0) or 0) >= int(
+                    target["sequence"]
+                ):
+                    acknowledgements[tile] = event
+                    first_ack_sequences.setdefault(
+                        tile, int(event.get("sequence", 0) or 0)
+                    )
             elif edge == "target_released":
                 targets.pop(tile, None)
                 acknowledgements.pop(tile, None)
