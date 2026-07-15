@@ -3414,6 +3414,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     )
     session = SimpleNamespace(
         display_committed=False,
+        atomic_source_successor_committed=lambda: False,
         force_auto=False,
         tile_presentation_state=TilePresentationState(),
         consume_dirty_tiles=lambda: (),

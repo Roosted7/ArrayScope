@@ -150,6 +150,19 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > reverted: the first improved cold refinement but regressed scroll/convergence,
 > while the second lost the cold win and worsened scroll to 15.63 s. A session
 > flag is not an acceptable proxy for the plan phase.
+>
+> **[Codex 2026-07-15 — P9 source-generation result]** The reused
+> `FrameSession` no longer carries a sticky atomic-successor boolean across
+> index-window retargets. Completion is bound to the current `session_id` and
+> requires a coverage-complete backend acknowledgement. Real VisPy evidence
+> changed the ordinary FFT-scroll shape from roughly seventeen partial commits
+> per window to one ordered 60-slot transaction, with a clean trace replay and
+> coherent final pixels. It did **not** improve the performance gate: staged
+> FFT scroll measured **15.75 s** against the accepted **13.55 s** baseline.
+> P9 therefore continues at the now-isolated cause: avoid preparing/rebinding/
+> acknowledging all 60 slots for a one-index move while preserving atomic
+> visible identity. Slot relocation or an equivalent source-keyed remap is the
+> relevant ownership boundary; generic cohort tuning is not.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining

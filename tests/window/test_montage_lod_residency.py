@@ -2717,11 +2717,18 @@ def _shifted_plan(count=2, offset=1):
     )
 
 
-def _retarget(session, plan, new_source_ids, cached_tiles=None):
+def _retarget(
+    session,
+    plan,
+    new_source_ids,
+    cached_tiles=None,
+    *,
+    semantic_key=("semantic", "retargeted"),
+):
     return session.retarget_index_window(
         session_id=session.session_id + 1,
         key=("test", "retargeted"),
-        semantic_key=("semantic", "retargeted"),
+        semantic_key=semantic_key,
         level_key=("level", "retargeted"),
         render_generation=session.render_generation + 1,
         view_state=None,
@@ -2885,6 +2892,82 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert session.display_tile_payloads[1].source_index == 3
     assert set(session.pending_payload_upserts) == {0, 1}
     assert session.source_window_changed_pending is True
+
+
+def test_index_window_retarget_invalidates_atomic_successor_generation():
+    """An in-place session retarget cannot inherit the prior atomic handoff."""
+
+    session = _session(count=4)
+    session.semantic_key = ("semantic", "stable")
+    old_source_ids = {
+        index: session.tile_semantic_source_id(index) for index in range(4)
+    }
+    _state, delta = session.build_tile_presentation(old_source_ids)
+    report = TileCommitReport(
+        presented_tiles=frozenset(delta.upserts),
+        committed_upserts=frozenset(delta.upserts),
+    )
+    acknowledged = session.acknowledge_tile_presentation(delta, report)
+    assert session.acknowledge_atomic_source_successor(
+        delta,
+        report,
+        acknowledged,
+    )
+    assert session.atomic_source_successor_committed()
+    session.mark_presented(tuple(delta.upserts))
+    session.tile_source_ids = dict(old_source_ids)
+    session.rendered_tiles.clear()
+
+    successor_tiles = tuple(
+        replace(tile, source_index=(index + 1) % 4)
+        for index, tile in enumerate(_tiles(4))
+    )
+    successor = MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(1, 4),
+        columns=4,
+        rows=1,
+        gap=0,
+        tiles=successor_tiles,
+    )
+    _retarget(
+        session,
+        successor,
+        new_source_ids={
+            index: session.tile_semantic_source_id((index + 1) % 4)
+            for index in range(4)
+        },
+        semantic_key=session.semantic_key,
+    )
+
+    assert not session.atomic_source_successor_committed()
+    atomic = session.build_atomic_source_successor_presentation()
+    assert atomic is not None, session._atomic_fast_reject_reason
+    _state, successor_delta = atomic
+    assert tuple(successor_delta.upserts) == (0, 1, 2, 3)
+    assert tuple(
+        successor_delta.upserts[index].source_index for index in successor_delta.upserts
+    ) == (1, 2, 3, 0)
+
+
+def test_atomic_successor_requires_complete_backend_acknowledgement():
+    session = _session(count=2)
+    _state, delta = session.build_tile_presentation(
+        {0: ("src", 0), 1: ("src", 1)}
+    )
+    partial = TileCommitReport(
+        presented_tiles=frozenset({0}),
+        committed_upserts=frozenset({0}),
+    )
+    acknowledged = session.acknowledge_tile_presentation(delta, partial)
+
+    assert not session.acknowledge_atomic_source_successor(
+        delta,
+        partial,
+        acknowledged,
+    )
+    assert not session.atomic_source_successor_committed()
 
 
 def test_resident_only_remap_discards_stale_rendered_slot_owner():

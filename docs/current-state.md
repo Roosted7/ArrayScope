@@ -123,9 +123,18 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    truth plus four-item admission slice cuts the real VisPy FFT refinement to
    8.39 s and scripted scroll to 13.55 s, with clean trace replay and no
    acknowledgement-churn violation. It still fails presentation continuity,
-   the 16 ms heartbeat, and the 50 ms callback gate. Each scroll step still
-   drains about 60 remaps through roughly seventeen commits; this is the next
-   measured P9 surface, not permission to widen timeouts or hide continuity.
+   the 16 ms heartbeat, and the 50 ms callback gate. **[Codex 2026-07-15 —
+   superseding transaction-shape update]** Atomic completion is now generation-
+   bound and backend-acknowledged, so ordinary source-window steps use one
+   ordered all-slot commit rather than roughly seventeen partial commits. The
+   staged real run was nevertheless slower at 15.75 s: residency/remap/ack
+   preparation for all 60 slots is now the measured P9 surface, not permission
+   to widen timeouts or hide continuity.
+10. **[Codex 2026-07-15 — raw convergence reproduction]** A full real VisPy
+    retry stopped before FFT with 272 fallback tiles physically visible but
+    all 272 demanded LOD-2 targets unsettled and no work in flight. The stall
+    guard caught it in four seconds. This is unresolved nondeterministic
+    convergence debt and was not papered over to obtain the P9 scroll run.
 
 ## Material risks
 

@@ -737,6 +737,41 @@ acceptance.
 > redundant structural transactions or use an explicit plan phase; do not
 > infer it from `display_committed`. Artifacts:
 > `/tmp/arrayscope-vispy-{eight-item,cold-eight}`.
+>
+> **[Codex 2026-07-15 — P9 source-successor generation checkpoint]** The
+> roughly seventeen backend transactions per scroll window were real, but the
+> FFT was not their cause. A new real trace again contains exactly **one**
+> full-volume `StageKey` for `CenteredFFT -> FFTShift -> CenteredIFFT`. The
+> repeated work was presentation: `atomic_source_successor_committed` was a
+> boolean on the reused `FrameSession`, so an in-place index-window retarget
+> inherited the predecessor generation's answer and drained the next mapping
+> through ordinary four-item deltas. The boolean is deleted. Atomic completion
+> now names the acknowledged `session_id`, and advances only after one backend
+> report accepts every active identity. Qt-free regressions cover both a
+> retarget invalidating the previous generation and a partial report being
+> unable to advance it.
+>
+> The real-Wayland VisPy retry proves the ownership change: ordinary FFT scroll
+> successors now perform **one ordered 60-slot backend transaction** instead of
+> about seventeen partial transactions, the final captured FFT pixels are
+> coherent, the V1 on-screen VisPy pixel/trace scenario passes, and the
+> 40,172-event workflow trace replays clean with **272/272** final targets.
+> This is accepted as a correctness/ownership checkpoint, not performance
+> credit. The staged workflow measured FFT full **10.67 s**, refinement
+> **1.01 s**, and FFT scroll **15.75 s** versus the accepted scroll baseline of
+> **13.55 s**; continuity, one slow-scroll convergence step, 50 ms callback,
+> and 16 ms heartbeat gates remain red. The next measured cost is therefore
+> the all-slot residency/remap/ack path itself: a one-index move still prepares
+> and acknowledges 60 mappings even though 59 semantic sources overlap.
+> Artifact: `/tmp/arrayscope-vispy-atomic-generation-fft`.
+>
+> **[Codex 2026-07-15 — rejected/failed real-run evidence]** The first full
+> workflow attempt stopped before FFT with 272/272 raw fallback tiles visible
+> but every demanded LOD-2 target unsettled and no work in flight. The stall
+> guard fired rather than widening a timeout. This run did not exercise the
+> source-successor change and caused no compensating runtime edit; it is a
+> fresh reproduction of the open nondeterministic raw convergence class.
+> Artifact: `/tmp/arrayscope-vispy-atomic-generation`.
 
 ## The visible-truth harness (the only gate)
 

@@ -1404,9 +1404,7 @@ class FramePipelineEffects:
             cpu_atomic_successor = bool(
                 cpu_backend
                 and bool(getattr(session, "source_window_changed_pending", False))
-                and not bool(
-                    getattr(session, "atomic_source_successor_committed", False)
-                )
+                and not session.atomic_source_successor_committed()
                 and _compatible_successor_payload_count(session) > 0
             )
             predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
@@ -1420,12 +1418,19 @@ class FramePipelineEffects:
             shader_source_successor = bool(
                 capabilities.shader_windowing
                 and bool(getattr(session, "source_window_changed_pending", False))
-                and not bool(
-                    getattr(session, "atomic_source_successor_committed", False)
-                )
+                and not session.atomic_source_successor_committed()
                 and isinstance(predecessor_source, TiledValueSource)
                 and bool(getattr(predecessor_source, "payloads", None))
                 and _compatible_successor_payload_count(session) > 0
+            )
+            renderer._last_montage_atomic_source_committed_before = (
+                session.atomic_source_successor_committed()
+            )
+            renderer._last_montage_source_window_pending_before = bool(
+                getattr(session, "source_window_changed_pending", False)
+            )
+            renderer._last_montage_shader_source_successor = bool(
+                shader_source_successor
             )
             if cpu_atomic_successor:
                 lod_factor = int(session._selected_lod_factor())
@@ -1573,6 +1578,7 @@ class FramePipelineEffects:
                 prepared_atomic_current
             )
             renderer._last_montage_atomic_fast_built = False
+            renderer._last_montage_atomic_fast_reject_reason = ""
             if prepared_atomic_current:
                 base_tile_state = prepared_atomic["base_tile_state"]
                 tile_state = prepared_atomic["tile_state"]
@@ -1813,6 +1819,7 @@ class FramePipelineEffects:
                 warm_levels = normalize_bounds(renderer.win.img_view.getLevels())
             cpu_backend = not bool(capabilities.shader_windowing)
             atomic_successor = bool(cpu_atomic_successor or shader_source_successor)
+            renderer._last_montage_atomic_source_successor = bool(atomic_successor)
             resident_predicate = getattr(renderer.win.img_view, "tiledPayloadResident", None)
             cold_gpu_successor = bool(
                 not cpu_backend
@@ -1910,12 +1917,6 @@ class FramePipelineEffects:
                 renderer._last_montage_commit_outcome = "backend-declined"
                 return
             renderer._last_montage_commit_outcome = "backend-applied"
-            if atomic_successor:
-                # The backend has accepted the complete successor mapping.
-                # Keep source-window settlement armed until exact-visible
-                # completion, but never rebuild this all-slot handoff merely
-                # to advance one tile from fallback to its target rung.
-                session.atomic_source_successor_committed = True
             session._atomic_prepared_transaction = None
             self._acknowledge_and_publish(
                 tile_delta,
@@ -1923,6 +1924,7 @@ class FramePipelineEffects:
                 rendered_geometry,
                 active_payloads,
                 commit_start=commit_start,
+                atomic_source_successor=atomic_successor,
                 first_pass_histogram_published=bool(
                     publish_first_pass_histogram and histogram_plot_data is not None
                 ),
@@ -2136,6 +2138,7 @@ class FramePipelineEffects:
         active_payloads,
         *,
         commit_start: float,
+        atomic_source_successor: bool,
         first_pass_histogram_published: bool,
     ) -> None:
         renderer = self.renderer
@@ -2161,6 +2164,15 @@ class FramePipelineEffects:
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
+        if atomic_source_successor:
+            # A source successor is complete only after the lifecycle accepts
+            # one coverage-complete backend report.  Backend submission alone
+            # cannot suppress the next attempt after a stale/partial commit.
+            session.acknowledge_atomic_source_successor(
+                tile_delta,
+                report,
+                acknowledged,
+            )
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         _call(renderer, "_refresh_tile_truth_overlay")
         retained_start = perf_counter()
@@ -2273,13 +2285,22 @@ class FramePipelineEffects:
         self._finish_commit(
             report,
             tile_state,
+            tile_delta,
             commit_start=commit_start,
             preview_transition=preview_transition,
         )
         if first_pass_publication_transition:
             renderer.request_montage_replan(session)
 
-    def _finish_commit(self, report, tile_state, *, commit_start: float, preview_transition: bool) -> None:
+    def _finish_commit(
+        self,
+        report,
+        tile_state,
+        tile_delta,
+        *,
+        commit_start: float,
+        preview_transition: bool,
+    ) -> None:
         renderer = self.renderer
         session = self.session
         identity_start = perf_counter()
@@ -2299,6 +2320,7 @@ class FramePipelineEffects:
             elapsed_ms=float(renderer._last_montage_tile_commit_ms),
             presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
             committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
+            delta_upserts=tuple(int(tile) for tile in tile_delta.upserts),
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
@@ -2325,8 +2347,40 @@ class FramePipelineEffects:
                     or ()
                 )
             ),
-            atomic_source_successor_committed=bool(
-                getattr(session, "atomic_source_successor_committed", False)
+            atomic_source_successor_committed=(
+                session.atomic_source_successor_committed()
+            ),
+            atomic_source_successor_generation=getattr(
+                session, "atomic_source_successor_generation", None
+            ),
+            atomic_source_committed_before=bool(
+                getattr(
+                    renderer,
+                    "_last_montage_atomic_source_committed_before",
+                    False,
+                )
+            ),
+            source_window_pending_before=bool(
+                getattr(
+                    renderer,
+                    "_last_montage_source_window_pending_before",
+                    False,
+                )
+            ),
+            shader_source_successor=bool(
+                getattr(renderer, "_last_montage_shader_source_successor", False)
+            ),
+            atomic_source_successor=bool(
+                getattr(renderer, "_last_montage_atomic_source_successor", False)
+            ),
+            atomic_fast_built=bool(
+                getattr(renderer, "_last_montage_atomic_fast_built", False)
+            ),
+            atomic_fast_reject_reason=str(
+                getattr(renderer, "_last_montage_atomic_fast_reject_reason", "") or ""
+            ),
+            atomic_prepared_reused=bool(
+                getattr(renderer, "_last_montage_atomic_prepared_reused", False)
             ),
             preview_transition=bool(preview_transition),
         )

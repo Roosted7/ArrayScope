@@ -595,7 +595,11 @@ class FrameSession:
     # Quality convergence after that handoff must use ordinary per-tile deltas;
     # rebuilding the all-slot transaction re-acknowledges settled tiles and can
     # starve the entering tile's target rung indefinitely.
-    atomic_source_successor_committed: bool = False
+    # The all-slot source handoff is owned by one retarget generation.  A
+    # boolean survives ``retarget_index_window()`` because that path reuses
+    # the FrameSession object; binding the acknowledgement to session_id
+    # makes the next semantic window unambiguously uncommitted.
+    atomic_source_successor_generation: int | None = None
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -3004,6 +3008,42 @@ class FrameSession:
             target_identities=self.tile_target_identities(planned),
         )
         return previous_state.apply_delta(delta), delta
+
+    def atomic_source_successor_committed(self) -> bool:
+        """Whether the current retarget generation completed its all-slot handoff."""
+
+        generation = self.atomic_source_successor_generation
+        return generation is not None and int(generation) == int(self.session_id)
+
+    def acknowledge_atomic_source_successor(
+        self,
+        delta: TilePresentationDelta,
+        report: TileCommitReport | None,
+        acknowledged: TilePresentationState,
+    ) -> bool:
+        """Record a complete backend-acknowledged source-window transaction."""
+
+        if (
+            report is None
+            or bool(getattr(report, "stale", False))
+            or not report.acknowledges(delta)
+        ):
+            return False
+        required = tuple(int(tile) for tile in delta.active_tiles)
+        if not required or set(int(tile) for tile in delta.upserts) != set(required):
+            return False
+        if set(report.accepted_upserts_in_order(delta)) != set(required):
+            return False
+        acknowledged_payloads = dict(acknowledged.payloads)
+        if any(
+            tile not in acknowledged_payloads
+            or tile_ack_identity(acknowledged_payloads[tile])
+            != tile_ack_identity(delta.upserts[tile])
+            for tile in required
+        ):
+            return False
+        self.atomic_source_successor_generation = int(self.session_id)
+        return True
 
     def acknowledge_tile_presentation(
         self,
