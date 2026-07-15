@@ -15,6 +15,7 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE
 from arrayscope.display.lod import inner_uv_for_gutter
 from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
@@ -76,6 +77,109 @@ class TileDrawPart:
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_rect", tuple(float(v) for v in self.world_rect))
         object.__setattr__(self, "uv_rect", tuple(float(v) for v in self.uv_rect))
+
+
+@dataclass(frozen=True)
+class _PayloadChunk:
+    """One origin-anchored chunk of an anchored payload plane (ADR 0055 G3b-2).
+
+    ``key`` is the backend-private residency identity: equal keys mean equal
+    texels regardless of the display window that produced the payload
+    (``content_key`` folds document revision + operation steps + window-free
+    view identity; the clipped native rect, texture kind, dtype, and LOD
+    triple complete it). Boundary chunks carry their *clipped* rect, so they
+    are window-dependent by design and legitimately re-upload on a shift.
+    """
+
+    key: tuple
+    rect: tuple[int, int, int, int]  # native source rect (y0, y1, x0, x1)
+    plane_rect: tuple[int, int, int, int]  # same rect in payload plane pixels
+
+
+@dataclass(frozen=True)
+class _ChunkCommit:
+    """Result of committing one payload through the chunked-residency path."""
+
+    page_index: int
+    slot: int
+    uv: tuple[float, float, float, float]
+    uploads: int
+    upload_bytes: int
+    complex_uploads: int
+    prepare_ms: float
+    submit_ms: float
+    uploaded_any: bool
+
+
+def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
+    """Whether a payload may take the chunked-residency path (ADR 0055 G3b-2).
+
+    v1 gating: only exact, gutter-free payloads at native LOD (factor 1) whose
+    plane exactly spans the anchor rect and is strictly larger than one chunk.
+    Reduced-LOD previews (fractional plane/native mapping) and montage
+    payloads (no anchor) take the classic whole-tile path unchanged.
+    """
+
+    anchor = getattr(payload, "source_anchor", None)
+    if anchor is None:
+        return False
+    if str(getattr(payload, "quality", "exact") or "exact") != "exact":
+        return False
+    lod = getattr(payload, "lod", None)
+    if lod is not None and (
+        int(getattr(lod, "factor", 1) or 1) != 1
+        or int(getattr(lod, "gutter", 0) or 0) != 0
+    ):
+        return False
+    try:
+        y0, y1, x0, x1 = (int(value) for value in anchor.source_rect)
+    except Exception:
+        return False
+    if y0 < 0 or x0 < 0 or y1 <= y0 or x1 <= x0:
+        return False
+    plane_h, plane_w = _payload_class_shape(payload)
+    if (y1 - y0, x1 - x0) != (plane_h, plane_w):
+        return False
+    chunk_h, chunk_w = ANCHORED_CHUNK_SHAPE
+    if plane_h <= int(chunk_h) and plane_w <= int(chunk_w):
+        return False
+    return True
+
+
+def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...]:
+    """Origin-anchored chunk partition of an eligible payload plane.
+
+    Native chunk boundaries fall at integer multiples of the chunk shape;
+    interior chunks keep full-chunk rects (shift-invariant identity), chunks
+    clipped by the window edge carry the clipped rect.
+    """
+
+    anchor = payload.source_anchor
+    y0, y1, x0, x1 = (int(value) for value in anchor.source_rect)
+    chunk_h, chunk_w = (int(ANCHORED_CHUNK_SHAPE[0]), int(ANCHORED_CHUNK_SHAPE[1]))
+    kind = _payload_texture_kind(payload).value
+    texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
+    dtype = str(texture.dtype)
+    lod = getattr(payload, "lod", None)
+    lod_key = (
+        None
+        if lod is None
+        else (int(lod.factor), int(lod.level), int(lod.gutter))
+    )
+    chunks: list[_PayloadChunk] = []
+    for cy in range((y0 // chunk_h) * chunk_h, y1, chunk_h):
+        ry0, ry1 = (max(cy, y0), min(cy + chunk_h, y1))
+        for cx in range((x0 // chunk_w) * chunk_w, x1, chunk_w):
+            rx0, rx1 = (max(cx, x0), min(cx + chunk_w, x1))
+            rect = (ry0, ry1, rx0, rx1)
+            chunks.append(
+                _PayloadChunk(
+                    key=("anchored-chunk", anchor.content_key, rect, kind, dtype, lod_key),
+                    rect=rect,
+                    plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
+                )
+            )
+    return tuple(chunks)
 
 
 _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
@@ -256,6 +360,20 @@ class TextureAtlasPool:
         # ADR 0055 G3: optional per-tile quad list (UV-cropped sub-window
         # sampling). Tiles absent from this map draw one full-slot quad.
         self.tile_draw_parts: dict[int, tuple[TileDrawPart, ...]] = {}
+        # ADR 0055 G3b-2 chunked residency: tiles whose anchored payload is
+        # resident as N origin-anchored chunk slots instead of one whole-tile
+        # slot. Pure residency bookkeeping — tile-level identity records stay
+        # keyed by _resident_key(payload) exactly as on the classic path.
+        self.tile_chunk_residency: dict[int, tuple[object, ...]] = {}
+        self.chunk_resident_tiles: dict[object, set[int]] = {}
+        # Chunk keys of the current active tile set: protected from eviction
+        # alongside active tile-level keys.
+        self.active_chunk_keys: set[object] = set()
+        # Tile-level resident keys whose residency is a chunk set (no slot of
+        # their own in the page table).
+        self._chunked_tile_keys: set[object] = set()
+        self.chunk_upload_count = 0
+        self.chunk_reuse_count = 0
         self.tile_resident_keys: dict[int, object] = {}
         self.resident_tiles: dict[object, set[int]] = {}
         self.tile_uvs: dict[int, tuple[float, float, float, float]] = {}
@@ -414,6 +532,10 @@ class TextureAtlasPool:
             self._page_table = PageTable()
             self.tile_slots.clear()
             self.tile_draw_parts.clear()
+            self.tile_chunk_residency.clear()
+            self.chunk_resident_tiles.clear()
+            self.active_chunk_keys.clear()
+            self._chunked_tile_keys.clear()
             self.tile_resident_keys.clear()
             self.resident_tiles.clear()
             self.tile_uvs.clear()
@@ -638,6 +760,7 @@ class TextureAtlasPool:
         near_tile_source_ids: dict[int, object] | None = None,
         budget_bytes: int | None = None,
         tile_delta=None,
+        tile_world_regions: dict[int, tuple[int, int, int, int]] | None = None,
     ) -> tuple[dict[int, tuple[float, float, float, float]], TileLayerUpdateStats]:
         # Residency is a data-keyed cache; visibility is a presentation choice.
         # A viewport commit may hide or reveal tile mappings, but it must not
@@ -758,6 +881,34 @@ class TextureAtlasPool:
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         active_keys.update(retained_active_keys.values())
         self.active_resident_keys = set(active_keys)
+        # ADR 0055 G3b-2: anchored payloads with a matching world region take
+        # the chunked-residency path (backend-private; identity bookkeeping
+        # stays tile-level). Everything else is the classic whole-tile path.
+        world_regions = {
+            int(tile): tuple(int(value) for value in rect)
+            for tile, rect in dict(tile_world_regions or {}).items()
+        }
+        chunk_plans: dict[int, tuple[_PayloadChunk, ...]] = {}
+        for tile_number, payload in payload_items:
+            region = world_regions.get(int(tile_number))
+            if region is None or not _payload_chunked_eligible(payload):
+                continue
+            plane_h, plane_w = _payload_class_shape(payload)
+            if (int(region[3]), int(region[2])) != (plane_h, plane_w):
+                # World mapping must be 1:1 plane-pixel to world-unit; any
+                # mismatch falls back to the classic single-quad path.
+                continue
+            chunk_plans[int(tile_number)] = _payload_chunk_plan(payload)
+        active_chunk_keys: set[object] = set()
+        for chunks in chunk_plans.values():
+            active_chunk_keys.update(chunk.key for chunk in chunks)
+        for tile_number in active_set:
+            tile_number = int(tile_number)
+            if tile_number in chunk_plans or tile_number in removed_tiles:
+                continue
+            active_chunk_keys.update(self.tile_chunk_residency.get(tile_number, ()))
+        self.active_chunk_keys = active_chunk_keys
+        protected_keys = set(active_keys) | active_chunk_keys
         self.active_base_source_ids = {
             _lod_invariant_source_id(payload.source_id) for _tile_number, payload in payload_items
         }
@@ -789,7 +940,11 @@ class TextureAtlasPool:
         tile_h, tile_w = self.tile_shape or tile_shape
         base_shape = (int(tile_h), int(tile_w))
         class_counts: dict[tuple[int, int], int] = {}
-        for _tile_number, payload in payload_items:
+        for tile_number, payload in payload_items:
+            if int(tile_number) in chunk_plans:
+                # Chunk slots live in their own shape class; the chunk
+                # allocator grows it same-page as needed.
+                continue
             class_shape = _payload_class_shape(payload)
             if class_shape != base_shape:
                 class_counts[class_shape] = class_counts.get(class_shape, 0) + 1
@@ -799,11 +954,45 @@ class TextureAtlasPool:
 
         for tile_number, payload in payload_items:
             resident_key = _resident_key(payload)
+            chunks = chunk_plans.get(int(tile_number))
+            if chunks is not None:
+                committed = self._commit_chunked_payload(
+                    int(tile_number),
+                    payload,
+                    chunks,
+                    world_region=world_regions[int(tile_number)],
+                    protected_keys=protected_keys,
+                    near_keys=near_keys,
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+                if committed is None:
+                    # Chunk set cannot be placed (same-page capacity): fall
+                    # back cleanly to the classic whole-tile path below.
+                    chunk_plans.pop(int(tile_number), None)
+                else:
+                    active_tile_slots[int(tile_number)] = (
+                        int(committed.page_index),
+                        int(committed.slot),
+                    )
+                    active_tile_keys[int(tile_number)] = resident_key
+                    uvs[tile_number] = committed.uv
+                    active_tile_uvs[int(tile_number)] = committed.uv
+                    uploads += committed.uploads
+                    upload_bytes += committed.upload_bytes
+                    complex_uploads += committed.complex_uploads
+                    texture_prepare_ms += committed.prepare_ms
+                    texture_submit_ms += committed.submit_ms
+                    if committed.uploaded_any:
+                        uploaded_keys.add(resident_key)
+                        updated += 1
+                    else:
+                        skipped += 1
+                    continue
             class_shape = _payload_class_shape(payload)
             try:
                 page_index, slot, newly_assigned = self._slot_for(
                     resident_key,
-                    active_keys=active_keys,
+                    active_keys=protected_keys,
                     near_keys=near_keys,
                     tile_shape=class_shape,
                 )
@@ -1125,7 +1314,7 @@ class TextureAtlasPool:
             try:
                 page_index, slot, _newly_assigned = self._slot_for(
                     resident_key,
-                    active_keys=set(self.active_resident_keys),
+                    active_keys=set(self.active_resident_keys) | set(self.active_chunk_keys),
                     near_keys=near_keys,
                     tile_shape=class_shape,
                 )
@@ -1262,6 +1451,20 @@ class TextureAtlasPool:
                 f"but {len(active_keys)} active tiles require residency"
             )
         _priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
+        self._release_victim(victim, near_keys=near_keys)
+        page = self.pages[int(page_index)]
+        page.slot_owners[int(slot)] = resident_key
+        self._bind_resident_slot(resident_key, page_index, slot, page)
+        return int(page_index), int(slot), True
+
+    def _release_victim(self, victim: object, *, near_keys: set[object]) -> None:
+        """Evict one resident key: drop its slot binding and identity records.
+
+        Works for classic tile-level keys and for anchored chunk keys — the
+        tile-mapping discard below invalidates the owning tile(s) of a chunk
+        victim so the next commit re-uploads that chunk.
+        """
+
         self._discard_tile_mappings_for_resident_key(victim)
         self._page_table.unbind(victim)
         self.source_ids.pop(victim, None)
@@ -1273,10 +1476,6 @@ class TextureAtlasPool:
         self.eviction_count += 1
         if victim in near_keys:
             self.evicted_near_count += 1
-        page = self.pages[int(page_index)]
-        page.slot_owners[int(slot)] = resident_key
-        self._bind_resident_slot(resident_key, page_index, slot, page)
-        return int(page_index), int(slot), True
 
     def _bind_resident_slot(self, resident_key: object, page_index: int, slot: int, page: TextureAtlasPage) -> None:
         nbytes = _storage_mode_bytes_per_pixel(page.storage_mode) * page.tile_shape[0] * page.tile_shape[1]
@@ -1285,6 +1484,316 @@ class TextureAtlasPool:
             PageSlot("vispy-atlas", int(page_index), int(slot)),
             nbytes=nbytes,
         )
+
+    def _chunk_slots_for(
+        self,
+        chunk_keys: tuple[object, ...],
+        *,
+        protected_keys: set[object],
+        near_keys: set[object],
+    ) -> dict[object, tuple[int, int, bool]]:
+        """Place one tile's chunk set, all on the SAME page.
+
+        The montage layer buckets a tile to one visual via its (page, slot),
+        so a tile's chunks may never straddle pages. Prefers the page already
+        holding the most of this set; grows the chunk shape class when no
+        page has room. Raises :class:`AtlasCapacityError` when the set cannot
+        be placed on any single page (caller falls back to the classic path).
+        """
+
+        shape = (int(ANCHORED_CHUNK_SHAPE[0]), int(ANCHORED_CHUNK_SHAPE[1]))
+        keys = tuple(chunk_keys)
+        key_set = set(keys)
+        lookups = {key: self._page_table.lookup(key) for key in keys}
+        votes: dict[int, int] = {}
+        for slot_ref in lookups.values():
+            if slot_ref is not None:
+                votes[slot_ref.page_index] = votes.get(slot_ref.page_index, 0) + 1
+
+        def class_page_indices() -> tuple[int, ...]:
+            return tuple(
+                index for index, page in enumerate(self.pages) if page.tile_shape == shape
+            )
+
+        def page_headroom(page_index: int) -> bool:
+            page = self.pages[page_index]
+            resident_here = sum(
+                1
+                for slot_ref in lookups.values()
+                if slot_ref is not None and slot_ref.page_index == page_index
+            )
+            needed = len(keys) - resident_here
+            free = sum(1 for owner in page.slot_owners if owner is None)
+            evictable = sum(
+                1
+                for owner in page.slot_owners
+                if owner is not None and owner not in protected_keys and owner not in key_set
+            )
+            return free + evictable >= needed
+
+        ordered = sorted(votes, key=lambda index: -votes[index])
+        ordered.extend(index for index in class_page_indices() if index not in votes)
+        chosen = next((index for index in ordered if page_headroom(index)), None)
+        if chosen is None:
+            self._ensure_class_capacity(shape, self._class_capacity(shape) + len(keys))
+            chosen = next(
+                (index for index in class_page_indices() if page_headroom(index)),
+                None,
+            )
+        if chosen is None:
+            raise AtlasCapacityError(
+                f"no atlas page of shape {shape} can hold {len(keys)} chunks of one tile"
+            )
+        page = self.pages[int(chosen)]
+        results: dict[object, tuple[int, int, bool]] = {}
+        for key in keys:
+            slot_ref = lookups[key]
+            if slot_ref is not None and slot_ref.page_index == int(chosen):
+                self._page_table.touch(key)
+                results[key] = (int(chosen), int(slot_ref.slot_index), False)
+                continue
+            if slot_ref is not None:
+                # Resident on another page: same-page bucketing wins. Release
+                # the foreign slot (invalidating any tile drawn from it) and
+                # re-upload into this tile's page.
+                self._discard_tile_mappings_for_resident_key(key)
+                foreign = self.pages[int(slot_ref.page_index)]
+                foreign.slot_owners[int(slot_ref.slot_index)] = None
+                foreign._free_slots.append(int(slot_ref.slot_index))
+                self._page_table.unbind(key)
+            slot = page.take_free_slot(key)
+            if slot is None:
+                slot = self._evict_page_victim(
+                    int(chosen),
+                    protected_keys=protected_keys | key_set,
+                    near_keys=near_keys,
+                )
+                page.slot_owners[int(slot)] = key
+            self._bind_resident_slot(key, int(chosen), int(slot), page)
+            results[key] = (int(chosen), int(slot), True)
+        return results
+
+    def _evict_page_victim(
+        self,
+        page_index: int,
+        *,
+        protected_keys: set[object],
+        near_keys: set[object],
+    ) -> int:
+        """Evict the best victim on ONE page and return its freed slot index."""
+
+        page = self.pages[int(page_index)]
+        candidates = []
+        active_bases = self.active_base_source_ids
+        for slot, owner in enumerate(page.slot_owners):
+            if owner is None or owner in protected_keys:
+                continue
+            superseded = owner in self.superseded_keys and not self.resident_tiles.get(owner)
+            adjacent = superseded and _lod_invariant_source_id(self.source_ids.get(owner)) in active_bases
+            if superseded and not adjacent and owner not in near_keys:
+                rank = 0
+            elif superseded and not adjacent:
+                rank = 1
+            elif not superseded and owner not in near_keys:
+                rank = 2
+            elif not superseded:
+                rank = 3
+            else:
+                rank = 4
+            candidates.append((rank, self._page_table.last_use(owner), owner, int(slot)))
+        if not candidates:
+            raise AtlasCapacityError(
+                f"atlas page {page_index} has no evictable slot for a chunk allocation"
+            )
+        _rank, _last, victim, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
+        self._release_victim(victim, near_keys=near_keys)
+        return int(slot)
+
+    def _commit_chunked_payload(
+        self,
+        tile_number: int,
+        payload: DisplayTilePayload,
+        chunks: tuple[_PayloadChunk, ...],
+        *,
+        world_region: tuple[int, int, int, int],
+        protected_keys: set[object],
+        near_keys: set[object],
+        rgb_already_windowed: bool,
+    ) -> "_ChunkCommit | None":
+        """Commit one anchored payload as chunk residency plus draw parts.
+
+        Uploads only chunks whose keys are not resident; already-resident
+        (interior) chunks are reused byte-identically across window shifts.
+        Returns None when the chunk set cannot be placed on one page — the
+        caller then falls back to the classic whole-tile path.
+        """
+
+        tile_number = int(tile_number)
+        try:
+            slots = self._chunk_slots_for(
+                tuple(chunk.key for chunk in chunks),
+                protected_keys=protected_keys,
+                near_keys=near_keys,
+            )
+        except AtlasCapacityError:
+            return None
+        page_index = slots[chunks[0].key][0]
+        page = self.pages[int(page_index)]
+        resident_key = _resident_key(payload)
+        need_upload = tuple(chunk for chunk in chunks if slots[chunk.key][2])
+        need_records = resident_key not in self.physical_upload_records
+        scalar = color = None
+        prepare_ms = 0.0
+        if need_upload or need_records:
+            scalar, color, prepare_ms = _prepare_payload_texture_data(
+                payload,
+                tile_shape=_payload_class_shape(payload),
+                rgb_already_windowed=rgb_already_windowed,
+                need_scalar=self.scalar_is_atlas,
+                need_color=self.color_is_atlas,
+            )
+        submit_ms = 0.0
+        uploads = 0
+        upload_bytes = 0
+        complex_uploads = 0
+        for chunk in need_upload:
+            py0, py1, px0, px1 = chunk.plane_rect
+            _page_idx, slot, _newly = slots[chunk.key]
+            y_off, x_off = page.offset_for_slot(int(slot))
+            if scalar is not None:
+                sub = np.ascontiguousarray(scalar[py0:py1, px0:px1])
+                submit_ms += _upload_texture_plane(
+                    page.scalar_texture,
+                    sub,
+                    offset=(int(y_off), int(x_off)),
+                    copy=_upload_copy_required(sub, payload, force=page.complex_is_atlas),
+                )
+                uploads += 1
+                upload_bytes += int(sub.nbytes)
+                if page.complex_is_atlas:
+                    complex_uploads += 1
+            if color is not None:
+                sub = np.ascontiguousarray(color[py0:py1, px0:px1])
+                submit_ms += _upload_texture_plane(
+                    page.color_texture,
+                    sub,
+                    offset=(int(y_off), int(x_off)),
+                    copy=_upload_copy_required(sub, payload),
+                )
+                uploads += 1
+                upload_bytes += int(sub.nbytes)
+        if need_upload and page.mipmap_levels:
+            page.mipmap_dirty = True
+
+        # Draw parts: one UV-cropped quad per chunk. World rects tile the
+        # layout region exactly (adjacent chunks share edges — the plane maps
+        # 1:1 to world units at LOD factor 1); clipped chunks sample only the
+        # valid sub-region of their slot, never beyond it.
+        region_x, region_y = (int(world_region[0]), int(world_region[1]))
+        chunk_h, chunk_w = page.tile_shape
+        parts = []
+        for chunk in chunks:
+            py0, py1, px0, px1 = chunk.plane_rect
+            _page_idx, slot, _newly = slots[chunk.key]
+            u0, v0, u1, v1 = page.uv_for_slot(int(slot))
+            width = px1 - px0
+            height = py1 - py0
+            parts.append(
+                TileDrawPart(
+                    world_rect=(
+                        float(region_x + px0),
+                        float(region_y + py0),
+                        float(region_x + px1),
+                        float(region_y + py1),
+                    ),
+                    uv_rect=(
+                        u0,
+                        v0,
+                        u0 + (u1 - u0) * (width / float(chunk_w)),
+                        v0 + (v1 - v0) * (height / float(chunk_h)),
+                    ),
+                )
+            )
+
+        new_keys = tuple(chunk.key for chunk in chunks)
+        new_set = set(new_keys)
+        for key in self.tile_chunk_residency.get(tile_number, ()):
+            if key in new_set:
+                continue
+            owners = self.chunk_resident_tiles.get(key)
+            if owners is not None:
+                owners.discard(tile_number)
+                if not owners:
+                    self.chunk_resident_tiles.pop(key, None)
+        self.tile_chunk_residency[tile_number] = new_keys
+        for key in new_keys:
+            self.chunk_resident_tiles.setdefault(key, set()).add(tile_number)
+        self.tile_draw_parts[tile_number] = tuple(parts)
+
+        # Tile-level identity bookkeeping stays exactly as on the classic
+        # path: acknowledgement, presented identities, and tile truth are
+        # keyed by _resident_key(payload). The chunk layer is pure residency.
+        self.source_ids[resident_key] = payload.source_id
+        self.acknowledged_identities[resident_key] = (
+            getattr(payload, "tile_identity", None) or payload.source_id
+        )
+        self._chunked_tile_keys.add(resident_key)
+        record_plane = scalar if scalar is not None else color
+        if record_plane is not None:
+            real_plane, imag_plane = array_plane_identities(record_plane)
+            self.physical_upload_records[resident_key] = {
+                "physical_texture_kind": _payload_texture_kind(payload).value,
+                "physical_storage_mode": str(page.storage_mode),
+                "physical_texture_dtype": str(np.asarray(record_plane).dtype),
+                "physical_texture_shape": tuple(
+                    int(value) for value in np.asarray(record_plane).shape
+                ),
+                "physical_real_plane_identity": plane_identity_record(real_plane),
+                "physical_imag_plane_identity": plane_identity_record(imag_plane),
+            }
+        self.chunk_upload_count += len(need_upload)
+        self.chunk_reuse_count += len(chunks) - len(need_upload)
+        first_slot = slots[chunks[0].key]
+        return _ChunkCommit(
+            page_index=int(first_slot[0]),
+            slot=int(first_slot[1]),
+            uv=page.uv_for_slot(int(first_slot[1])),
+            uploads=uploads,
+            upload_bytes=upload_bytes,
+            complex_uploads=complex_uploads,
+            prepare_ms=prepare_ms,
+            submit_ms=submit_ms,
+            uploaded_any=bool(need_upload),
+        )
+
+    def _release_tile_chunks(self, tile_number: int) -> bool:
+        """Unlink a tile from its chunk residency (chunks stay LRU-evictable)."""
+
+        tile_number = int(tile_number)
+        keys = self.tile_chunk_residency.pop(tile_number, ())
+        for key in keys:
+            owners = self.chunk_resident_tiles.get(key)
+            if owners is not None:
+                owners.discard(tile_number)
+                if not owners:
+                    self.chunk_resident_tiles.pop(key, None)
+        if keys:
+            self.tile_draw_parts.pop(tile_number, None)
+        return bool(keys)
+
+    def _forget_unreferenced_chunked_key(self, resident_key: object) -> None:
+        """Drop identity records of a chunked tile-level key no tile presents.
+
+        Chunked tile-level keys own no slot of their own; without this their
+        records would outlive the draw mapping (classic keys instead become
+        superseded and are reclaimed together with their slot).
+        """
+
+        if resident_key in self._chunked_tile_keys and not self.resident_tiles.get(resident_key):
+            self._chunked_tile_keys.discard(resident_key)
+            self.source_ids.pop(resident_key, None)
+            self.acknowledged_identities.pop(resident_key, None)
+            self.physical_upload_records.pop(resident_key, None)
 
     def _clear_tile_mapping(self, tile_number: int) -> None:
         tile_number = int(tile_number)
@@ -1295,9 +1804,11 @@ class TextureAtlasPool:
                 tiles.discard(tile_number)
                 if not tiles:
                     self.resident_tiles.pop(old_key, None)
+            self._forget_unreferenced_chunked_key(old_key)
         self.tile_slots.pop(tile_number, None)
         self.tile_draw_parts.pop(tile_number, None)
         self.tile_uvs.pop(tile_number, None)
+        self._release_tile_chunks(tile_number)
 
     def _set_tile_mapping(
         self,
@@ -1320,7 +1831,13 @@ class TextureAtlasPool:
             # presents it anymore (ADR 0041 gate 5 holds until here).
             if not self.resident_tiles.get(old_key) and old_key in self._page_table:
                 self.superseded_keys.add(old_key)
+            self._forget_unreferenced_chunked_key(old_key)
         self.superseded_keys.discard(resident_key)
+        if resident_key not in self._chunked_tile_keys:
+            # The tile now presents whole-tile residency: any chunk links and
+            # per-chunk draw parts from a previous chunked presentation are
+            # stale (the chunks themselves stay warm and LRU-evictable).
+            self._release_tile_chunks(tile_number)
         self.tile_slots[tile_number] = (int(page_index), int(slot))
         self.tile_resident_keys[tile_number] = resident_key
         self.resident_tiles.setdefault(resident_key, set()).add(tile_number)
@@ -1334,6 +1851,14 @@ class TextureAtlasPool:
                 self.tile_slots.pop(tile_number, None)
                 self.tile_draw_parts.pop(tile_number, None)
                 self.tile_uvs.pop(tile_number, None)
+                self._release_tile_chunks(tile_number)
+        # A chunk victim invalidates its owning tile(s) entirely: one missing
+        # chunk means the tile no longer presents its full content, so the
+        # next commit must re-chunk (and re-upload only what was lost).
+        for tile_number in tuple(self.chunk_resident_tiles.get(resident_key, ())):
+            self._clear_tile_mapping(int(tile_number))
+        self.chunk_resident_tiles.pop(resident_key, None)
+        self._chunked_tile_keys.discard(resident_key)
 
     def _touch(self, resident_key: object) -> None:
         self._page_table.touch(resident_key)
@@ -1632,6 +2157,15 @@ class GpuMontageLayer:
             near_tile_source_ids=near_tile_source_ids,
             budget_bytes=tile_residency_budget_bytes,
             tile_delta=tile_delta,
+            tile_world_regions={
+                int(tile): (
+                    int(region.x),
+                    int(region.y),
+                    int(region.width),
+                    int(region.height),
+                )
+                for tile, region in layout.items()
+            },
         )
         active_mapping_key = _active_mapping_key(
             payloads,
