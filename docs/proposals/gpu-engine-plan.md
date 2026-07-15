@@ -3,8 +3,17 @@
 **Date:** 2026-07-15. **Branch:** `codex/gpu-engine`.
 **Decision record:** [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md)
 (three-way separation of view tiles, data chunks, residency pages).
-**Status:** G1 in progress on this branch; later stages are design-committed
-but gate-blocked, in roadmap style ("code exists" is not completion).
+**Status (2026-07-15):** G1 and the G2 first slice are implemented (gpu
+package + atlas on the page table). G3 is implemented offscreen-first:
+windowability predicate (`pipeline_windowable_display_axes`), source-anchored
+single-image planning (`ANCHORED_CHUNK_SHAPE` 256², `source_rect`,
+buffer-independent content source_ids, gpu_atlas-gated), TileDrawPart
+multi-quad/UV-crop substrate, and the residency gate tests (boundary-only
+uploads on ±1 shift, zero-upload scroll-back, FFT negative control). The G3
+exit gate still requires the real-display harness half. Known G3b-1 limit:
+windows narrower than ~3 chunks contain no interior chunks and still
+re-materialize fully — lifted by G3b-2 (full-chunk materialization with
+window-as-camera clipping, design below).
 
 ## User problem
 
@@ -115,6 +124,19 @@ uploads only boundary chunks (recorded upload counter), pixel-identical to
 the PyQtGraph oracle; the FFT-along-displayed-axis case takes the full
 re-evaluation path and stays pixel-correct; first-image latency on cold
 window unchanged (±10%).
+
+**G3b-2 — full-chunk residency, window as camera (design).** G3b-1 clips
+regions to the window, so small windows have no shift-stable interior
+chunks, and every shift still re-evaluates the (cheap for raw views) CPU
+plane. The completion: materialize *whole* source-aligned chunks for the
+chunk-expanded window (union of chunks intersecting it), let world
+coordinates equal source coordinates, and present the user window as a
+camera rect over the tiled plane — a shift becomes a camera move plus
+boundary-chunk requests, with zero re-materialization of resident chunks.
+This subsumes the UV-crop path for interiors (whole quads, camera-clipped
+edges) and is the natural place to relax the `"no-axis"` session rebirth in
+`frame_controller` for anchored plans. Requires the display-coordinate
+mapping (probes, ROI, camera fit) to learn the window origin offset.
 
 ### G4 — Small-array whole residency + GPU indexing
 
