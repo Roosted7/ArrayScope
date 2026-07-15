@@ -1,7 +1,6 @@
 """Source-anchored single-image tile identity (ADR 0055 G3b-1)."""
 
 import numpy as np
-import pytest
 
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
@@ -9,11 +8,12 @@ from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE, FramePlanner, _axis_origins
 from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.source_anchoring import (
-    SourceAnchoring,
     contiguous_range_start,
     source_anchoring_for_view,
 )
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate
+
+from tests.display.vispy_test_utils import FakeDisplayImage
 
 
 TARGET = FrameTarget(semantic_key="test", viewport_key=None, presentation_key=None, quality="exact-visible")
@@ -129,12 +129,6 @@ class TestAnchoredPlan:
         plan = plan_for(state, (512, 100), None)
         assert plan.source_content_key is None
         assert all(region.source_rect is None for region in plan.regions)
-
-
-class FakeDisplayImage:
-    def __init__(self, data):
-        self.data = data
-        self.histogram_data = None
 
 
 class TestAnchoredSourceIds:

@@ -23,23 +23,12 @@ from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
 from arrayscope.display.pyramid import reduce_box_mean
 
+from tests.display.vispy_test_utils import FakeGloo
+
 CHUNK = int(ANCHORED_CHUNK_SHAPE[0])
 HEIGHT = 2 * CHUNK
 DATA_WIDTH = 8 * CHUNK
 EXTENT = 4 * CHUNK
-
-
-class RecordingTexture2D:
-    def __init__(self, data=None, *, shape=None, **kwargs):
-        self.shape = tuple(shape) if shape is not None else tuple(np.shape(data))
-        self.uploads: list[tuple[tuple[int, int], np.ndarray]] = []
-
-    def set_data(self, data, *, offset=None, copy=True):
-        self.uploads.append((tuple(int(v) for v in (offset or (0, 0))), np.array(data, copy=True)))
-
-
-class FakeGloo:
-    Texture2D = RecordingTexture2D
 
 
 def _data():

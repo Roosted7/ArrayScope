@@ -32,7 +32,7 @@ from arrayscope.display.shader_mapping import (
     ShaderMapping,
 )
 
-from tests.display.test_vispy_tiled_renderer import FakeGloo, FakeVisual, complex_payload
+from tests.display.vispy_test_utils import FakeGloo, FakeVisual, complex_payload
 
 
 class PhysicalFakeVisual(FakeVisual):

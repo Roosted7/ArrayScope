@@ -17,24 +17,7 @@ from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.source_anchoring import source_anchoring_for_view
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 
-
-class FakeTexture2D:
-    def __init__(self, data=None, *, shape=None, **kwargs):
-        self.shape = tuple(shape) if shape is not None else tuple(np.shape(data))
-
-    def set_data(self, data, *, offset=None, copy=True):
-        pass
-
-
-class FakeGloo:
-    Texture2D = FakeTexture2D
-
-
-class FakeDisplayImage:
-    def __init__(self, data):
-        self.data = np.asarray(data)
-        self.histogram_data = None
-
+from tests.display.vispy_test_utils import FakeDisplayImage, FakeGloo
 
 TARGET = FrameTarget(semantic_key="gate", viewport_key=None, presentation_key=None, quality="exact-visible")
 CHUNK = ANCHORED_CHUNK_SHAPE[1]
