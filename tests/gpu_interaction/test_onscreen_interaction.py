@@ -72,7 +72,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
 
         tiles = h.session.plan.tiles
         boundary_tile = tiles[5]
-        height, width = h.session.plan.display_shape
+        height, _width = h.session.plan.display_shape
         view = win.img_view.getView()
         view.setRange(
             xRange=(0.0, float(boundary_tile.x0)),
@@ -100,11 +100,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
 
         # Revealing the boundary column must require no new materialization:
         # its exact pixels were already an obligation at the landing edge.
-        view.setRange(
-            xRange=(0.0, float(width)),
-            yRange=(0.0, float(height)),
-            padding=0,
-        )
+        h.fit_plan_view()
         assert h.wait_settled(timeout=20.0)
         # V1 certifies the image layer. Remove independent composition
         # overlays before sampling the constant-tile framebuffer; two default

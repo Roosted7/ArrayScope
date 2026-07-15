@@ -131,6 +131,13 @@ Ordered by confidence:
     24 both failed, so all runtime/test changes were removed. Revisit only
     with physical transaction-order evidence; do not infer safety from the
     semantic queue model.
+    **[Codex 2026-07-15 — correction]** The reverted baseline reproduced the
+    same row-zero assertion. V1 had sampled off-frame rectangles after fitting
+    exact content bounds into a differently shaped viewport; clamping aliased
+    them onto another visible row. The gate now zooms out with the production
+    square-pixel fit range and refuses off-frame sampling, and the 4-test
+    backend matrix is green. The refill design is reopened; the rejection
+    immediately above is not valid physical evidence against it.
 16. **Presentation-gate timer-edge pacing + GPU draw back-pressure**
     (`frame_effects.py`, `render_coordinator.py`) — replace self-reposting
     low-priority events with receiver-bound timers; don't admit a second

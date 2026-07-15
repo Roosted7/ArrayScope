@@ -228,6 +228,22 @@ class Harness:
         self.toggle_fit_stretch(False)
         self.pump(0.2)
 
+    def fit_plan_view(self) -> None:
+        """Zoom out to the full applied plan without changing its layout."""
+
+        from arrayscope.window.montage_viewport import square_montage_fit_view_range
+
+        viewport = self.win.img_view.graphicsView.viewport().size()
+        x_range, y_range = square_montage_fit_view_range(
+            self.session.plan,
+            (max(1, viewport.height()), max(1, viewport.width())),
+        )
+        self.win.img_view.getView().setRange(
+            xRange=x_range,
+            yRange=y_range,
+            padding=0,
+        )
+
     def toggle_fit_stretch(self, enabled: bool) -> None:
         self.win.fit_image_to_view(bool(enabled))
         self.app.processEvents()
@@ -334,11 +350,15 @@ class Harness:
             )
             x0, x1 = sorted((p0[0], p1[0]))
             y0, y1 = sorted((p0[1], p1[1]))
-            interior = shot[
-                max(0, y0) : min(shot.shape[0], y1 + 1),
-                max(0, x0) : min(shot.shape[1], x1 + 1),
-                0,
-            ]
+            assert 0 <= x0 <= x1 < shot.shape[1], (
+                f"tile {tile.montage_index} interior is outside the framebuffer: "
+                f"x=({x0}, {x1}), width={shot.shape[1]}"
+            )
+            assert 0 <= y0 <= y1 < shot.shape[0], (
+                f"tile {tile.montage_index} interior is outside the framebuffer: "
+                f"y=({y0}, {y1}), height={shot.shape[0]}"
+            )
+            interior = shot[y0 : y1 + 1, x0 : x1 + 1, 0]
             assert interior.size
             modes.append(float(np.bincount(interior.reshape(-1), minlength=256).argmax()))
         return modes

@@ -571,6 +571,19 @@ acceptance.
 > refill/pending ownership rather than cohort size. The whole experiment was
 > removed. Do not land completion-owned refill until its backend transaction
 > ordering can pass V1; a clean lifecycle trace is insufficient evidence.
+>
+> **[Codex 2026-07-15 — correction to the P9 refill rejection above]** The
+> reverted P8 baseline failed the same framebuffer assertion, disproving the
+> attribution to completion refill. The V1 reveal used exact montage bounds
+> without compensating for the viewport aspect, then `tile_pixel_modes()`
+> clamped off-frame tile rectangles onto the framebuffer edge; it repeatedly
+> sampled the first visible row as though it were row zero. The scenario now
+> zooms out to `square_montage_fit_view_range()` without changing columns, and
+> the oracle rejects any off-frame rectangle instead of clamping it. The
+> hardened reverted baseline is **4/4** green on real Wayland. Completion-owned
+> refill is therefore reopened for P9 and must be judged against this corrected
+> gate; the earlier non-GPU design evidence remains useful, but its stated
+> physical rejection is superseded.
 
 ## The visible-truth harness (the only gate)
 
