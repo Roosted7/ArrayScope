@@ -520,8 +520,23 @@ acceptance.
 > scroll still fails level-settlement/continuity/slow-scroll gates, and FFT
 > zoom/pan still misses full-grid target LOD. P8 receives correctness and
 > convergence credit only; the remaining measured bottlenecks stay open for
-> the next P-step. A full PyQtGraph workflow rerun is also still required; the
-> shared PyQtGraph real-pixel and transition gates above are green.
+> the next P-step.
+>
+> **[Codex 2026-07-15 — P8 PyQtGraph completion and open-stall record]** The
+> full PyQtGraph workflow rerun reached the end of every phase without the
+> reported recursive viewport failure: raw **2,270 ms**, FFT full
+> **3,052 ms**, refinement **666 ms**, FFT scroll **17,326 ms**, scalar
+> scroll **7,873 ms**, FFT zoom/pan **8,117 ms**, and scalar zoom/pan
+> **9,960 ms**. This is not a clean performance or trace result. The run
+> emitted a profile stall-guard signature
+> `(159, 0, 0, 0, 0, 0, 1, 0, 60, 22)`, heartbeat maxima remained
+> **71-883 ms**, and whole-workflow `trace_verify` did not retain a complete
+> final target scope (**45/272** acknowledged in the final replay). Preserve
+> both observations for P9: PyQtGraph presentation commits measured roughly
+> **17-25 ms** while its shared governor decision consumed a feedback channel
+> that this backend did not publish. Do not call the trace clean until the
+> phase/session scope and the stall signature are separately resolved.
+>
 > The final parallel non-GPU suite is **1,955 passed, 8 skipped**. Two failures
 > encountered while hardening that gate were test defects and are recorded to
 > avoid repeating them: the new draw-edge timer had to be explicitly added to

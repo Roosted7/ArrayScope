@@ -82,6 +82,18 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > guard but did not improve the 7/60 deadlock. The active measured cause is now
 > governor lane policy.
 
+> **[Codex 2026-07-15 — P8 result; correctness only]** Interaction lane
+> quotas and a plan-wide preview barrier prevent exact/ROI work from
+> overtaking the visible preview pass; canonical priority reaches execution
+> and both backend admission paths. Source-successor and level-generation
+> feedback loops now converge, synchronous viewport continuation and VisPy
+> draw acknowledgement cross receiver-owned Qt turns, and the full non-GPU
+> suite is **1,955 passed, 8 skipped**. Real-Wayland V1/V2 is green on both
+> backends and both complete workflow runs reach their final phase, but the
+> 16 ms heartbeat and throughput bars remain red. The active measured cause
+> is now presentation admission batching; PyQtGraph exposed an untrained
+> shared commit-feedback channel and 17-25 ms commit samples.
+
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
 coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do

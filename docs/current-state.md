@@ -1,6 +1,8 @@
 # Current state
 
-**Snapshot:** `main`, 2026-07-14, after linear redesign/review rebase.
+**Snapshot:** `codex/redesign-p8`, 2026-07-15, after the P8 correctness slice.
+**[Codex 2026-07-15 — branch/state update]** P8 remains on a linear feature
+branch rebased over `origin/main`; it has not been merged into `main`.
 **[Codex 2026-07-14 — history correction]** No redesign integration merge
 remains; completed queue and review commits are a single linear sequence.
 **[Codex 2026-07-14 — post-V4 update]** The redesign execution record and
@@ -20,7 +22,7 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
   `RenderOrchestrator` (`window/render.py`) over
   `frame_controller/frame_session/frame_effects/frame_runtime`.
 
-## Viewer-truth fixes now on `main`
+## Viewer-truth fixes through `codex/redesign-p8`
 
 1. Required-tile admission, completion, evidence, and presentation consume
    the canonical `FrameSession.required_tile_numbers()` owner; the V1
@@ -45,6 +47,11 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    worker mutation lock; pyramid floor probes use one batch lookup, and
    superseded render results check cancellation between expensive shaping
    boundaries.
+9. **[Codex 2026-07-15 — P8 update]** Interaction policy preserves one
+   preview lane and parks exact/inspection work until the plan-wide preview
+   pass closes. Recursive viewport continuation and synchronous VisPy draw
+   acknowledgement now cross receiver-owned Qt turns; source/level
+   convergence reaches the end of both backend workflows.
 
 ## Known open work
 
@@ -52,10 +59,12 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    50 ms callback, 16 ms heartbeat, and 15 ms warm-input commitments; FFT
    scroll remains the primary throughput target. Follow the measured
    P-program in the roadmap.
-2. **The broad suite is red.** The final pre-integration non-GPU run reported
-   42 failures and 2 teardown errors; 41 failures reproduced serially.
-   Stale deleted-owner assertions coexist with real coalescer, levels,
-   viewport/ROI, cache-rebind, and transition behavior debt.
+2. **[Codex 2026-07-15 — superseded suite-risk update]** The stale
+   deleted-owner assertions and the real coalescer/levels/viewport/ROI/
+   cache-rebind/transition regressions from the pre-integration run have been
+   repaired or migrated to canonical owners. The final parallel non-GPU run
+   is **1,955 passed, 8 skipped**. Real-display GPU checks remain a separate
+   mandatory gate and are not implied by that number.
 3. Hardware evidence remains Linux-only; the histogram adapter remains
    sensitive to private PyQtGraph API.
 4. **Completion-drain coalescing is rejected in isolation.** Empty-edge
@@ -63,11 +72,13 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    real VisPy V2 pixel gate in three capacity-wake variants. The unchanged
    per-completion bridge remains production truth until the pipeline refill
    contract is redesigned with a real-display proof.
-5. **The presentation deadlock survives P6.** Viewport cadence removes 39–50%
-   of kernel submissions in the frozen workflow, but the FFT phase still ends
-   at 7/60 presented and 53 dirty with no work in flight. Do not attribute
-   that gate failure to viewport planning or re-couple semantic continuation
-   to the gesture timer.
+5. **[Codex 2026-07-15 — P8 recurrence update]** The former P6/P7 7/60
+   presentation deadlock now converges on both backends. Performance remains
+   unacceptable: complete workflow heartbeat maxima are 214-883 ms and FFT
+   scroll takes about 29.0 s on VisPy / 17.3 s on PyQtGraph. The PyQtGraph
+   run also emitted a stall-guard signature and its final whole-workflow trace
+   scope was incomplete; preserve these as P9 evidence rather than reviving
+   viewport-cadence or synchronous-continuation experiments.
 
 ## Material risks
 
@@ -76,9 +87,10 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    fields; the same fact (residency, visibility, priority) lives in several
    owners. Every fix that doesn't reduce owner count tends to create the
    next bug.
-2. **Suite/acceptance split.** The visible-truth harness now exists and is
-   authoritative for pixels, but the broad offscreen suite must be brought
-   back to truth without reintroducing superseded ownership models.
+2. **[Codex 2026-07-15 — suite/acceptance split update]** The broad offscreen
+   suite is green again, but the visible-truth harness remains authoritative
+   for pixels. Neither test layer substitutes for complete phase-scoped trace
+   replay and real-display performance evidence.
 3. **Performance work can regress truth.** Every P-step therefore needs
    before/after measurements plus the real-display pixel/trace gates.
 
