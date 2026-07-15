@@ -9,7 +9,6 @@ import numpy as np
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.display.colormaps import gray_colormap, named_colormap, phase_colormap
 from arrayscope.ui.dialogs import SaveRangeDialog
 from arrayscope.operations.recipes import load_recipe, save_recipe
 from arrayscope.operations.registry import operation_entries

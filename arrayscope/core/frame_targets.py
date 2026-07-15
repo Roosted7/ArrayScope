@@ -1,15 +1,14 @@
-"""Qt-free scheduler request and diagnostics models.
+"""Qt-free frame-target request and diagnostics models.
 
-Canonical priority vocabulary lives in the kernel (redesign R0). This module
-keeps a compatibility alias only until the legacy controllers are deleted at
-the end of R1; new code imports `Priority` from `arrayscope.kernel`.
+Priority vocabulary lives in the kernel; import ``Priority`` from
+``arrayscope.kernel``. This module holds only the shared frame-target and
+diagnostics dataclasses exchanged between the window layer and the kernel
+evaluation adapter.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from arrayscope.kernel.task import Priority as EvalPriority  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -26,20 +25,6 @@ class FrameProgress:
     presented: FrameTarget | None = None
     active: FrameTarget | None = None
     queued_latest: FrameTarget | None = None
-
-
-@dataclass(frozen=True)
-class EvalRequest:
-    key: object
-    priority: EvalPriority
-    generation: int
-    replace_group: str
-    group_generation: int
-    memory_budget_bytes: int | None = None
-    frame_target: FrameTarget | None = None
-    supersession_key: object | None = None
-    supersession_value: object | None = None
-    work_item: object | None = None
 
 
 @dataclass(frozen=True)

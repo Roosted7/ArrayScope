@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES

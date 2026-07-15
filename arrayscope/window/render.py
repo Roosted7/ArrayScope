@@ -7,12 +7,12 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.trace import emit_trace
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.core.window_levels import LevelSourceRank
-from arrayscope.display.colormaps import named_colormap, phase_colormap
+from arrayscope.display.colormap_library import get_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.viewport import ViewportPolicy
@@ -27,7 +27,7 @@ from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
 from arrayscope.display.geometry import display_geometry_coordinates_equal
 from arrayscope.window.display_presenter import DisplayPresentationMixin
-from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.kernel import Priority
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.frame_controller import FrameControllerMixin
 from arrayscope.window.render_contract import RenderGeneration, generation_is_current
@@ -226,7 +226,7 @@ class RenderOrchestrator(
         self.win.pixel_evaluation_controller.start_latest(
             evaluate,
             key=request_key,
-            priority=EvalPriority.HOVER,
+            priority=Priority.HOVER,
             replace_group="pixel-hover",
             frame_target=frame_target,
             supersession_key="pixel-hover",
@@ -463,7 +463,7 @@ class RenderOrchestrator(
         self.win.profile_evaluation_controller.start_latest(
             evaluate,
             key=tuple(request_keys.values()),
-            priority=EvalPriority.LIVE_PROFILE,
+            priority=Priority.LIVE_PROFILE,
             replace_group="live-profile",
             frame_target=FrameTarget(
                 semantic_key=tuple(request_keys.values()),
@@ -672,7 +672,7 @@ class RenderOrchestrator(
 
         family = colormap_family(self.win.view_state.channel)
         name = self._coerced_colormap_for_family(name, family)
-        colormap = named_colormap(str(name))
+        colormap = get_colormap(str(name))
         if colormap is None:
             raise ValueError(f"unknown colormap: {name}")
         key_getter = getattr(self.win.img_view, "displayColorMapKey", None)
@@ -926,7 +926,7 @@ class RenderOrchestrator(
         self.win.profile_evaluation_controller.start_latest(
             evaluate,
             key=tuple(request_keys.values()),
-            priority=EvalPriority.LIVE_PROFILE,
+            priority=Priority.LIVE_PROFILE,
             replace_group="profile-plot",
             frame_target=FrameTarget(
                 semantic_key=tuple(request_keys.values()),

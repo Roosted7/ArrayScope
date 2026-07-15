@@ -4,7 +4,7 @@ import time
 
 
 def _make_controller(qt_app):
-    from arrayscope.window.evaluation_controller import EvaluationController
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     return EvaluationController(name="capacity-test", max_workers=1)
 

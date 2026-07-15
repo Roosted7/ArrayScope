@@ -13,13 +13,13 @@ from pyqtgraph.Qt import QtWidgets
 from arrayscope.core.compare import CompareDocument
 from arrayscope.core.histograms import HistogramSpec, comparison_histograms
 from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_values_for_region
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.tile_regions import TileRegionRequest
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.tile_data_provider import TileDataProvider
-from arrayscope.window.evaluation_controller import EvalPriority
+from arrayscope.kernel import Priority
 from arrayscope.window.interaction_mode import InteractionMode
 
 
@@ -347,13 +347,13 @@ class InspectionWorkflowMixin:
             return False
         return getattr(getattr(self, "view_state", None), "montage_axis", None) is not None
 
-    def _roi_refresh_priority(self, selections, *, panel_visible: bool) -> EvalPriority:
+    def _roi_refresh_priority(self, selections, *, panel_visible: bool) -> Priority:
         if not panel_visible:
-            return EvalPriority.HIDDEN_ROI
+            return Priority.HIDDEN_ROI
         reason = str(getattr(self, "_roi_refresh_reason", "") or "")
         if self._roi_uses_montage_demand(selections) and reason != "refresh":
-            return EvalPriority.VISIBLE_ROI
-        return EvalPriority.SELECTED_ROI
+            return Priority.VISIBLE_ROI
+        return Priority.SELECTED_ROI
 
     def _montage_roi_values_pending(self) -> bool:
         renderer = getattr(self, "renderer", None)
@@ -417,7 +417,7 @@ class InspectionWorkflowMixin:
                 )
                 result = provider.request_tile_region(
                     request,
-                    priority=getattr(self, "_roi_inspection_priority", EvalPriority.HIDDEN_ROI),
+                    priority=getattr(self, "_roi_inspection_priority", Priority.HIDDEN_ROI),
                 )
                 source = result.histogram_data if result.histogram_data is not None else result.image
                 y_slice, x_slice = region

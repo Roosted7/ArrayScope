@@ -11,7 +11,7 @@ from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key

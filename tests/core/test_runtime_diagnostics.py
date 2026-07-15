@@ -21,7 +21,7 @@ from arrayscope.core.runtime_diagnostics import (
 )
 from arrayscope.operations.stage_cache import StageCacheDiagnostics
 from arrayscope.window.montage_prefetch import MontagePrefetchDecision
-from arrayscope.core.scheduler import FrameTarget, SchedulerDiagnostics
+from arrayscope.core.frame_targets import FrameTarget, SchedulerDiagnostics
 
 
 def _cache():

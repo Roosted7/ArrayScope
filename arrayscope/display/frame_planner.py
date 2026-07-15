@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from math import ceil
 from typing import Iterable
 
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.montage import MontageTileState, make_montage_plan

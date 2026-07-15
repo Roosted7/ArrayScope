@@ -167,7 +167,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
     monkeypatch,
 ):
     _clear_arrayscope_settings()
-    from arrayscope.core.scheduler import WorkStart
+    from arrayscope.core.frame_targets import WorkStart
     from arrayscope.window import ArrayScopeWindow
     from arrayscope.window import montage_prefetch
 
@@ -249,7 +249,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
 def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState
-    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.frame_targets import FrameTarget
     from arrayscope.kernel import Lane as WorkLane, WorkItem
     from arrayscope.window import ArrayScopeWindow
 

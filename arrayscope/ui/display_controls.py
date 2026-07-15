@@ -3,7 +3,8 @@ from __future__ import annotations
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.core.scheduler import EvalPriority, FrameTarget, WorkStart
+from arrayscope.core.frame_targets import FrameTarget, WorkStart
+from arrayscope.kernel import Priority
 from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.display.image_view_factory import create_image_view
 from arrayscope.ui.docks.inspection import InspectionDock
@@ -567,7 +568,7 @@ class DisplayControlBuildMixin:
         generation = controller.start_active_plus_latest(
             fn,
             key=key,
-            priority=EvalPriority.HISTOGRAM,
+            priority=Priority.HISTOGRAM,
             replace_group="histogram-plot",
             frame_target=frame_target,
             supersession_key="histogram-plot",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.frame_planner import FramePlanner

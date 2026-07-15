@@ -100,7 +100,7 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 - `window.render_contract` defines the one staleness/ordering vocabulary: the render generation,
   montage-session currency, and per-kind work tokens. Orchestrator predicates delegate to it;
   no orchestration site defines a local staleness comparison (roadmap Y1).
-- `window.evaluation_controller`, coalescing, and prefetch coordinate work around Qt.
+- `kernel.eval_adapter` (`KernelEvaluationController`), coalescing, and prefetch coordinate work around Qt.
 - `core.memory_policy`, compute policy, latency feedback, telemetry, and resource governor decide limits/admission inputs.
 
 ### UI and interaction

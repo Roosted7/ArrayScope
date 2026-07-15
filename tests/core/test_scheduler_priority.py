@@ -1,4 +1,4 @@
-from arrayscope.core.scheduler import EvalPriority
+from arrayscope.kernel import Priority as EvalPriority
 
 
 def test_eval_priority_order_matches_user_visible_work_ladder():

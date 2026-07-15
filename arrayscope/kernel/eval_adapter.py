@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.app.qt_binding import prefer_pyside6
-from arrayscope.core.scheduler import EvalPriority, FrameProgress, FrameTarget, SchedulerDiagnostics, WorkStart
+from arrayscope.core.frame_targets import FrameProgress, FrameTarget, SchedulerDiagnostics, WorkStart
 from arrayscope.kernel.qt_bridge import QtKernelBridge
 from arrayscope.kernel.scheduler import Kernel
 from arrayscope.kernel.task import Lane, Priority, Supersession, TaskSpec, WorkItem
@@ -153,7 +153,7 @@ class KernelEvaluationController(Qt.QtCore.QObject):
         on_stale=None,
         on_slow=None,
         slow_ms=100,
-        priority=EvalPriority.HOVER,
+        priority=Priority.HOVER,
         key=None,
         replace_group="default",
         frame_target: FrameTarget | None = None,

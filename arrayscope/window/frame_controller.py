@@ -17,7 +17,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner

@@ -14,7 +14,7 @@ def _wait_until(qtbot, predicate, *, timeout_ms=_WAIT_TIMEOUT_MS):
 
 
 def test_evaluation_controller_ignores_stale_results(qtbot):
-    from arrayscope.window.evaluation_controller import EvaluationController
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     done = []
@@ -31,7 +31,8 @@ def test_evaluation_controller_ignores_stale_results(qtbot):
 def test_start_latest_uses_kernel_scope_clear_not_pool_clear_luck(qtbot):
     """R1: clear_queued/clear_group are kernel scope clears, not pool.clear()."""
 
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     entered = threading.Event()
@@ -62,7 +63,8 @@ def test_start_latest_uses_kernel_scope_clear_not_pool_clear_luck(qtbot):
 
 
 def test_active_plus_latest_reuses_stale_completion(qtbot):
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     entered = threading.Event()
@@ -100,7 +102,8 @@ def test_active_plus_latest_reuses_stale_completion(qtbot):
 
 
 def test_supersession_does_not_advance_group_generation(qtbot):
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     done = []
@@ -123,7 +126,8 @@ def test_supersession_does_not_advance_group_generation(qtbot):
 
 
 def test_clear_group_prefix_invalidates_child_group(qtbot):
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     entered = threading.Event()
@@ -151,7 +155,7 @@ def test_clear_group_prefix_invalidates_child_group(qtbot):
 
 
 def test_start_prefetch_local_gates_then_submits_to_kernel(qtbot):
-    from arrayscope.window.evaluation_controller import EvaluationController
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     done = []
@@ -174,7 +178,8 @@ def test_start_prefetch_local_gates_then_submits_to_kernel(qtbot):
 
 
 def test_start_latest_can_pass_cancellation_token(qtbot):
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     seen = []
@@ -195,7 +200,8 @@ def test_start_latest_can_pass_cancellation_token(qtbot):
 
 def test_cancelled_evaluation_does_not_call_error(qtbot):
     from arrayscope.operations.cancellation import EvaluationCancelled
-    from arrayscope.window.evaluation_controller import EvalPriority, EvaluationController
+    from arrayscope.kernel import Priority as EvalPriority
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     errors = []
@@ -221,7 +227,7 @@ def test_cancelled_evaluation_does_not_call_error(qtbot):
 def test_drain_fallback_counters_live_on_bridge_once(qtbot):
     """R1: fallback polls are bridge diagnostics, not per-controller state."""
 
-    from arrayscope.window.evaluation_controller import EvaluationController
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
 
     controller = EvaluationController(max_workers=1)
     try:

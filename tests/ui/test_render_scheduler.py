@@ -120,7 +120,8 @@ def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
 
 def test_histogram_background_work_uses_histogram_priority_not_prefetch(qtbot, monkeypatch):
     _clear_arrayscope_settings()
-    from arrayscope.core.scheduler import EvalPriority, WorkStart
+    from arrayscope.core.frame_targets import WorkStart
+    from arrayscope.kernel import Priority as EvalPriority
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))

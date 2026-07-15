@@ -1043,7 +1043,7 @@ def test_vispy_tile_layer_bounds_cover_full_montage_not_viewport_canvas(qt_app):
 
 
 def test_vispy_typed_tiled_single_plane_uses_frame_plan_geometry(qt_app):
-    from arrayscope.core.scheduler import FrameTarget
+    from arrayscope.core.frame_targets import FrameTarget
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.backend_contract import VISPY_CAPABILITIES
     from arrayscope.display.frame_planner import FramePlanner

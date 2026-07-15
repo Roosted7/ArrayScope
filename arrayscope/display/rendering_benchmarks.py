@@ -17,7 +17,7 @@ import numpy as np
 
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane as WorkLane, WorkItem
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import image_view_backend_capabilities

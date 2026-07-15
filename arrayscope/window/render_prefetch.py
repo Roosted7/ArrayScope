@@ -6,7 +6,7 @@ from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.prefetch_policy import SliceScrubMomentum
-from arrayscope.core.scheduler import FrameTarget
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
