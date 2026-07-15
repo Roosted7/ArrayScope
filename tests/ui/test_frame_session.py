@@ -1533,7 +1533,7 @@ def test_level_scope_growth_reopens_pending_target_for_new_active_tile():
 def test_shader_level_acknowledgement_settles_all_active_tiles():
     session = _session()
     session.level_generation.set_active_tiles((0, 2, 3))
-    session.set_level_update_pending(True)
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
 
     session.acknowledge_uniform_level_presentation((2.0, 4.0))
 
@@ -1542,6 +1542,19 @@ def test_shader_level_acknowledgement_settles_all_active_tiles():
     assert session.level_generation.value_counts() == {(2.0, 4.0): 3}
     assert session.level_generation.tile_values == {0: (2.0, 4.0), 2: (2.0, 4.0), 3: (2.0, 4.0)}
     assert session.level_generation.tile_revisions == {0: 1, 2: 1, 3: 1}
+
+
+def test_shader_level_acknowledgement_cannot_replace_the_target():
+    session = _session()
+    session.level_generation.set_active_tiles((0, 2, 3))
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+
+    session.acknowledge_uniform_level_presentation((1.0, 5.0))
+
+    assert session.level_generation.target_levels == (2.0, 4.0)
+    assert session.level_generation.revision == 1
+    assert session.has_pending_level_update() is True
+    assert session.level_presentation_snapshot().stale_count == 3
 
 
 def test_shader_preview_payload_with_level_evidence_enters_level_scope():
@@ -1568,6 +1581,7 @@ def test_shader_preview_payload_with_level_evidence_enters_level_scope():
 
     assert session.level_generation.active_tiles == frozenset({0})
     assert session.pending_tile_numbers() == ()
+    assert session.begin_level_presentation_update((2.0, 8.0)) is True
     session.acknowledge_uniform_level_presentation((2.0, 8.0))
     assert session.level_generation.value_counts() == {(2.0, 8.0): 1}
 

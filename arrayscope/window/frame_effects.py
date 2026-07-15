@@ -20,6 +20,8 @@ from arrayscope.display.model.commit import CommitKind, DisplayPayload, Presenta
 from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.display.model.presentation_generation import levels_match
+from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_priority import prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import reduce_box_mean
@@ -899,7 +901,10 @@ class FramePipelineEffects:
         session = self.session
         renderer = self.renderer
         level = int(level)
-        tiles = tuple(tiles or ())
+        tiles = prioritize_tiles(
+            tuple(tiles or ()),
+            context=session.tile_priority_context(),
+        )
         if not tiles:
             return 0
         shader_display = bool(getattr(session, "shader_display", False))
@@ -1344,6 +1349,9 @@ class FramePipelineEffects:
             cpu_atomic_successor = bool(
                 cpu_backend
                 and bool(getattr(session, "source_window_changed_pending", False))
+                and not bool(
+                    getattr(session, "atomic_source_successor_committed", False)
+                )
                 and _compatible_successor_payload_count(session) > 0
             )
             predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
@@ -1357,6 +1365,9 @@ class FramePipelineEffects:
             shader_source_successor = bool(
                 capabilities.shader_windowing
                 and bool(getattr(session, "source_window_changed_pending", False))
+                and not bool(
+                    getattr(session, "atomic_source_successor_committed", False)
+                )
                 and isinstance(predecessor_source, TiledValueSource)
                 and bool(getattr(predecessor_source, "payloads", None))
                 and _compatible_successor_payload_count(session) > 0
@@ -1405,6 +1416,7 @@ class FramePipelineEffects:
                         mode=session.window_mode,
                     ).as_level_source()
                     current_levels = normalize_bounds(current_level_source.levels)
+                    session.applied_level_source = current_level_source
                 if (
                     current_level_source is not None
                     and current_levels is not None
@@ -1417,7 +1429,6 @@ class FramePipelineEffects:
                         )
                     )
                 ):
-                    session.applied_level_source = current_level_source
                     session.begin_level_presentation_update(current_levels)
             elif requested_levels is None:
                 # Shader levels are one global physical uniform, but the
@@ -1437,6 +1448,31 @@ class FramePipelineEffects:
                     )
                     if not bool(getattr(current_summary, "refined", False)):
                         current_level_source = None
+                if current_level_source is None:
+                    # Withhold an unrefined *candidate*, not the already
+                    # accepted source. The histogram callback can advance the
+                    # generation just before the controller retains a broader
+                    # applied window. Re-target convergence to that accepted
+                    # source or refinement remains blocked behind six stale
+                    # uniforms with no external work left to wake them.
+                    applied_source = getattr(session, "applied_level_source", None)
+                    if (
+                        getattr(applied_source, "semantic_key", None)
+                        == session.level_key
+                    ):
+                        current_level_source = applied_source
+                if current_level_source is not None:
+                    current_level_source = WindowLevelController().decide(
+                        previous=getattr(session, "applied_level_source", None),
+                        candidate=current_level_source,
+                        explicit_auto=bool(getattr(session, "force_auto", False)),
+                        mode=session.window_mode,
+                    ).as_level_source()
+                    # The applied source and convergence target are separate:
+                    # the target may already name these levels while a prior
+                    # display decision still owns the applied source. Publish
+                    # every accepted controller decision, not only revisions.
+                    session.applied_level_source = current_level_source
                 current_levels = normalize_bounds(
                     getattr(current_level_source, "levels", None)
                 )
@@ -1819,6 +1855,12 @@ class FramePipelineEffects:
                 renderer._last_montage_commit_outcome = "backend-declined"
                 return
             renderer._last_montage_commit_outcome = "backend-applied"
+            if atomic_successor:
+                # The backend has accepted the complete successor mapping.
+                # Keep source-window settlement armed until exact-visible
+                # completion, but never rebuild this all-slot handoff merely
+                # to advance one tile from fallback to its target rung.
+                session.atomic_source_successor_committed = True
             session._atomic_prepared_transaction = None
             self._acknowledge_and_publish(
                 tile_delta,
@@ -2057,6 +2099,7 @@ class FramePipelineEffects:
         acknowledge_start = perf_counter()
         committed_levels = normalize_bounds(renderer.win.img_view.getLevels())
         presented_before = set(session.lifecycle.presented_tiles)
+        first_pixels_before = bool(session.visible_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         _call(renderer, "_refresh_tile_truth_overlay")
@@ -2070,9 +2113,13 @@ class FramePipelineEffects:
         presented_tiles = active_payloads if report is None else getattr(report, "presented_tiles", active_payloads)
         session.mark_presented(presented_tiles)
         presented_after = set(session.lifecycle.presented_tiles)
+        first_pixels_presented = bool(session.visible_first_pixels_presented())
+        first_pixel_transition = bool(
+            first_pixels_presented and not first_pixels_before
+        )
         renderer._last_montage_ack_new_presented = len(presented_after - presented_before)
         renderer._last_montage_ack_lost_presented = len(presented_before - presented_after)
-        if session.lifecycle.visible_first_pixels_presented():
+        if first_pixels_presented:
             extent_changed = renderer._publish_montage_content_extent(session.plan)
             if extent_changed:
                 refresh_extent_intent = getattr(
@@ -2125,15 +2172,20 @@ class FramePipelineEffects:
             session.final_commit_pending = True
         session.display_committed = bool(session.lifecycle.presented_tiles)
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
-        if semantic_progress is not None and (
-            semantic_progress.inflight_generation is not None
-            or int(semantic_progress.pending_batches) > 0
-        ):
-            # A shader backend can commit rough levels while refined semantic
-            # evidence is quota-parked behind the just-finished visible work.
-            # The commit changes that eligibility without producing another
-            # kernel completion, so reconcile the existing lane quota at the
-            # state transition instead of adding a polling timer.
+        semantic_evidence_waiting = bool(
+            semantic_progress is not None
+            and (
+                semantic_progress.inflight_generation is not None
+                or int(semantic_progress.pending_batches) > 0
+            )
+        )
+        if first_pixel_transition or semantic_evidence_waiting:
+            # Physical first-pixel completion changes DISPLAY_PREPARATION and
+            # side-work eligibility without a kernel completion after this
+            # acknowledgement. Refined semantic evidence has the same shape.
+            # Reconcile the existing quotas at their canonical lifecycle edge
+            # rather than polling or letting the preview-era quota strand the
+            # exact rung planned by the follow-up replan.
             reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
             if callable(reconcile_quotas):
                 reconcile_quotas(refresh_telemetry=False)
@@ -2185,6 +2237,28 @@ class FramePipelineEffects:
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
+            vertex_uploads=int(getattr(report, "vertex_uploads", 0) or 0),
+            level_revision=int(
+                getattr(getattr(session, "level_generation", None), "revision", 0)
+                or 0
+            ),
+            level_target=getattr(
+                getattr(session, "level_generation", None), "target_levels", None
+            ),
+            stale_level_tiles=tuple(
+                sorted(
+                    getattr(
+                        getattr(session, "level_generation", None),
+                        "stale_active_tiles",
+                        (),
+                    )
+                    or ()
+                )
+            ),
+            atomic_source_successor_committed=bool(
+                getattr(session, "atomic_source_successor_committed", False)
+            ),
+            preview_transition=bool(preview_transition),
         )
         complete_inline_work(
             renderer,
@@ -2500,13 +2574,18 @@ def _commit_report_accepts_new_preview(session, report, tile_delta, tile_state) 
         return False
     committed = report.accepted_upserts(tile_delta)
     payloads = dict(getattr(tile_state, "payloads", {}) or {})
+    previously_presented = dict(
+        getattr(getattr(session, "lifecycle", None), "backend_presented_identities", {})
+        or {}
+    )
     for tile_number in tuple(committed or ()):
         payload = payloads.get(int(tile_number))
-        if payload is None or str(getattr(payload, "quality", "exact")) != "preview":
+        if payload is None or str(getattr(payload, "quality", "exact")) not in {
+            "preview",
+            "fallback",
+        }:
             continue
-        record = session.lifecycle.peek(int(tile_number))
-        acknowledged = None if record is None else getattr(record, "acknowledged_payload", None)
-        if acknowledged is None or getattr(acknowledged, "source_id", None) != payload.source_id:
+        if previously_presented.get(int(tile_number)) != tile_ack_identity(payload):
             return True
     return False
 

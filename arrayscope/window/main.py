@@ -392,6 +392,7 @@ class ArrayScopeWindow(
         stage_ready = False
         backlog = 0
         semantic_evidence_blocking = False
+        first_pixel_pending = False
         if session is not None:
             stage_ready = bool(
                 session.stage_fan_in.values
@@ -413,9 +414,26 @@ class ArrayScopeWindow(
                     or int(semantic_progress.pending_batches) > 0
                 )
             )
+            first_pixel_pending = not bool(session.visible_first_pixels_presented())
+        kernel_visible_busy = bool(self.kernel.diagnostics().visible_backlog)
         return SchedulerBusyState(
-            visible_busy=getattr(getattr(self, "visible_evaluation_controller", None), "is_busy", lambda: False)(),
-            montage_busy=getattr(getattr(self, "montage_tile_evaluation_controller", None), "is_busy", lambda: False)(),
+            visible_busy=bool(
+                first_pixel_pending
+                or kernel_visible_busy
+                or getattr(
+                    getattr(self, "visible_evaluation_controller", None),
+                    "is_busy",
+                    lambda: False,
+                )()
+            ),
+            montage_busy=bool(
+                first_pixel_pending
+                or getattr(
+                    getattr(self, "montage_tile_evaluation_controller", None),
+                    "is_busy",
+                    lambda: False,
+                )()
+            ),
             stage_busy=getattr(getattr(self, "stage_evaluation_controller", None), "is_busy", lambda: False)(),
             prefetch_busy=getattr(getattr(self, "prefetch_evaluation_controller", None), "is_busy", lambda: False)(),
             result_backlog=backlog,
@@ -430,17 +448,14 @@ class ArrayScopeWindow(
         )
 
     def _note_interaction_state_changed(self) -> None:
-        """Track interaction edges without pacing governor decisions.
-
-        Kernel completions provide the governor wakeup. Interaction stop still
-        wakes deferred native-quality replans, because those are render intent,
-        not pacing-budget updates.
-        """
+        """Apply interaction quotas on the edge and wake deferred quality."""
         if getattr(self, "_closing", False):
             return
         active = self._interaction_active_now()
         previous_active = getattr(self, "_last_interaction_active_state", None)
         self._last_interaction_active_state = active
+        if previous_active is None or bool(previous_active) != bool(active):
+            self._apply_resource_governor_decisions(refresh_telemetry=False)
         if previous_active is True and not active:
             renderer = getattr(self, "renderer", None)
             replan = getattr(renderer, "replan_deferred_interactive_native_quality", None)
@@ -463,11 +478,14 @@ class ArrayScopeWindow(
         self._governor_interactive_applied = interactive
         busy = self._scheduler_busy_state()
         quota_by_lane: dict[Lane, int] = {}
+        montage_worker_target = None
         for lane, controller in self._evaluation_controllers_by_lane().items():
             if controller is None:
                 continue
             decision = governor.decide_lane_workers(lane, interactive=interactive, busy_state=busy)
             controller.set_reported_max_workers(decision.target_workers)
+            if lane == ComputeLane.MONTAGE_TILE:
+                montage_worker_target = int(decision.target_workers)
             kernel_lane = self._kernel_lane_for_compute_lane(lane)
             quota_by_lane[kernel_lane] = max(
                 int(decision.target_workers),
@@ -475,6 +493,13 @@ class ArrayScopeWindow(
             )
         for lane, workers in quota_by_lane.items():
             self.kernel.set_lane_quota(lane, workers)
+        if montage_worker_target is not None:
+            preview_target = min(1, montage_worker_target) if interactive else montage_worker_target
+            self.kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, preview_target)
+            self.kernel.set_lane_quota(
+                Lane.DISPLAY_PREPARATION,
+                0 if interactive else montage_worker_target,
+            )
         # R4: completions drain through one QtKernelBridge; the governor owns
         # only this drain knob plus commit batch bounds and kernel lane quotas.
         bridge = getattr(self, "kernel_bridge", None)

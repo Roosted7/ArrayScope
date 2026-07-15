@@ -9,6 +9,7 @@ import numpy as np
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
 from arrayscope.display.shader_mapping import TexturePlaneKind
@@ -247,6 +248,24 @@ def test_native_only_mode_is_unchanged_by_default():
     for payload in delta.upserts.values():
         assert payload.lod.level == 0
         assert payload.texture_data.shape[:2] == (TILE, TILE)
+
+
+def test_uncapped_backend_batch_preserves_canonical_admission_order():
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    expected = prioritize_tile_numbers(
+        range(12),
+        plan_tiles=session.plan.tiles,
+        context=session.tile_priority_context(),
+    )
+
+    _state, delta = session.build_tile_presentation({})
+
+    assert expected != tuple(range(12))
+    assert tuple(delta.upserts) == expected
 
 
 def test_visible_replacement_retains_presented_payload_until_acknowledged():
@@ -3814,12 +3833,14 @@ def test_preview_commit_ack_is_actionable_for_target_followup_replan():
     session.lifecycle.remember_presentable(0, preview)
     session.lifecycle.commit_emitted({0: preview})
     session.lifecycle.acknowledge_presented(0, preview.source_id, "preview", preview.lod.level)
+    session.lifecycle.backend_presented_snapshot({0: tile_ack_identity(preview)})
     assert not montage_commit._commit_report_accepts_new_preview(
         session,
         TileCommitReport(presented_tiles=(0, 1), committed_upserts=(0,)),
         delta,
         tile_state,
     )
+
 
 
 def test_vispy_level_stats_queue_until_semantic_key_has_evidence():
@@ -3993,6 +4014,44 @@ def test_shared_transform_kernel_key_uses_full_semantic_marker():
         shader_display=False,
     )
     assert kernel.specs[-1].supersession.value == second_key[1]
+
+
+def test_shared_transform_fanout_uses_canonical_viewport_priority():
+    from types import SimpleNamespace
+
+    class CaptureKernel:
+        def __init__(self):
+            self.specs = []
+
+        def submit(self, spec, **_callbacks):
+            self.specs.append(spec)
+            return object()
+
+    session = _session(
+        count=3,
+        pyramid=PyramidCache(max_bytes=1 << 20),
+        view_range=((128.0, 192.0), (0.0, 64.0)),
+    )
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    kernel = CaptureKernel()
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(kernel=kernel),
+        _frame_session_is_current=lambda _session: True,
+    )
+    effects = FramePipelineEffects(renderer, session)
+
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=2,
+        tiles=tuple(session.plan.tiles),
+        priority=Priority.VISIBLE_IMAGE,
+        lane=Lane.DISPLAY_PREPARATION,
+    )
+
+    marker = kernel.specs[-1].key[1]
+    assert [identity[0] for identity in marker[-1]] == [2, 1, 0]
 
 
 def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod(monkeypatch):

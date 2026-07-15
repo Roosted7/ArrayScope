@@ -312,6 +312,14 @@ class FrameRuntimeMixin:
             return submitted
         montage_commit.rearm_ready_stage_dependents(session)
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
+        emit_trace(
+            "pipeline_plan",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            submitted=int(submitted),
+            states=tuple(getattr(pipeline, "last_plan_states", ()) or ()),
+            steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
+            first_pixels_presented=bool(session.visible_first_pixels_presented()),
+        )
         pipeline.effects.release_display_owned_pending(scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)

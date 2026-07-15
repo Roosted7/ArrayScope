@@ -208,13 +208,13 @@ def test_montage_quality_policy_change_applies_to_next_montage_session(qtbot):
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":"))
         _process_events(qtbot)
         expected = win.renderer._montage_quality_policy_mode()
-        session = getattr(win.renderer, "_montage_session", None)
+        session = getattr(win.renderer, "_frame_session", None)
         if session is not None:
             assert str(session.lod_policy_mode) == expected
 
         _submenu_action(win, "Performance", "Montage LOD", "Native only").trigger()
         _process_events(qtbot)
-        session = getattr(win.renderer, "_montage_session", None)
+        session = getattr(win.renderer, "_frame_session", None)
         assert win.renderer._montage_quality_policy_mode() == "native-only"
         if session is not None:
             # The menu change replaced the session so the new policy is live.

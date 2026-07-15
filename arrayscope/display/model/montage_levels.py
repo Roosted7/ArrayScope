@@ -665,4 +665,22 @@ def _tile_stats_is_improvement(candidate: TileLevelStats, previous: TileLevelSta
         return True
     if candidate_quality < previous_quality:
         return False
-    return bool(candidate.refined and not previous.refined)
+    if candidate.refined and not previous.refined:
+        return True
+    candidate_bounds = normalize_bounds(candidate.bounds)
+    previous_bounds = normalize_bounds(previous.bounds)
+    if candidate_bounds is None:
+        return False
+    if previous_bounds is None:
+        return True
+    contains_previous = bool(
+        candidate_bounds[0] <= previous_bounds[0]
+        and candidate_bounds[1] >= previous_bounds[1]
+    )
+    return bool(
+        contains_previous
+        and (
+            candidate_bounds != previous_bounds
+            or candidate.sample_count > previous.sample_count
+        )
+    )

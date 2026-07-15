@@ -411,7 +411,7 @@ class DisplayPresentationMixin:
         )
 
     def _note_display_level_source(self, decision) -> None:
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if session is None:
             return
         source = getattr(decision, "applied_level_source", None)
@@ -429,11 +429,6 @@ class DisplayPresentationMixin:
         return bridge
 
     def _schedule_frame_viewport_update(self, *, delay_ms: int | None = None) -> None:
-        if getattr(self.win.view_state, "montage_axis", None) is not None:
-            scheduler = getattr(self, "retarget_montage_viewport", None)
-            if callable(scheduler):
-                scheduler()
-            return
         timer = getattr(self, "_frame_viewport_update_timer", None)
         if timer is None:
             from pyqtgraph.Qt import QtCore
@@ -470,6 +465,11 @@ class DisplayPresentationMixin:
             scheduler()
 
     def _run_frame_viewport_update(self) -> None:
+        if getattr(self.win.view_state, "montage_axis", None) is not None:
+            scheduler = getattr(self, "retarget_montage_viewport", None)
+            if callable(scheduler):
+                scheduler()
+            return
         frame = getattr(self.win, "_committed_display_frame", None)
         scene = getattr(frame, "scene", None)
         if frame is None or scene is None:
@@ -607,7 +607,7 @@ class DisplayPresentationMixin:
         if levels is None:
             return None
         frame = getattr(self.win, "_committed_display_frame", None)
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if semantic_key is None and frame is not None:
             semantic_key = frame.key.semantic_key
         if semantic_key is None and session is not None:
@@ -680,11 +680,11 @@ class DisplayPresentationMixin:
             rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
             source_count=0,
             expected_count=0,
-            semantic_key=getattr(getattr(self, "_montage_session", None), "level_key", None),
+            semantic_key=getattr(getattr(self, "_frame_session", None), "level_key", None),
             mode=mode,
         )
         self._explicit_user_level_source = source
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if session is not None:
             session.applied_level_source = source
 
@@ -697,7 +697,7 @@ class DisplayPresentationMixin:
         levels = normalize_bounds(levels)
         if levels is None:
             return False
-        session = getattr(self, "_montage_session", None)
+        session = getattr(self, "_frame_session", None)
         if session is None or not bool(getattr(session, "display_committed", False)):
             return False
         if str(getattr(self.win.img_view, "montageDisplayMode", lambda: "none")()) not in {"tile_layer", "vispy_tile_layer"}:
@@ -751,7 +751,7 @@ class DisplayPresentationMixin:
             return True
 
         if bool(final):
-            committer = getattr(self, "commit_montage_session_presentation", None)
+            committer = getattr(self, "commit_frame_session_presentation", None)
             if callable(committer) and not bool(getattr(self, "_montage_presentation_commit_active", False)):
                 committer(session)
                 return True

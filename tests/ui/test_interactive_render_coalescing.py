@@ -23,7 +23,7 @@ def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeyp
         assert win.widgets["spins"]["slice_indices"][2].value() == 3
         assert calls == []
 
-        _process_events(qtbot, count=3)
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=_WAIT_TIMEOUT_MS)
         assert len(calls) == 1
         assert calls[0][0]["reason"] == "slice"
         assert calls[0][0]["defer_side_panels"] is True
@@ -239,7 +239,7 @@ def test_direct_render_still_refreshes_side_panels(qtbot, monkeypatch):
         win.close()
 
 
-def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot, monkeypatch):
+def test_cached_interactive_render_uses_cadence_and_cancels_side_work(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -263,7 +263,8 @@ def test_cached_interactive_render_uses_zero_delay_without_cancelling_work(qtbot
         assert cancellations == []
         qtbot.waitUntil(lambda: bool(renders), timeout=_WAIT_TIMEOUT_MS)
         assert renders[-1]["reason"] == "cached-slice"
-        assert win.render_coordinator.immediate_cache_flushes == before_flushes + 1
+        assert cancellations == [True]
+        assert win.render_coordinator.immediate_cache_flushes == before_flushes
     finally:
         win.close()
 
@@ -288,13 +289,14 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
             super().__init__()
             self.img_view = DummyImageView()
             self.rendered = []
+            self.cancelled = 0
             self.render_coordinator = RenderCoordinator(self)
 
         def _interactive_frame_cache_hit(self):
             return True
 
         def _cancel_render_dependent_work_for_interactive_change(self):
-            raise AssertionError("cached presentation backpressure must not cancel visible work")
+            self.cancelled += 1
 
         def render(self, **kwargs):
             self.rendered.append(kwargs)
@@ -313,6 +315,7 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
     qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-3"]
+    assert win.cancelled == 1
 
 
 def test_uncached_interactive_render_supersedes_pending_draw(qtbot):
@@ -353,11 +356,11 @@ def test_uncached_interactive_render_supersedes_pending_draw(qtbot):
     win = DummyWindow()
     win.render_coordinator.request(reason="slice-1", interactive=True)
     win.render_coordinator.request(reason="slice-2", interactive=True)
-    qtbot.waitUntil(lambda: len(win.rendered) == 2, timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: len(win.rendered) == 1, timeout=_WAIT_TIMEOUT_MS)
 
-    assert win.cancelled == 2
+    assert win.cancelled == 1
     assert win.render_coordinator.presentation_backpressure_skips == 2
-    assert [call["reason"] for call in win.rendered] == ["slice-1", "slice-2"]
+    assert [call["reason"] for call in win.rendered] == ["slice-2"]
 
 
 def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
@@ -380,13 +383,14 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
             super().__init__()
             self.img_view = DummyImageView()
             self.rendered = []
+            self.cancelled = 0
             self.render_coordinator = RenderCoordinator(self, quiet_interval_ms=1, busy_retry_ms=1)
 
         def _interactive_frame_cache_hit(self):
             return True
 
         def _cancel_render_dependent_work_for_interactive_change(self):
-            raise AssertionError("cache hit should not cancel visible work")
+            self.cancelled += 1
 
         def render(self, **kwargs):
             self.rendered.append(kwargs)
@@ -400,6 +404,7 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
     qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-latest"]
+    assert win.cancelled == 1
 
 
 def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):

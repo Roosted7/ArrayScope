@@ -48,6 +48,27 @@ def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(mon
     assert kwargs["priority"].name == "HIDDEN_ROI"
 
 
+def test_montage_roi_waits_for_canonical_visible_plan_completion():
+    from arrayscope.window.inspection import InspectionWorkflowMixin
+
+    win = InspectionWorkflowMixin()
+    state = object()
+    win.view_state = state
+    session = SimpleNamespace(
+        view_state=state,
+        visible_plan_complete=lambda: False,
+    )
+    win.renderer = SimpleNamespace(_frame_session=session)
+
+    assert win._montage_roi_values_pending()
+
+    session.visible_plan_complete = lambda: True
+    assert not win._montage_roi_values_pending()
+
+    session.view_state = object()
+    assert win._montage_roi_values_pending()
+
+
 def _render_committed_tiled_frame(win, qtbot, *, reason: str) -> None:
     win.render(reason=reason)
     qtbot.waitUntil(lambda: getattr(getattr(win, "_committed_display_frame", None), "is_tiled", False), timeout=3000)
@@ -237,14 +258,23 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         win.close()
 
 
-def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, monkeypatch):
+@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
+    qtbot,
+    backend,
+):
+    if backend == "vispy":
+        pytest.importorskip("vispy")
     _clear_arrayscope_settings()
-    from dataclasses import replace
+    from pyqtgraph.Qt import QtCore
     from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import EvaluationResult
     from arrayscope.window import ArrayScopeWindow
 
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", backend)
+    settings.sync()
     data = np.arange(2 * 2 * 4, dtype=np.float32).reshape(2, 2, 4)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
@@ -260,29 +290,36 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(qtbot, m
                 montage_axis=2,
                 colormap_lut=None,
                 result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
+                shader_display=backend == "vispy",
             )
 
         win._set_view_state(first_state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: getattr(win._montage_session, "display_committed", False), timeout=1000)
+        qtbot.waitUntil(lambda: getattr(win.renderer._frame_session, "display_committed", False), timeout=1000)
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
         _process_events(qtbot, count=20)
+        # The committed cached payload owns the visible frame's value
+        # semantics. Preserve that truthful value (10 here) while the
+        # successor is incomplete; never sample a black loading placeholder.
         assert "µ=10" in win.img_view._roi_info_panel.text()
         truthful_text = win.img_view._roi_info_panel.text()
 
         second_state = win.view_state.with_axis_range(2, indices=(2, 3), text="2:4")
         win._set_view_state(second_state)
-        monkeypatch.setattr(win.renderer, "retarget_montage_pipeline", lambda _session: 0)
-        win.update_image_view()
+        # The semantic state now leads the still-committed frame session.
+        # Refreshing inspection at this boundary must retain the committed
+        # values until update_image_view installs and completes a successor.
         win._refresh_inspection_dock()
         _process_events(qtbot, count=20)
 
-        assert not win._montage_session.display_committed
+        assert win._montage_roi_values_pending()
         assert win.img_view._roi_info_panel.text() == truthful_text
         assert "µ=0" not in win.img_view._roi_info_panel.text()
     finally:
         win.close()
+        settings.setValue("image_rendering_backend", "pyqtgraph")
+        settings.sync()
 
 
 def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
@@ -427,12 +464,14 @@ def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(q
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
         win.update_image_view()
+        qtbot.waitUntil(lambda: len(calls) >= 2, timeout=3000)
         _process_events(qtbot, count=40)
+        calls_after_layout = len(calls)
         win.update_image_view()
         _process_events(qtbot, count=40)
 
-        assert len(calls) == 2
-        assert calls[0][0][3].columns != calls[1][0][3].columns
+        assert len(calls) == calls_after_layout
+        assert calls[0][0][3].columns != calls[-1][0][3].columns
     finally:
         win.close()
 

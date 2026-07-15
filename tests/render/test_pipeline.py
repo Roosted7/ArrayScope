@@ -199,6 +199,26 @@ def test_retarget_submits_ladder_work_and_commits_batches():
     assert pipeline.counters.first_pixel_quality_deferred == 2
 
 
+def test_any_missing_preview_defers_quality_for_already_previewed_tiles():
+    kernel, effects, pipeline = make_pipeline(tiles=2)
+    effects.states[0] = TileLodState(
+        tile_number=0,
+        presented_level=2,
+        presented_quality="preview",
+        resident_levels=(2,),
+    )
+
+    submitted = pipeline.retarget(intent(), demand(1), scope(0, 1, missing=1))
+    drain(kernel)
+
+    assert submitted == 2
+    assert [(tile, rung) for tile, rung, _level in effects.evaluated] == [
+        (1, int(Rung.FLOOR)),
+        (1, int(Rung.PREVIEW)),
+    ]
+    assert pipeline.counters.first_pixel_quality_deferred == 2
+
+
 def test_converged_retarget_submits_nothing():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.states[0] = TileLodState(tile_number=0, presented_level=1, resident_levels=(1,))

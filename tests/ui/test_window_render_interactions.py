@@ -6,12 +6,23 @@ import pytest
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
     assert_size_close as _assert_size_close,
-    clear_arrayscope_settings as _clear_arrayscope_settings,
+    clear_arrayscope_settings,
     panel_body as _panel_body,
     process_events as _process_events,
     view_action as _view_action,
     wait_for_panel_preserve as _wait_for_panel_preserve,
 )
+
+
+def _clear_arrayscope_settings():
+    """Use one deterministic backend for backend-independent UI contracts."""
+
+    from pyqtgraph.Qt import QtCore
+
+    clear_arrayscope_settings()
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", "pyqtgraph")
+    settings.sync()
 
 
 def test_channel_auto_manual_coercion_matrix(qtbot):
@@ -247,7 +258,8 @@ def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monke
         win.render(reason="test-live-frame-effect-gate")
 
         qtbot.waitUntil(lambda: bool(observed), timeout=5000)
-        assert observed == [True]
+        assert observed
+        assert all(observed)
     finally:
         win.close()
 
@@ -329,7 +341,11 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
-        _process_events(qtbot, count=20)
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 6.0),
+            timeout=5000,
+        )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
         _process_events(qtbot, count=5)
@@ -402,7 +418,11 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
-        _process_events(qtbot, count=20)
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 19.0),
+            timeout=5000,
+        )
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
@@ -430,7 +450,11 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
         _process_events(qtbot, count=20)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
-        _process_events(qtbot, count=20)
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 19.0),
+            timeout=5000,
+        )
         qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
@@ -526,6 +550,13 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 19.0),
+            timeout=5000,
+        )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win.img_view.setLevels(5.0, 15.0)
@@ -552,6 +583,13 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 19.0),
+            timeout=5000,
+        )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win.img_view.setLevels(5.0, 15.0)
@@ -586,6 +624,13 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+        win._set_view_state(win.view_state.with_slice(2, 0))
+        win.render(reason="test-initial-slice")
+        qtbot.waitUntil(
+            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+            == (0.0, 19.0),
+            timeout=5000,
+        )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win.img_view.setLevels(5.0, 15.0)

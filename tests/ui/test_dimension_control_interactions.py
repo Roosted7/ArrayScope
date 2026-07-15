@@ -183,11 +183,11 @@ def test_raw_index_list_montage_renders_each_selected_source(qtbot):
         win._on_slice_text_changed(2, "7 8 9 11 14 56")
         for _ in range(120):
             _process_events(qtbot, count=2)
-            session = getattr(win, "_montage_session", None)
+            session = getattr(win.renderer, "_frame_session", None)
             if session is not None and len(getattr(session, "rendered_tiles", {})) == len(selected):
                 break
 
-        session = win._montage_session
+        session = win.renderer._frame_session
         rendered = [session.rendered_tiles[tile] for tile in sorted(session.rendered_tiles)]
         assert tuple(tile.tile.source_index for tile in rendered) == selected
         for rendered_tile in rendered:

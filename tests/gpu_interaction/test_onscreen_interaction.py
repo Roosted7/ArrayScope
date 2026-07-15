@@ -43,8 +43,10 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
     app.setApplicationName("ArrayScope")
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend")
+    previous_hints = settings.value("first_run_hints_dismissed")
     settings.setValue("image_rendering_backend", backend)
     settings.setValue("montage_quality_policy", "resident")
+    settings.setValue("first_run_hints_dismissed", True)
     settings.sync()
     configure_trace(trace_path)
 
@@ -64,7 +66,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             )
         )
         win.render(reason="gpu-harness-v1-initial")
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=20.0), h.settlement_diagnostics()
         win.img_view.setLevels(0.0, 36.0)
         assert h.wait_settled(timeout=20.0)
 
@@ -103,10 +105,40 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             yRange=(0.0, float(height)),
             padding=0,
         )
-        app.processEvents()
-        means = h.tile_means()
-        expected = [255.0 * value / 36.0 for value in shifted]
-        assert all(means[index] > means[index - 1] + 1.0 for index in range(1, 36)), means
+        assert h.wait_settled(timeout=20.0)
+        # V1 certifies the image layer. Remove independent composition
+        # overlays before sampling the constant-tile framebuffer; two default
+        # ROI/label shapes otherwise cover most of tiles 6 and 7 and turn a
+        # correct texture ramp into an overlay-color assertion.
+        win._clear_rois()
+        win.img_view.clearMontageTileOverlays()
+        win.img_view.hideProfileMarker()
+        win._clear_image_hover_state()
+        h.pump(0.05)
+        h.assert_vispy_visual_mapping_matches_pool()
+        payload_means = {
+            int(tile): float(
+                np.asarray(
+                    payload.texture_data
+                    if payload.texture_data is not None
+                    else payload.image
+                ).mean()
+            )
+            for tile, payload in h.session.display_tile_payloads.items()
+        }
+        assert all(
+            abs(payload_means[index] - shifted[index]) < 0.01
+            for index in range(36)
+        ), payload_means
+        means = h.tile_pixel_modes()
+        low, high = (float(value) for value in win.img_view.getLevels())
+        expected = [
+            255.0 * min(1.0, max(0.0, (float(value) - low) / (high - low)))
+            for value in shifted
+        ]
+        assert all(
+            means[index] > means[index - 1] + 1.0 for index in range(1, 36)
+        ), f"shifted physical ramp: {[round(value, 1) for value in means]}"
         assert max(abs(actual - wanted) for actual, wanted in zip(means, expected)) <= 12.0, means
         h.assert_lifecycle_settled()
     finally:
@@ -118,6 +150,10 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             settings.remove("image_rendering_backend")
         else:
             settings.setValue("image_rendering_backend", previous_backend)
+        if previous_hints is None:
+            settings.remove("first_run_hints_dismissed")
+        else:
+            settings.setValue("first_run_hints_dismissed", previous_hints)
         settings.sync()
 
     verification = verify_trace(trace_path)
@@ -150,8 +186,10 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     app.setApplicationName("ArrayScope")
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend")
+    previous_hints = settings.value("first_run_hints_dismissed")
     settings.setValue("image_rendering_backend", backend)
     settings.setValue("montage_quality_policy", "resident")
+    settings.setValue("first_run_hints_dismissed", True)
     settings.sync()
     configure_trace(trace_path)
 
@@ -187,7 +225,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
             win.render(reason="gpu-harness-v2-fast-scroll")
             app.processEvents()
 
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=20.0), h.settlement_diagnostics()
         assert h.session.required_target_settled()
         expected_order = tuple(
             int(tile.montage_index)
@@ -220,6 +258,10 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
             settings.remove("image_rendering_backend")
         else:
             settings.setValue("image_rendering_backend", previous_backend)
+        if previous_hints is None:
+            settings.remove("first_run_hints_dismissed")
+        else:
+            settings.setValue("first_run_hints_dismissed", previous_hints)
         settings.sync()
 
     verification = verify_trace(trace_path)

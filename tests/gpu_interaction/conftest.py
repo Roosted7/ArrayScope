@@ -17,7 +17,7 @@ latency; xdist workers building GL contexts next door would poison both.
 from __future__ import annotations
 
 import os
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, sleep
 
 import numpy as np
 import pytest
@@ -101,7 +101,13 @@ class Harness:
 
     def settled(self) -> bool:
         s = self.session
-        return bool(s is not None and s.visible_plan_complete())
+        pending_draw = getattr(self.win.img_view, "presentationDrawPending", None)
+        physical_drawn = not bool(pending_draw()) if callable(pending_draw) else True
+        return bool(
+            s is not None
+            and s.visible_plan_complete()
+            and physical_drawn
+        )
 
     def assert_lifecycle_settled(self) -> None:
         s = self.session
@@ -142,6 +148,23 @@ class Harness:
                 f"believes level {session_level} is presented (stale-LOD desync)"
             )
 
+    def assert_vispy_visual_mapping_matches_pool(self) -> None:
+        """The atlas registry must match the texcoords actually drawn."""
+
+        layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
+        if layer is None:
+            return
+        for page_index, payloads in enumerate(layer._page_payloads_by_index):
+            visual = layer._visuals_by_page[page_index]
+            ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
+            for offset, tile in enumerate(ordered_tiles):
+                expected = np.asarray(layer._pool.tile_uvs[tile][:2], dtype=np.float32)
+                actual = np.asarray(visual.texcoord_data[offset * 6], dtype=np.float32)
+                assert np.allclose(actual, expected), (
+                    f"tile {tile} pool UV {expected.tolist()} != drawn UV "
+                    f"{actual.tolist()} (slot={layer._pool.tile_slots.get(tile)})"
+                )
+
     # -- event loop ----------------------------------------------------------
 
     def pump(self, seconds: float) -> None:
@@ -155,7 +178,28 @@ class Harness:
             self.app.processEvents()
             if self.settled():
                 return True
+            # A tight Python/Qt poll can monopolize the client process long
+            # enough for Wayland/GL paint delivery to miss the very draw ack
+            # this condition is observing. This is still a condition wait,
+            # not a fixed timing assertion; yield one millisecond to the
+            # compositor between polls.
+            sleep(0.001)
         return self.settled()
+
+    def settlement_diagnostics(self) -> dict[str, object]:
+        session = self.session
+        pending_draw = getattr(self.win.img_view, "presentationDrawPending", None)
+        return {
+            "visible_complete": session.visible_plan_complete(),
+            "required_unsettled": session.required_target_unsettled_tiles(),
+            "pending": tuple(session.pending_tiles),
+            "active_requests": tuple(session.active_tile_requests),
+            "dirty": tuple(session.dirty_payloads),
+            "upserts": tuple(session.pending_payload_upserts),
+            "level_snapshot": session.level_presentation_snapshot(),
+            "draw_pending": bool(pending_draw()) if callable(pending_draw) else False,
+            "lifecycle": session.lifecycle.counters(),
+        }
 
     def heartbeat_gaps(self, seconds: float, *, step=None, step_interval: float = 0.1):
         """Pump the loop for ``seconds``; return gap samples (ms) between
@@ -235,6 +279,69 @@ class Harness:
                 )
             )
         return means
+
+    def tile_medians(
+        self, shot: np.ndarray | None = None, *, half: int = 5
+    ) -> list[float]:
+        """Center-patch pixel oracle robust to thin ROI/hover overlay lines."""
+
+        shot = self.screenshot() if shot is None else shot
+        medians: list[float] = []
+        for x, y in self.tile_centers_px():
+            xi, yi = int(round(x)), int(round(y))
+            assert 0 <= yi - half and yi + half < shot.shape[0]
+            assert 0 <= xi - half and xi + half < shot.shape[1]
+            medians.append(
+                float(
+                    np.median(
+                        shot[
+                            yi - half : yi + half + 1,
+                            xi - half : xi + half + 1,
+                            0,
+                        ]
+                    )
+                )
+            )
+        return medians
+
+    def tile_pixel_modes(self, shot: np.ndarray | None = None) -> list[float]:
+        """Dominant interior red-channel value for constant synthetic tiles.
+
+        The V1 ramp tiles are analytically constant. Sampling the full tile
+        interior makes thin lines and even a large ROI label irrelevant while
+        still reading the real framebuffer rather than backend metadata.
+        """
+
+        from pyqtgraph.Qt import QtCore
+
+        shot = self.screenshot() if shot is None else shot
+        vb = self.win.img_view.getView()
+        gv = vb.scene().views()[0]
+
+        def to_widget(x: float, y: float) -> tuple[int, int]:
+            scene_pt = vb.mapViewToScene(QtCore.QPointF(x, y))
+            widget_pt = gv.mapTo(self.win.img_view, gv.mapFromScene(scene_pt))
+            return int(round(widget_pt.x())), int(round(widget_pt.y()))
+
+        modes: list[float] = []
+        for tile in self.session.plan.tiles:
+            inset_x = max(1.0, float(tile.width) * 0.08)
+            inset_y = max(1.0, float(tile.height) * 0.08)
+            p0 = to_widget(tile.x0 + inset_x, tile.y0 + inset_y)
+            p1 = to_widget(
+                tile.x0 + tile.width - inset_x,
+                tile.y0 + tile.height - inset_y,
+            )
+            x0, x1 = sorted((p0[0], p1[0]))
+            y0, y1 = sorted((p0[1], p1[1]))
+            interior = shot[
+                max(0, y0) : min(shot.shape[0], y1 + 1),
+                max(0, x0) : min(shot.shape[1], x1 + 1),
+                0,
+            ]
+            assert interior.size
+            modes.append(float(np.bincount(interior.reshape(-1), minlength=256).argmax()))
+        return modes
 
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:
         """Every tile must show ITS OWN constant value: the measured gray

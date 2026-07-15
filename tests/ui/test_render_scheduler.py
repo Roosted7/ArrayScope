@@ -38,7 +38,7 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
         previous_frame = win._committed_display_frame
         win.operation_evaluator.clear_cache()
         # Force a fresh session so the budget decision is actually re-evaluated.
-        win.renderer._montage_session = None
+        win.renderer._frame_session = None
         tiny_policy = dataclass_replace(win.renderer._memory_policy(), single_tile_budget_bytes=1)
         monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda *args, **kwargs: tiny_policy)
         monkeypatch.setattr(win.renderer, "_memory_policy", lambda *args, **kwargs: tiny_policy)
@@ -49,7 +49,7 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
 
         np.testing.assert_array_equal(win.img_view.image, previous_image)
         assert win._committed_display_frame is previous_frame
-        assert win._montage_session.skipped_tiles
+        assert win.renderer._frame_session.skipped_tiles
         assert warnings
         assert "over the visible render budget" in warnings[0]
     finally:
@@ -168,21 +168,21 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
         qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
         win.operation_evaluator.clear_cache()
         win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
-        win.renderer._montage_session = None
+        win.renderer._frame_session = None
         frame = getattr(win, "_committed_display_frame", None)
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
         if isinstance(payloads, dict):
             payloads.clear()
         win.update_image_view()
-        stale_session = win._montage_session
-        win.renderer.show_montage_session_slow_overlay(stale_session)
+        stale_session = win.renderer._frame_session
+        win.renderer.show_frame_session_slow_overlay(stale_session)
         assert win.img_view._evaluation_overlay is not None
 
         # Supersede the render, then let the old work report slow/stale.
         win._set_view_state(win.view_state.with_slice(2, 2))
         win.update_image_view()
         win.img_view.setEvaluationOverlay(True, "Updating image frame...")
-        win.renderer.show_montage_session_slow_overlay(stale_session)
+        win.renderer.show_frame_session_slow_overlay(stale_session)
         win.renderer._settle_montage_visible_plan_if_complete(stale_session)
 
         assert win.img_view._evaluation_overlay.isVisible()

@@ -92,8 +92,6 @@ class TileIdentity:
 
         if not isinstance(target, TileIdentity) or self.semantic_key != target.semantic_key:
             return False
-        if self == target:
-            return True
         return bool(
             self.quality == "fallback"
             or int(self.lod.level) > int(target.lod.level)

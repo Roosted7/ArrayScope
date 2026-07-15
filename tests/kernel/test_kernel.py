@@ -141,7 +141,7 @@ def test_priority_orders_real_execution():
     assert ran == ["interactive", "visible", "hover", "prefetch"]
 
 
-def test_spatial_rank_orders_visible_tiles_across_quality_priorities():
+def test_quality_priority_completes_floor_before_spatially_nearer_exact():
     kernel, backend = make_manual()
     ran = []
     kernel.submit(
@@ -163,7 +163,7 @@ def test_spatial_rank_orders_visible_tiles_across_quality_priorities():
 
     backend.run_all()
 
-    assert ran == ["center-exact", "edge-floor"]
+    assert ran == ["edge-floor", "center-exact"]
 
 
 def test_unranked_visible_work_does_not_preempt_ranked_tiles():
@@ -173,7 +173,7 @@ def test_unranked_visible_work_does_not_preempt_ranked_tiles():
         TaskSpec(
             key="unranked-stage",
             fn=lambda: ran.append("unranked-stage"),
-            priority=Priority.INTERACTIVE,
+            priority=Priority.VISIBLE_IMAGE,
             scheduling_rank=UNRANKED_SCHEDULING_RANK,
         )
     )

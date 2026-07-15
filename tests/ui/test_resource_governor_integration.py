@@ -48,8 +48,9 @@ def test_histogram_preview_interval_is_governor_controlled(qtbot):
         win.close()
 
 
-def test_kernel_completion_applies_interactive_budget_without_edge_reapply(qtbot):
+def test_interaction_edge_applies_budget_and_lane_quotas_immediately(qtbot):
     clear_arrayscope_settings()
+    from arrayscope.kernel import Lane
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
@@ -64,22 +65,19 @@ def test_kernel_completion_applies_interactive_budget_without_edge_reapply(qtbot
         idle_budget = win.kernel_bridge._budget_ms
         assert idle_budget is not None
 
-        # Interaction edges only update render intent. The governor budget is
-        # reapplied by the next kernel-completion wakeup.
         win.render_coordinator.request(reason="interaction-edge-test", interactive=True)
-        assert win.kernel_bridge._budget_ms == idle_budget
-
-        win._note_kernel_completion_drain()
-
         interactive_budget = win.kernel_bridge._budget_ms
         assert win._governor_interactive_applied is True
         assert interactive_budget < idle_budget
+        assert win.kernel._lane_quotas[Lane.DISPLAY_PREVIEW] == 1
+        assert win.kernel._lane_quotas[Lane.DISPLAY_PREPARATION] == 0
     finally:
         win.close()
 
 
-def test_kernel_completion_restores_idle_budget_after_interaction_stop(qtbot):
+def test_interaction_stop_edge_restores_idle_budget_and_preparation_lane(qtbot):
     clear_arrayscope_settings()
+    from arrayscope.kernel import Lane
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
@@ -93,19 +91,15 @@ def test_kernel_completion_restores_idle_budget_after_interaction_stop(qtbot):
         idle_budget = win.kernel_bridge._budget_ms
 
         win.render_coordinator.request(reason="interaction-stop-edge-test", interactive=True)
-        assert win.kernel_bridge._budget_ms == idle_budget
-
-        win._note_kernel_completion_drain()
         interactive_budget = win.kernel_bridge._budget_ms
         assert interactive_budget < idle_budget
+        assert win._governor_interactive_applied is True
+        assert win.kernel._lane_quotas[Lane.DISPLAY_PREPARATION] == 0
 
         win.render_coordinator._quiet_timer_elapsed()
-        assert win._governor_interactive_applied is True
-        assert win.kernel_bridge._budget_ms == interactive_budget
-
-        win._note_kernel_completion_drain()
         assert win._governor_interactive_applied is False
         assert win.kernel_bridge._budget_ms == idle_budget
+        assert win.kernel._lane_quotas[Lane.DISPLAY_PREPARATION] > 0
     finally:
         win.close()
 
@@ -166,6 +160,33 @@ def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
 
     assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
     assert replanned == [first_session, second_session]
+
+
+def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot, monkeypatch):
+    clear_arrayscope_settings()
+    from arrayscope.core.compute_policy import ComputeLane
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        process_events(qtbot)
+        session = win.renderer._frame_session
+        monkeypatch.setattr(session, "visible_first_pixels_presented", lambda: False)
+
+        busy = win._scheduler_busy_state()
+        decision = win.resource_governor.decide_lane_workers(
+            ComputeLane.ROI,
+            interactive=False,
+            busy_state=busy,
+        )
+
+        assert busy.visible_busy is True
+        assert busy.montage_busy is True
+        assert decision.target_workers == 0
+        assert "inspection parked" in decision.reason
+    finally:
+        win.close()
 
 
 def test_runtime_diagnostics_lists_kernel_bridge_drain_channel(qtbot):

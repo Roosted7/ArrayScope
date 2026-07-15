@@ -2055,6 +2055,84 @@ def test_pyqtgraph_warm_residency_prepares_invisible_item_without_committing(qt_
         view.close()
 
 
+def test_pyqtgraph_resident_pixels_without_physical_identity_are_reacknowledged(qt_app):
+    from dataclasses import replace
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.tile_identity import TileIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(
+            2, columns=1, indices=(0,), text=":"
+        ),
+        display_shape=(2, 2),
+        montage=MontageGeometry(
+            indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0
+        ),
+        montage_tile_states=(MontageTileState.LOADED,),
+    )
+    image = np.arange(4, dtype=np.float32).reshape(2, 2)
+    payload = DisplayTilePayload(0, 0, image, None, ("resident", 0))
+    identity = TileIdentity(
+        document_generation=("document", 1),
+        operation_key=(),
+        source_index=0,
+        image_axes=(0, 1),
+        axis_flips=(False, False, False),
+        channel="real",
+        complex_mapping=("scalar", "real", "mapped"),
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        semantic_generation=("tile", 0),
+    )
+    payload = replace(payload, tile_identity=identity)
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts={0: payload},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        target_identities={0: identity},
+    )
+    try:
+        first = view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: payload}),
+            tile_delta=delta,
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+        assert first.committed_upserts == frozenset({0})
+
+        state = view._montage_tile_layer.states[0]
+        state.acknowledged_identity = None
+        second = view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: payload}),
+            tile_delta=replace(delta, payload_revision=2),
+            histogramPlotData=None,
+            levels=(0.0, 3.0),
+            histogramRange=(0.0, 3.0),
+        )
+
+        assert second.committed_upserts == frozenset({0})
+        assert second.presented_tiles == frozenset({0})
+        assert state.acknowledged_identity == identity
+        assert state.item.isVisible()
+    finally:
+        view.close()
+
+
 def test_pyqtgraph_residency_budget_evicts_inactive_fifo_without_evicting_active(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

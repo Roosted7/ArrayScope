@@ -524,6 +524,40 @@ def test_vispy_tile_redraw_coalesces_canvas_updates_but_keeps_draw_wait(qt_app, 
         view.close()
 
 
+def test_vispy_draw_ack_listener_requests_next_canvas_update_after_draw(qt_app, monkeypatch):
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    update_calls = []
+    acknowledgements = []
+    try:
+        monkeypatch.setattr(
+            view._vispy_canvas,
+            "update",
+            lambda *args, **kwargs: update_calls.append((args, kwargs)),
+        )
+        view.presentationDrawn.connect(
+            lambda: (
+                acknowledgements.append("drawn"),
+                view._request_vispy_tile_layer_redraw(),
+            )
+        )
+        view._mark_presentation_draw_pending()
+        view._request_vispy_tile_layer_redraw()
+        view._on_vispy_draw()
+
+        assert acknowledgements == []
+        assert update_calls == [((), {})]
+        for _ in range(5):
+            qt_app.processEvents()
+
+        assert acknowledgements == ["drawn"]
+        assert update_calls == [((), {}), ((), {})]
+        assert view._vispy_tile_presentation_draw_pending()
+    finally:
+        view.close()
+
+
 def test_windowed_rgb_presentation_uses_shader_path(qt_app, monkeypatch):
     import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -1909,6 +1943,24 @@ def test_vispy_first_class_tiled_shifted_window_reuses_resident_sources(qt_app):
         assert shifted.tile_layer_texture_uploads == 0
         assert shifted.visible_bytes == 0
         assert shifted.tile_layer_resident_items == 4
+        assert shifted.tile_layer_vertex_uploads == 1
+        layer = view._vispy_gpu_montage_layer
+        expected_uv = np.asarray(layer._pool.tile_uvs[0], dtype=np.float32)
+        actual_uv = np.asarray(layer.visual.texcoord_data[:6], dtype=np.float32)
+        assert np.allclose(
+            actual_uv,
+            np.asarray(
+                (
+                    (expected_uv[0], expected_uv[1]),
+                    (expected_uv[2], expected_uv[1]),
+                    (expected_uv[2], expected_uv[3]),
+                    (expected_uv[0], expected_uv[1]),
+                    (expected_uv[2], expected_uv[3]),
+                    (expected_uv[0], expected_uv[3]),
+                ),
+                dtype=np.float32,
+            ),
+        )
     finally:
         view.close()
 

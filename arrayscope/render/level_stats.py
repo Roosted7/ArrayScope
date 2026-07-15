@@ -225,8 +225,6 @@ class LevelStatsService:
         )
         if bool(require_refined) and quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
             return False
-        if tracker.has_source_quality(level_key, source_index, quality):
-            return True
         level_stats = getattr(rendered, "level_stats", None)
         if level_stats is not None:
             if require_refined and not bool(getattr(level_stats, "refined", False)):
@@ -242,6 +240,8 @@ class LevelStatsService:
                 aggregate=False,
             )
             self._remember_montage_source_level_stats(level_key, stats)
+            return True
+        if tracker.has_source_quality(level_key, source_index, quality):
             return True
         if require_refined:
             return False
@@ -869,6 +869,17 @@ class LevelStatsService:
                 rendered,
                 refined=bool(require_refined),
             )
+            if getattr(rendered, "level_stats", None) is not None and self._update_montage_level_bounds_from_prepared(
+                session.level_key,
+                rendered,
+                expected_indices=expected,
+                require_refined=require_refined,
+                evidence_quality=quality,
+            ):
+                self._queue_montage_level_refinement(session, rendered)
+                queued_sources.discard(source_index)
+                merged += 1
+                continue
             cached_stats = self._cached_montage_source_level_stats(
                 session.level_key,
                 source_index,

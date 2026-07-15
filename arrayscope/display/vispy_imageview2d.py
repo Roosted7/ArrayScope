@@ -233,6 +233,24 @@ class VisPyImageView2D(ImageViewShell):
         pending_clear = getattr(self, "_vispy_pending_overlay_clear_request_count", None)
         if pending_clear is not None and self._vispy_tile_presentation_draw_count >= int(pending_clear):
             self._hide_vispy_montage_tile_overlays_now(request_update=False)
+        # Timer category: anti-hang fallback. A presentationDrawn listener may
+        # immediately commit the next tile
+        # band. Emitting from inside VisPy's draw callback lets that commit
+        # call canvas.update() while the canvas is still painting; Qt/VisPy
+        # can drop that request and leave the logical draw gate armed forever.
+        # Publish the physical acknowledgement after the draw event returns.
+        drawn_request_count = int(self._vispy_tile_presentation_draw_count)
+        QtCore.QTimer.singleShot(
+            0,
+            self,
+            lambda count=drawn_request_count: self._publish_vispy_draw_ack(count),
+        )
+
+    def _publish_vispy_draw_ack(self, drawn_request_count: int) -> None:
+        if int(getattr(self, "_vispy_tile_presentation_draw_count", 0) or 0) < int(
+            drawn_request_count
+        ):
+            return
         self._mark_presentation_drawn()
 
     def vispyPresentationDiagnostics(self) -> dict[str, object]:

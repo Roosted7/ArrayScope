@@ -143,6 +143,39 @@ def test_montage_level_tracker_records_provisional_then_refined_samples():
     assert PROVISIONAL_TILE_SAMPLE_LIMIT < refined.sample.size <= REFINED_TILE_SAMPLE_LIMIT
 
 
+def test_equal_quality_exact_stats_replace_narrower_refined_evidence():
+    tracker = MontageLevelTracker()
+    key = "exact-expands-refined"
+    tracker.ensure(key, (0,))
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (9.0, 10.0),
+            np.asarray([9.5], dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+        aggregate=False,
+    )
+
+    tracker.update_from_stats(
+        key,
+        TileLevelStats(
+            0,
+            (0.0, 19.0),
+            np.arange(20, dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+        aggregate=False,
+    )
+
+    stats = tracker.stats_for(key)
+    assert stats.bounds == (0.0, 19.0)
+    assert np.array_equal(stats.sample, np.arange(20, dtype=np.float32))
+
+
 def test_montage_level_tracker_orders_preview_target_and_refined_evidence():
     tracker = MontageLevelTracker()
     key = "quality-scope"

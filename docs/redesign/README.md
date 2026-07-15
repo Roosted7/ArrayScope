@@ -442,6 +442,94 @@ acceptance.
 > deterministic non-blocking bound—not workflow throughput. P8 (governor lane
 > policy) is next.
 
+> **[Codex 2026-07-15 — P8 regression checkpoint; not accepted]** Real-Wayland
+> V1 still fails after the phase-first scheduler work. The source-window
+> successor now performs one atomic all-slot handoff, but the following
+> ordinary commit path re-emits 14 already-exact visible tiles with zero
+> uploads while the entering boundary tile remains at preview quality. One
+> 20 s VisPy trace contains **88,853 events, 1,322 commit batches, and 1,235
+> identical acknowledgements per repeated tile**; `trace_verify` reports only
+> **35/36** target acknowledgements. Two rejected attempts are preserved here
+> to avoid circling back: (1) rejecting the atomic builder when predecessor
+> payload source indices already matched the new plan did not close the loop;
+> (2) recording a once-only atomic handoff correctly removed repeated atomic
+> construction but exposed the separate level/presentation re-arm loop. Do not
+> relax the plan-wide preview-before-refinement rule to make this gate pass:
+> the user's live VisPy observation showed exact tiles and ROI work overtaking
+> an incomplete preview pass, followed by roughly 75% of preview tiles popping
+> in together. The next hypothesis is confined to level-generation
+> convergence/re-arm ownership. PyQtGraph also overflowed the Python stack in
+> synchronous viewport retargeting; that recursion remains an open P8 blocker,
+> not an axis-validation error to catch or suppress.
+
+> **[Codex 2026-07-15 — P8 correctness slice accepted; performance bars
+> remain red]** The governor now applies interaction quotas on the interaction
+> edge: one preview worker remains available, exact display preparation is
+> parked until the preview pass closes, montage evaluation is capped at two
+> workers, and prefetch/profile/ROI/pixel lanes are parked behind visible
+> rendering. The pipeline's first-pixel barrier is plan-wide rather than
+> per-tile, so exact work cannot overtake missing preview tiles; kernel lane
+> priority again sorts before per-tile distance rank, closing the adversarial
+> review's non-tile priority inversion without giving up center-out ordering
+> inside a lane. PyQtGraph direct-reuse items are removed from the warm pool
+> when selected for an active slot and only physically visible upserts are
+> acknowledged. VisPy has backend-specific resident-slot/UV reuse coverage in
+> addition to the shared pixel gate.
+>
+> The source-successor livelock had two independent feedback loops. A complete
+> compatible handoff is now atomic exactly once; later quality convergence uses
+> ordinary deltas. Automatic shader levels now pass through the one
+> `WindowLevelController`, publish its accepted applied source, and retarget
+> stale uniform convergence to that source. This reduced the synthetic V1
+> trace from **88,853 events / 1,235 identical acknowledgements per tile / 35
+> of 36 targets** to a clean **36 of 36** replay with no acknowledgement-churn
+> violation. A separate six-tile raw VisPy regression had all physical targets
+> settled but kept `(4, 956)` as the convergence target while the controller
+> retained `(1, 956)`; the same accepted-source rule closes that deadlock.
+>
+> Real-Wayland evidence is green for V1 boundary pixels and V2 center-out on
+> both backends (**4 passed**), all operation/channel/complex/axis semantic
+> transitions (**8 passed**), and the viewport-retarget/interaction slice
+> (**12 passed**). The first-run coach mark initially looked like corruption
+> in VisPy tiles 6 and 7; a captured framebuffer proved it was composited over
+> those tiles, so the harness now isolates that persisted UI setting instead
+> of weakening its pixel oracle.
+>
+> **[Codex 2026-07-15 — P8 recursion and draw-ack recurrence record]** The
+> user's PyQtGraph and VisPy `RecursionError` stacks were stack-exhaustion
+> victims, not failures in `validate_distinct_axes`, enum access, hashing, or
+> dataclass equality. `_schedule_frame_viewport_update(delay_ms=1)` called the
+> montage retarget synchronously, so every supposedly bounded continuation
+> nested another viewport transaction. It now always crosses a receiver-owned
+> Qt event-turn barrier; a regression proves repeated scheduling never invokes
+> the retarget inline. `TileIdentity.compatible_fallback_for()` also no longer
+> enters full dataclass equality before its field-wise compatibility check.
+>
+> After that fix the frozen workflow exposed the analogous VisPy draw-edge
+> re-entry: `presentationDrawn` was emitted inside the canvas draw callback,
+> and its listener could submit `canvas.update()` while VisPy was still
+> painting. Qt/VisPy dropped the update, leaving draw request/ack at **358/88**
+> with all **272/272** targets physically current. The acknowledgement now
+> publishes on the next receiver-owned turn, keyed by the captured draw count.
+> The raw 272-tile phase then completed in **8,266 ms** instead of timing out,
+> and the complete VisPy workflow reached the end of every phase: FFT scroll
+> **29,027 ms**, scalar scroll **13,864 ms**, FFT zoom/pan **11,794 ms**, and
+> scalar zoom/pan **10,541 ms**. This is a major convergence improvement over
+> P7's **7/60 presented, 53 dirty, no work in flight**, but it is explicitly
+> **not a performance pass**: heartbeat maxima remain **214–874 ms**, FFT
+> scroll still fails level-settlement/continuity/slow-scroll gates, and FFT
+> zoom/pan still misses full-grid target LOD. P8 receives correctness and
+> convergence credit only; the remaining measured bottlenecks stay open for
+> the next P-step. A full PyQtGraph workflow rerun is also still required; the
+> shared PyQtGraph real-pixel and transition gates above are green.
+> The final parallel non-GPU suite is **1,955 passed, 8 skipped**. Two failures
+> encountered while hardening that gate were test defects and are recorded to
+> avoid repeating them: the new draw-edge timer had to be explicitly added to
+> the architecture timer inventory, and the montage profile smoke test waited
+> only for “any curve,” so it accepted the stale pre-montage curve and asserted
+> too early. It now waits on the actual `d2=1` profile result with a generous
+> condition-based timeout.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

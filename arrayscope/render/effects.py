@@ -320,7 +320,7 @@ def evaluate_preview_tile(
         np.asarray(source),
         None if histogram is None else np.asarray(histogram),
         getattr(value, "shader_mapping", None),
-        getattr(value, "texture_kind", None),
+        texture_kind,
         getattr(value, "level_data", None),
         getattr(value, "level_stats", None),
     )
@@ -451,7 +451,7 @@ def evaluate_shared_preview(
                 np.asarray(source),
                 None if histogram is None else np.asarray(histogram),
                 getattr(value, "shader_mapping", None),
-                getattr(value, "texture_kind", None),
+                texture_kind,
                 getattr(value, "level_data", None),
                 getattr(value, "level_stats", None),
             )
@@ -1188,7 +1188,7 @@ def _evaluate_tile_native_output_preview(
         np.asarray(source),
         None if reduced_histogram is None else np.asarray(reduced_histogram),
         getattr(value, "shader_mapping", None),
-        getattr(value, "texture_kind", None),
+        texture_kind,
         getattr(value, "level_data", None),
         getattr(value, "level_stats", None),
     )

@@ -279,9 +279,9 @@ class FramePipeline:
         step: RungStep,
         first_pixel_tiles: set[int],
     ) -> bool:
-        """Do not race exact/native quality against this plan's first pixels."""
+        """Keep every quality rung behind the plan-wide first-pixel pass."""
 
-        if int(step.tile_number) not in first_pixel_tiles:
+        if not first_pixel_tiles:
             return False
         if step.rung == Rung.EXACT:
             return True

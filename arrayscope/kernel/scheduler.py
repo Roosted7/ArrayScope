@@ -533,12 +533,12 @@ class Kernel:
         rank = 0 if spec.visible else 1
         heapq.heappush(
             self._ready,
-            (rank, int(spec.scheduling_rank), int(spec.priority), deadline, record.seq),
+            (rank, int(spec.priority), int(spec.scheduling_rank), deadline, record.seq),
         )
 
     def _pop_ready_locked(self) -> _Record | None:
         while self._ready:
-            _rank, _scheduling_rank, _priority, _deadline, seq = heapq.heappop(self._ready)
+            _rank, _priority, _scheduling_rank, _deadline, seq = heapq.heappop(self._ready)
             record = self._records.get(seq)
             if record is None or record.state != _QUEUED:
                 continue

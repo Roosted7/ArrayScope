@@ -309,7 +309,7 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
     warm = getattr(getattr(window.win, "img_view", None), "warmTiledResidency", None)
     if not callable(warm):
         return
-    if not window._montage_session_is_current(session):
+    if not window._frame_session_is_current(session):
         return
     tile_number = int(getattr(tile, "montage_index", -1))
     if tile_number < 0:
@@ -359,7 +359,7 @@ def _invite_walk_continuation(window) -> None:
     if getattr(window, "_montage_walk_invite_pending", False):
         return
     window._montage_walk_invite_pending = True
-    session = getattr(window, "_montage_session", None)
+    session = getattr(window, "_frame_session", None)
     if session is None:
         window._montage_walk_invite_pending = False
         return
@@ -373,8 +373,8 @@ def _invite_walk_continuation(window) -> None:
         window._montage_walk_invite_pending = False
         if _interaction_active(window):
             return
-        current = getattr(window, "_montage_session", None)
-        if current is None or not window._montage_session_is_current(current):
+        current = getattr(window, "_frame_session", None)
+        if current is None or not window._frame_session_is_current(current):
             return
         current_generation = (
             getattr(current, "key", None),

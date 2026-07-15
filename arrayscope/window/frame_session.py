@@ -63,6 +63,7 @@ from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home i
     texture_source_for_rendered,
     viewport_identity as _viewport_identity,
 )
+from arrayscope.core.trace import emit_trace
 
 
 @dataclass(frozen=True)
@@ -590,6 +591,11 @@ class FrameSession:
     presentation_geometry_changed: bool = False
     _layout_geometry_changed_pending: bool = False
     source_window_changed_pending: bool = False
+    # A same-layout source-window successor needs one atomic physical handoff.
+    # Quality convergence after that handoff must use ordinary per-tile deltas;
+    # rebuilding the all-slot transaction re-acknowledges settled tiles and can
+    # starve the entering tile's target rung indefinitely.
+    atomic_source_successor_committed: bool = False
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -1219,11 +1225,23 @@ class FrameSession:
         tile is active so subsequently materialized tiles inherit it.
         """
 
+        previous_levels = self.level_generation.target_levels
+        previous_revision = int(self.level_generation.revision)
+        source = self.applied_level_source if source is None else source
         needs_work = ProgressiveTileLevelConvergence().begin(
             self.level_generation,
             levels,
-            source=self.applied_level_source if source is None else source,
+            source=source,
             active_tiles=self.level_generation.active_tiles,
+        )
+        emit_trace(
+            "level_target",
+            session_id=int(self.session_id),
+            previous_levels=previous_levels,
+            target_levels=self.level_generation.target_levels,
+            previous_revision=previous_revision,
+            revision=int(self.level_generation.revision),
+            source_rank=int(getattr(source, "rank", 0) or 0),
         )
         self._level_update_pending = bool(needs_work)
         return bool(needs_work)
@@ -1283,13 +1301,18 @@ class FrameSession:
         convergence diagnostics used by CPU-windowed backends.
         """
 
-        UniformLevelConvergence().begin(
+        UniformLevelConvergence().acknowledge(
             self.level_generation,
-            levels,
-            source=self.applied_level_source,
+            target_revision=int(self.level_generation.revision),
             active_tiles=self.level_generation.active_tiles,
+            levels=levels,
         )
-        self._level_update_pending = False
+        self._level_update_pending = not bool(
+            self.level_generation.snapshot(
+                pending_upserts=tuple(self.pending_payload_upserts),
+                active_tile_count=len(self.visible_tile_numbers),
+            ).settled
+        )
 
     def expand_viewport_coverage(
         self,
@@ -2047,8 +2070,16 @@ class FrameSession:
             for tile, payload in payloads.items()
             if payload.source_id in self.acknowledged_source_ids
         }
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        admission_candidates = tuple(
+            plan_tiles_by_number.get(int(tile), int(tile))
+            for tile in payloads
+        )
         admission = TileAdmissionQueue(self.tile_priority_context()).admit(
-            tuple(payloads),
+            admission_candidates,
             retained=(),
             free_fn=(
                 (lambda tile: int(tile) in resident_retargets)
@@ -2729,8 +2760,16 @@ class FrameSession:
             }
             resident_retarget_tiles.intersection_update(coverage_upserts)
         free_retarget_tiles = frozenset() if pace_resident_retargets else frozenset(resident_retarget_tiles)
+        plan_tiles_by_number = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        admission_candidates = tuple(
+            plan_tiles_by_number.get(int(tile), int(tile))
+            for tile in all_candidate_upserts
+        )
         admission = TileAdmissionQueue(priority_context).admit(
-            tuple(all_candidate_upserts),
+            admission_candidates,
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
             item_free_fn=(
@@ -2765,11 +2804,13 @@ class FrameSession:
             for tile in admission.admitted
             if int(tile) in all_candidate_upserts
         }
-        upserts = {
-            int(tile): payload
-            for tile, payload in upserts.items()
-            if int(tile) in capped_upserts
-        }
+        # Admission owns both membership and order. Re-filtering the original
+        # candidate mapping preserved membership but silently restored its
+        # insertion order. That was mostly hidden by small capped uploads, but
+        # VisPy item-free batches may admit the whole remaining cohort: after
+        # the first eight center tiles, the backend then acknowledged the rest
+        # row-by-row. Carry the canonical admission order to the backend.
+        upserts = capped_upserts
         near = tuple(tile for tile in self._near_tile_numbers(margin_tiles=2) if int(tile) not in self.skipped_tiles)
         # Residency is keyed by the complete texture-content identity carried
         # by DisplayTilePayload.source_id, not the evaluator's base tile key.
@@ -2879,6 +2920,8 @@ class FrameSession:
             int(tile.montage_index): tile
             for tile in tuple(getattr(self.plan, "tiles", ()) or ())
         }
+        previous_state = self.tile_presentation_state
+        previous_payloads = dict(previous_state.payloads)
         # Cache-hit scroll windows commonly have 58-59 payload mirrors ready
         # and one entering edge represented only by a resident LOD floor.
         # Materialize only those missing wrappers; scanning/rebuilding all 60
@@ -2923,7 +2966,6 @@ class FrameSession:
                 return None
             self.display_tile_payloads[int(tile_number)] = payload
             payloads[int(tile_number)] = payload
-        previous_state = self.tile_presentation_state
         previous_tiles = set(int(tile) for tile in previous_state.payloads)
         if previous_tiles and previous_tiles != set(planned):
             self._atomic_fast_reject_reason = "previous-scope"

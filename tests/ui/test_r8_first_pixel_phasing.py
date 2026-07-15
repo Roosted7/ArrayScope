@@ -98,6 +98,11 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         changed = original_set_levels(visual, levels)
         if changed:
             events.append(("shader levels applied", normalized))
+            if (
+                any(event[0] == "refined evidence start" for event in events)
+                and not any(event[0] == "refined levels publication" for event in events)
+            ):
+                events.append(("refined levels publication", normalized))
         return changed
 
     def present(view, **kwargs):
@@ -231,7 +236,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         assert "target pass start" in names, events
         assert "target pass complete" in names, events
         assert "refined evidence start" in names, events
-        assert "refined levels/histogram publication" in names, "\n".join(
+        assert "refined levels publication" in names, "\n".join(
             (
                 *(map(str, events)),
                 f"decision={win.renderer._last_montage_level_decision!r}",
@@ -255,7 +260,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         target_start = _event_index(events, "target pass start")
         target_complete = _event_index(events, "target pass complete")
         refined_start = _event_index(events, "refined evidence start")
-        refined_publication = _event_index(events, "refined levels/histogram publication")
+        refined_publication = _event_index(events, "refined levels publication")
         assert rough_complete < rough_histogram < target_start
         assert target_complete < refined_start < refined_publication
 

@@ -269,6 +269,9 @@ class ResourceGovernor:
             desired = min(desired, 1)
             reasons.append("high memory pressure")
         if lane == ComputeLane.MONTAGE_TILE:
+            if interactive:
+                desired = min(desired, 2)
+                reasons.append("bounded montage workers during interaction")
             if not busy_state.stage_ready_or_in_flight and busy_state.stage_busy:
                 desired = min(desired, 2)
                 reasons.append("waiting for reusable stage")
@@ -280,8 +283,9 @@ class ResourceGovernor:
                 reasons.append("high tile-result fan-in pressure")
         elif lane == ComputeLane.PREFETCH:
             if interactive or busy_state.visible_busy or busy_state.montage_busy:
-                desired = 1
-                reasons.append("prefetch kept narrow while user-visible work is active")
+                min_workers = 0
+                desired = 0
+                reasons.append("prefetch parked while user-visible work is active")
         elif lane == ComputeLane.HISTOGRAM:
             if busy_state.semantic_evidence_blocking:
                 desired = min(desired, 1)
@@ -296,12 +300,24 @@ class ResourceGovernor:
                 reasons.append("histogram parked behind runnable user-visible rendering")
             else:
                 desired = min(desired, max_workers)
-        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE, ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
+        elif lane in {ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
+            if interactive or busy_state.visible_busy or busy_state.montage_busy or busy_state.stage_busy:
+                min_workers = 0
+                desired = 0
+                reasons.append("inspection parked behind visible rendering")
+            else:
+                desired = min(desired, max_workers)
+        elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
             desired = min(desired, max_workers)
         if desired > 0 and pressure.cpu_headroom < 0.15 and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
             desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - 1))
             reasons.append("low CPU headroom")
-        target = self._damped_lane_target(lane, _clamp_int(desired, min_workers, max_workers))
+        clamped_desired = _clamp_int(desired, min_workers, max_workers)
+        target = (
+            clamped_desired
+            if lane == ComputeLane.MONTAGE_TILE and interactive
+            else self._damped_lane_target(lane, clamped_desired)
+        )
         decision = LaneWorkerDecision(lane, target, min_workers, max_workers, ", ".join(reasons) or "profile baseline")
         self._lane_decisions[lane] = decision
         return decision
@@ -315,7 +331,7 @@ class ResourceGovernor:
         """Return the shared presentation-commit knob: item and byte bounds."""
 
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-        return self._decide_budget("presentation_commit", interactive=interactive, byte_cap=byte_cap)
+        return self._decide_budget("montage_present_total", interactive=interactive, byte_cap=byte_cap)
 
     def _decide_budget(self, channel: str, *, interactive: bool, byte_cap: int) -> UiWorkDecision:
         channel = str(channel)
@@ -471,6 +487,10 @@ class ResourceGovernor:
 
     def _damped_lane_target(self, lane: ComputeLane, desired: int) -> int:
         desired = max(0, int(desired))
+        if lane not in self._lane_decisions:
+            self._lane_targets[lane] = desired
+            self._last_lane_update_monotonic[lane] = monotonic()
+            return desired
         if desired == 0:
             self._lane_targets[lane] = 0
             self._last_lane_update_monotonic[lane] = monotonic()

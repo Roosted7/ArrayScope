@@ -356,18 +356,18 @@ class InspectionWorkflowMixin:
         return EvalPriority.SELECTED_ROI
 
     def _montage_roi_values_pending(self) -> bool:
-        session = getattr(self, "_montage_session", None)
+        renderer = getattr(self, "renderer", None)
+        session = None if renderer is None else getattr(renderer, "_frame_session", None)
         if session is None:
             return False
-        return bool(
-            not getattr(session, "display_committed", False)
-            or getattr(session, "pending_tiles", None)
-            or getattr(session, "loading_tiles", None)
-            or getattr(session, "active_tile_requests", None)
-            or getattr(session, "dirty_payloads", None)
-            or getattr(session, "pending_payload_upserts", None)
-            or getattr(session, "pending_removals", None)
-        )
+        current_view_state = getattr(self, "view_state", None)
+        session_view_state = getattr(session, "view_state", None)
+        if current_view_state is not None and session_view_state != current_view_state:
+            return True
+        visible_plan_complete = getattr(session, "visible_plan_complete", None)
+        if not callable(visible_plan_complete):
+            raise RuntimeError("live frame session has no completion owner")
+        return not bool(visible_plan_complete())
 
     def _roi_uses_tiled_demand(self, selections) -> bool:
         return bool(selections and self._committed_tiled_frame() is not None)

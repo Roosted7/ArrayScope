@@ -461,6 +461,13 @@ class MontageTileLayer:
                     reused_source = True
                     resident_current = True
             existing_item = item_state is not None
+            identity_current = bool(
+                item_state is not None
+                and acknowledged_identity_satisfies_target(
+                    item_state.acknowledged_identity,
+                    target_identities.get(int(tile_number)),
+                )
+            )
             geometry_changed = (
                 item_state is None
                 or tuple(item_state.local_rect) != local_rect
@@ -491,6 +498,7 @@ class MontageTileLayer:
             should_upload = bool(
                 item_state is None
                 or source_changed
+                or not identity_current
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
@@ -499,6 +507,7 @@ class MontageTileLayer:
                 item_state is None
                 or item_state.source_array_id == 0
                 or source_changed
+                or not identity_current
                 or dirty
                 or (not item_state.visible and not resident_current)
                 or missing_display
@@ -555,6 +564,13 @@ class MontageTileLayer:
                     self.layer_owner.add_tile_item(tile_number, item_state.item)
                 self._states[int(tile_number)] = item_state
 
+            # A state can remain assigned to its tile while hidden in the
+            # direct-reuse pool. Once this transaction selects it for an
+            # active slot, remove that warm-residency claim immediately.
+            # Otherwise a later tile in the same commit can pop and move the
+            # very same ImageItem, leaving lifecycle acknowledgement for two
+            # tiles but only the last physical item on screen.
+            self._remove_from_direct_reuse_pool(item_state)
             self._touch_resident_state(item_state)
             item_state.item.setPos(float(world_x), float(world_y))
             _apply_item_lod_scale(item_state, scale_x, scale_y)
@@ -652,6 +668,7 @@ class MontageTileLayer:
                 if _state_is_physically_visible(state)
             )
         )
+        committed_upserts.intersection_update(physically_presented)
 
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),

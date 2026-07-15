@@ -68,6 +68,20 @@ def test_only_same_semantic_coarser_lod_is_a_compatible_fallback():
     assert not incompatible.compatible_fallback_for(target)
 
 
+def test_fallback_compatibility_does_not_recurse_through_full_identity_equality(monkeypatch):
+    target = _identity(level=0)
+    fallback = _identity(level=2, quality="fallback")
+    monkeypatch.setattr(
+        TileIdentity,
+        "__eq__",
+        lambda _self, _other: (_ for _ in ()).throw(
+            AssertionError("full TileIdentity equality entered")
+        ),
+    )
+
+    assert fallback.compatible_fallback_for(target)
+
+
 def test_presentation_identity_is_separate_from_pixel_identity():
     identity = _identity()
     first = TilePresentationIdentity(4, levels=(0.0, 2.0), scale="linear", lut_identity="gray")

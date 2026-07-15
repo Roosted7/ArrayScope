@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -65,10 +64,6 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
     from pyqtgraph.Qt import QtCore, QtGui
     _clear_arrayscope_settings()
 
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(_make_data())
@@ -128,10 +123,6 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
 def test_progressive_view_configuration_artifacts(qt_app):
     from pyqtgraph.Qt import QtCore
     _clear_arrayscope_settings()
-
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
 
     from arrayscope.window import ArrayScopeWindow
 
@@ -195,10 +186,6 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
     from pyqtgraph.Qt import QtCore
     _clear_arrayscope_settings()
 
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     pytest.importorskip("vispy")
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
@@ -244,10 +231,6 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
 def test_dimension_strip_wraps_for_many_dimensions(qt_app):
     _clear_arrayscope_settings()
 
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     from arrayscope.window import ArrayScopeWindow
 
     data = np.zeros((2, 3, 4, 5, 6, 7), dtype=float)
@@ -284,10 +267,6 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
     from pyqtgraph.Qt import QtCore
 
     _clear_arrayscope_settings()
-
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
 
     from arrayscope.core.roi import RoiKind
     from arrayscope.window import ArrayScopeWindow
@@ -339,10 +318,6 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
 
     _clear_arrayscope_settings()
 
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     from arrayscope.window import ArrayScopeWindow
 
     base = np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6)
@@ -360,7 +335,10 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         win.img_view.setProfileMarker(2, 2, visible=True)
         win._on_profile_marker_moved(2, 2)
         win._update_live_profile_from_pending_pos()
-        _process_events(qt_app, count=80)
+        assert _wait_until(
+            qt_app,
+            lambda: len(win.profile_dock.line_plot.curves) >= 2,
+        )
 
         assert win.profile_dock.isVisible()
         assert len(win.profile_axes) == 2
@@ -395,12 +373,16 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         win.img_view.setProfileMarker(second_tile_x, 1, visible=True)
         win._on_profile_marker_moved(second_tile_x, 1)
         win._update_live_profile_from_pending_pos()
-        for _ in range(40):
-            _process_events(qt_app, count=4)
-            if win.profile_dock.line_plot.curves:
-                break
-            QtCore.QThread.msleep(20)
-        assert win.profile_dock.line_plot.curves
+        assert _wait_until(
+            qt_app,
+            lambda: bool(
+                win.profile_dock.line_plot.curves
+                and win.profile_dock.line_plot.curves[0]
+                .name()
+                .endswith("d2=1")
+            ),
+            timeout_s=10.0,
+        )
         assert win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
 
         win.img_view.setProfileMarker(tile_width, 1, visible=True)
@@ -414,10 +396,6 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
 
 def test_diagnostics_dialog_artifact_is_compact(qt_app):
     _clear_arrayscope_settings()
-
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
 
     from arrayscope.window import ArrayScopeWindow
 

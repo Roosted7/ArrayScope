@@ -43,7 +43,7 @@ def test_bridge_drain_knob_uses_profile_feedback_defaults():
 def test_commit_batch_knob_covers_last_observed_bytes_per_item():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     governor.record_ui_observation(
-        "presentation_commit",
+        "montage_present_total",
         12.0,
         item_count=6,
         byte_count=6 * 1024 * 1024,
@@ -53,7 +53,7 @@ def test_commit_batch_knob_covers_last_observed_bytes_per_item():
 
     decision = governor.decide_commit_batch(interactive=False)
 
-    assert decision.channel == "presentation_commit"
+    assert decision.channel == "montage_present_total"
     assert decision.batch_limit >= 1
     assert decision.byte_cap >= decision.batch_limit * 1024 * 1024
     assert decision.interval_ms == 0
@@ -109,6 +109,44 @@ def test_histogram_workers_park_only_behind_runnable_visible_work():
         busy_state=SchedulerBusyState(result_backlog=2),
     )
     assert bookkeeping_only.target_workers == bookkeeping_only.max_workers
+
+
+def test_interaction_immediately_parks_side_lanes_and_limits_montage():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    busy = SchedulerBusyState(montage_busy=True)
+
+    montage = governor.decide_lane_workers(
+        ComputeLane.MONTAGE_TILE,
+        interactive=True,
+        busy_state=busy,
+    )
+    prefetch = governor.decide_lane_workers(
+        ComputeLane.PREFETCH,
+        interactive=True,
+        busy_state=busy,
+    )
+    profile = governor.decide_lane_workers(
+        ComputeLane.PROFILE,
+        interactive=True,
+        busy_state=busy,
+    )
+
+    assert montage.target_workers == 2
+    assert "bounded montage workers" in montage.reason
+    assert prefetch.target_workers == 0
+    assert profile.target_workers == 0
+
+
+def test_first_lane_decision_starts_at_policy_target_without_damping_from_maximum():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+
+    decision = governor.decide_lane_workers(
+        ComputeLane.PREFETCH,
+        interactive=True,
+        busy_state=SchedulerBusyState(visible_busy=True),
+    )
+
+    assert decision.target_workers == 0
 
 
 def test_blocking_semantic_evidence_keeps_one_histogram_worker():
