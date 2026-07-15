@@ -18,8 +18,6 @@ from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.region_source import EagerDisplayRegionSource
-from arrayscope.display.source_anchoring import source_anchoring_for_view
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
@@ -39,43 +37,6 @@ from arrayscope.window.viewport_bridge import ViewportBridge
 
 
 class DisplayPresentationMixin:
-    def _apply_display_image(
-        self,
-        display_image,
-        *,
-        geometry,
-        window_mode,
-        previous_frame,
-        force_auto,
-        defer_side_panels: bool = False,
-        document_key=None,
-        request_key=None,
-        render_generation=None,
-        montage_level_key=None,
-        montage_dirty_tiles=None,
-        montage_tile_source_ids=None,
-        tile_state=None,
-        tile_delta=None,
-        user_levels=None,
-    ):
-        self._apply_full_display_image(
-            display_image,
-            geometry=geometry,
-            window_mode=window_mode,
-            previous_frame=previous_frame,
-            force_auto=force_auto,
-            defer_side_panels=defer_side_panels,
-            document_key=document_key,
-            request_key=request_key,
-            render_generation=render_generation,
-            montage_level_key=montage_level_key,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            tile_state=tile_state,
-            tile_delta=tile_delta,
-            user_levels=user_levels,
-        )
-
     def _apply_full_display_image(
         self,
         display_image,
@@ -115,17 +76,13 @@ class DisplayPresentationMixin:
                 render_generation=render_generation,
                 semantic_key=montage_level_key,
             )
-            frame_plan = frame_plan or self._frame_plan_for_display(
-                context=context,
-                geometry=geometry,
-                display_shape=display_image.data.shape[:2],
-            )
-            if tile_state is None:
-                tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
-                    display_image,
-                    frame_plan=frame_plan,
-                    source_key=context.request_key,
-                )
+            # One commit path: the frame session owns the plan and the tile
+            # presentation. A commit without them is a programming error, not
+            # a case to paper over with a divergent secondary plan (the
+            # 2026-07-15 window-shift diagnosis found exactly such dead
+            # fallbacks masking that the live flow never used them).
+            if frame_plan is None or tile_state is None:
+                raise ValueError("display commits require the session's frame_plan and tile_state")
             decision = decide_presentation(
                 PresentationInput(
                     payload=DisplayPayload(
@@ -239,17 +196,13 @@ class DisplayPresentationMixin:
                 render_generation=render_generation,
                 semantic_key=montage_level_key,
             )
-            frame_plan = frame_plan or self._frame_plan_for_display(
-                context=context,
-                geometry=geometry,
-                display_shape=display_image.data.shape[:2],
-            )
-            if tile_state is None:
-                tile_state, base_tile_state, tile_delta = _tile_presentation_for_display_image(
-                    display_image,
-                    frame_plan=frame_plan,
-                    source_key=context.request_key,
-                )
+            # One commit path: the frame session owns the plan and the tile
+            # presentation. A commit without them is a programming error, not
+            # a case to paper over with a divergent secondary plan (the
+            # 2026-07-15 window-shift diagnosis found exactly such dead
+            # fallbacks masking that the live flow never used them).
+            if frame_plan is None or tile_state is None:
+                raise ValueError("display commits require the session's frame_plan and tile_state")
             decision = decide_presentation(
                 PresentationInput(
                     payload=DisplayPayload(
@@ -344,38 +297,6 @@ class DisplayPresentationMixin:
             planner = FramePlanner()
             self._frame_planner_instance = planner
         return planner
-
-    def _frame_plan_for_display(self, *, context: RenderRequestContext, geometry, display_shape):
-        if getattr(geometry, "montage", None) is not None:
-            return None
-        target = FrameTarget(
-            semantic_key=context.semantic_key or context.request_key,
-            viewport_key=None,
-            presentation_key=None,
-            quality="exact-visible",
-        )
-        capabilities = image_view_backend_capabilities(self.win.img_view)
-        return self._frame_planner().plan(
-            target=target,
-            view_state=geometry.view_state,
-            display_shape=display_shape,
-            backend_capabilities=capabilities,
-            memory_policy=self._memory_policy(),
-            source_anchoring=self._source_anchoring_for_display(geometry.view_state, capabilities),
-        )
-
-    def _source_anchoring_for_display(self, view_state, capabilities):
-        """ADR 0055 G3: anchor tile identity to source coordinates when the
-        chain is windowable, so window shifts keep GPU residency. Only for
-        atlas-resident backends — the CPU backend re-windows items anyway
-        and prefers the coarse classic tiling."""
-
-        if getattr(capabilities, "tile_residency_kind", None) != "gpu_atlas":
-            return None
-        document = getattr(self.win, "document", None)
-        if document is None:
-            return None
-        return source_anchoring_for_view(document, view_state)
 
     def _previous_display_frame_for_policy(self, *, force_auto: bool) -> CommittedDisplayFrame | None:
         if force_auto:
@@ -799,29 +720,3 @@ def _current_view_range(window):
         return None
 
 
-def _tile_presentation_for_display_image(display_image, *, frame_plan, source_key):
-    source = EagerDisplayRegionSource(
-        display_image,
-        source_key=source_key,
-        content_key=getattr(frame_plan, "source_content_key", None),
-    )
-    payloads: dict[int, DisplayTilePayload] = {}
-    for region in tuple(getattr(frame_plan, "regions", ()) or ()):
-        tile_number = int(region.region_id)
-        payloads[tile_number] = source.read_region(region, quality="exact-visible")
-    state = TilePresentationState(payloads, revision=1)
-    delta = TilePresentationDelta(
-        structure_revision=1,
-        payload_revision=1,
-        visibility_revision=1,
-        level_revision=1,
-        histogram_revision=1,
-        viewport_revision=1,
-        base_revision=0,
-        target_revision=1,
-        upserts=payloads,
-        active_tiles=frame_plan.active_region_ids,
-        planned_tiles=frame_plan.planned_region_ids,
-        near_tiles=frame_plan.near_region_ids,
-    )
-    return state, TilePresentationState(revision=0), delta
