@@ -14,6 +14,7 @@ import numpy as np
 
 from arrayscope.display.backends.vispy.tiles import (
     ANCHORED_CHUNK_SHAPE,
+    AtlasCapacityError,
     TextureAtlasPool,
     _payload_chunk_plan,
     _payload_chunked_eligible,
@@ -847,3 +848,57 @@ def test_reduced_warm_payloads_make_visible_commit_upload_free():
     assert len(pool.tile_draw_parts[0]) == 4
     # Plane A's chunks survived as warm residency.
     assert all(key in pool.resident_slots for key in chunks_a)
+
+
+def test_eviction_free_placement_never_relocates_foreign_page_residents():
+    """Speculative warm must never disturb existing residency.
+
+    The same-page bucketing branch releases a foreign-page resident and
+    re-uploads it on the chosen page — legitimate for visible commits, a
+    presentation-outcome change when done speculatively. Under
+    allow_eviction=False a set straddling pages is a denial, not a move.
+    """
+
+    import pytest as _pytest
+
+    from arrayscope.gpu.page_table import PageSlot
+
+    data = _data()
+    pool = TextureAtlasPool(FakeGloo())
+    payload = anchored_payload(data, 100)
+    commit(pool, {0: payload})
+    plan = _payload_chunk_plan(payload)
+    keys = [chunk.key for chunk in plan]
+
+    # Manufacture a straddle: move ONE chunk's residency to a fresh page of
+    # the same class, keeping page bookkeeping coherent.
+    pool._ensure_class_capacity((256, 256), pool._class_capacity((256, 256)) + len(keys))
+    moved = keys[0]
+    old_page_index, old_slot = pool.resident_slots[moved]
+    target_index = next(
+        index
+        for index, page in enumerate(pool.pages)
+        if page.tile_shape == (256, 256) and index != old_page_index
+    )
+    old_page = pool.pages[old_page_index]
+    old_page.slot_owners[old_slot] = None
+    old_page._free_slots.append(old_slot)
+    pool._page_table.unbind(moved)
+    target_page = pool.pages[target_index]
+    new_slot = target_page.take_free_slot(moved)
+    pool._page_table.bind(
+        moved, PageSlot("vispy-atlas", target_index, new_slot), nbytes=0
+    )
+
+    resident_before = dict(pool.resident_slots)
+
+    with _pytest.raises(AtlasCapacityError):
+        pool._chunk_slots_for(
+            tuple(keys),
+            protected_keys=set(),
+            near_keys=set(),
+            allow_eviction=False,
+        )
+
+    # Nothing moved: the straddling resident stayed exactly where it was.
+    assert pool.resident_slots == resident_before

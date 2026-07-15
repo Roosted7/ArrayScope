@@ -1790,6 +1790,19 @@ class TextureAtlasPool:
                 f"no atlas page of shape {shape} can hold {len(keys)} chunks of one tile"
             )
         page = self.pages[int(chosen)]
+        if not allow_eviction:
+            # Eviction-free (speculative warm) placements must never disturb
+            # existing residency: relocating a foreign-page resident releases
+            # its slot and invalidates any tile drawn from it, which violates
+            # "speculative work never changes visible presentation outcomes".
+            # Deny the set instead; a visible commit has relocation rights.
+            for key in keys:
+                slot_ref = lookups[key]
+                if slot_ref is not None and slot_ref.page_index != int(chosen):
+                    raise AtlasCapacityError(
+                        "eviction-free chunk placement would relocate a resident chunk "
+                        f"from page {slot_ref.page_index} to {int(chosen)}"
+                    )
         results: dict[object, tuple[int, int, bool]] = {}
         for key in keys:
             slot_ref = lookups[key]
