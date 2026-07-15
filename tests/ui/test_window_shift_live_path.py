@@ -28,7 +28,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    apply_plane,
+    committed_value,
+    frame_session_settled,
+    make_backend_window,
+    plane_settled,
+    restore_default_backend,
+    use_vispy_backend,
+)
 
 _WAIT_TIMEOUT_MS = 15_000
 
@@ -40,36 +48,21 @@ START_A = 100
 START_B = 101
 
 
-def _use_vispy_backend():
-    from pyqtgraph.Qt import QtCore
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+@pytest.fixture
+def upload_log(monkeypatch):
+    """Shapes of every real ``_upload_texture_plane`` call (uploads still run)."""
 
-    clear_arrayscope_settings()
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-    return settings
+    import arrayscope.display.backends.vispy.tiles as vispy_tiles
 
+    uploads: list[tuple[int, int]] = []
+    original = vispy_tiles._upload_texture_plane
 
-def _restore_default_backend(settings):
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    def counting_upload(texture, plane, *, offset, copy):
+        uploads.append(tuple(int(value) for value in np.shape(plane)[:2]))
+        return original(texture, plane, offset=offset, copy=copy)
 
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
-    settings.sync()
-
-
-def _make_window(qtbot, data):
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
-    capabilities = image_view_backend_capabilities(win.img_view)
-    if capabilities.name != "vispy":
-        win.close()
-        pytest.skip("VisPy backend unavailable in this Qt environment")
-    assert capabilities.tile_residency_kind == "gpu_atlas"
-    return win
+    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+    return uploads
 
 
 def _apply_window(win, start: int, *, reason: str) -> None:
@@ -89,30 +82,11 @@ def _window_settled(win, start: int) -> bool:
     indices = frame.geometry.view_state.axis_range_indices[1]
     if not indices or int(indices[0]) != start or len(indices) != EXTENT:
         return False
-    session = getattr(win.renderer, "_frame_session", None)
-    if session is None:
-        return False
-    return (
-        session.visible_plan_complete()
-        and not win.montage_tile_evaluation_controller.is_busy()
-        and session.required_target_settled()
-    )
+    return frame_session_settled(win)
 
 
 def _wait_for_window(win, qtbot, start: int) -> None:
     qtbot.waitUntil(lambda: _window_settled(win, start), timeout=_WAIT_TIMEOUT_MS)
-
-
-def _committed_value(win, view_x: int, view_y: int):
-    """Probe the committed frame the way live hover does (render.py)."""
-
-    geometry = win.renderer.display_geometry
-    if geometry is None:
-        return None
-    context = geometry.context_for_view_point(float(view_x), float(view_y))
-    if context is None:
-        return None
-    return win.renderer._hover_value_from_display(context.mapping)
 
 
 def _pool(win):
@@ -138,10 +112,10 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
     """
 
     pytest.importorskip("vispy")
-    settings = _use_vispy_backend()
+    settings = use_vispy_backend()
     rng = np.random.default_rng(23)
     data = rng.standard_normal((2 * CHUNK, 8 * CHUNK)).astype(np.float32)
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         _apply_window(win, START_A, reason="test-window-initial")
         _wait_for_window(win, qtbot, START_A)
@@ -153,10 +127,10 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
         probes = ((CHUNK // 2, CHUNK // 2), (EXTENT // 2 + 7, CHUNK + 11), (EXTENT - CHUNK, 2 * CHUNK - 1))
         for view_x, view_y in probes:
             qtbot.waitUntil(
-                lambda x=view_x, y=view_y: _committed_value(win, x, y) is not None,
+                lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
                 timeout=_WAIT_TIMEOUT_MS,
             )
-            value = _committed_value(win, view_x, view_y)
+            value = committed_value(win, view_x, view_y)
             expected = data[view_y, START_B + view_x]
             assert value == pytest.approx(float(expected)), (
                 f"committed value at view ({view_x}, {view_y}) is {value!r}, "
@@ -164,33 +138,23 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
             )
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)
 
 
-def test_window_shift_live_uploads_only_boundary_strips(qtbot, monkeypatch):
+def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
     """E2E fast-path half: a one-pixel shift re-uploads only boundary strips."""
 
     pytest.importorskip("vispy")
     from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE
-    import arrayscope.display.backends.vispy.tiles as vispy_tiles
 
     assert ANCHORED_CHUNK_SHAPE == (CHUNK, CHUNK)
 
-    settings = _use_vispy_backend()
-
-    uploads: list[tuple[int, int]] = []
-    original_upload = vispy_tiles._upload_texture_plane
-
-    def counting_upload(texture, plane, *, offset, copy):
-        shape = tuple(int(value) for value in np.shape(plane)[:2])
-        uploads.append(shape)
-        return original_upload(texture, plane, offset=offset, copy=copy)
-
-    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+    settings = use_vispy_backend()
+    uploads = upload_log
 
     rng = np.random.default_rng(23)
     data = rng.standard_normal((2 * CHUNK, 8 * CHUNK)).astype(np.float32)
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         _apply_window(win, START_A, reason="test-window-initial")
         _wait_for_window(win, qtbot, START_A)
@@ -258,28 +222,7 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, monkeypatch):
         )
     finally:
         win.close()
-        _restore_default_backend(settings)
-
-
-def _apply_plane(win, index: int, *, reason: str) -> None:
-    win._set_view_state(win.view_state.with_slice(0, index))
-    win.render(reason=reason)
-
-
-def _plane_settled(win, index: int) -> bool:
-    frame = getattr(win, "_committed_display_frame", None)
-    if frame is None:
-        return False
-    if int(frame.geometry.view_state.slice_indices[0]) != int(index):
-        return False
-    session = getattr(win.renderer, "_frame_session", None)
-    if session is None:
-        return False
-    return (
-        session.visible_plan_complete()
-        and not win.montage_tile_evaluation_controller.is_busy()
-        and session.required_target_settled()
-    )
+        restore_default_backend(settings)
 
 
 def _plane_content_key(win, index: int):
@@ -298,7 +241,7 @@ def _resident_chunk_keys_for_content(pool, content_key) -> set:
     }
 
 
-def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, monkeypatch):
+def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
     """G4c live gate: prefetch warms the NEXT plane's GPU chunks in advance.
 
     After plane 0 settles, the slice prefetcher evaluates plane 1 on the
@@ -310,28 +253,19 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, monkeypatch):
     """
 
     pytest.importorskip("vispy")
-    import arrayscope.display.backends.vispy.tiles as vispy_tiles
     from arrayscope.app.settings_state import AppSettingsState
 
-    settings = _use_vispy_backend()
-
-    uploads: list[tuple[int, int]] = []
-    original_upload = vispy_tiles._upload_texture_plane
-
-    def counting_upload(texture, plane, *, offset, copy):
-        uploads.append(tuple(int(value) for value in np.shape(plane)[:2]))
-        return original_upload(texture, plane, offset=offset, copy=copy)
-
-    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+    settings = use_vispy_backend()
+    uploads = upload_log
 
     rng = np.random.default_rng(31)
     data = rng.standard_normal((3, 2 * CHUNK, 4 * CHUNK)).astype(np.float32)
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
 
         pool = _pool(win)
         assert _resident_chunks(pool), "plane 0 did not engage chunked residency"
@@ -359,8 +293,8 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, monkeypatch):
 
         chunk_uploads_before = pool.chunk_upload_count
         uploads.clear()
-        _apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: _plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        apply_plane(win, 1, reason="test-plane-forward")
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
 
         # The scroll commit presented plane 1 through the chunked path...
         presented_now = _resident_chunks(pool)
@@ -380,14 +314,14 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, monkeypatch):
         )
 
         # Pixel truth on the warmed plane.
-        value = _committed_value(win, CHUNK // 2, CHUNK // 2)
+        value = committed_value(win, CHUNK // 2, CHUNK // 2)
         assert value == pytest.approx(float(data[1, CHUNK // 2, CHUNK // 2]))
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)
 
 
-def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
+def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
     """G4a live gate: revisiting an already-seen plane re-uses GPU residency.
 
     Content-keyed residency (source anchor per plane) plus grow-before-evict
@@ -396,34 +330,25 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
     """
 
     pytest.importorskip("vispy")
-    import arrayscope.display.backends.vispy.tiles as vispy_tiles
 
-    settings = _use_vispy_backend()
-
-    uploads: list[tuple[int, int]] = []
-    original_upload = vispy_tiles._upload_texture_plane
-
-    def counting_upload(texture, plane, *, offset, copy):
-        uploads.append(tuple(int(value) for value in np.shape(plane)[:2]))
-        return original_upload(texture, plane, offset=offset, copy=copy)
-
-    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+    settings = use_vispy_backend()
+    uploads = upload_log
 
     rng = np.random.default_rng(29)
     data = rng.standard_normal((3, 2 * CHUNK, 4 * CHUNK)).astype(np.float32)
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
 
         pool = _pool(win)
         chunks_plane_0 = _resident_chunks(pool)
         assert chunks_plane_0, "plane 0 did not engage chunked residency"
 
-        _apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: _plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        apply_plane(win, 1, reason="test-plane-forward")
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
         # Different plane, different content: plane 0's chunks are unlinked
         # from the tile but must SURVIVE as warm page-table residency
         # (grow-before-evict) while plane 1's arrive.
@@ -435,8 +360,8 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
         )
 
         uploads.clear()
-        _apply_plane(win, 0, reason="test-plane-back")
-        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        apply_plane(win, 0, reason="test-plane-back")
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
 
         native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
         assert not native_uploads, (
@@ -445,11 +370,11 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
         )
 
         # Pixel truth on the revisited plane.
-        value = _committed_value(win, CHUNK // 2, CHUNK // 2)
+        value = committed_value(win, CHUNK // 2, CHUNK // 2)
         assert value == pytest.approx(float(data[0, CHUNK // 2, CHUNK // 2]))
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)
 
 
 def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
@@ -471,11 +396,11 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
     pytest.importorskip("vispy")
     from arrayscope.display.pyramid import reduce_box_mean
 
-    settings = _use_vispy_backend()
+    settings = use_vispy_backend()
     rng = np.random.default_rng(23)
     data = rng.standard_normal((2 * CHUNK, 8 * CHUNK)).astype(np.float32)
     shifted_start = START_A + CHUNK // 2
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         _apply_window(win, START_A, reason="test-window-initial")
         _wait_for_window(win, qtbot, START_A)
@@ -540,10 +465,10 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         probes = ((CHUNK // 2, CHUNK // 2), (CHUNK + 11, CHUNK // 2 + 7))
         for view_x, view_y in probes:
             qtbot.waitUntil(
-                lambda x=view_x, y=view_y: _committed_value(win, x, y) is not None,
+                lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
                 timeout=_WAIT_TIMEOUT_MS,
             )
-            value = _committed_value(win, view_x, view_y)
+            value = committed_value(win, view_x, view_y)
             expected = reduced[view_y, view_x]
             assert value == pytest.approx(float(expected)), (
                 f"committed value at view ({view_x}, {view_y}) is {value!r}, "
@@ -551,4 +476,4 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
             )
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)

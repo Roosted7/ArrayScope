@@ -22,7 +22,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    frame_session_settled,
+    make_backend_window,
+    restore_default_backend,
+    use_vispy_backend,
+)
 
 _WAIT_TIMEOUT_MS = 15_000
 
@@ -33,50 +38,10 @@ _PAL_RELAXED_ORANGE = (249, 127, 16)
 _ORANGE_TOLERANCE = 16
 
 
-def _use_vispy_backend():
-    from pyqtgraph.Qt import QtCore
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-
-    clear_arrayscope_settings()
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.sync()
-    return settings
-
-
-def _restore_default_backend(settings):
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
-    settings.sync()
-
-
-def _make_window(qtbot, data):
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
-    from arrayscope.window import ArrayScopeWindow
-
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
-    capabilities = image_view_backend_capabilities(win.img_view)
-    if capabilities.name != "vispy":
-        win.close()
-        pytest.skip("VisPy backend unavailable in this Qt environment")
-    assert capabilities.tile_residency_kind == "gpu_atlas"
-    return win
-
-
 def _settled(win) -> bool:
-    frame = getattr(win, "_committed_display_frame", None)
-    if frame is None:
+    if getattr(win, "_committed_display_frame", None) is None:
         return False
-    session = getattr(win.renderer, "_frame_session", None)
-    if session is None:
-        return False
-    return (
-        session.visible_plan_complete()
-        and not win.montage_tile_evaluation_controller.is_busy()
-        and session.required_target_settled()
-    )
+    return frame_session_settled(win)
 
 
 def _wait_settled(win, qtbot) -> None:
@@ -114,10 +79,10 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
     the next re-present, not re-acknowledged."""
 
     pytest.importorskip("vispy")
-    settings = _use_vispy_backend()
+    settings = use_vispy_backend()
     data = np.zeros((128, 128), dtype=np.complex64)
     data[8:24, 8:24] = 40.0 + 0.0j  # small bright block so levels span > 0
-    win = _make_window(qtbot, data)
+    win = make_backend_window(qtbot, data, require_gpu_atlas=True)
     try:
         win._on_channel_clicked("complex")  # phase_color display, PAL-relaxed LUT
         win.render(reason="test-phase-initial")
@@ -169,4 +134,4 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
         assert np.all(np.asarray(visual.mode_data) == 4.0)
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)

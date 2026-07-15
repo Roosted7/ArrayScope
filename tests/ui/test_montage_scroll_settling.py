@@ -20,32 +20,16 @@ in both directions with zero watchdog stall assertions.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    frame_session_settled,
+    make_backend_window,
+    restore_default_backend,
+    use_vispy_backend,
+)
 
 _FILL_TIMEOUT_MS = 60_000
 _SCROLL_TIMEOUT_MS = 30_000
-
-
-def _use_vispy_backend():
-    from pyqtgraph.Qt import QtCore
-
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-
-    clear_arrayscope_settings()
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    settings.setValue("montage_quality_policy", "resident")
-    settings.sync()
-    return settings
-
-
-def _restore_default_backend(settings):
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
-    settings.sync()
 
 
 def _window_settled(win, indices) -> bool:
@@ -55,11 +39,7 @@ def _window_settled(win, indices) -> bool:
     plan_sources = tuple(int(tile.source_index) for tile in session.plan.tiles)
     if plan_sources != tuple(indices):
         return False
-    return bool(
-        session.visible_plan_complete()
-        and not win.montage_tile_evaluation_controller.is_busy()
-        and session.required_target_settled()
-    )
+    return frame_session_settled(win)
 
 
 def _scroll_to(win, qtbot, indices) -> None:
@@ -75,20 +55,15 @@ def _scroll_to(win, qtbot, indices) -> None:
 
 
 def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
-    settings = _use_vispy_backend()
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
     from arrayscope.operations.pipeline import CenteredFFT
-    from arrayscope.window import ArrayScopeWindow
 
     rng = np.random.default_rng(20260715)
     data = rng.standard_normal((96, 96, 36), dtype=np.float32)
 
-    win = ArrayScopeWindow(data)
+    win = make_backend_window(qtbot, data)
     win.resize(520, 420)
-    qtbot.addWidget(win)
     try:
-        if image_view_backend_capabilities(win.img_view).name != "vispy":
-            pytest.skip("VisPy backend unavailable in this Qt environment")
         win.show()
         # FFT over the montage axis: non-commuting for display LOD, so the
         # shared-transform fanout owns every tile's producer — the exact
@@ -120,4 +95,4 @@ def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()
-        _restore_default_backend(settings)
+        restore_default_backend(settings)
