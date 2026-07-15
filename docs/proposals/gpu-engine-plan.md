@@ -3,29 +3,13 @@
 **Date:** 2026-07-15. **Branch:** `codex/gpu-engine`.
 **Decision record:** [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md)
 (three-way separation of view tiles, data chunks, residency pages).
-**Status (2026-07-15, end of day):** G1, G2 first slice, and G3 are
-implemented and verified on real hardware. The live upload path is
-**backend-private chunked residency**: exact non-montage payloads carry a
-window-invariant `PayloadSourceAnchor` (content key + native source rect,
-stamped by the frame session on gpu_atlas backends for windowable chains);
-the VisPy pool partitions eligible payloads into origin-anchored 256²
-chunks keyed by content, draws them as UV-cropped quads (TileDrawPart), and
-skips uploads for resident chunks. Measured live (512×1024 window, ±1 px
-shift): 4 boundary strips uploaded (25% of window area), 6/10 interior
-chunks survive byte-identical, scroll-back uploads zero; FFT along the
-shifted axis correctly re-uploads everything. The gate test passes offscreen
-and on real Wayland GL; on-screen regression parity and ±10% benchmark
-neutrality are recorded in `tests/artifacts/`. The presenter-path anchored
-*planning* (G3b-1) proved dead in the live flow and its presenter glue was
-deleted; the planner/gate-test machinery remains as the X5d-shaped
-region-first future. Remaining G3 gaps: windows ≤ 1 chunk take the classic
-path; a chunk set exceeding one atlas page falls back to classic (correct,
-not fast). CPU re-evaluation of the shifted window plane still happens each
-shift — lifted by window-as-camera (below), now the G4-adjacent target.
-Reduced-LOD planes (factor>1) now take chunked residency with uniform
-plane-pixel pages (G5 slice 1, below); their whole-plane re-upload on a
-native-pixel shift is the documented honest limit of window-anchored
-reduction binning, not a residency gap.
+**Status (2026-07-16 handoff):** G1–G4 and G5 slice 1 are implemented and
+real-GL verified; the physical-presentation-truth invariant is standing;
+five field defects were root-caused from live traces and fixed with
+failing-pre-fix gates. Full suite 2072/24. The continuation queue, open
+field evidence, and environment facts live in
+[`gpu-port-continuation.md`](gpu-port-continuation.md) — read that first.
+Historical status detail: this file's git history.
 
 ## User problem
 
