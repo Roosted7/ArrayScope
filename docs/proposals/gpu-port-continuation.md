@@ -123,6 +123,17 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    controller-side expected-source coverage during session switches is
    worth an audit.
 
+## Test-suite state (consolidation landed 2026-07-16: 1bc532da/55247c4e/9d1197b2)
+
+Shared fakes live in `tests/display/vispy_test_utils.py` (FakeTexture2D/
+FakeGloo/FakeVisual/payload builders) and the live-window harness in
+`tests/ui/helpers.py` (backend switch, settle predicates, upload_log
+fixture) — use these, don't re-roll. Suite 2072/24 in ~92-104 s; no new
+test in the top-25 durations. Watch item: one observed flake in
+`test_prefetch_gated_by_busy_visible_runs_after_drain` (timing-sensitive,
+passed all re-runs). Follow-up: six pre-existing UI test files carry their
+own backend-switch helpers and could adopt tests/ui/helpers.py.
+
 ## Working practices that made tonight work
 
 Repro-first (failing test before fix); every fix carries its gate; live
