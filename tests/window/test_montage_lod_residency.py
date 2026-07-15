@@ -4022,8 +4022,8 @@ def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
     )
     session.display_tile_payloads[0] = preview
     session.tile_presentation_state.payloads[0] = preview
-    session.lifecycle.backend_presented_snapshot({0: source_id})
-    session.lifecycle.presentation_confirmed((0,))
+    session.lifecycle.commit_emitted({0: preview})
+    session.lifecycle.backend_ack({0: preview})
 
     preview_tiles = tuple(
         render_effects.shared_transform_candidate_tiles(
@@ -4061,13 +4061,8 @@ def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
         )
         session.display_tile_payloads[int(tile.montage_index)] = payload
         session.tile_presentation_state.payloads[int(tile.montage_index)] = payload
-    session.lifecycle.backend_presented_snapshot(
-        {
-            int(tile.montage_index): session.tile_semantic_source_id(tile.source_index)
-            for tile in session.plan.tiles
-        }
-    )
-    session.lifecycle.presentation_confirmed(tuple(range(3)))
+    session.lifecycle.commit_emitted(session.tile_presentation_state.payloads)
+    session.lifecycle.backend_ack(session.tile_presentation_state.payloads)
     assert effects.shared_first_pass_barrier_pending(None)
 
     session.first_pass_histogram_published = True
@@ -4123,8 +4118,8 @@ def test_finer_presented_preview_remains_shared_target_candidate_after_zoom_out(
     )
     session.display_tile_payloads[0] = preview
     session.tile_presentation_state.payloads[0] = preview
-    session.lifecycle.backend_presented_snapshot({0: source_id})
-    session.lifecycle.presentation_confirmed((0,))
+    session.lifecycle.commit_emitted({0: preview})
+    session.lifecycle.backend_ack({0: preview})
 
     candidates = tuple(
         render_effects.shared_transform_candidate_tiles(
@@ -4136,6 +4131,68 @@ def test_finer_presented_preview_remains_shared_target_candidate_after_zoom_out(
     )
 
     assert candidates == (tile,)
+
+
+def test_shared_target_candidates_follow_settlement_not_historical_quality():
+    """Session-50 gate: historical quality cannot hide a coarser LOD row.
+
+    A prior demand presented a shared L4 payload as ``quality="exact"``.
+    After the demand moved to L2, that physically acknowledged first pixel
+    was still valid fallback coverage but no longer the target.  Shared target
+    admission must follow lifecycle settlement, not the historical quality
+    label, or the tile has no producer.  A row already exact at L2 must not be
+    resubmitted.
+    """
+
+    session = _session(count=3, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    preview_tile, coarse_tile, settled_tile = session.plan.tiles
+    source_id = session.tile_semantic_source_id(coarse_tile.source_index)
+    coarse_exact = DisplayTilePayload(
+        coarse_tile.montage_index,
+        coarse_tile.source_index,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=4, factor=16, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="exact",
+    )
+    preview = DisplayTilePayload(
+        preview_tile.montage_index,
+        preview_tile.source_index,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        session.tile_semantic_source_id(preview_tile.source_index),
+        lod=coarse_exact.lod,
+        quality="preview",
+    )
+    settled = replace(
+        coarse_exact,
+        tile_number=settled_tile.montage_index,
+        source_index=settled_tile.source_index,
+        source_id=session.tile_semantic_source_id(settled_tile.source_index),
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(16, 16)),
+    )
+    payloads = {0: preview, 1: coarse_exact, 2: settled}
+    session.display_tile_payloads.update(payloads)
+    session.tile_presentation_state.payloads.update(payloads)
+    session.lifecycle.commit_emitted(payloads)
+    session.lifecycle.backend_ack(payloads)
+
+    assert session.lifecycle.first_pixels_presented((0, 1, 2))
+    assert session.lifecycle.target_unsettled_tiles((0, 1, 2)) == (0, 1)
+
+    candidates = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=2,
+            include_missing=False,
+            require_presented_preview=True,
+        )
+    )
+
+    assert candidates == (preview_tile, coarse_tile)
 
 
 def test_shared_transform_kernel_key_uses_full_semantic_marker():

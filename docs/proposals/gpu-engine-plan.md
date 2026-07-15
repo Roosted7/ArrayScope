@@ -5,7 +5,7 @@
 (three-way separation of view tiles, data chunks, residency pages).
 **Status (2026-07-16 handoff):** G1–G4 and G5 slice 1 are implemented and
 real-GL verified; the physical-presentation-truth invariant is standing;
-five field defects were root-caused from live traces and fixed with
+six field defects were root-caused from live traces and fixed with
 failing-pre-fix gates. Full suite 2072/24. The continuation queue, open
 field evidence, and environment facts live in
 [`gpu-port-continuation.md`](gpu-port-continuation.md) — read that first.

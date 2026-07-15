@@ -71,7 +71,10 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
   defect (`d049b212`); scrub retain-until-replace
   (`slice_only_session_transition`; doc/op changes still blank) +
   prefetch re-arm on visible drain (`fa76a3c1`); Performance-menu prefetch
-  toggle restored. Severed-wire pattern: three limbs of old deletions were
+  toggle restored; post-race session-50 shared-target candidate hole (coarse
+  payload labelled exact was physically valid fallback but excluded from the
+  finer target pass) fixed from lifecycle settlement truth. Severed-wire
+  pattern: three limbs of old deletions were
   found dangling (scheduler call, menu item, and dead presenter fallbacks)
   — grep for orphaned handlers when something "does nothing".
 - **Cleanups**: legacy single-quad path deleted (~1100 LOC, resurrection
@@ -82,14 +85,13 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
 
 ## OPEN items (the new session's queue, in suggested order)
 
-1. **Fresh field evidence to mine first**:
-   `/home/thomas/projects/ArrayScope/arrayscope-diagnostics-20260715-235102.jsonl`
-   (montage session WITH A STALL — `/tmp/arrayscope-stall-50-1.trace.jsonl`,
-   23:51, fired through the commit-progress watchdog on the current build,
-   AFTER the evidence-race fix — a distinct or residual stall family) and
-   `…-235200.jsonl` (single-slice: no more black flicker, but **retained
-   stale plane lingers "quite long"** — retention works, replacement is
-   slow; user classifies as perf, OK to sequence after the stall).
+1. **Fresh field evidence**: session-50 montage stall from
+   `arrayscope-diagnostics-20260715-235102.jsonl` /
+   `/tmp/arrayscope-stall-50-1.trace.jsonl` is fixed at the shared-target
+   candidate owner (details and rejected shortcut in the coverage-stall
+   dossier).  The remaining `…-235200.jsonl` item is single-slice retention:
+   no black flicker, but the retained stale plane lingers too long; measured
+   scheduling fix remains priority 3 below.
 2. **Montage scroll-direction GPU warming** (task board #20, unblocked):
    montage prefetch warms only `cpu_item` backends today
    (`window/montage_prefetch.py`); wire the G4c pool warm machinery for the

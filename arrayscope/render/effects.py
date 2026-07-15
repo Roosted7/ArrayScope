@@ -754,13 +754,18 @@ def shared_transform_candidate_tiles(
         tile_number = int(candidate.montage_index)
         if allowed is not None and tile_number not in allowed:
             continue
-        if tile_number in getattr(session, "rendered_tiles", {}):
-            continue
         if require_presented_preview:
-            payload = presented_preview_payload(session, tile_number)
-            if payload is None:
+            payload = presented_first_pixel_payload(session, tile_number)
+            lifecycle = getattr(session, "lifecycle", None)
+            if (
+                payload is None
+                or lifecycle is None
+                or not lifecycle.target_unsettled_tiles((tile_number,))
+            ):
                 continue
             yield candidate
+            continue
+        if tile_number in getattr(session, "rendered_tiles", {}):
             continue
         payload = getattr(session, "display_tile_payloads", {}).get(tile_number)
         if payload is None:
@@ -777,12 +782,27 @@ def shared_transform_candidate_tiles(
 def presented_preview_payload(session, tile_number: int):
     """Acknowledged preview payload for scheduling higher shared quality."""
 
+    payload = presented_first_pixel_payload(session, tile_number)
+    if payload is None or str(getattr(payload, "quality", "exact")) != "preview":
+        return None
+    return payload
+
+
+def presented_first_pixel_payload(session, tile_number: int):
+    """Current physically acknowledged payload, regardless of old quality.
+
+    A payload labelled ``exact`` under an earlier coarse demand remains valid
+    first-pixel coverage after zooming in, but it is not the new target.  The
+    lifecycle owns that target-settlement decision; historical payload quality
+    must not suppress the shared target's only producer.
+    """
+
     tile_number = int(tile_number)
     lifecycle = getattr(session, "lifecycle", None)
     if tile_number not in set(getattr(lifecycle, "presented_tiles", ()) or ()):
         return None
     payload = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}).get(tile_number)
-    if payload is None or str(getattr(payload, "quality", "exact")) != "preview":
+    if payload is None:
         return None
     backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
     if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(payload):

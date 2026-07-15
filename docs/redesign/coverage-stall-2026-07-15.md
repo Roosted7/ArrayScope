@@ -121,9 +121,51 @@ FFT-montage scroll-down-then-up settling regression
    `test_partial_coverage_shared_fanout_releases_all_claims_and_refills`;
    fresh traces show the surviving live stall was the evidence race above,
    fixed in ffafb821 — dedupe both against the P9 record at integration.]
+
 2. (P9/main) Watchdog signature gains a commit-progress term so a live
    22 Hz drain does not assert (done on this branch; port with dedupe).
 3. (this branch, done) Physical presentation truth + injected-corruption
    gates as above.
 4. (this branch, done — ffafb821) First-pass histogram publication
    obligation must survive evidence completing after the last ack commit.
+
+## Bug 1 update — session 50 exact-quality/coarse-LOD candidate hole (fixed 2026-07-16)
+
+Fresh post-evidence-race evidence:
+`arrayscope-diagnostics-20260715-235102.jsonl` plus
+`/tmp/arrayscope-stall-50-1.trace.jsonl`.  This is a third, distinct shared-
+target producer hole.
+
+Session 50 first committed 60 physically valid rows.  Thirteen required rows
+(`[33..40,45..49]`) remained acknowledged at L4 while the current demand was
+L1.  The final shared-target task (981) selected and fanned out only tiles 81
+and 82; after they acknowledged, sequence 36556 still planned the thirteen L1
+DESIRED steps but submitted zero work.  The kernel and every evidence/stage
+lane were idle, so the commit-progress watchdog correctly fired with
+`pending=13`, `dirty=11`, `upserts=11`, `flush_pending=true`, and
+`final_commit_pending=true`.
+
+The stranded rows were not native `rendered_tiles`: lifecycle trace rows were
+`semantic="planned"`, and the resident-remap path had deliberately removed
+their predecessor renderer entries.  They were shared L4 payloads labelled
+`quality="exact"` because L4 had satisfied an earlier, coarser demand.  Shared
+target admission called `presented_preview_payload()` and therefore rejected
+them solely because their historical quality label was not `preview`.  The
+ordinary per-tile producer correctly deferred to the non-commuting FFT shared
+owner, leaving no producer.
+
+The fix makes shared target candidates follow canonical lifecycle truth:
+the tile must have a physically acknowledged current first pixel and
+`TileLifecycle.target_unsettled_tiles()` must still name it.  Historical
+`preview` versus `exact` labels no longer reinterpret current settlement; an
+already exact target row remains excluded.  The trace-shaped mixed regression
+pins an L4 preview row and an L4 exact row as candidates while excluding an L2
+exact row.  The shared-target/claim slice is 9 passed, the focused render/
+window/UI slice is 168 passed, and the real-Wayland
+`test_fft_preview_refinement_settles_without_stalls` gate passes.
+
+Rejected path: moving the `rendered_tiles` shortcut did not explain this
+trace and would not fix it, because the actual thirteen rows had no renderer
+entry and were rejected later by the quality-label check.  Do not add a
+watchdog retry or another commit wake; the plan already ran and the missing
+fact was candidate ownership.
