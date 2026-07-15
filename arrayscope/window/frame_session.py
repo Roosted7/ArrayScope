@@ -536,6 +536,11 @@ class FrameSession:
     dirty_tiles: list[int] = field(default_factory=list)
     flush_pending: bool = False
     last_commit_monotonic: float = 0.0
+    # Monotonic count of executed commit batches (including acknowledgement-
+    # only and no-op batches).  The stall watchdog folds this into its
+    # signature so a slow-but-live drain (e.g. one upsert per batch at 22 Hz)
+    # never reads as a frozen session while commits are still landing.
+    commit_batches: int = 0
     final_commit_pending: bool = False
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
@@ -3607,6 +3612,7 @@ class FrameSession:
 
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
+        self.commit_batches += 1
         commit_owed = bool(
             self.dirty_payloads
             or self.pending_payload_upserts

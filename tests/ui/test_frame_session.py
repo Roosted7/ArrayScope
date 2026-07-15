@@ -2156,6 +2156,10 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
                 0,
                 0,
                 0,
+                # Commit-progress terms: commit_batches and presentation-state
+                # revision (both absent on this stub session, so 0).
+                0,
+                0,
             )
             self._montage_watchdog_state_since = 10.0
 
@@ -2184,3 +2188,81 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
         assert window._arrayscope_status_message_timer is None
     finally:
         dump_path.unlink(missing_ok=True)
+
+
+def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot):
+    """A slow-but-live drain keeps every queue length constant across ticks
+    (one upsert enters as one leaves) while commit batches keep landing; the
+    monotonic commit-progress terms must keep the watchdog from firing
+    (field session 2026-07-15: 22 Hz one-upsert batches read as a stall)."""
+
+    import importlib
+
+    from pyqtgraph.Qt import QtWidgets
+
+    # Resolve through sys.modules, not the package attribute: the conftest
+    # module-identity snapshot can leave a stale ``arrayscope.window``
+    # attribute pointing at a purged module object when frame_runtime was
+    # first imported inside an earlier test, and patching the stale object
+    # would miss the module FrameRuntimeMixin actually executes in.
+    frame_runtime = importlib.import_module("arrayscope.window.frame_runtime")
+    FrameRuntimeMixin = frame_runtime.FrameRuntimeMixin
+
+    monkeypatch.setattr(frame_runtime, "perf_counter", lambda: 12.1)
+
+    session_id = 424_242
+    session = SimpleNamespace(
+        session_id=session_id,
+        pending_tiles=(),
+        lifecycle=SimpleNamespace(evaluating_tiles=frozenset(), presented_tiles=frozenset()),
+        active_tile_requests=frozenset(),
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_rung_materializations=(),
+        stage_planning_deferred=False,
+        pending_level_tiles=(),
+        level_scan_remaining_tiles=0,
+        semantic_level_evidence_progress=None,
+        has_pending_level_update=lambda: False,
+        required_target_unsettled_tiles=lambda: (5,),
+        flush_pending=False,
+        final_commit_pending=False,
+        rendered_tiles={},
+        stage_fan_in=SimpleNamespace(
+            active_requests=frozenset(),
+            attached_requests=frozenset(),
+            tile_stage_keys={},
+        ),
+        loading_tiles=frozenset(),
+        commit_batches=7,
+        tile_presentation_state=SimpleNamespace(revision=3),
+    )
+    window = QtWidgets.QMainWindow()
+    qtbot.addWidget(window)
+
+    class Renderer(FrameRuntimeMixin):
+        def __init__(self):
+            self.win = window
+            self._frame_session = session
+            # Previous tick observed the same queue lengths but OLDER commit
+            # progress (commit_batches=6): commits are still landing.
+            self._montage_watchdog_state = (
+                session_id,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                6,
+                3,
+            )
+            self._montage_watchdog_state_since = 10.0
+
+        @staticmethod
+        def _frame_session_is_current(_session):
+            return True
+
+    renderer = Renderer()
+    renderer._montage_watchdog_tick()
+
+    assert getattr(renderer, "_montage_stall_assertions", 0) == 0
+    assert getattr(renderer, "_montage_watchdog_last_trace_path", None) is None
+    # The tick re-based the progress clock on the new signature.
+    assert renderer._montage_watchdog_state[-2:] == (7, 3)
+    assert renderer._montage_watchdog_state_since == 12.1

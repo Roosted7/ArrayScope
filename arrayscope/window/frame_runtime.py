@@ -461,6 +461,14 @@ class FrameRuntimeMixin:
             level_stale,
             len(session.lifecycle.presented_tiles),
             len(session.rendered_tiles),
+            # Monotonic commit progress: a slow-but-live drain can hold every
+            # queue length constant across ticks (one upsert enters as one
+            # leaves, presented set already saturated) while commit batches
+            # keep landing (field session 2026-07-15: 22 Hz one-upsert
+            # batches read as a stall).  Any executed commit batch changes
+            # the signature; a genuinely idle session leaves it constant.
+            int(getattr(session, "commit_batches", 0) or 0),
+            int(getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0),
         )
         previous = getattr(self, "_montage_watchdog_state", None)
         self._montage_watchdog_state = signature
