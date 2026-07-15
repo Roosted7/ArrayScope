@@ -1243,6 +1243,51 @@ class TextureAtlasPool:
                 warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
                 capacity_warning="warm payload storage mode differs from the active atlas",
             )
+        # ADR 0055 G4c: anchored payloads warm as pure chunk residency — the
+        # later visible commit finds their chunks via _chunk_slots_for and
+        # uploads nothing. Classic whole-tile warming would be useless for
+        # them (the chunked visible path never consults whole-tile slots).
+        chunk_warm = None
+        if any(_payload_chunked_eligible(payload) for _tile, payload in payload_items):
+            chunk_items = tuple(
+                (tile_number, payload)
+                for tile_number, payload in payload_items
+                if _payload_chunked_eligible(payload)
+            )
+            payload_items = tuple(
+                (tile_number, payload)
+                for tile_number, payload in payload_items
+                if not _payload_chunked_eligible(payload)
+            )
+            chunk_warm = self._warm_anchored_chunk_items(
+                chunk_items,
+                rgb_already_windowed=rgb_already_windowed,
+            )
+            if not payload_items:
+                return TileLayerUpdateStats(
+                    resident_items=self.resident_count,
+                    storage_capacity=self.capacity,
+                    texture_uploads=chunk_warm["uploads"],
+                    texture_upload_bytes=chunk_warm["upload_bytes"],
+                    items_updated=chunk_warm["updated"],
+                    items_skipped=chunk_warm["skipped"],
+                    estimated_gpu_bytes=self.estimated_gpu_bytes,
+                    cpu_shadow_bytes=self.cpu_shadow_bytes,
+                    upload_ms=(perf_counter() - start) * 1000.0 if chunk_warm["updated"] else 0.0,
+                    texture_prepare_ms=chunk_warm["prepare_ms"],
+                    texture_submit_ms=chunk_warm["submit_ms"],
+                    page_count=len(self.pages),
+                    device_max_texture_size=self.max_texture_size,
+                    budget_bytes=self.budget_bytes,
+                    warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+                    complex_texture_uploads=chunk_warm["complex_uploads"],
+                    capacity_warning=(
+                        f"skipped {chunk_warm['skipped_denied']} warm anchored payloads because "
+                        "chunk capacity/budget is full"
+                        if chunk_warm["skipped_denied"]
+                        else ""
+                    ),
+                )
         target_count = len(set(self.active_resident_keys).union(_resident_key(payload) for _tile, payload in payload_items))
         tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
         bytes_per_slot = _storage_mode_bytes_per_pixel(requested_mode) * tile_h * tile_w
@@ -1271,14 +1316,15 @@ class TextureAtlasPool:
         if budget_bytes is not None:
             self.budget_bytes = max(0, int(budget_bytes))
         near_keys = self._near_resident_keys(near_tile_source_ids)
-        near_keys.update(_resident_key(payload) for payload in dict(payloads).values())
-        uploads = 0
-        upload_bytes = 0
-        complex_uploads = 0
-        texture_prepare_ms = 0.0
-        texture_submit_ms = 0.0
-        updated = 0
-        skipped = 0
+        near_keys.update(_resident_key(payload) for _tile, payload in payload_items)
+        # Mixed batches fold the (already completed) chunk-warm counters in.
+        uploads = 0 if chunk_warm is None else int(chunk_warm["uploads"])
+        upload_bytes = 0 if chunk_warm is None else int(chunk_warm["upload_bytes"])
+        complex_uploads = 0 if chunk_warm is None else int(chunk_warm["complex_uploads"])
+        texture_prepare_ms = 0.0 if chunk_warm is None else float(chunk_warm["prepare_ms"])
+        texture_submit_ms = 0.0 if chunk_warm is None else float(chunk_warm["submit_ms"])
+        updated = 0 if chunk_warm is None else int(chunk_warm["updated"])
+        skipped = 0 if chunk_warm is None else int(chunk_warm["skipped"])
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -1395,6 +1441,111 @@ class TextureAtlasPool:
             ),
         )
 
+    def _warm_anchored_chunk_items(
+        self,
+        payload_items: tuple[tuple[int, DisplayTilePayload], ...],
+        *,
+        rgb_already_windowed: bool,
+    ) -> dict[str, object]:
+        """Warm anchored payloads as pure chunk residency (ADR 0055 G4c).
+
+        Chunks become page-table residents that a later visible commit finds
+        via ``_chunk_slots_for`` and reuses upload-free.  Nothing is
+        presented: no draw parts, no tile mapping, no tile-level identity or
+        acknowledgement records.  The branch is strictly speculative — it
+        never evicts anything (free slots plus budgeted chunk-class growth
+        only; ``_ensure_class_capacity`` enforces ``budget_bytes``) and never
+        establishes or rebuilds the atlas layout.  Denied placements are
+        skipped silently; the pool budget itself is owned by visible commits
+        and is deliberately not reconfigured here.
+        """
+
+        counters: dict[str, object] = {
+            "uploads": 0,
+            "upload_bytes": 0,
+            "complex_uploads": 0,
+            "prepare_ms": 0.0,
+            "submit_ms": 0.0,
+            "updated": 0,
+            "skipped": 0,
+            "skipped_denied": 0,
+        }
+        protected = set(self.active_resident_keys) | set(self.active_chunk_keys)
+        for _tile_number, payload in payload_items:
+            if not self.pages or self.storage_mode is None:
+                # Warm work never creates the atlas layout: without a prior
+                # visible commit there is nothing to be adjacent to.
+                counters["skipped"] += 1
+                counters["skipped_denied"] += 1
+                continue
+            if not _payload_supported_by_storage_mode(
+                payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed
+            ):
+                counters["skipped"] += 1
+                continue
+            chunks = _payload_chunk_plan(payload)
+            if all(self._page_table.lookup(chunk.key) is not None for chunk in chunks):
+                for chunk in chunks:
+                    self._page_table.touch(chunk.key)
+                counters["skipped"] += 1
+                continue
+            try:
+                slots = self._chunk_slots_for(
+                    tuple(chunk.key for chunk in chunks),
+                    protected_keys=protected,
+                    near_keys=set(),
+                    allow_eviction=False,
+                )
+            except AtlasCapacityError:
+                counters["skipped"] += 1
+                counters["skipped_denied"] += 1
+                continue
+            need_upload = tuple(chunk for chunk in chunks if slots[chunk.key][2])
+            if not need_upload:
+                counters["skipped"] += 1
+                continue
+            page = self.pages[int(slots[chunks[0].key][0])]
+            scalar, color, prepare_ms = _prepare_payload_texture_data(
+                payload,
+                tile_shape=_payload_class_shape(payload),
+                rgb_already_windowed=rgb_already_windowed,
+                need_scalar=self.scalar_is_atlas,
+                need_color=self.color_is_atlas,
+            )
+            counters["prepare_ms"] += prepare_ms
+            for chunk in need_upload:
+                py0, py1, px0, px1 = chunk.plane_rect
+                _page_index, slot, _newly = slots[chunk.key]
+                y_off, x_off = page.offset_for_slot(int(slot))
+                if scalar is not None:
+                    sub = np.ascontiguousarray(scalar[py0:py1, px0:px1])
+                    counters["submit_ms"] += _upload_texture_plane(
+                        page.scalar_texture,
+                        sub,
+                        offset=(int(y_off), int(x_off)),
+                        copy=_upload_copy_required(sub, payload, force=page.complex_is_atlas),
+                    )
+                    counters["uploads"] += 1
+                    counters["upload_bytes"] += int(sub.nbytes)
+                    if page.complex_is_atlas:
+                        counters["complex_uploads"] += 1
+                if color is not None:
+                    sub = np.ascontiguousarray(color[py0:py1, px0:px1])
+                    counters["submit_ms"] += _upload_texture_plane(
+                        page.color_texture,
+                        sub,
+                        offset=(int(y_off), int(x_off)),
+                        copy=_upload_copy_required(sub, payload),
+                    )
+                    counters["uploads"] += 1
+                    counters["upload_bytes"] += int(sub.nbytes)
+            if page.mipmap_levels:
+                page.mipmap_dirty = True
+            self.chunk_upload_count += len(need_upload)
+            self.chunk_reuse_count += len(chunks) - len(need_upload)
+            counters["updated"] += 1
+        return counters
+
     def _slot_for(
         self,
         resident_key: object,
@@ -1505,6 +1656,7 @@ class TextureAtlasPool:
         *,
         protected_keys: set[object],
         near_keys: set[object],
+        allow_eviction: bool = True,
     ) -> dict[object, tuple[int, int, bool]]:
         """Place one tile's chunk set, all on the SAME page.
 
@@ -1513,6 +1665,10 @@ class TextureAtlasPool:
         holding the most of this set; grows the chunk shape class when no
         page has room. Raises :class:`AtlasCapacityError` when the set cannot
         be placed on any single page (caller falls back to the classic path).
+
+        ``allow_eviction=False`` restricts placement to genuinely free slots
+        plus budgeted class growth (ADR 0055 G4c): speculative warm work must
+        never destroy resident content, so denial raises instead of evicting.
         """
 
         shape = (int(ANCHORED_CHUNK_SHAPE[0]), int(ANCHORED_CHUNK_SHAPE[1]))
@@ -1571,9 +1727,9 @@ class TextureAtlasPool:
         chosen = scan(allow_eviction=False)
         if chosen is None and self.budget_bytes > 0:
             chosen = grow_and_rescan(allow_eviction=False)
-        if chosen is None:
+        if chosen is None and allow_eviction:
             chosen = scan(allow_eviction=True)
-        if chosen is None:
+        if chosen is None and allow_eviction:
             chosen = grow_and_rescan(allow_eviction=True)
         if chosen is None:
             raise AtlasCapacityError(
@@ -1598,6 +1754,20 @@ class TextureAtlasPool:
                 self._page_table.unbind(key)
             slot = page.take_free_slot(key)
             if slot is None:
+                if not allow_eviction:
+                    # Unreachable given the headroom precondition; if it ever
+                    # fires, roll back this set's fresh binds so no key stays
+                    # "resident" without its texels ever being uploaded.
+                    for bound_key, (bound_page_index, bound_slot, newly) in results.items():
+                        if not newly:
+                            continue
+                        bound_page = self.pages[int(bound_page_index)]
+                        bound_page.slot_owners[int(bound_slot)] = None
+                        bound_page._free_slots.append(int(bound_slot))
+                        self._page_table.unbind(bound_key)
+                    raise AtlasCapacityError(
+                        f"atlas page {chosen} ran out of free chunk slots during an eviction-free placement"
+                    )
                 slot = self._evict_page_victim(
                     int(chosen),
                     protected_keys=protected_keys | key_set,
@@ -2425,12 +2595,25 @@ class GpuMontageLayer:
         tile_residency_budget_bytes: int = 0,
     ) -> TileLayerUpdateStats:
         montage = getattr(geometry, "montage", None)
+        payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
         if montage is None:
-            return TileLayerUpdateStats()
+            # ADR 0055 G4c: non-montage geometries warm only source-anchored
+            # payloads, and only as chunk residency (the pool's chunk-warm
+            # branch). Anything else has no montage layout to warm against.
+            payload_map = {
+                tile: payload
+                for tile, payload in payload_map.items()
+                if _payload_chunked_eligible(payload)
+            }
+            if not payload_map:
+                return TileLayerUpdateStats()
+            fallback = _payload_class_shape(next(iter(payload_map.values())))
+        else:
+            fallback = (int(montage.tile_height), int(montage.tile_width))
         try:
             return self._pool.warm_payloads(
-                {int(key): value for key, value in dict(payloads or {}).items()},
-                tile_shape=_atlas_base_tile_shape_for_payloads(payloads, fallback=(int(montage.tile_height), int(montage.tile_width))),
+                payload_map,
+                tile_shape=_atlas_base_tile_shape_for_payloads(payload_map, fallback=fallback),
                 rgb_already_windowed=rgb_already_windowed,
                 near_tile_source_ids=dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}),
                 budget_bytes=tile_residency_budget_bytes,

@@ -8,6 +8,8 @@ display-window shift re-uploads only the boundary strips and re-registers
 draw parts over the surviving interior chunks.
 """
 
+from dataclasses import replace
+
 import numpy as np
 
 from arrayscope.display.backends.vispy.tiles import (
@@ -289,6 +291,121 @@ def test_chunked_to_classic_transition_releases_chunk_links():
     commit(pool, {0: anchored_payload(data, 100)})
     assert pool.chunk_upload_count == uploads_before
     assert len(pool.tile_chunk_residency[0]) == 10
+
+
+def test_warm_payloads_chunks_are_pure_residency_and_make_commit_upload_free():
+    """ADR 0055 G4c: background warming of an adjacent plane's chunks.
+
+    Warming uploads chunk residency only — no draw parts, no tile mapping,
+    no tile-level identity — and the later visible commit of the same plane
+    finds every chunk resident and uploads nothing.
+    """
+
+    data = _data()
+    other = np.random.default_rng(11).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+    plane_b_key = ("src-anchored", "doc-rev-0", "plane-1")
+    pool = TextureAtlasPool(FakeGloo())
+
+    payload_a = anchored_payload(data, 100)
+    commit(pool, {0: payload_a})
+    chunks_a = set(pool.tile_chunk_residency[0])
+    parts_a = pool.tile_draw_parts[0]
+
+    warm_payload = replace(
+        anchored_payload(other, 100, content_key=plane_b_key, tile_number=0),
+        source_id=("prefetch-warm", "plane-1"),
+    )
+    plan_b = _payload_chunk_plan(warm_payload)
+    stats = pool.warm_payloads(
+        {0: warm_payload},
+        tile_shape=(HEIGHT, EXTENT),
+        rgb_already_windowed=False,
+    )
+    assert stats.items_updated == 1
+    assert stats.texture_uploads == len(plan_b) == 10
+    assert stats.storage_evictions == 0
+
+    # Residency: every warm chunk is in the page table, byte-identical to
+    # the plane sub-arrays it was cut from.
+    slots = pool.resident_slots
+    plane_b = other[:, 100 : 100 + EXTENT]
+    for chunk in plan_b:
+        assert chunk.key in slots, f"warm chunk not resident: {chunk.key!r}"
+        page_index, slot = slots[chunk.key]
+        page = pool.pages[page_index]
+        by_offset = {offset: content for offset, content in page.scalar_texture.uploads}
+        py0, py1, px0, px1 = chunk.plane_rect
+        assert np.array_equal(by_offset[page.offset_for_slot(slot)], plane_b[py0:py1, px0:px1])
+
+    # Presentation is untouched: tile 0 still presents plane A.
+    assert set(pool.tile_chunk_residency[0]) == chunks_a
+    assert pool.tile_draw_parts[0] == parts_a
+    assert pool.presented_identities()[0] == payload_a.source_id
+    # No tile-level identity records for the warm-only payload.
+    assert warm_payload.source_id not in set(pool.source_ids.values())
+    assert warm_payload.source_id not in set(pool.acknowledged_identities.values())
+
+    # Re-warming the same plane is a residency touch, not more uploads.
+    uploads_before = pool.chunk_upload_count
+    again = pool.warm_payloads(
+        {0: warm_payload},
+        tile_shape=(HEIGHT, EXTENT),
+        rgb_already_windowed=False,
+    )
+    assert pool.chunk_upload_count == uploads_before
+    assert again.items_updated == 0
+    assert again.items_skipped == 1
+
+    # The visible commit of the warmed plane uploads ZERO chunks and
+    # registers the presentation (draw parts + identity).
+    uploads_before = pool.chunk_upload_count
+    scalar_upload_count_before = len(scalar_uploads(pool))
+    visible = commit(pool, {0: warm_payload})
+    assert pool.chunk_upload_count == uploads_before
+    assert len(scalar_uploads(pool)) == scalar_upload_count_before
+    assert visible.texture_uploads == 0
+    assert visible.presented_tiles == (0,)
+    assert len(pool.tile_draw_parts[0]) == 10
+    assert set(pool.tile_chunk_residency[0]) == {chunk.key for chunk in plan_b}
+    assert pool.presented_identities()[0] == warm_payload.source_id
+    # Plane A's chunks survived as warm residency (no eviction happened).
+    assert all(key in pool.resident_slots for key in chunks_a)
+
+
+def test_warm_payloads_denied_by_budget_skips_without_evicting():
+    """G4c hard invariant: warm work never evicts to make room for itself."""
+
+    base_bytes = HEIGHT * EXTENT * 4
+    chunk_bytes = CHUNK * CHUNK * 4
+    budget = base_bytes + 10 * chunk_bytes  # exactly plane A's residency
+    data = _data()
+    other = np.random.default_rng(13).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+    pool = TextureAtlasPool(FakeGloo(), budget_bytes=budget)
+
+    commit(pool, {0: anchored_payload(data, 100)})
+    chunks_a = set(pool.tile_chunk_residency[0])
+    assert len(chunks_a) == 10
+
+    warm_payload = anchored_payload(
+        other, 100, content_key=("src-anchored", "doc-rev-0", "plane-1"), tile_number=0
+    )
+    uploads_before = pool.chunk_upload_count
+    stats = pool.warm_payloads(
+        {0: warm_payload},
+        tile_shape=(HEIGHT, EXTENT),
+        rgb_already_windowed=False,
+    )
+    assert stats.items_updated == 0
+    assert stats.items_skipped == 1
+    assert stats.texture_uploads == 0
+    assert stats.storage_evictions == 0
+    assert "warm anchored payloads" in stats.capacity_warning
+    assert pool.chunk_upload_count == uploads_before
+    # Nothing warm was destroyed: plane A stays fully resident and presented.
+    assert all(key in pool.resident_slots for key in chunks_a)
+    assert set(pool.tile_chunk_residency[0]) == chunks_a
+    warm_keys = {chunk.key for chunk in _payload_chunk_plan(warm_payload)}
+    assert not any(key in pool.resident_slots for key in warm_keys)
 
 
 def test_layout_reset_clears_chunk_maps():
