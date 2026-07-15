@@ -215,7 +215,6 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
         Path("arrayscope/display/model/montage_levels.py"),
         Path("arrayscope/window/frame_controller.py"),
@@ -549,10 +548,10 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/display/backends/vispy/tiles.py"),
     )
     retired = (
+        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/window/display_frame.py"),
         Path("arrayscope/window/render_model.py"),
         Path("arrayscope/window/presentation.py"),

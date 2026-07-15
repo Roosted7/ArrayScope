@@ -9,7 +9,6 @@ use VisPy's GPU texture scaling via ``texture_format='auto'`` and ``clim``.
 
 from __future__ import annotations
 
-from time import perf_counter
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,25 +33,16 @@ from arrayscope.display.model.tiled_histogram_identity import (
     tiled_semantic_histogram_identity,
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
-from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
-from arrayscope.display.backends.vispy.gpu_mapped_visual import (
-    GpuMappedImageVisual,
-    _coerce_texture_kind,
-    _contiguous_display,
-    _contiguous_scalar,
-    _normalize_levels,
-)
 from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
-    TexturePlaneKind,
     common_shader_mapping,
     default_phase_lut,
     shader_mapping_with_lut,
 )
-from arrayscope.display.viewport import ViewportPolicy, coerce_viewport_policy
+from arrayscope.display.viewport import ViewportPolicy
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
@@ -102,22 +92,6 @@ class VisPyImageView2D(ImageViewShell):
         self._vispy_view.camera = self._vispy_panzoom_camera(aspect=1)
         self._vispy_view.camera.interactive = False
         self._vispy_view.camera.flip = (False, True, False)
-        self._vispy_image = self._vispy_visuals.Image(
-            np.zeros((1, 1), dtype=np.float32),
-            parent=self._vispy_view.scene,
-            interpolation="nearest",
-            texture_format="auto",
-            method="auto",
-            clim=(0.0, 1.0),
-        )
-        self._vispy_image.order = 0
-        self._vispy_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
-        self._vispy_windowed_image = self._vispy_scene.visuals.create_visual_node(GpuMappedImageVisual)(
-            parent=self._vispy_view.scene
-        )
-        self._vispy_windowed_image.order = 0
-        self._vispy_windowed_image.visible = False
-        self._vispy_windowed_image.transform = self._vispy_transforms.STTransform(translate=(0.0, 0.0, 0.0))
         from arrayscope.display.backends.vispy.tiles import create_gpu_montage_layer
 
         self._vispy_gpu_montage_layer = create_gpu_montage_layer(
@@ -164,12 +138,6 @@ class VisPyImageView2D(ImageViewShell):
         self.tile_histogram_cross_level_reuses = 0
         self._last_vispy_tiled_histogram_inputs = None
         self._last_vispy_frame_viewport_key = None
-        self._vispy_main_data_id: int | None = None
-        self._vispy_main_color_source_id: int | None = None
-        self._vispy_main_scalar_source_id: int | None = None
-        self._last_vispy_main_source_shader_mapping = None
-        self._last_vispy_main_shader_mapping = None
-        self._last_vispy_main_texture_kind = None
         self._pending_vispy_histogram_update = None
         self._vispy_histogram_update_pending = False
         # Timer category: UI cosmetic. Lower-priority metadata continuation. Pixel commits are synchronous;
@@ -302,12 +270,6 @@ class VisPyImageView2D(ImageViewShell):
     def reset_surface(self, reason: str) -> None:
         self._cancel_vispy_speculative_work()
         super().reset_surface(reason)
-        self._vispy_main_data_id = None
-        self._vispy_main_color_source_id = None
-        self._vispy_main_scalar_source_id = None
-        self._last_vispy_main_source_shader_mapping = None
-        self._last_vispy_main_shader_mapping = None
-        self._last_vispy_main_texture_kind = None
         self._vispy_canvas_update_pending = False
 
     def teardown_surface(self) -> None:
@@ -333,8 +295,6 @@ class VisPyImageView2D(ImageViewShell):
             layer.clear()
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
-        _set_visual_visible(getattr(self, "_vispy_image", None), False)
-        _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
     def hide_tiled_presentation(self, reason: str) -> None:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
@@ -343,8 +303,6 @@ class VisPyImageView2D(ImageViewShell):
         self.clearMontageTileOverlays()
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
-        _set_visual_visible(getattr(self, "_vispy_image", None), False)
-        _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
     def reset_tiled_residency(self, reason: str) -> None:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
@@ -365,31 +323,15 @@ class VisPyImageView2D(ImageViewShell):
         self._last_vispy_tiled_reset_reason = str(reason)
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
-        _set_visual_visible(getattr(self, "_vispy_image", None), False)
-        _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
 
     def clear(self):
         super().clear()
         self.reset_tiled_residency("view-clear")
-        self._vispy_main_data_id = None
-        self._vispy_main_color_source_id = None
-        self._vispy_main_scalar_source_id = None
-        self._last_vispy_main_source_shader_mapping = None
-        self._last_vispy_main_shader_mapping = None
-        self._last_vispy_main_texture_kind = None
 
     def setColorMap(self, colormap):
         """Update the shared colorbar/render-surface LUT without re-uploading pixels."""
 
         super().setColorMap(colormap)
-        self._apply_vispy_native_colormap()
-        texture_kind = getattr(self, "_last_vispy_main_texture_kind", None)
-        if texture_kind in {TexturePlaneKind.SCALAR_R32F, TexturePlaneKind.COMPLEX_RG32F}:
-            mapping = self._display_shader_mapping(getattr(self, "_last_vispy_main_source_shader_mapping", None))
-            self._last_vispy_main_shader_mapping = mapping
-            visual = getattr(self, "_vispy_windowed_image", None)
-            if visual is not None:
-                visual.set_shader_mapping(mapping)
         if getattr(self, "_montage_display_mode", "") == "vispy_tile_layer":
             mapping = self._display_shader_mapping(getattr(self, "_last_vispy_tiled_source_shader_mapping", None))
             self._last_vispy_tiled_shader_mapping = mapping
@@ -429,161 +371,6 @@ class VisPyImageView2D(ImageViewShell):
             self.displayColorMapLookupTable(),
             lut_identity=self.displayColorMapKey(),
         )
-
-    def _apply_vispy_native_colormap(self) -> None:
-        try:
-            from vispy.color import Colormap
-
-            lut = np.asarray(self.displayColorMapLookupTable(), dtype=np.float32) / 255.0
-            colormap = Colormap(lut)
-            self._vispy_native_colormap = colormap
-            image = getattr(self, "_vispy_image", None)
-            if image is not None:
-                image.cmap = colormap
-        except Exception:
-            pass
-
-    def _apply_vispy_colormap_to_visual(self, visual) -> None:
-        colormap = getattr(self, "_vispy_native_colormap", None)
-        if colormap is None:
-            self._apply_vispy_native_colormap()
-            colormap = getattr(self, "_vispy_native_colormap", None)
-        if colormap is not None:
-            try:
-                visual.cmap = colormap
-            except Exception:
-                pass
-
-    def setImage(
-        self,
-        img,
-        autoRange=None,
-        autoLevels=True,
-        levels=None,
-        pos=None,
-        scale=None,
-        transform=None,
-        autoHistogramRange=True,
-        histogramData=None,
-        histogramPlotData=None,
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        image_origin: tuple[float, float] = (0.0, 0.0),
-        viewport_content_rect=None,
-        shader_mapping=None,
-        texture_kind=None,
-        semantic_data: np.ndarray | None = None,
-        lod=None,
-    ):
-        if not isinstance(img, np.ndarray):
-            raise TypeError("Image must be a numpy array")
-        viewport_policy = coerce_viewport_policy(viewport_policy, autoRange)
-        self._start_upload_timing("vispy_full")
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            self.hide_tiled_presentation("normal-image-commit")
-            self.image = img
-            self.histogramSource = histogramData
-            self.histogramPlotSource = histogramPlotData
-            display_levels = _normalize_levels(levels, self._displayLevels or (0.0, 1.0))
-            self._upload_vispy_main_image(
-                img,
-                histogramData=histogramData,
-                levels=display_levels,
-                image_origin=image_origin,
-                rgb_already_windowed=rgb_already_windowed,
-                shader_mapping=shader_mapping,
-                texture_kind=texture_kind,
-                semantic_data=semantic_data,
-                lod=lod,
-            )
-            self._set_vispy_display_levels(display_levels)
-            self._request_histogram_for_vispy(
-                histogramData,
-                histogramPlotData,
-                display_levels,
-                histogramRange=(self.getHistogramDataBounds() or display_levels) if autoHistogramRange else None,
-            )
-            if autoHistogramRange:
-                bounds = self.getHistogramDataBounds() or display_levels
-                self.setHistogramDataBounds(bounds)
-            self._update_profile_line_bounds()
-            self._updateAspectRatio()
-            self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
-            self._apply_viewport_policy(
-                tuple(img.shape[:2]),
-                viewport_policy,
-                image_origin=image_origin,
-                content_rect=viewport_content_rect,
-            )
-            self._sync_vispy_camera_to_view()
-        finally:
-            self._applying_presentation = applying
-            self._finish_upload_timing()
-
-    def updateImageDataFast(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None = None,
-        histogramPlotData: np.ndarray | None = None,
-        levels: tuple[float, float] | None = None,
-        histogramRange: tuple[float, float] | None = None,
-        rgb_already_windowed: bool = False,
-        image_origin: tuple[float, float] = (0.0, 0.0),
-        viewport_content_rect=None,
-        shader_mapping=None,
-        texture_kind=None,
-        semantic_data: np.ndarray | None = None,
-        lod=None,
-    ) -> None:
-        if self.image is None:
-            raise RuntimeError("fast image update requires an existing image")
-        if tuple(img.shape[:2]) != tuple(self.image.shape[:2]):
-            raise ValueError("fast image update requires the same display shape")
-        self._start_upload_timing("vispy_fast")
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            self.hide_tiled_presentation("normal-image-fast-update")
-            self.image = img
-            self.histogramSource = histogramData
-            self.histogramPlotSource = histogramPlotData
-            if histogramRange is not None:
-                self.setHistogramDataBounds(histogramRange)
-            display_levels = _normalize_levels(levels, self._displayLevels or (0.0, 1.0))
-            self._upload_vispy_main_image(
-                img,
-                histogramData=histogramData,
-                levels=display_levels,
-                image_origin=image_origin,
-                rgb_already_windowed=rgb_already_windowed,
-                shader_mapping=shader_mapping,
-                texture_kind=texture_kind,
-                semantic_data=semantic_data,
-                lod=lod,
-            )
-            self._set_vispy_display_levels(display_levels)
-            self._request_histogram_for_vispy(
-                histogramData,
-                histogramPlotData,
-                display_levels,
-                histogramRange=histogramRange,
-            )
-            if histogramRange is not None:
-                self.setHistogramDataBounds(histogramRange)
-            self._update_profile_line_bounds()
-            self._sync_vispy_bounds(tuple(img.shape[:2]), image_origin=image_origin)
-            self._refresh_viewport_content_rect(
-                tuple(img.shape[:2]),
-                viewport_content_rect,
-                image_origin=image_origin,
-            )
-            self._sync_vispy_camera_to_view()
-        finally:
-            self._applying_presentation = applying
-            self._finish_upload_timing()
 
     def _apply_vispy_tile_layer_presentation(
         self,
@@ -758,11 +545,6 @@ class VisPyImageView2D(ImageViewShell):
             tiled_presentation_complete = (
                 stats_presented_set is None or stats_presented_set == requested_presented_tiles
             )
-            try:
-                self._vispy_image.visible = False
-            except Exception:
-                pass
-            _set_visual_visible(getattr(self, "_vispy_windowed_image", None), False)
             self._record_tile_layer_stats(stats)
             if not (data_unchanged and not levels_changed and not mapping_changed):
                 self._request_vispy_tile_layer_redraw()
@@ -962,165 +744,23 @@ class VisPyImageView2D(ImageViewShell):
 
     def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
         self._vispy_last_levels = levels
-        if self._montage_display_mode == "vispy_tile_layer":
-            layer = getattr(self, "_vispy_gpu_montage_layer", None)
-            if layer is None:
-                return
-            # A level gesture owns only the level uniform. Replaying the
-            # separately cached frame mapping here let a stale scalar mapping
-            # overwrite an already-correct complex phase mapping during the
-            # full-montage -> scroll transition. The next payload commit then
-            # appeared to "heal" the psychedelic tiles. Preserve the physical
-            # layer's current mapping and update exactly the signal received.
-            stats = layer.set_presentation_uniforms(levels=levels)
-            self._record_tile_layer_stats(stats)
-            self._request_vispy_tile_layer_redraw()
-            handler = getattr(self, "_level_presentation_change_handler", None)
-            if callable(handler):
-                handler(levels, final=bool(final))
+        if self._montage_display_mode != "vispy_tile_layer":
             return
-        if self._is_windowed_rgb_vispy_main():
-            self._vispy_windowed_image.set_levels(levels)
-            self._request_vispy_canvas_update()
-        elif self._is_rgb_image(self.image):
-            self._upload_vispy_main_image(self.image, histogramData=self.histogramSource, levels=levels, image_origin=getattr(self, "_last_vispy_origin", (0.0, 0.0)))
-        else:
-            try:
-                self._vispy_image.clim = levels
-            except Exception:
-                pass
-
-    def _upload_vispy_main_image(
-        self,
-        img,
-        *,
-        histogramData,
-        levels,
-        image_origin=(0.0, 0.0),
-        rgb_already_windowed=False,
-        shader_mapping=None,
-        texture_kind=None,
-        semantic_data=None,
-        lod=None,
-    ):
-        start = perf_counter()
-        self._last_vispy_main_lod = lod
-        texture_kind = _coerce_texture_kind(texture_kind)
-        if texture_kind in {TexturePlaneKind.COMPLEX_RG32F, TexturePlaneKind.SCALAR_R32F} and semantic_data is not None:
-            source_shader_mapping = shader_mapping
-            shader_mapping = self._display_shader_mapping(source_shader_mapping)
-            self._last_vispy_main_source_shader_mapping = source_shader_mapping
-            self._last_vispy_main_shader_mapping = shader_mapping
-            self._last_vispy_main_texture_kind = texture_kind
-            data = self._upload_vispy_mapped_image(
-                semantic_data,
-                texture_kind=texture_kind,
-                levels=levels,
-                image_origin=image_origin,
-                visual=self._vispy_windowed_image,
-                shader_mapping=shader_mapping,
-            )
-            previous = self._vispy_main_data_id
-            same_object = previous == id(data)
-            self._vispy_main_data_id = id(data)
-            self._vispy_image.visible = False
-            self._vispy_windowed_image.visible = True
-        elif self._should_use_windowed_rgb(img, histogramData, rgb_already_windowed=rgb_already_windowed):
-            self._last_vispy_main_source_shader_mapping = None
-            self._last_vispy_main_shader_mapping = None
-            self._last_vispy_main_texture_kind = None
-            data = self._upload_vispy_windowed_rgb(
-                img,
-                histogramData,
-                levels,
-                image_origin=image_origin,
-                visual=self._vispy_windowed_image,
-            )
-            previous = self._vispy_main_data_id
-            same_object = previous == id(data)
-            self._vispy_main_data_id = id(data)
-            self._vispy_image.visible = False
-            self._vispy_windowed_image.visible = True
-        else:
-            self._last_vispy_main_source_shader_mapping = None
-            self._last_vispy_main_shader_mapping = None
-            self._last_vispy_main_texture_kind = None
-            data = self._vispy_display_data(img, histogramData, levels, rgb_already_windowed=rgb_already_windowed)
-            previous = self._vispy_main_data_id
-            same_object = previous == id(data)
-            self._vispy_image.set_data(data, copy=False)
-            self._vispy_main_data_id = id(data)
-            if data.ndim == 2:
-                self._vispy_image.clim = (float(levels[0]), float(levels[1]))
-                self._apply_vispy_native_colormap()
-            self._vispy_image.transform = self._vispy_transforms.STTransform(translate=(float(image_origin[0]), float(image_origin[1]), 0.0))
-            self._vispy_image.visible = True
-            _set_visual_visible(self._vispy_windowed_image, False)
-        self._last_vispy_origin = (float(image_origin[0]), float(image_origin[1]))
-        elapsed = (perf_counter() - start) * 1000.0
-        self._record_upload_timing("visible_upload_ms", elapsed)
-        timing = self._upload_timing
-        if timing is not None:
-            array = np.asarray(data)
-            timing["visible_bytes"] = int(timing["visible_bytes"]) + int(array.nbytes)
-            timing["visible_pixels"] = int(timing["visible_pixels"]) + int(np.prod(array.shape[:2]))
-            timing["fast_same_object"] = bool(timing["fast_same_object"] or same_object)
-
-    def _vispy_display_data(self, img, histogramData, levels, *, rgb_already_windowed=False, timing_field="rgb_window_ms"):
-        if self._is_rgb_image(img):
-            if rgb_already_windowed:
-                self.imageDisp = np.asarray(img[..., :3])
-                return _contiguous_display(self.imageDisp)
-            rgb_start = perf_counter()
-            base = np.asarray(img[..., :3], dtype=np.float32)
-            source = histogramData if histogramData is not None else self._histogram_data(base)
-            self.imageDisp = rgb_display_for_levels(base, source, levels)
-            self._record_upload_timing(timing_field, (perf_counter() - rgb_start) * 1000.0)
-            return _contiguous_display(self.imageDisp)
-        self.imageDisp = np.asarray(img)
-        return _contiguous_display(self.imageDisp)
-
-    def _should_use_windowed_rgb(self, img, histogramData, *, rgb_already_windowed: bool) -> bool:
-        return self._is_rgb_image(img) and not bool(rgb_already_windowed) and histogramData is not None
-
-    def _upload_vispy_windowed_rgb(self, img, histogramData, levels, *, image_origin, visual):
-        color = _contiguous_display(np.asarray(img)[..., :3])
-        scalar = _contiguous_scalar(histogramData)
-        self.imageDisp = color
-        color_source_id = id(color)
-        scalar_source_id = id(scalar)
-        visual.set_data(
-            color,
-            scalar,
-            levels=levels,
-            color_source_id=color_source_id,
-            scalar_source_id=scalar_source_id,
-            copy=False,
-        )
-        visual.transform = self._vispy_transforms.STTransform(translate=(float(image_origin[0]), float(image_origin[1]), 0.0))
-        self._vispy_main_color_source_id = color_source_id
-        self._vispy_main_scalar_source_id = scalar_source_id
-        return color
-
-    def _upload_vispy_mapped_image(self, data, *, texture_kind: TexturePlaneKind, levels, image_origin, visual, shader_mapping=None):
-        texture_kind = _coerce_texture_kind(texture_kind)
-        source_id = (id(data), getattr(texture_kind, "value", texture_kind))
-        self.imageDisp = np.asarray(data)
-        visual.set_mapped_data(
-            data,
-            texture_kind=texture_kind,
-            levels=levels,
-            source_id=source_id,
-            shader_mapping=shader_mapping,
-            copy=False,
-        )
-        visual.transform = self._vispy_transforms.STTransform(translate=(float(image_origin[0]), float(image_origin[1]), 0.0))
-        self._vispy_main_scalar_source_id = source_id
-        return np.asarray(data)
-
-    def _is_windowed_rgb_vispy_main(self) -> bool:
-        visual = getattr(self, "_vispy_windowed_image", None)
-        return bool(visual is not None and getattr(visual, "visible", False))
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is None:
+            return
+        # A level gesture owns only the level uniform. Replaying the
+        # separately cached frame mapping here let a stale scalar mapping
+        # overwrite an already-correct complex phase mapping during the
+        # full-montage -> scroll transition. The next payload commit then
+        # appeared to "heal" the psychedelic tiles. Preserve the physical
+        # layer's current mapping and update exactly the signal received.
+        stats = layer.set_presentation_uniforms(levels=levels)
+        self._record_tile_layer_stats(stats)
+        self._request_vispy_tile_layer_redraw()
+        handler = getattr(self, "_level_presentation_change_handler", None)
+        if callable(handler):
+            handler(levels, final=bool(final))
 
     def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
         selection = super().createRoi(kind, points=points, rect=rect, line_width=line_width, label=label, color=color)
