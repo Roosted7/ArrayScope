@@ -24,7 +24,19 @@ class ImageSurface(Protocol):
 
     def present_tiled(self, presentation: "DisplayTiledPresentation") -> "TileCommitReport": ...
 
-    def invalidate_tiled_presentation(self, reason: str) -> None: ...
+    def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
+        """Mark the drawn tiled presentation as semantically superseded.
+
+        ``hide_pixels=True`` (the default) blanks the surface: superseded
+        pixels disappear until the successor commits.  ``hide_pixels=False``
+        keeps the previously drawn plane VISIBLE as a stale-but-honest
+        preview (video-player semantics) while the successor evaluates; the
+        caller owns the proof that the retained pixels differ from the new
+        target only by slice index.  Either way the surface must treat its
+        slot mappings as non-evidence: acknowledgement state lives in the
+        FrameSession lifecycle, which starts cold on every transition.
+        """
+        ...
 
     def hide_tiled_presentation(self, reason: str) -> None: ...
 

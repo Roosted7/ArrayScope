@@ -760,9 +760,19 @@ class ImageViewShell(QtWidgets.QWidget):
     def clearMontageTileLayer(self) -> None:
         self.reset_tiled_residency("surface-reset")
 
-    def invalidate_tiled_presentation(self, reason: str) -> None:
-        """Hide semantically superseded pixels without discarding residency."""
+    def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
+        """Hide semantically superseded pixels without discarding residency.
 
+        With ``hide_pixels=False`` the tile-layer items keep drawing the
+        previous plane (stale-but-honest preview across a slice-index-only
+        session transition).  The retained items are presentation only: the
+        successor session's lifecycle starts cold, and its first tile-layer
+        commit replaces the drawn payloads through the ordinary
+        identity-checked upsert path.
+        """
+
+        if not hide_pixels:
+            return
         if self._montage_tile_layer is not None:
             self._montage_tile_layer.hide_all()
         self._montage_tile_layer_histogram_key = None

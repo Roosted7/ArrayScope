@@ -29,8 +29,8 @@ class _FakeSurface:
             removed_tiles=frozenset(presentation.tile_delta.removals),
         )
 
-    def invalidate_tiled_presentation(self, reason):
-        self.calls.append(("invalidate_tiled", str(reason), None))
+    def invalidate_tiled_presentation(self, reason, *, hide_pixels=True):
+        self.calls.append(("invalidate_tiled", str(reason), bool(hide_pixels)))
 
     def hide_tiled_presentation(self, reason):
         self.calls.append(("hide_tiled", str(reason), None))

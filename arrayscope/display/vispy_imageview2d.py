@@ -290,9 +290,20 @@ class VisPyImageView2D(ImageViewShell):
     def clearMontageTileLayer(self) -> None:
         self.hide_tiled_presentation("surface-reset")
 
-    def invalidate_tiled_presentation(self, reason: str) -> None:
-        """Hide semantically superseded pixels without discarding residency."""
+    def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
+        """Hide semantically superseded pixels without discarding residency.
 
+        With ``hide_pixels=False`` the layer keeps drawing the previous
+        plane (stale-but-honest preview across a slice-index-only session
+        transition).  Nothing here may create evidence for the successor:
+        the surface's ``_last_vispy_tiled_*`` keys still describe the OLD
+        content, so the successor's first commit computes a different
+        source key, takes the full update path, and swaps the drawn layout
+        atomically; acknowledgement flows only from that commit's report.
+        """
+
+        if not hide_pixels:
+            return
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         if layer is not None:
             layer.clear()

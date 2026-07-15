@@ -2392,7 +2392,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         def present_tiled(self, _presentation):
             raise AssertionError("presentation is owned by the test window")
 
-        def invalidate_tiled_presentation(self, reason):
+        def invalidate_tiled_presentation(self, reason, *, hide_pixels=True):
             self.invalidations.append(str(reason))
 
         def hide_tiled_presentation(self, _reason):
