@@ -282,6 +282,111 @@ def _plane_settled(win, index: int) -> bool:
     )
 
 
+def _plane_content_key(win, index: int):
+    from arrayscope.display.source_anchoring import source_anchoring_for_view
+
+    anchoring = source_anchoring_for_view(win.document, win.view_state.with_slice(0, index))
+    assert anchoring is not None
+    return anchoring.content_key
+
+
+def _resident_chunk_keys_for_content(pool, content_key) -> set:
+    return {
+        key
+        for key in pool._page_table.resident_keys()
+        if isinstance(key, tuple) and len(key) >= 2 and key[0] == "anchored-chunk" and key[1] == content_key
+    }
+
+
+def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, monkeypatch):
+    """G4c live gate: prefetch warms the NEXT plane's GPU chunks in advance.
+
+    After plane 0 settles, the slice prefetcher evaluates plane 1 on the
+    PREFETCH lane, stores it in the CPU display cache, and pushes its
+    anchored chunks into atlas residency (render_prefetch ->
+    VisPyImageView2D.warmPlaneResidency -> pool chunk-warm branch). The
+    subsequent scroll 0 -> 1 then commits through the chunked path with
+    ZERO chunk uploads.
+    """
+
+    pytest.importorskip("vispy")
+    import arrayscope.display.backends.vispy.tiles as vispy_tiles
+    from arrayscope.app.settings_state import AppSettingsState
+
+    settings = _use_vispy_backend()
+
+    uploads: list[tuple[int, int]] = []
+    original_upload = vispy_tiles._upload_texture_plane
+
+    def counting_upload(texture, plane, *, offset, copy):
+        uploads.append(tuple(int(value) for value in np.shape(plane)[:2]))
+        return original_upload(texture, plane, offset=offset, copy=copy)
+
+    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+
+    rng = np.random.default_rng(31)
+    data = rng.standard_normal((3, 2 * CHUNK, 4 * CHUNK)).astype(np.float32)
+    win = _make_window(qtbot, data)
+    try:
+        state = win.view_state.with_image_axes(1, 2)
+        win._set_view_state(state.with_slice(0, 0))
+        win.render(reason="test-plane-initial")
+        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+
+        pool = _pool(win)
+        assert _resident_chunks(pool), "plane 0 did not engage chunked residency"
+
+        # Drive the slice prefetcher the way tests/ui/test_prefetch.py does:
+        # enable the setting, declare the scrub axis, and submit the request.
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
+        win._active_slice_axis = 0
+        win.renderer._prefetch_nearby_slices(win.view_state, None)
+
+        plane_1_key = _plane_content_key(win, 1)
+        expected_chunks = (data.shape[1] // CHUNK) * (data.shape[2] // CHUNK)
+
+        def plane_1_warm() -> bool:
+            return len(_resident_chunk_keys_for_content(pool, plane_1_key)) >= expected_chunks
+
+        qtbot.waitUntil(plane_1_warm, timeout=_WAIT_TIMEOUT_MS)
+        # The warm plane is residency only: tile 0 still presents plane 0.
+        presented = _resident_chunks(pool)
+        assert not (presented & _resident_chunk_keys_for_content(pool, plane_1_key)), (
+            "warm plane 1 chunks must not be presented before the scroll"
+        )
+
+        chunk_uploads_before = pool.chunk_upload_count
+        uploads.clear()
+        _apply_plane(win, 1, reason="test-plane-forward")
+        qtbot.waitUntil(lambda: _plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+
+        # The scroll commit presented plane 1 through the chunked path...
+        presented_now = _resident_chunks(pool)
+        assert presented_now & _resident_chunk_keys_for_content(pool, plane_1_key), (
+            "plane 1 was not presented through chunked residency"
+        )
+        # ...and found every chunk already warm: ZERO chunk uploads.
+        assert pool.chunk_upload_count == chunk_uploads_before, (
+            f"scroll-forward uploaded {pool.chunk_upload_count - chunk_uploads_before} "
+            f"chunks despite prefetch warming (all uploads: {uploads})"
+        )
+        # No classic full-plane fallback upload either.
+        full_plane_uploads = [shape for shape in uploads if shape[0] >= 2 * CHUNK]
+        assert not full_plane_uploads, (
+            f"scroll-forward re-uploaded full native planes: {full_plane_uploads} "
+            f"(all uploads: {uploads})"
+        )
+
+        # Pixel truth on the warmed plane.
+        value = _committed_value(win, CHUNK // 2, CHUNK // 2)
+        assert value == pytest.approx(float(data[1, CHUNK // 2, CHUNK // 2]))
+    finally:
+        win.close()
+        _restore_default_backend(settings)
+
+
 def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
     """G4a live gate: revisiting an already-seen plane re-uses GPU residency.
 

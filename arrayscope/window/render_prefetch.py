@@ -84,6 +84,12 @@ class RenderPrefetchMixin:
         if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
             return
         document = self.win.document
+        # Evaluate exactly what the visible flow would evaluate for this
+        # backend: shader-display construction keeps scale/LUT out of the
+        # data plane, so the CPU-cache key matches the visible key AND the
+        # GPU warm texels (ADR 0055 G4c) are byte-compatible with the plane
+        # the later visible commit uploads/reuses.
+        shader_display = self._prefetch_shader_display()
         size = view_state.shape[axis]
         current = view_state.slice_indices[axis]
         momentum = getattr(self, "_prefetch_momentum", None)
@@ -103,20 +109,23 @@ class RenderPrefetchMixin:
                     prefetch_state,
                     colormap_lut=colormap_lut,
                     document=document,
+                    shader_display=shader_display,
                 )
                 started = self.win.prefetch_evaluation_controller.start_prefetch(
-                    lambda prefetch_state=prefetch_state, document=document: self.win.operation_evaluator.prefetch_display_tile_snapshot(
+                    lambda prefetch_state=prefetch_state, document=document, shader_display=shader_display: self.win.operation_evaluator.prefetch_display_tile_snapshot(
                         document,
                         prefetch_state,
                         colormap_lut=colormap_lut,
                         evaluation_context=self.win._evaluation_context(ComputeLane.PREFETCH, None),
+                        shader_display=shader_display,
                     ),
-                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key: self._store_prefetch_display_tile_if_current(
+                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key, shader_display=shader_display: self._store_prefetch_display_tile_if_current(
                         document,
                         prefetch_key,
                         prefetch_state,
                         colormap_lut,
                         result,
+                        shader_display=shader_display,
                     ),
                     key=prefetch_key,
                     memory_budget_bytes=policy.prefetch_budget_bytes,
@@ -244,12 +253,168 @@ class RenderPrefetchMixin:
             return False
         return self.win.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
 
-    def _store_prefetch_display_tile_if_current(self, document, request_key, view_state, colormap_lut, result):
-        current_key = self.win.operation_evaluator.display_tile_key(view_state, colormap_lut=colormap_lut)
+    def _prefetch_shader_display(self) -> bool:
+        """Whether this window's backend evaluates shader-display images."""
+
+        from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+        return bool(
+            getattr(
+                image_view_backend_capabilities(self.win.img_view),
+                "shader_windowing",
+                False,
+            )
+        )
+
+    def _store_prefetch_display_tile_if_current(self, document, request_key, view_state, colormap_lut, result, *, shader_display: bool = False):
+        current_key = self.win.operation_evaluator.display_tile_key(
+            view_state,
+            colormap_lut=colormap_lut,
+            shader_display=shader_display,
+        )
         if request_key != current_key:
             self.win.operation_evaluator.note_prefetch_stale()
             return False
-        return self.win.operation_evaluator.store_prefetch_display_tile_result(document, view_state, colormap_lut, result)
+        stored = self.win.operation_evaluator.store_prefetch_display_tile_result(
+            document,
+            view_state,
+            colormap_lut,
+            result,
+            shader_display=shader_display,
+        )
+        if stored:
+            # ADR 0055 G4c: the plane is now CPU-cached; also push it into
+            # GPU chunk residency so scroll-forward commits upload-free.
+            self._warm_prefetched_plane_residency(document, view_state, result)
+        return stored
+
+    def _warm_prefetched_plane_residency(self, document, view_state, result) -> bool:
+        """Warm a prefetched adjacent plane into GPU atlas chunk residency.
+
+        Runs on the GUI thread (kernel-bridge callback dispatch) directly
+        after the CPU display cache accepted the prefetch result — the
+        adjacent-plane evaluation itself stayed on PREFETCH-lane workers.
+        Currency: the display-tile key was just re-validated against the
+        live document (stale documents never reach this), and the current
+        window state must still be the same non-montage 2D view the plane
+        was prefetched for; a superseded result is dropped, not warmed.
+        Warm chunks are content-keyed, so even a wasted warm can never
+        present wrong pixels. Bails silently on non-gpu_atlas backends and
+        on pool capacity/budget denial.
+        """
+
+        if result is None or getattr(result, "value", None) is None:
+            return False
+        view = getattr(self.win, "img_view", None)
+        warm = getattr(view, "warmPlaneResidency", None)
+        if not callable(warm):
+            return False
+        from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+        capabilities = image_view_backend_capabilities(view)
+        if getattr(capabilities, "tile_residency_kind", None) != "gpu_atlas":
+            return False
+        current_state = getattr(self.win, "view_state", None)
+        if current_state is None or getattr(current_state, "montage_axis", None) is not None:
+            return False
+        if tuple(getattr(current_state, "image_axes", None) or ()) != tuple(
+            getattr(view_state, "image_axes", None) or ()
+        ):
+            return False
+        payload = self._prefetched_plane_payload(
+            document,
+            view_state,
+            result,
+            shader_display=bool(getattr(capabilities, "shader_windowing", False)),
+        )
+        if payload is None:
+            return False
+        return bool(warm(payload))
+
+    def _prefetched_plane_payload(self, document, view_state, result, *, shader_display: bool):
+        """Build the anchored exact payload of one prefetched plane.
+
+        Mirrors the frame session's construction for the pieces that decide
+        chunk identity (``_payload_source_anchor`` + ``_payload_chunk_plan``):
+        the anchoring content key from ``source_anchoring_for_view``, the
+        native source rect from the anchored starts plus the plane shape, the
+        texture source/kind via ``texture_source_for_rendered``, and a native
+        (factor-1, gutter-free) LOD identity. The visible commit later reads
+        the SAME cached ``DisplayImage``, so warm texels are byte-identical.
+        """
+
+        import numpy as np
+
+        value = result.value
+        image_axes = getattr(view_state, "image_axes", None)
+        if (
+            getattr(view_state, "montage_axis", None) is not None
+            or image_axes is None
+            or len(tuple(image_axes)) != 2
+        ):
+            return None
+        lod = getattr(value, "lod", None)
+        if lod is not None and (
+            int(getattr(lod, "factor", 1) or 1) != 1
+            or int(getattr(lod, "gutter", 0) or 0) != 0
+        ):
+            # Reduced/gutter previews never take the chunked path; warming
+            # them would key residency the visible commit cannot reuse.
+            return None
+        image = np.asarray(getattr(value, "data", None))
+        if image.ndim < 2:
+            return None
+        from types import SimpleNamespace
+
+        from arrayscope.display.lod import LodInfo
+        from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+        from arrayscope.display.source_anchoring import source_anchoring_for_view
+        from arrayscope.render.lod import texture_source_for_rendered
+
+        anchoring = source_anchoring_for_view(document, view_state)
+        if anchoring is None:
+            return None
+        texture, _histogram, texture_kind = texture_source_for_rendered(
+            SimpleNamespace(
+                image=image,
+                texture_kind=getattr(value, "texture_kind", None),
+                semantic_data=getattr(value, "semantic_data", None),
+                histogram_data=None,
+            ),
+            shader_display=shader_display,
+        )
+        height, width = (int(image.shape[0]), int(image.shape[1]))
+        starts = tuple(getattr(anchoring, "anchored_starts", (None, None)))
+        y_start = int(starts[0] or 0)
+        x_start = int(starts[1] or 0)
+        source_anchor = PayloadSourceAnchor(
+            content_key=anchoring.content_key,
+            source_rect=(y_start, y_start + height, x_start, x_start + width),
+        )
+        texture_shape = (int(texture.shape[0]), int(texture.shape[1]))
+        try:
+            return DisplayTilePayload(
+                tile_number=0,
+                source_index=0,
+                image=image,
+                histogram_data=None,
+                source_id=("prefetch-warm-plane", anchoring.content_key, source_anchor.source_rect),
+                texture_data=texture,
+                texture_kind=texture_kind,
+                semantic_data=getattr(value, "semantic_data", None),
+                shader_mapping=getattr(value, "shader_mapping", None),
+                lod=LodInfo(
+                    level=0,
+                    factor=1,
+                    source_shape=texture_shape,
+                    texture_shape=texture_shape,
+                    gutter=0,
+                ),
+                quality="exact",
+                source_anchor=source_anchor,
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _note_prefetch_start(self, started):
         if started.scheduled:

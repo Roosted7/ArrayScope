@@ -637,6 +637,10 @@ class VisPyImageView2D(ImageViewShell):
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
     ) -> None:
+        # ADR 0055 G4c: the prefetch warm hook mirrors the residency knobs of
+        # the most recent visible commit instead of inventing its own.
+        self._vispy_last_tile_residency_budget_bytes = int(tile_residency_budget_bytes or 0)
+        self._vispy_last_tiled_rgb_already_windowed = bool(rgb_already_windowed)
         placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
             geometry,
             tile_state=tile_state,
@@ -739,6 +743,44 @@ class VisPyImageView2D(ImageViewShell):
             return
         if queue:
             self._submit_vispy_warm_tile_residency_continuation()
+
+    def warmPlaneResidency(self, payload) -> bool:
+        """Warm one anchored non-montage plane into GPU chunk residency.
+
+        ADR 0055 G4c: the slice prefetcher hands over the exact payload of an
+        adjacent plane after its evaluation landed in the CPU display cache;
+        the atlas pool uploads the plane's chunks as pure page-table
+        residency so a subsequent fixed-index scroll commits upload-free.
+        GUI-thread only (GL uploads). Returns True when the plane is warm
+        (uploaded now or already resident); False when warming is
+        unavailable or was denied (no layer, no atlas layout yet, storage
+        mode mismatch, capacity/budget denial) — all silent by design.
+        """
+
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        if layer is None or not hasattr(layer, "warm_residency"):
+            return False
+        if payload is None or getattr(payload, "source_anchor", None) is None:
+            return False
+        try:
+            stats = layer.warm_residency(
+                payloads={int(payload.tile_number): payload},
+                geometry=None,
+                rgb_already_windowed=bool(
+                    getattr(self, "_vispy_last_tiled_rgb_already_windowed", False)
+                ),
+                tile_delta=None,
+                tile_residency_budget_bytes=int(
+                    getattr(self, "_vispy_last_tile_residency_budget_bytes", 0) or 0
+                ),
+            )
+        except Exception:
+            return False
+        self._last_vispy_warm_tile_stats = stats
+        capacity_denied = bool(getattr(stats, "capacity_warning", ""))
+        return bool(
+            (stats.items_updated or stats.items_skipped) and not capacity_denied
+        )
 
     _level_preview_timing_channel = "vispy_level_preview"
 
