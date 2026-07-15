@@ -545,6 +545,20 @@ acceptance.
 > too early. It now waits on the actual `d2=1` profile result with a generous
 > condition-based timeout.
 
+> **[Codex 2026-07-15 — P9 rejected first hypothesis; runtime reverted]**
+> Wiring PyQtGraph's complete commit time into `montage_present_total` exposed
+> that the shared governor learned a one-item interactive batch but both
+> backends forced it back to four. Removing that floor passed **103** focused
+> governor/backend tests, then failed the frozen real-Wayland workflow. FFT
+> scroll regressed from P8's **17,326 ms** to **24,977 ms** (+44%) and scalar
+> scroll from **7,873 ms** to **14,832 ms** (+88%); FFT zoom/pan then stranded
+> all **60/60** visible tiles at exact LOD 4 against a demanded LOD 5 with no
+> work in flight and `physical_drawn` blocked. The production and test edits
+> were removed. Do not retry one-tile presentation commits as pipeline
+> admission batching: they amplify fixed per-commit state publication and do
+> not supply the missing same-target evaluation refill. The ignored trace is
+> preserved under `tests/artifacts/redesign-p9-2026-07-15/pyqtgraph-feedback/`.
+
 ## The visible-truth harness (the only gate)
 
 One scripted scenario runner on real Wayland, assembled from pieces that

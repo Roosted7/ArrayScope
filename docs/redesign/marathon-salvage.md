@@ -119,6 +119,11 @@ Ordered by confidence:
     continuation (1000+ planning tasks). Re-derive the
     `reusable=True→False` rung-supersession change **separately** — prime
     suspect for the marathon's stale-transition regressions.
+    **[Codex 2026-07-15 — rejected detour]** Presentation upsert batches are
+    not this step's admission batch. Letting feedback collapse those commits
+    from four tiles to one regressed both scroll phases 44-88% and exposed an
+    idle LOD 4→5 refill stall; that runtime experiment was removed. P9 remains
+    scoped to the pipeline's pending rung queue and completion-owned refill.
 16. **Presentation-gate timer-edge pacing + GPU draw back-pressure**
     (`frame_effects.py`, `render_coordinator.py`) — replace self-reposting
     low-priority events with receiver-bound timers; don't admit a second
