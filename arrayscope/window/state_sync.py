@@ -77,6 +77,17 @@ class StateSyncMixin:
             self.update_shift_indicators()
             self._interactive_slice_controls_synced_state = None
         self.request_render(reason=reason, interactive=interactive)
+        # Adjacent-slice prefetch (opt-in setting) rides every slice change:
+        # the scheduler is latest-wins and runs on the speculative kernel
+        # lane, so scrub bursts collapse and visible work always goes first.
+        # (This call was severed when the legacy normal-image update path was
+        # deleted; the setting had been silently dead since.)
+        if state.montage_axis is None:
+            schedule_prefetch = getattr(
+                getattr(self, "renderer", None), "_schedule_prefetch_nearby_slices", None
+            )
+            if callable(schedule_prefetch):
+                schedule_prefetch(state, self.renderer._evaluation_colormap_lut(state))
         self._notify_sync("dims")
 
     def _apply_synced_dimension_state(self, state) -> None:

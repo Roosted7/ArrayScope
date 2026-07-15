@@ -330,3 +330,61 @@ def test_cost_aware_prefetch_blocks_expensive_fft_stack(qtbot):
         assert win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked > before_blocked
     finally:
         win.close()
+
+
+def test_slice_change_schedules_nearby_prefetch_when_enabled(qtbot):
+    """The opt-in slice prefetcher rides every live slice change.
+
+    Regression guard: the scheduler call was severed when the legacy
+    normal-image update path was deleted, leaving the setting silently dead.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 4 * 6, dtype=np.float32).reshape(4, 4, 6))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
+        before = win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
+        win._apply_slice_state(
+            2,
+            win.view_state.with_slice(2, 3),
+            reason="test-slice-prefetch-wiring",
+            interactive=True,
+            immediate_axis_only=True,
+        )
+        qtbot.waitUntil(
+            lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > before,
+            timeout=5000,
+        )
+    finally:
+        win.close()
+
+
+def test_slice_change_without_setting_skips_prefetch(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 4 * 6, dtype=np.float32).reshape(4, 4, 6))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        before = win.operation_evaluator.display_cache_diagnostics().prefetch_skipped
+        win._apply_slice_state(
+            2,
+            win.view_state.with_slice(2, 2),
+            reason="test-slice-prefetch-off",
+            interactive=True,
+            immediate_axis_only=True,
+        )
+        qtbot.waitUntil(
+            lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_skipped > before,
+            timeout=5000,
+        )
+    finally:
+        win.close()
