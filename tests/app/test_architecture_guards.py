@@ -227,11 +227,18 @@ def test_display_presentation_boundary_modules_exist():
     assert not (ROOT / "arrayscope" / "window" / "montage_renderer.py").exists()
 
 
-def test_display_presenter_uses_unified_frame_planner_for_frame_semantics():
+def test_display_presenter_has_one_commit_path_without_fallback_planning():
+    # The frame session owns the plan and tile presentation. The presenter
+    # must not re-plan frame semantics behind the session's back — the
+    # 2026-07-15 window-shift diagnosis traced a dead divergent secondary
+    # planner that masked the live flow never using it. Commits without the
+    # session's plan/state fail loudly instead.
     text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
+    assert "_frame_plan_for_display" not in text
+    assert "display commits require the session's frame_plan and tile_state" in text
+    # The single-layout viewport retarget legitimately re-plans active/near
+    # sets over the committed payloads; that planner stays.
     assert "FramePlanner" in text
-    assert "_frame_plan_for_display" in text
-    assert "frame_plan=frame_plan" in text
 
 
 def test_tiled_display_committer_does_not_require_montage_geometry():

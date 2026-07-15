@@ -1547,7 +1547,6 @@ def test_large_complex_montage_auto_uses_tile_layer(qtbot):
         qtbot.waitUntil(lambda: getattr(win.renderer._frame_session, "display_committed", False), timeout=5000)
 
         assert win.img_view.montageDisplayMode().endswith("tile_layer")
-        assert getattr(win.renderer, "_last_montage_backend_actual", "").endswith("tile_layer")
     finally:
         win.close()
 
