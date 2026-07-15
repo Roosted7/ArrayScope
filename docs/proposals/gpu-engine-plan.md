@@ -161,17 +161,24 @@ same cheapness (today they always rebirth).
 small array performs zero uploads and holds the 16 ms heartbeat; FFT-scroll
 benchmark improves toward the scalar rate (the #1 throughput target).
 
-### G5 — N-D chunk pool and streaming for large arrays
+### G5 — Sparse virtual multiresolution pyramid (ADR 0056)
 
-Chunked/lazy sources (ADR 0049) stream source chunks; optional
-staging-repack into view-optimized bricks when displayed axes are highly
-strided. Size-tiered policy: small = whole-array resident; medium =
-active-XY repacked layout; large = streamed bricks. Predictive residency
-reuses the existing prefetch/priority machinery.
+The LOD ladder's members become immutable logical data chunks: anisotropic
+`reduction_vector` + reducer identity in chunk keys; uniform plane-pixel
+pages shared across LODs (closes the reduced-LOD re-upload gap by
+construction); page-table entries resolving to the best resident ancestor
+with generations; pinned coarse coverage with never-black eviction order;
+mode-specific derived LOD families over shared raw L0 (lazy, budgeted);
+sufficient statistics only where exact reducers demand them. Streaming for
+large/lazy sources (ADR 0049) rides the same page model; brick depth along
+non-displayed axes stays backend policy.
 
-*Gate:* out-of-core scroll scenario sustains interactivity with bounded VRAM
-(pool budget respected, evictions traced); no shared-layer code path
-distinguishes backends.
+*Gate:* mixed-LOD scene with injected missing fine pages renders from
+pinned coarse coverage (no black tile, explicit missing-value only when no
+ancestor exists); zoom across LOD thresholds swaps page-table entries with
+zero re-uploads of already-resident levels; complex magnitude/phase views
+use their own reducer families (unit-verified against phase-cancellation
+fixtures); out-of-core scroll sustains interactivity with bounded VRAM.
 
 ### G6 — GPU compute consumers
 

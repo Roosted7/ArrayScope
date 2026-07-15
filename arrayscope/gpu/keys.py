@@ -25,18 +25,71 @@ RGB8 = "rgb8"
 REPRESENTATIONS = (SCALAR_R32F, COMPLEX_RG32F, RGB8)
 
 
+# Reducers that can produce a derived LOD family (ADR 0056). The reducer is
+# SEMANTIC identity: for complex data, mean(abs(z)) != abs(mean(z)) (phase
+# cancellation), so magnitude/phase/power overviews are different data from
+# component means. NATIVE marks unreduced chunks. Display-only approximate
+# reducers must still be named here — the approximation is part of what the
+# chunk *is*.
+REDUCER_NATIVE = "native"
+REDUCER_MEAN = "mean"
+REDUCER_RMS = "rms"
+REDUCER_MEAN_ABS = "mean_abs"
+REDUCER_POWER = "power"
+REDUCER_PHASE_VECTOR = "phase_vector"
+REDUCERS = (
+    REDUCER_NATIVE,
+    REDUCER_MEAN,
+    REDUCER_RMS,
+    REDUCER_MEAN_ABS,
+    REDUCER_POWER,
+    REDUCER_PHASE_VECTOR,
+)
+
+
 @dataclass(frozen=True)
 class ChunkLod:
-    """Level-of-detail identity of a chunk's values (mirrors TileLodIdentity)."""
+    """Level-of-detail identity of a chunk's values (ADR 0056).
+
+    ``reduction`` is the anisotropic per-axis reduction vector in log2 steps
+    (``0`` = native along that axis), in the chunk's axis order; ``()`` means
+    fully native. ``reducer`` names the semantic reduction that produced the
+    values. The legacy scalar ``level``/``factor`` mirror the isotropic
+    display ladder (ADR 0050) and remain until its members migrate onto
+    reduction vectors; new code should prefer ``reduction``.
+    """
 
     level: int = 0
     factor: int = 1
     gutter: int = 0
+    reduction: tuple[int, ...] = ()
+    reducer: str = REDUCER_NATIVE
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "level", max(0, int(self.level)))
         object.__setattr__(self, "factor", max(1, int(self.factor)))
         object.__setattr__(self, "gutter", max(0, int(self.gutter)))
+        reduction = tuple(int(step) for step in tuple(self.reduction))
+        if any(step < 0 for step in reduction):
+            raise ValueError(f"reduction steps must be non-negative, got {reduction}")
+        object.__setattr__(self, "reduction", reduction)
+        reducer = str(self.reducer)
+        if reducer not in REDUCERS:
+            raise ValueError(f"unknown reducer {reducer!r}; expected one of {REDUCERS}")
+        if reducer == REDUCER_NATIVE and any(reduction):
+            raise ValueError("reduced chunks must name a non-native reducer")
+        object.__setattr__(self, "reducer", reducer)
+
+    @property
+    def is_native(self) -> bool:
+        return not any(self.reduction) and self.factor == 1 and self.level == 0
+
+    def axis_scale(self, axis: int) -> int:
+        """Source samples per stored sample along ``axis`` (1 = native)."""
+
+        if axis < len(self.reduction):
+            return 1 << self.reduction[axis]
+        return 1
 
 
 @dataclass(frozen=True)

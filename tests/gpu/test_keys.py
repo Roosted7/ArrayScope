@@ -59,3 +59,32 @@ def test_view_tile_key_is_presentation_scoped():
     b = ViewTileKey(presentation_key=("frame", 7), tile_number="3")
     assert a == b
     assert a != ViewTileKey(presentation_key=("frame", 8), tile_number=3)
+
+
+def test_chunk_lod_anisotropic_reduction_identity():
+    from arrayscope.gpu.keys import REDUCER_MEAN_ABS, REDUCER_NATIVE
+
+    native = ChunkLod()
+    assert native.is_native and native.reduction == () and native.reducer == REDUCER_NATIVE
+    aniso = ChunkLod(reduction=(4, 1), reducer=REDUCER_MEAN_ABS)
+    assert aniso.axis_scale(0) == 16
+    assert aniso.axis_scale(1) == 2
+    assert aniso.axis_scale(2) == 1  # axes beyond the vector are native
+    assert not aniso.is_native
+    # Reduction vector and reducer are identity: same geometry, different
+    # reducer, different chunk.
+    a = make_key(lod=ChunkLod(reduction=(1, 1), reducer="mean"))
+    b = make_key(lod=ChunkLod(reduction=(1, 1), reducer="mean_abs"))
+    assert a != b
+    assert make_key(lod=ChunkLod(reduction=(1, 1), reducer="mean")) == a
+
+
+def test_chunk_lod_rejects_inconsistent_reduction():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        ChunkLod(reduction=(-1,), reducer="mean")
+    with _pytest.raises(ValueError):
+        ChunkLod(reduction=(1,), reducer="native")
+    with _pytest.raises(ValueError):
+        ChunkLod(reduction=(1,), reducer="bicubic-guess")
