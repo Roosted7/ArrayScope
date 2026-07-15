@@ -199,6 +199,15 @@ texture-size assumptions, acknowledged residency everywhere, no full-set
 rebuilds on zoom threshold crossings, exact inspection independent of
 display LOD, documented backend/LOD default evidence.
 
+> **[Codex 2026-07-15 — trace-proven stall + presentation-truth dossier]**
+> A live session's stall traces (49/54/63) are decoded in
+> [`redesign/coverage-stall-2026-07-15.md`](redesign/coverage-stall-2026-07-15.md):
+> a surviving shared-transform coverage-refill stall (P9 lane, queue item
+> there) and an acknowledgement-only presentation truth gap (stale
+> a_mode/mapping renders PAL-relaxed LUT[0] orange on zero-magnitude
+> complex data) fixed on `codex/gpu-engine` with physical-truth checks and
+> injected-corruption gates.
+
 > **[Codex 2026-07-15 — GPU-engine branch pointer]** A separate program on
 > `codex/gpu-engine` pursues the ADR 0055 three-way separation of view
 > tiles, data chunks, and residency pages toward a GPU-resident N-D data
