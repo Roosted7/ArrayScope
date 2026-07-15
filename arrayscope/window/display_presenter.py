@@ -19,6 +19,7 @@ from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work a
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.region_source import EagerDisplayRegionSource
+from arrayscope.display.source_anchoring import source_anchoring_for_view
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
@@ -353,13 +354,28 @@ class DisplayPresentationMixin:
             presentation_key=None,
             quality="exact-visible",
         )
+        capabilities = image_view_backend_capabilities(self.win.img_view)
         return self._frame_planner().plan(
             target=target,
             view_state=geometry.view_state,
             display_shape=display_shape,
-            backend_capabilities=image_view_backend_capabilities(self.win.img_view),
+            backend_capabilities=capabilities,
             memory_policy=self._memory_policy(),
+            source_anchoring=self._source_anchoring_for_display(geometry.view_state, capabilities),
         )
+
+    def _source_anchoring_for_display(self, view_state, capabilities):
+        """ADR 0055 G3: anchor tile identity to source coordinates when the
+        chain is windowable, so window shifts keep GPU residency. Only for
+        atlas-resident backends — the CPU backend re-windows items anyway
+        and prefers the coarse classic tiling."""
+
+        if getattr(capabilities, "tile_residency_kind", None) != "gpu_atlas":
+            return None
+        document = getattr(self.win, "document", None)
+        if document is None:
+            return None
+        return source_anchoring_for_view(document, view_state)
 
     def _previous_display_frame_for_policy(self, *, force_auto: bool) -> CommittedDisplayFrame | None:
         if force_auto:
@@ -784,7 +800,11 @@ def _current_view_range(window):
 
 
 def _tile_presentation_for_display_image(display_image, *, frame_plan, source_key):
-    source = EagerDisplayRegionSource(display_image, source_key=source_key)
+    source = EagerDisplayRegionSource(
+        display_image,
+        source_key=source_key,
+        content_key=getattr(frame_plan, "source_content_key", None),
+    )
     payloads: dict[int, DisplayTilePayload] = {}
     for region in tuple(getattr(frame_plan, "regions", ()) or ()):
         tile_number = int(region.region_id)

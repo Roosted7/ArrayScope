@@ -15,6 +15,13 @@ from arrayscope.display.scene import DisplayLayout
 
 DEFAULT_INTERNAL_TILE_SHAPE = (1024, 1024)
 
+# Chunk size for source-anchored plans (ADR 0055 G3). Finer than the classic
+# internal tile so that windows a few chunks wide contain *interior* chunks —
+# the ones whose content keys survive a window shift. A window smaller than
+# ~3 chunks still re-materializes fully in G3b-1 (full-chunk materialization
+# with camera-clipped windows lifts that in the next stage).
+ANCHORED_CHUNK_SHAPE = (256, 256)
+
 
 @dataclass(frozen=True)
 class FrameRegion:
@@ -29,6 +36,10 @@ class FrameRegion:
     planned: bool = True
     near: bool = True
     materialization_key: object | None = None
+    # ADR 0055 G3: (y0, y1, x0, x1) content coordinates of this region on a
+    # source-anchored tile grid — invariant under display-window shifts on
+    # anchored axes. None on the classic window-relative path.
+    source_rect: tuple[int, int, int, int] | None = None
 
     @property
     def width(self) -> int:
@@ -50,6 +61,9 @@ class FramePlan:
     regions: tuple[FrameRegion, ...]
     semantic_key: object
     materialization_key: object
+    # Shift-invariant content identity shared by this plan's source-anchored
+    # regions (ADR 0055 G3); None when the plan is window-relative.
+    source_content_key: object | None = None
     _active_region_ids: tuple[int, ...] = field(init=False, repr=False)
     _planned_region_ids: tuple[int, ...] = field(init=False, repr=False)
     _near_region_ids: tuple[int, ...] = field(init=False, repr=False)
@@ -106,6 +120,7 @@ class FramePlanner:
         view_range=None,
         memory_policy=None,
         montage_plan=None,
+        source_anchoring=None,
     ) -> FramePlan:
         display_shape = _shape2(display_shape)
         if getattr(view_state, "montage_axis", None) is not None:
@@ -123,6 +138,7 @@ class FramePlanner:
             display_shape=display_shape,
             view_range=view_range,
             memory_policy=memory_policy,
+            source_anchoring=source_anchoring,
         )
 
     def _plan_single(
@@ -133,11 +149,36 @@ class FramePlanner:
         display_shape: tuple[int, int],
         view_range,
         memory_policy,
+        source_anchoring=None,
     ) -> FramePlan:
-        tile_shape = self._single_tile_shape(display_shape)
-        regions = tuple(self._single_tile_regions(view_state, display_shape, tile_shape, view_range))
-        columns = max(1, ceil(display_shape[1] / tile_shape[1]))
-        rows = max(1, ceil(display_shape[0] / tile_shape[0]))
+        anchored_starts = (None, None)
+        content_key = None
+        if source_anchoring is not None and getattr(source_anchoring, "any_anchored", False):
+            anchored_starts = tuple(source_anchoring.anchored_starts)
+            content_key = source_anchoring.content_key
+        if content_key is not None:
+            tile_shape = (
+                min(int(display_shape[0]), ANCHORED_CHUNK_SHAPE[0]) if anchored_starts[0] is None else ANCHORED_CHUNK_SHAPE[0],
+                min(int(display_shape[1]), ANCHORED_CHUNK_SHAPE[1]) if anchored_starts[1] is None else ANCHORED_CHUNK_SHAPE[1],
+            )
+        else:
+            tile_shape = self._single_tile_shape(display_shape)
+        row_origins = _axis_origins(display_shape[0], tile_shape[0], anchored_starts[0])
+        column_origins = _axis_origins(display_shape[1], tile_shape[1], anchored_starts[1])
+        regions = tuple(
+            self._single_tile_regions(
+                view_state,
+                display_shape,
+                tile_shape,
+                view_range,
+                row_origins=row_origins,
+                column_origins=column_origins,
+                anchored_starts=anchored_starts,
+                anchored=content_key is not None,
+            )
+        )
+        columns = max(1, len(column_origins))
+        rows = max(1, len(row_origins))
         geometry = DisplayGeometry(
             view_state=view_state,
             display_shape=display_shape,
@@ -164,6 +205,7 @@ class FramePlanner:
             regions=regions,
             semantic_key=target.semantic_key,
             materialization_key=materialization_key,
+            source_content_key=content_key,
         )
 
     def _plan_montage(
@@ -259,18 +301,32 @@ class FramePlanner:
         display_shape: tuple[int, int],
         tile_shape: tuple[int, int],
         view_range,
+        *,
+        row_origins: tuple[int, ...] | None = None,
+        column_origins: tuple[int, ...] | None = None,
+        anchored_starts: tuple[int | None, int | None] = (None, None),
+        anchored: bool = False,
     ) -> Iterable[FrameRegion]:
         height, width = display_shape
         tile_h, tile_w = tile_shape
+        if row_origins is None:
+            row_origins = _axis_origins(height, tile_h, None)
+        if column_origins is None:
+            column_origins = _axis_origins(width, tile_w, None)
+        y_start = int(anchored_starts[0] or 0)
+        x_start = int(anchored_starts[1] or 0)
         active_rect = _view_rect_or_full(view_range, width=width, height=height)
         region_id = 0
-        for row in range(ceil(height / tile_h)):
-            y0 = row * tile_h
-            y1 = min(height, y0 + tile_h)
-            for column in range(ceil(width / tile_w)):
-                x0 = column * tile_w
-                x1 = min(width, x0 + tile_w)
+        for y0 in row_origins:
+            y1 = _axis_span_end(y0, height, tile_h, y_start)
+            for x0 in column_origins:
+                x1 = _axis_span_end(x0, width, tile_w, x_start)
                 active = _rects_intersect((x0, y0, x1, y1), active_rect)
+                # Content coordinates: source-anchored on anchored axes,
+                # window-relative (start 0) otherwise — that axis's window
+                # stays part of the plan's content key, so identity is still
+                # correct across shifts on the anchored axis alone.
+                source_rect = (y_start + y0, y_start + y1, x_start + x0, x_start + x1)
                 yield FrameRegion(
                     region_id=region_id,
                     source_index=None,
@@ -280,9 +336,42 @@ class FramePlanner:
                     active=active,
                     planned=True,
                     near=active,
-                    materialization_key=("single", region_id, (y0, y1, x0, x1)),
+                    materialization_key=(
+                        ("single-src", source_rect)
+                        if anchored
+                        else ("single", region_id, (y0, y1, x0, x1))
+                    ),
+                    source_rect=source_rect if anchored else None,
                 )
                 region_id += 1
+
+
+def _axis_origins(extent: int, tile: int, start: int | None) -> tuple[int, ...]:
+    """Window-relative tile origins along one axis.
+
+    Unanchored (``start is None``): multiples of ``tile`` from 0. Anchored:
+    tile boundaries fall on *source-coordinate* multiples of ``tile``, so the
+    first window tile is clipped when the window starts mid-chunk and the
+    interior tiles stay identical under window shifts.
+    """
+
+    extent = int(extent)
+    tile = int(tile)
+    if extent <= 0:
+        return ()
+    if start is None or int(start) % tile == 0:
+        return tuple(range(0, extent, tile))
+    first_boundary = ((int(start) // tile) + 1) * tile
+    origins = [0]
+    origins.extend(range(first_boundary - int(start), extent, tile))
+    return tuple(origins)
+
+
+def _axis_span_end(origin: int, extent: int, tile: int, start: int) -> int:
+    """Window-relative end of the tile at ``origin`` (next source boundary)."""
+
+    to_boundary = tile - (int(start) + int(origin)) % tile
+    return min(int(extent), int(origin) + to_boundary)
 
 
 def _shape2(shape) -> tuple[int, int]:
