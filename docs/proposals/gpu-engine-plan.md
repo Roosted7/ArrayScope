@@ -251,6 +251,17 @@ pool/presentation seam, not a second layer update or scheduler: the live ladder
 still emits whole-plane `PyramidLevelKey` members, so its migration to logical
 page targets is the next G5 slice.
 
+**Slice 4a landed (2026-07-16): live-ladder logical target planning.**
+The render-LOD layer now decomposes desired native source rectangles into
+canonical `DataChunkKey` pages on the global reduction grid as a pure value
+transform. Shifted factor-2 windows share aligned interiors and keep clipped
+boundaries distinct; desired target identity remains separate from physical
+fallback. Wiring is intentionally deferred until materialization stops using
+window-local `reduce_box_mean`: assigning global keys to those current texels,
+or uniformly stretching a page whose partial boundary bins have unequal source
+width, would violate semantic/coordinate truth. Materialization plus boundary
+draw geometry is the next atomic slice.
+
 ### G6 — GPU compute consumers
 
 Histogram/level reductions over resident chunks (sharing the shader's

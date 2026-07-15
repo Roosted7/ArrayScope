@@ -114,6 +114,20 @@ coupling:
 - 111 focused GPU/pyramid/VisPy tests pass. The next slice is the live
   ladder/cache migration that emits logical page targets into this seam.
 
+The ladder-side target planner is also now explicit:
+
+- `render.lod.plan_lod_page_targets` is a Qt-free deterministic transform
+  from content identity, native source rect, anisotropic reduction, and
+  uniform stored-page shape to canonical `DataChunkKey` targets;
+- factor-2 windows starting at 101 and 102 share the aligned interior page
+  and keep both clipped boundaries distinct; desired mean-family identity
+  stays separate from a coarser physical resolution;
+- the planner is not yet attached to `DisplayTilePayload`. Current reduced
+  ladder values are still binned from window-local zero, and attaching global
+  target names to those texels would be false identity. The next slice must
+  migrate materialization and boundary draw geometry together before feeding
+  these targets into the VisPy resolver.
+
 ## Rejected shortcuts
 
 - backend-private tuple keys as the permanent pyramid identity;
@@ -126,6 +140,9 @@ coupling:
   denial gates use an explicit byte budget; without one the atlas may grow);
 - treating previous-screen retention as data-level coverage;
 - renaming window-origin reductions without changing their bins;
+- stamping source-grid target keys onto window-origin reduced values;
+- drawing a clipped boundary page as one uniformly stretched quad when its
+  first/last partial bins have different native widths;
 - reusing clipped boundary values across different valid footprints;
 - preserving `PyramidLevelKey` behind a compatibility shim;
 - deferring anisotropy or collapsing complex modes to one reducer family;

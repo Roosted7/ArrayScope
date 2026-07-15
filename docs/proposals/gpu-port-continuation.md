@@ -125,6 +125,9 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    route-canonicalization contract is
    explicit in `docs/redesign/g5-source-grid-pyramid-2026-07-16.md`; every
    remaining consumer must use it rather than infer a second reduction route.
+   The pure ladder target planner is now landed; do not attach it to payloads
+   until window-local reduction and non-uniform clipped-boundary draw geometry
+   migrate in the same correctness slice.
 5. **G6**: GPU histogram/levels over the chunk store with the ADR 0056
    coverage frontier (per-chunk summaries; workgroup-local bins); GPU LOD
    generation from resident chunks.
