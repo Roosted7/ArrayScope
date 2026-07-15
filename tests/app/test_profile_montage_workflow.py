@@ -10,6 +10,45 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_preview_floor_physical_rows_preserve_page_shader_evidence():
+    from arrayscope.tools.profile_montage_workflow import _preview_floor_physical_rows
+
+    physical = {
+        7: {
+            "physical_page": 2,
+            "physical_slot": 4,
+            "physical_texture_kind": "complex_rg32f",
+            "physical_storage_mode": "complex",
+            "physical_texture_dtype": "float32",
+            "physical_texture_shape": (84, 84, 2),
+            "physical_mapping_mode": 4.0,
+            "physical_component_mode": 2.0,
+            "physical_levels": (0.0, 8.0),
+            "physical_shader_mapping_key": "phase",
+            "unbounded_identity": object(),
+        }
+    }
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(tileTruthPhysicalRows=lambda: physical),
+    )
+
+    assert _preview_floor_physical_rows(win) == [
+        {
+            "tile": 7,
+            "physical_page": 2,
+            "physical_slot": 4,
+            "physical_texture_kind": "complex_rg32f",
+            "physical_storage_mode": "complex",
+            "physical_texture_dtype": "float32",
+            "physical_texture_shape": (84, 84, 2),
+            "physical_mapping_mode": 4.0,
+            "physical_component_mode": 2.0,
+            "physical_levels": (0.0, 8.0),
+            "physical_shader_mapping_key": "phase",
+        }
+    ]
+
+
 def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     from arrayscope.tools.profile_montage_workflow import py_spy_command
 

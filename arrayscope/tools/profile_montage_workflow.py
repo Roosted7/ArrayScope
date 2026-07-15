@@ -2991,6 +2991,7 @@ def _wait_for_montage_complete(
     first_visible_reused_compatible_predecessor = False
     preview_floor_screenshot_saved = None
     preview_floor_screenshot_error = None
+    preview_floor_physical_rows: list[dict[str, object]] = []
     presentation_settled_ms = None
     final_visibility_state: dict[str, object] = {}
     final_level_state: dict[str, object] = {}
@@ -3101,6 +3102,7 @@ def _wait_for_montage_complete(
                             win,
                             preview_floor_screenshot_path,
                         )
+                        preview_floor_physical_rows = _preview_floor_physical_rows(win)
                     except Exception as exc:  # pragma: no cover - diagnostic path
                         preview_floor_screenshot_saved = False
                         preview_floor_screenshot_error = repr(exc)
@@ -3119,6 +3121,7 @@ def _wait_for_montage_complete(
                             win,
                             preview_floor_screenshot_path,
                         )
+                        preview_floor_physical_rows = _preview_floor_physical_rows(win)
                     except Exception as exc:  # pragma: no cover - diagnostic path
                         preview_floor_screenshot_saved = False
                         preview_floor_screenshot_error = repr(exc)
@@ -3232,6 +3235,7 @@ def _wait_for_montage_complete(
                 ),
                 "preview_floor_screenshot_saved": preview_floor_screenshot_saved,
                 "preview_floor_screenshot_error": preview_floor_screenshot_error,
+                "preview_floor_physical_rows": preview_floor_physical_rows,
                 "final_display_payload_count": int(final_payload_state.get("display_payload_count", 0)),
                 "final_preview_payload_count": int(final_payload_state.get("preview_payload_count", 0)),
                 "final_exact_payload_count": int(final_payload_state.get("exact_payload_count", 0)),
@@ -3666,6 +3670,36 @@ def _save_view_screenshot(win, path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     pixmap = win.img_view.grab()
     return bool(pixmap.save(str(path)))
+
+
+def _preview_floor_physical_rows(win) -> list[dict[str, object]]:
+    """Compact physical page state captured with the transient pixel proof."""
+
+    physical_rows = getattr(getattr(win, "img_view", None), "tileTruthPhysicalRows", None)
+    if not callable(physical_rows):
+        return []
+    keep = (
+        "physical_page",
+        "physical_slot",
+        "physical_texture_kind",
+        "physical_storage_mode",
+        "physical_texture_dtype",
+        "physical_texture_shape",
+        "physical_mapping_mode",
+        "physical_component_mode",
+        "physical_levels",
+        "physical_shader_mapping_key",
+    )
+    return [
+        {
+            "tile": int(tile),
+            **{
+                key: row.get(key)
+                for key in keep
+            },
+        }
+        for tile, row in sorted(dict(physical_rows() or {}).items())
+    ]
 
 
 def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> None:
