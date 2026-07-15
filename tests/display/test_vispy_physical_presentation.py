@@ -1,0 +1,327 @@
+"""Physical presentation truth for the VisPy GPU tile layer (P9).
+
+Field defect 2026-07-15 (ring-buffer trace of a live montage index scroll):
+every tile presentation was acknowledgement-only (retarget remap -> pool skip
+path -> lifecycle presented with payload=None) while a page visual physically
+held a stale per-quad ``a_mode``/``u_component_mode``.  Zero-magnitude
+complex texels then rendered the PAL-relaxed LUT[0] orange instead of black.
+The identity layer cannot see this class by construction (it deliberately
+excludes levels/LUT/scale and nothing pins the mode vertex buffer), so the
+layer itself must compare desired state against each active page visual's
+PHYSICAL state before re-presenting, and repair on divergence.
+
+These tests inject exactly that corruption into a committed layer and assert
+the clean re-present and uniforms-only paths detect it, repair it, and charge
+the repair to the acknowledged stats instead of reporting a no-op.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import numpy as np
+
+from arrayscope.display.backends.vispy.tiles import (
+    GpuDeviceLimits,
+    GpuMontageLayer,
+    _visual_shader_mapping_key,
+)
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    ShaderMapping,
+)
+
+from tests.display.test_vispy_tiled_renderer import FakeGloo, FakeVisual, complex_payload
+
+
+class PhysicalFakeVisual(FakeVisual):
+    """FakeVisual that mirrors GpuWindowedTileVisual's PHYSICAL state.
+
+    The base fake tracks call counts only; this subclass stores the same
+    attributes the real visual exposes (``_shader_mapping_key``,
+    ``_scale_mode``/``_symlog_constant``/``_component_mode``, ``_levels``,
+    ``mode_data``) so injected corruption is observable by the layer's
+    physical-divergence audit exactly as on a live canvas.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._shader_mapping_key = None
+        self._scale_mode = 0.0
+        self._symlog_constant = 0.0
+        self._component_mode = 0.0
+        self._levels = (0.0, 1.0)
+        self.mode_data = np.zeros((0,), dtype=np.float32)
+
+    def set_geometry(self, vertices, texcoords, modes):
+        super().set_geometry(vertices, texcoords, modes)
+        self.mode_data = np.asarray(modes, dtype=np.float32).reshape((-1,))
+
+    def set_levels(self, levels):
+        levels = tuple(float(value) for value in levels)
+        if levels == self._levels:
+            return False
+        self._levels = levels
+        self.levels.append(levels)
+        return True
+
+    def set_shader_mapping(self, mapping):
+        self.mapping_calls += 1
+        key = _visual_shader_mapping_key(mapping)
+        if key == self._shader_mapping_key:
+            return False
+        self._shader_mapping_key = key
+        self._scale_mode, self._symlog_constant, self._component_mode = (
+            float(key[0]),
+            float(key[1]),
+            float(key[2]),
+        )
+        self.mappings.append((None if mapping is None else mapping.identity_key, mapping))
+        return True
+
+
+class PhysicalFakeSceneVisuals:
+    @staticmethod
+    def create_visual_node(_visual_type):
+        return lambda parent=None: PhysicalFakeVisual()
+
+
+class PhysicalFakeScene:
+    visuals = PhysicalFakeSceneVisuals()
+
+
+PHASE_MAPPING = ShaderMapping(
+    component=ShaderComponent.ABS,
+    display_mode=ShaderDisplayMode.PHASE_COLOR,
+)
+
+
+def _committed_phase_layer():
+    """One committed complex phase_color presentation on physical fakes."""
+
+    layer = GpuMontageLayer(
+        scene=PhysicalFakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=4),
+    )
+    montage = SimpleNamespace(
+        indices=tuple(range(4)),
+        tile_width=2,
+        tile_height=2,
+        columns=4,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",) * 4)
+    payloads = {index: complex_payload(index) for index in range(4)}
+    delta = SimpleNamespace(
+        upserts=payloads,
+        removals=(),
+        active_tiles=tuple(range(4)),
+        planned_tiles=tuple(range(4)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+    first = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        shader_mapping=PHASE_MAPPING,
+        tile_delta=delta,
+    )
+    assert first.physical_repairs == 0
+    assert first.presented_tiles == tuple(range(4))
+    clean_delta = SimpleNamespace(
+        upserts={},
+        removals=(),
+        active_tiles=tuple(range(4)),
+        planned_tiles=tuple(range(4)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+    return layer, geometry, payloads, clean_delta
+
+
+def _clean_represent(layer, geometry, payloads, clean_delta):
+    return layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=(),
+        rgb_already_windowed=False,
+        shader_mapping=PHASE_MAPPING,
+        tile_delta=clean_delta,
+    )
+
+
+def _visible_visual(layer):
+    for visual in layer._visuals_by_page:
+        if visual.visible:
+            return visual
+    raise AssertionError("no visible page visual")
+
+
+def test_clean_represent_is_noop_when_physical_state_matches():
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+
+    clean = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert clean.physical_repairs == 0
+    assert clean.vertex_uploads == 0
+    assert clean.shader_uniform_updates == 0
+    assert layer.changed_page_indices() == ()
+
+
+def test_clean_represent_repairs_stale_component_uniform_behind_fresh_key():
+    # The field-defect class: the visual's mapping KEY still looks fresh but
+    # the derived uniform diverged (u_component_mode stale -> LUT(0) orange
+    # for zero-magnitude complex texels).
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    expected_component = float(visual._component_mode)
+    visual._component_mode = 5.0
+
+    repaired = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert repaired.physical_repairs == 1
+    assert repaired.shader_uniform_updates == 1
+    assert visual._component_mode == expected_component
+    assert visual._shader_mapping_key == _visual_shader_mapping_key(PHASE_MAPPING)
+    assert layer.changed_page_indices() != ()
+    # Repaired state must present clean again (no repair oscillation).
+    clean = _clean_represent(layer, geometry, payloads, clean_delta)
+    assert clean.physical_repairs == 0
+    assert clean.shader_uniform_updates == 0
+
+
+def test_clean_represent_repairs_wrong_shader_mapping_key():
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    visual._shader_mapping_key = ("stale", "mapping", "key")
+
+    repaired = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert repaired.physical_repairs == 1
+    assert repaired.shader_uniform_updates == 1
+    assert visual._shader_mapping_key == _visual_shader_mapping_key(PHASE_MAPPING)
+    assert visual.mappings[-1][1] is PHASE_MAPPING
+
+
+def test_clean_represent_repairs_corrupted_mode_vertex_buffer():
+    # Stale a_mode 3 (complex-through-LUT, no magnitude modulation) on a
+    # phase_color quad is the orange-background draw; nothing but the
+    # physical audit pins this buffer.
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    assert np.all(visual.mode_data == 4.0)
+    visual.mode_data = visual.mode_data.copy()
+    visual.mode_data[0:6] = 3.0
+    geometry_calls_before = visual.geometry_calls
+
+    repaired = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert repaired.physical_repairs == 1
+    assert repaired.vertex_uploads == 1
+    assert visual.geometry_calls == geometry_calls_before + 1
+    assert np.all(visual.mode_data == 4.0)
+    clean = _clean_represent(layer, geometry, payloads, clean_delta)
+    assert clean.physical_repairs == 0
+    assert clean.vertex_uploads == 0
+
+
+def test_clean_represent_repairs_stale_levels_uniform():
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    visual._levels = (5.0, 9.0)
+
+    repaired = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert repaired.physical_repairs == 1
+    assert repaired.level_updates == 1
+    assert visual._levels == (0.0, 2.0)
+
+
+def test_divergent_layer_never_acknowledges_a_physical_noop():
+    # ADR 0051 rule 1 extension: the acknowledged stats for a divergent
+    # re-present must carry the repair work, not read as items_skipped-only.
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    visual._component_mode = 5.0
+    visual.mode_data = visual.mode_data.copy()
+    visual.mode_data[:] = 3.0
+
+    repaired = _clean_represent(layer, geometry, payloads, clean_delta)
+
+    assert repaired.physical_repairs == 2
+    assert repaired.shader_uniform_updates >= 1
+    assert repaired.vertex_uploads == 1
+    # The presentation itself is still acknowledged (tiles stay presented) —
+    # only the "no physical work happened" claim is withdrawn.
+    assert repaired.presented_tiles == tuple(range(4))
+    assert repaired.committed_upserts == ()
+
+
+def test_uniforms_only_path_repairs_divergent_visual_state():
+    # A levels/mapping no-op through set_presentation_uniforms must also
+    # audit physical state: the level gesture path re-presents without a
+    # payload commit.
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    visual._component_mode = 5.0
+    visual.mode_data = visual.mode_data.copy()
+    visual.mode_data[6:12] = 3.0
+
+    stats = layer.set_presentation_uniforms(levels=(0.0, 2.0))
+
+    assert stats.physical_repairs == 2
+    assert stats.shader_uniform_updates >= 1
+    assert stats.vertex_uploads == 1
+    assert visual._component_mode == 2.0  # ShaderComponent.ABS
+    assert np.all(visual.mode_data == 4.0)
+    follow_up = layer.set_presentation_uniforms(levels=(0.0, 2.0))
+    assert follow_up.physical_repairs == 0
+    assert follow_up.shader_uniform_updates == 0
+
+
+def test_full_update_repairs_stale_uniform_the_page_sync_cannot_see():
+    # A real upsert commit walks the touched pages through
+    # visual.set_shader_mapping, but that setter no-ops when the visual's
+    # mapping KEY still looks fresh — a corrupted derived uniform slips
+    # through.  The end-of-update physical audit must catch it.
+    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    visual = _visible_visual(layer)
+    visual._component_mode = 5.0
+
+    replacement = complex_payload(3)
+    payloads = dict(payloads)
+    payloads[3] = replacement
+    update_delta = SimpleNamespace(
+        upserts={3: replacement},
+        removals=(),
+        active_tiles=tuple(range(4)),
+        planned_tiles=tuple(range(4)),
+        near_tiles=(),
+        near_tile_source_ids={index: value.source_id for index, value in payloads.items()},
+        force_refresh=False,
+    )
+
+    stats = layer.update(
+        payloads=payloads,
+        geometry=geometry,
+        levels=(0.0, 2.0),
+        dirty_tiles=(3,),
+        rgb_already_windowed=False,
+        shader_mapping=PHASE_MAPPING,
+        tile_delta=update_delta,
+    )
+
+    assert stats.physical_repairs == 1
+    assert visual._component_mode == 2.0

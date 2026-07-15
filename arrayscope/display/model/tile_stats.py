@@ -62,6 +62,13 @@ class TileLayerUpdateStats:
     lod_level_swaps_with_upload: int = 0
     superseded_reclaimed_under_pressure: int = 0
     shader_uniform_updates: int = 0
+    # Physical presentation truth (P9): count of desired-vs-physical page
+    # divergences (stale mapping key/uniform, stale levels, stale per-quad
+    # mode buffer) detected AND repaired during this update.  Zero on a
+    # healthy commit; any non-zero value means an acknowledgement would have
+    # been produced from a physically divergent layer state without the
+    # repair.  GPU backends fill it; CPU tile layers leave it at zero.
+    physical_repairs: int = 0
     upload_ms: float = 0.0
     level_update_processed_items: int = 0
     level_update_pending_items: int = 0

@@ -2101,6 +2101,14 @@ class GpuMontageLayer:
         self._levels: tuple[float, float] = (0.0, 1.0)
         self._shader_mapping = None
         self._shader_mapping_key = None
+        # Inputs the physical-truth audit needs between commits: the last
+        # committed layout/rgb flag reproduce the exact per-page ``a_mode``
+        # buffer expectation, and the visual-granularity mapping key is
+        # cached per layer mapping identity so the LUT content is not
+        # re-hashed on every clean commit.
+        self._last_layout: dict = {}
+        self._rgb_already_windowed = False
+        self._visual_mapping_key_cache: tuple[object, ...] | None = None
         self._visible_items = 0
         self._changed_pages: tuple[int, ...] = ()
         self._last_stats = TileLayerUpdateStats()
@@ -2117,6 +2125,7 @@ class GpuMontageLayer:
 
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         rows = self._pool.tile_truth_physical_rows()
+        spans_by_page: dict[int, dict[int, tuple[int, int, float]]] = {}
         for tile_number, row in rows.items():
             slot_ref = self._pool.tile_slots.get(int(tile_number))
             if slot_ref is None:
@@ -2125,27 +2134,17 @@ class GpuMontageLayer:
             if page_index >= len(self._visuals_by_page):
                 continue
             visual = self._visuals_by_page[page_index]
-            payloads = (
-                self._page_payloads_by_index[page_index]
-                if page_index < len(self._page_payloads_by_index)
-                else {}
-            )
-            # Vertex offsets are a prefix sum of per-tile quad counts: tiles
-            # with registered draw parts emit 6 vertices per part, others 6.
-            ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
-            draw_parts = self._pool.tile_draw_parts
-            payload_offset = -1
-            offset = 0
-            for tile in ordered_tiles:
-                if tile == int(tile_number):
-                    payload_offset = offset
-                    break
-                offset += 6 * max(1, len(draw_parts.get(tile, ())))
+            if page_index not in spans_by_page:
+                spans_by_page[page_index] = {
+                    tile: (offset, count, mode)
+                    for tile, offset, count, mode in self._page_mode_spans_for(page_index)
+                }
+            span = spans_by_page[page_index].get(int(tile_number))
             mode_data = np.asarray(getattr(visual, "mode_data", ()), dtype=np.float32)
             physical_mode = (
                 None
-                if payload_offset < 0 or payload_offset >= len(mode_data)
-                else float(mode_data[payload_offset])
+                if span is None or span[1] <= 0 or span[0] >= len(mode_data)
+                else float(mode_data[span[0]])
             )
             row.update(
                 {
@@ -2166,6 +2165,151 @@ class GpuMontageLayer:
     def changed_page_indices(self) -> tuple[int, ...]:
         return tuple(int(index) for index in self._changed_pages)
 
+    def _desired_visual_mapping_key(self) -> tuple[object, ...]:
+        """Visual-granularity key for the layer's desired shader mapping.
+
+        Cached per layer mapping identity (``_mapping_identity_key``): the
+        visual key hashes the normalized LUT content, which must not be
+        recomputed on every clean commit.
+        """
+
+        cache = self._visual_mapping_key_cache
+        if cache is None or cache[0] != self._shader_mapping_key:
+            cache = (
+                self._shader_mapping_key,
+                _visual_shader_mapping_key(self._shader_mapping),
+            )
+            self._visual_mapping_key_cache = cache
+        return cache[1]
+
+    def _page_mode_spans_for(self, page_index: int):
+        payloads = (
+            self._page_payloads_by_index[int(page_index)]
+            if 0 <= int(page_index) < len(self._page_payloads_by_index)
+            else {}
+        )
+        return _page_mode_spans(
+            self._last_layout,
+            payloads,
+            self._pool.tile_uvs,
+            self._pool.tile_draw_parts,
+            rgb_already_windowed=self._rgb_already_windowed,
+        )
+
+    def physical_page_divergences(self) -> dict[int, tuple[str, ...]]:
+        """Desired-vs-physical audit of every ACTIVE page visual.
+
+        The layer-level caches (``_shader_mapping_key``/``_levels``/
+        ``_geometry_keys``) are desired-state hints, not physical truth: a
+        hidden page can re-enter holding an older uniform set, and nothing
+        pins the per-quad ``a_mode`` vertex buffer (field defect 2026-07-15:
+        stale mode 3 / stale ``u_component_mode`` rendered zero-magnitude
+        complex texels as the PAL-relaxed LUT[0] orange, invisible to the
+        identity layer by construction).  This audit compares each visible
+        page visual's own physical state against the layer's desired state.
+
+        Bounded cost per commit: per active page, three cached-key/uniform
+        comparisons plus one float32 equality sweep over that page's
+        ``a_mode`` buffer (6 floats per drawn quad — a few hundred entries
+        for a full montage page).  The desired visual mapping key is cached
+        per mapping identity, so no LUT hashing happens here.  Visuals that
+        do not expose physical state (CPU/back-compat fakes) contribute no
+        evidence and are never flagged.
+        """
+
+        divergences: dict[int, tuple[str, ...]] = {}
+        desired_mapping = self._desired_visual_mapping_key()
+        for page_index, visual in enumerate(self._visuals_by_page):
+            if page_index >= len(self._page_visibility) or not self._page_visibility[page_index]:
+                continue
+            page_payloads = (
+                self._page_payloads_by_index[page_index]
+                if page_index < len(self._page_payloads_by_index)
+                else {}
+            )
+            if not page_payloads:
+                continue
+            kinds: list[str] = []
+            physical_mapping = getattr(visual, "_shader_mapping_key", _UNSET)
+            if physical_mapping is not _UNSET:
+                stale_key = physical_mapping != desired_mapping
+                # A stale uniform can hide behind a fresh-looking key (the
+                # injected-corruption class): audit the derived uniforms too.
+                stale_uniforms = (
+                    float(getattr(visual, "_scale_mode", desired_mapping[0])) != float(desired_mapping[0])
+                    or float(getattr(visual, "_symlog_constant", desired_mapping[1])) != float(desired_mapping[1])
+                    or float(getattr(visual, "_component_mode", desired_mapping[2])) != float(desired_mapping[2])
+                )
+                if stale_key or stale_uniforms:
+                    kinds.append("mapping")
+            physical_levels = getattr(visual, "_levels", _UNSET)
+            if physical_levels is not _UNSET and tuple(
+                float(value) for value in physical_levels
+            ) != tuple(float(value) for value in self._levels):
+                kinds.append("levels")
+            mode_data = getattr(visual, "mode_data", _UNSET)
+            if (
+                mode_data is not _UNSET
+                and self._last_layout
+                and self._mode_buffer_diverged(page_index, mode_data)
+            ):
+                kinds.append("modes")
+            if kinds:
+                divergences[int(page_index)] = tuple(kinds)
+        return divergences
+
+    def _mode_buffer_diverged(self, page_index: int, mode_data) -> bool:
+        spans = self._page_mode_spans_for(page_index)
+        mode_data = np.asarray(mode_data, dtype=np.float32).reshape((-1,))
+        total = 0 if not spans else int(spans[-1][1] + spans[-1][2])
+        if len(mode_data) != total:
+            return True
+        for _tile, offset, count, mode in spans:
+            if count and not bool(
+                np.all(mode_data[offset:offset + count] == np.float32(mode))
+            ):
+                return True
+        return False
+
+    def _repair_physical_divergences(
+        self, divergences: dict[int, tuple[str, ...]]
+    ) -> tuple[int, int, int]:
+        """Re-apply desired state onto divergent page visuals.
+
+        Returns ``(mapping_updates, level_updates, vertex_uploads)`` so the
+        caller can charge the repairs to the commit stats — a repaired
+        presentation must never be acknowledged as a physical no-op.
+        """
+
+        mapping_updates = 0
+        level_updates = 0
+        vertex_uploads = 0
+        for page_index, kinds in sorted(dict(divergences).items()):
+            visual = self._visuals_by_page[int(page_index)]
+            if "mapping" in kinds:
+                # Clear the visual's own no-op cache first: a stale uniform
+                # behind a fresh-looking key would otherwise no-op the setter.
+                visual._shader_mapping_key = None
+                mapping_updates += int(bool(visual.set_shader_mapping(self._shader_mapping)))
+            if "levels" in kinds:
+                level_updates += int(bool(visual.set_levels(self._levels)))
+            if "modes" in kinds:
+                page_payloads = (
+                    self._page_payloads_by_index[int(page_index)]
+                    if int(page_index) < len(self._page_payloads_by_index)
+                    else {}
+                )
+                vertices, texcoords, modes = _quad_buffers(
+                    self._last_layout,
+                    page_payloads,
+                    self._pool.tile_uvs,
+                    rgb_already_windowed=self._rgb_already_windowed,
+                    draw_parts=self._pool.tile_draw_parts,
+                )
+                visual.set_geometry(vertices, texcoords, modes)
+                vertex_uploads += 1
+        return mapping_updates, level_updates, vertex_uploads
+
     def reset_residency(self) -> None:
         for visual in self._visuals_by_page:
             visual.visible = False
@@ -2178,6 +2322,7 @@ class GpuMontageLayer:
         self._montage_geometry_key = None
         self._active_mapping_key = None
         self._atlas_serial = -1
+        self._last_layout = {}
         self._visible_items = 0
         self._changed_pages = ()
         self._last_stats = TileLayerUpdateStats()
@@ -2195,6 +2340,7 @@ class GpuMontageLayer:
         self._montage_geometry_key = None
         self._active_mapping_key = None
         self._atlas_serial = -1
+        self._last_layout = {}
         self._visible_items = 0
         self._changed_pages = ()
 
@@ -2220,6 +2366,20 @@ class GpuMontageLayer:
                 self._shader_mapping_key = mapping_key
                 for visual in self._visuals_by_page:
                     mapping_updates += int(bool(visual.set_shader_mapping(shader_mapping)))
+        # Physical presentation truth: this uniforms-only path may present
+        # as a no-op ONLY when every active page visual physically matches
+        # the desired mapping/levels/mode-buffer state.  Divergence is
+        # repaired here and charged to the returned stats.
+        divergences = self.physical_page_divergences()
+        repaired_vertex_uploads = 0
+        physical_repairs = 0
+        if divergences:
+            repaired_mappings, repaired_levels, repaired_vertex_uploads = (
+                self._repair_physical_divergences(divergences)
+            )
+            mapping_updates += repaired_mappings
+            level_updates += repaired_levels
+            physical_repairs = sum(len(kinds) for kinds in divergences.values())
         previous = self._last_stats
         changed_pages = (
             tuple(
@@ -2230,6 +2390,7 @@ class GpuMontageLayer:
             if level_updates or mapping_updates
             else ()
         )
+        changed_pages = tuple(sorted({*changed_pages, *divergences}))
         self._changed_pages = changed_pages
         self._last_stats = TileLayerUpdateStats(
             visible_items=self._visible_items,
@@ -2245,6 +2406,8 @@ class GpuMontageLayer:
             storage_capacity=self._pool.capacity,
             level_updates=int(bool(level_updates)),
             shader_uniform_updates=level_updates + mapping_updates,
+            vertex_uploads=repaired_vertex_uploads,
+            physical_repairs=physical_repairs,
             items_skipped=self._visible_items,
             estimated_gpu_bytes=self._pool.estimated_gpu_bytes,
             cpu_shadow_bytes=self._pool.cpu_shadow_bytes,
@@ -2301,6 +2464,8 @@ class GpuMontageLayer:
         payloads = {int(key): value for key, value in dict(payloads or {}).items()}
         levels = _normalize_levels(levels, self._levels)
         mapping_key = _mapping_identity_key(shader_mapping)
+        self._last_layout = layout
+        self._rgb_already_windowed = bool(rgb_already_windowed)
         layout_key = _layout_geometry_key(layout)
         # Mapping order is the admission order.  Backends own storage, never
         # presentation priority, so this must not be sorted by tile number.
@@ -2333,6 +2498,13 @@ class GpuMontageLayer:
             and levels == self._levels
             and mapping_key == self._shader_mapping_key
         ):
+            # The desired-state caches above prove the COMMIT is clean, not
+            # that the page visuals physically hold that state (1e36084b
+            # proved levels can diverge; the mapping key and mode buffer can
+            # too).  Re-presenting without touching visuals is allowed only
+            # when the physical audit passes; divergence is repaired and the
+            # repair is charged to the acknowledged stats.
+            divergences = self.physical_page_divergences()
             self._last_stats = _clean_layer_stats(
                 self._last_stats,
                 visible_items=self._visible_items,
@@ -2341,7 +2513,20 @@ class GpuMontageLayer:
                 pool=self._pool,
                 page_visibility=self._page_visibility,
             )
-            self._changed_pages = ()
+            if divergences:
+                repaired_mappings, repaired_levels, repaired_vertex_uploads = (
+                    self._repair_physical_divergences(divergences)
+                )
+                self._last_stats = replace(
+                    self._last_stats,
+                    vertex_uploads=repaired_vertex_uploads,
+                    level_updates=int(bool(repaired_levels)),
+                    shader_uniform_updates=repaired_mappings + repaired_levels,
+                    physical_repairs=sum(len(kinds) for kinds in divergences.values()),
+                )
+                self._changed_pages = tuple(sorted(divergences))
+            else:
+                self._changed_pages = ()
             return self._last_stats
         reserve_count = max(
             _atlas_reserve_count(geometry, minimum=len(payloads), frame_plan=frame_plan),
@@ -2486,6 +2671,21 @@ class GpuMontageLayer:
                 for index, visual in enumerate(self._visuals_by_page)
                 if bool(getattr(visual, "visible", False))
             )
+        # Physical presentation truth: even a full update rebuilds geometry
+        # and re-applies uniforms only where the desired-state caches say so;
+        # a physically clobbered page that those caches call fresh would be
+        # acknowledged stale.  Audit and repair before reporting.
+        physical_repairs = 0
+        divergences = self.physical_page_divergences()
+        if divergences:
+            repaired_mappings, repaired_levels, repaired_vertex_uploads = (
+                self._repair_physical_divergences(divergences)
+            )
+            mapping_updates += repaired_mappings
+            level_updates += repaired_levels
+            vertex_uploads += repaired_vertex_uploads
+            physical_repairs = sum(len(kinds) for kinds in divergences.values())
+            changed_pages.update(int(index) for index in divergences)
         self._changed_pages = tuple(sorted(changed_pages))
         self._last_stats = TileLayerUpdateStats(
             visible_items=len(effective_presented_tiles),
@@ -2523,6 +2723,7 @@ class GpuMontageLayer:
             mipmap_available=texture_stats.mipmap_available,
             complex_texture_uploads=texture_stats.complex_texture_uploads,
             shader_uniform_updates=level_updates + mapping_updates,
+            physical_repairs=physical_repairs,
             lod_level_swaps_zero_upload=texture_stats.lod_level_swaps_zero_upload,
             lod_level_swaps_with_upload=texture_stats.lod_level_swaps_with_upload,
             superseded_reclaimed_under_pressure=texture_stats.superseded_reclaimed_under_pressure,
@@ -3209,6 +3410,35 @@ def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool, draw_par
     )
 
 
+def _page_mode_spans(layout, payloads, uvs, draw_parts, *, rgb_already_windowed: bool):
+    """Ordered ``(tile, offset, count, mode)`` spans of a page's ``a_mode`` buffer.
+
+    Mirrors ``_quad_buffers`` exactly — same sorted-tile order, same
+    draw-parts quad emission, same skip rule for tiles without a layout
+    region or UV — so ``offset:offset + count`` addresses a tile's vertices
+    in the visual's physical mode buffer and ``mode`` is the desired
+    ``_payload_mode`` for those vertices.  Shared by the tile-truth
+    diagnostics rows and the physical-divergence audit.  Cost: O(tiles on
+    page).
+    """
+
+    spans = []
+    offset = 0
+    for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads or {}).items()):
+        quads = _tile_quad_rects(tile_number, layout, uvs, draw_parts)
+        count = 6 * len(quads)
+        spans.append(
+            (
+                tile_number,
+                offset,
+                count,
+                float(_payload_mode(payload, rgb_already_windowed=rgb_already_windowed)),
+            )
+        )
+        offset += count
+    return spans
+
+
 def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bool) -> tuple[object, ...]:
     # Registered draw parts are keyed explicitly: their UV crops are geometry
     # inputs that slot/region/gutter alone no longer determine (a window
@@ -3300,6 +3530,7 @@ def _clean_layer_stats(
         vertex_uploads=0,
         level_updates=0,
         shader_uniform_updates=0,
+        physical_repairs=0,
         upload_ms=0.0,
         resident_items=pool.resident_count,
         storage_capacity=pool.capacity,
