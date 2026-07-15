@@ -3856,6 +3856,94 @@ class FrameSession:
         )
 
 
+def slice_only_session_transition(previous_session, session) -> bool:
+    """True when a session rebirth changed nothing but ``slice_indices``.
+
+    Deciding predicate for retaining the drawn (stale-but-honest) plane
+    across the transition instead of blanking the surface.  Deliberately
+    conservative (ADR 0051 correctness history): every axis that could make
+    the retained pixels a lie for the new target — document revision and
+    operation steps, montage layout geometry, colormap, window/levels mode,
+    shader/CPU backend semantics, dtype, complex-RGB mode, LOD policy —
+    must match exactly, or the transition keeps the full blank (the camera
+    deliberately does not participate; see the note inline).
+    Comparing against the DYING session (not the last committed
+    frame) is chain-safe: a predecessor that itself blanked left the surface
+    hidden, so retention degenerates to today's behavior, and a predecessor
+    that retained satisfied this same predicate transitively.
+
+    Retention is presentation-only.  It can never resurrect the ADR 0051
+    stale-acknowledgement class because nothing here touches the session:
+    the new lifecycle starts cold, payload seeding still requires exact
+    source identities, and hover/probe reads stay gated by the render
+    generation (`_is_committed_display_frame_current`), which every rebirth
+    advances.
+    """
+
+    from arrayscope.operations.evaluator import _document_key
+
+    if previous_session is None or session is None:
+        return False
+    # Scope: plain sliced images only. True montage sessions never reach the
+    # rebirth path for index scrubs (retarget_index_window owns those).
+    if getattr(session, "montage_axis", None) is not None:
+        return False
+    if getattr(previous_session, "montage_axis", None) is not None:
+        return False
+    if bool(getattr(session, "force_auto", False)):
+        return False
+    if getattr(session, "skipped_tiles", None) or getattr(previous_session, "skipped_tiles", None):
+        return False
+    if _document_key(previous_session.document) != _document_key(session.document):
+        return False
+    if previous_session.window_mode != session.window_mode:
+        return False
+    if previous_session.user_levels_override != session.user_levels_override:
+        return False
+    if previous_session.colormap_lut is not session.colormap_lut:
+        return False
+    if bool(getattr(previous_session, "shader_display", False)) != bool(
+        getattr(session, "shader_display", False)
+    ):
+        return False
+    if previous_session.output_dtype != session.output_dtype:
+        return False
+    if bool(previous_session.rgb) != bool(session.rgb):
+        return False
+    if getattr(previous_session, "lod_policy_mode", None) != getattr(session, "lod_policy_mode", None):
+        return False
+    previous_geometry = getattr(getattr(previous_session, "plan", None), "geometry", None)
+    geometry = getattr(getattr(session, "plan", None), "geometry", None)
+    if previous_geometry is None or geometry is None:
+        return False
+    if (
+        tuple(previous_geometry.tile_shape) != tuple(geometry.tile_shape)
+        or int(previous_geometry.columns) != int(geometry.columns)
+        or int(previous_geometry.rows) != int(geometry.rows)
+        or int(previous_geometry.gap) != int(geometry.gap)
+        or len(previous_geometry.indices) != len(geometry.indices)
+    ):
+        return False
+    if tuple(getattr(previous_session.plan, "display_shape", ()) or ()) != tuple(
+        getattr(session.plan, "display_shape", ()) or ()
+    ):
+        return False
+    # Viewport shape / camera range deliberately do NOT participate: retained
+    # tiles are anchored in scene coordinates, so a camera change (or the
+    # startup scrollbar/layout drift that shifts the viewport a few pixels
+    # between session construction and settle) only re-crops the same honest
+    # plane; it cannot make the retained pixels describe different content.
+    previous_state = previous_session.view_state
+    state = session.view_state
+    if type(previous_state) is not type(state):
+        return False
+    try:
+        aligned = replace(state, slice_indices=previous_state.slice_indices)
+    except (TypeError, ValueError):
+        return False
+    return aligned == previous_state
+
+
 def _base_source_id(source_id) -> object:
     if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
         return source_id[0]
