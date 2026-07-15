@@ -584,6 +584,31 @@ acceptance.
 > refill is therefore reopened for P9 and must be judged against this corrected
 > gate; the earlier non-GPU design evidence remains useful, but its stated
 > physical rejection is superseded.
+>
+> **[Codex 2026-07-15 — P9 real-VisPy veto after corrected V1; runtime
+> reverted]** Completion-owned refill with a two-task initial cohort and two
+> admissions per real completion passed **438** focused tests and the hardened
+> real-Wayland V1/V2 matrix (**4/4**). PyQtGraph improved FFT scroll from
+> **17,326 ms** to **15,323 ms** and scalar scroll from **7,873 ms** to
+> **7,366 ms** without regressing cold raw fill. The same build failed the
+> full VisPy gate: cold raw fill regressed from **8,266 ms** to **9,704 ms**,
+> scalar scroll from **13,864 ms** to **26,905 ms**, and the first FFT scroll
+> visibly mixed incompatible-looking tile groups while filling out of priority
+> order. The trace nevertheless acknowledged the sampled FFT tiles as complex
+> channel, `complex_rg32f`, phase-color mapping, and two float32 planes. The
+> scheduler experiment is removed. Do not attribute the pixel corruption to
+> refill yet: it may predate this run. Reproduce it on the accepted P8 baseline
+> and prove the physical atlas slot/page identity before changing scheduling.
+> The rejected traces remain under
+> `tests/artifacts/redesign-p9-2026-07-15/{pyqtgraph,vispy}-cohort-refill/`.
+>
+> The P8 stress review adds a converging clue without proving a shared backend
+> cause: a transient CPU-path scroll dump recorded tile 4 acknowledged with
+> tile 7's identity and the same physical plane pointer. Retarget identity
+> rebinding and the VisPy-specific atlas page fallback therefore become the
+> next correctness investigation. The review's drivers × oracles matrix is now
+> in the linear branch history; broken pixels and center-out/preview ordering
+> remain ahead of trace calibration and further throughput experiments.
 
 ## The visible-truth harness (the only gate)
 

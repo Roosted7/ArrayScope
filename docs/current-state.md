@@ -79,6 +79,13 @@ the live product ordering has returned to [docs/roadmap.md](roadmap.md).
    run also emitted a stall-guard signature and its final whole-workflow trace
    scope was incomplete; preserve these as P9 evidence rather than reviving
    viewport-cadence or synchronous-continuation experiments.
+6. **[Codex 2026-07-15 — P9 VisPy correctness veto]** Completion-owned
+   admission refill is reverted despite PyQtGraph scroll improvements: VisPy
+   scalar scroll regressed by about 94%, and a real FFT scroll displayed
+   incompatible-looking tile groups while lifecycle acknowledgements still
+   described complex float32 payloads. The defect may predate P9. Physical
+   atlas/page identity, retarget rebinding, and backend-specific pixel tests
+   are the current blocker before more performance work.
 
 ## Material risks
 

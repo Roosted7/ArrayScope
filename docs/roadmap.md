@@ -93,6 +93,15 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > 16 ms heartbeat and throughput bars remain red. The active measured cause
 > is now presentation admission batching; PyQtGraph exposed an untrained
 > shared commit-feedback channel and 17-25 ms commit samples.
+>
+> **[Codex 2026-07-15 — P9 correction after real-VisPy gate]** Two bounded
+> admission designs improved some PyQtGraph phases but are rejected and fully
+> reverted: one-tile presentation batching regressed both scrolls and stranded
+> exact LOD, while completion-owned refill nearly doubled VisPy scalar-scroll
+> time and coincided with visibly mixed FFT-scroll tiles. The active step is
+> correctness-first physical identity rebinding plus center-out/preview-order
+> proof on both backend cache implementations; no further scheduler tuning is
+> allowed until that gate is clean.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
