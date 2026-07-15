@@ -92,9 +92,22 @@ boundary strip. Requires: texcoord/offset indirection in the tile visual
 (sample the atlas with a sub-window), and delta planning that requests only
 missing chunks through the existing pipeline.
 
+**Correctness precondition — windowability.** Chunk reuse across a window
+shift is valid only when the operation chain commutes with slicing along the
+shifted display axis: `op(data)[101:201] == op(data[101:201])` (raw views,
+flips, elementwise/complex maps). An FFT (or any whole-axis transform) along
+a displayed axis makes every output value depend on the entire window, so a
+shift is genuinely new content — the fast path must be gated per
+(operation chain × axis) by an explicit windowability predicate, defaulting
+to *not windowable*. A wrong `True` here shows plausible-but-wrong pixels at
+high speed; the gate tests must include the FFT-along-displayed-axis
+negative case.
+
 *Gate:* harness scenario — repeated ±1 window shift over a resident frame
 uploads only boundary chunks (recorded upload counter), pixel-identical to
-the PyQtGraph oracle; first-image latency on cold window unchanged (±10%).
+the PyQtGraph oracle; the FFT-along-displayed-axis case takes the full
+re-evaluation path and stays pixel-correct; first-image latency on cold
+window unchanged (±10%).
 
 ### G4 — Small-array whole residency + GPU indexing
 
