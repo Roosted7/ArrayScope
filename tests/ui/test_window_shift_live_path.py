@@ -6,7 +6,8 @@ The pool-level halves of this gate prove the residency arithmetic offscreen:
   payloads with window-invariant source ids skip interior uploads.
 * tests/display/test_vispy_chunked_residency.py — anchored PAYLOADS (ADR 0055
   G3b-2): the live flow ships ONE window-sized exact payload stamped with a
-  ``PayloadSourceAnchor``; the atlas pool chunks it privately into
+  ``PayloadSourceAnchor``; the atlas pool chunks it into canonical
+  ``DataChunkKey`` pages in
   origin-anchored 256x256 slots and re-uploads only boundary strips.
 
 This module drives the same scenario through the REAL ArrayScopeWindow flow —
@@ -27,6 +28,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
+from arrayscope.gpu import DataChunkKey
 
 from tests.ui.helpers import (
     apply_plane,
@@ -98,8 +101,17 @@ def _resident_chunks(pool) -> set:
 
 
 def _chunk_rect(chunk_key) -> tuple[int, int, int, int]:
-    # ("anchored-chunk", content_key, (y0, y1, x0, x1), kind, dtype, lod)
-    return tuple(int(value) for value in chunk_key[2])
+    y0, x0 = chunk_key.chunk_origin
+    y1, x1 = chunk_key.stop
+    return (int(y0), int(y1), int(x0), int(x1))
+
+
+def _chunk_content_key(chunk_key: DataChunkKey) -> tuple[object, ...]:
+    return (
+        "src-anchored",
+        chunk_key.document_generation,
+        chunk_key.operation_key,
+    )
 
 
 def test_window_shift_live_pixels_stay_correct(qtbot):
@@ -177,7 +189,7 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
         # window, so their content identity legitimately changes on a shift.
         expected_boundary = 2 * len(rows)
         assert len(columns) > 2, "window must contain interior chunk columns"
-        content_keys_a = {key[1] for key in chunks_a}
+        content_keys_a = {_chunk_content_key(key) for key in chunks_a}
         assert len(content_keys_a) == 1, "one window-invariant content key expected"
 
         uploads.clear()
@@ -188,7 +200,7 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
         assert len(chunks_b) == total
         # The content key is window-invariant: the shift renames nothing but
         # the clipped boundary rects.
-        assert {key[1] for key in chunks_b} == content_keys_a
+        assert {_chunk_content_key(key) for key in chunks_b} == content_keys_a
 
         # Residency: interior chunks survive the shift byte-identical.
         overlap = chunks_a & chunks_b
@@ -237,7 +249,7 @@ def _resident_chunk_keys_for_content(pool, content_key) -> set:
     return {
         key
         for key in pool._page_table.resident_keys()
-        if isinstance(key, tuple) and len(key) >= 2 and key[0] == "anchored-chunk" and key[1] == content_key
+        if isinstance(key, DataChunkKey) and _chunk_content_key(key) == content_key
     }
 
 
@@ -427,7 +439,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
             return {
                 key
                 for key in _resident_chunks(pool)
-                if isinstance(key[5], tuple) and int(key[5][0]) > 1
+                if int(key.lod.factor) > 1
             }
 
         qtbot.waitUntil(lambda: bool(reduced_chunks()), timeout=_WAIT_TIMEOUT_MS)
@@ -435,7 +447,9 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         # Factor-2 keys: LOD triple (factor, level, gutter) == (2, 1, 0);
         # native key rects span factor * chunk-shape source samples and
         # anchor at the shifted window start.
-        assert {key[5] for key in chunks} == {(2, 1, 0)}
+        assert {
+            (key.lod.factor, key.lod.level, key.lod.gutter) for key in chunks
+        } == {(2, 1, 0)}
         assert len(chunks) == 2
         rects = sorted(_chunk_rect(key) for key in chunks)
         assert rects == [

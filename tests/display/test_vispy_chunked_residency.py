@@ -22,6 +22,7 @@ from arrayscope.display.backends.vispy.tiles import (
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
 from arrayscope.display.pyramid import reduce_box_mean
+from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot
 
 from tests.display.vispy_test_utils import FakeGloo
 
@@ -95,11 +96,17 @@ def test_chunk_plan_keys_and_rects():
     assert (0, 256, 100, 256) in rects  # left boundary: clipped rect
     assert (0, 256, 256, 512) in rects  # interior: full chunk rect
     assert (256, 512, 1024, 1124) in rects  # right boundary: clipped rect
-    # Keys fold the full content identity.
-    key = plan[0].key
-    assert key[0] == "anchored-chunk"
-    assert key[1] == CONTENT_KEY
-    assert key[3] == "scalar_r32f" or isinstance(key[3], str)
+    # Keys are canonical source-grid pages, not backend-private tuples.
+    for chunk in plan:
+        key = chunk.key
+        y0, y1, x0, x1 = chunk.rect
+        assert key.document_generation == "doc-rev-0"
+        assert key.operation_key == "windowless-view"
+        assert key.chunk_origin == (y0, x0)
+        assert key.chunk_shape == (y1 - y0, x1 - x0)
+        assert key.representation == "scalar_r32f"
+        assert key.lod.reduction == (0, 0)
+        assert key.lod.reducer == "native"
     # The plane tiles exactly: chunk plane rects cover every pixel once.
     covered = np.zeros((HEIGHT, EXTENT), dtype=np.int32)
     for chunk in plan:
@@ -524,11 +531,22 @@ def test_reduced_plan_uniform_plane_pixel_chunks_with_native_scaled_keys():
         (1024, 1536, 100, 1124),
         (1024, 1536, 1124, 2148),
     }
-    # Keys fold content identity plus the LOD triple.
+    # Keys fold canonical content identity plus the reduction contract.
     for chunk in plan:
-        assert chunk.key[0] == "anchored-chunk"
-        assert chunk.key[1] == R_CONTENT_KEY
-        assert chunk.key[5] == (R_FACTOR, R_LEVEL, 0)
+        key = chunk.key
+        y0, y1, x0, x1 = chunk.rect
+        assert key.document_generation == "doc-rev-0"
+        assert key.operation_key == "windowless-view-reduced"
+        assert key.chunk_origin == (y0, x0)
+        assert key.chunk_shape == (y1 - y0, x1 - x0)
+        assert key.representation == "scalar_r32f"
+        assert key.lod.reduction == (R_LEVEL, R_LEVEL)
+        assert key.lod.reducer == "mean"
+        assert (key.lod.factor, key.lod.level, key.lod.gutter) == (
+            R_FACTOR,
+            R_LEVEL,
+            0,
+        )
     # The plane tiles exactly: chunk plane rects cover every sample once.
     covered = np.zeros((R_PLANE_H, R_PLANE_W), dtype=np.int32)
     for chunk in plan:
@@ -1102,3 +1120,221 @@ def test_window_session_to_classic_montage_same_tile_numbers_no_stale_state():
         1: ("montage-tile", 2),
         2: ("montage-tile", 3),
     }
+
+
+# ---------------------------------------------------------------------------
+# ADR 0056 G5: consume best-resident page resolutions in the VisPy pool.
+#
+# These gates deliberately stop at the pool boundary.  The pure PageTable
+# resolver is already covered in tests/gpu; the missing integration seam is
+# the one CPU-side resolution pass that binds an existing physical slot to a
+# view tile without introducing a second layer.update presentation path.
+# ---------------------------------------------------------------------------
+
+
+def virtual_page_key(*, origin, shape, reduction, document=("doc", 1), reducer="mean"):
+    return DataChunkKey(
+        document_generation=document,
+        operation_key=("op", "identity"),
+        lod=ChunkLod(reduction=reduction, reducer=reducer),
+        chunk_origin=origin,
+        chunk_shape=shape,
+        dtype="float32",
+    )
+
+
+def virtual_page_payload(key, value, *, tile_number):
+    reduction = tuple(int(step) for step in key.lod.reduction)
+    stored_shape = tuple(
+        max(1, int(extent) // (1 << int(step)))
+        for extent, step in zip(key.chunk_shape, reduction)
+    )
+    return DisplayTilePayload(
+        tile_number=int(tile_number),
+        source_index=int(tile_number),
+        image=np.full(stored_shape, float(value), dtype=np.float32),
+        histogram_data=None,
+        # G5 migration contract: a canonical DataChunkKey is already the
+        # residency identity; the backend must not wrap it in a legacy tuple.
+        source_id=key,
+        quality="exact",
+    )
+
+
+def commit_virtual_pages(pool, payloads, *, reserve_count):
+    _uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=int(reserve_count),
+    )
+    return stats
+
+
+def virtual_page_family():
+    target = virtual_page_key(origin=(2, 2), shape=(2, 2), reduction=(0, 0))
+    coarse = virtual_page_key(origin=(0, 0), shape=(8, 8), reduction=(2, 2))
+    fine = virtual_page_key(origin=(2, 2), shape=(2, 2), reduction=(0, 0))
+    return target, coarse, fine
+
+
+def test_missing_fine_target_binds_resident_coarse_page_without_upload():
+    target, coarse, _fine = virtual_page_family()
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    cold = commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    uploads_before = cold.texture_uploads
+
+    resolved = pool.resolve_page_targets({7: target})
+
+    assert resolved[7] is not None
+    assert resolved[7].target_key == target
+    assert resolved[7].actual_key == coarse
+    assert resolved[7].slot == PageSlot("vispy-atlas", *pool.tile_slots[7])
+    assert pool.presented_identities()[7] == coarse
+    # Resolving resident coverage is a mapping operation, never an upload.
+    assert sum(len(page.scalar_texture.uploads) for page in pool.pages) == uploads_before
+
+
+def test_resident_fine_arrival_supersedes_coarse_with_zero_resolution_uploads():
+    target, coarse, fine = virtual_page_family()
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    first = pool.resolve_page_targets({7: target})[7]
+    assert first.actual_key == coarse
+
+    warmed = pool.warm_payloads(
+        {1: virtual_page_payload(fine, 9.0, tile_number=1)},
+        tile_shape=(2, 2),
+        rgb_already_windowed=False,
+    )
+    assert warmed.texture_uploads == 1
+    uploads_before_resolution = sum(
+        len(page.scalar_texture.uploads) for page in pool.pages
+    )
+
+    refined = pool.resolve_page_targets({7: target})[7]
+
+    assert refined.actual_key == fine
+    assert refined.slot == PageSlot("vispy-atlas", *pool.tile_slots[7])
+    assert refined.binding_generation > first.binding_generation
+    assert pool.presented_identities()[7] == fine
+    assert sum(len(page.scalar_texture.uploads) for page in pool.pages) == uploads_before_resolution
+
+
+def test_fine_unbind_re_resolves_pinned_coarse_without_clearing_target_tile():
+    target, coarse, fine = virtual_page_family()
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    pool.warm_payloads(
+        {1: virtual_page_payload(fine, 9.0, tile_number=1)},
+        tile_shape=(2, 2),
+        rgb_already_windowed=False,
+    )
+    assert pool.resolve_page_targets({7: target})[7].actual_key == fine
+    assert 7 in pool.tile_slots
+
+    # Eviction invalidates the logical binding.  Resolution happens before
+    # geometry publication, so the view-tile mapping is replaced in place:
+    # it is never cleared to a black placeholder between exact and fallback.
+    pool._page_table.unbind(fine)
+    fallback = pool.resolve_page_targets({7: target})[7]
+
+    assert fallback.actual_key == coarse
+    assert 7 in pool.tile_slots
+    assert pool.presented_identities()[7] == coarse
+
+
+def test_no_compatible_ancestor_is_explicit_missing_and_drops_stale_mapping():
+    target, coarse, _fine = virtual_page_family()
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    assert pool.resolve_page_targets({7: target})[7] is not None
+
+    incompatible = virtual_page_key(
+        origin=(2, 2),
+        shape=(2, 2),
+        reduction=(0, 0),
+        document=("other-doc", 1),
+    )
+    missing = pool.resolve_page_targets({7: incompatible})
+
+    assert missing == {7: None}
+    assert 7 not in pool.tile_slots
+    assert 7 not in pool.presented_identities()
+    assert 7 not in pool.tile_truth_physical_rows()
+
+
+def test_warm_cannot_evict_or_relocate_owner_pinned_coarse_coverage():
+    target, coarse, fine = virtual_page_family()
+    # One 2x2 slot: there is physically no room beside the coarse page.
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=2, budget_bytes=2 * 2 * 4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=1,
+    )
+    resolution = pool.resolve_page_targets({7: target})[7]
+    resident_before = dict(pool.resident_slots)
+    generation_before = resolution.binding_generation
+
+    denied = pool.warm_payloads(
+        {1: virtual_page_payload(fine, 9.0, tile_number=1)},
+        tile_shape=(2, 2),
+        rgb_already_windowed=False,
+    )
+
+    assert denied.texture_uploads == 0
+    assert denied.storage_evictions == 0
+    assert pool.resident_slots == resident_before
+    assert coarse not in pool._page_table.eviction_candidates()
+    still_covered = pool.resolve_page_targets({7: target})[7]
+    assert still_covered.actual_key == coarse
+    assert still_covered.binding_generation == generation_before
+
+
+def test_remap_generation_rebinds_target_instead_of_sampling_stale_slot():
+    target, coarse, _fine = virtual_page_family()
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    initial = pool.resolve_page_targets({7: target})[7]
+    assert initial.slot.slot_index == 0
+
+    # Model atlas compaction moving the physical association to the other
+    # slot on the same page.  The old PageResolution must not stay cached.
+    page = pool.pages[0]
+    page.slot_owners[0] = None
+    page.slot_owners[1] = coarse
+    page._free_slots = [slot for slot in page._free_slots if int(slot) != 1]
+    page._free_slots.append(0)
+    pool._page_table.remap_slots(
+        lambda slot: PageSlot(slot.pool_id, slot.page_index, 1)
+        if slot == initial.slot
+        else slot
+    )
+
+    remapped = pool.resolve_page_targets({7: target})[7]
+
+    assert remapped.slot == PageSlot("vispy-atlas", 0, 1)
+    assert remapped.binding_generation > initial.binding_generation
+    assert pool.tile_slots[7] == (0, 1)

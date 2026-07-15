@@ -33,7 +33,13 @@ from arrayscope.display.model.tile_identity import (
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
-from arrayscope.gpu.page_table import PageSlot, PageTable
+from arrayscope.gpu.keys import (
+    REDUCER_MEAN,
+    REDUCER_NATIVE,
+    ChunkLod,
+    DataChunkKey,
+)
+from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable
 
 try:
     from vispy.visuals import Visual
@@ -83,15 +89,13 @@ class TileDrawPart:
 class _PayloadChunk:
     """One origin-anchored chunk of an anchored payload plane (ADR 0055 G3b-2).
 
-    ``key`` is the backend-private residency identity: equal keys mean equal
-    texels regardless of the display window that produced the payload
-    (``content_key`` folds document revision + operation steps + window-free
-    view identity; the clipped native rect, texture kind, dtype, and LOD
-    triple complete it). Boundary chunks carry their *clipped* rect, so they
-    are window-dependent by design and legitimately re-upload on a shift.
+    ``key`` is the canonical source-grid residency identity: equal keys mean
+    equal texels regardless of the display window that produced the payload.
+    Boundary chunks carry their *clipped* native footprint, so they remain
+    distinct from aligned interiors and legitimately re-upload on a shift.
     """
 
-    key: tuple
+    key: DataChunkKey
     rect: tuple[int, int, int, int]  # native source rect (y0, y1, x0, x1)
     plane_rect: tuple[int, int, int, int]  # same rect in payload plane pixels
 
@@ -136,6 +140,11 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
     lod = getattr(payload, "lod", None)
     factor = 1 if lod is None else int(getattr(lod, "factor", 1) or 1)
     if factor < 1:
+        return False
+    if factor & (factor - 1):
+        # DataChunkKey reduction vectors are exact log2 source-grid steps.
+        # A non-power-of-two legacy factor has no honest page ancestry in
+        # that model and stays on the classic whole-payload path.
         return False
     if lod is not None and int(getattr(lod, "gutter", 0) or 0) != 0:
         return False
@@ -191,11 +200,6 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
     texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     dtype = str(texture.dtype)
     lod = getattr(payload, "lod", None)
-    lod_key = (
-        None
-        if lod is None
-        else (int(lod.factor), int(lod.level), int(lod.gutter))
-    )
     factor = 1 if lod is None else max(1, int(getattr(lod, "factor", 1) or 1))
     chunks: list[_PayloadChunk] = []
     if factor == 1:
@@ -206,7 +210,13 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
                 rect = (ry0, ry1, rx0, rx1)
                 chunks.append(
                     _PayloadChunk(
-                        key=("anchored-chunk", anchor.content_key, rect, kind, dtype, lod_key),
+                        key=_data_chunk_key(
+                            content_key=anchor.content_key,
+                            rect=rect,
+                            representation=kind,
+                            dtype=dtype,
+                            lod=lod,
+                        ),
                         rect=rect,
                         plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
                     )
@@ -225,7 +235,13 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
             )
             chunks.append(
                 _PayloadChunk(
-                    key=("anchored-chunk", anchor.content_key, rect, kind, dtype, lod_key),
+                    key=_data_chunk_key(
+                        content_key=anchor.content_key,
+                        rect=rect,
+                        representation=kind,
+                        dtype=dtype,
+                        lod=lod,
+                    ),
                     rect=rect,
                     plane_rect=(py0, py1, px0, px1),
                 )
@@ -233,8 +249,66 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
     return tuple(chunks)
 
 
+def _data_chunk_key(
+    *,
+    content_key: object,
+    rect: tuple[int, int, int, int],
+    representation: str,
+    dtype: str,
+    lod,
+) -> DataChunkKey:
+    """Canonical logical page identity for one anchored atlas chunk.
+
+    ``SourceAnchoring`` already separates the immutable document/evaluation
+    identity from the window-free request.  Test/foreign anchors that do not
+    carry that tagged shape remain one opaque document generation rather than
+    being guessed apart.
+    """
+
+    if (
+        isinstance(content_key, tuple)
+        and len(content_key) == 3
+        and content_key[0] == "src-anchored"
+    ):
+        document_generation, operation_key = content_key[1], content_key[2]
+    else:
+        document_generation, operation_key = content_key, None
+    factor = 1 if lod is None else max(1, int(getattr(lod, "factor", 1) or 1))
+    level = 0 if lod is None else max(0, int(getattr(lod, "level", 0) or 0))
+    gutter = 0 if lod is None else max(0, int(getattr(lod, "gutter", 0) or 0))
+    if factor == 1:
+        reduction = (0, 0)
+        reducer = REDUCER_NATIVE
+    else:
+        reduction_step = factor.bit_length() - 1
+        if (1 << reduction_step) != factor:
+            raise ValueError(f"chunked LOD factor must be a power of two, got {factor}")
+        reduction = (reduction_step, reduction_step)
+        reducer = REDUCER_MEAN
+    y0, y1, x0, x1 = (int(value) for value in rect)
+    return DataChunkKey(
+        document_generation=document_generation,
+        operation_key=operation_key,
+        lod=ChunkLod(
+            level=level,
+            factor=factor,
+            gutter=gutter,
+            reduction=reduction,
+            reducer=reducer,
+        ),
+        chunk_origin=(y0, x0),
+        chunk_shape=(y1 - y0, x1 - x0),
+        dtype=dtype,
+        representation=representation,
+    )
+
+
 _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
 _UNSET = object()
+
+
+def _page_target_pin_owner(tile_number: int) -> tuple[str, int]:
+    return ("vispy-page-target", int(tile_number))
 
 # Raw-GL constants for atlas mipmaps (gloo has no mipmap support; the visual
 # generates them itself with the context current, see _refresh_mipmaps).
@@ -407,6 +481,8 @@ class TextureAtlasPool:
         # is the ADR 0055 page table; the atlas keeps only texture mechanics
         # and the view-tile → resident-key presentation maps below.
         self._page_table = PageTable()
+        self.page_target_resolutions: dict[int, PageResolution] = {}
+        self._page_target_pin_tiles: set[int] = set()
         self.tile_slots: dict[int, tuple[int, int]] = {}
         # ADR 0055 G3: optional per-tile quad list (UV-cropped sub-window
         # sampling). Tiles absent from this map draw one full-slot quad.
@@ -476,6 +552,48 @@ class TextureAtlasPool:
             if key in self.source_ids
         }
 
+    def resolve_page_targets(
+        self,
+        targets: dict[int, DataChunkKey],
+    ) -> dict[int, PageResolution | None]:
+        """Bind logical view targets to their best resident physical pages.
+
+        Resolution is one bounded CPU lookup per target.  It changes only
+        mappings and owner-scoped pins: not-resident stays explicit and this
+        method never uploads, evaluates, or schedules work.
+        """
+
+        requested = {int(tile): key for tile, key in dict(targets).items()}
+        for tile in self._page_target_pin_tiles.difference(requested):
+            self._page_table.replace_pin_set(_page_target_pin_owner(tile), ())
+            self.page_target_resolutions.pop(int(tile), None)
+            self._clear_tile_mapping(int(tile))
+        results: dict[int, PageResolution | None] = {}
+        for tile, target in requested.items():
+            resolution = self._page_table.resolve(target)
+            results[tile] = resolution
+            owner = _page_target_pin_owner(tile)
+            if resolution is None:
+                self._page_table.replace_pin_set(owner, ())
+                self.page_target_resolutions.pop(tile, None)
+                self._clear_tile_mapping(tile)
+                continue
+            self._page_table.replace_pin_set(owner, (resolution.actual_key,))
+            self._page_table.touch(resolution.actual_key)
+            page_index = int(resolution.slot.page_index)
+            slot = int(resolution.slot.slot_index)
+            page = self.pages[page_index]
+            self._set_tile_mapping(
+                tile,
+                resolution.actual_key,
+                page_index,
+                slot,
+                page.uv_for_slot(slot),
+            )
+            self.page_target_resolutions[tile] = resolution
+        self._page_target_pin_tiles = set(requested)
+        return results
+
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         rows: dict[int, dict[str, object]] = {}
         for tile, resident_key in self.tile_resident_keys.items():
@@ -493,6 +611,23 @@ class TextureAtlasPool:
                     self.source_ids.get(resident_key),
                 ),
             }
+            resolution = self.page_target_resolutions.get(int(tile))
+            if resolution is not None:
+                rows[int(tile)].update(
+                    {
+                        "physical_page_target_key": resolution.target_key,
+                        "physical_page_actual_key": resolution.actual_key,
+                        "physical_page_lod": resolution.actual_key.lod,
+                        "physical_page_quality": (
+                            "exact"
+                            if resolution.actual_key == resolution.target_key
+                            else "fallback"
+                        ),
+                        "physical_page_binding_generation": int(
+                            resolution.binding_generation
+                        ),
+                    }
+                )
         return rows
 
     @property
@@ -581,6 +716,8 @@ class TextureAtlasPool:
         if shape_changed or mode_changed:
             self.pages.clear()
             self._page_table = PageTable()
+            self.page_target_resolutions.clear()
+            self._page_target_pin_tiles.clear()
             self.tile_slots.clear()
             self.tile_draw_parts.clear()
             self.tile_chunk_residency.clear()
@@ -704,7 +841,11 @@ class TextureAtlasPool:
                 adjacent = _lod_invariant_source_id(self.source_ids.get(key)) in active_bases
                 if adjacent != adjacent_pass:
                     continue
-                if key in self.active_resident_keys or self.resident_tiles.get(key):
+                if (
+                    key in self.active_resident_keys
+                    or self.resident_tiles.get(key)
+                    or self._page_table.is_pinned(key)
+                ):
                     continue
                 slot_ref = self._page_table.lookup(key)
                 if slot_ref is None:
@@ -1674,7 +1815,11 @@ class TextureAtlasPool:
         active_bases = self.active_base_source_ids
         for page_index, page in class_pages:
             for slot, owner in enumerate(page.slot_owners):
-                if owner is not None and owner not in active_keys:
+                if (
+                    owner is not None
+                    and owner not in active_keys
+                    and not self._page_table.is_pinned(owner)
+                ):
                     # Eviction preference under pressure (ADR 0050): first
                     # superseded classes of tiles that are neither active nor
                     # near, then presented classes of non-active tiles, and
@@ -1786,7 +1931,12 @@ class TextureAtlasPool:
             evictable = sum(
                 1
                 for owner in page.slot_owners
-                if owner is not None and owner not in protected_keys and owner not in key_set
+                if (
+                    owner is not None
+                    and owner not in protected_keys
+                    and owner not in key_set
+                    and not self._page_table.is_pinned(owner)
+                )
             )
             return free + evictable >= needed
 
@@ -1889,7 +2039,11 @@ class TextureAtlasPool:
         candidates = []
         active_bases = self.active_base_source_ids
         for slot, owner in enumerate(page.slot_owners):
-            if owner is None or owner in protected_keys:
+            if (
+                owner is None
+                or owner in protected_keys
+                or self._page_table.is_pinned(owner)
+            ):
                 continue
             superseded = owner in self.superseded_keys and not self.resident_tiles.get(owner)
             adjacent = superseded and _lod_invariant_source_id(self.source_ids.get(owner)) in active_bases
@@ -4056,6 +4210,11 @@ def _resident_key(payload: DisplayTilePayload) -> object:
     cached = payload.__dict__.get("_vispy_resident_key")
     if cached is not None:
         return cached
+    if isinstance(payload.source_id, DataChunkKey):
+        # A canonical logical page is already complete residency identity.
+        # Wrapping it in the legacy tile texture tuple would make the page
+        # invisible to best-resident-ancestor resolution.
+        return payload.source_id
     texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     lod = getattr(payload, "lod", None)
     key = (

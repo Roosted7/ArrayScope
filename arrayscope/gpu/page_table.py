@@ -100,6 +100,12 @@ class PageTable:
         target_reduction = _reduction_vector(target)
         candidates: list[tuple[tuple[object, ...], DataChunkKey, ResidencyEntry]] = []
         for sequence, (key, entry) in enumerate(self._entries.items()):
+            # Transitional atlas integration: the VisPy pool also stores
+            # whole-tile presentation keys in this table.  They are physical
+            # residency bookkeeping, not logical data pages, and therefore
+            # can never satisfy a DataChunkKey target.
+            if not isinstance(key, DataChunkKey):
+                continue
             if not _same_value_family(target, key):
                 continue
             actual_reduction = _reduction_vector(key)
@@ -208,6 +214,12 @@ class PageTable:
 
         entry = self._entries.get(key)
         return default if entry is None else entry.last_use
+
+    def is_pinned(self, key: DataChunkKey) -> bool:
+        """Whether any owner currently protects this resident binding."""
+
+        entry = self._entries.get(key)
+        return bool(entry is not None and entry.pinned)
 
     def slot_items(self) -> tuple[tuple[DataChunkKey, PageSlot], ...]:
         return tuple((key, entry.slot) for key, entry in self._entries.items())

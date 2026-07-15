@@ -1,7 +1,8 @@
 # G5 source-grid sparse pyramid contract — 2026-07-16
 
 **Status:** authoritative implementation contract for the remaining ADR 0056
-work; pure page resolution/pins and source-grid mean geometry implemented.
+work; pure page resolution/pins, source-grid mean geometry, and the VisPy
+CPU-resolution/physical-truth seam implemented.
 This closes the dangling “route-canonicalization” reference in the GPU handoff
 before production code chooses an accidental second reduction route.
 
@@ -86,7 +87,8 @@ display is allowed only when no compatible resident ancestor exists.
 
 ## Implementation progress
 
-The first pure slice is now standing without Qt, VisPy, or scheduler coupling:
+The pure model and first VisPy consumption slice now stand without scheduler
+coupling:
 
 - `PageTable.resolve` returns exact or finest compatible covering residency,
   including actual key/slot, target-to-resident sample transform, and binding
@@ -97,8 +99,20 @@ The first pure slice is now standing without Qt, VisPy, or scheduler coupling:
 - `reduce_source_grid_mean` plans global anisotropic bins, reports native-source
   coverage/identity per sample, shares aligned interiors across origins 101/102,
   rejects clipped recursive inputs, and matches a direct CPU oracle;
-- 74 focused GPU/pyramid tests pass. The next slice is VisPy consumption of
-  these resolutions with actual-coarse physical acknowledgement.
+- anchored atlas chunks now use canonical `DataChunkKey` identities instead of
+  backend-private tuples; the mixed atlas page table deliberately excludes
+  legacy whole-tile keys from logical ancestor lookup;
+- `TextureAtlasPool.resolve_page_targets` performs one bounded CPU resolution
+  pass, changes mappings/pins only, and never uploads or schedules. It rebinds
+  fine arrival and fine removal in place, reports explicit missing only when no
+  compatible page exists, and refreshes bindings after slot remap;
+- owner pins are honored by every atlas eviction route, including speculative
+  warm placement and superseded-page reclamation;
+- physical presentation rows report target key, actual key/LOD, exact versus
+  fallback quality, and binding generation; presented identity is the actual
+  resident page, never the requested fine page;
+- 111 focused GPU/pyramid/VisPy tests pass. The next slice is the live
+  ladder/cache migration that emits logical page targets into this seam.
 
 ## Rejected shortcuts
 
@@ -107,6 +121,9 @@ The first pure slice is now standing without Qt, VisPy, or scheduler coupling:
 - active exact chunks as a substitute for owner-scoped coarse pins;
 - pinning every coarse page forever;
 - acknowledging a coarse physical fallback as the fine target;
+- wrapping a `DataChunkKey` in the legacy whole-tile residency tuple;
+- treating `max_texture_size` as a total VRAM/page-count budget (pin-pressure
+  denial gates use an explicit byte budget; without one the atlas may grow);
 - treating previous-screen retention as data-level coverage;
 - renaming window-origin reductions without changing their bins;
 - reusing clipped boundary values across different valid footprints;

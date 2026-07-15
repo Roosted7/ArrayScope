@@ -24,13 +24,16 @@ import numpy as np
 from arrayscope.display.backends.vispy.tiles import (
     GpuDeviceLimits,
     GpuMontageLayer,
+    TextureAtlasPool,
     _visual_shader_mapping_key,
 )
+from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
     ShaderMapping,
 )
+from arrayscope.gpu import ChunkLod, DataChunkKey
 
 from tests.display.vispy_test_utils import FakeGloo, FakeVisual, complex_payload
 
@@ -325,3 +328,54 @@ def test_full_update_repairs_stale_uniform_the_page_sync_cannot_see():
 
     assert stats.physical_repairs == 1
     assert visual._component_mode == 2.0
+
+
+def test_coarse_page_fallback_reports_actual_physical_identity_and_quality():
+    """G5 physical truth names sampled coarse data, never desired fine data."""
+
+    coarse = DataChunkKey(
+        document_generation=("doc", 1),
+        operation_key=("op", "identity"),
+        lod=ChunkLod(reduction=(2, 2), reducer="mean"),
+        chunk_origin=(0, 0),
+        chunk_shape=(8, 8),
+        dtype="float32",
+    )
+    target = DataChunkKey(
+        document_generation=("doc", 1),
+        operation_key=("op", "identity"),
+        lod=ChunkLod(reduction=(0, 0), reducer="mean"),
+        chunk_origin=(2, 2),
+        chunk_shape=(2, 2),
+        dtype="float32",
+    )
+    payload = DisplayTilePayload(
+        tile_number=0,
+        source_index=0,
+        image=np.full((2, 2), 4.0, dtype=np.float32),
+        histogram_data=None,
+        source_id=coarse,
+        quality="exact",
+    )
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=2)
+    _uvs, cold = pool.update_payloads(
+        {0: payload},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+    )
+    assert cold.texture_uploads == 1
+
+    resolution = pool.resolve_page_targets({7: target})[7]
+    row = pool.tile_truth_physical_rows()[7]
+
+    assert resolution.actual_key == coarse
+    assert pool.presented_identities()[7] == coarse
+    assert pool.presented_identities()[7] != target
+    assert row["physical_acknowledged_identity"] == coarse
+    assert row["physical_page_target_key"] == target
+    assert row["physical_page_actual_key"] == coarse
+    assert row["physical_page_lod"] == coarse.lod
+    assert row["physical_page_quality"] == "fallback"
+    assert row["physical_page_binding_generation"] == resolution.binding_generation

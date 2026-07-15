@@ -118,10 +118,11 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    exit gates, and rejected timer/session/warming shortcuts are in
    `docs/redesign/slice-retention-staleness-2026-07-16.md`.
 4. **G5 remaining**: the pure best-resident-ancestor binding, owner-scoped
-   coarse pins, and source-grid mean geometry are landed and gated. Next wire
-   actual-coarse fallback into VisPy physical truth/never-black presentation,
-   then migrate the ladder from whole-plane keys to logical chunks and finish
-   reducer families. The formerly missing route-canonicalization contract is
+   coarse pins, source-grid mean geometry, and VisPy CPU-resolution/actual
+   physical-truth seam are landed and gated. Next migrate the live ladder from
+   whole-plane keys to logical chunks so it feeds that seam, then finish
+   source-grid materialization and reducer families. The formerly missing
+   route-canonicalization contract is
    explicit in `docs/redesign/g5-source-grid-pyramid-2026-07-16.md`; every
    remaining consumer must use it rather than infer a second reduction route.
 5. **G6**: GPU histogram/levels over the chunk store with the ADR 0056

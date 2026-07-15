@@ -241,6 +241,16 @@ reduction is accepted only from an aligned input grid. This slice is pure
 model only; VisPy actual-LOD fallback presentation and ladder chunk migration
 remain next.
 
+**Slice 3 landed (2026-07-16): VisPy resolved-page consumption seam.**
+Anchored atlas chunks now carry canonical `DataChunkKey` identities. The pool
+resolves logical targets once on the CPU, owner-pins actual coverage, rebinds
+fine arrival/removal without a resolution upload or black intermediate, and
+reports actual coarse LOD/fallback quality plus binding generation in physical
+truth. Every atlas eviction route respects those pins. This is deliberately a
+pool/presentation seam, not a second layer update or scheduler: the live ladder
+still emits whole-plane `PyramidLevelKey` members, so its migration to logical
+page targets is the next G5 slice.
+
 ### G6 — GPU compute consumers
 
 Histogram/level reductions over resident chunks (sharing the shader's
