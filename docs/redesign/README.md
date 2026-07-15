@@ -558,6 +558,19 @@ acceptance.
 > admission batching: they amplify fixed per-commit state publication and do
 > not supply the missing same-target evaluation refill. The ignored trace is
 > preserved under `tests/artifacts/redesign-p9-2026-07-15/pyqtgraph-feedback/`.
+>
+> **[Codex 2026-07-15 — P9 rejected completion-refill design; runtime
+> reverted]** Replacing synthetic `frame-admission` tasks with a completion-
+> owned pending queue passed **437** kernel/render/presentation/session tests,
+> including same-target preservation and identity dedup. Real V2 stayed green,
+> but V1 failed on **both** backends: `trace_verify` reported clean **36/36**
+> acknowledgement while the real framebuffer's first row contained pixels
+> from another row. Making pending admissions part of canonical settlement
+> removed a premature-completion window but did not repair the pixels. Restoring
+> only the cohort from 2 to 24 also failed identically, isolating the defect to
+> refill/pending ownership rather than cohort size. The whole experiment was
+> removed. Do not land completion-owned refill until its backend transaction
+> ordering can pass V1; a clean lifecycle trace is insufficient evidence.
 
 ## The visible-truth harness (the only gate)
 

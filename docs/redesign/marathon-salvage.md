@@ -124,6 +124,13 @@ Ordered by confidence:
     from four tiles to one regressed both scroll phases 44-88% and exposed an
     idle LOD 4→5 refill stall; that runtime experiment was removed. P9 remains
     scoped to the pipeline's pending rung queue and completion-owned refill.
+    **[Codex 2026-07-15 — second rejected design]** A completion-owned queue
+    with live-priority rebuild, step-key dedup, and explicit pending-settlement
+    truth passed 437 non-GPU tests but produced wrong first-row framebuffer
+    pixels on both backends while V1's trace still passed 36/36. Cohorts 2 and
+    24 both failed, so all runtime/test changes were removed. Revisit only
+    with physical transaction-order evidence; do not infer safety from the
+    semantic queue model.
 16. **Presentation-gate timer-edge pacing + GPU draw back-pressure**
     (`frame_effects.py`, `render_coordinator.py`) — replace self-reposting
     low-priority events with receiver-bound timers; don't admit a second
