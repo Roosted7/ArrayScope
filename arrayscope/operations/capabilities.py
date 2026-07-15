@@ -117,6 +117,59 @@ def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=Non
     return True
 
 
+def pipeline_windowable_display_axes(operations, base_shape, base_dtype=None, *, display_axes=()) -> tuple[int, ...]:
+    """Display axes whose subset window commutes with the whole pipeline.
+
+    ADR 0055 G3 window-shift fast path: resident chunks may be reused across
+    a display-axis window shift (``X=100:200 → 101:201``) only when
+    ``chain(data)[window] == chain(data[window])`` on that axis — otherwise a
+    shift is genuinely new content (FFT along a displayed axis being the
+    canonical case) and must re-evaluate.
+
+    Conservative by construction (a wrong inclusion shows plausible-but-wrong
+    pixels at interactive speed):
+
+    - unknown or capability-less operations disqualify every axis;
+    - any shape-changing step disqualifies every axis (axis identity below
+      the chain would no longer match the source grid);
+    - an axis in any step's ``expands_request_axes`` is out (the step needs
+      the full axis to produce a sub-window);
+    - a step that declares the axis is accepted only when ELEMENTWISE:
+      coordinate-remapping view steps (reverse, fftshift) are windowable in
+      principle but excluded until source-anchored chunk keys apply their
+      coordinate maps.
+
+    An empty chain returns every display axis — the raw-view case that the
+    v1 fast path targets.
+    """
+
+    shape = tuple(int(size) for size in base_shape)
+    candidates = list(dict.fromkeys(int(axis) for axis in tuple(display_axes or ())))
+    dtype = base_dtype
+    for operation in tuple(operations or ()):
+        if not candidates:
+            return ()
+        capabilities = getattr(operation, "capabilities", None)
+        output_shape = getattr(operation, "output_shape", None)
+        if not callable(capabilities) or not callable(output_shape):
+            return ()
+        if tuple(int(size) for size in output_shape(shape)) != shape:
+            return ()
+        caps = normalize_capabilities(capabilities(shape, dtype), ndim=len(shape))
+        declared = set(_operation_declared_axes(operation))
+        expanded = set(caps.expands_request_axes)
+        candidates = [
+            axis
+            for axis in candidates
+            if axis not in expanded
+            and (axis not in declared or caps.kind is OperationKind.ELEMENTWISE)
+        ]
+        output_dtype = getattr(operation, "output_dtype", None)
+        if callable(output_dtype):
+            dtype = output_dtype(dtype)
+    return tuple(candidates)
+
+
 def _normalize_kind(kind) -> OperationKind:
     if isinstance(kind, OperationKind):
         return kind

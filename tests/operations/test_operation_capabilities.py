@@ -157,3 +157,53 @@ def test_fft_pipeline_is_reduced_input_suitable_without_lod_commuting():
         np.float32,
         display_axes=(0, 1),
     ) is True
+
+
+def test_pipeline_windowable_display_axes_raw_and_elementwise_chains():
+    from arrayscope.operations.capabilities import pipeline_windowable_display_axes
+
+    shape = (4, 8, 16)
+    # The v1 fast-path case: no operations -> every display axis windowable.
+    assert pipeline_windowable_display_axes((), shape, np.float32, display_axes=(1, 2)) == (1, 2)
+    # Pointwise value maps keep windows valid on every axis.
+    assert pipeline_windowable_display_axes(
+        (Conjugate(),), shape, np.complex64, display_axes=(1, 2)
+    ) == (1, 2)
+
+
+def test_pipeline_windowable_display_axes_fft_blocks_only_its_axis():
+    from arrayscope.operations.capabilities import pipeline_windowable_display_axes
+
+    shape = (4, 8, 16)
+    # FFT along a displayed axis: a window shift there is new content
+    # (the ADR 0055 canonical negative case). The other display axis
+    # stays windowable.
+    assert pipeline_windowable_display_axes(
+        (CenteredFFT(axis=1),), shape, np.complex64, display_axes=(1, 2)
+    ) == (2,)
+    # FFT along a non-displayed axis leaves both display axes windowable.
+    assert pipeline_windowable_display_axes(
+        (CenteredFFT(axis=0),), shape, np.complex64, display_axes=(1, 2)
+    ) == (1, 2)
+
+
+def test_pipeline_windowable_display_axes_is_conservative():
+    from arrayscope.operations.capabilities import pipeline_windowable_display_axes
+
+    shape = (4, 8, 16)
+    # Shape-changing steps disqualify everything (axis identity drifts).
+    assert pipeline_windowable_display_axes(
+        (Mean(axis=0),), shape, np.float32, display_axes=(1, 2)
+    ) == ()
+    # Coordinate-remapping view steps on a display axis are excluded in v1
+    # even though required_input_region could window them.
+    assert pipeline_windowable_display_axes(
+        (ReverseAxis(axis=1),), shape, np.float32, display_axes=(1, 2)
+    ) == (2,)
+    assert pipeline_windowable_display_axes(
+        (FFTShift(axis=2),), shape, np.float32, display_axes=(1, 2)
+    ) == (1,)
+    # Capability-less objects poison the chain.
+    assert pipeline_windowable_display_axes(
+        (object(),), shape, np.float32, display_axes=(1, 2)
+    ) == ()
