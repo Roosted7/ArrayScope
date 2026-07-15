@@ -1,39 +1,26 @@
 """G3 live gate: source-anchored window-shift fast path through the real window.
 
-The pool-level half of this gate (tests/display/test_window_shift_gate.py)
-proves the residency arithmetic: anchored plans + content-keyed payloads make
-the VisPy atlas skip interior-chunk uploads across a one-pixel window shift.
+The pool-level halves of this gate prove the residency arithmetic offscreen:
+
+* tests/display/test_window_shift_gate.py — anchored PLANS: per-chunk region
+  payloads with window-invariant source ids skip interior uploads.
+* tests/display/test_vispy_chunked_residency.py — anchored PAYLOADS (ADR 0055
+  G3b-2): the live flow ships ONE window-sized exact payload stamped with a
+  ``PayloadSourceAnchor``; the atlas pool chunks it privately into
+  origin-anchored 256x256 slots and re-uploads only boundary strips.
+
 This module drives the same scenario through the REAL ArrayScopeWindow flow —
 view-state window mutation, render scheduling, frame session, tiled commit —
-and measures actual texture uploads and pixel truth.
+and measures actual texture uploads, chunk residency, and pixel truth.
 
-Live status (2026-07-15): the fast path does NOT engage end-to-end. The
-divergence, in order:
-
-* window/frame_controller.py:617 — the live frame plan is built by
-  ``self._montage_frame_planner().plan(...)`` WITHOUT ``source_anchoring``,
-  so ``FramePlanner._plan_single`` (display/frame_planner.py:156) takes the
-  unanchored branch: classic (512, 1024) tile shape, ``source_rect=None``,
-  ``source_content_key=None``.
-* window/frame_effects.py:1987/2024/2073 — every live commit passes
-  ``frame_plan=session.frame_plan`` and a prebuilt montage ``tile_state``,
-  so the only anchoring wiring — ``_frame_plan_for_display``
-  (window/display_presenter.py:348, gated on ``tile_residency_kind ==
-  "gpu_atlas"`` at :373) and the region-payload producer
-  ``_tile_presentation_for_display_image`` (display_presenter.py:802) — is
-  unreachable: the ``frame_plan or ...`` / ``if tile_state is None`` fallbacks
-  never fire.
-* window/frame_session.py:1827 + window/montage_viewport.py:486 — the payload
-  identities that actually reach the atlas are
-  ``("montage-tile", montage_tile_semantic_key, source_index)`` where the
-  semantic key embeds the windowed ViewState (``axis_range_indices``) and the
-  window-sized ``viewport_plan.tile_shape``; a one-pixel shift renames every
-  texel, so the whole window re-uploads.
-
-``test_window_shift_live_uploads_only_boundary_strips`` is therefore a strict
-xfail: it starts failing (XPASS) the moment the live flow plans with source
-anchoring and commits per-region payloads, at which point the marker must be
-removed and this docstring updated.
+Live wiring (2026-07-15): the frame plan itself stays classic (single
+window-sized tile, ``source_content_key=None``); the fast path engages one
+layer down. ``frame_controller._session_source_anchoring`` gives the session
+a window-free content identity on gpu_atlas backends,
+``frame_session._payload_source_anchor`` stamps it on exact non-montage
+payloads, and ``TextureAtlasPool.update_payloads`` takes the chunked
+residency path for eligible payloads (exact, gutter-free, native LOD, plane
+larger than one chunk).
 """
 
 from __future__ import annotations
@@ -132,12 +119,13 @@ def _pool(win):
     return win.img_view._vispy_gpu_montage_layer._pool
 
 
-def _active_source_ids(pool) -> set:
-    return {
-        pool.source_ids[key]
-        for key in pool.active_resident_keys
-        if key in pool.source_ids
-    }
+def _resident_chunks(pool) -> set:
+    return {key for keys in pool.tile_chunk_residency.values() for key in keys}
+
+
+def _chunk_rect(chunk_key) -> tuple[int, int, int, int]:
+    # ("anchored-chunk", content_key, (y0, y1, x0, x1), kind, dtype, lod)
+    return tuple(int(value) for value in chunk_key[2])
 
 
 def test_window_shift_live_pixels_stay_correct(qtbot):
@@ -145,7 +133,8 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
 
     This must stay green regardless of whether the upload fast path engages —
     it proves the harness (window construction, view-state window mutation,
-    settle detection, committed-value probing) that the xfail half stands on.
+    settle detection, committed-value probing) that the fast-path half
+    stands on.
     """
 
     pytest.importorskip("vispy")
@@ -178,26 +167,8 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
         _restore_default_backend(settings)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ADR 0055 G3 fast path is not wired into the live flow: "
-        "frame_controller.py:617 plans without source_anchoring (unanchored "
-        "single-tile plan, source_content_key=None); frame_effects.py always "
-        "supplies session.frame_plan plus montage tile payloads, so "
-        "display_presenter._frame_plan_for_display / "
-        "_tile_presentation_for_display_image never run; live source_ids "
-        "(frame_session.py:1827 via montage_viewport.py:486) embed the axis "
-        "window, so a one-pixel shift renames all resident content and "
-        "re-uploads the full window."
-    ),
-)
 def test_window_shift_live_uploads_only_boundary_strips(qtbot, monkeypatch):
-    """E2E fast-path half: a one-pixel shift re-uploads only boundary strips.
-
-    Strict xfail — see module docstring. When the live flow starts planning
-    with source anchoring this XPASSes; remove the marker then.
-    """
+    """E2E fast-path half: a one-pixel shift re-uploads only boundary strips."""
 
     pytest.importorskip("vispy")
     from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE
@@ -224,57 +195,65 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, monkeypatch):
         _apply_window(win, START_A, reason="test-window-initial")
         _wait_for_window(win, qtbot, START_A)
 
-        plan_a = win.renderer._frame_session.frame_plan
-        # Divergence gate: the live plan must be source-anchored for any of
-        # the residency arithmetic below to be meaningful. Today this is the
-        # first assertion to fail (see module docstring).
-        assert plan_a.source_content_key is not None, (
-            "live frame plan is not source-anchored: "
-            f"tile_shape={plan_a.tile_shape}, regions={len(plan_a.regions)}, "
-            "source_content_key=None (frame_controller.py:617 plans without "
-            "source_anchoring; presenter fallback display_presenter.py:348 "
-            "is unreachable because frame_effects always passes "
-            "session.frame_plan)"
-        )
-        rects_a = {region.source_rect for region in plan_a.regions}
-        assert None not in rects_a
-
         pool = _pool(win)
-        resident_a = _active_source_ids(pool)
-        assert len(resident_a) >= len(plan_a.regions)
+        # Divergence gate: the exact full-window payload must have taken the
+        # chunked residency path (ADR 0055 G3b-2) for any of the arithmetic
+        # below to be meaningful. If this fails, the live payload was not
+        # source-anchored (frame_session._payload_source_anchor) or the pool
+        # rejected it (_payload_chunked_eligible in vispy/tiles.py).
+        chunks_a = _resident_chunks(pool)
+        assert chunks_a, (
+            "live commit did not engage chunked residency: no anchored chunks "
+            f"resident (tile_slots={dict(pool.tile_slots)!r})"
+        )
+        rows = {(_chunk_rect(key)[0], _chunk_rect(key)[1]) for key in chunks_a}
+        columns = {(_chunk_rect(key)[2], _chunk_rect(key)[3]) for key in chunks_a}
+        total = len(chunks_a)
+        # First and last column strips per chunk row are clipped by the
+        # window, so their content identity legitimately changes on a shift.
+        expected_boundary = 2 * len(rows)
+        assert len(columns) > 2, "window must contain interior chunk columns"
+        content_keys_a = {key[1] for key in chunks_a}
+        assert len(content_keys_a) == 1, "one window-invariant content key expected"
 
         uploads.clear()
         _apply_window(win, START_B, reason="test-window-shift")
         _wait_for_window(win, qtbot, START_B)
 
-        plan_b = win.renderer._frame_session.frame_plan
-        assert plan_b.source_content_key == plan_a.source_content_key
-        rects_b = {region.source_rect for region in plan_b.regions}
-        rows = {rect[:2] for rect in rects_b}
-        columns = {rect[2:] for rect in rects_b}
-        total = len(plan_b.regions)
-        # First and last column strips per chunk row are clipped by the
-        # window, so their content identity legitimately changes on a shift.
-        expected_boundary = 2 * len(rows)
-        assert len(columns) > 2, "window must contain interior chunk columns"
+        chunks_b = _resident_chunks(pool)
+        assert len(chunks_b) == total
+        # The content key is window-invariant: the shift renames nothing but
+        # the clipped boundary rects.
+        assert {key[1] for key in chunks_b} == content_keys_a
 
         # Residency: interior chunks survive the shift byte-identical.
-        resident_b = _active_source_ids(pool)
-        overlap = resident_a & resident_b
+        overlap = chunks_a & chunks_b
         assert len(overlap) >= total - expected_boundary, (
             f"interior chunks did not survive the shift: overlap={len(overlap)}, "
             f"total={total}, expected_boundary={expected_boundary}"
         )
 
         # Uploads: only boundary strips may hit the GPU. Count native-height
-        # planes so tiny LOD-preview thumbnails cannot mask a full re-upload.
+        # planes so tiny LOD-preview thumbnails cannot mask a full re-upload,
+        # and bound the uploaded AREA against the boundary-strip area.
         native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
         assert len(native_uploads) <= expected_boundary + 2, (
             f"shift uploaded {len(native_uploads)} native strips "
             f"(expected <= {expected_boundary + 2}); all uploads: {uploads}"
         )
         assert len(native_uploads) < total / 2, (
-            f"shift re-uploaded {len(native_uploads)} of {total} tiles — "
+            f"shift re-uploaded {len(native_uploads)} of {total} chunks — "
+            "fast path did not engage"
+        )
+        window_area = EXTENT * data.shape[0]
+        native_area = sum(h * w for h, w in native_uploads)
+        boundary_area_bound = expected_boundary * CHUNK * CHUNK
+        assert native_area <= boundary_area_bound, (
+            f"shift uploaded {native_area} px of native planes "
+            f"(boundary strips bound: {boundary_area_bound}); uploads: {uploads}"
+        )
+        assert native_area < window_area / 2, (
+            f"shift re-uploaded {native_area} of {window_area} window px — "
             "fast path did not engage"
         )
     finally:
