@@ -127,6 +127,71 @@ def _assert_document_change_blanks(qtbot, win):
     assert not bool(getattr(win.renderer, "_frame_session_transition_retained_pixels", True))
 
 
+def _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(qtbot, win, data):
+    """Pin the measured field condition instead of racing the 120 ms timer.
+
+    The successor can read native pixels from the already-materialized stage,
+    so its only DESIRED rung is correctness/first-pixel work.  Interaction
+    parks DISPLAY_PREPARATION but leaves DISPLAY_PREVIEW runnable; the retained
+    predecessor must therefore be replaced without waiting for quiet.
+    """
+
+    from arrayscope.kernel import Lane
+    from arrayscope.window.diagnostics_snapshot import collect_runtime_diagnostics_snapshot
+
+    win._set_view_state(win.view_state.with_image_axes(1, 2))
+    # FFT over the scrub axis is non-windowable: the initial plane must
+    # materialize one full-array stage, making plane 1 a genuine hot
+    # stage-backed successor rather than cold native work.
+    win.request_operation("centered_fft", 0)
+    apply_plane(win, 0, reason="test-retention-interactive-initial")
+    qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+    assert win.operation_evaluator.stage_cache.diagnostics().entries >= 1
+
+    state_1 = win.view_state.with_slice(0, 1)
+    assert win.operation_evaluator.cached_display_tile(state_1) is None
+
+    # Hold the viewport interaction edge open deterministically.  No fixed
+    # sleep is involved, and the real governor applies the production quotas.
+    timer = getattr(win, "_viewport_interaction_quiet_timer", None)
+    if timer is not None:
+        timer.stop()
+    win._viewport_interaction_active = True
+    win._note_interaction_state_changed()
+    assert win.kernel._lane_quotas[Lane.DISPLAY_PREVIEW] == 1
+    assert win.kernel._lane_quotas[Lane.DISPLAY_PREPARATION] == 0
+
+    before = collect_runtime_diagnostics_snapshot(win).montage
+    apply_plane(win, 1, reason="test-retention-interactive-successor")
+    during = collect_runtime_diagnostics_snapshot(win).montage
+    assert during.slice_retention_transitions == before.slice_retention_transitions + 1
+    assert during.slice_retention_replacements == before.slice_retention_replacements
+    assert during.slice_retention_active
+    assert during.slice_retention_inflight_age_ms >= 0.0
+
+    qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+
+    session = win.renderer._frame_session
+    assert session is not None
+    assert session.tile_compute_stage_backed >= 1
+    assert win._interaction_active_now()
+    after = collect_runtime_diagnostics_snapshot(win).montage
+    assert after.slice_retention_transitions == during.slice_retention_transitions
+    assert after.slice_retention_replacements == during.slice_retention_replacements + 1
+    assert not after.slice_retention_active
+    assert after.slice_retention_inflight_age_ms == 0.0
+    assert after.slice_retention_last_replacement_ms > 0.0
+    assert after.slice_retention_max_replacement_ms >= after.slice_retention_last_replacement_ms
+    value = committed_value(win, WIDTH // 2, HEIGHT // 2)
+    from arrayscope.operations.dim_ops import centered_fft
+
+    expected_complex = centered_fft(data, 0)[1, HEIGHT // 2, WIDTH // 2]
+    # Backends currently expose either the exact complex probe or its active
+    # display mapping here; both must come from the successor plane.
+    expected = expected_complex if np.iscomplexobj(value) else abs(expected_complex)
+    assert value == pytest.approx(expected)
+
+
 def test_scrub_step_retains_previous_plane_pyqtgraph(qtbot):
     clear_arrayscope_settings()
     rng = np.random.default_rng(17)
@@ -149,5 +214,39 @@ def test_scrub_step_retains_previous_plane_vispy(qtbot):
         _assert_scrub_step_never_blanks(qtbot, win, data)
         _assert_document_change_blanks(qtbot, win)
     finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_interactive_stage_backed_scrub_replaces_retained_plane_pyqtgraph(qtbot):
+    clear_arrayscope_settings()
+    rng = np.random.default_rng(23)
+    data = rng.standard_normal((4, HEIGHT, WIDTH)).astype(np.float32)
+    win = make_backend_window(qtbot, data, backend="pyqtgraph")
+    try:
+        _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(
+            qtbot,
+            win,
+            data,
+        )
+    finally:
+        win._viewport_interaction_active = False
+        win.close()
+
+
+def test_interactive_stage_backed_scrub_replaces_retained_plane_vispy(qtbot):
+    pytest.importorskip("vispy")
+    settings = use_vispy_backend()
+    rng = np.random.default_rng(29)
+    data = rng.standard_normal((4, HEIGHT, WIDTH)).astype(np.float32)
+    win = make_backend_window(qtbot, data, backend="vispy")
+    try:
+        _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(
+            qtbot,
+            win,
+            data,
+        )
+    finally:
+        win._viewport_interaction_active = False
         win.close()
         restore_default_backend(settings)

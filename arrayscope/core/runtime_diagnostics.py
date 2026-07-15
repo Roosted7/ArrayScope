@@ -202,6 +202,15 @@ class MontageRuntimeDiagnostics:
     # identity differs from the session's current payload — nonzero at idle
     # means visibly stale tiles (the entire 2026-07-05 defect family).
     backend_stale_identities: int = 0
+    # Slice-only session transitions may deliberately keep predecessor pixels
+    # drawn until the successor's first physical acknowledgement. These
+    # counters make that bounded stale interval measurable in field JSONLs.
+    slice_retention_transitions: int = 0
+    slice_retention_replacements: int = 0
+    slice_retention_active: bool = False
+    slice_retention_inflight_age_ms: float = 0.0
+    slice_retention_last_replacement_ms: float = 0.0
+    slice_retention_max_replacement_ms: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -313,12 +313,26 @@ def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
 def test_interactive_retained_native_source_is_correctness_work():
     kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
     effects.retained_native.add(0)
+    kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, 1)
+    kernel.set_lane_quota(Lane.DISPLAY_PREPARATION, 0)
 
     assert pipeline.retarget(intent(interactive=True), demand(1), scope(0)) == 1
     drain(kernel)
 
     assert effects.evaluated == [(0, 2, 1)]
     assert pipeline.counters.interactive_native_deferred == 0
+
+
+def test_interactive_cold_native_stays_deferred_with_preview_lane_available():
+    kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
+    kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, 1)
+    kernel.set_lane_quota(Lane.DISPLAY_PREPARATION, 0)
+
+    assert pipeline.retarget(intent(interactive=True), demand(1), scope(0)) == 0
+    drain(kernel)
+
+    assert effects.evaluated == []
+    assert pipeline.counters.interactive_native_deferred == 1
 
 
 def test_zoom_out_over_presented_native_submits_no_display_demotions():

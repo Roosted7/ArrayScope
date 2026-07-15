@@ -2174,6 +2174,33 @@ class FramePipelineEffects:
         _call(renderer, "_refresh_tile_truth_overlay")
         retained_start = perf_counter()
         accepted_payloads = accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)
+        retention_started_at = getattr(renderer, "_slice_retention_started_at", None)
+        retention_session_id = getattr(renderer, "_slice_retention_session_id", None)
+        if (
+            accepted_payloads
+            and retention_started_at is not None
+            and retention_session_id == int(session.session_id)
+        ):
+            replacement_ms = max(0.0, (perf_counter() - float(retention_started_at)) * 1000.0)
+            renderer._slice_retention_replacements = (
+                int(getattr(renderer, "_slice_retention_replacements", 0) or 0) + 1
+            )
+            renderer._slice_retention_last_replacement_ms = replacement_ms
+            renderer._slice_retention_max_replacement_ms = max(
+                float(getattr(renderer, "_slice_retention_max_replacement_ms", 0.0) or 0.0),
+                replacement_ms,
+            )
+            renderer._slice_retention_started_at = None
+            renderer._slice_retention_session_id = None
+            emit_trace(
+                "slice_retention_replaced",
+                session_id=int(session.session_id),
+                elapsed_ms=float(replacement_ms),
+                accepted_tiles=tuple(sorted(int(tile) for tile in accepted_payloads)),
+                cache_hits=int(getattr(session, "tile_compute_cache_hits", 0) or 0),
+                stage_backed=int(getattr(session, "tile_compute_stage_backed", 0) or 0),
+                uploads=int(getattr(report, "texture_uploads", 0) or 0),
+            )
         renderer._retained_tiled_payload_store().remember_acknowledged(
             accepted_payloads
         )

@@ -18,6 +18,7 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.frame_targets import FrameTarget
+from arrayscope.core.trace import emit_trace
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.frame_planner import FramePlanner
@@ -751,6 +752,17 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             self._frame_session_transitions_retained = (
                 int(getattr(self, "_frame_session_transitions_retained", 0) or 0) + 1
             )
+            self._slice_retention_started_at = perf_counter()
+            self._slice_retention_session_id = int(session.session_id)
+            emit_trace(
+                "slice_retention_started",
+                session_id=int(session.session_id),
+                predecessor_session_id=int(getattr(dying_session, "session_id", 0) or 0),
+                transition_count=int(self._frame_session_transitions_retained),
+            )
+        else:
+            self._slice_retention_started_at = None
+            self._slice_retention_session_id = None
         surface_for_view(self.win.img_view).invalidate_tiled_presentation(
             "frame-session-transition",
             hide_pixels=not retain_stale_pixels,

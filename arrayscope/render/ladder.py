@@ -220,13 +220,30 @@ class LodLadder:
         if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
+            # DESIRED is usually refinement and belongs to preparation.  But
+            # when no floor/preview/current payload exists it is also the
+            # successor target's first and only presentable rung.  Classify
+            # that work by its semantic role, not by the historical rung
+            # name: during a retained slice scrub DISPLAY_PREPARATION is
+            # intentionally parked, while one DISPLAY_PREVIEW worker remains
+            # available to replace the stale predecessor atomically.
+            has_first_pixel = bool(
+                presented is not None
+                or ready is not None
+                or resident
+                or any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+            )
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
                     rung=Rung.DESIRED,
                     level=desired,
                     reduce_from_native=not policy.reduced_input_available,
-                    lane=Lane.DISPLAY_PREPARATION,
+                    lane=(
+                        Lane.DISPLAY_PREPARATION
+                        if has_first_pixel
+                        else Lane.DISPLAY_PREVIEW
+                    ),
                     priority=(
                         Priority.VISIBLE_IMAGE
                         if presented is None or presented not in acceptable

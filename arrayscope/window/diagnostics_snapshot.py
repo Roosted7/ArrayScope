@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
@@ -53,6 +55,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presented_lod = _montage_presented_lod(session, lod_decision)
     lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
     lifecycle_phase_counts = {} if lifecycle_snapshot is None else dict(lifecycle_snapshot.counts)
+    retention_started_at = getattr(window.renderer, "_slice_retention_started_at", None)
     stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
     stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
     unresolved_stage_bindings = {
@@ -189,6 +192,24 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             0 if lifecycle_snapshot is None else int(lifecycle_snapshot.parked_without_producer)
         ),
         backend_stale_identities=_backend_stale_identities(session),
+        slice_retention_transitions=int(
+            getattr(window.renderer, "_frame_session_transitions_retained", 0) or 0
+        ),
+        slice_retention_replacements=int(
+            getattr(window.renderer, "_slice_retention_replacements", 0) or 0
+        ),
+        slice_retention_active=retention_started_at is not None,
+        slice_retention_inflight_age_ms=(
+            0.0
+            if retention_started_at is None
+            else max(0.0, (perf_counter() - float(retention_started_at)) * 1000.0)
+        ),
+        slice_retention_last_replacement_ms=float(
+            getattr(window.renderer, "_slice_retention_last_replacement_ms", 0.0) or 0.0
+        ),
+        slice_retention_max_replacement_ms=float(
+            getattr(window.renderer, "_slice_retention_max_replacement_ms", 0.0) or 0.0
+        ),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
         last_stall_signature=tuple(
             int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())

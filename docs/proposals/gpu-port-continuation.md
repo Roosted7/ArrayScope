@@ -92,9 +92,9 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    `arrayscope-diagnostics-20260715-235102.jsonl` /
    `/tmp/arrayscope-stall-50-1.trace.jsonl` is fixed at the shared-target
    candidate owner (details and rejected shortcut in the coverage-stall
-   dossier).  The remaining `…-235200.jsonl` item is single-slice retention:
-   no black flicker, but the retained stale plane lingers too long; measured
-   scheduling fix remains priority 3 below.
+   dossier).  The remaining `…-235200.jsonl` item was single-slice retention:
+   no black flicker, but the retained stale plane lingered too long. It is now
+   measured and fixed at the first-pixel lane owner (priority 3 below).
 2. **Montage scroll-direction GPU warming** (task board #20, landed
    2026-07-16): montage prefetch completion now warms both persistent
    `cpu_item` and `gpu_atlas` backends. VisPy queues bounded GUI-thread atlas
@@ -106,10 +106,17 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    manufacture lifecycle/presentation state rather than warm evaluated
    content. The implementation deliberately reorders only candidates already
    admitted by the standing montage-prefetch scheduler.
-3. **Retention staleness perf**: likely the same lever — while the previous
-   plane is retained, the successor evaluates at full rebirth latency;
-   consider preview-floor-first commits for slice transitions and/or
-   warming making forward planes hot (measure first: the 23:52 JSONL).
+3. **Retention staleness perf** (landed 2026-07-16): the 23:52 diagnostics
+   disproved session rebirth and GPU upload as bottlenecks. The atlas already
+   had 200 warm residents and zero upload time; 235 completed successor
+   admissions were initially quota-blocked because the first/only `DESIRED`
+   rung was mislabeled `DISPLAY_PREPARATION`. The ladder now labels a
+   first-presentable `DESIRED` as `DISPLAY_PREVIEW`; ordinary refinement stays
+   preparation, and the existing interaction proof still defers cold native
+   work while admitting retained-stage extraction. Diagnostics and trace
+   events measure retained-transition replacement latency. Full evidence,
+   exit gates, and rejected timer/session/warming shortcuts are in
+   `docs/redesign/slice-retention-staleness-2026-07-16.md`.
 4. **G5 remaining**: best-resident-ancestor page-table resolution + pinned
    coarse coverage (never-black at data level; ADR 0056 §5-6); then the
    ladder migration with source-anchored reduction binning (fixes reduced-
@@ -139,7 +146,8 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
 Shared fakes live in `tests/display/vispy_test_utils.py` (FakeTexture2D/
 FakeGloo/FakeVisual/payload builders) and the live-window harness in
 `tests/ui/helpers.py` (backend switch, settle predicates, upload_log
-fixture) — use these, don't re-roll. Suite 2072/24 in ~92-104 s; no new
+fixture) — use these, don't re-roll. Current suite 2081/24 in ~124 s after
+the montage-warming and retention gates; no new
 test in the top-25 durations. Watch item: one observed flake in
 `test_prefetch_gated_by_busy_visible_runs_after_drain` (timing-sensitive,
 passed all re-runs). Follow-up: six pre-existing UI test files carry their
