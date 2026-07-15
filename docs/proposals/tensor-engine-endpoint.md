@@ -132,20 +132,74 @@ handles; page-table indirection makes idle, bandwidth-budgeted compaction
 possible (allocate → copy → atomic entry swap → retire after fence). CPU
 side mirrors it: few large arenas, recycled slots, NUMA-aware placement.
 
-## Renderer strategy
+## Renderer strategy (updated 2026-07-15 after the Datoviz/alternatives study)
 
 Keep VisPy as the present integration layer; keep engine logic out of it
-(already ADR 0055 §5; the gloo/GLIR deprecation direction confirms it).
-Build the backend-neutral request protocol first; then vertical-slice
-experiments — current VisPy/OpenGL, Datoviz (Vulkan-native, request
-protocol, VisPy 2.0 foundation; young API, GLFW/ImGui client), wgpu
-(portable compute, but no core sparse-binding — fine for the software page
-table), direct Vulkan (maximum memory/queue/sparse control, maximum cost).
-Migrate on measured blockage, never novelty. Vulkan external memory later
-enables a GPU service process / remote renderer split; DLPack enables
-zero-copy ingestion from CuPy/PyTorch/JAX (external ownership + sync become
-engine concepts). Multiple windows on one document share chunks/pages/
-histograms — view tiles stay private, data chunks do not.
+(ADR 0055 §5). The renderer decision is now gated by a three-gate framework
+proven in the Datoviz study: (1) GPU-native Qt composition (no framebuffer
+readback), (2) custom shaders/compute, (3) zero-copy uploads
+(caller-owned/persistently mapped staging; no per-request internal copy).
+
+**Study verdicts:**
+
+- **Datoviz** — shaders GO (low-level DRP, precompiled SPIR-V; avoid the
+  high-level visuals), Qt backend NO-GO today (synchronous
+  `server_grab()` CPU readback inside Qt event handlers; "experimental
+  (and slow)" by its own label), uploads FAIL gate 3 today (documented
+  internal copy per request), compute not yet in the public protocol.
+  WAIT on upstream interop answers (the eight questions are recorded in
+  the study); its request-protocol philosophy still aligns with ours.
+- **wgpu-py + rendercanvas** — best immediate experiment: real
+  `QRenderWidget` for PySide6, WGSL render+compute pipelines, binding
+  arrays/non-uniform indexing/timestamp queries; no hardware sparse
+  binding (software page table only — which we already prefer, ADR 0056);
+  must field-test `present_method="screen"` vs bitmap on Wayland/docks.
+  Use wgpu-py directly, NOT Pygfx (no second scene graph; the VisPy
+  lesson).
+- **Qt 6 QRhiWidget + native runtime** — likely production architecture:
+  Qt owns window/composition/resize/DPI into a composited texture;
+  `beginExternal()`/`endExternal()` lets a native ArrayScope runtime
+  record Vulkan/Metal/D3D commands inside Qt's pass. Costs: C++/Rust
+  extension work, and QRhi classes are Qt::GuiPrivate (no minor-version
+  compatibility guarantee — per-Qt-version builds). Sparse via native
+  external commands is a gate to prove, not assume.
+- **Direct Vulkan + Qt** — the escape hatch with the highest ceiling
+  (sparse binds, external memory, timeline semaphores, transfer queues,
+  CUDA interop). Pay this tax only when measurement proves those needs;
+  never raw Vulkan calls from Python — Python submits declarative batches
+  to a native data plane.
+- **ModernGL / direct OpenGL** — pragmatic low-risk fallback AND the
+  control implementation: if a bespoke GL backend matches wgpu/Datoviz on
+  the same architecture, the abstraction layer was the problem, not the
+  API. Rejected: bgfx (game-oriented, non-turnkey Qt), Pygfx (scene graph
+  we don't need), VTK (wrong abstraction level). CUDA/CuPy/Taichi are
+  optional compute executors behind the planner, never the display
+  architecture.
+
+**The load-bearing decision — a backend-neutral semantic command protocol**
+that never assumes WGSL, QRhi resources, Datoviz IDs, GL texture names, or
+one-physical-texture-per-tile:
+
+| Protocol command | Existing G-program seam |
+|---|---|
+| ensure chunk resident | `ChunkStore.ensure` / pool chunk plan (G1/G3b-2) |
+| update page mapping | `PageTable` bind/remap (G1/G2) |
+| update tile instances | draw parts / quad emission (G3c) |
+| set display mapping | shader-mapping uniforms + physical-truth audit |
+| dispatch histogram | G6 reduction (planned) |
+| present generation | `TileCommitReport` acknowledgement + physical audit |
+
+Formalizing this table into an explicit protocol module is the bridge from
+the current VisPy executor to Experiments A/B and is a G-program stage in
+its own right.
+
+**Combined plan:** Experiment A = wgpu-py vertical slice (raw complex
+chunks, page-table lookup, mixed-LOD fallback, compute histogram, instanced
+montage, Qt pacing on Wayland). Experiment B = QRhiWidget narrow slice
+(composited texture, one raw texture + shader + compute reduction, async
+state handoff, native-commands coexistence). Multi-window shared residency,
+DLPack zero-copy ingestion, and the GPU-service/remote split remain
+endpoint items on whichever executor wins.
 
 ## The steering questions (apply at every design review)
 
