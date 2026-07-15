@@ -160,6 +160,24 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             renderer_backend=image_view_backend_capabilities(self.win.img_view).name,
         )
 
+    def _session_source_anchoring(self, document, view_state, axis):
+        """ADR 0055 G3: window-invariant payload anchoring for the session.
+
+        Non-montage sessions on atlas-resident backends stamp exact payloads
+        with a window-free content identity so the backend can keep chunked
+        residency across display-window shifts. Montage sessions already
+        anchor per source index; CPU-item backends re-window anyway.
+        """
+
+        if axis is not None:
+            return None
+        capabilities = image_view_backend_capabilities(self.win.img_view)
+        if getattr(capabilities, "tile_residency_kind", None) != "gpu_atlas":
+            return None
+        from arrayscope.display.source_anchoring import source_anchoring_for_view
+
+        return source_anchoring_for_view(document, view_state)
+
     def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
         axis = view_state.montage_axis
         all_indices = (0,) if axis is None else tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
@@ -650,6 +668,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             view_state=view_state,
             document=document,
             montage_axis=axis,
+            source_anchoring=self._session_source_anchoring(document, view_state, axis),
             colormap_lut=colormap_lut,
             viewport_shape=viewport_shape,
             view_range=current_range,

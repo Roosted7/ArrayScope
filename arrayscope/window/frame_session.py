@@ -524,6 +524,12 @@ class FrameSession:
     skipped_tiles: set[int]
     pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
     shader_display: bool = False
+    # ADR 0055 G3: window-invariant anchoring for non-montage sessions on
+    # atlas backends (display.source_anchoring.SourceAnchoring); stamps
+    # exact payloads with a PayloadSourceAnchor so backend residency can
+    # survive display-window shifts. None for montage sessions and
+    # non-windowable chains.
+    source_anchoring: object | None = None
     active_tile_requests: set[int] = field(default_factory=set)
     stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
     tile_states: list[MontageTileState] = field(default_factory=list)
@@ -1507,6 +1513,7 @@ class FrameSession:
             source_shape=tuple(int(value) for value in exact_image.shape[:2]),
             lod=lod,
             shader_mapping=mapping,
+            source_anchor=self._payload_source_anchor(exact_image.shape[:2]),
             level_data=exact_level_data,
             level_stats=level_stats,
             tile_identity=self.tile_payload_identity(
@@ -1815,6 +1822,32 @@ class FrameSession:
 
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         return render_lod.session_resident_levels(self, previous_factor)
+
+    def _payload_source_anchor(self, native_shape) -> object | None:
+        """Window-invariant anchor for a non-montage exact payload (ADR 0055 G3).
+
+        The exact plane covers the whole display window; its native source
+        rect is the window start (anchored axes) plus the native extent. A
+        non-anchored axis keeps start 0 — consistent, because that axis's
+        window stays folded into the anchoring content key.
+        """
+
+        anchoring = self.source_anchoring
+        if anchoring is None or self.montage_axis is not None:
+            return None
+        starts = getattr(anchoring, "anchored_starts", None)
+        content_key = getattr(anchoring, "content_key", None)
+        if starts is None or content_key is None:
+            return None
+        from arrayscope.display.model.frame import PayloadSourceAnchor
+
+        y_start = int(starts[0] or 0)
+        x_start = int(starts[1] or 0)
+        height, width = (int(native_shape[0]), int(native_shape[1]))
+        return PayloadSourceAnchor(
+            content_key=content_key,
+            source_rect=(y_start, y_start + height, x_start, x_start + width),
+        )
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
         """Semantic content identity of one montage tile (ADR 0050).

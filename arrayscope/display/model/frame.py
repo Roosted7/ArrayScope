@@ -27,6 +27,27 @@ def array_value_at(data, y_i: int, x_i: int):
 
 
 @dataclass(frozen=True)
+class PayloadSourceAnchor:
+    """Window-invariant content identity of a payload's plane (ADR 0055 G3).
+
+    ``content_key`` identifies the evaluated-value space the plane samples
+    (document revision + operation steps + window-free view identity);
+    ``source_rect`` is the plane's ``(y0, y1, x0, x1)`` in that space at
+    native resolution. A backend may key sub-plane residency on
+    ``(content_key, chunk rect, lod, texture kind)`` — equal keys mean equal
+    texels regardless of the display window that produced the payload.
+    """
+
+    content_key: object
+    source_rect: tuple[int, int, int, int]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "source_rect", tuple(int(value) for value in self.source_rect)
+        )
+
+
+@dataclass(frozen=True)
 class DisplayTilePayload:
     tile_number: int
     source_index: int
@@ -46,6 +67,10 @@ class DisplayTilePayload:
     quality: str = "exact"
     tile_identity: TileIdentity | None = None
     presentation_identity: TilePresentationIdentity | None = None
+    # ADR 0055 G3: optional window-invariant anchor; lets a backend keep
+    # sub-plane residency across display-window shifts. Never part of tile
+    # semantic identity.
+    source_anchor: PayloadSourceAnchor | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
