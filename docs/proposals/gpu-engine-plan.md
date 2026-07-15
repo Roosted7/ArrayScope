@@ -92,16 +92,23 @@ boundary strip. Requires: texcoord/offset indirection in the tile visual
 (sample the atlas with a sub-window), and delta planning that requests only
 missing chunks through the existing pipeline.
 
-**Correctness precondition — windowability.** Chunk reuse across a window
-shift is valid only when the operation chain commutes with slicing along the
-shifted display axis: `op(data)[101:201] == op(data[101:201])` (raw views,
-flips, elementwise/complex maps). An FFT (or any whole-axis transform) along
-a displayed axis makes every output value depend on the entire window, so a
-shift is genuinely new content — the fast path must be gated per
-(operation chain × axis) by an explicit windowability predicate, defaulting
-to *not windowable*. A wrong `True` here shows plausible-but-wrong pixels at
-high speed; the gate tests must include the FFT-along-displayed-axis
-negative case.
+**Correctness rule — key it, don't special-case it.** Operations stay on the
+CPU (2026-07-15 scope decision): the GPU engine consumes *evaluated* planes,
+so its chunk space is the evaluated-value space at the current operation
+revision, and "ops output" is indistinguishable from "no ops" on the GPU
+side. Chunk reuse across a window shift is then a pure keying question:
+
+- when the operation chain provably does not consume the display-axis window
+  (v1: the chain is empty / range-inert — the raw-view case), chunk identity
+  is source-anchored and shifts reuse resident chunks;
+- otherwise the window stays folded into the chunk key exactly as the
+  evaluator keys it today, and a shift naturally misses — correct by
+  construction, no windowability oracle to get wrong.
+
+An FFT along a displayed axis is the canonical must-miss case and joins the
+gate tests as the negative control. Moving simple ops (flip, crop,
+conjugate) onto the GPU is a *later* G6 experiment, done only if measured
+performance justifies duplicating semantics.
 
 *Gate:* harness scenario — repeated ±1 window shift over a resident frame
 uploads only boundary chunks (recorded upload counter), pixel-identical to
@@ -139,8 +146,11 @@ distinguishes backends.
 
 Histogram/level reductions over resident chunks (sharing the shader's
 complex-mapping function, keeping ADR 0054 evidence phases); GPU LOD
-generation; first operation kernels (start with elementwise/complex ops).
-CPU evaluation remains the correctness path for everything else.
+generation. Operation kernels (flip/crop/conjugate-class only) are an
+opt-in experiment at the end of this stage: CPU evaluation remains the
+correctness path, and a GPU op lands only with harness evidence that it
+beats the CPU+upload route — semantics duplication has to buy real
+performance.
 
 *Gate:* histogram-from-chunks matches CPU histogram within documented
 tolerance on both real-hardware backends; levels convergence behavior
