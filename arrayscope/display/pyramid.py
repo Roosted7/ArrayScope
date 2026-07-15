@@ -53,6 +53,14 @@ class SourceGridPageIdentity:
 
 
 @dataclass(frozen=True)
+class SourceGridDrawBlock:
+    """Rectangular stored-sample run with one uniform native mapping."""
+
+    stored_rect_yx: tuple[int, int, int, int]
+    source_rect_yx: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
 class SourceGridPage:
     """One page of reduced values with exact per-sample draw coverage."""
 
@@ -60,6 +68,7 @@ class SourceGridPage:
     source_rect_yx: tuple[int, int, int, int]
     values: np.ndarray
     draw_source_rects: tuple[tuple[int, int, int, int], ...]
+    draw_blocks: tuple[SourceGridDrawBlock, ...]
 
 
 def partition_source_grid_pages(
@@ -122,9 +131,49 @@ def partition_source_grid_pages(
                 source_rect_yx=source_rect,
                 values=np.ascontiguousarray(values[row_slice, column_slice]),
                 draw_source_rects=tuple(tuple(int(value) for value in rect) for rect in page_rects),
+                draw_blocks=_source_grid_draw_blocks(
+                    rect_grid[row_slice, column_slice]
+                ),
             )
         )
     return tuple(pages)
+
+
+def _source_grid_draw_blocks(rect_grid: np.ndarray) -> tuple[SourceGridDrawBlock, ...]:
+    """Coalesce equal-width sample spans into a bounded Cartesian grid."""
+
+    rows, columns = rect_grid.shape[:2]
+    y_spans = tuple((int(rect_grid[row, 0, 0]), int(rect_grid[row, 0, 1])) for row in range(rows))
+    x_spans = tuple((int(rect_grid[0, column, 2]), int(rect_grid[0, column, 3])) for column in range(columns))
+    y_runs = _equal_width_runs(y_spans)
+    x_runs = _equal_width_runs(x_spans)
+    return tuple(
+        SourceGridDrawBlock(
+            stored_rect_yx=(row0, row1, column0, column1),
+            source_rect_yx=(source_y0, source_y1, source_x0, source_x1),
+        )
+        for row0, row1, source_y0, source_y1 in y_runs
+        for column0, column1, source_x0, source_x1 in x_runs
+    )
+
+
+def _equal_width_runs(
+    spans: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int, int, int], ...]:
+    runs: list[tuple[int, int, int, int]] = []
+    start = 0
+    while start < len(spans):
+        width = spans[start][1] - spans[start][0]
+        stop = start + 1
+        while (
+            stop < len(spans)
+            and spans[stop][0] == spans[stop - 1][1]
+            and spans[stop][1] - spans[stop][0] == width
+        ):
+            stop += 1
+        runs.append((start, stop, spans[start][0], spans[stop - 1][1]))
+        start = stop
+    return tuple(runs)
 
 
 def reduce_source_grid_mean(
@@ -472,6 +521,7 @@ __all__ = [
     "PyramidLevelKey",
     "PyramidCache",
     "SourceGridBinIdentity",
+    "SourceGridDrawBlock",
     "SourceGridPage",
     "SourceGridPageIdentity",
     "SourceGridReduction",

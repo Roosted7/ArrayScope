@@ -267,7 +267,9 @@ The canonical reducer output can now be partitioned into uniform stored-page
 classes without discarding per-sample native coverage. Partial edge bins keep
 their exact widths, draw spans cover the valid source rectangle exactly once,
 and shifted windows share only complete interior page identity and values.
-This remains pure and backend-free. The next live slice carries these pages
+The spans coalesce into at most 3-by-3 uniform draw blocks per page (one for a
+fully aligned interior), bounding later quad count. This remains pure and
+backend-free. The next live slice carries these pages
 through ladder cache/payload state and constructs grouped VisPy quads from the
 recorded spans; the old uniform whole-plane draw stays in place until then.
 

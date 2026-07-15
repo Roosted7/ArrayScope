@@ -131,3 +131,29 @@ def test_shifted_windows_share_only_complete_interior_page_identity():
         shifted_by_identity[shared_identity].values,
     )
 
+
+def test_draw_blocks_bound_quads_and_cover_stored_and_source_spaces_once():
+    pages = pages_for(FIRST_RECT)
+    for page in pages:
+        assert len(page.draw_blocks) <= 9
+        stored = np.zeros(np.asarray(page.values).shape[:2], dtype=np.uint8)
+        y0, y1, x0, x1 = page.source_rect_yx
+        source = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+        for block in page.draw_blocks:
+            sy0, sy1, sx0, sx1 = block.stored_rect_yx
+            stored[sy0:sy1, sx0:sx1] += 1
+            by0, by1, bx0, bx1 = block.source_rect_yx
+            source[by0 - y0 : by1 - y0, bx0 - x0 : bx1 - x0] += 1
+        np.testing.assert_array_equal(stored, np.ones_like(stored))
+        np.testing.assert_array_equal(source, np.ones_like(source))
+
+
+def test_aligned_interior_page_is_one_uniform_draw_block():
+    page = next(
+        page for page in pages_for(FIRST_RECT) if page.source_rect_yx == (100, 104, 102, 108)
+    )
+
+    assert len(page.draw_blocks) == 1
+    block = page.draw_blocks[0]
+    assert block.stored_rect_yx == (0, 2, 0, 3)
+    assert block.source_rect_yx == page.source_rect_yx

@@ -138,6 +138,9 @@ The pure boundary-geometry half of that atomic slice is now implemented:
   exactly once;
 - shifted windows share only a complete aligned interior page identity and
   attach byte-identical values to it. Boundary page identities remain distinct.
+- per-sample spans coalesce into at most a 3-by-3 Cartesian set of uniform
+  `SourceGridDrawBlock`s; aligned interior pages are one block, while stored
+  and native-source coverage both remain exactly once.
 
 The remaining live step is to carry these page values and spans through the
 ladder cache/payload contract and have VisPy build grouped quads from the spans.
