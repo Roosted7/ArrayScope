@@ -1420,6 +1420,20 @@ class TextureAtlasPool:
             self._bind_resident_slot(resident_key, page_index, slot, page)
             return int(page_index), int(slot), True
 
+        if self.budget_bytes > 0 and shape is not None:
+            # Budgeted pools grow before evicting warm residency: reclaiming
+            # a warm slot while byte headroom remains would silently destroy
+            # cross-plane reuse (index scroll-back re-uploads).
+            self._ensure_class_capacity(shape, self._class_capacity(shape) + 1)
+            for page_index, page in enumerate(self.pages):
+                if page.tile_shape != shape:
+                    continue
+                slot = page.take_free_slot(resident_key)
+                if slot is None:
+                    continue
+                self._bind_resident_slot(resident_key, page_index, slot, page)
+                return int(page_index), int(slot), True
+
         candidates = []
         active_bases = self.active_base_source_ids
         for page_index, page in class_pages:
@@ -1515,7 +1529,7 @@ class TextureAtlasPool:
                 index for index, page in enumerate(self.pages) if page.tile_shape == shape
             )
 
-        def page_headroom(page_index: int) -> bool:
+        def page_headroom(page_index: int, *, allow_eviction: bool) -> bool:
             page = self.pages[page_index]
             resident_here = sum(
                 1
@@ -1524,6 +1538,10 @@ class TextureAtlasPool:
             )
             needed = len(keys) - resident_here
             free = sum(1 for owner in page.slot_owners if owner is None)
+            if free >= needed:
+                return True
+            if not allow_eviction:
+                return False
             evictable = sum(
                 1
                 for owner in page.slot_owners
@@ -1531,15 +1549,32 @@ class TextureAtlasPool:
             )
             return free + evictable >= needed
 
-        ordered = sorted(votes, key=lambda index: -votes[index])
-        ordered.extend(index for index in class_page_indices() if index not in votes)
-        chosen = next((index for index in ordered if page_headroom(index)), None)
-        if chosen is None:
-            self._ensure_class_capacity(shape, self._class_capacity(shape) + len(keys))
-            chosen = next(
-                (index for index in class_page_indices() if page_headroom(index)),
+        def scan(*, allow_eviction: bool) -> int | None:
+            ordered = sorted(votes, key=lambda index: -votes[index])
+            ordered.extend(index for index in class_page_indices() if index not in votes)
+            return next(
+                (index for index in ordered if page_headroom(index, allow_eviction=allow_eviction)),
                 None,
             )
+
+        def grow_and_rescan(*, allow_eviction: bool) -> int | None:
+            self._ensure_class_capacity(shape, self._class_capacity(shape) + len(keys))
+            return scan(allow_eviction=allow_eviction)
+
+        # Placement preference: a page (ideally already holding most of this
+        # set) with genuinely free room first. With an explicit byte budget,
+        # grow within it BEFORE evicting warm (non-protected) chunks —
+        # evicting warm residency while budget headroom remains silently
+        # destroys cross-plane reuse (index scroll-back). Budget-less pools
+        # keep the legacy fixed-capacity order (evict, then grow as a last
+        # resort).
+        chosen = scan(allow_eviction=False)
+        if chosen is None and self.budget_bytes > 0:
+            chosen = grow_and_rescan(allow_eviction=False)
+        if chosen is None:
+            chosen = scan(allow_eviction=True)
+        if chosen is None:
+            chosen = grow_and_rescan(allow_eviction=True)
         if chosen is None:
             raise AtlasCapacityError(
                 f"no atlas page of shape {shape} can hold {len(keys)} chunks of one tile"

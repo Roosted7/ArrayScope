@@ -151,3 +151,89 @@ def test_fft_along_shifted_axis_reuploads_everything():
     # consumes it: nothing may be reused across the shift.
     assert warm.items_updated == len(payloads_b)
     assert warm.items_skipped == 0
+
+
+def scrolled_state(shape, index):
+    return (
+        ViewState.from_shape(shape)
+        .with_image_axes(1, 2)
+        .with_slice(0, index)
+    )
+
+
+def payloads_for_plane(document, data, index, *, extent):
+    state = scrolled_state(data.shape, index)
+    anchoring = source_anchoring_for_view(document, state)
+    assert anchoring is not None
+    plan = FramePlanner().plan(
+        target=TARGET,
+        view_state=state,
+        display_shape=(data.shape[1], extent),
+        backend_capabilities=VISPY_CAPABILITIES,
+        source_anchoring=anchoring,
+    )
+    plane = np.ascontiguousarray(data[index, :, :extent])
+    source = EagerDisplayRegionSource(
+        FakeDisplayImage(plane),
+        source_key=("request", index),
+        content_key=anchoring.content_key,
+    )
+    return anchoring, {
+        int(region.region_id): source.read_region(region, quality="exact-visible")
+        for region in plan.regions
+    }
+
+
+def test_fixed_index_scroll_back_is_upload_free():
+    """G4a: revisiting an already-seen plane re-uses resident chunks."""
+
+    rng = np.random.default_rng(3)
+    data = rng.standard_normal((3, CHUNK, 4 * CHUNK)).astype(np.float32)
+    document = ArrayDocument(data)
+    extent = 3 * CHUNK
+
+    anchor_0, plane_0 = payloads_for_plane(document, data, 0, extent=extent)
+    anchor_1, plane_1 = payloads_for_plane(document, data, 1, extent=extent)
+    # Different fixed indexes are different content.
+    assert anchor_0.content_key != anchor_1.content_key
+
+    pool = TextureAtlasPool(FakeGloo(), budget_bytes=64 * 1024 * 1024)
+    tile_shape = (CHUNK, CHUNK)
+    cold = commit(pool, plane_0, tile_shape)
+    assert cold.items_updated == len(plane_0)
+    forward = commit(pool, plane_1, tile_shape)
+    assert forward.items_updated == len(plane_1)
+    # Re-derive plane 0 from scratch (fresh buffers): reuse must come from
+    # content identity, not object identity.
+    _anchor, plane_0_again = payloads_for_plane(document, data, 0, extent=extent)
+    back = commit(pool, plane_0_again, tile_shape)
+    assert back.items_updated == 0
+
+
+def test_non_windowable_chain_still_gets_scroll_back_residency():
+    """Content-keyed residency is independent of window anchoring: an FFT
+    along both display axes anchors no axis, but revisiting the identical
+    plane still re-uses resident chunks."""
+
+    rng = np.random.default_rng(5)
+    data = (rng.standard_normal((2, CHUNK, 3 * CHUNK)) + 0j).astype(np.complex64)
+    document = ArrayDocument(data, operations=(CenteredFFT(axis=1), CenteredFFT(axis=2)))
+    extent = 3 * CHUNK
+
+    anchoring = source_anchoring_for_view(document, scrolled_state(data.shape, 0))
+    assert anchoring is not None
+    assert anchoring.anchored_starts == (None, None)
+    assert anchoring.any_anchored is False
+
+    _anchor_a, plane_a = payloads_for_plane(document, data.real.astype(np.float32), 0, extent=extent)
+    _anchor_b, plane_b = payloads_for_plane(document, data.real.astype(np.float32), 1, extent=extent)
+    pool = TextureAtlasPool(FakeGloo(), budget_bytes=64 * 1024 * 1024)
+    tile_shape = (CHUNK, CHUNK)
+    commit(pool, plane_a, tile_shape)
+    forward = commit(pool, plane_b, tile_shape)
+    assert forward.items_updated == len(plane_b)
+    _anchor, plane_a_again = payloads_for_plane(
+        document, data.real.astype(np.float32), 0, extent=extent
+    )
+    back = commit(pool, plane_a_again, tile_shape)
+    assert back.items_updated == 0

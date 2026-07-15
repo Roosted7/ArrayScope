@@ -153,7 +153,12 @@ class FramePlanner:
     ) -> FramePlan:
         anchored_starts = (None, None)
         content_key = None
-        if source_anchoring is not None and getattr(source_anchoring, "any_anchored", False):
+        if source_anchoring is not None:
+            # A fully-unanchored anchoring (no windowable axis, e.g. FFT on
+            # both display axes) still content-keys the plan: the grid stays
+            # window-relative (starts 0) and every window is folded into the
+            # content key, so reuse happens only when the identical
+            # plane/window is revisited — never across a shift.
             anchored_starts = tuple(source_anchoring.anchored_starts)
             content_key = source_anchoring.content_key
         if content_key is not None:

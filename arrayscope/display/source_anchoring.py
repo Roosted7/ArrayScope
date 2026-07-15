@@ -56,9 +56,14 @@ def contiguous_range_start(indices) -> int | None:
 def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
     """Anchoring decision for a non-montage 2D view, or ``None``.
 
-    Returns ``None`` when nothing can anchor: no 2D image axes, montage
-    views (they anchor per source index already), non-contiguous windows,
-    or an operation chain that consumes the window on both display axes.
+    Returns ``None`` only when the view has no 2D image axes or is a montage
+    (montage tiles anchor per source index already). Otherwise the result
+    always carries a stable ``content_key``, even when NO axis is anchored
+    (non-windowable chain, e.g. FFT along both display axes): the key then
+    keeps every window folded in, which is exactly right — resident chunks
+    may be reused only when the identical plane/window is revisited (index
+    scroll-back), never across a window shift. Per-axis ``anchored_starts``
+    additionally unlock shift reuse where the chain allows it.
     """
 
     image_axes = getattr(view_state, "image_axes", None)
@@ -91,8 +96,6 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
         anchored_starts.append(start)
         if start is not None:
             windowless = windowless.with_axis_range(axis, None)
-    if all(start is None for start in anchored_starts):
-        return None
 
     # Deferred import: evaluator pulls in the operations planner stack, and
     # this module is imported by the Qt-free display layer.
