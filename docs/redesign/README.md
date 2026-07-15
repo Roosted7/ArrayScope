@@ -725,6 +725,18 @@ acceptance.
 > byte-cap tuning unless a trace first shows the byte cap truncating an
 > otherwise larger admitted cohort. Artifact:
 > `/tmp/arrayscope-vispy-byte-cohort`.
+>
+> **[Codex 2026-07-15 — rejected P9 eight-item experiments; runtime
+> reverted]** An unconditional eight-item minimum cut real FFT refinement
+> **8.39 s -> 4.56 s**, but scroll regressed **13.55 s -> 14.50 s** and
+> `slow_scroll_converged` became red. Restricting eight items to
+> `not session.display_committed` removed the cold win (**8.04 s**) and
+> worsened scroll again to **15.63 s**. Both variants are removed. The session
+> flag does not describe cold-vs-successor transaction ownership, and a larger
+> generic floor trades continuity for throughput. The next attempt must reduce
+> redundant structural transactions or use an explicit plan phase; do not
+> infer it from `display_committed`. Artifacts:
+> `/tmp/arrayscope-vispy-{eight-item,cold-eight}`.
 
 ## The visible-truth harness (the only gate)
 

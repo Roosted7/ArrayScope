@@ -146,6 +146,10 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > A 4 MiB minimum byte-cohort follow-up was measured and reverted: the item
 > cap remained binding and scroll regressed 13.55 s -> 13.79 s. The next P9
 > cause must therefore address item/transaction ownership, not byte tuning.
+> Generic eight-item and `not display_committed` eight-item variants were also
+> reverted: the first improved cold refinement but regressed scroll/convergence,
+> while the second lost the cold win and worsened scroll to 15.63 s. A session
+> flag is not an acceptable proxy for the plan phase.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
