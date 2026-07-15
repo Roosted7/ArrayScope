@@ -1069,12 +1069,19 @@ class TextureAtlasPool:
                 != tile_ack_identity(payload)
             )
             missing_uploaded_source = resident_key not in self.source_ids
+            # A drawn tile must always have a physical upload record (tile
+            # truth).  Records travel with source_ids on every reclamation
+            # path, so this is normally redundant — it self-heals any legacy
+            # residency that predates record-keeping instead of presenting a
+            # truth-less tile.
+            missing_physical_record = resident_key not in self.physical_upload_records
             should_upload = bool(
                 layout_invalidates_residency
                 or newly_assigned
                 or source_changed
                 or acknowledged_changed
                 or missing_uploaded_source
+                or missing_physical_record
             )
             uvs[tile_number] = page.uv_for_slot_with_gutter(slot, gutter=_payload_gutter(payload))
             active_tile_uvs[int(tile_number)] = uvs[tile_number]
@@ -1202,7 +1209,13 @@ class TextureAtlasPool:
                 active_tile_slots[int(tile)][0],
                 active_tile_slots[int(tile)][1],
                 active_tile_uvs[int(tile)],
+                chunked=int(tile) in chunk_plans,
             )
+        # Reclaim identity records of chunked keys that no tile presents
+        # anymore, now that every mapping of this commit has settled (the
+        # per-call forget skips active keys so a retarget cannot destroy a
+        # key's records between its displacing and re-presenting tiles).
+        self._sweep_unreferenced_chunked_keys()
         self.lod_level_swaps_zero_upload += level_swaps_zero_upload
         self.lod_level_swaps_with_upload += level_swaps_with_upload
         uvs = self.tile_uvs
@@ -1457,6 +1470,24 @@ class TextureAtlasPool:
                 page.mipmap_dirty = True
             self.source_ids[resident_key] = payload.source_id
             self.acknowledged_identities[resident_key] = getattr(payload, "tile_identity", None) or payload.source_id
+            # Warm uploads are real texels: record them like the visible
+            # path does.  Without this, a warm→visible promotion presents
+            # through the acknowledged-identity skip (no re-upload) and the
+            # drawn tile has no physical truth row (field defect 2026-07-15:
+            # ``phys None/None`` on prefetch-warmed montage tiles).
+            upload_plane = scalar if scalar is not None else color
+            if upload_plane is not None:
+                real_plane, imag_plane = array_plane_identities(upload_plane)
+                self.physical_upload_records[resident_key] = {
+                    "physical_texture_kind": _payload_texture_kind(payload).value,
+                    "physical_storage_mode": str(page.storage_mode),
+                    "physical_texture_dtype": str(np.asarray(upload_plane).dtype),
+                    "physical_texture_shape": tuple(
+                        int(value) for value in np.asarray(upload_plane).shape
+                    ),
+                    "physical_real_plane_identity": plane_identity_record(real_plane),
+                    "physical_imag_plane_identity": plane_identity_record(imag_plane),
+                }
             self._touch(resident_key)
             updated += 1
 
@@ -2069,13 +2100,42 @@ class TextureAtlasPool:
         Chunked tile-level keys own no slot of their own; without this their
         records would outlive the draw mapping (classic keys instead become
         superseded and are reclaimed together with their slot).
+
+        Active keys are exempt: within one commit the mapping loop may move a
+        key between tile numbers (index-window retarget), transiently leaving
+        it unreferenced between the displacing and the re-presenting mapping
+        call.  Forgetting at that moment destroyed the re-presented tile's
+        just-committed records and chunk registration (field defect
+        2026-07-15: zoomed tiles + ``phys None/None`` truth rows).  The
+        commit-end sweep in ``update_payloads`` reclaims records of chunked
+        keys that genuinely stopped being presented.
         """
 
-        if resident_key in self._chunked_tile_keys and not self.resident_tiles.get(resident_key):
+        if (
+            resident_key in self._chunked_tile_keys
+            and not self.resident_tiles.get(resident_key)
+            and resident_key not in self.active_resident_keys
+        ):
             self._chunked_tile_keys.discard(resident_key)
             self.source_ids.pop(resident_key, None)
             self.acknowledged_identities.pop(resident_key, None)
             self.physical_upload_records.pop(resident_key, None)
+
+    def _sweep_unreferenced_chunked_keys(self) -> None:
+        """Commit-end reclamation of chunked tile-level identity records.
+
+        Runs after the mapping loop has settled every tile of the commit, so
+        ``resident_tiles`` is final: any chunked key without a presenting
+        tile now (active or not) has genuinely stopped being drawn and its
+        records may go.  A later re-present rebuilds them from the still-warm
+        chunks (``_commit_chunked_payload`` ``need_records``)."""
+
+        for key in tuple(self._chunked_tile_keys):
+            if not self.resident_tiles.get(key):
+                self._chunked_tile_keys.discard(key)
+                self.source_ids.pop(key, None)
+                self.acknowledged_identities.pop(key, None)
+                self.physical_upload_records.pop(key, None)
 
     def _clear_tile_mapping(self, tile_number: int) -> None:
         tile_number = int(tile_number)
@@ -2099,6 +2159,8 @@ class TextureAtlasPool:
         page_index: int,
         slot: int,
         uv: tuple[float, float, float, float],
+        *,
+        chunked: bool = False,
     ) -> None:
         tile_number = int(tile_number)
         old_key = self.tile_resident_keys.get(tile_number)
@@ -2115,15 +2177,33 @@ class TextureAtlasPool:
                 self.superseded_keys.add(old_key)
             self._forget_unreferenced_chunked_key(old_key)
         self.superseded_keys.discard(resident_key)
-        if resident_key not in self._chunked_tile_keys:
+        if not chunked:
             # The tile now presents whole-tile residency: any chunk links and
-            # per-chunk draw parts from a previous chunked presentation are
-            # stale (the chunks themselves stay warm and LRU-evictable).
+            # per-chunk draw parts from a previous presentation are stale (the
+            # chunks themselves stay warm and LRU-evictable).  This must be
+            # decided by HOW this commit presented the tile, not by whether
+            # the key is registered chunked — the same resident key can be
+            # committed chunked once and classically later (the anchor is not
+            # part of the key), and the registry can be transiently stale
+            # within a retarget commit (field defect 2026-07-15).
             self._release_tile_chunks(tile_number)
+            self.tile_draw_parts.pop(tile_number, None)
         self.tile_slots[tile_number] = (int(page_index), int(slot))
         self.tile_resident_keys[tile_number] = resident_key
         self.resident_tiles.setdefault(resident_key, set()).add(tile_number)
         self.tile_uvs[tile_number] = uv
+        if not chunked and resident_key in self._chunked_tile_keys:
+            # A classic presentation of a previously chunked key: the key now
+            # owns a whole-tile slot, so its identity records live and die
+            # with that slot like any classic key.  Keep the chunked
+            # registration only while another tile still draws this key
+            # through chunk parts.
+            if not any(
+                self.tile_chunk_residency.get(int(other))
+                for other in self.resident_tiles.get(resident_key, ())
+                if int(other) != tile_number
+            ):
+                self._chunked_tile_keys.discard(resident_key)
 
     def _discard_tile_mappings_for_resident_key(self, resident_key: object) -> None:
         for tile_number in tuple(self.resident_tiles.pop(resident_key, set())):

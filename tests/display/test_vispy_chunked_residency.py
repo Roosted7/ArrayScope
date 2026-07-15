@@ -902,3 +902,214 @@ def test_eviction_free_placement_never_relocates_foreign_page_residents():
 
     # Nothing moved: the straddling resident stayed exactly where it was.
     assert pool.resident_slots == resident_before
+
+
+# ---------------------------------------------------------------------------
+# Field defect 2026-07-15: stale draw parts / missing physical truth rows
+# across chunked->classic transitions and index-window retargets.
+# ---------------------------------------------------------------------------
+
+
+def classic_payload(tile_number, data, *, source_id):
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=tile_number,
+        image=np.ascontiguousarray(data[:, :EXTENT]),
+        histogram_data=None,
+        source_id=source_id,
+    )
+
+
+def commit_classic(pool, payloads):
+    """Commit without world regions: every payload takes the classic path."""
+
+    _uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=(HEIGHT, EXTENT),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=len(payloads),
+    )
+    return stats
+
+
+def anchored_content_payload(data, *, content_key, source_id, tile_number=0):
+    """Anchored payload whose source id does NOT embed the tile number, so a
+    retarget can present the identical resident key under a new tile."""
+
+    plane = np.ascontiguousarray(data[:, :EXTENT])
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=0,
+        image=plane,
+        histogram_data=None,
+        source_id=source_id,
+        quality="exact",
+        source_anchor=PayloadSourceAnchor(
+            content_key=content_key,
+            source_rect=(0, plane.shape[0], 0, EXTENT),
+        ),
+    )
+
+
+def test_classic_re_present_of_same_key_clears_stale_draw_parts():
+    """The residency key does not include the anchor: the same payload
+    identity committed chunked once (world region supplied) and classically
+    later (no region) must not keep the chunked presentation's UV-cropped
+    draw parts — they sample a sub-window of the plane stretched over the
+    whole tile (the field's "zoomed tile")."""
+
+    data = _data()
+    pool = TextureAtlasPool(FakeGloo())
+    commit(pool, {0: anchored_payload(data, 100)})
+    assert 0 in pool.tile_draw_parts and 0 in pool.tile_chunk_residency
+
+    stats = commit_classic(pool, {0: anchored_payload(data, 100)})
+    assert stats.presented_tiles == (0,)
+    assert 0 not in pool.tile_draw_parts
+    assert 0 not in pool.tile_chunk_residency
+    # The key now owns whole-tile residency: it must no longer be registered
+    # chunked, or a later displacement would drop its identity records while
+    # its classic slot stays resident.
+    assert not pool._chunked_tile_keys
+    rows = pool.tile_truth_physical_rows()
+    assert 0 in rows and rows[0]["physical_texture_dtype"] == "float32"
+
+
+def test_index_retarget_remap_keeps_chunked_records_and_draw_parts():
+    """One commit moves content A from tile 0 to tile 1 while tile 0 gets new
+    content C.  The mapping loop processes tile 0 first, transiently leaving
+    key A unreferenced; forgetting it at that moment destroyed tile 1's
+    just-committed chunk links, draw parts, AND physical upload records
+    (field defect 2026-07-15: zoomed tiles + ``phys None/None`` rows)."""
+
+    data_a = _data()
+    data_b = np.random.default_rng(9).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+    data_c = np.random.default_rng(11).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+    pool = TextureAtlasPool(FakeGloo())
+    commit(
+        pool,
+        {
+            0: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A")),
+            1: anchored_content_payload(data_b, content_key=("doc", "B"), source_id=("plane", "B"), tile_number=1),
+        },
+    )
+    assert set(pool.tile_chunk_residency) == {0, 1}
+    chunk_count = len(pool.tile_chunk_residency[0])
+
+    uploads_before = pool.chunk_upload_count
+    stats = commit(
+        pool,
+        {
+            0: anchored_content_payload(data_c, content_key=("doc", "C"), source_id=("plane", "C")),
+            1: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"), tile_number=1),
+        },
+    )
+    assert stats.presented_tiles == (0, 1)
+    # The remapped tile keeps its full chunked presentation.
+    assert len(pool.tile_chunk_residency.get(1, ())) == chunk_count
+    assert len(pool.tile_draw_parts.get(1, ())) == chunk_count
+    assert pool.presented_identities()[1] == ("plane", "A")
+    # Content A moved tiles without re-uploading a single chunk.
+    assert pool.chunk_upload_count - uploads_before == chunk_count  # only C's chunks
+    # Every drawn tile has a physical truth row (the field showed phys
+    # None/None on exactly the remapped tiles).
+    rows = pool.tile_truth_physical_rows()
+    assert 0 in rows and 1 in rows
+
+
+def test_commit_end_sweep_reclaims_records_of_unpresented_chunked_keys():
+    """Deferred forgetting must not leak: once a chunked key genuinely stops
+    being presented, the commit-end sweep drops its identity records (the
+    chunks themselves stay warm for a later re-present)."""
+
+    data_a = _data()
+    data_c = np.random.default_rng(11).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+    pool = TextureAtlasPool(FakeGloo())
+    payload_a = anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"))
+    commit(pool, {0: payload_a})
+    resident_key_a = next(iter(pool._chunked_tile_keys))
+
+    commit(pool, {0: anchored_content_payload(data_c, content_key=("doc", "C"), source_id=("plane", "C"))})
+    assert resident_key_a not in pool._chunked_tile_keys
+    assert resident_key_a not in pool.source_ids
+    assert resident_key_a not in pool.physical_upload_records
+    # Re-presenting A re-links the warm chunks and rebuilds its records.
+    uploads_before = pool.chunk_upload_count
+    commit(pool, {0: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"))})
+    assert pool.chunk_upload_count == uploads_before
+    assert 0 in pool.tile_truth_physical_rows()
+
+
+def test_warm_promoted_classic_tile_has_physical_truth_row():
+    """Classic warm uploads are real texels: the later visible commit
+    presents them through the acknowledged-identity skip path (zero
+    uploads), so the warm path itself must leave the physical upload record
+    (field defect 2026-07-15: ``phys None/None`` on prefetch-warmed montage
+    tiles scrolled into view)."""
+
+    data = _data()
+    pool = TextureAtlasPool(FakeGloo())
+    seed = classic_payload(1, data, source_id=("montage-tile", 8))
+    commit_classic(pool, {1: seed})
+
+    warm = classic_payload(0, data, source_id=("montage-tile", 7))
+    pool.warm_payloads({0: warm}, tile_shape=(HEIGHT, EXTENT), rgb_already_windowed=False)
+
+    stats = commit_classic(pool, {0: warm, 1: seed})
+    assert 0 in stats.presented_tiles
+    assert stats.texture_uploads == 0  # promotion reuses the warm upload
+    rows = pool.tile_truth_physical_rows()
+    assert 0 in rows and 1 in rows
+    assert rows[0]["physical_texture_dtype"] == "float32"
+
+
+def test_window_session_to_classic_montage_same_tile_numbers_no_stale_state():
+    """The task's field sequence: a chunked (anchored) window session for
+    tiles 0..N, then a classic montage presentation reusing the SAME tile
+    numbers without an intervening reset, then a remap-style re-present.
+    No montage tile may draw with leftover chunk draw parts, and every drawn
+    tile must have a physical truth row."""
+
+    pool = TextureAtlasPool(FakeGloo())
+    window = {
+        t: anchored_content_payload(
+            np.random.default_rng(20 + t).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32),
+            content_key=("doc", f"W{t}"),
+            source_id=("plane", f"W{t}"),
+            tile_number=t,
+        )
+        for t in range(3)
+    }
+    commit(pool, window)
+    assert all(t in pool.tile_draw_parts for t in range(3))
+
+    montage_data = {
+        t: np.random.default_rng(30 + t).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
+        for t in range(4)
+    }
+    montage = {
+        t: classic_payload(t, montage_data[t], source_id=("montage-tile", t)) for t in range(3)
+    }
+    commit_classic(pool, montage)
+    assert all(t not in pool.tile_draw_parts for t in range(3))
+    assert all(t not in pool.tile_chunk_residency for t in range(3))
+    rows = pool.tile_truth_physical_rows()
+    assert all(t in rows for t in range(3))
+
+    # Remap-style re-present: content shifts one tile number; the shifted
+    # keys are already resident, so the pool presents them via the skip path.
+    remap = {
+        t: classic_payload(t, montage_data[t + 1], source_id=("montage-tile", t + 1))
+        for t in range(3)
+    }
+    stats = commit_classic(pool, remap)
+    assert stats.presented_tiles == (0, 1, 2)
+    rows = pool.tile_truth_physical_rows()
+    assert all(t in rows for t in range(3))
+    assert all(t not in pool.tile_draw_parts for t in range(3))
+    assert pool.presented_identities() == {
+        0: ("montage-tile", 1),
+        1: ("montage-tile", 2),
+        2: ("montage-tile", 3),
+    }
