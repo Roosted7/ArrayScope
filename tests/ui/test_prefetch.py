@@ -388,3 +388,61 @@ def test_slice_change_without_setting_skips_prefetch(qtbot):
         )
     finally:
         win.close()
+
+
+def test_prefetch_menu_action_exists_and_toggles_setting(qtbot):
+    """The Performance-menu toggle must stay wired to the live setting.
+
+    Regression guard: the handler survived the legacy-path removal but the
+    menu action itself was lost, leaving the setting unreachable in the UI.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        action = getattr(win, "_prefetch_nearby_slices_action", None)
+        assert action is not None, "Performance menu lost the prefetch toggle"
+        assert action.isCheckable()
+        assert not action.isChecked()
+        assert not win.app_settings.prefetch_nearby_slices
+        action.setChecked(True)
+        _process_events(qtbot)
+        assert win.app_settings.prefetch_nearby_slices
+        action.setChecked(False)
+        _process_events(qtbot)
+        assert not win.app_settings.prefetch_nearby_slices
+    finally:
+        win.close()
+
+
+def test_prefetch_menu_action_exists_and_toggles_setting(qtbot):
+    """The Performance-menu toggle must stay wired to the live setting.
+
+    Regression guard: the handler survived the legacy-path removal but the
+    menu action itself was lost, leaving the setting unreachable in the UI.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        action = getattr(win, "_prefetch_nearby_slices_action", None)
+        assert action is not None, "Performance menu lost the prefetch toggle"
+        assert action.isCheckable()
+        assert not action.isChecked()
+        assert not win.app_settings.prefetch_nearby_slices
+        action.setChecked(True)
+        _process_events(qtbot)
+        assert win.app_settings.prefetch_nearby_slices
+        action.setChecked(False)
+        _process_events(qtbot)
+        assert not win.app_settings.prefetch_nearby_slices
+    finally:
+        win.close()

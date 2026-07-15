@@ -150,6 +150,15 @@ class WindowMenuMixin:
             profile_menu.addAction(action)
             self._memory_profile_actions[choice] = action
 
+        # The prefetch handler survived the legacy-path removal but its menu
+        # action did not; the setting was unreachable except by editing the
+        # config file (2026-07-15 rewiring, together with its scheduler call).
+        prefetch_action = QtGui.QAction("Prefetch Nearby Slices", self, checkable=True)
+        prefetch_action.setChecked(bool(getattr(self.app_settings, "prefetch_nearby_slices", False)))
+        prefetch_action.toggled.connect(self._set_prefetch_enabled)
+        performance_menu.addAction(prefetch_action)
+        self._prefetch_nearby_slices_action = prefetch_action
+
         self._fft_backend_actions = {}
         self._fft_backend_action_group = QtGui.QActionGroup(self)
         self._fft_backend_action_group.setExclusive(True)
