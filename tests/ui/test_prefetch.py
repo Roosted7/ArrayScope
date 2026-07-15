@@ -276,10 +276,164 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
             ),
             on_done=lambda _value: None,
         )
+        before_scheduled = win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
-        _process_events(qtbot, count=5)
 
-        assert win.prefetch_evaluation_controller.diagnostics().prefetch_visible_busy_blocked == 1
+        # The gate decision is synchronous: blocked, nothing scheduled, and
+        # (post re-arm fix) the request is retained for the drain retry
+        # rather than dropped.
+        assert win.prefetch_evaluation_controller.diagnostics().prefetch_visible_busy_blocked >= 1
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == before_scheduled
+        assert getattr(win.renderer, "_pending_prefetch_request", None) is not None
+    finally:
+        win.close()
+
+
+def _pin_visible_busy(win):
+    """Deterministically close the visible-busy gate like a live scrub does.
+
+    In the field the gate closes because every scrub step starts a new
+    visible evaluation milliseconds before the speculative dispatch lands;
+    reproducing that timing with real work is racy offscreen (the kernel
+    also parks the speculative batch behind real visible work), so pin the
+    predicate itself and release it explicitly.
+    """
+
+    state = {"busy": True}
+    original = win.visible_evaluation_controller.is_busy
+    win.visible_evaluation_controller.is_busy = lambda: state["busy"]
+
+    def release():
+        state["busy"] = False
+        win.visible_evaluation_controller.is_busy = original
+        # The retained request re-arms on the next completion drain; give the
+        # shared bridge one completed task to drain, exactly like the visible
+        # frame whose completion would wake the retry in a live session.
+        from arrayscope.core.frame_targets import FrameTarget
+        from arrayscope.kernel import Lane as WorkLane, WorkItem
+
+        win.visible_evaluation_controller.start_latest(
+            lambda: None,
+            key="drain",
+            priority=0,
+            replace_group="visible",
+            frame_target=FrameTarget("drain", None, "presentation", "exact-visible"),
+            supersession_key="visible-image",
+            supersession_value="drain",
+            work_item=WorkItem(
+                key=("visible", "drain"),
+                lane=WorkLane.VISIBLE_MATERIALIZATION,
+                frame_target=FrameTarget("drain", None, "presentation", "exact-visible"),
+                supersession_key="visible-image",
+                supersession_value="drain",
+            ),
+            on_done=lambda _value: None,
+        )
+
+    return release
+
+
+def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
+    """A visible-busy dispatch retains the request and re-arms on drain.
+
+    Regression gate: the speculative dispatch lands milliseconds after the
+    slice change that armed it — while that change's own visible evaluation
+    is still in flight — so the busy gate closed on ~every scrub step,
+    CONSUMED the pending request, and never re-armed: 43/43 dispatches
+    skipped, prefetch_scheduled=0 across a whole scrub session.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win._active_slice_axis = 2
+        # Let startup evaluation drain first so the speculative dispatch is
+        # not parked behind real work under parallel test load.
+        qtbot.waitUntil(
+            lambda: not win.visible_evaluation_controller.is_busy(),
+            timeout=10000,
+        )
+        release_busy = _pin_visible_busy(win)
+
+        state = win.view_state.with_slice(2, 2)
+        win.renderer._schedule_prefetch_nearby_slices(state, None)
+
+        # The dispatch must actually hit the closed gate first...
+        qtbot.waitUntil(
+            lambda: win.prefetch_evaluation_controller.diagnostics().prefetch_visible_busy_blocked >= 1,
+            timeout=10000,
+        )
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == 0
+        assert getattr(win.renderer, "_pending_prefetch_request", None) is not None, (
+            "the gated dispatch must retain the request, not consume it"
+        )
+
+        # ...and the retained request must run once the visible work drains.
+        release_busy()
+        qtbot.waitUntil(
+            lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled >= 1,
+            timeout=5000,
+        )
+        qtbot.waitUntil(
+            lambda: win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
+            or win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 3)) is not None,
+            timeout=5000,
+        )
+    finally:
+        win.close()
+
+
+def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
+    """Rapid gated scrub steps collapse to one latest-wins retry.
+
+    Momentum observes at SCHEDULE time, so the gated steps still feed the
+    direction model (pre-fix: observe only ran inside the gated body, so a
+    busy scrub session left momentum with no data at all).
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=float).reshape(3, 4, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win._active_slice_axis = 2
+        qtbot.waitUntil(
+            lambda: not win.visible_evaluation_controller.is_busy(),
+            timeout=10000,
+        )
+        release_busy = _pin_visible_busy(win)
+
+        for index in (2, 3, 4, 5):
+            win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, index), None)
+        _process_events(qtbot, count=10)
+
+        momentum = getattr(win.renderer, "_prefetch_momentum", None)
+        assert momentum is not None, "gated scrub steps must still feed the momentum model"
+        assert momentum.direction == 1
+        assert momentum.streak >= 3
+        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == 0
+
+        release_busy()
+        qtbot.waitUntil(
+            lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled >= 1,
+            timeout=5000,
+        )
+        _process_events(qtbot, count=40)
+        diagnostics = win.operation_evaluator.display_cache_diagnostics()
+        # Latest-wins coalescing: one retained request, one momentum-planned
+        # fan-out (max_depth=4) — not one prefetch per gated step.
+        assert diagnostics.prefetch_scheduled <= 4
+        assert getattr(win.renderer, "_pending_prefetch_request", None) is None
     finally:
         win.close()
 

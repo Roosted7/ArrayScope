@@ -18,6 +18,11 @@ class RenderPrefetchMixin:
         if not getattr(self.win.app_settings, "prefetch_nearby_slices", False):
             self.win.operation_evaluator.note_prefetch_skipped()
             return
+        # Direction data accrues at SCHEDULE time: during a fast scrub the
+        # dispatch below is gated (visible busy) on almost every step, and
+        # that is exactly when the momentum model needs the step stream so
+        # the first ungated run speculates in the right direction.
+        self._observe_prefetch_momentum(view_state)
         self._pending_prefetch_request = (view_state, colormap_lut)
         if bool(getattr(self, "_prefetch_dispatch_queued", False)):
             return
@@ -47,16 +52,65 @@ class RenderPrefetchMixin:
     def _run_pending_prefetch(self):
         self._prefetch_dispatch_queued = False
         request = getattr(self, "_pending_prefetch_request", None)
-        self._pending_prefetch_request = None
         if request is None:
             return
         view_state, colormap_lut = request
         self._refresh_memory_policy(active_render=self.win.visible_evaluation_controller.is_busy())
         if self.win.visible_evaluation_controller.is_busy():
+            # The speculative dispatch lands milliseconds after the slice
+            # change that armed it — while that same change's visible eval is
+            # still in flight, so this gate closes on ~every scrub step.
+            # Dropping the request here left the prefetcher deterministically
+            # dead. Keep it pending (latest-wins: newer slice changes simply
+            # overwrite it) and retry when the visible work drains.
             self.win.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
             self.win.operation_evaluator.note_prefetch_skipped()
+            self._arm_prefetch_visible_drain_retry()
             return
+        self._pending_prefetch_request = None
         self._prefetch_nearby_slices(view_state, colormap_lut)
+
+    def _arm_prefetch_visible_drain_retry(self) -> None:
+        """Retry the retained prefetch request after the next completion drain.
+
+        ADR 0053: no new timers. The kernel bridge's one-shot capacity waiter
+        fires on the GUI thread right after a completion batch is dispatched —
+        the visible evaluation that closed the gate is itself such a
+        completion, so its drain is the wake-up. If the gate is still closed
+        (another visible frame started), the retry re-arms; the waiter key
+        keeps at most one continuation outstanding per window.
+        """
+
+        notify = getattr(self.win.visible_evaluation_controller, "notify_when_capacity", None)
+        if not callable(notify):
+            return
+        notify(
+            ("slice-prefetch-visible-drain", id(self)),
+            self._retry_prefetch_after_visible_drain,
+        )
+
+    def _retry_prefetch_after_visible_drain(self) -> None:
+        if getattr(self.win, "_closing", False):
+            return
+        if getattr(self, "_pending_prefetch_request", None) is None:
+            return
+        if bool(getattr(self, "_prefetch_dispatch_queued", False)):
+            # A fresh speculative dispatch is already queued; it reads the
+            # latest pending request itself.
+            return
+        self._run_pending_prefetch()
+
+    def _observe_prefetch_momentum(self, view_state) -> None:
+        axis = getattr(self.win, "_active_slice_axis", None)
+        if axis is None or view_state.image_axes is None or axis in view_state.image_axes:
+            return
+        if not (0 <= int(axis) < len(view_state.slice_indices)):
+            return
+        momentum = getattr(self, "_prefetch_momentum", None)
+        if momentum is None:
+            momentum = SliceScrubMomentum()
+            self._prefetch_momentum = momentum
+        momentum.observe(int(view_state.slice_indices[int(axis)]), now=monotonic())
 
     def _prefetch_nearby_slices(self, view_state, colormap_lut):
         if not getattr(self.win.app_settings, "prefetch_nearby_slices", False):
@@ -68,6 +122,9 @@ class RenderPrefetchMixin:
         if self.win.visible_evaluation_controller.is_busy():
             self.win.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
             self.win.operation_evaluator.note_prefetch_skipped()
+            if getattr(self, "_pending_prefetch_request", None) is None:
+                self._pending_prefetch_request = (view_state, colormap_lut)
+            self._arm_prefetch_visible_drain_retry()
             return
         policy = self._memory_policy()
         if self.win.operation_evaluator._display_cache.bytes_used > int(self.win.operation_evaluator._display_cache.max_bytes * policy.cache_prefetch_skip_fraction):
@@ -92,11 +149,12 @@ class RenderPrefetchMixin:
         shader_display = self._prefetch_shader_display()
         size = view_state.shape[axis]
         current = view_state.slice_indices[axis]
+        # observe() happens at schedule time (_observe_prefetch_momentum);
+        # this ungated run only reads the accumulated direction.
         momentum = getattr(self, "_prefetch_momentum", None)
         if momentum is None:
             momentum = SliceScrubMomentum()
             self._prefetch_momentum = momentum
-        momentum.observe(current, now=monotonic())
         plan = momentum.plan(size=size)
         scheduled = 0
         for delta in plan.deltas:
