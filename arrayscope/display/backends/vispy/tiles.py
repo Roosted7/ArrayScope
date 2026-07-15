@@ -55,6 +55,29 @@ class AtlasCapacityError(RuntimeError):
     """Raised when one atlas page cannot contain the requested tile set."""
 
 
+@dataclass(frozen=True)
+class TileDrawPart:
+    """One quad of a view tile: a world sub-rect sampling a cropped UV rect.
+
+    ADR 0055 G3: a view tile no longer necessarily owns one full slot. It may
+    draw as several parts, each sampling a UV sub-window of a resident slot
+    (window shifts become texcoord updates plus boundary uploads). A tile
+    with no parts registered draws the classic single full-slot quad.
+
+    Seam rules (see docs/proposals/gpu-engine-plan.md G3): world-space part
+    edges must fall on integer texel boundaries (atlas filtering is NEAREST),
+    and cropped UV rects must stay inside the gutter-protected inner region
+    of their slot while whole-atlas mipmaps are enabled.
+    """
+
+    world_rect: tuple[float, float, float, float]  # x0, y0, x1, y1
+    uv_rect: tuple[float, float, float, float]  # u0, v0, u1, v1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "world_rect", tuple(float(v) for v in self.world_rect))
+        object.__setattr__(self, "uv_rect", tuple(float(v) for v in self.uv_rect))
+
+
 _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
 _UNSET = object()
 
@@ -230,6 +253,9 @@ class TextureAtlasPool:
         # and the view-tile → resident-key presentation maps below.
         self._page_table = PageTable()
         self.tile_slots: dict[int, tuple[int, int]] = {}
+        # ADR 0055 G3: optional per-tile quad list (UV-cropped sub-window
+        # sampling). Tiles absent from this map draw one full-slot quad.
+        self.tile_draw_parts: dict[int, tuple[TileDrawPart, ...]] = {}
         self.tile_resident_keys: dict[int, object] = {}
         self.resident_tiles: dict[object, set[int]] = {}
         self.tile_uvs: dict[int, tuple[float, float, float, float]] = {}
@@ -387,6 +413,7 @@ class TextureAtlasPool:
             self.pages.clear()
             self._page_table = PageTable()
             self.tile_slots.clear()
+            self.tile_draw_parts.clear()
             self.tile_resident_keys.clear()
             self.resident_tiles.clear()
             self.tile_uvs.clear()
@@ -1269,6 +1296,7 @@ class TextureAtlasPool:
                 if not tiles:
                     self.resident_tiles.pop(old_key, None)
         self.tile_slots.pop(tile_number, None)
+        self.tile_draw_parts.pop(tile_number, None)
         self.tile_uvs.pop(tile_number, None)
 
     def _set_tile_mapping(
@@ -1304,6 +1332,7 @@ class TextureAtlasPool:
             if self.tile_resident_keys.get(tile_number) == resident_key:
                 self.tile_resident_keys.pop(tile_number, None)
                 self.tile_slots.pop(tile_number, None)
+                self.tile_draw_parts.pop(tile_number, None)
                 self.tile_uvs.pop(tile_number, None)
 
     def _touch(self, resident_key: object) -> None:
@@ -1371,11 +1400,17 @@ class GpuMontageLayer:
                 if page_index < len(self._page_payloads_by_index)
                 else {}
             )
+            # Vertex offsets are a prefix sum of per-tile quad counts: tiles
+            # with registered draw parts emit 6 vertices per part, others 6.
             ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
-            try:
-                payload_offset = ordered_tiles.index(int(tile_number)) * 6
-            except ValueError:
-                payload_offset = -1
+            draw_parts = self._pool.tile_draw_parts
+            payload_offset = -1
+            offset = 0
+            for tile in ordered_tiles:
+                if tile == int(tile_number):
+                    payload_offset = offset
+                    break
+                offset += 6 * max(1, len(draw_parts.get(tile, ())))
             mode_data = np.asarray(getattr(visual, "mode_data", ()), dtype=np.float32)
             physical_mode = (
                 None
@@ -1648,6 +1683,7 @@ class GpuMontageLayer:
                     page_payloads,
                     uvs,
                     rgb_already_windowed=rgb_already_windowed,
+                    draw_parts=self._pool.tile_draw_parts,
                 )
                 visual.set_geometry(vertices, texcoords, modes)
                 self._geometry_keys[page_index] = geometry_key
@@ -2383,26 +2419,37 @@ def _upload_copy_required(staging: np.ndarray, payload: DisplayTilePayload, *, f
     return True
 
 
-def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool):
+def _tile_quad_rects(tile_number, layout, uvs, draw_parts):
+    """(world_rect, uv_rect) quads for one tile — registered parts, else the
+    classic single full-slot quad; empty when the tile has no layout/UV."""
+
+    parts = None if draw_parts is None else draw_parts.get(int(tile_number))
+    if parts:
+        return tuple((part.world_rect, part.uv_rect) for part in parts)
+    region = layout.get(int(tile_number))
+    if region is None:
+        return ()
+    uv = uvs.get(int(tile_number))
+    if uv is None:
+        return ()
+    x0 = float(region.x)
+    y0 = float(region.y)
+    return (((x0, y0, x0 + float(region.width), y0 + float(region.height)), tuple(uv)),)
+
+
+def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool, draw_parts=None):
     vertices = []
     texcoords = []
     modes = []
     for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
-        region = layout.get(int(tile_number))
-        if region is None:
+        quads = _tile_quad_rects(tile_number, layout, uvs, draw_parts)
+        if not quads:
             continue
-        uv = uvs.get(int(tile_number))
-        if uv is None:
-            continue
-        x0 = float(region.x)
-        y0 = float(region.y)
-        x1 = x0 + float(region.width)
-        y1 = y0 + float(region.height)
-        u0, v0, u1, v1 = uv
-        vertices.extend(((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)))
-        texcoords.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v0), (u1, v1), (u0, v1)))
         mode = float(_payload_mode(payload, rgb_already_windowed=rgb_already_windowed))
-        modes.extend((mode,) * 6)
+        for (x0, y0, x1, y1), (u0, v0, u1, v1) in quads:
+            vertices.extend(((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)))
+            texcoords.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v0), (u1, v1), (u0, v1)))
+            modes.extend((mode,) * 6)
     return (
         np.asarray(vertices, dtype=np.float32).reshape((-1, 2)),
         np.asarray(texcoords, dtype=np.float32).reshape((-1, 2)),
@@ -2411,6 +2458,10 @@ def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool):
 
 
 def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bool) -> tuple[object, ...]:
+    # Registered draw parts are keyed explicitly: their UV crops are geometry
+    # inputs that slot/region/gutter alone no longer determine (a window
+    # shift changes only the crop rects, and must rebuild the buffers).
+    draw_parts = pool.tile_draw_parts
     return (
         tuple(
             (
@@ -2422,6 +2473,7 @@ def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bo
                 int(layout[int(key)].height),
                 _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
                 _payload_gutter(payload),
+                tuple((part.world_rect, part.uv_rect) for part in draw_parts.get(int(key), ())),
             )
             for key, payload in sorted(dict(payloads or {}).items())
             if int(key) in pool.tile_slots and int(key) in layout
