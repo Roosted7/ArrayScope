@@ -582,6 +582,23 @@ def test_histogram_imageitem_binding_is_centralized():
     assert "regionChanged()" in adapter
 
 
+def test_display_surfaces_do_not_resurrect_normal_image_commit_entry_points():
+    """The legacy normal-image single-quad path is deleted (2026-07).
+
+    Every live 2D commit flows DisplayCommitter.commit_tile_layer ->
+    present_tiled -> setTiledPresentation. The surfaces must not grow the
+    legacy entry points back.
+    """
+
+    for rel in (
+        Path("arrayscope/display/imageview2d.py"),
+        Path("arrayscope/display/vispy_imageview2d.py"),
+    ):
+        text = (ROOT / rel).read_text()
+        assert "def setImage(" not in text, rel
+        assert "def updateImageDataFast(" not in text, rel
+
+
 def test_frame_renderer_does_not_mutate_image_items_directly():
     text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     forbidden = (".setImage(", ".setMontageTileLayerPresentation(", "ImageItem(")
