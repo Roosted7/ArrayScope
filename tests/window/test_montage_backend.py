@@ -7,7 +7,6 @@ import pytest
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.core.memory_policy import MemoryProfileChoice
 from arrayscope.core.resource_governor import ResourcePressure, ResourcePressureState
-from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.window.montage_prefetch import _owner_memory_pressure_blocks_prefetch, _owner_prefetch_batch_limit
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
@@ -1079,13 +1078,6 @@ def test_first_cpu_level_scan_continuation_uses_visible_lane():
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
 
 
-def test_auto_small_scalar_montage_uses_tile_layer():
-    decision = choose_montage_backend(_geometry(), np.zeros((64, 64), dtype=np.float32))
-
-    assert decision.backend == "tile_layer"
-
-    assert "tiled montage presentation" in decision.reason
-
 
 def test_initial_montage_plan_uses_pending_restored_viewport_range():
     from pyqtgraph.Qt import QtCore
@@ -1331,34 +1323,7 @@ def test_montage_commit_reschedules_restored_roi_stats():
     assert calls == ["viewport", ("roi", "montage-semantic-commit")]
 
 
-def test_auto_large_scalar_montage_uses_tile_layer():
-    data = np.zeros((1500, 1500), dtype=np.float32)
 
-    decision = choose_montage_backend(_geometry(), data)
-    slow = choose_montage_backend(_geometry(), data)
-
-    assert decision.backend == "tile_layer"
-    assert slow.backend == "tile_layer"
-
-
-def test_auto_large_scalar_vispy_montage_uses_tile_layer_to_avoid_full_uploads():
-    data = np.zeros((1500, 1500), dtype=np.float32)
-
-    decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
-
-    assert decision.backend == "tile_layer"
-
-    assert "tiled montage presentation" in decision.reason
-
-
-def test_auto_small_scalar_vispy_montage_uses_tile_layer():
-    data = np.zeros((64, 64), dtype=np.float32)
-
-    decision = choose_montage_backend(_geometry(), data, renderer_backend="vispy")
-
-    assert decision.backend == "tile_layer"
-
-    assert "tiled montage presentation" in decision.reason
 
 
 def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
@@ -2129,38 +2094,7 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
     assert tuple(delta.upserts) == (1, 2)
 
 
-def test_auto_policy_uses_renderer_backend_name():
-    data = np.zeros((1500, 1500), dtype=np.float32)
-    decision = choose_montage_backend(
-        _geometry(),
-        data,
-        renderer_backend="future-gpu-backend",
-    )
 
-    assert decision.backend == "tile_layer"
-    assert "future-gpu-backend" in decision.reason
-
-
-def test_montage_policy_is_always_tiled():
-    data = np.zeros((64, 64), dtype=np.float32)
-
-    decision = choose_montage_backend(
-        _geometry(),
-        data,
-        renderer_backend="future-gpu-backend",
-    )
-
-    assert decision.backend == "tile_layer"
-    assert "tiled montage presentation" in decision.reason
-
-
-def test_auto_preserves_vispy_tile_layer_mode():
-    data = np.zeros((64, 64), dtype=np.float32)
-
-    decision = choose_montage_backend(_geometry(), data)
-
-    assert decision.backend == "tile_layer"
-    assert "tiled montage presentation" in decision.reason
 
 
 def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
@@ -3356,20 +3290,12 @@ def test_tiled_payload_source_id_follows_semantic_materialization_identity():
     assert third.source_id != second.source_id
 
 
-def test_auto_large_rgb_montage_uses_tile_layer():
-    data = np.zeros((1500, 1500, 3), dtype=np.uint8)
-
-    decision = choose_montage_backend(_geometry(), data)
-
-    assert decision.backend == "tile_layer"
-
 
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
     from arrayscope.display.geometry import MontageGeometry
     from arrayscope.display.model.frame import TilePresentationDelta, TilePresentationState
     from arrayscope.window.frame_controller import FrameControllerMixin
-    from arrayscope.window.montage_backend import MontageBackendDecision
 
     class _Window(FrameControllerMixin):
         def __init__(self):
@@ -3382,9 +3308,6 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
 
         def _classify_visible_montage_tiles(self, _session):
             return None
-
-        def _montage_backend_policy(self, _geometry, _data):
-            return MontageBackendDecision("tile_layer", "test")
 
         def _montage_tile_source_ids(self, _session):
             return {}

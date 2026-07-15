@@ -33,7 +33,6 @@ from arrayscope.render import effects as render_effects
 from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
-from arrayscope.window.montage_backend import choose_montage_backend
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
@@ -144,7 +143,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         return planner
 
     def _montage_tile_layer_policy(self, geometry, data) -> bool:
-        return self._montage_backend_policy(geometry, data).backend == "tile_layer"
+        # Every montage display commits through the tile layer; the historical
+        # per-size/per-backend chooser collapsed to this predicate.
+        return getattr(geometry, "montage", None) is not None
 
     def _retained_tiled_payload_store(self) -> RetainedTiledPayloadStore:
         store = getattr(self, "_montage_retained_tiled_payloads", None)
@@ -152,13 +153,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             store = RetainedTiledPayloadStore()
             self._montage_retained_tiled_payloads = store
         return store
-
-    def _montage_backend_policy(self, geometry, data):
-        return choose_montage_backend(
-            geometry,
-            data,
-            renderer_backend=image_view_backend_capabilities(self.win.img_view).name,
-        )
 
     def _session_source_anchoring(self, document, view_state, axis):
         """ADR 0055 G3: window-invariant payload anchoring for the session.

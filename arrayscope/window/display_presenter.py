@@ -30,7 +30,6 @@ from arrayscope.display.model.frame import (
     TilePresentationState,
     TiledValueSource,
 )
-from arrayscope.window.montage_backend import MontageBackendDecision, backend_warning_for_actual_commit
 from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, DisplayTiledPresentation, PresentationInput, RenderRequestContext
 from arrayscope.window.viewport_bridge import ViewportBridge
@@ -113,10 +112,7 @@ class DisplayPresentationMixin:
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
 
             set_image_start = perf_counter()
-            backend_decision = self._montage_backend_decision_for_display(decision.display_presentation.geometry, display_image.data)
             frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
-            actual_backend = "tile_layer"
-            self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = frame.geometry
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
@@ -232,10 +228,7 @@ class DisplayPresentationMixin:
             )
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
             set_image_start = perf_counter()
-            backend_decision = self._montage_backend_decision_for_display(decision.display_presentation.geometry, display_image.data)
             frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
-            actual_backend = "tile_layer"
-            self._record_montage_backend_commit(backend_decision, actual_backend)
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = frame.geometry
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
@@ -272,17 +265,6 @@ class DisplayPresentationMixin:
         if policy is None:
             return False
         return bool(policy(geometry, data))
-
-    def _montage_backend_decision_for_display(self, geometry, data) -> MontageBackendDecision:
-        policy = getattr(self, "_montage_backend_policy", None)
-        if policy is None or getattr(geometry, "montage", None) is None:
-            return MontageBackendDecision("none", "not a montage display")
-        return policy(geometry, data)
-
-    def _record_montage_backend_commit(self, decision: MontageBackendDecision, actual_backend: str) -> None:
-        self._last_montage_backend_choice = decision
-        self._last_montage_backend_actual = str(actual_backend)
-        self._last_montage_backend_warning = backend_warning_for_actual_commit(decision, actual_backend)
 
     def _display_committer(self) -> DisplayCommitter:
         committer = getattr(self, "_display_committer_instance", None)

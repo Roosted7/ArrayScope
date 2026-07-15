@@ -1195,9 +1195,8 @@ class FramePipelineEffects:
             montage_origin_y=0,
             montage_tile_states=tile_states,
         )
-        decision = self.renderer._montage_backend_policy(geometry, placeholder)
-        if decision.backend != "tile_layer":
-            return None
+        # The geometry above always carries the session's montage plan, so
+        # this is unconditionally a tile-layer presentation.
         return DisplayImage(data=placeholder, histogram_data=None, rgb_already_windowed=False), geometry
 
     # ------------------------------------------------------------------ admit
@@ -2095,12 +2094,10 @@ class FramePipelineEffects:
             getattr(getattr(decision, "applied_level_source", None), "rank", 0) or 0
         )
         set_image_start = perf_counter()
-        backend_decision = renderer._montage_backend_decision_for_display(geometry, display_image.data)
-        if backend_decision.backend != "tile_layer":
+        if getattr(geometry, "montage", None) is None:
             return False
         committer = renderer._display_committer()
         committer.commit_tiled_delta(decision.display_presentation)
-        renderer._record_montage_backend_commit(backend_decision, "tile_layer")
         renderer._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
         renderer.display_geometry = geometry
         report = getattr(committer, "last_tile_commit_report", None)
