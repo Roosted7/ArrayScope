@@ -2684,6 +2684,111 @@ def test_vispy_warm_residency_schedule_caps_one_speculative_batch(qt_app):
         view.close()
 
 
+def test_vispy_warm_tiled_residency_enqueues_bounded_nonpresenting_work(qt_app):
+    """The public montage-prefetch hook queues GL work without acknowledging it.
+
+    A warm batch may add source-keyed atlas residency, but it must not change
+    the active mapping or physically presented identities until a later typed
+    presentation commit promotes that source.
+    """
+
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    geometry = _montage_geometry()
+    visible = DisplayTilePayload(
+        0,
+        0,
+        np.zeros((2, 2), dtype=np.float32),
+        None,
+        ("visible-source", 0),
+    )
+    warm_payloads = {
+        tile: DisplayTilePayload(
+            tile,
+            tile,
+            np.full((2, 2), float(tile), dtype=np.float32),
+            None,
+            ("warm-source", tile),
+        )
+        for tile in range(1, 7)
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        active_tiles=(0,),
+        planned_tiles=tuple(range(7)),
+        near_tiles=tuple(range(7)),
+        near_tile_source_ids={
+            0: visible.source_id,
+            **{tile: payload.source_id for tile, payload in warm_payloads.items()},
+        },
+    )
+    callbacks = []
+    view = VisPyImageView2D()
+    try:
+        view.setTiledPresentation(
+            geometry=geometry,
+            tile_state=TilePresentationState({0: visible}),
+            tile_delta=TilePresentationDelta(
+                structure_revision=1,
+                payload_revision=1,
+                visibility_revision=1,
+                level_revision=1,
+                histogram_revision=1,
+                viewport_revision=1,
+                upserts={0: visible},
+                active_tiles=(0,),
+                planned_tiles=(0,),
+            ),
+            histogramPlotData=None,
+            levels=(0.0, 6.0),
+            histogramRange=(0.0, 6.0),
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+        pool = view._vispy_gpu_montage_layer._pool
+        presented_before = dict(pool.presented_identities())
+        active_before = set(pool.active_resident_keys)
+        slots_before = dict(pool.tile_slots)
+        view._vispy_warm_tile_scheduler = callbacks.append
+
+        view.warmTiledResidency(
+            payloads=warm_payloads,
+            geometry=geometry,
+            levels=(0.0, 6.0),
+            rgb_already_windowed=False,
+            tile_delta=delta,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+        assert len(callbacks) == 1
+        pending = view._vispy_pending_warm_tile_payloads
+        assert len(pending) == len(warm_payloads)
+        assert pool.presented_identities() == presented_before
+        assert pool.active_resident_keys == active_before
+        assert pool.tile_slots == slots_before
+
+        callbacks.pop(0)()
+
+        stats = view._last_vispy_warm_tile_stats
+        assert stats.items_updated == 4
+        assert len(view._vispy_pending_warm_tile_payloads) == 2
+        assert len(callbacks) == 1
+        assert pool.presented_identities() == presented_before
+        assert pool.active_resident_keys == active_before
+        assert pool.tile_slots == slots_before
+    finally:
+        view.close()
+
+
 def test_vispy_direct_tiled_histogram_only_commit_refreshes_histogram(qt_app, monkeypatch):
     from types import SimpleNamespace
 

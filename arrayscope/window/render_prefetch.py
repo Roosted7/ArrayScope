@@ -112,6 +112,34 @@ class RenderPrefetchMixin:
             self._prefetch_momentum = momentum
         momentum.observe(int(view_state.slice_indices[int(axis)]), now=monotonic())
 
+    def _observe_montage_prefetch_momentum(self, previous_state, view_state) -> None:
+        """Observe an index-window shift for montage speculation ordering.
+
+        Montage evaluation and GPU warming keep using the standing prefetch
+        scheduler.  This owner records only the input direction so that the
+        next idle admission can prefer already-eligible tiles ahead of the
+        scroll without creating future-window lifecycle state.
+        """
+
+        axis = getattr(view_state, "montage_axis", None)
+        indices = tuple(getattr(view_state, "montage_indices", ()) or ())
+        previous_axis = getattr(previous_state, "montage_axis", None)
+        previous_indices = tuple(getattr(previous_state, "montage_indices", ()) or ())
+        if axis is None or not indices:
+            return
+        key = (int(axis), len(indices))
+        if previous_axis != axis or len(previous_indices) != len(indices):
+            self._montage_prefetch_momentum_key = key
+            self._montage_prefetch_momentum = SliceScrubMomentum()
+        elif getattr(self, "_montage_prefetch_momentum_key", None) != key:
+            self._montage_prefetch_momentum_key = key
+            self._montage_prefetch_momentum = SliceScrubMomentum()
+        momentum = getattr(self, "_montage_prefetch_momentum", None)
+        if momentum is None:
+            momentum = SliceScrubMomentum()
+            self._montage_prefetch_momentum = momentum
+        momentum.observe(int(indices[0]), now=monotonic())
+
     def _prefetch_nearby_slices(self, view_state, colormap_lut):
         if not getattr(self.win.app_settings, "prefetch_nearby_slices", False):
             self.win.operation_evaluator.note_prefetch_skipped()

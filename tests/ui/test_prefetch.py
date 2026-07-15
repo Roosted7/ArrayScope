@@ -246,6 +246,188 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
         win.close()
 
 
+def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatch):
+    """A stored montage prefetch must cross the persistent GPU-residency seam.
+
+    Pre-fix, the completion path accepted only ``cpu_item`` residency, so the
+    same completed payload that warmed PyQtGraph was silently left CPU-only on
+    a ``gpu_atlas`` backend.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.core.frame_targets import WorkStart
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.montage import RenderedTile
+    from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window import montage_prefetch
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.request_operation("reverse", 0)
+        state = win.view_state.with_montage_axis(
+            2,
+            columns=4,
+            indices=tuple(range(8)),
+            text=":",
+        )
+        win._set_view_state(state)
+        win.render(reason="test-gpu-montage-prefetch-warm")
+        qtbot.waitUntil(lambda: win.renderer._frame_session is not None, timeout=5000)
+        session = win.renderer._frame_session
+        tile = session.plan.tiles[-1]
+        image = np.full(tuple(session.plan.tile_shape), float(tile.source_index), dtype=np.float32)
+        rendered = RenderedTile(
+            tile=tile,
+            image=image,
+            histogram_data=image,
+            eval_ms=0.0,
+            slab_shape=image.shape,
+            slab_nbytes=image.nbytes,
+        )
+        captured = {}
+        warm_calls = []
+
+        def capture_prefetch(_evaluate, *, on_done, **_kwargs):
+            captured["done"] = on_done
+            return WorkStart(True)
+
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: False)
+        monkeypatch.setattr(montage_prefetch, "_candidate_tiles", lambda _session: (tile,))
+        monkeypatch.setattr(
+            montage_prefetch,
+            "_stage_for_tile",
+            lambda _owner, _session, _tile: (object(), object(), object()),
+        )
+        monkeypatch.setattr(
+            montage_prefetch,
+            "image_view_backend_capabilities",
+            lambda _view: VISPY_CAPABILITIES,
+        )
+        monkeypatch.setattr(
+            win.operation_evaluator,
+            "cached_montage_tile",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            win.operation_evaluator,
+            "store_montage_tile_result",
+            lambda *_args, **_kwargs: rendered,
+        )
+        monkeypatch.setattr(
+            win.prefetch_evaluation_controller,
+            "start_prefetch",
+            capture_prefetch,
+        )
+        monkeypatch.setattr(
+            win.img_view,
+            "warmTiledResidency",
+            lambda **kwargs: warm_calls.append(kwargs),
+            raising=False,
+        )
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(
+            win.renderer,
+            session,
+            max_tiles=1,
+        )
+        assert decisions[0].decision == "scheduled"
+        captured["done"](object())
+
+        assert len(warm_calls) == 1, "gpu_atlas montage prefetch must warm the completed payload"
+        call = warm_calls[0]
+        assert tuple(call["payloads"]) == (int(tile.montage_index),)
+        payload = call["payloads"][int(tile.montage_index)]
+        assert payload.source_index == int(tile.source_index)
+        assert call["geometry"].montage == session.plan.geometry
+    finally:
+        win.close()
+
+
+def test_montage_prefetch_candidates_bias_ahead_of_scroll_direction():
+    """Directional speculation stays local to prefetch candidate ordering.
+
+    The canonical viewport-priority order remains the no-momentum fallback.
+    Once a montage index-window scrub has direction, candidates ahead of the
+    focused visible source are warmed nearest-first, followed by the bounded
+    reverse-side guard in the same nearest-first order.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.display.model.tile_priority import TilePriorityContext
+    from arrayscope.window.montage_prefetch import _candidate_tiles
+
+    state = ViewState.from_shape((2, 2, 5)).with_montage_axis(
+        2,
+        columns=5,
+        indices=tuple(range(5)),
+        text=":",
+    )
+    plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=tuple(range(5)),
+        tile_shape=(2, 2),
+        columns=5,
+    )
+    context = TilePriorityContext.from_tiles(
+        focus=(float(plan.tiles[2].x0 + 1), float(plan.tiles[2].y0 + 1)),
+        view_range=((5.0, 9.0), (-1.0, 3.0)),
+        visible_tiles=(2,),
+        near_tiles=tuple(range(5)),
+    )
+    session = SimpleNamespace(
+        plan=plan,
+        visible_tiles=(plan.tiles[2],),
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        tile_priority_context=lambda: context,
+    )
+
+    neutral = tuple(tile.source_index for tile in _candidate_tiles(session, direction=0))
+    forward = tuple(tile.source_index for tile in _candidate_tiles(session, direction=1))
+    reverse = tuple(tile.source_index for tile in _candidate_tiles(session, direction=-1))
+
+    assert neutral == (1, 3, 0, 4)
+    assert forward == (3, 4, 1, 0)
+    assert reverse == (1, 0, 3, 4)
+
+
+def test_montage_index_window_observation_reuses_scrub_momentum(monkeypatch):
+    from types import SimpleNamespace
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window.render_prefetch import RenderPrefetchMixin
+    import arrayscope.window.render_prefetch as render_prefetch
+
+    times = iter((0.0, 0.1, 0.2))
+    monkeypatch.setattr(render_prefetch, "monotonic", lambda: next(times))
+    owner = SimpleNamespace()
+    initial = ViewState.from_shape((2, 2, 8)).with_montage_axis(
+        2, columns=4, indices=(0, 1, 2, 3), text="0:4"
+    )
+    forward = initial.with_montage_axis(
+        2, columns=4, indices=(1, 2, 3, 4), text="1:5"
+    )
+    reverse = initial.with_montage_axis(
+        2, columns=4, indices=(0, 1, 2, 3), text="0:4"
+    )
+
+    observe = RenderPrefetchMixin._observe_montage_prefetch_momentum
+    observe(owner, initial, initial)
+    observe(owner, initial, forward)
+    assert owner._montage_prefetch_momentum.plan().direction == 1
+
+    observe(owner, forward, reverse)
+    assert owner._montage_prefetch_momentum.plan().direction == -1
+
+
 def test_prefetch_skips_while_visible_controller_busy(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import AppSettingsState

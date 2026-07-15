@@ -50,7 +50,10 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
 - **G4a/G4c**: content-keyed residency without window anchoring (FFT views
   get scroll-back reuse); grow-before-evict for budgeted pools; scroll-back
   = 0 uploads live; warm prefetch of adjacent planes (pure chunk residency,
-  never evicts/relocates residents — denial tests). G4b (session-reuse)
+  never evicts/relocates residents — denial tests). Montage prefetch now
+  crosses the same backend seam into the bounded VisPy atlas warm queue and
+  biases eligible work along observed index-window motion without changing
+  presentation truth. G4b (session-reuse)
   CLOSED BY MEASUREMENT: scrub step 10.2 ms mean / 13.8 p95 on the user's
   real data — rebirth is not the bottleneck.
 - **G5 slice 1**: reduced-LOD planes chunk into uniform plane-pixel pages
@@ -92,11 +95,17 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    dossier).  The remaining `…-235200.jsonl` item is single-slice retention:
    no black flicker, but the retained stale plane lingers too long; measured
    scheduling fix remains priority 3 below.
-2. **Montage scroll-direction GPU warming** (task board #20, unblocked):
-   montage prefetch warms only `cpu_item` backends today
-   (`window/montage_prefetch.py`); wire the G4c pool warm machinery for the
-   VisPy atlas along the scroll direction (scrub momentum exists). This is
-   the user's primary workflow.
+2. **Montage scroll-direction GPU warming** (task board #20, landed
+   2026-07-16): montage prefetch completion now warms both persistent
+   `cpu_item` and `gpu_atlas` backends. VisPy queues bounded GUI-thread atlas
+   batches; gates prove that warm residency does not alter active mappings or
+   physical-presentation acknowledgement. The renderer observes montage
+   index-window momentum and partitions candidates ahead of motion inside
+   the existing viewport priority bands. Rejected: synthesizing payloads for
+   a future montage window through `_ensure_display_tile_payload`; that would
+   manufacture lifecycle/presentation state rather than warm evaluated
+   content. The implementation deliberately reorders only candidates already
+   admitted by the standing montage-prefetch scheduler.
 3. **Retention staleness perf**: likely the same lever — while the previous
    plane is retained, the successor evaluates at full rebirth latency;
    consider preview-floor-first commits for slice transitions and/or

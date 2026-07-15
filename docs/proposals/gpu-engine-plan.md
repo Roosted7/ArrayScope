@@ -163,6 +163,19 @@ same cheapness (today they always rebirth).
 small array performs zero uploads and holds the 16 ms heartbeat; FFT-scroll
 benchmark improves toward the scalar rate (the #1 throughput target).
 
+**G4c montage warming slice landed (2026-07-16).** The existing stage-aware
+montage prefetch completion now hands evaluated payloads to the common
+`warmTiledResidency` backend seam for both CPU-item and GPU-atlas residency.
+VisPy enqueues the payload on its standing bounded GL continuation; warm
+content remains source-keyed, non-presenting residency until an ordinary
+typed commit promotes it. Montage range changes feed the existing
+`SliceScrubMomentum` policy, and idle candidate order prefers the motion side
+inside each canonical viewport-priority band. This does not create a second
+scheduler or speculative lifecycle rows. In particular, constructing
+future-window payloads with the session's presentation helper was rejected:
+the warm path consumes only results the existing prefetch owner evaluated and
+admitted.
+
 ### G5 — Sparse virtual multiresolution pyramid (ADR 0056)
 
 The LOD ladder's members become immutable logical data chunks: anisotropic

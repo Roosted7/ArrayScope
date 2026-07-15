@@ -63,7 +63,13 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
     decisions = []
     scheduled = 0
     shader_display = bool(getattr(session, "shader_display", False))
-    for tile in _candidate_tiles(session):
+    direction = _montage_prefetch_direction(window)
+    candidates = (
+        _candidate_tiles(session, direction=direction)
+        if direction
+        else _candidate_tiles(session)
+    )
+    for tile in candidates:
         if scheduled >= int(max_tiles):
             break
         if preview_walk_only and _preview_resident(session, tile):
@@ -160,7 +166,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                 # worker-side; storing the native result would churn the
                 # display cache this mode exists to protect.
                 window.win.operation_evaluator.prefetch_stored += 1
-                _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key)
+                _warm_prefetched_tiled_residency(window, session, tile, rendered)
             # Walk continuation (ADR 0050 background preview walk): flush
             # paths only invite prefetch while something is happening, so at
             # true idle the walk stalled after one batch.  Each completion
@@ -222,7 +228,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
     return _record(window, tuple(decisions))
 
 
-def _candidate_tiles(session):
+def _candidate_tiles(session, *, direction: int = 0):
     excluded = set(int(tile.montage_index) for tile in getattr(session, "visible_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "rendered_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "loading_tiles", ()))
@@ -235,7 +241,45 @@ def _candidate_tiles(session):
     context_builder = getattr(session, "tile_priority_context", None)
     if not callable(context_builder):
         raise RuntimeError("live frame session has no tile-priority owner")
-    return MontageTilePriorityQueue(candidates, context=context_builder()).ordered_tiles()
+    context = context_builder()
+    ordered = MontageTilePriorityQueue(candidates, context=context).ordered_tiles()
+    direction = 1 if int(direction) > 0 else (-1 if int(direction) < 0 else 0)
+    if direction == 0:
+        return ordered
+    visible_numbers = {
+        int(visible.montage_index) for visible in getattr(session, "visible_tiles", ())
+    }
+    visible_sources = tuple(
+        int(tile.source_index)
+        for tile in tuple(session.plan.tiles)
+        if int(tile.montage_index) in visible_numbers
+    )
+    if not visible_sources:
+        return ordered
+    boundary = max(visible_sources) if direction > 0 else min(visible_sources)
+
+    def direction_rank(tile) -> tuple[int, int]:
+        tile_number = int(tile.montage_index)
+        band = (
+            0
+            if tile_number in context.priority_tiles or tile_number in context.visible_tiles
+            else (1 if tile_number in context.near_tiles else 2)
+        )
+        source_index = int(tile.source_index)
+        ahead = source_index > boundary if direction > 0 else source_index < boundary
+        return band, (0 if ahead else 1)
+
+    # Python's stable sort preserves the canonical viewport-distance order
+    # inside each band's ahead and reversal-guard partitions. A WAITING tile
+    # can therefore never overtake a NEAR tile merely because it is ahead.
+    return tuple(sorted(ordered, key=direction_rank))
+
+
+def _montage_prefetch_direction(window) -> int:
+    momentum = getattr(window, "_montage_prefetch_momentum", None)
+    if momentum is None:
+        return 0
+    return int(momentum.plan().direction)
 
 
 def _stage_for_tile(window, session, tile):
@@ -299,11 +343,12 @@ def _owner_memory_pressure_blocks_prefetch(window) -> bool:
     return pressure_name in {"elevated", "high"}
 
 
-def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -> None:
+def _warm_prefetched_tiled_residency(window, session, tile, rendered) -> None:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if not (
         bool(getattr(capabilities, "persistent_tile_residency", False))
-        and str(getattr(capabilities, "tile_residency_kind", "none") or "none") == "cpu_item"
+        and str(getattr(capabilities, "tile_residency_kind", "none") or "none")
+        in {"cpu_item", "gpu_atlas"}
     ):
         return
     warm = getattr(getattr(window.win, "img_view", None), "warmTiledResidency", None)
@@ -314,38 +359,34 @@ def _warm_prefetched_pyqtgraph_tile(window, session, tile, rendered, tile_key) -
     tile_number = int(getattr(tile, "montage_index", -1))
     if tile_number < 0:
         return
+    source_ids = window._montage_tile_source_ids(session)
+    payload = session._ensure_display_tile_payload(
+        tile_number,
+        rendered,
+        source_ids,
+        lod_factor=int(session._selected_lod_factor()),
+    )
+    geometry = DisplayGeometry(
+        view_state=session.view_state,
+        display_shape=tuple(session.plan.display_shape),
+        montage=session.plan.geometry,
+        montage_tile_states=session.ensure_tile_states(),
+    )
     try:
-        source_ids = (
-            window._montage_tile_source_ids(session)
-            if hasattr(window, "_montage_tile_source_ids")
-            else {tile_number: tile_key}
+        levels = tuple(float(value) for value in window.win.img_view.getLevels())
+    except (AttributeError, TypeError, ValueError):
+        levels = tuple(
+            float(value)
+            for value in getattr(session, "user_levels_override", None) or (0.0, 1.0)
         )
-        payload = session._ensure_display_tile_payload(
-            tile_number,
-            rendered,
-            source_ids,
-            lod_factor=int(session._selected_lod_factor()),
-        )
-        geometry = DisplayGeometry(
-            view_state=session.view_state,
-            display_shape=tuple(session.plan.display_shape),
-            montage=session.plan.geometry,
-            montage_tile_states=session.ensure_tile_states(),
-        )
-        try:
-            levels = tuple(float(value) for value in window.win.img_view.getLevels())
-        except Exception:
-            levels = tuple(float(value) for value in getattr(session, "user_levels_override", None) or (0.0, 1.0))
-        warm(
-            payloads={tile_number: payload},
-            geometry=geometry,
-            levels=(float(levels[0]), float(levels[1])),
-            rgb_already_windowed=not bool(getattr(session, "shader_display", False)),
-            tile_residency_budget_bytes=0,
-            frame_plan=getattr(session, "frame_plan", None),
-        )
-    except Exception:
-        return
+    warm(
+        payloads={tile_number: payload},
+        geometry=geometry,
+        levels=(float(levels[0]), float(levels[1])),
+        rgb_already_windowed=not bool(getattr(session, "shader_display", False)),
+        tile_residency_budget_bytes=int(getattr(session, "tile_residency_budget_bytes", 0) or 0),
+        frame_plan=getattr(session, "frame_plan", None),
+    )
 
 
 def _invite_walk_continuation(window) -> None:

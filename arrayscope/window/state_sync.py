@@ -58,6 +58,10 @@ class StateSyncMixin:
     def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
         axis = int(axis)
         self._active_slice_axis = axis
+        renderer = getattr(self, "renderer", None)
+        observe_montage = getattr(renderer, "_observe_montage_prefetch_momentum", None)
+        if state.montage_axis is not None and callable(observe_montage):
+            observe_montage(self.view_state, state)
         if interactive:
             # Dimension scrubbing IS user interaction: without this note the
             # interaction gates (commit coalescing, speculation yielding,
@@ -84,7 +88,7 @@ class StateSyncMixin:
         # deleted; the setting had been silently dead since.)
         if state.montage_axis is None:
             schedule_prefetch = getattr(
-                getattr(self, "renderer", None), "_schedule_prefetch_nearby_slices", None
+                renderer, "_schedule_prefetch_nearby_slices", None
             )
             if callable(schedule_prefetch):
                 schedule_prefetch(state, self.renderer._evaluation_colormap_lut(state))

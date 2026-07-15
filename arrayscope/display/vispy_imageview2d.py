@@ -722,6 +722,41 @@ class VisPyImageView2D(ImageViewShell):
         }
         self._submit_vispy_warm_tile_residency_continuation()
 
+    def warmTiledResidency(
+        self,
+        *,
+        payloads,
+        geometry,
+        levels: tuple[float, float],
+        rgb_already_windowed: bool = False,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
+    ) -> None:
+        """Queue non-presenting montage payloads for bounded atlas warming.
+
+        This is the persistent-residency seam shared with the CPU-item
+        backend.  VisPy performs the GL work through its standing GUI-thread
+        continuation; warming changes only content-keyed pool residency and
+        never acknowledges a presentation or changes an active slot mapping.
+        ``levels`` and ``frame_plan`` are accepted as part of the backend
+        contract but do not affect raw atlas content identity.
+        """
+
+        del levels, frame_plan
+        budget_bytes = int(
+            tile_residency_budget_bytes
+            or getattr(self, "_vispy_last_tile_residency_budget_bytes", 0)
+            or 0
+        )
+        self._schedule_vispy_warm_tile_residency(
+            payloads,
+            geometry=geometry,
+            rgb_already_windowed=rgb_already_windowed,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=budget_bytes,
+        )
+
     def _submit_vispy_warm_tile_residency_continuation(self) -> None:
         scheduler = getattr(self, "_vispy_warm_tile_scheduler", None)
         if callable(scheduler):
