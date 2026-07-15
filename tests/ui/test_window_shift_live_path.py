@@ -259,3 +259,89 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, monkeypatch):
     finally:
         win.close()
         _restore_default_backend(settings)
+
+
+def _apply_plane(win, index: int, *, reason: str) -> None:
+    win._set_view_state(win.view_state.with_slice(0, index))
+    win.render(reason=reason)
+
+
+def _plane_settled(win, index: int) -> bool:
+    frame = getattr(win, "_committed_display_frame", None)
+    if frame is None:
+        return False
+    if int(frame.geometry.view_state.slice_indices[0]) != int(index):
+        return False
+    session = getattr(win.renderer, "_frame_session", None)
+    if session is None:
+        return False
+    return (
+        session.visible_plan_complete()
+        and not win.montage_tile_evaluation_controller.is_busy()
+        and session.required_target_settled()
+    )
+
+
+def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
+    """G4a live gate: revisiting an already-seen plane re-uses GPU residency.
+
+    Content-keyed residency (source anchor per plane) plus grow-before-evict
+    means scrolling 0 -> 1 -> 0 re-uploads nothing native on the return leg,
+    even though every scroll step still rebirths the frame session.
+    """
+
+    pytest.importorskip("vispy")
+    import arrayscope.display.backends.vispy.tiles as vispy_tiles
+
+    settings = _use_vispy_backend()
+
+    uploads: list[tuple[int, int]] = []
+    original_upload = vispy_tiles._upload_texture_plane
+
+    def counting_upload(texture, plane, *, offset, copy):
+        uploads.append(tuple(int(value) for value in np.shape(plane)[:2]))
+        return original_upload(texture, plane, offset=offset, copy=copy)
+
+    monkeypatch.setattr(vispy_tiles, "_upload_texture_plane", counting_upload)
+
+    rng = np.random.default_rng(29)
+    data = rng.standard_normal((3, 2 * CHUNK, 4 * CHUNK)).astype(np.float32)
+    win = _make_window(qtbot, data)
+    try:
+        state = win.view_state.with_image_axes(1, 2)
+        win._set_view_state(state.with_slice(0, 0))
+        win.render(reason="test-plane-initial")
+        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+
+        pool = _pool(win)
+        chunks_plane_0 = _resident_chunks(pool)
+        assert chunks_plane_0, "plane 0 did not engage chunked residency"
+
+        _apply_plane(win, 1, reason="test-plane-forward")
+        qtbot.waitUntil(lambda: _plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        # Different plane, different content: plane 0's chunks are unlinked
+        # from the tile but must SURVIVE as warm page-table residency
+        # (grow-before-evict) while plane 1's arrive.
+        warm_resident = set(pool._page_table.resident_keys())
+        missing = {key for key in chunks_plane_0 if key not in warm_resident}
+        assert not missing, (
+            f"plane 0 residency was evicted during forward scroll despite "
+            f"byte-budget headroom: {len(missing)} of {len(chunks_plane_0)} gone"
+        )
+
+        uploads.clear()
+        _apply_plane(win, 0, reason="test-plane-back")
+        qtbot.waitUntil(lambda: _plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+
+        native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
+        assert not native_uploads, (
+            f"scroll-back re-uploaded native planes: {native_uploads} "
+            f"(all uploads: {uploads})"
+        )
+
+        # Pixel truth on the revisited plane.
+        value = _committed_value(win, CHUNK // 2, CHUNK // 2)
+        assert value == pytest.approx(float(data[0, CHUNK // 2, CHUNK // 2]))
+    finally:
+        win.close()
+        _restore_default_backend(settings)
