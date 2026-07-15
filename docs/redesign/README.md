@@ -715,6 +715,16 @@ acceptance.
 > is **1,973 passed, 13 skipped**. Compileall, F821/E9 lint, and diff checks
 > are clean. Real artifacts are under
 > `/tmp/arrayscope-vispy-level-{evidence,fix,batch-fix}`.
+>
+> **[Codex 2026-07-15 — rejected P9 byte-cohort experiment; runtime
+> reverted]** Raising the learned persistent byte cap from 1 MiB to 4 MiB
+> left the trace at four-item cohorts because `max_upserts`, not bytes, was
+> binding. Real FFT refinement changed **8.39 s -> 8.02 s** while scroll
+> regressed **13.55 s -> 13.79 s**; neither continuity nor callback gates
+> improved. The runtime and unit expectations were restored. Do not revisit
+> byte-cap tuning unless a trace first shows the byte cap truncating an
+> otherwise larger admitted cohort. Artifact:
+> `/tmp/arrayscope-vispy-byte-cohort`.
 
 ## The visible-truth harness (the only gate)
 

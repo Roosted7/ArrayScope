@@ -143,6 +143,9 @@ benchmark evidence; the real-display pixel/trace gates must stay green.
 > replay is clean. P9 remains active because the scripted scroll is 13.55 s,
 > continuity and heartbeat are red, and each source-window step still pays
 > for roughly seventeen bounded presentation transactions.
+> A 4 MiB minimum byte-cohort follow-up was measured and reverted: the item
+> cap remained binding and scroll regressed 13.55 s -> 13.79 s. The next P9
+> cause must therefore address item/transaction ownership, not byte tuning.
 
 In parallel only where it does not reorder a P-step, migrate stale tests to
 the canonical `window.renderer` / `FrameSession` owners and fix the remaining
