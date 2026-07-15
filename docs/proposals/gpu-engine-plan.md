@@ -3,17 +3,26 @@
 **Date:** 2026-07-15. **Branch:** `codex/gpu-engine`.
 **Decision record:** [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md)
 (three-way separation of view tiles, data chunks, residency pages).
-**Status (2026-07-15):** G1 and the G2 first slice are implemented (gpu
-package + atlas on the page table). G3 is implemented offscreen-first:
-windowability predicate (`pipeline_windowable_display_axes`), source-anchored
-single-image planning (`ANCHORED_CHUNK_SHAPE` 256², `source_rect`,
-buffer-independent content source_ids, gpu_atlas-gated), TileDrawPart
-multi-quad/UV-crop substrate, and the residency gate tests (boundary-only
-uploads on ±1 shift, zero-upload scroll-back, FFT negative control). The G3
-exit gate still requires the real-display harness half. Known G3b-1 limit:
-windows narrower than ~3 chunks contain no interior chunks and still
-re-materialize fully — lifted by G3b-2 (full-chunk materialization with
-window-as-camera clipping, design below).
+**Status (2026-07-15, end of day):** G1, G2 first slice, and G3 are
+implemented and verified on real hardware. The live upload path is
+**backend-private chunked residency**: exact non-montage payloads carry a
+window-invariant `PayloadSourceAnchor` (content key + native source rect,
+stamped by the frame session on gpu_atlas backends for windowable chains);
+the VisPy pool partitions eligible payloads into origin-anchored 256²
+chunks keyed by content, draws them as UV-cropped quads (TileDrawPart), and
+skips uploads for resident chunks. Measured live (512×1024 window, ±1 px
+shift): 4 boundary strips uploaded (25% of window area), 6/10 interior
+chunks survive byte-identical, scroll-back uploads zero; FFT along the
+shifted axis correctly re-uploads everything. The gate test passes offscreen
+and on real Wayland GL; on-screen regression parity and ±10% benchmark
+neutrality are recorded in `tests/artifacts/`. The presenter-path anchored
+*planning* (G3b-1) proved dead in the live flow and its presenter glue was
+deleted; the planner/gate-test machinery remains as the X5d-shaped
+region-first future. Remaining G3 gaps: reduced-LOD planes (factor>1)
+re-upload whole on shift; windows ≤ 1 chunk take the classic path; a
+chunk set exceeding one atlas page falls back to classic (correct, not
+fast). CPU re-evaluation of the shifted window plane still happens each
+shift — lifted by window-as-camera (below), now the G4-adjacent target.
 
 ## User problem
 
