@@ -43,6 +43,9 @@ from arrayscope.display.shader_mapping import (
     shader_mapping_with_lut,
 )
 from arrayscope.display.viewport import ViewportPolicy
+# The levels-convergence no-op test (P9) and the tile layer must normalize
+# levels identically; the single definition lives with the layer.
+from arrayscope.display.backends.vispy.tiles import _normalize_levels
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
