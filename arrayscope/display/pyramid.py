@@ -20,6 +20,135 @@ ALGO_VERSION = 1
 """Reduction algorithm version; part of every pyramid cache key."""
 
 
+@dataclass(frozen=True)
+class SourceGridBinIdentity:
+    """Value identity of one globally anchored reduced source rectangle."""
+
+    source_rect_yx: tuple[int, int, int, int]
+    reduction_vector_xy: tuple[int, int]
+    reducer: str = "mean"
+    algo_version: int = ALGO_VERSION
+
+
+@dataclass(frozen=True)
+class SourceGridReduction:
+    """Reduced values plus the native-source coverage of every sample."""
+
+    values: np.ndarray
+    source_rects: tuple[tuple[int, int, int, int], ...]
+    identities: tuple[SourceGridBinIdentity, ...]
+    grid_origin_yx: tuple[int, int]
+    reduction_vector_xy: tuple[int, int]
+    valid_source_rect_yx: tuple[int, int, int, int]
+
+
+def reduce_source_grid_mean(
+    array,
+    *,
+    source_origin_yx: tuple[int, int],
+    valid_source_rect_yx: tuple[int, int, int, int],
+    reduction_vector_xy: tuple[int, int],
+    input_reduction_vector_xy: tuple[int, int] = (0, 0),
+) -> SourceGridReduction:
+    """Reduce on the global native-source grid, independent of window origin.
+
+    The reduction vectors are absolute log2 steps in ``(x, y)`` order.
+    ``source_origin_yx`` locates input sample ``[0, 0]`` in native source
+    coordinates. Recursive reduction is accepted only for a fully aligned
+    input grid, which makes the result identical to direct source reduction;
+    clipped partial parents are rejected instead of making cache history part
+    of the values.
+    """
+
+    values = np.asarray(array)
+    if values.ndim < 2 or values.ndim > 3:
+        raise ValueError("source-grid mean requires 2D data plus at most one component axis")
+    level_x, level_y = _reduction_vector(reduction_vector_xy, name="reduction")
+    input_level_x, input_level_y = _reduction_vector(
+        input_reduction_vector_xy,
+        name="input reduction",
+    )
+    if level_x < input_level_x or level_y < input_level_y:
+        raise ValueError("output reduction must not be finer than the input reduction")
+    factor_x, factor_y = (1 << level_x, 1 << level_y)
+    input_factor_x, input_factor_y = (1 << input_level_x, 1 << input_level_y)
+    source_y, source_x = (int(source_origin_yx[0]), int(source_origin_yx[1]))
+    valid_y0, valid_y1, valid_x0, valid_x1 = (
+        int(value) for value in valid_source_rect_yx
+    )
+    if valid_y1 <= valid_y0 or valid_x1 <= valid_x0:
+        raise ValueError("valid source rectangle must be non-empty")
+    input_y1 = source_y + int(values.shape[0]) * input_factor_y
+    input_x1 = source_x + int(values.shape[1]) * input_factor_x
+    if not (
+        source_y <= valid_y0 < valid_y1 <= input_y1
+        and source_x <= valid_x0 < valid_x1 <= input_x1
+    ):
+        raise ValueError("valid source rectangle lies outside the input sample coverage")
+    if (input_level_x or input_level_y) and (
+        source_y % input_factor_y
+        or source_x % input_factor_x
+        or valid_y0 % input_factor_y
+        or valid_y1 % input_factor_y
+        or valid_x0 % input_factor_x
+        or valid_x1 % input_factor_x
+    ):
+        raise ValueError("recursive input and valid coverage must align to its source grid")
+
+    y_rects = _source_grid_axis_rects(valid_y0, valid_y1, factor_y)
+    x_rects = _source_grid_axis_rects(valid_x0, valid_x1, factor_x)
+    output_shape = (len(y_rects), len(x_rects), *values.shape[2:])
+    output_dtype = np.complex64 if np.iscomplexobj(values) else np.float32
+    reduced = np.empty(output_shape, dtype=output_dtype)
+    source_rects: list[tuple[int, int, int, int]] = []
+    identities: list[SourceGridBinIdentity] = []
+    accumulated = values.astype(output_dtype, copy=False)
+    for out_y, (rect_y0, rect_y1) in enumerate(y_rects):
+        local_y0 = (rect_y0 - source_y) // input_factor_y
+        local_y1 = (rect_y1 - source_y) // input_factor_y
+        for out_x, (rect_x0, rect_x1) in enumerate(x_rects):
+            local_x0 = (rect_x0 - source_x) // input_factor_x
+            local_x1 = (rect_x1 - source_x) // input_factor_x
+            source_rect = (rect_y0, rect_y1, rect_x0, rect_x1)
+            sample = accumulated[local_y0:local_y1, local_x0:local_x1]
+            if sample.size == 0:
+                raise ValueError("source-grid bin has no input samples")
+            reduced[out_y, out_x] = np.mean(sample, axis=(0, 1), dtype=output_dtype)
+            source_rects.append(source_rect)
+            identities.append(
+                SourceGridBinIdentity(
+                    source_rect_yx=source_rect,
+                    reduction_vector_xy=(level_x, level_y),
+                )
+            )
+    return SourceGridReduction(
+        values=reduced,
+        source_rects=tuple(source_rects),
+        identities=tuple(identities),
+        grid_origin_yx=(
+            (valid_y0 // factor_y) * factor_y,
+            (valid_x0 // factor_x) * factor_x,
+        ),
+        reduction_vector_xy=(level_x, level_y),
+        valid_source_rect_yx=(valid_y0, valid_y1, valid_x0, valid_x1),
+    )
+
+
+def _reduction_vector(value, *, name: str) -> tuple[int, int]:
+    level_x, level_y = (int(value[0]), int(value[1]))
+    if level_x < 0 or level_y < 0:
+        raise ValueError(f"{name} steps must be non-negative")
+    return (level_x, level_y)
+
+
+def _source_grid_axis_rects(start: int, stop: int, factor: int) -> tuple[tuple[int, int], ...]:
+    first = (int(start) // int(factor)) * int(factor)
+    return tuple(
+        (max(int(start), origin), min(int(stop), origin + int(factor)))
+        for origin in range(first, int(stop), int(factor))
+    )
+
+
 def reduce_box_mean(array, factor_xy: tuple[int, int]) -> np.ndarray:
     """Reduce the first two axes of ``array`` by per-axis box means.
 
@@ -253,7 +382,15 @@ class PyramidCache:
             self._revision += 1
 
 
-__all__ = ["ALGO_VERSION", "PyramidLevelKey", "PyramidCache", "reduce_box_mean"]
+__all__ = [
+    "ALGO_VERSION",
+    "PyramidLevelKey",
+    "PyramidCache",
+    "SourceGridBinIdentity",
+    "SourceGridReduction",
+    "reduce_box_mean",
+    "reduce_source_grid_mean",
+]
 
 
 def preview_level_for_tile_shape(tile_shape, *, target_edge: int = 48, min_level: int = 2, max_level: int = 6) -> int:

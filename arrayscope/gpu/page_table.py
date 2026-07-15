@@ -36,6 +36,25 @@ class ResidencyEntry:
     pinned: bool = False
 
 
+@dataclass(frozen=True)
+class PageResolution:
+    """One CPU-resolved target → resident-page binding (ADR 0056 §5).
+
+    ``scale`` and ``offset`` map coordinates in the target page's stored
+    sample space into the actual resident page's stored sample space.  The
+    binding generation belongs to that physical association, so compaction
+    or slot reuse invalidates a cached resolution even when the logical key
+    survives.
+    """
+
+    target_key: DataChunkKey
+    actual_key: DataChunkKey
+    slot: PageSlot
+    scale: tuple[float, ...]
+    offset: tuple[float, ...]
+    binding_generation: int
+
+
 @dataclass
 class PageTable:
     """Mapping of resident chunks with LRU order, pins, and generations.
@@ -50,6 +69,7 @@ class PageTable:
     _slots: dict[PageSlot, DataChunkKey] = field(default_factory=dict)
     _generation: int = 0
     _use_counter: int = 0
+    _pin_sets: dict[object, frozenset[DataChunkKey]] = field(default_factory=dict)
 
     @property
     def generation(self) -> int:
@@ -67,6 +87,76 @@ class PageTable:
         entry = self._entries.get(key)
         return None if entry is None else entry.slot
 
+    def resolve(self, target: DataChunkKey) -> PageResolution | None:
+        """Resolve ``target`` to its finest compatible resident ancestor.
+
+        Logical chunk geometry is native-source space.  An ancestor must
+        cover the complete target footprint and be at least as reduced on
+        every axis; semantic generations, representation, dtype, and reducer
+        family must match exactly.  Resolution is performed once on the CPU,
+        never as a per-fragment shader search.
+        """
+
+        target_reduction = _reduction_vector(target)
+        candidates: list[tuple[tuple[object, ...], DataChunkKey, ResidencyEntry]] = []
+        for sequence, (key, entry) in enumerate(self._entries.items()):
+            if not _same_value_family(target, key):
+                continue
+            actual_reduction = _reduction_vector(key)
+            if any(actual < wanted for actual, wanted in zip(actual_reduction, target_reduction)):
+                continue
+            if any(
+                actual_start > target_start or actual_stop < target_stop
+                for actual_start, actual_stop, target_start, target_stop in zip(
+                    key.chunk_origin,
+                    key.stop,
+                    target.chunk_origin,
+                    target.stop,
+                )
+            ):
+                continue
+            delta = tuple(
+                int(actual) - int(wanted)
+                for actual, wanted in zip(actual_reduction, target_reduction)
+            )
+            rank = (
+                sum(delta),
+                max(delta, default=0),
+                delta,
+                _source_volume(key),
+                sum(
+                    int(target_start) - int(actual_start)
+                    for target_start, actual_start in zip(
+                        target.chunk_origin,
+                        key.chunk_origin,
+                    )
+                ),
+                -int(entry.last_use),
+                int(sequence),
+            )
+            candidates.append((rank, key, entry))
+        if not candidates:
+            return None
+        _rank, actual, entry = min(candidates, key=lambda row: row[0])
+        actual_reduction = _reduction_vector(actual)
+        target_scale = tuple(float(1 << step) for step in target_reduction)
+        actual_scale = tuple(float(1 << step) for step in actual_reduction)
+        return PageResolution(
+            target_key=target,
+            actual_key=actual,
+            slot=entry.slot,
+            scale=tuple(target_step / actual_step for target_step, actual_step in zip(target_scale, actual_scale)),
+            offset=tuple(
+                (float(target_start) - float(actual_start)) / actual_step
+                for target_start, actual_start, actual_step in zip(
+                    target.chunk_origin,
+                    actual.chunk_origin,
+                    actual_scale,
+                )
+            ),
+            binding_generation=int(entry.generation),
+        )
+
     def bind(self, key: DataChunkKey, slot: PageSlot, *, nbytes: int, pinned: bool = False) -> None:
         """Record that ``key``'s values now live in ``slot``."""
 
@@ -83,9 +173,11 @@ class PageTable:
             nbytes=int(nbytes),
             generation=self._generation,
             last_use=self._use_counter,
-            pinned=bool(pinned),
+            pinned=bool(pinned or self._owners_for(key)),
         )
         self._slots[slot] = key
+        if pinned:
+            self._replace_owner_key(_LEGACY_PIN_OWNER, key, True)
 
     def unbind(self, key: DataChunkKey) -> PageSlot | None:
         """Drop ``key``; returns the freed slot (``None`` if absent)."""
@@ -94,6 +186,14 @@ class PageTable:
         if entry is None:
             return None
         del self._slots[entry.slot]
+        for owner, keys in tuple(self._pin_sets.items()):
+            if key not in keys:
+                continue
+            remaining = frozenset(value for value in keys if value != key)
+            if remaining:
+                self._pin_sets[owner] = remaining
+            else:
+                self._pin_sets.pop(owner, None)
         self._generation += 1
         return entry.slot
 
@@ -126,14 +226,44 @@ class PageTable:
                 raise ValueError(f"remap collides on slot {slot}")
             entry.slot = slot
             new_slots[slot] = key
-        self._slots = new_slots
         self._generation += 1
+        for entry in self._entries.values():
+            entry.generation = self._generation
+        self._slots = new_slots
 
     def pin(self, key: DataChunkKey, pinned: bool = True) -> None:
         entry = self._entries.get(key)
         if entry is None:
             raise KeyError(f"cannot pin non-resident chunk {key}")
-        entry.pinned = bool(pinned)
+        self._replace_owner_key(_LEGACY_PIN_OWNER, key, bool(pinned))
+
+    def replace_pin_set(self, owner: object, keys) -> None:
+        """Atomically replace one owner's resident coverage pins."""
+
+        requested = frozenset(keys or ())
+        missing = tuple(key for key in requested if key not in self._entries)
+        if missing:
+            raise KeyError(f"cannot pin non-resident chunks: {missing!r}")
+        previous = self._pin_sets.get(owner, frozenset())
+        if requested:
+            self._pin_sets[owner] = requested
+        else:
+            self._pin_sets.pop(owner, None)
+        for key in previous | requested:
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry.pinned = bool(self._owners_for(key))
+
+    def _replace_owner_key(self, owner: object, key: DataChunkKey, pinned: bool) -> None:
+        values = set(self._pin_sets.get(owner, frozenset()))
+        if pinned:
+            values.add(key)
+        else:
+            values.discard(key)
+        self.replace_pin_set(owner, values)
+
+    def _owners_for(self, key: DataChunkKey) -> tuple[object, ...]:
+        return tuple(owner for owner, keys in self._pin_sets.items() if key in keys)
 
     def chunk_in_slot(self, slot: PageSlot) -> DataChunkKey | None:
         return self._slots.get(slot)
@@ -152,3 +282,31 @@ class PageTable:
             for key, entry in sorted(self._entries.items(), key=lambda item: item[1].last_use)
             if not entry.pinned
         )
+
+
+_LEGACY_PIN_OWNER = object()
+
+
+def _reduction_vector(key: DataChunkKey) -> tuple[int, ...]:
+    reduction = tuple(int(step) for step in key.lod.reduction)
+    if len(reduction) < key.rank:
+        reduction += (0,) * (key.rank - len(reduction))
+    return reduction[: key.rank]
+
+
+def _same_value_family(target: DataChunkKey, actual: DataChunkKey) -> bool:
+    return bool(
+        target.rank == actual.rank
+        and target.document_generation == actual.document_generation
+        and target.operation_key == actual.operation_key
+        and target.dtype == actual.dtype
+        and target.representation == actual.representation
+        and target.lod.reducer == actual.lod.reducer
+    )
+
+
+def _source_volume(key: DataChunkKey) -> int:
+    volume = 1
+    for extent in key.chunk_shape:
+        volume *= int(extent)
+    return volume

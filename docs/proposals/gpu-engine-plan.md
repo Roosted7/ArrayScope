@@ -178,6 +178,13 @@ admitted.
 
 ### G5 — Sparse virtual multiresolution pyramid (ADR 0056)
 
+**Canonical route contract (2026-07-16):**
+[`g5-source-grid-pyramid-2026-07-16.md`](../redesign/g5-source-grid-pyramid-2026-07-16.md)
+defines the one source-grid reduction route, boundary/gutter identity,
+best-resident-ancestor binding, owner-scoped pin, and physical-truth rules for
+every remaining G5 slice. Ingest, ladder, CPU cache, and later GPU generation
+must consume that model; none may independently bin from a viewport origin.
+
 The LOD ladder's members become immutable logical data chunks: anisotropic
 `reduction_vector` + reducer identity in chunk keys; uniform plane-pixel
 pages shared across LODs (closes the reduced-LOD re-upload gap by
@@ -221,6 +228,18 @@ factor>1 needs source-anchored reduction binning — the ladder-migration
 slice that moves reduction bins onto the source grid (with the gutter
 story) remains open G5 work, together with ancestor resolution, pinned
 coarse coverage, and reducer families.
+
+**Slice 2 landed (2026-07-16): pure source-grid model and page resolution.**
+`PageTable.resolve` now selects the finest compatible covering resident page
+and returns its actual key/LOD, slot, target-sample scale/offset, and binding
+generation. Compaction/reuse refreshes generations; owner-scoped atomic pin
+sets preserve shared coarse coverage and deny refinement rather than evicting
+an all-pinned fallback. `reduce_source_grid_mean` is the first consumer of the
+canonical route: anisotropic bins are globally anchored, shifted windows share
+full interiors, clipped boundaries retain distinct identities, and recursive
+reduction is accepted only from an aligned input grid. This slice is pure
+model only; VisPy actual-LOD fallback presentation and ladder chunk migration
+remain next.
 
 ### G6 — GPU compute consumers
 

@@ -14,7 +14,7 @@ points the other way.
 
 from arrayscope.gpu.keys import ChunkLod, DataChunkKey, ViewTileKey
 from arrayscope.gpu.chunk_grid import ChunkGrid, WindowDelta
-from arrayscope.gpu.page_table import PageSlot, PageTable, ResidencyEntry
+from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable, ResidencyEntry
 from arrayscope.gpu.chunk_store import (
     CapacityError,
     ChunkStore,
@@ -31,6 +31,7 @@ __all__ = [
     "ChunkStoreDiagnostics",
     "DataChunkKey",
     "PageSlot",
+    "PageResolution",
     "PageTable",
     "Residency",
     "ResidencyEntry",

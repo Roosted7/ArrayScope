@@ -161,6 +161,11 @@ class ChunkStore:
         if key in self.table:
             self.table.pin(key, False)
 
+    def replace_pins(self, owner: object, keys) -> None:
+        """Replace one consumer's coverage set without disturbing others."""
+
+        self.table.replace_pin_set(owner, keys)
+
     def diagnostics(self) -> ChunkStoreDiagnostics:
         return ChunkStoreDiagnostics(
             pool_id=self.pool.pool_id,

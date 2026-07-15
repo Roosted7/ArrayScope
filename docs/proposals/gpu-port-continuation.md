@@ -117,10 +117,13 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    events measure retained-transition replacement latency. Full evidence,
    exit gates, and rejected timer/session/warming shortcuts are in
    `docs/redesign/slice-retention-staleness-2026-07-16.md`.
-4. **G5 remaining**: best-resident-ancestor page-table resolution + pinned
-   coarse coverage (never-black at data level; ADR 0056 §5-6); then the
-   ladder migration with source-anchored reduction binning (fixes reduced-
-   LOD shift reuse; route-canonicalization note in gpu-engine-plan G5).
+4. **G5 remaining**: the pure best-resident-ancestor binding, owner-scoped
+   coarse pins, and source-grid mean geometry are landed and gated. Next wire
+   actual-coarse fallback into VisPy physical truth/never-black presentation,
+   then migrate the ladder from whole-plane keys to logical chunks and finish
+   reducer families. The formerly missing route-canonicalization contract is
+   explicit in `docs/redesign/g5-source-grid-pyramid-2026-07-16.md`; every
+   remaining consumer must use it rather than infer a second reduction route.
 5. **G6**: GPU histogram/levels over the chunk store with the ADR 0056
    coverage frontier (per-chunk summaries; workgroup-local bins); GPU LOD
    generation from resident chunks.

@@ -17,7 +17,13 @@ from arrayscope.display.lod import (
     resident_lod_policy,
     select_lod_demand,
 )
-from arrayscope.display.pyramid import ALGO_VERSION, PyramidCache, PyramidLevelKey, reduce_box_mean
+from arrayscope.display.pyramid import (
+    ALGO_VERSION,
+    PyramidCache,
+    PyramidLevelKey,
+    reduce_box_mean,
+    reduce_source_grid_mean,
+)
 
 
 def _key(level_xy=(1, 1), tile=0, component="scalar_r32f", source="src"):
@@ -146,6 +152,166 @@ class TestReduceBoxMean:
         direct = reduce_box_mean(array, (4, 4))
 
         np.testing.assert_allclose(via_levels, direct, rtol=1e-5, atol=1e-5)
+
+
+def _global_plane(rect: tuple[int, int, int, int]) -> np.ndarray:
+    """Deterministic source values whose coordinates survive windowing."""
+
+    y0, y1, x0, x1 = rect
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    return (yy * 1000 + xx).astype(np.float32)
+
+
+def _result_by_source_rect(result) -> dict[tuple[int, int, int, int], tuple[object, float]]:
+    rects = tuple(result.source_rects)
+    identities = tuple(result.identities)
+    values = np.asarray(result.values).reshape(-1)
+    assert len(rects) == len(identities) == len(values)
+    return {
+        tuple(int(value) for value in rect): (identity, float(value))
+        for rect, identity, value in zip(rects, identities, values, strict=True)
+    }
+
+
+class TestSourceGridMeanReduction:
+    """G5 contract for source-anchored, cache-history-independent reduction.
+
+    ``source_origin_yx`` locates input sample ``[0, 0]`` in native source
+    coordinates. ``valid_source_rect_yx`` is a half-open native-source rect,
+    and ``reduction_vector_xy`` is the absolute per-axis log2 reduction.
+    Returned ``source_rects`` and opaque, hashable ``identities`` are row-major
+    alongside ``values``. Full global bins must therefore retain identity
+    across differently clipped input windows while boundary fragments do not.
+    """
+
+    def test_shifted_windows_share_full_global_bins_but_not_clipped_boundaries(self):
+        first_rect = (100, 104, 101, 113)
+        second_rect = (100, 104, 102, 114)
+
+        first = reduce_source_grid_mean(
+            _global_plane(first_rect),
+            source_origin_yx=first_rect[:1] + first_rect[2:3],
+            valid_source_rect_yx=first_rect,
+            reduction_vector_xy=(2, 2),
+        )
+        second = reduce_source_grid_mean(
+            _global_plane(second_rect),
+            source_origin_yx=second_rect[:1] + second_rect[2:3],
+            valid_source_rect_yx=second_rect,
+            reduction_vector_xy=(2, 2),
+        )
+
+        first_by_rect = _result_by_source_rect(first)
+        second_by_rect = _result_by_source_rect(second)
+        for full_rect in ((100, 104, 104, 108), (100, 104, 108, 112)):
+            assert first_by_rect[full_rect][0] == second_by_rect[full_rect][0]
+            assert first_by_rect[full_rect][1] == second_by_rect[full_rect][1]
+
+        first_boundary = first_by_rect[(100, 104, 101, 104)][0]
+        second_boundary = second_by_rect[(100, 104, 102, 104)][0]
+        assert first_boundary != second_boundary
+
+    def test_values_match_direct_cpu_global_grid_oracle(self):
+        array_rect = (99, 110, 100, 116)
+        valid_rect = (101, 109, 102, 115)
+        source = _global_plane(array_rect)
+
+        result = reduce_source_grid_mean(
+            source,
+            source_origin_yx=(array_rect[0], array_rect[2]),
+            valid_source_rect_yx=valid_rect,
+            reduction_vector_xy=(2, 1),
+        )
+
+        expected = []
+        for y0, y1, x0, x1 in result.source_rects:
+            local = source[
+                int(y0) - array_rect[0] : int(y1) - array_rect[0],
+                int(x0) - array_rect[2] : int(x1) - array_rect[2],
+            ]
+            expected.append(float(np.mean(local, dtype=np.float32)))
+        np.testing.assert_allclose(np.asarray(result.values).reshape(-1), expected)
+
+    def test_recursive_route_matches_direct_only_for_aligned_input_grid(self):
+        rect = (96, 112, 96, 112)
+        source = _global_plane(rect)
+        level_one = reduce_source_grid_mean(
+            source,
+            source_origin_yx=(96, 96),
+            valid_source_rect_yx=rect,
+            reduction_vector_xy=(1, 1),
+        )
+
+        recursive = reduce_source_grid_mean(
+            level_one.values,
+            source_origin_yx=level_one.grid_origin_yx,
+            valid_source_rect_yx=rect,
+            input_reduction_vector_xy=(1, 1),
+            reduction_vector_xy=(2, 2),
+        )
+        direct = reduce_source_grid_mean(
+            source,
+            source_origin_yx=(96, 96),
+            valid_source_rect_yx=rect,
+            reduction_vector_xy=(2, 2),
+        )
+
+        assert tuple(recursive.source_rects) == tuple(direct.source_rects)
+        assert tuple(recursive.identities) == tuple(direct.identities)
+        np.testing.assert_allclose(recursive.values, direct.values, rtol=1e-6, atol=1e-6)
+
+        clipped_rect = (101, 113, 101, 113)
+        clipped_level_one = reduce_source_grid_mean(
+            _global_plane(clipped_rect),
+            source_origin_yx=(101, 101),
+            valid_source_rect_yx=clipped_rect,
+            reduction_vector_xy=(1, 1),
+        )
+        with pytest.raises(ValueError, match="align"):
+            reduce_source_grid_mean(
+                clipped_level_one.values,
+                source_origin_yx=clipped_level_one.grid_origin_yx,
+                valid_source_rect_yx=clipped_rect,
+                input_reduction_vector_xy=(1, 1),
+                reduction_vector_xy=(2, 2),
+            )
+
+    def test_anisotropic_vector_places_bins_on_each_source_axis_grid(self):
+        rect = (5, 12, 9, 20)
+
+        result = reduce_source_grid_mean(
+            _global_plane(rect),
+            source_origin_yx=(5, 9),
+            valid_source_rect_yx=rect,
+            reduction_vector_xy=(2, 1),
+        )
+
+        assert result.reduction_vector_xy == (2, 1)
+        assert result.grid_origin_yx == (4, 8)
+        assert np.asarray(result.values).shape == (4, 3)
+        assert tuple(result.source_rects)[0] == (5, 6, 9, 12)
+        assert tuple(result.source_rects)[-1] == (10, 12, 16, 20)
+
+    def test_reported_coverage_partitions_valid_rect_without_gaps_or_overlaps(self):
+        array_rect = (1, 17, 2, 21)
+        valid_rect = (3, 14, 5, 18)
+
+        result = reduce_source_grid_mean(
+            _global_plane(array_rect),
+            source_origin_yx=(array_rect[0], array_rect[2]),
+            valid_source_rect_yx=valid_rect,
+            reduction_vector_xy=(2, 1),
+        )
+
+        coverage = np.zeros((valid_rect[1] - valid_rect[0], valid_rect[3] - valid_rect[2]), dtype=np.uint8)
+        for y0, y1, x0, x1 in result.source_rects:
+            assert valid_rect[0] <= y0 < y1 <= valid_rect[1]
+            assert valid_rect[2] <= x0 < x1 <= valid_rect[3]
+            coverage[
+                int(y0) - valid_rect[0] : int(y1) - valid_rect[0],
+                int(x0) - valid_rect[2] : int(x1) - valid_rect[2],
+            ] += 1
+        np.testing.assert_array_equal(coverage, np.ones_like(coverage))
 
 
 class TestPyramidLevelKey:
