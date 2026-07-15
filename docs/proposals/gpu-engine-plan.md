@@ -78,6 +78,21 @@ representation)` — deliberately parallel to the evaluator's cache keys so the
 two derivations can be property-tested against each other (the
 `montage_tile_key_batch` self-check pattern).
 
+## Physical presentation truth (landed 2026-07-15, field-driven)
+
+A live field defect (orange tiles on montage scroll; dossier:
+[`../redesign/coverage-stall-2026-07-15.md`](../redesign/coverage-stall-2026-07-15.md))
+proved that acknowledgement-only presentation could re-present physically
+divergent GL state invisibly: identity deliberately excludes levels/LUT/
+scale, and nothing pinned the per-quad mode buffer. The engine now audits
+every active page visual (mapping key + derived uniforms, levels, mode
+buffer) before ANY re-present, repairs divergence, counts repairs
+(`physical_repairs`), and a live framebuffer gate asserts zero-magnitude
+complex data never renders the PAL-relaxed LUT[0] orange. This is a
+standing engine invariant: every later stage (pyramid pages, compressed
+backing, new executors) inherits the rule that acknowledgement requires
+physically verified state, never identity equality alone.
+
 ## Stages and exit gates
 
 ### G1 — Concepts and software page table (no behavior change)
