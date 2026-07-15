@@ -18,11 +18,14 @@ and on real Wayland GL; on-screen regression parity and ±10% benchmark
 neutrality are recorded in `tests/artifacts/`. The presenter-path anchored
 *planning* (G3b-1) proved dead in the live flow and its presenter glue was
 deleted; the planner/gate-test machinery remains as the X5d-shaped
-region-first future. Remaining G3 gaps: reduced-LOD planes (factor>1)
-re-upload whole on shift; windows ≤ 1 chunk take the classic path; a
-chunk set exceeding one atlas page falls back to classic (correct, not
-fast). CPU re-evaluation of the shifted window plane still happens each
+region-first future. Remaining G3 gaps: windows ≤ 1 chunk take the classic
+path; a chunk set exceeding one atlas page falls back to classic (correct,
+not fast). CPU re-evaluation of the shifted window plane still happens each
 shift — lifted by window-as-camera (below), now the G4-adjacent target.
+Reduced-LOD planes (factor>1) now take chunked residency with uniform
+plane-pixel pages (G5 slice 1, below); their whole-plane re-upload on a
+native-pixel shift is the documented honest limit of window-anchored
+reduction binning, not a residency gap.
 
 ## User problem
 
@@ -194,6 +197,33 @@ ancestor exists); zoom across LOD thresholds swaps page-table entries with
 zero re-uploads of already-resident levels; complex magnitude/phase views
 use their own reducer families (unit-verified against phase-cancellation
 fixtures); out-of-core scroll sustains interactivity with bounded VRAM.
+
+**Slice 1 landed (2026-07-15): uniform plane-pixel pages across LODs.**
+`_payload_chunked_eligible` no longer gates on factor 1: an exact,
+gutter-free reduced plane whose shape is exactly the isotropic box
+reduction of its anchor rect (`ceil(extent/factor)` per axis, verified
+against the payload's `LodInfo`) chunks into the SAME origin-anchored 256²
+plane-pixel slots native planes use — a chunk slot holds 256² *stored
+samples* at any LOD, so mixed factor-1/factor-4 planes share one shape
+class and no per-plane-size class explosion or cross-class eviction occurs.
+Chunk keys keep NATIVE source rects (anchor origin + plane rect × factor,
+clipped) plus the LOD triple: identical revisits at the same LOD reuse
+every chunk (zero uploads); draw-part world rects apply the same uniform
+stretch as the classic single reduced quad (exactly `factor` when the
+extent divides), so placement is pixel-identical. Live wiring: exact
+reduced planes (ingest-reduced payloads and pyramid-materialized floor
+payloads) now carry the source anchor sized by their LOD's NATIVE source
+shape, so a zoomed-out window shift presents its reduced exact target
+through chunked residency (live gate in
+`tests/ui/test_window_shift_live_path.py`). HONEST LIMIT (tested): at
+factor>1 the reduction bins are anchored to the window origin, so a ±1
+NATIVE-pixel shift resamples the plane — every chunk key changes and the
+plane correctly re-uploads whole; anisotropic reductions and any
+plane/native mismatch fall back to the classic path. True shift-reuse at
+factor>1 needs source-anchored reduction binning — the ladder-migration
+slice that moves reduction bins onto the source grid (with the gutter
+story) remains open G5 work, together with ancestor resolution, pinned
+coarse coverage, and reducer families.
 
 ### G6 — GPU compute consumers
 
