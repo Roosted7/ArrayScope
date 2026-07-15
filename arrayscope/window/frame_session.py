@@ -1518,7 +1518,13 @@ class FrameSession:
             source_shape=tuple(int(value) for value in exact_image.shape[:2]),
             lod=lod,
             shader_mapping=mapping,
-            source_anchor=self._payload_source_anchor(exact_image.shape[:2]),
+            # The anchor rect is the NATIVE source extent the plane covers.
+            # ``exact_image`` is already reduced on the ingest-reduction path,
+            # so a reduced texture anchors by its LOD's native source shape
+            # (ADR 0056 G5: reduced planes take chunked residency too).
+            source_anchor=self._payload_source_anchor(
+                lod.source_shape if lod is not None else exact_image.shape[:2]
+            ),
             level_data=exact_level_data,
             level_stats=level_stats,
             tile_identity=self.tile_payload_identity(

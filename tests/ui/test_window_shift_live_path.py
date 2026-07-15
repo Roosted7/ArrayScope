@@ -450,3 +450,105 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, monkeypatch):
     finally:
         win.close()
         _restore_default_backend(settings)
+
+
+def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
+    """ADR 0056 G5 slice 1 live half: a reduced EXACT target takes the
+    chunked-residency path with uniform plane-pixel pages.
+
+    Zooming the camera out (world range = 3x the viewport per axis) makes the
+    resident LOD policy demand an isotropic factor-2 level.  The ladder never
+    demotes already-presented finer content (camera-only zooms must not churn
+    materialization), so the reduced target engages on the NEXT content
+    change: shifting the data window while zoomed out materializes the
+    demanded level-1 plane, and the exact reduced payload presents through
+    ``tile_chunk_residency`` with factor-2 keys in uniform 256^2 plane-pixel
+    slots (the same shape class native chunks use) instead of the classic
+    one-giant-slot-per-plane-size path.  Committed hover truth follows the
+    reduced plane exactly (the established floor-presentation contract).
+    """
+
+    pytest.importorskip("vispy")
+    from arrayscope.display.pyramid import reduce_box_mean
+
+    settings = _use_vispy_backend()
+    rng = np.random.default_rng(23)
+    data = rng.standard_normal((2 * CHUNK, 8 * CHUNK)).astype(np.float32)
+    shifted_start = START_A + CHUNK // 2
+    win = _make_window(qtbot, data)
+    try:
+        _apply_window(win, START_A, reason="test-window-initial")
+        _wait_for_window(win, qtbot, START_A)
+
+        pool = _pool(win)
+        assert _resident_chunks(pool), "native window did not engage chunked residency"
+
+        session = win.renderer._frame_session
+        viewport_h, viewport_w = (int(value) for value in session.viewport_shape)
+        assert viewport_h > 0 and viewport_w > 0
+        # 3.0 source texels per screen pixel on BOTH axes: desired factor 2
+        # on both (isotropic — anisotropic reductions fall back to classic).
+        view = win.img_view.getView()
+        center_x, center_y = (EXTENT / 2.0, CHUNK)
+        half_w, half_h = (1.5 * viewport_w, 1.5 * viewport_h)
+        view.setRange(
+            xRange=(center_x - half_w, center_x + half_w),
+            yRange=(center_y - half_h, center_y + half_h),
+            padding=0,
+        )
+        _apply_window(win, shifted_start, reason="test-window-shift-zoomed-out")
+
+        def reduced_chunks() -> set:
+            return {
+                key
+                for key in _resident_chunks(pool)
+                if isinstance(key[5], tuple) and int(key[5][0]) > 1
+            }
+
+        qtbot.waitUntil(lambda: bool(reduced_chunks()), timeout=_WAIT_TIMEOUT_MS)
+        chunks = reduced_chunks()
+        # Factor-2 keys: LOD triple (factor, level, gutter) == (2, 1, 0);
+        # native key rects span factor * chunk-shape source samples and
+        # anchor at the shifted window start.
+        assert {key[5] for key in chunks} == {(2, 1, 0)}
+        assert len(chunks) == 2
+        rects = sorted(_chunk_rect(key) for key in chunks)
+        assert rects == [
+            (0, 2 * CHUNK, shifted_start, shifted_start + 2 * CHUNK),
+            (0, 2 * CHUNK, shifted_start + 2 * CHUNK, shifted_start + 4 * CHUNK),
+        ]
+        # Uniform plane-pixel pages: the reduced chunks live in the same
+        # 256^2 shape class as native chunks.
+        slots = pool.resident_slots
+        for key in chunks:
+            page_index, _slot = slots[key]
+            assert pool.pages[page_index].tile_shape == (CHUNK, CHUNK)
+        # The presented payload really is the exact reduced target.
+        session = win.renderer._frame_session
+        payload = session.display_tile_payloads.get(0)
+        assert payload is not None
+        assert str(payload.quality) == "exact"
+        assert int(payload.lod.factor) == 2
+
+        # Committed value truth: floor-presented planes map view points 1:1
+        # to reduced-plane pixels; hover must report exactly the reduced
+        # plane the session admitted for the SHIFTED window (stale values
+        # from the previous window would betray a wrong chunk mapping).
+        reduced = np.asarray(
+            reduce_box_mean(data[:, shifted_start : shifted_start + EXTENT], (2, 2))
+        )
+        probes = ((CHUNK // 2, CHUNK // 2), (CHUNK + 11, CHUNK // 2 + 7))
+        for view_x, view_y in probes:
+            qtbot.waitUntil(
+                lambda x=view_x, y=view_y: _committed_value(win, x, y) is not None,
+                timeout=_WAIT_TIMEOUT_MS,
+            )
+            value = _committed_value(win, view_x, view_y)
+            expected = reduced[view_y, view_x]
+            assert value == pytest.approx(float(expected)), (
+                f"committed value at view ({view_x}, {view_y}) is {value!r}, "
+                f"expected reduced plane pixel {expected!r}"
+            )
+    finally:
+        win.close()
+        _restore_default_backend(settings)

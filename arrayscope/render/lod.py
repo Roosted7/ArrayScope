@@ -946,6 +946,19 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             texture_shape=tuple(int(value) for value in np.shape(plane)[:2]),
             gutter=0,
         )
+        # ADR 0056 G5 slice 1: an EXACT reduced plane covering the whole
+        # display window carries the window-invariant source anchor (native
+        # rect = window start + native tile extent), so the VisPy pool can
+        # take the chunked-residency path with uniform plane-pixel pages.
+        # Preview floors stay unanchored: the anchor promises texels that
+        # are a pure function of (content key, rect, LOD), which degraded
+        # planes do not honor.  ``_payload_source_anchor`` itself returns
+        # None for montage sessions and unanchorable chains.
+        source_anchor = None
+        if best_quality == "exact":
+            anchor_fn = getattr(session, "_payload_source_anchor", None)
+            if callable(anchor_fn):
+                source_anchor = anchor_fn(tile_shape)
         payload = DisplayTilePayload(
             tile_number=tile_number,
             source_index=source_index,
@@ -957,6 +970,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             lod=lod,
             quality=str(getattr(metadata, "quality", "preview") or "preview"),
             shader_mapping=getattr(metadata, "shader_mapping", None),
+            source_anchor=source_anchor,
             level_data=getattr(metadata, "level_data", None),
             level_stats=getattr(metadata, "level_stats", None),
             tile_identity=session.tile_payload_identity(
