@@ -4569,3 +4569,168 @@ def test_reduced_rgb_resident_without_magnitude_histogram_falls_back_to_native()
     assert lod.level == 0
     assert texture is rgb_base
     assert texture_histogram is None
+
+
+def test_partial_coverage_shared_fanout_releases_all_claims_and_refills(monkeypatch):
+    """Dossier exit gate (coverage-stall-2026-07-15): partial fanout coverage.
+
+    A shared-transform fanout that completes with PARTIAL coverage of the
+    claimed tile set (here 3 of 8; live shape was ~5 of 60) must release the
+    claims of the tiles it never covered and arm a replan, so the refill pass
+    can submit producers for them.  No tile may stay claimed-but-unproduced
+    with the kernel idle.
+    """
+
+    from types import SimpleNamespace
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(count=8, pyramid=pyramid)
+    demand = session.lod_policy_decision.demand
+    rendered_by_number = dict(session.rendered_tiles)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+
+    submissions = []
+
+    class _CaptureKernel:
+        def submit(self, spec, *, on_done=None, on_stale=None, on_error=None):
+            submissions.append(SimpleNamespace(spec=spec, on_done=on_done, on_stale=on_stale))
+            return object()
+
+    class _Renderer(_RungPrepareRenderer):
+        def __init__(self):
+            super().__init__()
+            self.win = SimpleNamespace(kernel=_CaptureKernel())
+
+        def _rendered_tile_for_current_payload(self, _session, _tile, _payload):
+            return None
+
+    effects = FramePipelineEffects(_Renderer(), session)
+    monkeypatch.setattr(
+        montage_commit,
+        "_post_low_priority_callback",
+        lambda _renderer, callback: callback(),
+    )
+    monkeypatch.setattr(effects, "request_presentation", lambda: None)
+
+    level = 4  # preview level above the desired level 2: the first-fill fanout
+    tiles = tuple(session.plan.tiles)
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=level,
+        tiles=tiles,
+        priority=Priority.INTERACTIVE,
+        lane=Lane.DISPLAY_PREVIEW,
+    ) == 1
+    claim_identities = {
+        int(tile.montage_index): effects._preview_claim_identity(None, tile)
+        for tile in tiles
+    }
+    assert all(
+        session.lifecycle.preview_claim_active(tile_number, identity)
+        for tile_number, identity in claim_identities.items()
+    )
+
+    def _row(tile):
+        rendered = rendered_by_number[int(tile.montage_index)]
+        semantic_id = session.tile_semantic_source_id(int(tile.source_index))
+        key = pyramid_key_for_rendered(
+            rendered, demand=demand, level=level, semantic_source_id=semantic_id
+        )
+        plane = reduce_box_mean(np.asarray(rendered.image), key.factor_xy)
+        return (int(tile.montage_index), key, plane, np.asarray(plane).copy())
+
+    covered = tiles[:3]
+    submissions[0].on_done(tuple(_row(tile) for tile in covered))
+
+    # Exit gate half 1: NOTHING stays claimed-but-unproduced, and a replan is
+    # armed so the planner can refill the uncovered tiles.
+    assert not any(
+        session.lifecycle.preview_claim_active(tile_number, identity)
+        for tile_number, identity in claim_identities.items()
+    )
+    assert getattr(session, "_test_replan_requested", False) is True
+
+    # Exit gate half 2: the refill pass sees exactly the uncovered tiles as
+    # candidates, can claim them afresh, and full delivery converges.
+    refill = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=level,
+            include_missing=True,
+            require_presented_preview=False,
+        )
+    )
+    assert sorted(int(tile.montage_index) for tile in refill) == [3, 4, 5, 6, 7]
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=level,
+        tiles=refill,
+        priority=Priority.INTERACTIVE,
+        lane=Lane.DISPLAY_PREVIEW,
+    ) == 1
+    submissions[1].on_done(tuple(_row(tile) for tile in refill))
+
+    assert not any(
+        session.lifecycle.preview_claim_active(tile_number, identity)
+        for tile_number, identity in claim_identities.items()
+    )
+    remaining = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=level,
+            include_missing=True,
+            require_presented_preview=False,
+        )
+    )
+    assert remaining == ()
+    assert set(session.display_tile_payloads) == set(range(8))
+
+
+def test_dropped_shared_fanout_releases_claims_for_replan_refill():
+    """A superseded/stale fanout must leave no claim behind (refill producer)."""
+
+    from types import SimpleNamespace
+
+    pyramid = PyramidCache(max_bytes=1 << 24)
+    session = _session(count=4, pyramid=pyramid)
+    demand = session.lod_policy_decision.demand
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+
+    submissions = []
+
+    class _CaptureKernel:
+        def submit(self, spec, *, on_done=None, on_stale=None, on_error=None):
+            submissions.append(SimpleNamespace(spec=spec, on_done=on_done, on_stale=on_stale))
+            return object()
+
+    class _Renderer(_RungPrepareRenderer):
+        def __init__(self):
+            super().__init__()
+            self.win = SimpleNamespace(kernel=_CaptureKernel())
+
+    effects = FramePipelineEffects(_Renderer(), session)
+    tiles = tuple(session.plan.tiles)
+    assert effects._submit_shared_transform_target(
+        demand=demand,
+        level=4,
+        tiles=tiles,
+        priority=Priority.INTERACTIVE,
+        lane=Lane.DISPLAY_PREVIEW,
+    ) == 1
+    claim_identities = {
+        int(tile.montage_index): effects._preview_claim_identity(None, tile)
+        for tile in tiles
+    }
+    assert all(
+        session.lifecycle.preview_claim_active(tile_number, identity)
+        for tile_number, identity in claim_identities.items()
+    )
+
+    submissions[0].on_stale()
+
+    assert not any(
+        session.lifecycle.preview_claim_active(tile_number, identity)
+        for tile_number, identity in claim_identities.items()
+    )

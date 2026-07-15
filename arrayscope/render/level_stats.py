@@ -1362,6 +1362,32 @@ class LevelStatsService:
             or semantic_remaining
         )
         flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
+        if (
+            processed
+            and not flush_parked
+            and bool(getattr(session, "shader_display", False))
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+            and self._first_pass_level_evidence_complete(session)
+        ):
+            # First-pass rough-histogram publication obligation, evidence-side
+            # edge (trace-proven idle stall, 2026-07-15: stall-18-1 seq
+            # 9703-9708, stall-65-2 seq 37576-37585).  After an index-window
+            # retarget the shared-transform DESIRED pass is barred behind
+            # ``first_pass_histogram_published`` (shared_first_pass_barrier),
+            # and that flag is only set by an acknowledgement commit.  When
+            # the last backend-ack commit lands BEFORE the rough level
+            # evidence for the newly scrolled sources completes, the ack-time
+            # arm in ``_acknowledge_and_publish`` cannot fire, and the settled
+            # -metadata refresh below never opens because the required tiles
+            # are unsettled precisely BY that barred pass: a closed wait
+            # cycle with an idle kernel.  Arm the same parked-flush
+            # obligation the ack path arms, so the existing resume path
+            # requests the publication commit which opens the barrier and
+            # replans the target pass.  No new scheduling: this reuses the
+            # presentation gate + replan hooks (ADR 0053).
+            session.flush_pending = True
+            session.final_commit_pending = True
+            flush_parked = True
         can_resume_parked_flush = bool(flush_parked and not evidence_remaining)
         can_refresh_settled_metadata = bool(
             not flush_parked and _montage_side_work_visible_settled(self, session)

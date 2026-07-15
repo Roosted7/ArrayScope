@@ -3638,3 +3638,131 @@ def test_automatic_level_generation_target_is_not_reclassified_as_user_intent():
 
     session.user_levels_override = (2.0, 4.0)
     assert session_requested_levels(session) == (2.0, 4.0)
+
+
+# ---------------------------------------------------------------------------
+# First-pass histogram publication: evidence-side obligation (idle-stall fix)
+#
+# Trace-proven deadlock (2026-07-15, /tmp/arrayscope-stall-18-1 seq 9703-9708
+# and /tmp/arrayscope-stall-65-2 seq 37576-37585): after an index-window
+# retarget resets ``first_pass_histogram_published``, the shared-transform
+# DESIRED pass is barred behind that flag, and the flag is only set by an
+# acknowledgement commit.  When the last backend-ack commit lands BEFORE the
+# rough level evidence for the newly scrolled sources completes, the ack-time
+# arm cannot fire and the settled-metadata refresh never opens (the required
+# tiles are unsettled precisely BY the barred pass) — a closed wait cycle with
+# an idle kernel.  ``_maybe_publish_after_level_evidence`` must arm the parked
+# flush itself when it observes the completed first pass unpublished.
+# ---------------------------------------------------------------------------
+
+
+def _late_evidence_service(covered, *, drain_active=False):
+    from arrayscope.render.level_stats import LevelStatsService
+
+    service = LevelStatsService()
+    service.win = SimpleNamespace(kernel=SimpleNamespace(visible_backlog=0))
+    service._montage_level_tracker = lambda: SimpleNamespace(
+        summary_for=lambda _key: SimpleNamespace(source_indices=frozenset(covered)),
+    )
+    service._montage_commit_drain_active = bool(drain_active)
+    return service
+
+
+def _late_evidence_session(**overrides):
+    tiles = tuple(
+        SimpleNamespace(montage_index=index, source_index=100 + index)
+        for index in range(4)
+    )
+    presentation_requests = []
+    session = SimpleNamespace(
+        shader_display=True,
+        first_pass_quality="preview",
+        first_pass_histogram_published=False,
+        flush_pending=False,
+        final_commit_pending=False,
+        display_committed=True,
+        level_key=("levels", "late-first-pass"),
+        plan=SimpleNamespace(tiles=tiles),
+        first_pass_pixels_presented=lambda: True,
+        required_tile_numbers=lambda: (0, 1),
+        required_target_settled=lambda: False,
+        pending_level_tiles=(),
+        level_scan_remaining_tiles=0,
+        histogram_aggregate_inflight=False,
+        semantic_level_evidence_progress=None,
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_removals=(),
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(
+                request_presentation=lambda: presentation_requests.append(True),
+            ),
+        ),
+    )
+    session._presentation_requests = presentation_requests
+    for name, value in overrides.items():
+        setattr(session, name, value)
+    return session
+
+
+def test_late_first_pass_evidence_arms_publication_flush_and_resumes_presentation():
+    """Evidence completing after the last ack commit must still publish."""
+
+    service = _late_evidence_service({100, 101})
+    session = _late_evidence_session()
+
+    service._maybe_publish_after_level_evidence(session, processed=1)
+
+    assert session.flush_pending is True
+    assert session.final_commit_pending is True
+    assert session._presentation_requests == [True]
+
+
+def test_late_first_pass_evidence_defers_to_active_commit_drain():
+    service = _late_evidence_service({100, 101}, drain_active=True)
+    session = _late_evidence_session()
+
+    service._maybe_publish_after_level_evidence(session, processed=1)
+
+    # The obligation is parked on the session; the active commit's normal
+    # backlog rearm owns the continuation (no receiver event from inside its
+    # own handler).
+    assert session.flush_pending is True
+    assert session.final_commit_pending is True
+    assert session._presentation_requests == []
+    assert service._montage_gate_last_backlog is None
+
+
+def test_late_first_pass_evidence_keeps_obligation_while_evidence_remains():
+    service = _late_evidence_service({100, 101})
+    session = _late_evidence_session(pending_level_tiles=(3,))
+
+    service._maybe_publish_after_level_evidence(session, processed=1)
+
+    # More evidence batches are in flight: the flush stays parked for the
+    # final drain's resume path instead of committing per batch.
+    assert session.flush_pending is True
+    assert session.final_commit_pending is True
+    assert session._presentation_requests == []
+
+
+def test_published_first_pass_does_not_rearm_publication_flush():
+    service = _late_evidence_service({100, 101})
+    session = _late_evidence_session(first_pass_histogram_published=True)
+
+    service._maybe_publish_after_level_evidence(session, processed=1)
+
+    assert session.flush_pending is False
+    assert session.final_commit_pending is False
+    assert session._presentation_requests == []
+
+
+def test_incomplete_first_pass_evidence_does_not_arm_publication_flush():
+    service = _late_evidence_service({100})
+    session = _late_evidence_session()
+
+    service._maybe_publish_after_level_evidence(session, processed=1)
+
+    assert session.flush_pending is False
+    assert session.final_commit_pending is False
+    assert session._presentation_requests == []
