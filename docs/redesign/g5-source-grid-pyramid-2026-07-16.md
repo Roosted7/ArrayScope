@@ -128,6 +128,20 @@ The ladder-side target planner is also now explicit:
   migrate materialization and boundary draw geometry together before feeding
   these targets into the VisPy resolver.
 
+The pure boundary-geometry half of that atomic slice is now implemented:
+
+- `partition_source_grid_pages` groups globally reduced samples into uniform
+  stored-page classes while retaining the exact native-source rectangle of
+  every sample for draw construction;
+- clipped first/last factor-2 bins retain width one, aligned interiors retain
+  width two, and the flattened draw spans cover every valid source coordinate
+  exactly once;
+- shifted windows share only a complete aligned interior page identity and
+  attach byte-identical values to it. Boundary page identities remain distinct.
+
+The remaining live step is to carry these page values and spans through the
+ladder cache/payload contract and have VisPy build grouped quads from the spans.
+
 ## Rejected shortcuts
 
 - backend-private tuple keys as the permanent pyramid identity;

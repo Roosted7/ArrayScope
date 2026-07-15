@@ -262,6 +262,15 @@ or uniformly stretching a page whose partial boundary bins have unequal source
 width, would violate semantic/coordinate truth. Materialization plus boundary
 draw geometry is the next atomic slice.
 
+**Slice 4b landed (2026-07-16): source-grid page value/geometry partition.**
+The canonical reducer output can now be partitioned into uniform stored-page
+classes without discarding per-sample native coverage. Partial edge bins keep
+their exact widths, draw spans cover the valid source rectangle exactly once,
+and shifted windows share only complete interior page identity and values.
+This remains pure and backend-free. The next live slice carries these pages
+through ladder cache/payload state and constructs grouped VisPy quads from the
+recorded spans; the old uniform whole-plane draw stays in place until then.
+
 ### G6 — GPU compute consumers
 
 Histogram/level reductions over resident chunks (sharing the shader's

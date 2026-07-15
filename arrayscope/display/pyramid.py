@@ -42,6 +42,91 @@ class SourceGridReduction:
     valid_source_rect_yx: tuple[int, int, int, int]
 
 
+@dataclass(frozen=True)
+class SourceGridPageIdentity:
+    """Identity of one uniform stored-sample page and its valid footprint."""
+
+    source_rect_yx: tuple[int, int, int, int]
+    reduction_vector_xy: tuple[int, int]
+    reducer: str = "mean"
+    algo_version: int = ALGO_VERSION
+
+
+@dataclass(frozen=True)
+class SourceGridPage:
+    """One page of reduced values with exact per-sample draw coverage."""
+
+    identity: SourceGridPageIdentity
+    source_rect_yx: tuple[int, int, int, int]
+    values: np.ndarray
+    draw_source_rects: tuple[tuple[int, int, int, int], ...]
+
+
+def partition_source_grid_pages(
+    reduction: SourceGridReduction,
+    *,
+    stored_page_shape: tuple[int, int],
+) -> tuple[SourceGridPage, ...]:
+    """Partition reduced samples without losing their native draw spans.
+
+    Page alignment is global native-source alignment.  Values are grouped by
+    the page containing their bin origin; clipped first/last pages keep their
+    exact valid footprint in identity, and every sample retains its own
+    source rectangle for later backend geometry construction.
+    """
+
+    values = np.asarray(reduction.values)
+    if values.ndim < 2:
+        raise ValueError("source-grid page partition requires a 2D reduction")
+    stored_h, stored_w = (int(value) for value in stored_page_shape)
+    if stored_h <= 0 or stored_w <= 0:
+        raise ValueError(f"stored page shape must be positive, got {stored_page_shape}")
+    level_x, level_y = reduction.reduction_vector_xy
+    source_page_h = stored_h * (1 << int(level_y))
+    source_page_w = stored_w * (1 << int(level_x))
+    rect_grid = np.asarray(reduction.source_rects, dtype=np.int64).reshape(
+        values.shape[0], values.shape[1], 4
+    )
+    groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for row in range(values.shape[0]):
+        for column in range(values.shape[1]):
+            rect = rect_grid[row, column]
+            page_origin = (
+                (int(rect[0]) // source_page_h) * source_page_h,
+                (int(rect[2]) // source_page_w) * source_page_w,
+            )
+            groups.setdefault(page_origin, []).append((row, column))
+    pages: list[SourceGridPage] = []
+    for page_origin in sorted(groups):
+        positions = groups[page_origin]
+        rows = tuple(sorted({row for row, _column in positions}))
+        columns = tuple(sorted({column for _row, column in positions}))
+        if len(positions) != len(rows) * len(columns):
+            raise ValueError("source-grid page samples must form one rectangular block")
+        row_slice = slice(rows[0], rows[-1] + 1)
+        column_slice = slice(columns[0], columns[-1] + 1)
+        page_rects = rect_grid[row_slice, column_slice].reshape(-1, 4)
+        source_rect = (
+            int(np.min(page_rects[:, 0])),
+            int(np.max(page_rects[:, 1])),
+            int(np.min(page_rects[:, 2])),
+            int(np.max(page_rects[:, 3])),
+        )
+        identity = SourceGridPageIdentity(
+            source_rect_yx=source_rect,
+            reduction_vector_xy=tuple(reduction.reduction_vector_xy),
+        )
+        pages.append(
+            SourceGridPage(
+                identity=identity,
+                source_rect_yx=source_rect,
+                values=np.ascontiguousarray(values[row_slice, column_slice]),
+                draw_source_rects=tuple(tuple(int(value) for value in rect) for rect in page_rects),
+            )
+        )
+    return tuple(pages)
+
+
 def reduce_source_grid_mean(
     array,
     *,
@@ -387,7 +472,10 @@ __all__ = [
     "PyramidLevelKey",
     "PyramidCache",
     "SourceGridBinIdentity",
+    "SourceGridPage",
+    "SourceGridPageIdentity",
     "SourceGridReduction",
+    "partition_source_grid_pages",
     "reduce_box_mean",
     "reduce_source_grid_mean",
 ]
