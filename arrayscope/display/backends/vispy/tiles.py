@@ -32,6 +32,7 @@ from arrayscope.display.model.tile_identity import (
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
+from arrayscope.gpu.page_table import PageSlot, PageTable
 
 try:
     from vispy.visuals import Visual
@@ -224,7 +225,10 @@ class TextureAtlasPool:
         self.tile_shape: tuple[int, int] | None = None
         self.storage_mode: str | None = None
         self.pages: list[TextureAtlasPage] = []
-        self.resident_slots: dict[object, tuple[int, int]] = {}
+        # Chunk residency (which key lives in which page slot, LRU stamps)
+        # is the ADR 0055 page table; the atlas keeps only texture mechanics
+        # and the view-tile → resident-key presentation maps below.
+        self._page_table = PageTable()
         self.tile_slots: dict[int, tuple[int, int]] = {}
         self.tile_resident_keys: dict[int, object] = {}
         self.resident_tiles: dict[object, set[int]] = {}
@@ -232,7 +236,6 @@ class TextureAtlasPool:
         self.source_ids: dict[object, object] = {}
         self.acknowledged_identities: dict[object, object] = {}
         self.physical_upload_records: dict[object, dict[str, object]] = {}
-        self.last_used: dict[object, int] = {}
         self.active_resident_keys: set[object] = set()
         # Keys whose tile(s) now present a different residency class (ADR
         # 0050): the acknowledged replacement makes these slots reclaimable.
@@ -254,7 +257,15 @@ class TextureAtlasPool:
         # a superseded key whose base is active is the retained adjacent
         # level of a visible tile and is reclaimed only as a last resort.
         self.active_base_source_ids: set[object] = set()
-        self._clock = 0
+
+    @property
+    def resident_slots(self) -> dict[object, tuple[int, int]]:
+        """Resident key → (page, slot) view of the page table (diagnostics/tests)."""
+
+        return {
+            key: (slot.page_index, slot.slot_index)
+            for key, slot in self._page_table.slot_items()
+        }
 
     def presented_identities(self) -> dict[int, object]:
         """Ground truth: the payload identity each drawn tile slot holds NOW.
@@ -374,7 +385,7 @@ class TextureAtlasPool:
         self.tile_shape = (tile_h, tile_w)
         if shape_changed or mode_changed:
             self.pages.clear()
-            self.resident_slots.clear()
+            self._page_table = PageTable()
             self.tile_slots.clear()
             self.tile_resident_keys.clear()
             self.resident_tiles.clear()
@@ -382,7 +393,6 @@ class TextureAtlasPool:
             self.source_ids.clear()
             self.acknowledged_identities.clear()
             self.physical_upload_records.clear()
-            self.last_used.clear()
             self.active_resident_keys.clear()
             self.superseded_keys.clear()
         self.storage_mode = storage_mode
@@ -485,7 +495,7 @@ class TextureAtlasPool:
             tuple(self.superseded_keys),
             key=lambda key: (
                 _lod_invariant_source_id(self.source_ids.get(key)) in active_bases,
-                self.last_used.get(key, -1),
+                self._page_table.last_use(key),
             ),
         )
         for adjacent_pass in (False, True):
@@ -496,11 +506,11 @@ class TextureAtlasPool:
                     continue
                 if key in self.active_resident_keys or self.resident_tiles.get(key):
                     continue
-                slot_ref = self.resident_slots.get(key)
+                slot_ref = self._page_table.lookup(key)
                 if slot_ref is None:
                     self.superseded_keys.discard(key)
                     continue
-                page_index, slot = (int(slot_ref[0]), int(slot_ref[1]))
+                page_index, slot = (slot_ref.page_index, slot_ref.slot_index)
                 page = self.pages[page_index]
                 if protect is not None and page.tile_shape == protect:
                     # Same-class slots are useful as-is: ordinary eviction
@@ -508,11 +518,10 @@ class TextureAtlasPool:
                     continue
                 page.slot_owners[slot] = None
                 page._free_slots.append(slot)
-                self.resident_slots.pop(key, None)
+                self._page_table.unbind(key)
                 self.source_ids.pop(key, None)
                 self.acknowledged_identities.pop(key, None)
                 self.physical_upload_records.pop(key, None)
-                self.last_used.pop(key, None)
                 self.superseded_keys.discard(key)
                 self.eviction_count += 1
                 self.superseded_reclaimed_count += 1
@@ -537,10 +546,9 @@ class TextureAtlasPool:
             remap[old_index] = len(kept)
             kept.append(page)
         self.pages = kept
-        self.resident_slots = {
-            key: (remap[int(page_index)], int(slot))
-            for key, (page_index, slot) in self.resident_slots.items()
-        }
+        self._page_table.remap_slots(
+            lambda slot: PageSlot(slot.pool_id, remap[slot.page_index], slot.slot_index)
+        )
         self.tile_slots = {
             tile: (remap[int(page_index)], int(slot))
             for tile, (page_index, slot) in self.tile_slots.items()
@@ -1078,11 +1086,11 @@ class TextureAtlasPool:
                 self._touch(resident_key)
                 skipped += 1
                 continue
-            if resident_key not in self.resident_slots and new_warm_budget <= 0:
+            if resident_key not in self._page_table and new_warm_budget <= 0:
                 skipped += 1
                 skipped_budget += 1
                 continue
-            if resident_key not in self.resident_slots:
+            if resident_key not in self._page_table:
                 new_warm_budget -= 1
             class_shape = _payload_class_shape(payload)
             if class_shape != (tile_h, tile_w):
@@ -1179,9 +1187,9 @@ class TextureAtlasPool:
         near_keys: set[object],
         tile_shape: tuple[int, int] | None = None,
     ) -> tuple[int, int, bool]:
-        current = self.resident_slots.get(resident_key)
+        current = self._page_table.lookup(resident_key)
         if current is not None:
-            return int(current[0]), int(current[1]), False
+            return current.page_index, current.slot_index, False
 
         shape = self.tile_shape if tile_shape is None else (int(tile_shape[0]), int(tile_shape[1]))
         class_pages = tuple(
@@ -1193,7 +1201,7 @@ class TextureAtlasPool:
             slot = page.take_free_slot(resident_key)
             if slot is None:
                 continue
-            self.resident_slots[resident_key] = (int(page_index), int(slot))
+            self._bind_resident_slot(resident_key, page_index, slot, page)
             return int(page_index), int(slot), True
 
         candidates = []
@@ -1220,7 +1228,7 @@ class TextureAtlasPool:
                         rank = 3
                     else:
                         rank = 4
-                    candidates.append((rank, self.last_used.get(owner, -1), owner, int(page_index), int(slot)))
+                    candidates.append((rank, self._page_table.last_use(owner), owner, int(page_index), int(slot)))
         if not candidates:
             raise AtlasCapacityError(
                 f"atlas has {self._class_capacity(shape) if shape else self.capacity} slots of shape {shape} "
@@ -1228,11 +1236,10 @@ class TextureAtlasPool:
             )
         _priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
         self._discard_tile_mappings_for_resident_key(victim)
-        self.resident_slots.pop(victim, None)
+        self._page_table.unbind(victim)
         self.source_ids.pop(victim, None)
         self.acknowledged_identities.pop(victim, None)
         self.physical_upload_records.pop(victim, None)
-        self.last_used.pop(victim, None)
         if victim in self.superseded_keys:
             self.superseded_reclaimed_count += 1
         self.superseded_keys.discard(victim)
@@ -1241,8 +1248,16 @@ class TextureAtlasPool:
             self.evicted_near_count += 1
         page = self.pages[int(page_index)]
         page.slot_owners[int(slot)] = resident_key
-        self.resident_slots[resident_key] = (int(page_index), int(slot))
+        self._bind_resident_slot(resident_key, page_index, slot, page)
         return int(page_index), int(slot), True
+
+    def _bind_resident_slot(self, resident_key: object, page_index: int, slot: int, page: TextureAtlasPage) -> None:
+        nbytes = _storage_mode_bytes_per_pixel(page.storage_mode) * page.tile_shape[0] * page.tile_shape[1]
+        self._page_table.bind(
+            resident_key,
+            PageSlot("vispy-atlas", int(page_index), int(slot)),
+            nbytes=nbytes,
+        )
 
     def _clear_tile_mapping(self, tile_number: int) -> None:
         tile_number = int(tile_number)
@@ -1275,7 +1290,7 @@ class TextureAtlasPool:
             # The replacement is backend-acknowledged and presented for this
             # tile: the displaced key's slot becomes reclaimable once no tile
             # presents it anymore (ADR 0041 gate 5 holds until here).
-            if not self.resident_tiles.get(old_key) and old_key in self.resident_slots:
+            if not self.resident_tiles.get(old_key) and old_key in self._page_table:
                 self.superseded_keys.add(old_key)
         self.superseded_keys.discard(resident_key)
         self.tile_slots[tile_number] = (int(page_index), int(slot))
@@ -1292,8 +1307,7 @@ class TextureAtlasPool:
                 self.tile_uvs.pop(tile_number, None)
 
     def _touch(self, resident_key: object) -> None:
-        self._clock += 1
-        self.last_used[resident_key] = int(self._clock)
+        self._page_table.touch(resident_key)
 
     def _near_resident_keys(self, near_tile_source_ids) -> set[object]:
         """Resolve base or complete source identities to current residents."""

@@ -103,6 +103,32 @@ class PageTable:
             self._use_counter += 1
             entry.last_use = self._use_counter
 
+    def last_use(self, key: DataChunkKey, default: int = -1) -> int:
+        """Monotonic last-use stamp for LRU tiebreaks (``default`` if absent)."""
+
+        entry = self._entries.get(key)
+        return default if entry is None else entry.last_use
+
+    def slot_items(self) -> tuple[tuple[DataChunkKey, PageSlot], ...]:
+        return tuple((key, entry.slot) for key, entry in self._entries.items())
+
+    def remap_slots(self, transform) -> None:
+        """Rewrite every binding's slot via ``transform(slot) -> PageSlot``.
+
+        Used when pages are dropped/compacted and surviving page indices
+        shift. LRU state and pins survive; the generation bumps once.
+        """
+
+        new_slots: dict[PageSlot, DataChunkKey] = {}
+        for key, entry in self._entries.items():
+            slot = transform(entry.slot)
+            if slot in new_slots:
+                raise ValueError(f"remap collides on slot {slot}")
+            entry.slot = slot
+            new_slots[slot] = key
+        self._slots = new_slots
+        self._generation += 1
+
     def pin(self, key: DataChunkKey, pinned: bool = True) -> None:
         entry = self._entries.get(key)
         if entry is None:
