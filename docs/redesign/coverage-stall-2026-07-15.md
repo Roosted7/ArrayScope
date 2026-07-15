@@ -62,12 +62,68 @@ never acknowledge from a divergent visual; injected wrong-uniform/mode
 tests plus a framebuffer gate (zero-magnitude complex background must
 never render LUT[0]).
 
+## Bug 1 update — fresh traces (22:33/22:34) correct the mechanism; branch fix landed
+
+Fresh repros on the CURRENT branch build (includes the commit-progress
+watchdog, so genuinely idle): `/tmp/arrayscope-stall-18-1.trace.jsonl`
+(scroll down, stall `required_unsettled=[0..16]`, seq 9708) and
+`/tmp/arrayscope-stall-65-2.trace.jsonl` (back to 70:170 then scroll up,
+stall `required_unsettled=[98,99]`, seq 37585). Direction does not matter.
+
+The claim ledger is NOT the surviving defect on this build: 4646ecf8's
+release/refill held in both traces (every preview fanout released its
+claims and armed a replan; candidates re-yielded). The proven cycle is an
+**acknowledgement/evidence race around the first-pass histogram barrier**:
+
+1. `retarget_index_window` resets `first_pass_histogram_published`
+   (frame_session.py:1062); the scrolled window's first pass is the shared
+   L4 preview fanout (`first_pass_quality="preview"`).
+2. The DESIRED (L2/L1 exact) shared pass is refused by
+   `shared_first_pass_barrier_pending` until the flag is set
+   (frame_effects.py:331-335, gate at :892-896) — every later
+   `pipeline_plan` shows `submitted=0` (18-1 seq 9299→9706, 65-2 seq
+   37172→37579) while per-tile steps are correctly shared-owner-refused.
+3. The flag is only set inside an ack commit (`_acknowledge_and_publish`
+   :2227-2232), whose flush arm requires `_first_pass_level_evidence_complete`
+   AT COMMIT TIME (:2233-2241). In both stalls the LAST ack commit ran
+   while the rough-evidence task for the new sources was still in flight
+   (18-1: commit_batch 9703 precedes histogram task 228 start 9704; 65-2:
+   commit_batch 37576 precedes task 416/417 finishes 37578/37583).
+4. When the evidence continuation drained (bridge_drain 9707 / 37584),
+   `_maybe_publish_after_level_evidence` (level_stats.py:1334) found no
+   parked flush and refused the settled-metadata refresh because
+   `_montage_side_work_visible_settled` requires `required_target_settled()`
+   — false precisely BY the barred pass in (2). Closed wait cycle, idle
+   kernel, watchdog asserts (`flush_pending: false` in both stall dumps).
+
+Slow scrolling "resolves" it because each further retarget produces a new
+ack commit that can win the evidence race and arm the flush.
+
+**Fix landed on `codex/gpu-engine` at `ffafb821`** ("Arm first-pass
+histogram publication when level evidence completes late"):
+`_maybe_publish_after_level_evidence` arms the same parked-flush
+obligation the ack path arms when it observes a completed, unpublished
+first pass; the existing resume path then requests the publication
+commit, which sets the flag and replans the shared target (ADR 0053: no
+new scheduling, no timers). Tests: deterministic late-evidence unit tests
+(tests/window/test_montage_backend.py, fail pre-fix), the dossier's
+partial-coverage + dropped-fanout claim-release exit gates
+(tests/window/test_montage_lod_residency.py), and an offscreen VisPy
+FFT-montage scroll-down-then-up settling regression
+(tests/ui/test_montage_scroll_settling.py).
+
 ## Queue additions
 
 1. (P9/main) Partial shared-fanout coverage must release/refill claims for
    uncovered tiles; exit gate: injected 5-of-62 fanout coverage converges
    with no stall assertion and no idle kernel while unsettled tiles remain.
+   [2026-07-15 late: exit gate now pinned on this branch by
+   `test_partial_coverage_shared_fanout_releases_all_claims_and_refills`;
+   fresh traces show the surviving live stall was the evidence race above,
+   fixed in ffafb821 — dedupe both against the P9 record at integration.]
 2. (P9/main) Watchdog signature gains a commit-progress term so a live
    22 Hz drain does not assert (done on this branch; port with dedupe).
 3. (this branch, done) Physical presentation truth + injected-corruption
    gates as above.
+4. (this branch, done — ffafb821) First-pass histogram publication
+   obligation must survive evidence completing after the last ack commit.
