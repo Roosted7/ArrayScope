@@ -199,6 +199,14 @@ texture-size assumptions, acknowledged residency everywhere, no full-set
 rebuilds on zoom threshold crossings, exact inspection independent of
 display LOD, documented backend/LOD default evidence.
 
+> **[Codex 2026-07-15 — GPU-engine branch pointer]** A separate program on
+> `codex/gpu-engine` pursues the ADR 0055 three-way separation of view
+> tiles, data chunks, and residency pages toward a GPU-resident N-D data
+> store ([`proposals/gpu-engine-plan.md`](proposals/gpu-engine-plan.md)).
+> It joins this roadmap only after its G3 window-shift gate passes on real
+> hardware without regressing first-image latency; it must not reorder V/P
+> work on `main`.
+
 ## Later — product capabilities
 
 - **Linked windows and inspection groups** — first iteration shipped

@@ -82,6 +82,7 @@ Status terminology:
 | [0051](0051-single-owner-tile-lifecycle.md) | Single-owner tile lifecycle | Accepted; P1 + P2 core implemented, field-verified, and machine-derived dispatch landed (every event edge re-derives all pumps; the stall watchdog is an assertion). Remaining P2: sets as views + stage fan-in events, delta-walk cost; P3–P5 phased. |
 | [0053](0053-execution-kernel-and-modular-pipeline.md) | Execution kernel and modular rendering pipeline | Accepted; kernel, pipeline, ladder, and frame control-plane landed (R1–R7). Remaining visible-truth work is queued in `docs/redesign/README.md`. |
 | [0054](0054-montage-level-evidence-phasing.md) | Montage level evidence phasing | Implemented for montage level/histogram evidence ordering; rough preview, rough target, and refined stats are ranked explicitly. |
+| [0055](0055-view-tiles-data-chunks-residency-pages.md) | View tiles / data chunks / residency pages | Accepted (design) on `codex/gpu-engine`; G-program staged in [`proposals/gpu-engine-plan.md`](../proposals/gpu-engine-plan.md). G1 in progress. |
 
 ## Adding or changing a decision
 
