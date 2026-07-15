@@ -2431,9 +2431,6 @@ class ImageViewShell(QtWidgets.QWidget):
     def _cancel_interaction(self, reason: str) -> None:
         self._pointer_interaction.cancel(reason)
 
-    def _cancel_active_capture_for_frame_replacement(self) -> None:
-        self._pointer_interaction.cancel_active_capture_for_frame_replacement()
-
     def _current_image_world_rect(self):
         if self.image is None:
             return None

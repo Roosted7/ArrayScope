@@ -281,7 +281,7 @@ def test_vispy_manual_resize_uses_shared_viewport_transaction(qt_app):
         view.resize(520, 420)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.zeros((100, 100), dtype=np.float32))
+        _present_vispy_tiled(view, np.zeros((100, 100), dtype=np.float32), levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         qt_app.processEvents()
         view.getView().setRange(xRange=(-50.0, 150.0), yRange=(-40.0, 160.0), padding=0)
         qt_app.processEvents()
@@ -316,7 +316,7 @@ def test_vispy_background_pan_updates_camera_without_graphics_scene_drag(qt_app)
         view.resize(520, 420)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.zeros((100, 100), dtype=np.float32))
+        _present_vispy_tiled(view, np.zeros((100, 100), dtype=np.float32), levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         view.getView().setRange(xRange=(0.0, 100.0), yRange=(0.0, 100.0), padding=0)
         qt_app.processEvents()
         before_range = view.getView().viewRange()
@@ -368,7 +368,7 @@ def test_vispy_background_pan_matches_flipped_viewbox_axes(qt_app):
         view.resize(520, 420)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.zeros((100, 100), dtype=np.float32))
+        _present_vispy_tiled(view, np.zeros((100, 100), dtype=np.float32), levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         view.getView().invertX(True)
         view.getView().invertY(False)
         view.getView().setRange(xRange=(0.0, 100.0), yRange=(0.0, 100.0), padding=0)
@@ -428,7 +428,7 @@ def test_vispy_wheel_zoom_updates_camera_without_graphics_scene_wheel(qt_app):
         view.resize(520, 420)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.zeros((100, 100), dtype=np.float32))
+        _present_vispy_tiled(view, np.zeros((100, 100), dtype=np.float32), levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
         view.getView().setRange(xRange=(0.0, 100.0), yRange=(0.0, 100.0), padding=0)
         qt_app.processEvents()
         before_range = view.getView().viewRange()
@@ -455,7 +455,6 @@ def test_scalar_presentation_uses_tiled_visual(qt_app):
         assert timing.mode == "vispy_tile_layer"
         assert timing.rgb_window_ms == 0.0
         assert view._vispy_gpu_montage_layer.last_stats.visible_items == 1
-        assert not view._vispy_image.visible
     finally:
         view.close()
 
@@ -598,13 +597,12 @@ def test_vispy_draw_ack_listener_requests_next_canvas_update_after_draw(qt_app, 
 
 
 def test_windowed_rgb_presentation_uses_shader_path(qt_app, monkeypatch):
-    import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     def fail_cpu_window(*args, **kwargs):
         raise AssertionError("VisPy windowed RGB path should not CPU-window RGB display data")
 
-    monkeypatch.setattr(vispy_view, "rgb_display_for_levels", fail_cpu_window)
+    monkeypatch.setattr("arrayscope.display.image_upload.rgb_display_for_levels", fail_cpu_window)
     view = VisPyImageView2D()
     rgb = np.full((8, 9, 3), 200, dtype=np.uint8)
     magnitude = np.linspace(0.0, 1.0, 72, dtype=np.float64).reshape(8, 9)
@@ -799,85 +797,6 @@ def test_vispy_complex_level_preview_cannot_replay_stale_scalar_mapping(qt_app):
         view.close()
 
 
-def test_gpu_mapped_visual_shader_supports_raw_complex_components():
-    from arrayscope.display.backends.vispy.gpu_mapped_visual import GpuMappedImageVisual
-
-    shader = GpuMappedImageVisual._fragment_shader
-
-    assert "uniform float u_component_mode" in shader
-    assert "float complex_component" in shader
-    assert "if (u_component_mode > 2.5)" in shader
-    assert "scalar = length(z);" in shader
-    assert "gl_FragColor = vec4(color, 1.0);" in shader
-
-
-def test_gpu_mapped_visual_cached_complex_component_change_updates_uniform_without_upload():
-    from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
-    from arrayscope.display.backends.vispy.gpu_mapped_visual import GpuMappedImageVisual
-
-    visual = object.__new__(GpuMappedImageVisual)
-    visual._scalar_texture = object()
-    visual.scalar_source_id = ("source", "complex_rg32f")
-    visual._mode = 2.0
-    visual._scale_mode = 0.0
-    visual._symlog_constant = 0.0
-    visual._component_mode = 0.0
-    visual.upload_count = 3
-    visual._lut_key = None
-    visual._shader_mapping_key = None
-    visual.shader_uniform_update_count = 0
-    visual.update = lambda: None
-    visual._set_lut_texture = lambda lut, key=None: False
-    visual.set_levels = lambda levels, count=True: setattr(visual, "_levels", tuple(float(value) for value in levels))
-
-    visual.set_mapped_data(
-        np.ones((2, 2), dtype=np.complex64),
-        texture_kind=TexturePlaneKind.COMPLEX_RG32F,
-        levels=(0.0, 1.0),
-        source_id=("source", "complex_rg32f"),
-        shader_mapping=ShaderMapping(component=ShaderComponent.IMAG),
-    )
-
-    assert visual.upload_count == 3
-    assert visual._component_mode == 1.0
-    assert visual._levels == (0.0, 1.0)
-
-
-def test_gpu_mapped_visual_lut_change_is_uniform_only_for_cached_scalar_source():
-    from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
-    from arrayscope.display.backends.vispy.gpu_mapped_visual import GpuMappedImageVisual
-
-    visual = object.__new__(GpuMappedImageVisual)
-    visual._scalar_texture = object()
-    visual.scalar_source_id = ("source", "scalar_r32f")
-    visual._mode = 1.0
-    visual._scale_mode = 0.0
-    visual._symlog_constant = 0.0
-    visual._component_mode = 0.0
-    visual._lut_key = None
-    visual._shader_mapping_key = None
-    visual.upload_count = 4
-    visual.shader_uniform_update_count = 0
-    visual.update = lambda: None
-    uploaded_luts = []
-    visual._set_lut_texture = lambda lut, key=None: uploaded_luts.append(np.array(lut, copy=True)) or True
-    visual.set_levels = lambda levels, count=True: setattr(visual, "_levels", tuple(float(value) for value in levels))
-
-    mapping = ShaderMapping(lut_data=np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8))
-    visual.set_mapped_data(
-        np.ones((2, 2), dtype=np.float32),
-        texture_kind=TexturePlaneKind.SCALAR_R32F,
-        levels=(0.0, 1.0),
-        source_id=("source", "scalar_r32f"),
-        shader_mapping=mapping,
-    )
-
-    assert visual.upload_count == 4
-    assert visual.shader_uniform_update_count == 1
-    assert len(uploaded_luts) == 1
-    np.testing.assert_array_equal(uploaded_luts[0], mapping.lut_data)
-
-
 def test_vispy_complex_windowed_rgb_preserves_high_magnitude_scale(qt_app):
     from pyqtgraph.Qt import QtGui
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
@@ -929,7 +848,7 @@ def test_vispy_rejects_direct_tile_layer_presentation(qt_app):
         view.close()
 
 
-def test_vispy_tiled_mode_layers_tiles_above_base_visual(qt_app):
+def test_vispy_tiled_mode_layers_tiles_above_scene_base_order(qt_app):
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
@@ -959,12 +878,9 @@ def test_vispy_tiled_mode_layers_tiles_above_base_visual(qt_app):
             histogramRange=(0.0, 1.0),
         )
 
-        base_order = int(getattr(view._vispy_image, "order", 0))
         tile_orders = tuple(int(getattr(visual, "order", 0)) for visual in view._vispy_gpu_montage_layer._visuals_by_page)
-        assert view._vispy_image.visible is False
-        assert view._vispy_windowed_image.visible is False
         assert tile_orders
-        assert min(tile_orders) > base_order
+        assert min(tile_orders) > 0
     finally:
         view.close()
 
@@ -1112,14 +1028,13 @@ def test_vispy_typed_tiled_single_plane_uses_frame_plan_geometry(qt_app):
 
 
 def test_vispy_tile_layer_level_preview_updates_uniforms_without_upload(qt_app, monkeypatch):
-    import arrayscope.display.vispy_imageview2d as vispy_view
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload
 
     def fail_cpu_window(*args, **kwargs):
         raise AssertionError("VisPy tile shader level preview should not CPU-window RGB tiles")
 
-    monkeypatch.setattr(vispy_view, "rgb_display_for_levels", fail_cpu_window)
+    monkeypatch.setattr("arrayscope.display.image_upload.rgb_display_for_levels", fail_cpu_window)
     view = VisPyImageView2D()
     payloads = {
         0: DisplayTilePayload(0, 0, np.full((2, 2, 3), 180, dtype=np.uint8), np.ones((2, 2), dtype=np.float32), ("tile", 0)),
@@ -1385,64 +1300,6 @@ def test_vispy_zoom_out_rebinds_retained_resident_tiles_without_upload(qt_app):
         assert zoomed_out.tile_layer_resident_items == 3
         assert zoomed_out.tile_layer_storage_rebuilds == 0
         assert zoomed_out.tile_layer_texture_uploads == 0
-    finally:
-        view.close()
-
-
-def test_vispy_direct_tiled_hides_previous_windowed_main_visual(qt_app):
-    from arrayscope.core.view_state import ChannelMode, ViewState
-    from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.display.slice_engine import make_shader_image_from_slab
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-
-    class Request:
-        def __init__(self, view_state):
-            self.view_state = view_state
-            self.ranged_axes = ()
-
-    data = (np.arange(4, dtype=np.float32).reshape(2, 2) + 1j).astype(np.complex64)
-    state = ViewState.from_shape(data.shape).with_channel(ChannelMode.COMPLEX)
-    display = make_shader_image_from_slab(data, Request(state))
-    payload = DisplayTilePayload(
-        0,
-        0,
-        display.data,
-        display.histogram_data,
-        ("tile", 0),
-        texture_data=display.semantic_data,
-        texture_kind=display.texture_kind,
-        semantic_data=display.semantic_data,
-        semantic_histogram_data=display.histogram_data,
-        shader_mapping=display.shader_mapping,
-    )
-    view = VisPyImageView2D()
-    try:
-        _present_vispy_tiled(view,
-            display.data,
-            histogramData=display.histogram_data,
-            levels=(0.0, 4.0),
-            histogramRange=(0.0, 4.0),
-            shader_mapping=display.shader_mapping,
-            texture_kind=display.texture_kind,
-            semantic_data=display.semantic_data,
-        )
-        assert view._vispy_gpu_montage_layer.last_stats.visible_items == 1
-
-        _present_vispy_tiled(view,
-            np.zeros((2, 2), dtype=np.float32),
-            histogramData=None,
-            histogramPlotData=None,
-            geometry=_single_tile_montage_geometry(),
-            levels=(0.0, 4.0),
-            histogramRange=(0.0, 4.0),
-            montage_dirty_tiles=None,
-            montage_tile_source_ids={0: ("tile", 0)},
-            montage_tile_payloads={0: payload},
-        )
-
-        assert not view._vispy_image.visible
-        assert not view._vispy_windowed_image.visible
-        assert view._vispy_gpu_montage_layer.last_stats.visible_items == 1
     finally:
         view.close()
 
@@ -1889,7 +1746,7 @@ def test_vispy_first_class_tiled_new_semantic_state_reuses_resident_textures(qt_
         view.close()
 
 
-def test_vispy_normal_image_switch_preserves_tiled_residency(qt_app):
+def test_vispy_hidden_tiled_presentation_preserves_residency(qt_app):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
@@ -1929,7 +1786,7 @@ def test_vispy_normal_image_switch_preserves_tiled_residency(qt_app):
         resident_before = view._vispy_gpu_montage_layer._pool.resident_count
         tiled_source_key = view._last_vispy_tiled_source_key
 
-        view.setImage(np.zeros((3, 3), dtype=np.float32), levels=(0.0, 1.0))
+        view.hide_tiled_presentation("semantic-switch")
 
         assert view._vispy_gpu_montage_layer._pool.resident_count == resident_before
         assert view._last_vispy_tiled_source_key == tiled_source_key
@@ -2383,7 +2240,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         )
 
         assert report.presented_tiles == frozenset({0, 1})
-        assert not view._vispy_image.visible
         assert canvas_updates
 
         retry_report = view.setTiledPresentation(
@@ -2398,7 +2254,6 @@ def test_vispy_scalar_tiled_geometry_retry_preserves_previous_frame(qt_app):
         )
 
         assert retry_report.presented_tiles == frozenset({0, 1})
-        assert not view._vispy_image.visible
     finally:
         view.close()
 

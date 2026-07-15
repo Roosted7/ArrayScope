@@ -104,10 +104,6 @@ class QtPointerInteractionDriver:
         self._owner._set_roi_drawing_preview(None, ())
         self._owner.sync_interaction_state(state)
 
-    def cancel_active_capture_for_frame_replacement(self) -> None:
-        if self._controller.state.phase is not PointerPhase.IDLE:
-            self.cancel("frame-replacement")
-
     def _hit_tolerance(self) -> float:
         try:
             x_range, y_range = self._owner.view.viewRange()

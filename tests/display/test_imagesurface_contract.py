@@ -14,6 +14,7 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 from tests.display.test_imageview2d import (
     _present_tiled,
+    _seed_displayed_image,
     _send_viewport_mouse,
     _single_tile_geometry,
     _view_class,
@@ -134,7 +135,7 @@ def test_reset_tiled_residency_survives_and_recommits(qt_app, backend):
 def test_profile_marker_set_and_hide_share_semantics(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
-        view.setImage(np.zeros((20, 20), dtype=float))
+        _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         moved = []
         view.setProfileMarkerCallback(lambda x, y: moved.append((x, y)))
         view.setProfileMarker(5.0, 7.0, visible=True)
@@ -151,7 +152,7 @@ def test_profile_marker_set_and_hide_share_semantics(qt_app, backend):
 def test_preview_levels_route_through_shared_driver(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
-        view.setImage(np.linspace(0.0, 4.0, 400, dtype=np.float32).reshape(20, 20))
+        _seed_displayed_image(view, np.linspace(0.0, 4.0, 400, dtype=np.float32).reshape(20, 20))
         view._apply_histogram_preview_levels((0.5, 3.5))
         assert view._displayLevels == pytest.approx((0.5, 3.5))
         preview = view._histogram_preview_controller
@@ -174,7 +175,7 @@ def test_widget_close_cancels_active_pointer_interaction(qt_app, backend):
     from arrayscope.display.interaction import PointerPhase
 
     view = _shown_view(backend, qt_app)
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
     view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
     assert _send_viewport_mouse(

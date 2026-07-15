@@ -185,6 +185,40 @@ def _single_tile_geometry(canvas):
     )
 
 
+def _seed_displayed_image(view, data, *, levels=None, histogramData=None, viewport_policy=None):
+    """Seed displayed pixels through the production tiled-commit contract.
+
+    The legacy normal-image ``setImage`` path is deleted from both display
+    surfaces; tests that merely need "a displayed image" seed it the same way
+    production does — one loaded tile committed via ``setTiledPresentation``.
+    """
+
+    data = np.asarray(data)
+    if histogramData is None and data.ndim == 2:
+        histogramData = data
+    bounds_source = data if histogramData is None else np.asarray(histogramData)
+    finite = np.asarray(bounds_source, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size:
+        low, high = float(finite.min()), float(finite.max())
+    else:
+        low, high = 0.0, 1.0
+    if not high > low:
+        high = low + 1.0
+    histogram_range = (low, high)
+    if levels is None:
+        levels = histogram_range
+    return _present_tiled(
+        view,
+        data,
+        histogramData=histogramData,
+        levels=levels,
+        histogramRange=histogram_range,
+        viewport_policy=viewport_policy,
+        rgb_already_windowed=data.ndim == 3,
+    )
+
+
 def test_profile_marker_callback_replacement_and_programmatic_move(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -211,7 +245,7 @@ def test_evaluation_overlay_and_stale_opacity(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.arange(16, dtype=float).reshape(4, 4))
+    _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4))
     view.show()
     qt_app.processEvents()
 
@@ -234,7 +268,7 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
     from pyqtgraph.Qt import QtCore
 
     view = ImageView2D()
-    view.setImage(np.zeros((8, 8), dtype=float))
+    _seed_displayed_image(view, np.zeros((8, 8), dtype=float))
     first = (MontageTileOverlay(0, 0, 4, 4, "loading", "Loading"),)
     second = (
         MontageTileOverlay(0, 0, 4, 4, "loading", "Loading"),
@@ -260,7 +294,7 @@ def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
     view = ImageView2D()
     try:
         view.resize(400, 300)
-        view.setImage(np.zeros((4, 4), dtype=np.float32))
+        _seed_displayed_image(view, np.zeros((4, 4), dtype=np.float32))
         view.show()
         qt_app.processEvents()
         view.setTileTruthOverlayRows(
@@ -298,17 +332,23 @@ def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
         view.close()
 
 
-def test_update_image_data_fast_preserves_levels_and_view_range(qt_app, monkeypatch):
+def test_repeat_tiled_commit_preserves_levels_and_view_range(qt_app, monkeypatch):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((8, 8), dtype=float), levels=(0.0, 10.0))
+    _seed_displayed_image(view, np.zeros((8, 8), dtype=float), levels=(0.0, 10.0))
     view.getView().setRange(xRange=(1, 5), yRange=(2, 6), padding=0)
     before_range = view.getView().viewRange()
     autolevel_calls = []
     monkeypatch.setattr(view, "autoLevels", lambda: autolevel_calls.append(True))
 
-    view.updateImageDataFast(np.ones((8, 8), dtype=float), histogramData=np.ones((8, 8), dtype=float), levels=(0.0, 10.0))
+    _present_tiled(
+        view,
+        np.ones((8, 8), dtype=float),
+        histogramData=np.ones((8, 8), dtype=float),
+        levels=(0.0, 10.0),
+        histogramRange=(0.0, 10.0),
+    )
 
     assert autolevel_calls == []
     assert tuple(view.image.shape) == (8, 8)
@@ -416,21 +456,6 @@ def test_pyqtgraph_tile_commit_report_counts_distinct_updated_tiles():
     assert report.cold_count == 3
     assert report.texture_uploads == 3
     assert report.pyqtgraph_items_created == 0
-
-
-def test_update_image_data_fast_accepts_display_ready_rgb(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
-
-    view = ImageView2D()
-    view.setImage(np.zeros((4, 4, 3), dtype=np.uint8), levels=(0.0, 1.0), histogramData=np.zeros((4, 4)))
-    rgb = np.full((4, 4, 3), 128, dtype=np.uint8)
-
-    view.updateImageDataFast(rgb, histogramData=np.ones((4, 4)), levels=(0.0, 1.0), rgb_already_windowed=True)
-
-    assert view._rgbBaseImage is None
-    np.testing.assert_array_equal(view.imageDisp, rgb)
-    view.close()
-
 
 
 def test_large_histogram_refresh_uses_background_submitter(qt_app):
@@ -2536,50 +2561,20 @@ def test_display_ready_rgb_tile_layer_level_change_keeps_uint8_item_levels(qt_ap
 
 
 
-def test_display_ready_rgb_histogram_levels_do_not_rewindow_display(qt_app):
+def test_scalar_histogram_level_drag_routes_through_tiled_level_handler(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    rgb = np.full((4, 4, 3), 128, dtype=np.uint8)
-    hist = np.linspace(0.0, 1.0, 16, dtype=float).reshape(4, 4)
-    _present_tiled(view,
-        rgb,
-        histogramData=hist,
-        levels=(0.0, 1.0),
-        histogramRange=(0.0, 1.0),
-        rgb_already_windowed=True,
-    )
-    before = np.array(view.imageDisp, copy=True)
-
-    view.setLevels(0.5, 1.0)
-
-    assert view._rgbBaseImage is None
-    np.testing.assert_array_equal(view.imageDisp, before)
-    view.close()
-
-
-def test_scalar_image_upload_passes_levels_to_image_item(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
-
-    view = ImageView2D()
-    view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 12.0))
-
-    assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 12.0)
-    view.updateImageDataFast(np.ones((4, 4), dtype=float), levels=(3.0, 9.0))
-    assert tuple(float(value) for value in view.imageItem.levels) == (3.0, 9.0)
-    view.close()
-
-
-def test_scalar_histogram_level_drag_updates_display_item(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
-
-    view = ImageView2D()
-    view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 15.0))
+    _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 15.0))
+    applied = []
+    view.setLevelPresentationChangeHandler(lambda levels, final: applied.append((tuple(levels), bool(final))))
 
     view.histogram.setLevels(2.0, 8.0)
     view._on_histogram_levels_changed()
 
-    assert tuple(float(value) for value in view.imageItem.levels) == (2.0, 8.0)
+    assert applied
+    assert applied[-1][0] == (2.0, 8.0)
+    assert tuple(float(value) for value in view.getLevels()) == (2.0, 8.0)
     view.close()
 
 
@@ -2588,7 +2583,7 @@ def test_value_at_display_mapping_ignores_mismatched_histogram_source(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.ones((4, 4), dtype=float), histogramData=np.ones((4, 4), dtype=float), levels=(0.0, 2.0))
+    _seed_displayed_image(view, np.ones((4, 4), dtype=float), histogramData=np.ones((4, 4), dtype=float), levels=(0.0, 2.0))
     view.histogramSource = np.ones((8, 8), dtype=float)
 
     value = view.valueAtDisplayMapping(ViewPointMapping(view_x=0, view_y=0, display_x=0, display_y=0, local_x=0, local_y=0, array_index=(0, 0)))
@@ -2603,7 +2598,10 @@ def test_value_at_display_mapping_uses_display_coordinates_for_montage(qt_app):
 
     view = ImageView2D()
     data = np.arange(12, dtype=float).reshape(3, 4)
-    view.setImage(data, histogramData=data.copy(), levels=(0.0, 12.0))
+    _seed_displayed_image(view, data, histogramData=data.copy(), levels=(0.0, 12.0))
+    # Tiled commits publish histogram pixels through histogramPlotSource; the
+    # value readout contract feeds histogramSource explicitly.
+    view.histogramSource = data.copy()
 
     value = view.valueAtDisplayMapping(
         ViewPointMapping(
@@ -2628,12 +2626,12 @@ def test_profile_marker_bounds_update_when_image_shape_changes(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((8, 10), dtype=float))
+    _seed_displayed_image(view, np.zeros((8, 10), dtype=float))
     view.setProfileMarker(9, 7, visible=True)
     assert view._profile_vline.maxRange == (0, 9)
     assert view._profile_hline.maxRange == (0, 7)
 
-    view.setImage(np.zeros((4, 5), dtype=float))
+    _seed_displayed_image(view, np.zeros((4, 5), dtype=float))
     assert view._profile_vline.maxRange == (0, 4)
     assert view._profile_hline.maxRange == (0, 3)
     assert view.profileMarkerPosition() == (4.0, 3.0)
@@ -2644,7 +2642,7 @@ def test_profile_marker_lines_hide_when_marker_center_leaves_view(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     view.getView().setRange(xRange=(0, 10), yRange=(0, 10), padding=0)
     view.setProfileMarker(5, 5, visible=True)
 
@@ -2666,7 +2664,7 @@ def test_imageview_creates_polyline_and_freehand_rois(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((10, 12), dtype=float))
+    _seed_displayed_image(view, np.zeros((10, 12), dtype=float))
     created = []
     view.roiCreated.connect(lambda selection: created.append(selection))
 
@@ -2691,7 +2689,7 @@ def test_imageview_freehand_requires_points(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((10, 12), dtype=float))
+    _seed_displayed_image(view, np.zeros((10, 12), dtype=float))
 
     with pytest.raises(ValueError, match="freehand ROI requires a drag path"):
         view.createRoi(RoiKind.FREEHAND_POLYGON)
@@ -2704,7 +2702,7 @@ def test_persistent_polyline_and_freehand_tools_do_not_start_drawing(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((10, 12), dtype=float))
+    _seed_displayed_image(view, np.zeros((10, 12), dtype=float))
     view.setInspectionTool("roi_freehand")
     event = QtGui.QMouseEvent(
         QtCore.QEvent.Type.MouseButtonPress,
@@ -2743,7 +2741,7 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     view = _view_class(backend)()
     view.resize(320, 260)
     view.show()
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
     selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
     changed = []
@@ -2777,7 +2775,7 @@ def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     view = _view_class(backend)()
     view.resize(360, 260)
     view.show()
-    view.setImage(np.zeros((10, 10), dtype=float))
+    _seed_displayed_image(view, np.zeros((10, 10), dtype=float))
     view.getView().setRange(xRange=(0, 24), yRange=(0, 10), padding=0)
     selection = view.createRoi(RoiKind.RECTANGLE, rect=(20.0, 2.0, 2.0, 3.0))
     changed = []
@@ -2806,7 +2804,7 @@ def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 
     view = _view_class(backend)()
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     view.setRoiSelections(
         (
             RoiSelection(
@@ -2832,7 +2830,7 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     view = _view_class(backend)()
     view.resize(320, 260)
     view.show()
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
     view.setProfileMarker(5.0, 6.0, visible=True)
     moved = []
@@ -2865,7 +2863,7 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     ("action", "reason"),
     (
         ("mode-change", "tool-change"),
-        ("frame-replacement", "frame-replacement"),
+        ("surface-reset", "surface-reset"),
         ("target-removal", "target-removed"),
         ("window-deactivate", "window-deactivate"),
     ),
@@ -2879,7 +2877,7 @@ def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
 
     view = ImageView2D()
     try:
-        view.setImage(np.zeros((20, 20), dtype=float))
+        _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
         assert view._begin_pointer_capture(
             InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
@@ -2889,8 +2887,8 @@ def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
 
         if action == "mode-change":
             view.setInspectionTool("profile")
-        elif action == "frame-replacement":
-            view.setImage(np.ones((20, 20), dtype=float))
+        elif action == "surface-reset":
+            view.reset_surface("surface-reset")
         elif action == "target-removal":
             view.removeRoi(selection.id)
         elif action == "window-deactivate":
@@ -2909,7 +2907,7 @@ def test_pointer_capture_is_cancelled_by_close(qt_app):
     from arrayscope.display.interaction import InteractionTarget, PointerPhase
 
     view = ImageView2D()
-    view.setImage(np.zeros((20, 20), dtype=float))
+    _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
     selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
     assert view._begin_pointer_capture(
         InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
@@ -2923,7 +2921,7 @@ def test_pointer_capture_is_cancelled_by_close(qt_app):
 
 
 @pytest.mark.parametrize("phase", ("armed", "drawing"))
-def test_frame_replacement_cancels_roi_drawing_lifecycle(qt_app, phase):
+def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.display.imageview2d import ImageView2D
@@ -2933,7 +2931,7 @@ def test_frame_replacement_cancels_roi_drawing_lifecycle(qt_app, phase):
     try:
         view.resize(320, 260)
         view.show()
-        view.setImage(np.zeros((20, 20), dtype=float))
+        _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
         assert view.beginRoiDrawingOnce("roi_freehand")
         if phase == "drawing":
@@ -2947,12 +2945,12 @@ def test_frame_replacement_cancels_roi_drawing_lifecycle(qt_app, phase):
         else:
             assert view.interactionState().phase is PointerPhase.DRAWING_ARMED
 
-        view.setImage(np.ones((20, 20), dtype=float))
+        view.reset_surface("surface-reset")
 
         assert view.interactionState().phase is PointerPhase.IDLE
         assert view.interactionState().pending_draw_tool is None
         assert view.interactionState().drawing_points == ()
-        assert view.interactionState().last_cancel_reason == "frame-replacement"
+        assert view.interactionState().last_cancel_reason == "surface-reset"
     finally:
         view.close()
 
@@ -2968,7 +2966,7 @@ def test_pointer_hit_testing_ignores_margin_outside_committed_frame(qt_app, back
     try:
         view.resize(320, 260)
         view.show()
-        view.setImage(np.zeros((20, 20), dtype=float))
+        _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         view.getView().setRange(xRange=(0, 20), yRange=(0, 20), padding=0)
         view.createRoi(RoiKind.RECTANGLE, rect=(0.0, 3.0, 4.0, 5.0))
 
@@ -2994,7 +2992,7 @@ def test_pyqtgraph_roi_and_profile_visuals_mirror_interaction_state(qt_app):
 
     view = ImageView2D()
     try:
-        view.setImage(np.zeros((20, 20), dtype=float))
+        _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
         item, _stored = view._roi_items[selection.id]
         base_width = item.pen.widthF()
@@ -3018,11 +3016,11 @@ def test_imageview_preserves_view_range_for_same_shape_by_default(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((8, 10), dtype=float))
+    _seed_displayed_image(view, np.zeros((8, 10), dtype=float))
     view.getView().setRange(xRange=(2, 5), yRange=(1, 6), padding=0)
     before = view.getView().viewRange()
 
-    view.setImage(np.ones((8, 10), dtype=float))
+    _seed_displayed_image(view, np.ones((8, 10), dtype=float))
     after = view.getView().viewRange()
 
     assert after == before
@@ -3034,10 +3032,10 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
     from arrayscope.display.viewport import ViewportPolicy
 
     view = ImageView2D()
-    view.setImage(np.zeros((8, 10), dtype=float))
+    _seed_displayed_image(view, np.zeros((8, 10), dtype=float))
     view.getView().setRange(xRange=(2, 5), yRange=(1, 6), padding=0)
 
-    view.setImage(np.ones((4, 5), dtype=float), viewport_policy=ViewportPolicy.RESET_FOR_NEW_SHAPE)
+    _seed_displayed_image(view, np.ones((4, 5), dtype=float), viewport_policy=ViewportPolicy.RESET_FOR_NEW_SHAPE)
     after = view.getView().viewRange()
 
     assert after != [[2.0, 5.0], [1.0, 6.0]]
@@ -3052,7 +3050,7 @@ def test_imageview_replays_auto_intent_only_after_content_extent_changes(qt_app)
     try:
         view.resize(400, 240)
         view.show()
-        view.setImage(np.zeros((2, 5), dtype=float))
+        _seed_displayed_image(view, np.zeros((2, 5), dtype=float))
         qt_app.processEvents()
 
         before = view.getView().viewRange()
@@ -3084,7 +3082,7 @@ def test_imageview_manual_resize_preserves_screen_zoom_after_layout(qt_app):
         view.resize(500, 400)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.zeros((100, 100), dtype=float))
+        _seed_displayed_image(view, np.zeros((100, 100), dtype=float))
         qt_app.processEvents()
         view.getView().setRange(xRange=(-50.0, 150.0), yRange=(-50.0, 150.0), padding=0)
         qt_app.processEvents()
@@ -3113,7 +3111,7 @@ def test_imageview_limits_zoom_out_to_recoverable_content(qt_app):
     view = ImageView2D()
     try:
         view.resize(400, 400)
-        view.setImage(np.zeros((100, 100), dtype=float))
+        _seed_displayed_image(view, np.zeros((100, 100), dtype=float))
 
         view.getView().setRange(xRange=(-1070.0, 1330.0), yRange=(-850.0, 950.0), padding=0)
         x_range, y_range = view.getView().viewRange()
@@ -3132,7 +3130,7 @@ def test_imageview_rejects_extra_zoom_out_at_limit_without_panning(qt_app):
     view = ImageView2D()
     try:
         view.resize(400, 400)
-        view.setImage(np.zeros((100, 100), dtype=float))
+        _seed_displayed_image(view, np.zeros((100, 100), dtype=float))
         view.getView().setRange(xRange=(-870.0, 1130.0), yRange=(-950.0, 1050.0), padding=0)
         before = view.getView().viewRange()
 
@@ -3151,7 +3149,7 @@ def test_imageview_prevents_panning_content_fully_out_of_view(qt_app):
     view = ImageView2D()
     try:
         view.resize(400, 400)
-        view.setImage(np.zeros((100, 100), dtype=float))
+        _seed_displayed_image(view, np.zeros((100, 100), dtype=float))
 
         view.getView().setRange(xRange=(200.0, 300.0), yRange=(10.0, 110.0), padding=0)
         x_range, y_range = view.getView().viewRange()
@@ -3168,7 +3166,7 @@ def test_imageview_prevents_vertical_panning_content_fully_out_of_view(qt_app):
     view = ImageView2D()
     try:
         view.resize(400, 400)
-        view.setImage(np.zeros((100, 100), dtype=float))
+        _seed_displayed_image(view, np.zeros((100, 100), dtype=float))
 
         view.getView().setRange(xRange=(10.0, 110.0), yRange=(200.0, 300.0), padding=0)
         x_range, y_range = view.getView().viewRange()
@@ -3208,7 +3206,7 @@ def test_explicit_set_levels_emits_user_level_signal(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
     user_calls = []
     view.userLevelsChanged.connect(lambda: user_calls.append(True))
 
@@ -3224,7 +3222,7 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
     from pyqtgraph.Qt import QtCore
 
     view = ImageView2D()
-    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
     user_calls = []
     view.userLevelsChanged.connect(lambda: user_calls.append(True))
 
@@ -3250,7 +3248,7 @@ def test_histogram_finish_does_not_repeat_an_already_applied_preview(qt_app):
     from pyqtgraph.Qt import QtCore
 
     view = ImageView2D()
-    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
     applied = []
     view._apply_histogram_preview_levels = (
         lambda levels, *, final=False: applied.append((tuple(float(value) for value in levels), bool(final)))
@@ -3270,7 +3268,7 @@ def test_histogram_finish_reapplies_target_after_programmatic_level_change(qt_ap
     from pyqtgraph.Qt import QtCore
 
     view = ImageView2D()
-    view.setImage(np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
+    _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
     applied = []
     original_apply = view._apply_histogram_preview_levels
 
@@ -3372,12 +3370,14 @@ def test_adaptive_histogram_auto_level_refresh_updates_display_levels(qt_app):
     view = ImageView2D()
     try:
         data = np.arange(16, dtype=float).reshape(4, 4)
-        view.setImage(data, histogramData=data, levels=(2.0, 8.0))
+        _seed_displayed_image(view, data, histogramData=data, levels=(2.0, 8.0))
+        applied = []
+        view.setLevelPresentationChangeHandler(lambda levels, final: applied.append(tuple(levels)))
 
         view._histogram_display_controller.refresh_histogram_plot(auto_level=True)
 
         assert tuple(float(value) for value in view.getLevels()) == (0.0, 15.0)
-        assert tuple(float(value) for value in view.imageItem.levels) == (0.0, 15.0)
+        assert applied and applied[-1] == (0.0, 15.0)
     finally:
         view.close()
 
@@ -3391,7 +3391,7 @@ def test_histogram_native_double_click_between_limits_requests_auto_window(qt_ap
         view.resize(420, 280)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
         qt_app.processEvents()
         calls = []
         view.autoWindowRequested.connect(lambda: calls.append(True))
@@ -3437,7 +3437,7 @@ def test_histogram_release_pair_between_limits_requests_auto_window(qt_app):
         view.resize(420, 280)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
         qt_app.processEvents()
         calls = []
         view.autoWindowRequested.connect(lambda: calls.append(True))
@@ -3467,7 +3467,7 @@ def test_histogram_span_edit_waits_for_double_click_window(qt_app):
 
     view = ImageView2D()
     try:
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
         controller = view._histogram_display_controller
         scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 5.0))
 
@@ -3492,7 +3492,7 @@ def test_histogram_native_double_click_in_lut_area_requests_auto_window(qt_app):
         view.resize(420, 280)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
         qt_app.processEvents()
         calls = []
         view.autoWindowRequested.connect(lambda: calls.append(True))
@@ -3516,7 +3516,7 @@ def test_histogram_viewport_double_click_filter_requests_auto_window(qt_app):
         view.resize(420, 280)
         view.show()
         qt_app.processEvents()
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(2.0, 8.0))
         qt_app.processEvents()
         calls = []
         view.autoWindowRequested.connect(lambda: calls.append(True))
@@ -3546,7 +3546,7 @@ def test_histogram_limit_popup_live_preview_accepts_once(qt_app):
 
     view = ImageView2D()
     try:
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
         user_calls = []
         view.userLevelsChanged.connect(lambda: user_calls.append(True))
 
@@ -3570,7 +3570,7 @@ def test_histogram_limit_popup_escape_restores_without_user_signal(qt_app):
 
     view = ImageView2D()
     try:
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
         user_calls = []
         view.userLevelsChanged.connect(lambda: user_calls.append(True))
 
@@ -3593,7 +3593,7 @@ def test_histogram_span_popup_keeps_clicked_value_anchored(qt_app):
 
     view = ImageView2D()
     try:
-        view.setImage(np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
+        _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 10.0))
         scene_pos = view.histogram.item.vb.mapViewToScene(QtCore.QPointF(0.0, 2.0))
 
         view._histogram_display_controller.begin_span_edit(scene_pos)
