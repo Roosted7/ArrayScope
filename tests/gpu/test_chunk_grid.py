@@ -1,3 +1,7 @@
+"""ChunkGrid window->chunk math and window-shift deltas (ADR 0055 G1):
+the slice-window example (100:200 -> 101:201 keeps interior chunks) as
+testable geometry."""
+
 import pytest
 from hypothesis import given, strategies as st
 

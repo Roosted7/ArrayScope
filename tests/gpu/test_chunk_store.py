@@ -1,3 +1,7 @@
+"""PageTable/SlotPool/ChunkStore residency bookkeeping (ADR 0055 G1):
+explicit lookup misses, bind/unbind roundtrips, capacity denial instead of
+silent eviction."""
+
 import pytest
 
 from arrayscope.gpu import CapacityError, ChunkLod, ChunkStore, DataChunkKey, PageSlot, PageTable, SlotPool

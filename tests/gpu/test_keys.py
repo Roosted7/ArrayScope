@@ -1,3 +1,7 @@
+"""Identity laws for DataChunkKey/ViewTileKey/ChunkLod (ADR 0055 G1):
+value-equal, hashable, numerically normalized keys — the vocabulary the
+GPU residency engine stands on."""
+
 import pytest
 
 from arrayscope.gpu import ChunkLod, DataChunkKey, ViewTileKey
