@@ -88,7 +88,8 @@ class LodPagePlan:
     reduction_yx: tuple[int, int]
     stored_page_shape: tuple[int, int]
     draw_blocks: tuple["SourceGridDrawBlock", ...]
-    sample_source_rects_yx: tuple[tuple[int, int, int, int], ...]
+    source_y_bins: tuple[tuple[int, int], ...]
+    source_x_bins: tuple[tuple[int, int], ...]
     reducer: str
     route_id: str = ROUTE_ID
     algo_version: int = ALGO_VERSION
@@ -123,8 +124,20 @@ class LodPagePlan:
         stored_shape = (stored_rect[1] - stored_rect[0], stored_rect[3] - stored_rect[2])
         if stored_shape[0] > page_shape[0] or stored_shape[1] > page_shape[1]:
             raise ValueError("valid stored page footprint exceeds its page shape")
-        if len(self.sample_source_rects_yx) != stored_shape[0] * stored_shape[1]:
-            raise ValueError("sample source rectangles do not match stored page shape")
+        source_y_bins = _validated_axis_bins(
+            self.source_y_bins,
+            start=source_rect[0],
+            stop=source_rect[1],
+            expected_count=stored_shape[0],
+            name="source Y bins",
+        )
+        source_x_bins = _validated_axis_bins(
+            self.source_x_bins,
+            start=source_rect[2],
+            stop=source_rect[3],
+            expected_count=stored_shape[1],
+            name="source X bins",
+        )
         _validate_draw_blocks(self.draw_blocks, stored_shape, source_rect)
         object.__setattr__(self, "source_rect_yx", source_rect)
         object.__setattr__(self, "valid_source_rect_yx", valid_rect)
@@ -132,6 +145,8 @@ class LodPagePlan:
         object.__setattr__(self, "stored_rect_yx", stored_rect)
         object.__setattr__(self, "reduction_yx", reduction)
         object.__setattr__(self, "stored_page_shape", page_shape)
+        object.__setattr__(self, "source_y_bins", source_y_bins)
+        object.__setattr__(self, "source_x_bins", source_x_bins)
         object.__setattr__(self, "source_samples_per_stored_sample_yx", samples_per_stored)
         object.__setattr__(self, "reducer", str(self.reducer))
         object.__setattr__(self, "route_id", str(self.route_id))
@@ -141,6 +156,34 @@ class LodPagePlan:
     def stored_shape(self) -> tuple[int, int]:
         y0, y1, x0, x1 = self.stored_rect_yx
         return (y1 - y0, x1 - x0)
+
+    @property
+    def sample_source_rects_yx(self) -> tuple[tuple[int, int, int, int], ...]:
+        """Expanded bin geometry for diagnostics and compatibility queries.
+
+        Live planning and materialization use the compact independent axis
+        partitions above.  Expanding their Cartesian product is deliberately
+        lazy so route construction remains O(rows + columns), not O(pixels).
+        """
+
+        return tuple(
+            (y0, y1, x0, x1)
+            for y0, y1 in self.source_y_bins
+            for x0, x1 in self.source_x_bins
+        )
+
+    def stored_index_for_source(self, y_i: int, x_i: int) -> tuple[int, int] | None:
+        """Return the exact stored bin containing one native source sample."""
+
+        y_i, x_i = int(y_i), int(x_i)
+        y0, y1, x0, x1 = self.source_rect_yx
+        if not (y0 <= y_i < y1 and x0 <= x_i < x1):
+            return None
+        scale_y, scale_x = self.source_samples_per_stored_sample_yx
+        stored_y0, _stored_y1, stored_x0, _stored_x1 = self.stored_rect_yx
+        row = y_i // scale_y - stored_y0
+        column = x_i // scale_x - stored_x0
+        return (row, column)
 
 
 @dataclass(frozen=True)
@@ -211,12 +254,16 @@ def plan_source_grid_pages(
     source_page_h, source_page_w = stored_h * source_scale_y, stored_w * source_scale_x
     y_bins = _source_grid_axis_rects(valid_rect[0], valid_rect[1], source_scale_y)
     x_bins = _source_grid_axis_rects(valid_rect[2], valid_rect[3], source_scale_x)
-    groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
-    for row, (bin_y0, _bin_y1) in enumerate(y_bins):
-        nominal_y = ((bin_y0 // source_scale_y) // stored_h) * source_page_h
-        for column, (bin_x0, _bin_x1) in enumerate(x_bins):
-            nominal_x = ((bin_x0 // source_scale_x) // stored_w) * source_page_w
-            groups.setdefault((nominal_y, nominal_x), []).append((row, column))
+    y_page_bins = _axis_bins_by_page(
+        y_bins,
+        source_scale=source_scale_y,
+        stored_page_length=stored_h,
+    )
+    x_page_bins = _axis_bins_by_page(
+        x_bins,
+        source_scale=source_scale_x,
+        stored_page_length=stored_w,
+    )
 
     document_generation, base_operation_key = _content_identity(content_key)
     operation_key = _route_operation_key(base_operation_key)
@@ -228,64 +275,49 @@ def plan_source_grid_pages(
         reducer=reducer,
     )
     plans: list[LodPagePlan] = []
-    for nominal_y, nominal_x in sorted(groups):
-        positions = groups[(nominal_y, nominal_x)]
-        rows = tuple(sorted({row for row, _column in positions}))
-        columns = tuple(sorted({column for _row, column in positions}))
-        if len(positions) != len(rows) * len(columns):
-            raise ValueError("planned source-grid page samples must form a rectangle")
-        page_y_bins = y_bins[rows[0] : rows[-1] + 1]
-        page_x_bins = x_bins[columns[0] : columns[-1] + 1]
-        source_rect = (
-            page_y_bins[0][0],
-            page_y_bins[-1][1],
-            page_x_bins[0][0],
-            page_x_bins[-1][1],
-        )
-        stored_y0 = page_y_bins[0][0] // source_scale_y
-        stored_y1 = page_y_bins[-1][0] // source_scale_y + 1
-        stored_x0 = page_x_bins[0][0] // source_scale_x
-        stored_x1 = page_x_bins[-1][0] // source_scale_x + 1
-        rect_grid = np.asarray(
-            [
-                (bin_y0, bin_y1, bin_x0, bin_x1)
-                for bin_y0, bin_y1 in page_y_bins
-                for bin_x0, bin_x1 in page_x_bins
-            ],
-            dtype=np.int64,
-        ).reshape(len(page_y_bins), len(page_x_bins), 4)
-        key = DataChunkKey(
-            document_generation=document_generation,
-            operation_key=operation_key,
-            lod=lod,
-            chunk_origin=(source_rect[0], source_rect[2]),
-            chunk_shape=(source_rect[1] - source_rect[0], source_rect[3] - source_rect[2]),
-            dtype=str(dtype),
-            representation=str(representation),
-        )
-        plans.append(
-            LodPagePlan(
-                key=key,
-                source_rect_yx=source_rect,
-                valid_source_rect_yx=source_rect,
-                nominal_source_rect_yx=(
-                    nominal_y,
-                    nominal_y + source_page_h,
-                    nominal_x,
-                    nominal_x + source_page_w,
-                ),
-                stored_rect_yx=(stored_y0, stored_y1, stored_x0, stored_x1),
-                stored_page_origin_yx=(nominal_y // source_scale_y, nominal_x // source_scale_x),
-                source_samples_per_stored_sample_yx=(source_scale_y, source_scale_x),
-                reduction_yx=reduction,
-                stored_page_shape=(stored_h, stored_w),
-                draw_blocks=_source_grid_draw_blocks(rect_grid),
-                sample_source_rects_yx=tuple(
-                    tuple(int(value) for value in rect) for rect in rect_grid.reshape(-1, 4)
-                ),
-                reducer=reducer,
+    for nominal_y, page_y_bins in y_page_bins:
+        for nominal_x, page_x_bins in x_page_bins:
+            source_rect = (
+                page_y_bins[0][0],
+                page_y_bins[-1][1],
+                page_x_bins[0][0],
+                page_x_bins[-1][1],
             )
-        )
+            stored_y0 = page_y_bins[0][0] // source_scale_y
+            stored_y1 = page_y_bins[-1][0] // source_scale_y + 1
+            stored_x0 = page_x_bins[0][0] // source_scale_x
+            stored_x1 = page_x_bins[-1][0] // source_scale_x + 1
+            key = DataChunkKey(
+                document_generation=document_generation,
+                operation_key=operation_key,
+                lod=lod,
+                chunk_origin=(source_rect[0], source_rect[2]),
+                chunk_shape=(source_rect[1] - source_rect[0], source_rect[3] - source_rect[2]),
+                dtype=str(dtype),
+                representation=str(representation),
+            )
+            plans.append(
+                LodPagePlan(
+                    key=key,
+                    source_rect_yx=source_rect,
+                    valid_source_rect_yx=source_rect,
+                    nominal_source_rect_yx=(
+                        nominal_y,
+                        nominal_y + source_page_h,
+                        nominal_x,
+                        nominal_x + source_page_w,
+                    ),
+                    stored_rect_yx=(stored_y0, stored_y1, stored_x0, stored_x1),
+                    stored_page_origin_yx=(nominal_y // source_scale_y, nominal_x // source_scale_x),
+                    source_samples_per_stored_sample_yx=(source_scale_y, source_scale_x),
+                    reduction_yx=reduction,
+                    stored_page_shape=(stored_h, stored_w),
+                    draw_blocks=_source_grid_draw_blocks_from_axes(page_y_bins, page_x_bins),
+                    source_y_bins=page_y_bins,
+                    source_x_bins=page_x_bins,
+                    reducer=reducer,
+                )
+            )
     return tuple(plans)
 
 
@@ -414,6 +446,15 @@ def _source_grid_draw_blocks(rect_grid: np.ndarray) -> tuple[SourceGridDrawBlock
     rows, columns = rect_grid.shape[:2]
     y_spans = tuple((int(rect_grid[row, 0, 0]), int(rect_grid[row, 0, 1])) for row in range(rows))
     x_spans = tuple((int(rect_grid[0, column, 2]), int(rect_grid[0, column, 3])) for column in range(columns))
+    return _source_grid_draw_blocks_from_axes(y_spans, x_spans)
+
+
+def _source_grid_draw_blocks_from_axes(
+    y_spans: tuple[tuple[int, int], ...],
+    x_spans: tuple[tuple[int, int], ...],
+) -> tuple[SourceGridDrawBlock, ...]:
+    """Build exact draw blocks without expanding the Cartesian sample grid."""
+
     y_runs = _equal_width_runs(y_spans)
     x_runs = _equal_width_runs(x_spans)
     return tuple(
@@ -552,6 +593,44 @@ def _source_grid_axis_rects(start: int, stop: int, factor: int) -> tuple[tuple[i
     )
 
 
+def _axis_bins_by_page(
+    bins: tuple[tuple[int, int], ...],
+    *,
+    source_scale: int,
+    stored_page_length: int,
+) -> tuple[tuple[int, tuple[tuple[int, int], ...]], ...]:
+    """Partition one axis into canonical pages in linear axis work."""
+
+    source_page_length = int(source_scale) * int(stored_page_length)
+    groups: list[tuple[int, list[tuple[int, int]]]] = []
+    for span in bins:
+        nominal = ((span[0] // source_scale) // stored_page_length) * source_page_length
+        if not groups or groups[-1][0] != nominal:
+            groups.append((nominal, []))
+        groups[-1][1].append(span)
+    return tuple((nominal, tuple(spans)) for nominal, spans in groups)
+
+
+def _validated_axis_bins(
+    bins,
+    *,
+    start: int,
+    stop: int,
+    expected_count: int,
+    name: str,
+) -> tuple[tuple[int, int], ...]:
+    normalized = tuple((int(span[0]), int(span[1])) for span in bins)
+    if len(normalized) != int(expected_count):
+        raise ValueError(f"{name} do not match stored page shape")
+    if not normalized or normalized[0][0] != int(start) or normalized[-1][1] != int(stop):
+        raise ValueError(f"{name} do not cover the planned source footprint")
+    if any(a >= b for a, b in normalized):
+        raise ValueError(f"{name} must contain non-empty spans")
+    if any(left[1] != right[0] for left, right in zip(normalized, normalized[1:])):
+        raise ValueError(f"{name} must be a contiguous partition")
+    return normalized
+
+
 def materialize_lod_page(
     array,
     *,
@@ -582,16 +661,78 @@ def materialize_lod_page(
             "planned representation disagrees with reducer output: "
             f"{plan.key.representation!r} != {output_representation!r}"
         )
-    trailing_shape = () if plan.reducer not in (REDUCER_NATIVE, REDUCER_MEAN) else source.shape[2:]
-    values = np.empty((*plan.stored_shape, *trailing_shape), dtype=output_dtype)
-    for index, source_rect in enumerate(plan.sample_source_rects_yx):
-        row, column = divmod(index, plan.stored_shape[1])
-        y0, y1, x0, x1 = source_rect
-        sample = source[y0 - source_y : y1 - source_y, x0 - source_x : x1 - source_x]
-        if sample.size == 0:
-            raise ValueError("planned source-grid bin has no source samples")
-        values[row, column] = _reduce_sample(sample, reducer=plan.reducer)
+    y0, y1, x0, x1 = plan.valid_source_rect_yx
+    planned_source = source[y0 - source_y : y1 - source_y, x0 - source_x : x1 - source_x]
+    values = _reduce_planned_bins(planned_source, plan=plan, output_dtype=output_dtype)
     return MaterializedLodPage(plan=plan, values=np.ascontiguousarray(values))
+
+
+def _reduce_planned_bins(
+    source: np.ndarray,
+    *,
+    plan: LodPagePlan,
+    output_dtype: np.dtype,
+) -> np.ndarray:
+    """Reduce a page in two bounded vectorized axis passes."""
+
+    y0, _y1, x0, _x1 = plan.valid_source_rect_yx
+    y_starts = np.fromiter(
+        (span[0] - y0 for span in plan.source_y_bins),
+        dtype=np.intp,
+        count=len(plan.source_y_bins),
+    )
+    x_starts = np.fromiter(
+        (span[0] - x0 for span in plan.source_x_bins),
+        dtype=np.intp,
+        count=len(plan.source_x_bins),
+    )
+    y_counts = np.fromiter(
+        (span[1] - span[0] for span in plan.source_y_bins),
+        dtype=np.float32,
+        count=len(plan.source_y_bins),
+    )
+    x_counts = np.fromiter(
+        (span[1] - span[0] for span in plan.source_x_bins),
+        dtype=np.float32,
+        count=len(plan.source_x_bins),
+    )
+    reducer = str(plan.reducer)
+    if reducer == REDUCER_NATIVE:
+        if np.any(y_counts != 1) or np.any(x_counts != 1):
+            raise ValueError("native route must map one source sample to one stored sample")
+        return source.astype(output_dtype, copy=False)
+    if reducer == REDUCER_MEAN:
+        accumulated = source.astype(output_dtype, copy=False)
+    else:
+        if source.ndim != 2:
+            raise ValueError(f"{reducer} reduction requires scalar or complex 2D source values")
+        magnitude = np.abs(source).astype(np.float32, copy=False)
+        if reducer == REDUCER_MEAN_ABS:
+            accumulated = magnitude
+        elif reducer in (REDUCER_POWER, REDUCER_RMS):
+            accumulated = np.square(magnitude, dtype=np.float32)
+        elif reducer == REDUCER_PHASE_VECTOR:
+            if not np.iscomplexobj(source):
+                raise ValueError("phase_vector requires complex source values")
+            accumulated = np.zeros(source.shape, dtype=np.complex64)
+            nonzero = magnitude > 0.0
+            accumulated[nonzero] = (
+                source[nonzero].astype(np.complex64, copy=False) / magnitude[nonzero]
+            )
+        else:
+            raise ValueError(f"unsupported source-grid reducer {reducer!r}")
+    sums_y = np.add.reduceat(accumulated, y_starts, axis=0, dtype=accumulated.dtype)
+    sums = np.add.reduceat(sums_y, x_starts, axis=1, dtype=accumulated.dtype)
+    counts = y_counts[:, None] * x_counts[None, :]
+    if sums.ndim > 2:
+        counts = counts.reshape((*counts.shape, *((1,) * (sums.ndim - 2))))
+    result = sums / counts
+    if reducer == REDUCER_RMS:
+        result = np.sqrt(result, dtype=np.float32)
+    elif reducer == REDUCER_PHASE_VECTOR:
+        tolerance = np.finfo(np.float32).eps * counts
+        result = np.where(np.abs(result) <= tolerance, np.complex64(0.0), result)
+    return result.astype(output_dtype, copy=False)
 
 
 def materialize_source_grid_pages(
@@ -898,6 +1039,9 @@ class LodPageCache:
         self._claims: dict[DataChunkKey, object] = {}
         self._lock = RLock()
         self._revision = 0
+        self._resolver_revision = -1
+        self._resolver_table = PageTable()
+        self._resolver_pages_by_key: dict[DataChunkKey, MaterializedLodPage] = {}
 
     @property
     def revision(self) -> int:
@@ -915,27 +1059,14 @@ class LodPageCache:
     def resolve(self, key: DataChunkKey):
         """Resolve through the shared PageTable ancestry contract."""
 
-        table = PageTable()
-        for index, (resident_key, page) in enumerate(self._cache.items()):
-            table.bind(
-                resident_key,
-                PageSlot("cpu-lod-page-cache", 0, index),
-                nbytes=page.nbytes,
-            )
+        table, _pages_by_key = self._resolver_snapshot()
         return table.resolve(key)
 
     def resolved_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
         """Return the complete actual page set, or None for missing coverage."""
 
         requested = tuple(plans)
-        table = PageTable()
-        pages_by_key = dict(self._cache.items())
-        for index, (resident_key, page) in enumerate(pages_by_key.items()):
-            table.bind(
-                resident_key,
-                PageSlot("cpu-lod-page-cache", 0, index),
-                nbytes=page.nbytes,
-            )
+        table, pages_by_key = self._resolver_snapshot()
         resolved = tuple(table.resolve(plan.key) for plan in requested)
         if any(item is None for item in resolved):
             return None
@@ -943,6 +1074,27 @@ class LodPageCache:
             pages_by_key[key]
             for key in dict.fromkeys(item.actual_key for item in resolved)
         )
+
+    def _resolver_snapshot(
+        self,
+    ) -> tuple[PageTable, dict[DataChunkKey, MaterializedLodPage]]:
+        """Reuse one passive resolver until the resident page set changes."""
+
+        with self._lock:
+            if self._resolver_revision == self._revision:
+                return self._resolver_table, self._resolver_pages_by_key
+            pages_by_key = dict(self._cache.items())
+            table = PageTable()
+            for index, (resident_key, page) in enumerate(pages_by_key.items()):
+                table.bind(
+                    resident_key,
+                    PageSlot("cpu-lod-page-cache", 0, index),
+                    nbytes=page.nbytes,
+                )
+            self._resolver_table = table
+            self._resolver_pages_by_key = pages_by_key
+            self._resolver_revision = self._revision
+            return table, pages_by_key
 
     def begin_claim(self, key: DataChunkKey, owner: object) -> bool:
         """Own the one producer claim for ``key`` if it is missing."""
@@ -1062,8 +1214,8 @@ class LodPageCache:
         return tuple(page for _key, page in self._cache.items())
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
         with self._lock:
+            self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
             self._revision += 1
 
     def resident_lod_reducer_counts(self) -> dict[tuple[tuple[int, ...], str], int]:

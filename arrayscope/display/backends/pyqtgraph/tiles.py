@@ -19,8 +19,16 @@ from arrayscope.display.model.tile_identity import (
     plane_identity_record,
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
-from arrayscope.display.shader_mapping import TexturePlaneKind, cpu_display_rgba
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    TexturePlaneKind,
+    apply_phase_lut,
+    cpu_display_rgba,
+    mapped_scalar,
+)
 from arrayscope.display.tile_layout import tile_layout_map
+from arrayscope.gpu.page_table import page_key_can_cover
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 
@@ -43,8 +51,25 @@ def _assemble_page_backed_payload(
     backing = payload.page_backing
     if backing is None:
         return payload
-    pages = backing.materialized_by_key()
-    missing = tuple(key for key in backing.requested_keys if key not in pages)
+    resident_pages = tuple(backing.materialized_pages)
+    resolved_pages = []
+    missing = []
+    for target in backing.requested_keys:
+        candidates = tuple(
+            page for page in resident_pages if page_key_can_cover(target, page.key)
+        )
+        if not candidates:
+            missing.append(target)
+            continue
+        resolved_pages.append(
+            min(
+                candidates,
+                key=lambda page: (
+                    sum(int(step) for step in page.key.lod.reduction),
+                    tuple(int(step) for step in page.key.lod.reduction),
+                ),
+            )
+        )
     if missing:
         if payload.semantic_data is None:
             raise ValueError(
@@ -60,18 +85,38 @@ def _assemble_page_backed_payload(
             page_backing=None,
         )
     y0, y1, x0, x1 = backing.source_coverage_yx
-    sample = next(iter(pages.values())).values
+    sample = resolved_pages[0].values
     trailing = tuple(np.shape(sample)[2:])
     assembled = np.empty((y1 - y0, x1 - x0, *trailing), dtype=np.asarray(sample).dtype)
     coverage = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    for plan in backing.requested_plans:
-        page = pages[plan.key]
-        for index, (sy0, sy1, sx0, sx1) in enumerate(plan.sample_source_rects_yx):
-            row, column = divmod(index, plan.stored_shape[1])
-            assembled[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0, ...] = page.values[
-                row, column
-            ]
-            coverage[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] += 1
+    for target_plan, page in zip(backing.requested_plans, resolved_pages, strict=True):
+        plan = page.plan
+        target_y0, target_y1, target_x0, target_x1 = target_plan.valid_source_rect_yx
+        sy0, sy1 = max(y0, target_y0), min(y1, target_y1)
+        sx0, sx1 = max(x0, target_x0), min(x1, target_x1)
+        if sy0 >= sy1 or sx0 >= sx1:
+            continue
+        first = plan.stored_index_for_source(sy0, sx0)
+        last = plan.stored_index_for_source(sy1 - 1, sx1 - 1)
+        if first is None or last is None:
+            raise ValueError("resolved page does not cover its requested target geometry")
+        row0, column0 = first
+        row1, column1 = last[0] + 1, last[1] + 1
+        y_counts = tuple(end - start for start, end in plan.source_y_bins[row0:row1])
+        x_counts = tuple(end - start for start, end in plan.source_x_bins[column0:column1])
+        expanded = np.repeat(
+            np.repeat(page.values[row0:row1, column0:column1], y_counts, axis=0),
+            x_counts,
+            axis=1,
+        )
+        expanded_y0 = plan.source_y_bins[row0][0]
+        expanded_x0 = plan.source_x_bins[column0][0]
+        assembled[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0, ...] = expanded[
+            sy0 - expanded_y0 : sy1 - expanded_y0,
+            sx0 - expanded_x0 : sx1 - expanded_x0,
+            ...,
+        ]
+        coverage[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] += 1
     if not np.all(coverage == 1):
         raise ValueError("page-backed PyQtGraph assembly has incomplete or overlapping geometry")
     assembled = np.ascontiguousarray(assembled)
@@ -93,6 +138,29 @@ def _assemble_page_backed_payload(
             )
         if levels is not None:
             mapping = replace(mapping, levels=levels)
+        if mapping.display_mode != ShaderDisplayMode.PHASE_COLOR:
+            scalar = np.ascontiguousarray(mapped_scalar(assembled, mapping))
+            return replace(
+                payload,
+                image=scalar,
+                texture_data=scalar,
+                histogram_data=scalar,
+                texture_kind=TexturePlaneKind.SCALAR_R32F,
+            )
+        if mapping.component not in {
+            ShaderComponent.ANGLE,
+            ShaderComponent.COMPLEX_PHASE,
+        }:
+            display, _magnitude = apply_phase_lut(assembled, mapping.lut_data)
+            histogram = np.ascontiguousarray(mapped_scalar(assembled, mapping))
+            return replace(
+                payload,
+                image=np.ascontiguousarray(display),
+                texture_data=np.ascontiguousarray(display),
+                histogram_data=histogram,
+                texture_kind=TexturePlaneKind.RGB8,
+                rgb_windowed_levels=None,
+            )
         display = np.ascontiguousarray(cpu_display_rgba(assembled, mapping)[..., :3])
         return replace(
             payload,

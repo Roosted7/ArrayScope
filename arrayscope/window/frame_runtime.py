@@ -164,7 +164,7 @@ class FrameRuntimeMixin:
     def _montage_quality_policy_mode(self) -> str:
         return render_lod.policy_mode_for_renderer(self)
 
-    def _montage_lod_page_cache(self) -> LodPageCache:
+    def _lod_page_cache(self) -> LodPageCache:
         return render_lod.lod_page_cache_for_renderer(self)
 
     def _montage_render_intent(self, session) -> RenderIntent:

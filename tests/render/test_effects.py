@@ -297,7 +297,7 @@ def test_evaluate_preview_tile_returns_display_only_payload():
     assert texture_kind is not None
     assert level_data is None
     assert level_stats is not None
-    assert level_stats.source_index == tile.source_index
+    assert not level_stats.refined
 
 
 def test_evaluate_preview_tile_uses_requested_rung_level():

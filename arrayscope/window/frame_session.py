@@ -143,7 +143,19 @@ def _debug_lod_pass_texture(texture, *, quality: str):
 
 
 def _payload_has_level_presentation_evidence(payload, *, shader_display: bool) -> bool:
-    if str(getattr(payload, "quality", "exact") or "exact") == "exact":
+    quality = str(getattr(payload, "quality", "exact") or "exact")
+    if quality == "exact":
+        return True
+    if quality == "preview":
+        # Preview is intentionally non-semantic and cannot join a level
+        # generation even when its pixels happen to come from canonical pages.
+        return False
+    page_backing = getattr(payload, "page_backing", None)
+    if page_backing is not None and tuple(
+        getattr(page_backing, "materialized_pages", ()) or ()
+    ):
+        # Canonical reduced values are sufficient to re-window the physical
+        # fallback even though preview quality cannot satisfy semantic reads.
         return True
     if not bool(shader_display):
         return False
@@ -1535,7 +1547,12 @@ class FrameSession:
             tile_identity=self.tile_payload_identity(
                 rendered.tile,
                 texture_data=texture_data,
-                texture_kind=texture_kind,
+                texture_kind=(
+                    TexturePlaneKind.RGB8
+                    if not bool(self.shader_display)
+                    and texture_kind == TexturePlaneKind.COMPLEX_RG32F
+                    else texture_kind
+                ),
                 shader_mapping=mapping,
                 lod=lod,
                 quality="exact",

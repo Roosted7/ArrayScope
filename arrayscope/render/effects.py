@@ -1161,15 +1161,30 @@ def _evaluate_tile_native_output_preview(
         if pages[0].key.representation == "complex_rg32f"
         else TexturePlaneKind.SCALAR_R32F
     )
+    mapping = getattr(value, "shader_mapping", None)
+    reduced_level_values = []
+    for page in pages:
+        page_values = np.asarray(page.values)
+        if mapping is not None:
+            page_values = apply_shader_scale(
+                extract_component(page_values, getattr(mapping, "component", "real")),
+                getattr(mapping, "scale", "linear"),
+                symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
+            )
+        reduced_level_values.append(np.asarray(page_values).reshape(-1))
+    rough_level_stats = provisional_tile_level_stats(
+        np.concatenate(reduced_level_values),
+        int(tile.source_index),
+    )
     _check_render_cancelled(cancellation_token)
     return (
         key,
         pages,
         None,
-        getattr(value, "shader_mapping", None),
+        mapping,
         texture_kind,
-        getattr(value, "level_data", None),
-        getattr(value, "level_stats", None),
+        None,
+        rough_level_stats,
     )
 
 

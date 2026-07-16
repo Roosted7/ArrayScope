@@ -120,11 +120,10 @@ class PageBackedPresentation:
             page = pages.get(plan.key)
             if page is None:
                 return None
-            for index, (sy0, sy1, sx0, sx1) in enumerate(plan.sample_source_rects_yx):
-                if sy0 <= y_i < sy1 and sx0 <= x_i < sx1:
-                    row, column = divmod(index, plan.stored_shape[1])
-                    return array_value_at(page.values, row, column)
-            raise RuntimeError("planned page source coverage has no containing stored sample")
+            stored_index = plan.stored_index_for_source(y_i, x_i)
+            if stored_index is None:
+                raise RuntimeError("planned page source coverage has no containing stored sample")
+            return array_value_at(page.values, *stored_index)
         return None
 
 

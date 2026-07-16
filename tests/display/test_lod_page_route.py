@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from arrayscope.display import pyramid as pyramid_core
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.pyramid import (
     LodPageCache,
@@ -98,6 +99,37 @@ def test_plan_is_the_one_owner_of_key_geometry_and_route_lineage():
         assert page_plan.source_samples_per_stored_sample_yx == (2, 4)
         assert page_plan.stored_shape[0] <= 3
         assert page_plan.stored_shape[1] <= 2
+
+
+def test_large_route_planning_keeps_geometry_axis_compact():
+    plans = plan(
+        rect=(101, 8293, 102, 8294),
+        reduction=(3, 2),
+        page_shape=(256, 256),
+    )
+
+    stored_samples = sum(page.stored_shape[0] * page.stored_shape[1] for page in plans)
+    compact_spans = sum(len(page.source_y_bins) + len(page.source_x_bins) for page in plans)
+    assert stored_samples > 2_000_000
+    assert compact_spans < 20_000
+    assert all("sample_source_rects_yx" not in page.__dict__ for page in plans)
+
+
+def test_page_materialization_uses_vectorized_axis_reduction(monkeypatch):
+    rect = (101, 613, 102, 614)
+    page_plans = plan(rect=rect, reduction=(3, 2), page_shape=(256, 256))
+    values = source(rect)
+
+    def reject_scalar_reduction(*_args, **_kwargs):
+        raise AssertionError("materialization must not reduce one stored sample at a time")
+
+    monkeypatch.setattr(pyramid_core, "_reduce_sample", reject_scalar_reduction)
+    pages = materialize_source_grid_pages(
+        values,
+        source_origin_yx=(rect[0], rect[2]),
+        plans=page_plans,
+    )
+    assert sum(page.values.size for page in pages) == 8_385
 
 
 def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
@@ -258,6 +290,31 @@ def test_logical_page_cache_singleflight_and_terminal_cleanup_are_owner_scoped()
     assert cache.begin_claim(second.key, "request-c")
     assert cache.release_owner_claims("request-c") == (second.key,)
     assert cache.pending_count == 0
+
+
+def test_logical_page_cache_reuses_resolver_snapshot_until_residency_changes(monkeypatch):
+    page_plan = plan(rect=(0, 4, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(0, 0),
+        plan=page_plan,
+    )
+    cache = LodPageCache(max_bytes=1 << 20)
+    assert cache.begin_claim(page.key, "worker")
+    cache.admit(page, owner="worker")
+    bind_calls = 0
+    original_bind = pyramid_core.PageTable.bind
+
+    def counted_bind(table, *args, **kwargs):
+        nonlocal bind_calls
+        bind_calls += 1
+        return original_bind(table, *args, **kwargs)
+
+    monkeypatch.setattr(pyramid_core.PageTable, "bind", counted_bind)
+    assert cache.resolve(page.key) is not None
+    assert cache.resolve(page.key) is not None
+    assert cache.resolved_pages((page_plan,)) == (page,)
+    assert bind_calls == 1
 
 
 def test_wrong_key_admission_is_loud_and_releases_the_request_claim():

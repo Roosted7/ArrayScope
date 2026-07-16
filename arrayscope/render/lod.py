@@ -1131,7 +1131,12 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             tile_identity=session.tile_payload_identity(
                 session.plan.tiles[int(tile_number)],
                 texture_data=np.asarray(pages[0].values),
-                texture_kind=texture_kind,
+                texture_kind=(
+                    TexturePlaneKind.RGB8
+                    if not bool(getattr(session, "shader_display", True))
+                    and texture_kind == TexturePlaneKind.COMPLEX_RG32F
+                    else texture_kind
+                ),
                 shader_mapping=shader_mapping,
                 lod=lod,
                 quality=str(getattr(metadata, "quality", "preview") or "preview"),
@@ -1176,6 +1181,12 @@ def resident_texture_for_rendered_tile(
 
     source_shape = tuple(int(value) for value in source.shape[:2])
     native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+    if source.ndim >= 3 and source.shape[-1] in (3, 4):
+        native_texture_kind = TexturePlaneKind.RGB8
+    elif np.iscomplexobj(source) or (source.ndim >= 3 and source.shape[-1] == 2):
+        native_texture_kind = TexturePlaneKind.COMPLEX_RG32F
+    else:
+        native_texture_kind = TexturePlaneKind.SCALAR_R32F
     demand = session.lod_policy_decision.demand
     pyramid = session.lod_page_cache
     resident_levels = tile_resident_levels(session, rendered, demand=demand)
@@ -1184,11 +1195,11 @@ def resident_texture_for_rendered_tile(
     # queue with its own wakeup rules.
     applied = choose_resident_level(demand, resident_levels)
     if applied <= 0:
-        return source, histogram, native_lod, None, getattr(rendered, "texture_kind", None)
+        return source, histogram, native_lod, None, native_texture_kind
     key = page_set_key_for(session, rendered, demand=demand, level=applied)
     pages = _page_set_materialized_pages(pyramid, key)
     if not pages:
-        return source, histogram, native_lod, None, getattr(rendered, "texture_kind", None)
+        return source, histogram, native_lod, None, native_texture_kind
     factor_xy = factor_xy_for_level(demand, applied)
     stored_y0 = min(plan.stored_rect_yx[0] for plan in key.plans)
     stored_y1 = max(plan.stored_rect_yx[1] for plan in key.plans)
@@ -1342,7 +1353,7 @@ def native_policy_reason_for_renderer(renderer) -> str:
 
 
 def lod_page_cache_for_renderer(renderer) -> LodPageCache:
-    pyramid = getattr(renderer, "_montage_lod_page_cache_store", None)
+    pyramid = getattr(renderer, "_lod_page_cache_store", None)
     if not isinstance(pyramid, LodPageCache):
         # Zero re-upload zoom cycles (ADR 0050 gate 6) require the CPU
         # pyramid to actually retain the working set across threshold
@@ -1358,5 +1369,5 @@ def lod_page_cache_for_renderer(renderer) -> LodPageCache:
             int(renderer._memory_policy().display_cache_budget_bytes) // 2,
         )
         pyramid = LodPageCache(max_bytes=budget)
-        renderer._montage_lod_page_cache_store = pyramid
+        renderer._lod_page_cache_store = pyramid
     return pyramid

@@ -702,7 +702,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
             lod_page_cache=(
-                self._montage_lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+                self._lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
         )
         stage_planning_deferred = bool(
