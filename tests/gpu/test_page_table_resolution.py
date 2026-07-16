@@ -72,6 +72,31 @@ def test_exact_target_resolves_to_its_exact_binding():
     )
 
 
+def test_resolution_scans_only_the_targets_value_family(monkeypatch):
+    import arrayscope.gpu.page_table as page_table_module
+
+    table = PageTable()
+    target = chunk(origin=(256, 256))
+    ancestor = chunk(origin=(0, 0), shape=(1024, 1024), reduction=(2, 2))
+    ancestor_slot = bind(table, ancestor, 0)
+    for index in range(100):
+        bind(table, chunk(operation_key=("unrelated", index)), index + 1)
+    original = page_table_module.page_key_can_cover
+    calls = 0
+
+    def counted(wanted, actual, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(wanted, actual, **kwargs)
+
+    monkeypatch.setattr(page_table_module, "page_key_can_cover", counted)
+    resolution = table.resolve(target)
+
+    assert resolution.actual_key == ancestor
+    assert resolution.slot == ancestor_slot
+    assert calls == 1
+
+
 def test_finest_compatible_covering_ancestor_wins():
     table = PageTable()
     target = chunk(origin=(256, 256))

@@ -67,6 +67,9 @@ class PageTable:
 
     _entries: dict[DataChunkKey, ResidencyEntry] = field(default_factory=dict)
     _slots: dict[PageSlot, DataChunkKey] = field(default_factory=dict)
+    _family_entries: dict[tuple[object, ...], dict[DataChunkKey, ResidencyEntry]] = field(
+        default_factory=dict
+    )
     _generation: int = 0
     _use_counter: int = 0
     _pin_sets: dict[object, frozenset[DataChunkKey]] = field(default_factory=dict)
@@ -97,15 +100,13 @@ class PageTable:
         never as a per-fragment shader search.
         """
 
+        exact = self._entries.get(target)
+        if exact is not None:
+            return _page_resolution(target, target, exact)
         target_reduction = _reduction_vector(target)
         candidates: list[tuple[tuple[object, ...], DataChunkKey, ResidencyEntry]] = []
-        for sequence, (key, entry) in enumerate(self._entries.items()):
-            # Transitional atlas integration: the VisPy pool also stores
-            # whole-tile presentation keys in this table.  They are physical
-            # residency bookkeeping, not logical data pages, and therefore
-            # can never satisfy a DataChunkKey target.
-            if not isinstance(key, DataChunkKey):
-                continue
+        family = self._family_entries.get(_value_family_key(target), {})
+        for sequence, (key, entry) in enumerate(family.items()):
             actual_reduction = _reduction_vector(key)
             if not page_key_can_cover(target, key):
                 continue
@@ -132,24 +133,7 @@ class PageTable:
         if not candidates:
             return None
         _rank, actual, entry = min(candidates, key=lambda row: row[0])
-        actual_reduction = _reduction_vector(actual)
-        target_scale = tuple(float(1 << step) for step in target_reduction)
-        actual_scale = tuple(float(1 << step) for step in actual_reduction)
-        return PageResolution(
-            target_key=target,
-            actual_key=actual,
-            slot=entry.slot,
-            scale=tuple(target_step / actual_step for target_step, actual_step in zip(target_scale, actual_scale)),
-            offset=tuple(
-                (float(target_start) - float(actual_start)) / actual_step
-                for target_start, actual_start, actual_step in zip(
-                    target.chunk_origin,
-                    actual.chunk_origin,
-                    actual_scale,
-                )
-            ),
-            binding_generation=int(entry.generation),
-        )
+        return _page_resolution(target, actual, entry)
 
     def bind(self, key: DataChunkKey, slot: PageSlot, *, nbytes: int, pinned: bool = False) -> None:
         """Record that ``key``'s values now live in ``slot``."""
@@ -169,6 +153,8 @@ class PageTable:
             last_use=self._use_counter,
             pinned=bool(pinned or self._owners_for(key)),
         )
+        if isinstance(key, DataChunkKey):
+            self._family_entries.setdefault(_value_family_key(key), {})[key] = self._entries[key]
         self._slots[slot] = key
         if pinned:
             self._replace_owner_key(_LEGACY_PIN_OWNER, key, True)
@@ -180,6 +166,13 @@ class PageTable:
         if entry is None:
             return None
         del self._slots[entry.slot]
+        if isinstance(key, DataChunkKey):
+            family_key = _value_family_key(key)
+            family = self._family_entries.get(family_key)
+            if family is not None:
+                family.pop(key, None)
+                if not family:
+                    self._family_entries.pop(family_key, None)
         for owner, keys in tuple(self._pin_sets.items()):
             if key not in keys:
                 continue
@@ -302,6 +295,46 @@ def _same_value_family(target: DataChunkKey, actual: DataChunkKey) -> bool:
         and target.dtype == actual.dtype
         and target.representation == actual.representation
         and target.lod.reducer == actual.lod.reducer
+    )
+
+
+def _value_family_key(key: DataChunkKey) -> tuple[object, ...]:
+    return (
+        key.rank,
+        key.document_generation,
+        key.operation_key,
+        key.dtype,
+        key.representation,
+        key.lod.reducer,
+    )
+
+
+def _page_resolution(
+    target: DataChunkKey,
+    actual: DataChunkKey,
+    entry: ResidencyEntry,
+) -> PageResolution:
+    target_reduction = _reduction_vector(target)
+    actual_reduction = _reduction_vector(actual)
+    target_scale = tuple(float(1 << step) for step in target_reduction)
+    actual_scale = tuple(float(1 << step) for step in actual_reduction)
+    return PageResolution(
+        target_key=target,
+        actual_key=actual,
+        slot=entry.slot,
+        scale=tuple(
+            target_step / actual_step
+            for target_step, actual_step in zip(target_scale, actual_scale)
+        ),
+        offset=tuple(
+            (float(target_start) - float(actual_start)) / actual_step
+            for target_start, actual_start, actual_step in zip(
+                target.chunk_origin,
+                actual.chunk_origin,
+                actual_scale,
+            )
+        ),
+        binding_generation=int(entry.generation),
     )
 
 
