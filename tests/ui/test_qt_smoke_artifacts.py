@@ -360,7 +360,12 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         _process_events(qt_app, count=30)
 
         assert win.view_state.montage_axis == 2
-        assert win.view_state.montage_text == ":"
+        # ":" selects every index, which canonicalizes to the unselected
+        # spelling (montage_indices/montage_text None); the chip keeps
+        # displaying ":" for full-coverage montage axes.
+        assert win.view_state.montage_indices is None
+        assert win.view_state.montage_text is None
+        assert win.dimension_strip.chip(2).slice_edit.text() == ":"
         assert win.img_view.image is not None
         assert max(win.img_view.image.shape[:2]) > data.shape[1]
 

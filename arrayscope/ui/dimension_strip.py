@@ -203,6 +203,12 @@ class DimensionChip(QtWidgets.QFrame):
                 self._set_slice_text_if_changed(str(axis_text))
             elif is_m and getattr(view_state, "montage_text", None):
                 self._set_slice_text_if_changed(str(view_state.montage_text))
+            elif is_m:
+                # Canonical full coverage: montage_indices/montage_text
+                # normalize to None when every index is selected, and the
+                # honest spelling of "all montage indices" is ":" — not the
+                # scalar slice index the axis would have outside montage mode.
+                self._set_slice_text_if_changed(":")
             elif self.axis in image_axes:
                 self._set_slice_text_if_changed(":")
             else:

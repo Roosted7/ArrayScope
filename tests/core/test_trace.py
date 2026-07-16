@@ -153,6 +153,70 @@ def test_trace_verify_rejects_loud_stall_event(tmp_path):
     } in result["violations"]
 
 
+def test_trace_verify_rejects_identity_rejected_commits(tmp_path):
+    """Session-148 follow-up: a healthy replay never re-emits dead payloads.
+
+    ``commit_batch``/``backend_complete`` events carry the tiles whose
+    upserts the backend refused at the typed-identity gate.  Any non-empty
+    ``identity_rejected`` in a whole-workflow replay means the session
+    queued a payload that can never satisfy its own target — the re-emit
+    loop behind the stale/empty-tile stall — and must fail verification
+    even when every target eventually settles.
+    """
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    rows = [
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 0,
+            "source_index": 0,
+            "target_level": 0,
+            "sequence": 1,
+        },
+        {
+            "kind": "commit_batch",
+            "phase": "backend_complete",
+            "session_id": 148,
+            "revision": 7,
+            "committed_upserts": [],
+            "identity_rejected": [0],
+            "delta_upserts": [0],
+            "sequence": 2,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 0,
+            "accepted": True,
+            "source_index": 0,
+            "level": 0,
+            "quality": "exact",
+            "sequence": 3,
+        },
+    ]
+    path = tmp_path / "trace.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    result = verify_trace(path)
+    assert not result["ok"]
+    assert {
+        "invariant": "no_identity_rejected_commits",
+        "session_id": 148,
+        "revision": 7,
+        "identity_rejected": (0,),
+    } in result["violations"]
+    assert result["identity_rejected_commits"] == 1
+
+    # The same trace with a clean commit verifies green.
+    rows[1]["identity_rejected"] = []
+    rows[1]["committed_upserts"] = [0]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    clean = verify_trace(path)
+    assert clean["ok"]
+    assert clean["identity_rejected_commits"] == 0
+
+
 def test_trace_verify_rejects_empty_and_lifecycle_free_traces(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace
 

@@ -261,6 +261,48 @@ def test_full_coverage_axis_range_canonicalizes_to_none():
     assert partial != unwindowed
 
 
+def test_full_coverage_montage_indices_canonicalize_to_none():
+    """One spelling of "every montage index", same hazard as axis ranges.
+
+    ``montage_indices`` never enters ``semantic_generation`` — only session
+    keys — so the alias costs session churn rather than a commit stall, but
+    the canonicalization contract is the same: an explicit tuple selecting
+    the whole montage axis IS the unselected axis and must normalize to
+    ``None`` (with its text) in every construction path.
+    """
+
+    state = ViewState.from_shape((6, 4, 5))
+
+    explicit_full = state.with_montage_axis(2, columns=3, indices=tuple(range(5)), text="0:5")
+    unselected = state.with_montage_axis(2, columns=3, indices=None, text=None)
+    assert explicit_full == unselected
+    assert explicit_full.montage_indices is None
+    assert explicit_full.montage_text is None
+
+    # Direct construction (session restore) normalizes identically.
+    restored = ViewState(
+        ndim=3,
+        shape=(6, 4, 5),
+        image_axes=(0, 1),
+        line_axis=0,
+        slice_indices=(3, 2, 2),
+        axis_flipped=(False, False, False),
+        axis_fftshifted=(False, False, False),
+        montage_axis=2,
+        montage_columns=3,
+        montage_indices=tuple(range(5)),
+        montage_text="0:5",
+    )
+    assert restored.montage_indices is None
+    assert restored.montage_text is None
+
+    # A partial selection is a real subset and must survive untouched.
+    partial = state.with_montage_axis(2, columns=3, indices=(0, 2, 4), text="0:5:2")
+    assert partial.montage_indices == (0, 2, 4)
+    assert partial.montage_text == "0:5:2"
+    assert partial != unselected
+
+
 def test_view_state_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(VIEW_STATE_PATH.read_text())
 

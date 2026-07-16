@@ -3619,11 +3619,19 @@ class FrameSession:
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
         self.commit_batches += 1
-        commit_owed = bool(
-            self.dirty_payloads
-            or self.pending_payload_upserts
-            or self.pending_removals
-        )
+        # Upserts under identity-rejected backoff are not commit debt: the
+        # backend just proved it rejects exactly these payloads against
+        # exactly these targets, so re-arming the flush from them replays a
+        # guaranteed rejection at full flush rate (session-148 follow-up).
+        # The commit path clears the backoff as soon as either side of that
+        # comparison changes.
+        backoff = frozenset(getattr(self, "_identity_rejected_backoff_tiles", ()) or ())
+        dirty = self.dirty_payloads
+        pending = self.pending_payload_upserts
+        if backoff:
+            dirty = {tile for tile in dirty if int(tile) not in backoff}
+            pending = {tile for tile in pending if int(tile) not in backoff}
+        commit_owed = bool(dirty or pending or self.pending_removals)
         self.final_commit_pending = commit_owed
         self.flush_pending = commit_owed
 

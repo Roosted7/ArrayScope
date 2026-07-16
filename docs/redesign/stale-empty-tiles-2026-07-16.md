@@ -155,16 +155,30 @@ reasons), then bisect the churn script down to the minimal gesture pair.
 The realistic field gestures (fill, window shrink/grow, range flips at human
 pace) all converge with the fixes above.
 
-## Follow-ups (other-lane / lower priority)
+## Follow-ups (all landed 2026-07-16, each repro-first gated)
 
-- `montage_indices` has the same two-spellings hazard (explicit full tuple vs
+- `montage_indices` had the same two-spellings hazard (explicit full tuple vs
   `None`). It does not enter `semantic_generation`, only session keys
-  (session churn, not correctness), but the same canonicalization is cheap.
+  (session churn, not correctness). `ViewState.__post_init__` now
+  canonicalizes a full-coverage tuple (and `montage_text`) to `None`.
+  Gate: `tests/core/test_view_state.py::test_full_coverage_montage_indices_canonicalize_to_none`.
 - The per-tile analog of gap 2: `_display_payload_covers_display_target`
-  (prepare_rung) trusts payload currency without checking typed-target
-  satisfiability; non-shared pipelines could in principle starve the same way.
-- The presenter re-emits an unchanged rejected delta at full flush rate
-  (~25 ms of wasted geometry sync per cycle); with the fixes it converges,
-  but bounding identical-delta re-commits would cut the worst-case burn.
-- `trace_verify` could assert `identity_rejected == ()` on every
-  backend_complete commit in whole-workflow replays.
+  (prepare_rung) trusted payload currency without checking typed-target
+  satisfiability; non-shared pipelines could starve the same way. It now
+  additionally requires `acknowledged_identity_satisfies_target(payload,
+  lifecycle target)` — currency is not satisfiability.
+  Gate: `tests/window/test_montage_lod_residency.py::test_dead_identity_display_payload_does_not_cover_direct_tile_target`.
+- The presenter re-emitted an unchanged rejected delta at full flush rate
+  (~25 ms of wasted geometry sync per cycle). `_finish_commit` now signs an
+  all-identity-rejected delta (payload ack identity × delta target identity
+  per tile); an identical repeat emits a loud `identity_rejected_recommit`
+  trace, stops the flush re-arm from exactly those tiles (both the
+  commit-side backlog check and `FrameSession.note_committed`), and requests
+  a replan so producers own recovery. One retry is allowed (a retarget can
+  race a commit); any payload or target change re-arms normally.
+  Gate: `tests/window/test_montage_lod_residency.py::test_identical_identity_rejected_delta_recommit_is_bounded`.
+- `trace_verify` now fails any whole-workflow replay whose
+  `commit_batch`/`backend_complete` events carry a non-empty
+  `identity_rejected` (invariant `no_identity_rejected_commits`), even when
+  every target eventually settles.
+  Gate: `tests/core/test_trace.py::test_trace_verify_rejects_identity_rejected_commits`.

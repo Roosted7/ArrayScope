@@ -42,6 +42,12 @@ def verify_trace(
     across level rebinding; hundreds of identical accepted acks mean the
     presentation layer is spinning (observed: ~5,500 identical acks per tile
     per minute at idle).
+
+    Every ``commit_batch``/``backend_complete`` event must report an empty
+    ``identity_rejected``: a rejected upsert is a payload the session queued
+    against a target its typed identity can never satisfy (the silent
+    re-emit loop behind the 2026-07-16 stale/empty-tile stall), which is a
+    defect even when the run otherwise converges.
     """
 
     targets: dict[int, dict[str, object]] = {}
@@ -49,6 +55,7 @@ def verify_trace(
     first_ack_sequences: dict[int, int] = {}
     identical_ack_counts: dict[tuple[object, ...], int] = {}
     stalls: list[dict[str, object]] = []
+    identity_rejected_commits: list[dict[str, object]] = []
     lifecycle_events = 0
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -59,6 +66,18 @@ def verify_trace(
         kind = str(event.get("kind", ""))
         if kind == "stall":
             stalls.append(event)
+            continue
+        if kind == "commit_batch":
+            # A backend_complete commit reporting identity-rejected upserts
+            # means the session queued a payload whose typed identity can
+            # never satisfy its own target — the silent re-emit loop behind
+            # the 2026-07-16 stale/empty-tile stall.  Healthy replays commit
+            # zero such payloads even when every target eventually settles.
+            if (
+                str(event.get("phase", "")) == "backend_complete"
+                and tuple(event.get("identity_rejected", ()) or ())
+            ):
+                identity_rejected_commits.append(event)
             continue
         if kind == "lifecycle":
             lifecycle_events += 1
@@ -142,6 +161,15 @@ def verify_trace(
         }
         for event in stalls
     )
+    violations.extend(
+        {
+            "invariant": "no_identity_rejected_commits",
+            "session_id": event.get("session_id"),
+            "revision": event.get("revision"),
+            "identity_rejected": tuple(event.get("identity_rejected") or ()),
+        }
+        for event in identity_rejected_commits
+    )
     if event_count == 0:
         violations.append({"invariant": "trace_not_empty"})
     elif lifecycle_events == 0:
@@ -174,6 +202,7 @@ def verify_trace(
         "ok": not violations,
         "event_count": event_count,
         "lifecycle_events": lifecycle_events,
+        "identity_rejected_commits": len(identity_rejected_commits),
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(

@@ -114,6 +114,19 @@ class ViewState:
             object.__setattr__(self, "montage_indices", tuple(int(index) for index in self.montage_indices))
         if self.montage_text is not None:
             object.__setattr__(self, "montage_text", str(self.montage_text))
+        # Canonical spelling, same contract as axis_range_indices above: an
+        # explicit selection of every montage index IS the unselected axis.
+        # montage_indices only reaches session keys (not semantic
+        # generations), so the alias costs session churn rather than a
+        # commit stall — but one spelling by construction is equally cheap.
+        if (
+            self.montage_axis is not None
+            and self.montage_indices is not None
+            and self.montage_axis < len(self.shape)
+            and self.montage_indices == tuple(range(self.shape[self.montage_axis]))
+        ):
+            object.__setattr__(self, "montage_indices", None)
+            object.__setattr__(self, "montage_text", None)
 
         self.validate()
 

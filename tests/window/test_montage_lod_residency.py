@@ -3605,6 +3605,10 @@ def test_presented_shared_desired_payload_blocks_direct_tile_target():
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
     session.enqueue_pending_tile(tile)
+    # A live typed identity: coverage now requires target satisfiability, not
+    # just source currency (session-148 follow-up), and every production
+    # payload in display_tile_payloads carries its mint identity.
+    target_identity = session.lifecycle.peek(0).target.identity
     session.display_tile_payloads[0] = DisplayTilePayload(
         0,
         int(tile.source_index),
@@ -3613,6 +3617,7 @@ def test_presented_shared_desired_payload_blocks_direct_tile_target():
         session.tile_semantic_source_id(tile.source_index),
         lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(4, 4)),
         quality="preview",
+        tile_identity=replace(target_identity, quality="fallback"),
     )
     session.lifecycle.acknowledge_presented(
         0,
@@ -3635,6 +3640,93 @@ def test_presented_shared_desired_payload_blocks_direct_tile_target():
     assert not session.pending_tiles
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
+
+
+def test_dead_identity_display_payload_does_not_cover_direct_tile_target():
+    """Per-tile analog of the session-148 shared-coverage gate (2026-07-16).
+
+    ``_display_payload_covers_display_target`` used to trust payload currency
+    (source id + presented) plus an LOD-level compare, without asking whether
+    the payload's typed identity can satisfy the tile's current lifecycle
+    target.  A presented-but-retargeted payload whose identity is dead under
+    the new target is rejected by every backend commit, so counting it as
+    coverage denies the tile its only producer: the non-shared pipeline
+    starves exactly the way the shared first-pass path did.
+    """
+
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+    from arrayscope.presentation.tile_lifecycle import TileTarget
+
+    def identity(semantic_generation, *, quality="exact", level=2):
+        return TileIdentity(
+            document_generation=("doc", 0),
+            operation_key=("fft",),
+            source_index=0,
+            image_axes=(1, 0),
+            axis_flips=(False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=semantic_generation,
+            lod=TileLodIdentity(level=level, factor=1 << level),
+            quality=quality,
+        )
+
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    tile = session.plan.tiles[0]
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.enqueue_pending_tile(tile)
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    session.display_tile_payloads[0] = DisplayTilePayload(
+        0,
+        int(tile.source_index),
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+        tile_identity=identity(("range", (0, 1, 2, 3)), quality="fallback"),
+    )
+    session.lifecycle.acknowledge_presented(0, source_id, quality="preview", level=2)
+    session.lifecycle.retarget(
+        {
+            0: TileTarget(
+                tile_number=0,
+                source_index=0,
+                semantic_source_id=source_id,
+                lod_level=2,
+                identity=identity(("range", None)),
+            )
+        }
+    )
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
+    )
+
+    assert not effects._display_payload_covers_display_target(0, tile, step)
+    assert effects.prepare_rung(_pipeline_intent_for(session), step)
+
+    # Control: the same payload minted under the CURRENT semantics is live
+    # fallback coverage at the requested level and must keep denying the
+    # duplicate per-tile producer.
+    session.display_tile_payloads[0] = replace(
+        session.display_tile_payloads[0],
+        tile_identity=identity(("range", None), quality="fallback"),
+    )
+    session.enqueue_pending_tile(tile)
+
+    assert effects._display_payload_covers_display_target(0, tile, step)
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert not session.pending_tiles
 
 
 def test_shared_transform_pipeline_blocks_direct_display_target(monkeypatch):
@@ -4880,3 +4972,140 @@ def test_dropped_shared_fanout_releases_claims_for_replan_refill():
         session.lifecycle.preview_claim_active(tile_number, identity)
         for tile_number, identity in claim_identities.items()
     )
+
+
+def test_identical_identity_rejected_delta_recommit_is_bounded(monkeypatch):
+    """Session-148 follow-up: bound identical-delta re-commits.
+
+    When a commit's upserts are ALL identity-rejected, the pending upserts
+    stay queued and the backlog check re-arms the flush, so the presenter
+    rebuilt and re-committed the byte-identical delta at full flush rate
+    (~25 ms of wasted geometry sync per cycle in the field trace).  One
+    retry is allowed (a retarget can race the commit); an identical repeat
+    must emit a loud trace and stop re-arming the flush until either the
+    payload or its target identity actually changes.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.display.model.frame import TilePresentationDelta
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+
+    def identity(semantic_generation, *, quality="exact", level=2):
+        return TileIdentity(
+            document_generation=("doc", 0),
+            operation_key=("fft",),
+            source_index=0,
+            image_axes=(1, 0),
+            axis_flips=(False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=semantic_generation,
+            lod=TileLodIdentity(level=level, factor=1 << level),
+            quality=quality,
+        )
+
+    traces = []
+    monkeypatch.setattr(montage_commit, "emit_trace", lambda kind, **fields: traces.append((kind, fields)))
+    monkeypatch.setattr(
+        "arrayscope.window.montage_prefetch.schedule_near_viewport_montage_prefetch",
+        lambda _renderer, _session: None,
+    )
+
+    class _CommitRenderer(_RungPrepareRenderer):
+        def __init__(self):
+            super().__init__()
+            self.win = SimpleNamespace()
+
+        def _notify_file_session_montage_committed(self):
+            pass
+
+        def _settle_montage_visible_plan_if_complete(self, session):
+            pass
+
+        def _finish_frame_session_if_complete(self, session):
+            pass
+
+        def _retry_live_profile_after_montage_tile(self):
+            pass
+
+    session = _session(count=1)
+    session.frame_plan = SimpleNamespace(target=None)
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    target_identity = identity(("range", None))
+    dead_payload = DisplayTilePayload(
+        0,
+        0,
+        np.ones((16, 16), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(16, 16)),
+        quality="preview",
+        tile_identity=identity(("range", (0, 1, 2, 3)), quality="fallback"),
+    )
+
+    def delta_for(payload):
+        return TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts={0: payload},
+            active_tiles=(0,),
+            target_identities={0: target_identity},
+        )
+
+    rejected_report = TileCommitReport(
+        presented_tiles=frozenset(),
+        committed_upserts=frozenset(),
+        identity_rejected_tiles=frozenset({0}),
+    )
+    tile_state = SimpleNamespace(revision=1)
+    effects = FramePipelineEffects(_CommitRenderer(), session)
+
+    def run_commit(payload, report):
+        # The queued upsert the backlog check inspects: exactly the rejected
+        # tile, re-queued because the backend acknowledged nothing.
+        session.dirty_payloads = {0: None}
+        session.pending_payload_upserts = {0: None}
+        session.flush_pending = False
+        session.final_commit_pending = False
+        traces.clear()
+        effects._finish_commit(
+            report,
+            tile_state,
+            delta_for(payload),
+            commit_start=0.0,
+            preview_transition=False,
+        )
+
+    # First all-rejected commit: one retry is allowed, the flush re-arms.
+    run_commit(dead_payload, rejected_report)
+    assert session.flush_pending
+    assert not any(kind == "identity_rejected_recommit" for kind, _fields in traces)
+
+    # Identical repeat: loud trace, and the rejected tiles alone must not
+    # re-arm the full-rate flush again.
+    run_commit(dead_payload, rejected_report)
+    assert not session.flush_pending
+    recommits = [fields for kind, fields in traces if kind == "identity_rejected_recommit"]
+    assert recommits and recommits[0]["tiles"] == (0,)
+
+    # A changed payload identity is a new delta and commits normally again.
+    replaced = replace(dead_payload, tile_identity=identity(("range", None), quality="fallback"))
+    run_commit(replaced, rejected_report)
+    assert session.flush_pending
+
+    # A commit that accepts its upserts clears the backoff state entirely.
+    accepted_report = TileCommitReport(
+        presented_tiles=frozenset({0}),
+        committed_upserts=frozenset({0}),
+    )
+    run_commit(replaced, accepted_report)
+    assert session.flush_pending
+    run_commit(dead_payload, rejected_report)
+    assert session.flush_pending

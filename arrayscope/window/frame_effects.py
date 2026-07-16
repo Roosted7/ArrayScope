@@ -20,7 +20,7 @@ from arrayscope.display.model.commit import CommitKind, DisplayPayload, Presenta
 from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.display.model.presentation_generation import levels_match
-from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target, tile_ack_identity
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
@@ -469,7 +469,17 @@ class FramePipelineEffects:
         lod = getattr(payload, "lod", None)
         if lod is None:
             return False
-        return int(getattr(lod, "level", 0) or 0) <= int(step.level)
+        if int(getattr(lod, "level", 0) or 0) > int(step.level):
+            return False
+        # Currency is not satisfiability: a presented-but-retargeted payload
+        # whose typed identity can never satisfy the tile's current lifecycle
+        # target is rejected by every backend commit, so counting it as
+        # coverage would deny the tile its only producer — the per-tile
+        # analog of the shared-coverage starvation behind the session-148
+        # stall (render.effects.payload_identity_dead).
+        record = self.session.lifecycle.peek(int(tile_number))
+        target = None if record is None or record.target is None else record.target.identity
+        return acknowledged_identity_satisfies_target(tile_ack_identity(payload), target)
 
     def _display_payload_is_current(self, tile_number: int, tile, *, payload=None) -> bool:
         payload = self.session.display_tile_payloads.get(int(tile_number)) if payload is None else payload
@@ -2424,10 +2434,53 @@ class FramePipelineEffects:
             ),
         )
         self._record_commit_feedback(report)
+        # Bound identical-delta re-commits (session-148 follow-up): when every
+        # upsert of this commit was identity-rejected and the previous commit
+        # already rejected the byte-identical delta, re-arming the flush from
+        # those queued upserts only replays a guaranteed rejection at full
+        # flush rate (~25 ms of geometry sync per cycle in the field trace).
+        # One retry is allowed — a retarget can race the commit — and any
+        # payload or target-identity change re-arms normally.  Producers own
+        # recovery: dead payloads are regenerated via the replan below.
+        rejected_signature = _identity_rejected_delta_signature(tile_delta, report)
+        identical_rejected_recommit = bool(
+            rejected_signature is not None
+            and rejected_signature
+            == getattr(session, "_identity_rejected_delta_signature", None)
+        )
+        session._identity_rejected_delta_signature = rejected_signature
+        session._identity_rejected_backoff_tiles = (
+            frozenset(entry[0] for entry in rejected_signature)
+            if identical_rejected_recommit
+            else frozenset()
+        )
+        if identical_rejected_recommit:
+            repeats = int(getattr(session, "_identity_rejected_delta_repeats", 0) or 0) + 1
+            session._identity_rejected_delta_repeats = repeats
+            emit_trace(
+                "identity_rejected_recommit",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+                revision=int(getattr(tile_state, "revision", 0) or 0),
+                tiles=tuple(sorted(int(tile) for tile in tile_delta.upserts)),
+                repeats=repeats,
+                elapsed_ms=float(renderer._last_montage_tile_commit_ms),
+            )
+        else:
+            session._identity_rejected_delta_repeats = 0
+        backlog_dirty = dict(getattr(session, "dirty_payloads", None) or {})
+        backlog_pending = dict(getattr(session, "pending_payload_upserts", None) or {})
+        if identical_rejected_recommit:
+            rejected_tiles = {entry[0] for entry in rejected_signature}
+            backlog_dirty = {
+                tile: value for tile, value in backlog_dirty.items() if int(tile) not in rejected_tiles
+            }
+            backlog_pending = {
+                tile: value for tile, value in backlog_pending.items() if int(tile) not in rejected_tiles
+            }
         upload_backlog = bool(
-            getattr(session, "dirty_payloads", None)
+            backlog_dirty
             or getattr(session, "pending_removals", None)
-            or getattr(session, "pending_payload_upserts", None)
+            or backlog_pending
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
             or rearmed_parked
         )
@@ -2442,7 +2495,7 @@ class FramePipelineEffects:
         # commit; sending them through the full ladder retarget was the R2
         # O(tiles * commits) storm. Only lifecycle changes that can unlock new
         # quality work need a semantic replan.
-        if identity_mismatches or preview_transition:
+        if identity_mismatches or preview_transition or identical_rejected_recommit:
             renderer.request_montage_replan(session)
         renderer._settle_montage_visible_plan_if_complete(session)
         renderer._finish_frame_session_if_complete(session)
@@ -3802,6 +3855,31 @@ def interactive_active(window) -> bool:
 
 def viewport_interaction_active(window) -> bool:
     return bool(getattr(window.win, "_viewport_interaction_active", False))
+
+
+def _identity_rejected_delta_signature(tile_delta, report):
+    """Signature of a delta whose upserts were ALL identity-rejected.
+
+    Returns ``None`` unless the report proves every upsert in the delta was
+    refused at the identity gate with nothing committed.  The signature pairs
+    each payload's acknowledgement identity with the target identity it was
+    judged against, so replacing the payload OR retargeting the tile both
+    change it and re-arm normal commits.
+    """
+
+    upserts = dict(getattr(tile_delta, "upserts", {}) or {})
+    if not upserts:
+        return None
+    if tuple(getattr(report, "committed_upserts", ()) or ()):
+        return None
+    rejected = {int(tile) for tile in (getattr(report, "identity_rejected_tiles", ()) or ())}
+    if not rejected.issuperset(int(tile) for tile in upserts):
+        return None
+    targets = dict(getattr(tile_delta, "target_identities", {}) or {})
+    return tuple(
+        (int(tile), tile_ack_identity(payload), targets.get(int(tile)))
+        for tile, payload in sorted(upserts.items(), key=lambda item: int(item[0]))
+    )
 
 
 def latency_feedback(window):
