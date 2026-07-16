@@ -21,7 +21,10 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
     tile_level_stats_with_quality,
 )
-from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_identity import (
+    acknowledged_identity_satisfies_target,
+    tile_ack_identity,
+)
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.shader_mapping import (
@@ -772,11 +775,46 @@ def shared_transform_candidate_tiles(
             if include_missing:
                 yield candidate
             continue
+        if include_missing and payload_identity_dead(session, tile_number, payload):
+            # A payload the backend can never acknowledge (its typed identity
+            # cannot satisfy the tile's current target) is not coverage — it
+            # is a stale wrapper that every commit silently rejects. Counting
+            # it as resident starved the tile of any producer while the
+            # first-pixel barrier waited on exactly this acknowledgement
+            # (field stall 2026-07-16, session 148). Regenerate it fresh.
+            yield candidate
+            continue
         if str(getattr(payload, "quality", "exact")) != "preview":
             continue
         payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
         if payload_level > target_level:
             yield candidate
+
+
+def payload_identity_dead(session, tile_number: int, payload) -> bool:
+    """Whether the backend can never acknowledge this payload for its target.
+
+    The commit path only presents payloads whose typed identity satisfies the
+    tile's lifecycle target; anything else is rejected without state change.
+    A payload that fails that check while nothing is presented can therefore
+    never open the tile's first-pixel obligation — schedulers must treat it
+    as missing, not as coverage.
+    """
+
+    tile_number = int(tile_number)
+    lifecycle = getattr(session, "lifecycle", None)
+    if lifecycle is None:
+        return False
+    if tile_number in (getattr(lifecycle, "presented_tiles", None) or frozenset()):
+        return False
+    record = lifecycle.peek(tile_number)
+    target = None if record is None or record.target is None else record.target.identity
+    if target is None:
+        return False
+    identity = getattr(payload, "tile_identity", None)
+    if identity is None:
+        identity = getattr(payload, "source_id", None)
+    return not acknowledged_identity_satisfies_target(identity, target)
 
 
 def presented_preview_payload(session, tile_number: int):

@@ -2682,6 +2682,9 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         delta_key=delta_key,
         presented_identities=getattr(stats, "presented_identities", None),
         committed_upserts=committed_upserts,
+        identity_rejected_tiles=frozenset(
+            int(tile) for tile in tuple(getattr(stats, "identity_rejected_tiles", ()) or ())
+        ),
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
         texture_uploads=report_uploads,
         texture_upload_bytes=report_upload_bytes,

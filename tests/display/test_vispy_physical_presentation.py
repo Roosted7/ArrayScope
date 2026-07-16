@@ -379,3 +379,79 @@ def test_coarse_page_fallback_reports_actual_physical_identity_and_quality():
     assert row["physical_page_lod"] == coarse.lod
     assert row["physical_page_quality"] == "fallback"
     assert row["physical_page_binding_generation"] == resolution.binding_generation
+
+
+def test_identity_rejected_upserts_are_reported_not_silent():
+    """Session-148 gate (2026-07-16): typed-target rejection must be loud.
+
+    A delta upsert whose payload identity cannot satisfy that tile's target
+    identity is excluded from presentation.  That exclusion used to be
+    completely silent (no stat, no skip count), so a presenter re-emitting
+    the same dead payload looped forever while the tile stayed empty on
+    screen.  The commit stats must name the rejected tiles so diagnostics
+    and traces expose the loop on the first commit.
+    """
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    def identity(semantic_generation):
+        return TileIdentity(
+            document_generation=("doc", 0),
+            operation_key=("ops",),
+            source_index=3,
+            image_axes=(1, 0),
+            axis_flips=(False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=semantic_generation,
+            lod=TileLodIdentity(level=0, factor=1),
+        )
+
+    texture = np.zeros((4, 4), dtype=np.float32)
+    payload = DisplayTilePayload(
+        3,
+        3,
+        texture,
+        None,
+        ("tile", 3),
+        texture_data=texture,
+        lod=LodInfo(level=0, factor=1, source_shape=(4, 4), texture_shape=(4, 4)),
+        quality="exact",
+        tile_identity=identity(("stale",)),
+    )
+    delta = SimpleNamespace(
+        upserts={3: payload},
+        active_tiles=(3,),
+        target_identities={3: identity(("current",))},
+        removals=(),
+        near_tile_source_ids={},
+    )
+    pool = TextureAtlasPool(FakeGloo())
+    _uvs, stats = pool.update_payloads(
+        {3: payload},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+
+    assert stats.committed_upserts == ()
+    assert stats.texture_uploads == 0
+    assert stats.identity_rejected_items == 1
+    assert stats.identity_rejected_tiles == (3,)
+
+    # The matching identity presents normally and reports zero rejections.
+    delta.target_identities = {3: identity(("stale",))}
+    _uvs, stats = pool.update_payloads(
+        {3: payload},
+        tile_shape=(4, 4),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        tile_delta=delta,
+    )
+    assert stats.committed_upserts == (3,)
+    assert stats.identity_rejected_items == 0
+    assert stats.identity_rejected_tiles == ()

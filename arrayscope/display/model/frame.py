@@ -175,6 +175,10 @@ class TileCommitReport:
 
     presented_tiles: frozenset[int] = field(default_factory=frozenset)
     committed_upserts: frozenset[int] | None = None
+    # Upserts the backend refused because their typed identity cannot satisfy
+    # the delta's target identity.  Loud by contract: re-emitting the same
+    # rejected payloads never converges (field stall 2026-07-16).
+    identity_rejected_tiles: frozenset[int] = field(default_factory=frozenset)
     removed_tiles: frozenset[int] = field(default_factory=frozenset)
     texture_uploads: int = 0
     texture_upload_bytes: int = 0

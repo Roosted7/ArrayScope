@@ -1,0 +1,112 @@
+# Stale/empty montage tiles — identity-aliasing starvation stall (2026-07-16)
+
+**Status:** root-caused, fixed, gated. Live repro converges post-fix.
+
+## Field evidence
+
+- `/tmp/arrayscope-stall-148-1.trace.jsonl` / `-2` (user session, 2026-07-16
+  08:05, after the G5 commit series landed): session 148, full-axis 272-tile
+  complex FFT montage (`CenteredFFT+FFTShift+CenteredIFFT` on axis 2, VisPy,
+  resident policy). 91 required tiles unsettled, `dirty=91`, `upserts=91`,
+  `evaluating=0`, `pending=0`, `flush_pending=final_commit_pending=True`.
+- Tile 31's arc in the ring buffer: **never presented anything** for 7.5 s.
+  Its exact level-2 payload was `commit_emitted` ~30 times; every
+  `commit_batch` (phase `backend_complete`) reported
+  `delta_upserts=[31,30,10,9]`, `committed_upserts=[]`, `uploads=0` — the
+  backend rejected the same four payloads at ~25 ms each while the bounded
+  admission queue kept re-picking them, starving the other 87.
+- 272 − 181 presented = 91 stuck (field); the live repro reproduced
+  272 − 160/168 = 112/104 stuck — the arithmetic of "everything that ever
+  fails the commit gate stays failed".
+
+## Root cause (proven live, identity diff captured)
+
+`TileIdentity.semantic_generation` folds the tile view state's raw
+`axis_range_indices`. An explicit range covering the whole axis
+(`(0, 1, …, N-1)`, e.g. from typing `0:336` or programmatic full-range
+selection) and `None` are the same semantics but compared unequal. The
+montage source keys (`montage_tile_semantic_key`, anchoring content keys)
+normalize windows away, so retained/seeded payloads survive the spelling flip
+with matching *source ids* but dead *typed identities*:
+
+```
+payload.semantic_generation = (shape, slices, ((0,1,…,335), None, None), …)
+target .semantic_generation = (shape, slices, (None,      None, None), …)
+```
+
+`satisfies_target` then fails forever. Three compounding design gaps turned
+one aliased payload into a whole-montage stall:
+
+1. **Silent rejection.** `update_payloads` dropped non-satisfying upserts
+   with no counter, no trace, not even `items_skipped`.
+2. **Bookkeeping counted as coverage.** The shared-transform preview pass
+   skipped any tile holding a `quality="preview"` payload at the preview
+   level — even one the backend can never acknowledge — so no producer ever
+   regenerated it.
+3. **Barrier deadlock.** `shared_first_pass_barrier_pending` waits for
+   required first pixels; the rejected tiles were exactly the missing first
+   pixels, so the desired-level producer stayed barred while per-tile DESIRED
+   rungs are (by design) denied for shared-transform pipelines
+   (`_shared_transform_owns_display_target`). Result: replan livelock
+   (`pipeline_plan` every ~50 ms, `submitted=0`, endless `frame-admission`
+   continuations) with the kernel idle.
+
+**Attribution:** the stall reproduces at the pre-series base `2d0f605f` too —
+the G5/prefetch/retention series did **not** introduce the root defect; it
+changed exposure (more retained/warm coverage surviving transitions, so the
+spelling flip had more corpses to leave behind).
+
+## Reproduction
+
+- Live (stalls pre-fix 3/3, converges post-fix): seeded ~12 s gesture mix on
+  the real NIfTI — zoom glides, axis-0 range windows **including an explicit
+  full range and its `None` reset**, montage slice pokes — then idle.
+  Preserved as `tests/stress/test_interaction_convergence.py`
+  (`ARRAYSCOPE_STRESS=1`, real display, serial).
+- Offscreen does NOT reproduce the scheduling shape (consistent with the
+  2026-07 course-reset ground rules); the deterministic gates are unit-level.
+
+## Fixes
+
+1. **Canonical spelling (root).** `ViewState.__post_init__` normalizes an
+   explicit full-coverage `axis_range_indices[axis]` (and its text) to
+   `None`. One spelling of "whole axis" everywhere, by construction.
+   Gate: `tests/core/test_view_state.py::test_full_coverage_axis_range_canonicalizes_to_none`.
+2. **Dead payloads are missing coverage (self-heal).**
+   `render.effects.payload_identity_dead` + the shared-transform preview pass
+   treats an unpresented payload whose typed identity cannot satisfy the
+   tile's current lifecycle target as *missing* and regenerates it. Any
+   future identity-aliasing bug now degrades to one wasted evaluation
+   instead of a permanent stall.
+   Gate: `tests/window/test_montage_lod_residency.py::test_unacknowledgeable_payload_counts_as_missing_shared_coverage`.
+3. **Loud rejection.** `update_payloads` reports
+   `identity_rejected_items`/`identity_rejected_tiles` in
+   `TileLayerUpdateStats`, carried into `TileCommitReport` and the
+   `commit_batch` trace (`identity_rejected=`). A re-emit loop is now visible
+   on the first commit of any future trace.
+   Gate: `tests/display/test_vispy_physical_presentation.py::test_identity_rejected_upserts_are_reported_not_silent`.
+
+## Rejected shortcuts
+
+- Normalizing only inside `_tile_identity` (leaves every other ViewState
+  consumer aliased; session keys would keep churning).
+- Dropping rejected payloads from the retained store at commit time
+  (fights retain-until-replace; the transient "target changed, successor in
+  flight" case would blank correct pixels).
+- Accepting opaque source-id equality at the commit gate when identities
+  mismatch (reintroduces the R8A aliasing the typed contract exists to stop).
+- A watchdog that "repairs" the loop (V3 rule: watchdogs observe, owners fix).
+
+## Follow-ups (other-lane / lower priority)
+
+- `montage_indices` has the same two-spellings hazard (explicit full tuple vs
+  `None`). It does not enter `semantic_generation`, only session keys
+  (session churn, not correctness), but the same canonicalization is cheap.
+- The per-tile analog of gap 2: `_display_payload_covers_display_target`
+  (prepare_rung) trusts payload currency without checking typed-target
+  satisfiability; non-shared pipelines could in principle starve the same way.
+- The presenter re-emits an unchanged rejected delta at full flush rate
+  (~25 ms of wasted geometry sync per cycle); with the fixes it converges,
+  but bounding identical-delta re-commits would cut the worst-case burn.
+- `trace_verify` could assert `identity_rejected == ()` on every
+  backend_complete commit in whole-workflow replays.

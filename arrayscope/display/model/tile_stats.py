@@ -69,6 +69,15 @@ class TileLayerUpdateStats:
     # been produced from a physically divergent layer state without the
     # repair.  GPU backends fill it; CPU tile layers leave it at zero.
     physical_repairs: int = 0
+    # Payload upserts whose typed identity cannot satisfy the delta's target
+    # identity for that tile.  They are excluded from presentation without
+    # any other side effect, so a non-zero value on consecutive commits of
+    # the same delta means the presenter is re-emitting payloads the backend
+    # can never acknowledge (field stall 2026-07-16: the silent form of this
+    # rejection starved 91 required tiles of any producer).  Backends that
+    # enforce typed targets fill it; CPU tile layers leave it at zero.
+    identity_rejected_items: int = 0
+    identity_rejected_tiles: tuple[int, ...] = ()
     upload_ms: float = 0.0
     level_update_processed_items: int = 0
     level_update_pending_items: int = 0

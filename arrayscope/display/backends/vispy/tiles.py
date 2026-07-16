@@ -993,16 +993,26 @@ class TextureAtlasPool:
             for tile, source_id in dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}).items()
         }
         retained_active_keys: dict[int, object] = {}
-        raw_payload_items = tuple(
-            (int(tile), payload_map[int(tile)])
-            for tile in active_tiles
-            if int(tile) in payload_map
-            and acknowledged_identity_satisfies_target(
-                getattr(payload_map[int(tile)], "tile_identity", None)
-                or payload_map[int(tile)].source_id,
-                target_identities.get(int(tile)),
-            )
-        )
+        raw_payload_item_list: list[tuple[int, DisplayTilePayload]] = []
+        identity_rejected_tiles: list[int] = []
+        for tile in active_tiles:
+            tile = int(tile)
+            if tile not in payload_map:
+                continue
+            item_payload = payload_map[tile]
+            if acknowledged_identity_satisfies_target(
+                getattr(item_payload, "tile_identity", None) or item_payload.source_id,
+                target_identities.get(tile),
+            ):
+                raw_payload_item_list.append((tile, item_payload))
+            else:
+                # Not presentable for this delta's typed target; the payload
+                # is dropped from this commit.  Report it loudly — a payload
+                # that can NEVER satisfy its target re-appears here on every
+                # flush, and silence turned that into a starvation stall
+                # (2026-07-16, session 148).
+                identity_rejected_tiles.append(tile)
+        raw_payload_items = tuple(raw_payload_item_list)
         storage_mode = (
             _atlas_storage_mode(raw_payload_items, rgb_already_windowed=rgb_already_windowed)
             if raw_payload_items
@@ -1379,6 +1389,8 @@ class TextureAtlasPool:
                 for tile in explicit_upserts
                 if int(tile) in presented_set
             ),
+            identity_rejected_items=len(identity_rejected_tiles),
+            identity_rejected_tiles=tuple(identity_rejected_tiles),
             resident_items=self.resident_count,
             storage_capacity=self.capacity,
             storage_rebuilds=int(rebuilt),

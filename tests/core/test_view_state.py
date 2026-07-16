@@ -218,6 +218,49 @@ def test_montage_axis_validates_and_migrates_with_shape():
     assert migrated.montage_axis is None
 
 
+def test_full_coverage_axis_range_canonicalizes_to_none():
+    """One spelling of "the whole axis" (field stall 2026-07-16, session 148).
+
+    Every identity derived from a ViewState (typed tile identities, session
+    keys, cache keys) compares these tuples textually.  When an explicit
+    range covering the whole axis and ``None`` could coexist, retained
+    payloads minted under one spelling could never satisfy targets minted
+    under the other: the backend rejected their commits forever, the shared
+    first-pass barrier never opened, and the montage stalled with empty and
+    stale tiles.  The full-coverage range must therefore normalize to
+    ``None`` at construction, in every construction path.
+    """
+
+    state = ViewState.from_shape((6, 4, 5))
+
+    explicit_full = state.with_axis_range(0, indices=tuple(range(6)), text="0:6")
+    unwindowed = state.with_axis_range(0, indices=None, text=None)
+    assert explicit_full == unwindowed
+    assert explicit_full.axis_range_indices == (None, None, None)
+    assert explicit_full.axis_range_text == (None, None, None)
+
+    # Direct construction (session restore) normalizes identically.
+    restored = ViewState(
+        ndim=3,
+        shape=(6, 4, 5),
+        image_axes=(0, 1),
+        line_axis=0,
+        slice_indices=(3, 2, 2),
+        axis_flipped=(False, False, False),
+        axis_fftshifted=(False, False, False),
+        axis_range_indices=(tuple(range(6)), None, (1, 2, 3)),
+        axis_range_text=("0:6", None, "1:4"),
+    )
+    assert restored.axis_range_indices == (None, None, (1, 2, 3))
+    assert restored.axis_range_text == (None, None, "1:4")
+
+    # Partial coverage is a real window and must survive untouched.
+    partial = state.with_axis_range(0, indices=(1, 2, 3), text="1:4")
+    assert partial.axis_range_indices[0] == (1, 2, 3)
+    assert partial.axis_range_text[0] == "1:4"
+    assert partial != unwindowed
+
+
 def test_view_state_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse(VIEW_STATE_PATH.read_text())
 

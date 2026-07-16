@@ -78,6 +78,27 @@ class ViewState:
             object.__setattr__(self, "axis_range_text", (None,) * self.ndim)
         else:
             object.__setattr__(self, "axis_range_text", tuple(None if value is None else str(value) for value in self.axis_range_text))
+        # Canonical spelling: an explicit range covering the whole axis IS the
+        # unwindowed axis. Every identity derived from this state (semantic
+        # generations, session keys, cache keys) compares tuples textually, so
+        # letting "0:N" and None coexist aliases equal pixels under unequal
+        # identities. Field stall 2026-07-16 (session 148): retained payloads
+        # minted under one spelling could never satisfy targets minted under
+        # the other, so their commits were rejected forever and the montage
+        # never converged.
+        normalized_ranges = list(self.axis_range_indices)
+        normalized_texts = list(self.axis_range_text)
+        for axis, indices in enumerate(normalized_ranges):
+            if (
+                indices is not None
+                and axis < len(self.shape)
+                and indices == tuple(range(self.shape[axis]))
+            ):
+                normalized_ranges[axis] = None
+                if axis < len(normalized_texts):
+                    normalized_texts[axis] = None
+        object.__setattr__(self, "axis_range_indices", tuple(normalized_ranges))
+        object.__setattr__(self, "axis_range_text", tuple(normalized_texts))
         object.__setattr__(self, "channel", _coerce_enum(ChannelMode, self.channel))
         object.__setattr__(self, "scale", _coerce_enum(ScaleMode, self.scale))
 

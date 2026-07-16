@@ -2344,6 +2344,9 @@ class FramePipelineEffects:
             elapsed_ms=float(renderer._last_montage_tile_commit_ms),
             presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
             committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
+            identity_rejected=tuple(
+                sorted(getattr(report, "identity_rejected_tiles", ()) or ())
+            ),
             delta_upserts=tuple(int(tile) for tile in tile_delta.upserts),
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),

@@ -4195,6 +4195,95 @@ def test_shared_target_candidates_follow_settlement_not_historical_quality():
     assert candidates == (preview_tile, coarse_tile)
 
 
+def test_unacknowledgeable_payload_counts_as_missing_shared_coverage():
+    """Session-148 gate (2026-07-16): dead payload identity is not coverage.
+
+    A retained preview payload whose typed identity can never satisfy the
+    tile's current lifecycle target is rejected by every backend commit
+    without side effects.  Counting it as preview coverage starved the tile
+    of any producer while the shared first-pass barrier waited on exactly
+    that acknowledgement: 91 required tiles sat empty/stale with the kernel
+    idle until the stall watchdog fired.  The first-pixel pass must treat
+    such payloads as missing and regenerate them under current semantics.
+    """
+
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+    from arrayscope.presentation.tile_lifecycle import TileTarget
+
+    def identity(semantic_generation, *, quality="exact", level=2):
+        return TileIdentity(
+            document_generation=("doc", 0),
+            operation_key=("fft",),
+            source_index=0,
+            image_axes=(1, 0),
+            axis_flips=(False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=semantic_generation,
+            lod=TileLodIdentity(level=level, factor=1 << level),
+            quality=quality,
+        )
+
+    session = _session(count=1, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    target_identity = identity(("range", None))
+    session.lifecycle.retarget(
+        {
+            0: TileTarget(
+                tile_number=0,
+                source_index=0,
+                semantic_source_id=source_id,
+                lod_level=2,
+                identity=target_identity,
+            )
+        }
+    )
+    stale = DisplayTilePayload(
+        0,
+        0,
+        np.ones((16, 16), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=2, factor=4, source_shape=(TILE, TILE), texture_shape=(16, 16)),
+        quality="preview",
+        tile_identity=identity(("range", (0, 1, 2, 3)), quality="fallback"),
+    )
+    session.display_tile_payloads[0] = stale
+
+    assert render_effects.payload_identity_dead(session, 0, stale)
+    candidates = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=2,
+            include_missing=True,
+            require_presented_preview=False,
+        )
+    )
+    assert candidates == (tile,)
+
+    # Control: the same payload minted under the CURRENT semantics is live
+    # fallback coverage at the requested level and must not be re-produced.
+    live = replace(stale, tile_identity=identity(("range", None), quality="fallback"))
+    session.display_tile_payloads[0] = live
+    assert not render_effects.payload_identity_dead(session, 0, live)
+    assert (
+        tuple(
+            render_effects.shared_transform_candidate_tiles(
+                session,
+                level=2,
+                include_missing=True,
+                require_presented_preview=False,
+            )
+        )
+        == ()
+    )
+
+
 def test_shared_transform_kernel_key_uses_full_semantic_marker():
     from types import SimpleNamespace
 

@@ -69,7 +69,13 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
   (`tests/ui/test_vispy_phase_framebuffer.py`,
   `tests/display/test_vispy_physical_presentation.py`). "Drawn ⇒ physical
   truth row exists" is enforced with self-heal.
-- **Field fixes (all repro-first, failing-pre-fix gates)**: first-pass
+- **Field fixes (all repro-first, failing-pre-fix gates)**: session-148
+  identity-aliasing starvation stall (2026-07-16: explicit-full
+  `axis_range_indices` vs `None` aliased retained payloads into permanently
+  unacknowledgeable upserts; silent backend rejection + dead payloads counted
+  as coverage + first-pass barrier = whole-montage stale/empty livelock;
+  root-caused live, predates the G5 series — dossier
+  `docs/redesign/stale-empty-tiles-2026-07-16.md`); first-pass
   histogram evidence-race stall (`ffafb821`); zoom/phys-None triple pool
   defect (`d049b212`); scrub retain-until-replace
   (`slice_only_session_transition`; doc/op changes still blank) +
