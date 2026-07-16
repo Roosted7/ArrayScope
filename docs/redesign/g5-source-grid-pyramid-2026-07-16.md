@@ -151,6 +151,22 @@ only complete L2/L4 fallback and no materialization work in flight. That
 lost-wakeup is follow-on work, not a timeout exception or a reason to weaken
 the never-black fallback.
 
+The follow-on trace showed that no L6 work was actually missing: retained L2
+and L4 pixels already exceeded the later L6 demand. `TileRecord.target_settled`
+and the scoped `TileLifecycle` queries had drifted into two implementations;
+the latter required the historical quality label `exact` and therefore called
+finer retained fallback unsettled. `TileRecord` now owns first-pixel and target
+settlement truth, all scoped queries delegate to it, and one shared quality/LOD
+rule prevents demotion: an exact level satisfies its own or a coarser demand,
+while a retained fallback satisfies only a *strictly* coarser later demand.
+Equal-level and genuinely coarser fallback remain unsettled. The real-Wayland
+artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-settlement-fixed/`
+reaches `required_target_settled=True` without producing L6 replacement work.
+The broader profile remains red for presentation continuity, deep-checkpoint
+coverage, and input/event-loop latency; those failures stay separate from the
+now-single-owner settlement rule.
+
 The ladder-side target planner is also now explicit:
 
 - `render.lod.plan_lod_page_targets` is a Qt-free deterministic transform

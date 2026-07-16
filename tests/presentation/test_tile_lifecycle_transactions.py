@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from itertools import permutations
 
+from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
 from arrayscope.presentation import TileLifecycle, TilePayloadRef, TilePhase, TileTarget
 
 
@@ -21,6 +22,44 @@ def _payload(source_id, *, quality="exact", source=10, level=0, kind="complex_rg
     )
 
 
+def _typed_identity(*, level: int, quality: str = "exact") -> TileIdentity:
+    return TileIdentity(
+        document_generation="doc",
+        operation_key="operation",
+        source_index=10,
+        image_axes=(0, 1),
+        axis_flips=(False, False),
+        channel="complex",
+        complex_mapping=("phase_color", "abs", "mapped"),
+        texture_kind="complex_rg32f",
+        semantic_generation="semantic",
+        lod=TileLodIdentity(level=level, factor=1 << level),
+        quality=quality,
+    )
+
+
+def _typed_target(level: int) -> TileTarget:
+    return TileTarget(
+        0,
+        10,
+        ("semantic", 10),
+        lod_level=level,
+        identity=_typed_identity(level=level),
+    )
+
+
+def _typed_payload(*, level: int, quality: str) -> TilePayloadRef:
+    return TilePayloadRef(
+        source_id=("tile", level, quality),
+        quality=quality,
+        lod_level=level,
+        source_index=10,
+        texture_kind="complex_rg32f",
+        identity=_typed_identity(level=level, quality=quality),
+        payload=("payload", level, quality),
+    )
+
+
 def test_fallback_presented_never_settles_exact_target():
     ledger = TileLifecycle()
     ledger.retarget({0: _target(level=0)})
@@ -36,6 +75,29 @@ def test_fallback_presented_never_settles_exact_target():
     assert row.first_pixel_presented
     assert not row.target_settled
     assert not ledger.visible_target_settled()
+
+
+def test_retained_finer_fallback_settles_coarser_target_without_demotion():
+    ledger = TileLifecycle()
+    fallback = _typed_payload(level=2, quality="fallback")
+    ledger.retarget({0: _typed_target(0)})
+    ledger.fallback_ready(0, fallback)
+    ledger.commit_emitted({0: fallback})
+    assert ledger.backend_ack({0: fallback}) == (0,)
+    assert not ledger.row(0).target_settled
+
+    # Equal-level fallback still owes exact work.
+    ledger.retarget({0: _typed_target(2)})
+    assert not ledger.row(0).target_settled
+    assert ledger.target_unsettled_tiles((0,)) == (0,)
+
+    # L2 already exceeds a later L6 demand. Keep it physically presented and
+    # settle the coarser target instead of scheduling or presenting a demotion.
+    ledger.retarget({0: _typed_target(6)})
+    assert ledger.row(0).target_settled
+    assert ledger.visible_target_settled()
+    assert ledger.target_unsettled_tiles((0,)) == ()
+    assert ledger.presentation_changes() == ()
 
 
 def test_task_cannot_be_running_without_admitted_key_or_stage_key():
