@@ -1,15 +1,15 @@
 # GPU engine implementation plan (G-program)
 
-**Date:** 2026-07-15. **Branch:** `codex/gpu-engine`.
+**Date:** 2026-07-15. **Branch:** merged to `main` 2026-07-16.
 **Decision record:** [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md)
 (three-way separation of view tiles, data chunks, residency pages).
-**Status (2026-07-16 continuation):** G1–G4 and G5 slice 1 are implemented and
+**Status (2026-07-16):** G1–G4 and G5 slice 1 are implemented and
 real-GL verified; the physical-presentation-truth invariant is standing;
 seven field defects were root-caused from live traces and fixed with
-failing-pre-fix gates. Full suite 2081/24. The continuation queue, open
-field evidence, and environment facts live in
-[`gpu-port-continuation.md`](gpu-port-continuation.md) — read that first.
-Historical status detail: this file's git history.
+failing-pre-fix gates. **The remaining G-steps are ordered in
+[`../queue.md`](../queue.md)** (the only active queue); this file stays the
+design/stage record. Historical status detail: this file's git history and
+the [continuation brief](gpu-port-continuation.md).
 
 ## User problem
 

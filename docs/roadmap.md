@@ -1,224 +1,65 @@
 # Roadmap
 
-Ordered by risk reduction, not feature excitement. An item is complete only
-when its exit gate is met — "code exists" is not completion.
+Why the current work order serves the [mission](mission.md). The ordered,
+gated execution queue lives in [`queue.md`](queue.md) — this file stays at
+the strategy level and must not accumulate status logs (execution records go
+to dossiers and the archive; the P1–P9 log that used to fill this section is
+at
+[`redesign/archive/p-program-log-2026-07.md`](redesign/archive/p-program-log-2026-07.md)).
 
-Completed gates N4–N7 and X1–X4 are archived with their exit criteria in
-[`archive/roadmaps/completed-gates-n4-x4.md`](archive/roadmaps/completed-gates-n4-x4.md).
-Y1–Y3 (one generation contract, backend de-duplication, declarative UI
-sync/one cache core) completed 2026-07-02 — see git history and ADR
-0045/0046. The 2026-06/07 LOD and tile-lifecycle landings are recorded in
-ADR 0050/0051 and the archived
-[lod-remaining-work plans](archive/plans/lod-remaining-work/README.md).
+An item is complete only when its exit gate is met — "code exists" is not
+completion. Completed gate history: N4–X4 in
+[`archive/roadmaps/completed-gates-n4-x4.md`](archive/roadmaps/completed-gates-n4-x4.md),
+Y1–Y3 in ADR 0045/0046, the R1–R7 rewrite and V0–V4 visible-truth program in
+[`redesign/`](redesign/README.md), the 2026-07 P-program in the archive
+above.
 
-## Now — measured performance and suite truth (post-redesign)
+## Now — one architecture: the GPU tensor engine
 
-> **[Codex 2026-07-14 — post-V4 roadmap update; linear-history correction]**
-> R1–R7 and V0–V4 are rebased linearly onto `main`; no integration merge
-> remains. The fixed viewer passed the V1/V2 real-Wayland
-> pixel/trace scenarios on both backends and the V3 loud-stall injection.
-> The final pre-integration non-GPU suite remained red at 42 failures and 2
-> teardown errors; this is tracked work, not a green-suite claim.
+As of 2026-07-16, `main` **is** the GPU engine (ADR 0055/0056, G1–G5 slice 1
+landed and real-GL verified). The direction record is
+[`proposals/tensor-engine-endpoint.md`](proposals/tensor-engine-endpoint.md):
+a deadline-driven engine where the ADR 0053 kernel evolves into the resource
+broker and a backend-neutral semantic command protocol separates meaning
+from rendering runtime. The executable program is the G-series
+([`proposals/gpu-engine-plan.md`](proposals/gpu-engine-plan.md)), continued
+in [`queue.md`](queue.md).
 
-Proceed with the redesign P-program one measured cause at a time against
-the frozen T1 baseline, in the order recorded in
-[`docs/redesign/marathon-salvage.md`](redesign/marathon-salvage.md):
-prefetch-busy → committed `level_source` → viewport intent → background
-histogram aggregation → coalesced completion drain → cadence throttle →
-stage-cache snapshot/cancellation → governor policy → admission batching →
-gate pacing → slot relocation. Every P commit carries before/after trace and
-benchmark evidence; the real-display pixel/trace gates must stay green.
+Strategic commitments inside "Now":
 
-> **[Codex 2026-07-14 — P1 result]** Narrowing prefetch-busy was measured on
-> both backends, produced no FFT improvement, regressed the scalar elapsed
-> sample, and did not change PyQtGraph's 50/60 presentation freeze. The code
-> was reverted and the rejected measurements are recorded in the redesign
-> README. The active measured cause is now committed-frame `level_source`.
+- **Visible truth stays the acceptance bar** — the performance bars and
+  their real-display gates are recorded in [`queue.md`](queue.md); the
+  rings and their enforcement in [`testing/README.md`](testing/README.md).
+- **The P-program's endpoint is absorbed, not abandoned.** P9 isolated the
+  measured cost ("a one-index move prepares and acknowledges 60 slots");
+  the engine's content-keyed chunked residency is the structural answer.
+  Performance work resumes as measured steps on the engine substrate
+  (queue step 3), not as scheduler tuning beside it.
+- **De-clutter is part of the program.** Legacy single-quad path (~1100
+  LOC), dead planners, and shims are already deleted with resurrection
+  guards; the standing-debt lane in [`queue.md`](queue.md) continues this
+  (ImageViewShell duplication, key-owner consolidation).
 
-> **[Codex 2026-07-14 — P2 result]** Committing `level_source` removed the
-> workflow's first-evidence-quality failure but regressed the real VisPy V2
-> priority gate from 14/16 to 4/16 nearest first-cohort tiles and exposed a
-> rough-bounds relative-window error. The code was reverted; the redesign
-> README records the measurements and missing maturity rule. The active
-> measured cause is now viewport-intent replay.
+## Next — after the bars are green
 
-> **[Codex 2026-07-14 — P3 result]** Acknowledged content-extent changes now
-> replay AUTO/FIT without moving USER cameras, including VisPy's hidden-bounds
-> update. Focused and real-pixel gates pass on both backends. The canonical
-> USER-camera workflow remained stalled at the same 7/60 presentation state,
-> so P3 carries no performance credit and the stall remains open. The active
-> measured cause is now background histogram aggregation.
-
-> **[Codex 2026-07-14 — P4 result]** Aggregate histogram sampling is now
-> revision-guarded kernel work; its deterministic 60-tile selector is 9.8×
-> faster and the real trace moves up to 36.6 ms per aggregate off the GUI
-> thread. Prepared atomic transactions now include level revision, closing a
-> stale-level identity defect exposed by the new wake. Broad display/window
-> coverage is 840 passed and both physical gates remain green. The unrelated
-> 7/60 presentation stall persists. The active measured cause is now the
-> coalesced kernel completion drain.
-
-> **[Codex 2026-07-14 — P5 result]** Coalescing 205 completions into 42
-> bridge drains bounded the observed drain callbacks, but all three capacity-
-> wake variants failed the real VisPy priority gate with 36/36 exact targets
-> stranded at preview quality. The runtime experiment was removed and the
-> failed designs are recorded in the redesign README. The active measured
-> cause is now LOD-plan cadence plus synchronous-title removal.
-
-> **[Codex 2026-07-14 — P6 result]** Wheel/pan-derived replans now have a
-> committed-frame-only 16 ms cadence, separate from programmatic replay and
-> pipeline continuation; range input no longer performs synchronous title
-> layout. Two real traces cut kernel submissions 39–50% and bridge drains
-> 61–65%, with a +0.8% two-run first-ack midpoint. The V1/V2 physical matrix
-> and 873 focused/broad tests pass. The 7/60 deadlock remains unchanged. The
-> active measured cause is now the stage-cache resident snapshot,
-> cancellation tokens, and `peek_many`.
-
-> **[Codex 2026-07-14 — P7 result]** Hot stage reuse no longer acquires the
-> mutation lock, preview-floor probes batch 60 potential cache locks into one,
-> and cancelled render results stop between evaluation/reduction boundaries.
-> The deterministic lock-contention regression, 1,297 broad tests, and all
-> four physical gates pass. The workflow sample stayed within the ±10% latency
-> guard but did not improve the 7/60 deadlock. The active measured cause is now
-> governor lane policy.
-
-> **[Codex 2026-07-15 — P8 result; correctness only]** Interaction lane
-> quotas and a plan-wide preview barrier prevent exact/ROI work from
-> overtaking the visible preview pass; canonical priority reaches execution
-> and both backend admission paths. Source-successor and level-generation
-> feedback loops now converge, synchronous viewport continuation and VisPy
-> draw acknowledgement cross receiver-owned Qt turns, and the full non-GPU
-> suite is **1,955 passed, 8 skipped**. Real-Wayland V1/V2 is green on both
-> backends and both complete workflow runs reach their final phase, but the
-> 16 ms heartbeat and throughput bars remain red. The active measured cause
-> is now presentation admission batching; PyQtGraph exposed an untrained
-> shared commit-feedback channel and 17-25 ms commit samples.
->
-> **[Codex 2026-07-15 — P9 correction after real-VisPy gate]** Two bounded
-> admission designs improved some PyQtGraph phases but are rejected and fully
-> reverted: one-tile presentation batching regressed both scrolls and stranded
-> exact LOD, while completion-owned refill nearly doubled VisPy scalar-scroll
-> time and coincided with visibly mixed FFT-scroll tiles. The active step is
-> correctness-first physical identity rebinding plus center-out/preview-order
-> proof on both backend cache implementations; no further scheduler tuning is
-> allowed until that gate is clean.
->
-> **[Codex 2026-07-15 — P9 shared-transform checkpoint]** The zero-work
-> session-25 stall is closed at the shared-transform owner: retained finer
-> previews remain producers after a coarsening retarget, and target work waits
-> for unique required-tile physical coverage.  Real PyQtGraph raw and VisPy
-> FFT-full each converge 272/272 with clean trace replay, but performance gates
-> remain red and the trace cannot certify the user's transient wrong pixels.
-> The next single slice is the backend order boundary, not scheduler tuning:
-> VisPy currently receives ordered upserts but uploads by numeric active-grid
-> order, while the acknowledgement report setifies them.  Preserve command
-> order through physical work and its trace first; then replace the harness
-> event count with required-identity coverage and add framebuffer comparison
-> plus an injected wrong-uniform/page test before any further P9 throughput
-> experiment.
->
-> **[Codex 2026-07-15 — P9 ordered-presentation checkpoint]** One semantic
-> focus now drives current-layout shared fanout, ordered deltas, VisPy physical
-> upload, and ordered acknowledgement. Real-display traces changed the stale
-> first FFT cohort to current centre-out order. Physical page evidence then
-> isolated the broken pixels to stale shader state rather than dtype/source
-> corruption: levels-only updates now update levels only, and touched atlas
-> pages synchronize their page-local mapping even when the layer-wide key is
-> unchanged. `/tmp/arrayscope-vispy-onscreen-page-fix` has 60 coherent preview
-> tiles and zero physical identity mismatches. Performance remains vetoed
-> (31.75 s scroll, 123 ms heartbeat, worst continuity 1/60), and the immediate
-> next slice is the separate 58-ready/2-presented zero-work settlement hole.
-> General framebuffer comparison follows that settlement fix. Consolidating
-> scalar and batch montage cache-key derivation is tracked separately; its
-> runtime parity fallback must remain until one canonical key owner replaces
-> both implementations.
->
-> **[Codex 2026-07-15 — P9 level-truth/admission checkpoint]** A real trace
-> proved the last settlement hole was a VisPy cache/physical-level split, not
-> repeated FFT evaluation: exactly one full-volume shared FFT stage was
-> submitted. Tiled commits now reassert levels when either public or physical
-> layer state disagrees with the command, even if the completed-command cache
-> matches. After this fix, the formerly rejected four-item minimum cohort no
-> longer livelocks and cuts real FFT refinement from 42.36 s to 8.39 s; trace
-> replay is clean. P9 remains active because the scripted scroll is 13.55 s,
-> continuity and heartbeat are red, and each source-window step still pays
-> for roughly seventeen bounded presentation transactions.
-> A 4 MiB minimum byte-cohort follow-up was measured and reverted: the item
-> cap remained binding and scroll regressed 13.55 s -> 13.79 s. The next P9
-> cause must therefore address item/transaction ownership, not byte tuning.
-> Generic eight-item and `not display_committed` eight-item variants were also
-> reverted: the first improved cold refinement but regressed scroll/convergence,
-> while the second lost the cold win and worsened scroll to 15.63 s. A session
-> flag is not an acceptable proxy for the plan phase.
->
-> **[Codex 2026-07-15 — P9 source-generation result]** The reused
-> `FrameSession` no longer carries a sticky atomic-successor boolean across
-> index-window retargets. Completion is bound to the current `session_id` and
-> requires a coverage-complete backend acknowledgement. Real VisPy evidence
-> changed the ordinary FFT-scroll shape from roughly seventeen partial commits
-> per window to one ordered 60-slot transaction, with a clean trace replay and
-> coherent final pixels. It did **not** improve the performance gate: staged
-> FFT scroll measured **15.75 s** against the accepted **13.55 s** baseline.
-> P9 therefore continues at the now-isolated cause: avoid preparing/rebinding/
-> acknowledging all 60 slots for a one-index move while preserving atomic
-> visible identity. Slot relocation or an equivalent source-keyed remap is the
-> relevant ownership boundary; generic cohort tuning is not.
-
-In parallel only where it does not reorder a P-step, migrate stale tests to
-the canonical `window.renderer` / `FrameSession` owners and fix the remaining
-coalescer, levels, viewport/ROI, cache-rebind, and transition behavior. Do
-not weaken user-visible assertions merely to make the suite green.
-
-## Next — evidence gates (X5, after the redesign)
-
-X5 remains the evidence-first physical-strategy gate
-([ADR 0046](decisions/0046-evidence-first-performance-strategy.md)).
-X5a (Linux telemetry baseline) and X5b (acknowledged residency for montage
-tiled scenes) are done — see ADR 0047/0051. Remaining, re-expressed against
-the post-redesign modules:
-
-1. **X5c — Viewport-scoped tiled scenes.** Retarget scheduling keys on
-   tiled-scene/storage checks (not montage-mode checks) so internally tiled
-   normal images get visible-only active regions through the same
-   `RenderIntent`/pipeline path.
-2. **X5d — Region-first materialization + physical strategy policy.**
-   Visible-region reads without a full display image first; measured
-   singleton/direct vs tiled storage choice below `ImageSurface`, without a
-   separate normal-image semantic path.
-3. **X5e — Backend and LOD decision matrix.** Windows/macOS traces join the
-   Linux ones; per-OS backend defaults and source-provided-pyramid handling
-   decided from measurements. Includes P4 (per-slot mip validity before
-   atlas mipmaps default on).
-4. **Probe hardening.** Analytic per-tile content assertions for the
-   blank-tiles-at-zoom-back report; scripted zoom-across-threshold content
-   test.
-
-Exit gates for X5c–X5e are unchanged from the pre-redesign roadmap (full
-list in this file's git history): published benchmark matrix, no fixed
-texture-size assumptions, acknowledged residency everywhere, no full-set
-rebuilds on zoom threshold crossings, exact inspection independent of
-display LOD, documented backend/LOD default evidence.
-
-> **[Codex 2026-07-16 — GPU-engine branch status]** `codex/gpu-engine`
-> implements ADR 0055/0056 through G5 slice 1 (content-keyed chunked GPU
-> residency, window-shift/scroll-back/warm fast paths, physical
-> presentation truth, reduced-LOD uniform pages), real-GL verified, suite
-> 2072/24. Continuation queue + dossier index:
-> [`proposals/gpu-port-continuation.md`](proposals/gpu-port-continuation.md);
-> trace-proven defect record:
-> [`redesign/coverage-stall-2026-07-15.md`](redesign/coverage-stall-2026-07-15.md).
-> Joins this roadmap after integration; must not reorder V/P work on `main`.
+1. **X5c–X5e — evidence gates, re-expressed post-engine** (ADR 0046):
+   viewport-scoped tiled scenes for internally tiled normal images;
+   region-first materialization + measured physical-strategy policy;
+   Windows/macOS traces joining the Linux ones for per-OS backend/LOD
+   defaults. Exit gates unchanged (see this file's git history for the full
+   original list).
+2. **Renderer runtime decision** — after Experiment A (wgpu-py slice) and
+   the QRhiWidget study, pick the production runtime with measurements
+   (queue step 5 produces the evidence).
 
 ## Later — product capabilities
 
 - **Linked windows and inspection groups** — first iteration shipped
-  ([ADR 0048](decisions/0048-linked-window-sync.md)); remaining: cursor and
-  viewport links, named groups.
+  (ADR 0048); remaining: cursor and viewport links, named groups.
 - **Focused compare mode** — side-by-side/overlay with shared
   coordinates/levels; registration/segmentation stay out of core.
 - **Rich axis metadata** — `AxisInfo` continues incrementally
-  ([proposal](proposals/axis-info.md): coordinate arrays, orientation,
-  physical cursor readout).
+  ([proposal](proposals/axis-info.md)).
 - **Out-of-core sources** — chunked (Zarr/HDF5-like) adapter behind the
   ADR 0049 protocol, lazy selectors, chunk-aligned planning hints.
 - **Invocation adapters** — Jupyter/editor routes over the one semantic API
@@ -232,4 +73,7 @@ display LOD, documented backend/LOD default evidence.
 - Re-enabling the synchronous LOD pyramid path; refuse/degrade render
   decisions; the bespoke idle stage-warmup scheduler.
 - New scheduling systems beside the kernel, new pacing timers, or another
-  parallel tile-state collection (ADR 0053 forbids all three).
+  parallel tile-state collection (ADR 0053 — see
+  [ground rules](ground-rules.md)).
+- GPU op kernels (flip/crop/conjugate): operations stay on the CPU; the
+  engine consumes evaluated planes. Late, evidence-gated experiment only.

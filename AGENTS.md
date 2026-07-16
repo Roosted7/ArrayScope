@@ -6,17 +6,25 @@ ArrayScope is a Python/Qt n-dimensional scientific-array viewer. Preserve its de
 
 Use this order rather than scanning every historical note:
 
-1. `docs/mission.md` for scope and product principles.
-2. `docs/current-state.md` for maturity and known risks.
-3. `docs/roadmap.md` for active work and exit gates. While the redesign is
-   in flight, `docs/redesign/README.md` owns the active queue and ground
-   rules — read it before touching scheduling, rendering, or LOD code.
-4. `docs/architecture.md` for ownership and invariants.
-5. The relevant deep dive in `docs/architecture/`.
-6. `docs/decisions/README.md` and the specific ADR when a decision’s rationale matters.
-7. `docs/ideas.md` only for exploratory/future work.
+1. `docs/queue.md` — **the only active queue**: ordered next steps, exit
+   gates, performance bars.
+2. `docs/ground-rules.md` — standing law (pixels are the gate, one owner
+   per decision, no silent fallbacks). Read before touching scheduling,
+   rendering, or LOD code.
+3. `docs/graveyard.md` — rejected approaches. Read before any performance
+   or scheduling experiment; do not re-derive a buried idea.
+4. `docs/mission.md` for scope and `docs/roadmap.md` for why the queue is
+   ordered as it is.
+5. `docs/architecture.md`, then the relevant deep dive in
+   `docs/architecture/`.
+6. `docs/testing/README.md` — the test rings and which ring a change must
+   pass before its "fixed" claim counts.
+7. `docs/areas.md` when working in parallel with other agents/branches.
+8. `docs/decisions/README.md` and the specific ADR when rationale matters;
+   `docs/ideas.md` only for exploratory work.
 
-`docs/archive/` is historical evidence, not live direction. `docs/reviews/` contains dated assessments that may be superseded.
+`docs/archive/`, `docs/redesign/archive/`, and dated reviews are historical
+evidence, not live direction.
 
 ## Environment
 
@@ -101,4 +109,4 @@ For rendering/UI changes, perform the relevant manual checks from `docs/testing/
 
 ## Handoff
 
-State what changed, tests and manual checks run, remaining risks, and any follow-up that belongs in `docs/roadmap.md` or `docs/ideas.md`.
+State what changed, tests and manual checks run (naming the ring for any rendering/scheduling claim), remaining risks, and any follow-up. Follow-ups go to `docs/queue.md` (or the owning dossier); reverted experiments get a `docs/graveyard.md` row; exploratory material goes to `docs/ideas.md`. Update queue rows in place — never append status logs to planning docs.

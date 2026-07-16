@@ -1,57 +1,63 @@
 # Documentation index
 
-ArrayScope documentation is organized so a reader can stop at the first useful level instead of reading a chronological development diary.
+Organized by the question you're asking. Stop at the first useful level.
 
-## Level 1 — orient yourself
+## "What should I work on, and when is it done?"
 
-- [Mission](mission.md): who ArrayScope serves, what it promises, and what it will not become.
-- [Current state](current-state.md): a candid maturity map and the most important risks.
-- [v32 composition audit](reviews/v32-composition-audit.md): the current findings and measurements behind the roadmap. (Older status snapshot archived at [archive/project-status-v30.md](archive/project-status-v30.md).)
-- [Roadmap](roadmap.md): the active sequence of measurable gates.
+- [**The queue**](queue.md) — the only active, ordered work list, with exit
+  gates and the performance bars. If another doc claims to order work, that
+  doc is stale.
+- [Roadmap](roadmap.md) — why this order: Now / Next / Later / explicitly
+  not now.
+- [Mission](mission.md) — who ArrayScope serves, the product promise, and
+  what it will not become.
 
-These documents should answer most product and planning questions.
+## "How do we work here?"
 
-## Level 2 — understand the system
+- [Ground rules](ground-rules.md) — standing law: pixels are the gate, one
+  owner per decision, no silent fallbacks, repro-first.
+- [Testing](testing/README.md) — the rings, what runs in CI vs by hand, the
+  defect→ring law, environment facts and harness commands.
+- [Areas](areas.md) — how to split parallel work, the chokepoint files, ADR
+  numbering and integration conventions.
+- [Graveyard](graveyard.md) — rejected approaches with evidence. **Read
+  before starting any performance or scheduling experiment.**
 
-- [Architecture overview](architecture.md): ownership, identities, data flow, and non-negotiable invariants.
-- [State and operations](architecture/state-and-operations.md): `ViewState`, document revisions, operation planning, stages, and caches.
-- [Rendering](architecture/rendering.md): semantic tiled presentations, frames, geometry, residency, and backends.
-- [Scheduling and memory](architecture/scheduling-and-memory.md): visible work, montage sessions, budgets, feedback, and cancellation.
-- [Interaction and UI](architecture/interaction-and-ui.md): widget/state boundaries, viewport behavior, ROI/profile interaction, and panels.
-- [Invocation](invocation.md): launch routes — Python API, CLI, Jupyter, and the Julia/MATLAB wrappers — and the handoff efficiency contract.
+## "How does the system work?"
 
-Read only the deep dive related to the change being made.
+- [Architecture overview](architecture.md) — ownership, identities, data
+  flow, non-negotiable invariants.
+- Deep dives: [state and operations](architecture/state-and-operations.md),
+  [rendering](architecture/rendering.md),
+  [scheduling and memory](architecture/scheduling-and-memory.md),
+  [interaction and UI](architecture/interaction-and-ui.md).
+- [Invocation](invocation.md) — launch routes and wrappers.
+- [Current state](current-state.md) — maturity snapshot and material risks.
 
-## Level 3 — rationale and evidence
+## "Why is it this way?"
 
-- [Architecture decisions](decisions/README.md): accepted decisions, grouped by topic and implementation status.
-- [Testing strategy](testing/strategy.md): what each test layer proves and what it cannot prove.
-- [Manual regression](testing/manual-regression.md): compact release/hardware checks.
-- [Release-candidate evidence](testing/release-candidate.md): developer commands for N0/RC artifacts and package identity.
-- [Reviews](reviews/README.md): dated audits and trace analyses.
-- [Proposals](proposals/README.md): work that is designed but not accepted as current direction.
-
-## Product references
-
-- [ArrayShow reference](references/ArrayShow.md)
-- [ArrayView reference](references/ArrayView.md)
-- [Viewer comparison reference](references/viewer-comparison.md)
-- [Comparative assessment](comparison.md)
-
-References are sources of lessons, not specifications. ArrayScope should adopt useful interaction patterns without inheriting another project’s global state, feature sprawl, or rendering bottlenecks.
+- [Architecture decisions](decisions/README.md) — accepted ADRs (0001–0056).
+- [Proposals](proposals/README.md) — designed but not (yet) accepted
+  direction; includes the
+  [tensor-engine endpoint](proposals/tensor-engine-endpoint.md) and the
+  [GPU program plan](proposals/gpu-engine-plan.md).
+- [Redesign record](redesign/README.md) — the closed 2026-07 program, its
+  [retrospective](redesign/retro-2026-07.md), and the live defect dossiers.
+- [Reviews](reviews/README.md) — dated audits and trace analyses.
+- [References](references/) and [comparison](comparison.md) — ArrayShow/
+  ArrayView lessons; sources of patterns, not specifications.
 
 ## Historical material
 
-[`archive/`](archive/README.md) contains phase context, old roadmap snapshots, and dated manual checklists. It remains searchable because it explains why code exists, but it must not be used as the current backlog.
+[`archive/`](archive/README.md) and
+[`redesign/archive/`](redesign/archive/) explain why code exists; never use
+them as the backlog. [Ideas](ideas.md) holds exploratory/future material
+only.
 
 ## Source-of-truth order
 
-When documents disagree, use this order:
-
-1. Current tested behavior and public code contracts.
-2. Accepted ADRs that have not been explicitly superseded.
-3. `current-state.md`, `architecture.md`, and the active roadmap.
-4. Dated reviews/proposals.
-5. Archived phase notes.
-
-A contradiction in the first three levels is a documentation defect and should be fixed with the code change that exposes it.
+When documents disagree: (1) tested behavior and public code contracts;
+(2) accepted ADRs not explicitly superseded; (3) `queue.md`, `roadmap.md`,
+`architecture.md`, `ground-rules.md`; (4) dated reviews/proposals/dossiers;
+(5) archives. A contradiction in the first three levels is a documentation
+defect — fix it with the code change that exposes it.

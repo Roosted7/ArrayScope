@@ -1,7 +1,15 @@
 # GPU port — continuation brief (handoff, 2026-07-16)
 
+> **Superseded as a queue (2026-07-16):** the branch is merged; `main` is
+> the single line of development and **[`../queue.md`](../queue.md) owns
+> the ordered next steps** (this brief's OPEN items 1–3 landed; 4–9 were
+> transferred there). The worktree named below no longer exists and the
+> cwd trap with it. Kept for its done-inventory, evidence paths, and
+> working practices (now codified in [`../ground-rules.md`](../ground-rules.md)).
+
 Self-contained handoff for the session completing the GPU port. Branch:
-`codex/gpu-engine` in `/home/thomas/projects/ArrayScope/.worktrees/gpu-engine`.
+`codex/gpu-engine` in `/home/thomas/projects/ArrayScope/.worktrees/gpu-engine`
+(historical — see banner above).
 
 ## Environment facts (hard-won; trust these)
 
