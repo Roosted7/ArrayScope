@@ -37,6 +37,7 @@ from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN,
     REDUCER_NATIVE,
+    REDUCER_PHASE_VECTOR,
     RGB8,
     ChunkLod,
     DataChunkKey,
@@ -2827,6 +2828,34 @@ class GpuMontageLayer:
                 if span is None or span[1] <= 0 or span[0] >= len(mode_data)
                 else float(mode_data[span[0]])
             )
+            quads = _tile_quad_rects(
+                int(tile_number),
+                self._last_layout,
+                self._pool.tile_uvs,
+                self._pool.tile_draw_parts,
+            )
+            draw_rects = tuple(tuple(float(value) for value in world) for world, _uv in quads)
+            draw_bounds = (
+                None
+                if not draw_rects
+                else (
+                    min(rect[0] for rect in draw_rects),
+                    min(rect[1] for rect in draw_rects),
+                    max(rect[2] for rect in draw_rects),
+                    max(rect[3] for rect in draw_rects),
+                )
+            )
+            region = self._last_layout.get(int(tile_number))
+            expected_rect = (
+                None
+                if region is None
+                else (
+                    float(region.x),
+                    float(region.y),
+                    float(region.x + region.width),
+                    float(region.y + region.height),
+                )
+            )
             row.update(
                 {
                     "physical_mapping_mode": physical_mode,
@@ -2838,6 +2867,14 @@ class GpuMontageLayer:
                     ),
                     "physical_shader_mapping_key": repr(
                         getattr(visual, "_shader_mapping_key", None)
+                    ),
+                    "physical_draw_world_rects": draw_rects,
+                    "physical_draw_world_bounds": draw_bounds,
+                    "physical_expected_world_rect": expected_rect,
+                    "physical_draw_bounds_match_layout": bool(
+                        draw_bounds is not None
+                        and expected_rect is not None
+                        and np.allclose(draw_bounds, expected_rect, rtol=0.0, atol=1e-6)
                     ),
                 }
             )
@@ -3623,7 +3660,16 @@ class GpuWindowedTileVisual(Visual):
             float span = max(u_levels.y - u_levels.x, 1e-12);
             float phase_index;
             float intensity = 1.0;
-            if (u_component_mode > 2.5) {
+            if (v_mode > 4.5) {
+                // phase_vector pages contain a circular unit-vector mean.
+                // Their canonical resultant magnitude is already [0, 1];
+                // applying the native complex-amplitude levels makes every
+                // reduced page black when native FFT values span thousands.
+                intensity = clamp(length(z), 0.0, 1.0);
+                float phase = atan(z.y, z.x);
+                phase_index = clamp((phase + 3.141592653589793) / 6.283185307179586, 0.0, 1.0);
+                scalar = intensity;
+            } else if (u_component_mode > 2.5) {
                 scalar = map_scale(component_scalar);
                 phase_index = clamp((scalar - u_levels.x) / span, 0.0, 1.0);
             } else {
@@ -4483,7 +4529,13 @@ def _payload_mode(payload: DisplayTilePayload, *, rgb_already_windowed: bool) ->
     if _payload_texture_kind(payload) == TexturePlaneKind.COMPLEX_RG32F:
         mapping = getattr(payload, "shader_mapping", None)
         display_mode = getattr(getattr(mapping, "display_mode", None), "value", getattr(mapping, "display_mode", None))
-        return 4 if display_mode == ShaderDisplayMode.PHASE_COLOR.value else 3
+        if display_mode == ShaderDisplayMode.PHASE_COLOR.value:
+            backing = getattr(payload, "page_backing", None)
+            plans = tuple(getattr(backing, "requested_plans", ()) or ())
+            if plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans):
+                return 5
+            return 4
+        return 3
     image = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     if image.ndim == 3 and image.shape[-1] in (3, 4):
         return 2 if rgb_already_windowed else 1

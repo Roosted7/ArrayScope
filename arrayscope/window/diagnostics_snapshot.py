@@ -55,6 +55,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presented_lod = _montage_presented_lod(session, lod_decision)
     lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
     lifecycle_phase_counts = {} if lifecycle_snapshot is None else dict(lifecycle_snapshot.counts)
+    tile_identity_probe = _tile_identity_probe(window, session)
     retention_started_at = getattr(window.renderer, "_slice_retention_started_at", None)
     stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
     stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
@@ -214,9 +215,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         last_stall_signature=tuple(
             int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
         ),
-        tile_identity_probe=()
-        if session is None
-        else tuple(getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()),
+        tile_identity_probe=tile_identity_probe,
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
@@ -453,6 +452,34 @@ def _presentation_diagnostics(window) -> dict[str, object]:
         except Exception:
             return {}
     return {}
+
+
+def _tile_identity_probe(window, session) -> tuple[dict[str, object], ...]:
+    """Merge semantic/lifecycle rows with what the backend physically draws."""
+
+    if session is None:
+        return ()
+    semantic_rows = tuple(
+        dict(row)
+        for row in getattr(
+            session,
+            "diagnostic_tile_identity_rows",
+            lambda **_kwargs: (),
+        )()
+    )
+    getter = getattr(getattr(window, "img_view", None), "tileTruthPhysicalRows", None)
+    physical_rows = (
+        {}
+        if not callable(getter)
+        else {int(tile): dict(row) for tile, row in dict(getter() or {}).items()}
+    )
+    return tuple(
+        {
+            **row,
+            **physical_rows.get(int(row.get("tile", -1)), {}),
+        }
+        for row in semantic_rows
+    )
 
 
 def _lifecycle_semantic_mismatches(session) -> int:

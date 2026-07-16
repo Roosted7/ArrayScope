@@ -27,7 +27,9 @@ from arrayscope.display.backends.vispy.tiles import (
 )
 from arrayscope.display.tile_layout import TileLayoutRegion
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
-from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
+from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
 
 from tests.display.vispy_test_utils import (
     FakeGloo,
@@ -259,6 +261,60 @@ def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
 
     assert _payload_mode(payload, rgb_already_windowed=False) == 4
     np.testing.assert_array_equal(modes, np.full((6,), 4.0, dtype=np.float32))
+
+
+def test_phase_vector_page_quad_uses_resultant_range_shader_mode():
+    values = np.asarray([[1 + 0j, 1j], [-1 + 0j, -1j]], dtype=np.complex64)
+    plan = plan_source_grid_pages(
+        content_key=("phase",),
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(1, 1),
+        stored_page_shape=(2, 2),
+        dtype="complex64",
+        representation="complex_rg32f",
+        reducer="phase_vector",
+    )[0]
+    page = materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+    lod = LodInfo(level=1, factor=2, source_shape=(2, 2), texture_shape=(1, 1), gutter=0)
+    native = complex_payload(0)
+    payload = replace(
+        native,
+        image=page.values,
+        texture_data=page.values,
+        histogram_data=None,
+        lod=lod,
+        page_backing=PageBackedPresentation((plan,), (page,), (0, 2, 0, 2), lod),
+    )
+
+    assert _payload_mode(payload, rgb_already_windowed=False) == 5
+
+
+def test_mean_complex_page_keeps_level_controlled_phase_color_shader_mode():
+    values = np.asarray([[1 + 0j, 10j], [-100 + 0j, -10j]], dtype=np.complex64)
+    plan = plan_source_grid_pages(
+        content_key=("complex",),
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(1, 1),
+        stored_page_shape=(2, 2),
+        dtype="complex64",
+        representation="complex_rg32f",
+        reducer="mean",
+    )[0]
+    page = materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+    lod = LodInfo(level=1, factor=2, source_shape=(2, 2), texture_shape=(1, 1), gutter=0)
+    native = complex_payload(0)
+    payload = replace(
+        native,
+        image=page.values,
+        texture_data=page.values,
+        histogram_data=None,
+        lod=lod,
+        page_backing=PageBackedPresentation((plan,), (page,), (0, 2, 0, 2), lod),
+    )
+
+    # Mode 4 applies u_levels to magnitude and phase to hue. Mode 5 is only
+    # valid for explicit phase_vector pages and would make level drags inert.
+    assert _payload_mode(payload, rgb_already_windowed=False) == 4
 
 
 def test_complex_payload_upload_uses_defensive_copy_into_atlas():
