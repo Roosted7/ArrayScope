@@ -184,6 +184,16 @@ has no post-start sample with drawn coverage below the visible set and the
 `presentation_continuity` gate is green. Its remaining failures are LOD
 checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
 
+The full resident-LOD matrix is green again after translating eight legacy
+level-swap assertions that required native/finer pixels to be replaced by a
+newly requested coarse level. The policy is now explicit in both directions:
+without pressure, a finer compatible presentation satisfies later coarser
+demand and produces no swap/candidate work; with an explicit residency budget,
+the coarse transaction still exercises distinct page identity, per-tile mixed
+availability, bounded deferral without removals, native semantic-stat reuse,
+and stable histogram identity. `tests/window/test_montage_lod_residency.py`
+passes 156 tests serially.
+
 The ladder-side target planner is also now explicit:
 
 - `render.lod.plan_lod_page_targets` is a Qt-free deterministic transform

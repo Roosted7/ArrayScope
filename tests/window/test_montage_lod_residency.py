@@ -432,11 +432,15 @@ def test_page_singleflight_attaches_without_stealing_foreign_claim():
     assert pyramid.pending_count == 0
 
 
-def test_admitted_level_streams_in_with_distinct_identity_and_shape():
+def test_memory_pressure_admits_reduced_level_with_distinct_identity_and_shape():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
     state, delta = session.build_tile_presentation({})
     native_ids = {tile: payload.source_id for tile, payload in delta.upserts.items()}
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in delta.upserts.values()
+    ) - 1
 
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
@@ -464,10 +468,14 @@ def test_admitted_level_streams_in_with_distinct_identity_and_shape():
     assert session.pending_rung_materializations == []
 
 
-def test_mixed_residency_applies_per_tile_and_reports_common_level():
+def test_pressure_uses_available_coarse_per_tile_and_reports_common_level():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
-    session.build_tile_presentation({})
+    _state, native_delta = session.build_tile_presentation({})
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in native_delta.upserts.values()
+    ) - 1
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
     # Materialize the demanded level for tile 0 only.
@@ -599,7 +607,7 @@ def test_native_only_and_native_scale_sessions_have_no_ingest_demand():
     assert zoomed_in.ingest_lod_demand() is None
 
 
-def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
+def test_demand_flip_materialization_cannot_demote_finer_native_without_pressure():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
     demand = session.ingest_lod_demand()
@@ -613,8 +621,8 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
     rendered = _rendered(session.plan.tiles[0])
     assert _admit_demand_level_for_test(pyramid, demand, rendered, semantic_source_id=("test-tile", rendered.tile.source_index)) is not None
 
-    # No special cases: presentation never over-reduces with the stale level;
-    # it falls back and the ordinary streaming path materializes level 1.
+    # Presentation never over-reduces with the stale level; the ordinary
+    # streaming path may still populate level 1 for future pressure/reuse.
     session.mark_materialized(rendered)
     _state, delta = session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
@@ -628,8 +636,8 @@ def test_demand_flip_during_inflight_ingest_falls_back_to_streaming():
     _materialize(session, request)
     session.dirty_payloads[0] = None
     _state, delta = session.build_tile_presentation({})
-    assert delta.upserts[0].lod.level == 1
-    assert delta.upserts[0].texture_data.shape[:2] == (TILE // 2, TILE // 2)
+    assert delta.upserts[0].lod.level == 0
+    assert delta.upserts[0].texture_data.shape[:2] == (TILE, TILE)
 
 
 def _acknowledge(session, delta):
@@ -649,7 +657,11 @@ def test_presented_lod_summary_reports_plurality_of_presented_payloads():
     # Nothing committed yet: fall back to the session-wide decision (native).
     assert session.presented_lod_summary() == (0, 1, (1, 1))
 
-    session.build_tile_presentation({})
+    _state, native_delta = session.build_tile_presentation({})
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in native_delta.upserts.values()
+    ) - 1
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
     for request in requests:
@@ -852,7 +864,7 @@ def test_refresh_is_native_only_noop():
     assert not session.dirty_payloads
 
 
-def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
+def test_pressure_level_change_replaces_atomically_and_deferral_keeps_old():
     """ADR 0050 contract: a LOD swap never blanks or placeholders a tile.
 
     A commit that changes only the presented level of an acknowledged tile
@@ -865,6 +877,10 @@ def test_level_only_change_replaces_payload_atomically_and_deferral_keeps_old():
     _present_native(session)
     native_payloads = dict(session.tile_presentation_state.payloads)
     assert set(native_payloads) == {0, 1}
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in native_payloads.values()
+    ) - 1
     _admit_zoomed_out_levels(session)
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     session.dirty_payloads.update({0: None, 1: None})
@@ -1017,6 +1033,10 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
     _attach_native_stats(session)
     _present_native(session)
     assert session.lod_stats_recomputes == 0
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in session.tile_presentation_state.payloads.values()
+    ) - 1
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     _admit_zoomed_out_levels(session)
@@ -1057,6 +1077,10 @@ def test_level_swap_keeps_semantic_histogram_identity():
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
     _present_native(session)
     native_payloads = dict(session.tile_presentation_state.payloads)
+    session.tile_residency_budget_bytes = sum(
+        int(np.asarray(payload.texture_data).nbytes)
+        for payload in native_payloads.values()
+    ) - 1
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     _admit_zoomed_out_levels(session)
@@ -4452,7 +4476,7 @@ def test_shared_first_pass_barrier_uses_required_scope_not_retained_active_rows(
     assert not effects.shared_first_pass_barrier_pending(None)
 
 
-def test_finer_presented_preview_remains_shared_target_candidate_after_zoom_out():
+def test_finer_presented_preview_satisfies_coarser_shared_target_after_zoom_out():
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
@@ -4481,7 +4505,7 @@ def test_finer_presented_preview_remains_shared_target_candidate_after_zoom_out(
         )
     )
 
-    assert candidates == (tile,)
+    assert candidates == ()
 
 
 def test_shared_target_candidates_follow_settlement_not_historical_quality():
