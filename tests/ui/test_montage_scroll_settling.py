@@ -28,8 +28,9 @@ from tests.ui.helpers import (
     use_vispy_backend,
 )
 
-_FILL_TIMEOUT_MS = 60_000
-_SCROLL_TIMEOUT_MS = 30_000
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
+
 
 
 def _window_settled(win, indices) -> bool:
@@ -51,7 +52,7 @@ def _scroll_to(win, qtbot, indices) -> None:
     )
     win._set_view_state(state)
     win.update_image_view()
-    qtbot.waitUntil(lambda: _window_settled(win, indices), timeout=_SCROLL_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: _window_settled(win, indices), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
 def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
@@ -81,7 +82,7 @@ def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
         )
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: _window_settled(win, initial), timeout=_FILL_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: _window_settled(win, initial), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         # Scroll down (new sources appended), then back up (new sources
         # prepended) — both retarget directions of the live repro.

@@ -42,8 +42,9 @@ pytestmark = pytest.mark.skipif(
     reason="needs ARRAYSCOPE_STRESS=1, a real display, and the local NIfTI dataset",
 )
 
-_FILL_TIMEOUT_S = 120
-_CONVERGE_TIMEOUT_S = 120
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
+
+
 
 # PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
 # without their phase mapping (a_mode 3 instead of 4).  Real phase-color
@@ -184,7 +185,7 @@ def _build_fft_montage_window(qtbot):
     )
     win._set_view_state(state)
     win.update_image_view()
-    qtbot.waitUntil(lambda: _settled(win), timeout=_FILL_TIMEOUT_S * 1000)
+    qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_S * 1000)
     return win, settings, data, n
 
 
@@ -209,7 +210,7 @@ def test_montage_window_change_presents_mapped_complex_tiles(qtbot):
                 interactive=True,
                 immediate_axis_only=False,
             )
-            deadline = time.monotonic() + _CONVERGE_TIMEOUT_S
+            deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
             while time.monotonic() < deadline and not _settled(win):
                 _pump(qtbot, 0.08)
                 orange = _orange_pixel_count(win)
@@ -302,7 +303,7 @@ def test_interaction_churn_converges_on_real_data(qtbot):
             )
 
         try:
-            qtbot.waitUntil(lambda: _settled(win), timeout=_CONVERGE_TIMEOUT_S * 1000)
+            qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_S * 1000)
         except Exception:
             _dump_convergence_state(win, "post-churn-timeout")
             raise

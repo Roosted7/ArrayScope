@@ -4,6 +4,7 @@ from collections import Counter
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings
 
 
@@ -227,7 +228,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
                 .summary_for(win.renderer._frame_session.level_key)
                 .refined
             ),
-            timeout=20_000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         qtbot.wait(250)
 

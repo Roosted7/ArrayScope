@@ -22,6 +22,11 @@ from time import monotonic, perf_counter, sleep
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 
 def _display_available() -> bool:
     if os.environ.get("QT_QPA_PLATFORM", "") == "offscreen":
@@ -76,7 +81,7 @@ def montage_window():
         vs = win.view_state
         win._set_view_state(vs.with_montage_axis(2, text=":"))
         win.render(reason="gpu-harness-montage")
-        assert harness.wait_settled(timeout=20.0), "montage never settled after open"
+        assert harness.wait_settled(), "montage never settled after open"
         yield harness
     finally:
         win.close()
@@ -172,7 +177,10 @@ class Harness:
         while monotonic() < deadline:
             self.app.processEvents()
 
-    def wait_settled(self, timeout: float = 15.0) -> bool:
+    def wait_settled(
+        self, timeout: float = INTERACTION_SETTLE_HARD_LIMIT_S
+    ) -> bool:
+        timeout = bounded_interaction_settle_timeout_s(timeout)
         deadline = monotonic() + timeout
         while monotonic() < deadline:
             self.app.processEvents()

@@ -98,6 +98,12 @@ only on real data and is stored under `tests/artifacts/<gate>-<date>/`; the
 synthetic registration charts diagnose placement, phase, and continuity but
 do not establish a performance number.
 
+All G5 gates also obey the repository-wide per-step interaction budget: 2 s
+target and 5 s hard failure. A multi-step zoom/pan/scroll scenario receives a
+fresh budget per step, but no stage may turn a 5+ s settlement into a pass by
+widening its timeout. Each stage's commit message records the ring, exact
+pass/skip counts, and artifact paths.
+
 ## Implementation progress
 
 The pure model and first VisPy consumption slice now stand without scheduler

@@ -115,7 +115,7 @@ def test_full_workflow_settles_and_trace_verifies(tmp_path, shape, dtype, max_ti
             "--max-tiles",
             str(max_tiles),
             "--timeout-s",
-            "60",
+            "5",
             "--session-fixture",
             "",
             "--jsonl",
@@ -127,7 +127,9 @@ def test_full_workflow_settles_and_trace_verifies(tmp_path, shape, dtype, max_ti
         env=env,
         capture_output=True,
         text=True,
-        timeout=600,
+        # Process-deadlock guard for the whole multi-stage child.  Each
+        # user-visible stage has already hard-failed at five seconds.
+        timeout=60,
     )
     # Exit code 1 alone is tolerated: the R8 certification gates
     # (full-grid-not-capped, presentation-continuity, ...) are calibrated for

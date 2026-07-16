@@ -4,8 +4,95 @@ from pathlib import Path
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_MS,
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+)
+
 
 ROOT = Path(__file__).parents[2]
+
+
+def _constant_number(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, (int, float))
+    ):
+        return -float(node.operand.value)
+    return None
+
+
+def test_interaction_gates_have_one_bounded_timeout_owner():
+    """No UI gate may turn a slow step green by widening its local timeout."""
+
+    roots = (
+        ROOT / "arrayscope" / "tools",
+        ROOT / "tests" / "gpu_interaction",
+        ROOT / "tests" / "stress",
+        ROOT / "tests" / "ui",
+    )
+    offenders = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text())
+            rel = path.relative_to(ROOT)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        node.targets
+                        if isinstance(node, ast.Assign)
+                        else (node.target,)
+                    )
+                    value = node.value
+                    for target in targets:
+                        if not isinstance(target, ast.Name):
+                            continue
+                        name = target.id
+                        if (
+                            name.isupper()
+                            and "TIMEOUT" in name
+                            and rel != Path("arrayscope/tools/interaction_budget.py")
+                        ):
+                            offenders.append(f"{rel}:{node.lineno}:local {name}")
+                        numeric = _constant_number(value)
+                        if (
+                            numeric is not None
+                            and name.isupper()
+                            and ("SETTLE" in name or "BUDGET" in name)
+                            and rel != Path("arrayscope/tools/interaction_budget.py")
+                        ):
+                            offenders.append(
+                                f"{rel}:{node.lineno}:unbounded {name}={numeric:g}"
+                            )
+                if not isinstance(node, ast.Call):
+                    continue
+                function_name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else ""
+                )
+                for keyword in node.keywords:
+                    numeric = _constant_number(keyword.value)
+                    if numeric is None:
+                        continue
+                    limit = None
+                    if function_name == "waitUntil" and keyword.arg == "timeout":
+                        limit = float(INTERACTION_SETTLE_HARD_LIMIT_MS)
+                    elif function_name == "wait_settled" and keyword.arg == "timeout":
+                        limit = INTERACTION_SETTLE_HARD_LIMIT_S
+                    elif keyword.arg in {"timeout_s", "budget_s"}:
+                        limit = INTERACTION_SETTLE_HARD_LIMIT_S
+                    if limit is not None and numeric > limit:
+                        offenders.append(
+                            f"{rel}:{node.lineno}:{function_name} {keyword.arg}={numeric:g}"
+                        )
+    assert offenders == []
 
 
 def test_managed_docks_do_not_use_qt_toggle_view_action():

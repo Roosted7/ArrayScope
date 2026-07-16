@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
+
 pytestmark = pytest.mark.gpu_interaction
 
 # Thomas's bar (gui-responsiveness memory): any >50 ms synchronous step in the
@@ -66,9 +68,9 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             )
         )
         win.render(reason="gpu-harness-v1-initial")
-        assert h.wait_settled(timeout=20.0), h.settlement_diagnostics()
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), h.settlement_diagnostics()
         win.img_view.setLevels(0.0, 36.0)
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
 
         tiles = h.session.plan.tiles
         boundary_tile = tiles[5]
@@ -79,7 +81,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             yRange=(0.0, float(height)),
             padding=0,
         )
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         assert int(boundary_tile.montage_index) in h.session.required_tile_numbers()
 
         win._set_view_state(
@@ -88,7 +90,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
             )
         )
         win.render(reason="gpu-harness-v1-one-index-boundary")
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         assert h.session.required_target_settled()
         assert not h.session.required_target_unsettled_tiles()
         assert not (
@@ -101,7 +103,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
         # Revealing the boundary column must require no new materialization:
         # its exact pixels were already an obligation at the landing edge.
         h.fit_plan_view()
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         # V1 certifies the image layer. Remove independent composition
         # overlays before sampling the constant-tile framebuffer; two default
         # ROI/label shapes otherwise cover most of tiles 6 and 7 and turn a
@@ -204,10 +206,10 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
             )
         )
         win.render(reason="gpu-harness-v2-initial")
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         win.img_view.setLevels(0.0, 71.0)
         h.fit_view()
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
 
         for start in (36,):
             win._set_view_state(
@@ -221,7 +223,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
             win.render(reason="gpu-harness-v2-fast-scroll")
             app.processEvents()
 
-        assert h.wait_settled(timeout=20.0), h.settlement_diagnostics()
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), h.settlement_diagnostics()
         assert h.session.required_target_settled()
         expected_order = tuple(
             int(tile.montage_index)
@@ -302,7 +304,7 @@ def test_view_fits_montage_when_enabled_after_settle():
         h.pump(3.0)  # let the single-frame view settle completely
         win._set_view_state(win.view_state.with_montage_axis(2, text=":"))
         win.render(reason="gpu-harness-late-montage")
-        assert h.wait_settled(timeout=20.0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         (x0, x1), (y0, y1) = h.session.view_range
         height, width = h.session.plan.display_shape
         span_x, span_y = x1 - x0, y1 - y0
@@ -355,7 +357,7 @@ def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_wind
     )
     for x_range, y_range in ranges:
         view.setRange(xRange=x_range, yRange=y_range, padding=0)
-        assert h.wait_settled(timeout=20.0), f"never settled after zoom range {x_range}/{y_range}"
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), f"never settled after zoom range {x_range}/{y_range}"
         h.assert_lifecycle_settled()
 
     h.fit_view()
@@ -380,7 +382,7 @@ def test_index_scrub_and_return_shows_no_stale_content_or_wedged_claims(montage_
 
     for text in ("9:27", "18:36", "0:18", ":"):
         select(text)
-        assert h.wait_settled(timeout=20.0), f"never settled after scrub to {text!r}"
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), f"never settled after scrub to {text!r}"
 
     h.fit_view()
     h.assert_tile_identity_ramp()
@@ -422,7 +424,7 @@ def test_fft_preview_refinement_settles_without_stalls(montage_window):
 
     for text in (":", "6:24", ":"):
         select(text)
-        assert h.wait_settled(timeout=30.0), (
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), (
             f"FFT preview/refinement montage never settled after scrub to {text!r}"
         )
         h.assert_lifecycle_settled()

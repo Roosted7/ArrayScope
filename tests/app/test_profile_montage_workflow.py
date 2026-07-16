@@ -1345,7 +1345,7 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
             "--backend",
             "pyqtgraph",
             "--timeout-s",
-            "180",
+            "5",
             "--jsonl",
             str(jsonl),
             "--profiler-type",
@@ -1356,6 +1356,8 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
         check=False,
         text=True,
         capture_output=True,
+        # Whole profiler-child deadlock guard.  The workflow itself hard-fails
+        # each user-visible step after the shared five-second limit.
         timeout=45,
     )
 
@@ -1392,7 +1394,7 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
     if "vispy" in backends:
         pytest.importorskip("vispy")
 
-    timeout_s = float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "180"))
+    timeout_s = float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "5"))
     max_tiles_raw = int(os.environ.get("ARRAYSCOPE_PROFILE_MAX_TILES", "0"))
     max_tiles = None if max_tiles_raw <= 0 else max_tiles_raw
     jsonl = tmp_path / "profile-workflow.jsonl"

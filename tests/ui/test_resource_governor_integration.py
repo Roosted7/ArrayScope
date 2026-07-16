@@ -1,6 +1,8 @@
 import numpy as np
 from types import SimpleNamespace
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import clear_arrayscope_settings, process_events
 
 
@@ -57,7 +59,7 @@ def test_interaction_edge_applies_budget_and_lane_quotas_immediately(qtbot):
     qtbot.addWidget(win)
     try:
         process_events(qtbot)
-        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         # A known drain cost separates the idle and interactive budgets.
         for _ in range(6):
             win.resource_governor.record_ui_observation("kernel_bridge_drain", 10.0, item_count=2)
@@ -84,7 +86,7 @@ def test_interaction_stop_edge_restores_idle_budget_and_preparation_lane(qtbot):
     qtbot.addWidget(win)
     try:
         process_events(qtbot)
-        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         for _ in range(6):
             win.resource_governor.record_ui_observation("kernel_bridge_drain", 10.0, item_count=2)
         win._apply_resource_governor_decisions()
@@ -113,7 +115,7 @@ def test_interaction_stop_edge_replans_deferred_native_montage_quality(qtbot, mo
     calls = []
     try:
         process_events(qtbot)
-        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=5000)
+        qtbot.waitUntil(lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         monkeypatch.setattr(
             win.renderer,
             "replan_deferred_interactive_native_quality",

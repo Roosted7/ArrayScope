@@ -2,14 +2,15 @@ import os
 import threading
 import time
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-_WAIT_TIMEOUT_MS = 5000
 
 
-def _wait_until(qtbot, predicate, *, timeout_ms=_WAIT_TIMEOUT_MS):
+def _wait_until(qtbot, predicate, *, timeout_ms=INTERACTION_SETTLE_HARD_LIMIT_MS):
     qtbot.waitUntil(predicate, timeout=timeout_ms)
 
 

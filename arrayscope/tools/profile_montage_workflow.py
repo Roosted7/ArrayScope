@@ -22,6 +22,10 @@ from time import perf_counter
 from uuid import uuid4
 
 import numpy as np
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
 from arrayscope.core.trace import emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
 
@@ -39,15 +43,14 @@ PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
 # slow scroll paces by target-LOD completion, and a single short settle runs
 # after the whole zoom/pan storm.
 SCROLL_FAST_DURATION_S = 5.0
-SCROLL_SLOW_LOD_BUDGET_S = 3.0
-ZOOMPAN_FINAL_SETTLE_S = 3.0
-MONTAGE_PREP_SOFT_BUDGET_S = 8.0
+SCROLL_SLOW_LOD_BUDGET_S = bounded_interaction_settle_timeout_s(3.0)
+ZOOMPAN_FINAL_SETTLE_S = bounded_interaction_settle_timeout_s(3.0)
 ZOOMPAN_INPUT_FPS = 120.0
 ZOOMPAN_MAX_OUT_REQUEST_SCALE = 1_000_000.0
 ZOOMPAN_CENTRAL_SPAN_SCALE = 0.16
 ZOOMPAN_PAN_FRACTION = 0.32
 ZOOMPAN_DEEP_SPAN_SCALE = 0.06
-ZOOMPAN_CHECKPOINT_SETTLE_S = 3.0
+ZOOMPAN_CHECKPOINT_SETTLE_S = bounded_interaction_settle_timeout_s(3.0)
 ZOOMPAN_NEAR_OBSERVE_S = 0.20
 R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
@@ -101,7 +104,7 @@ def run_profile_montage_workflow(
     data_path: str | Path = DEFAULT_DATA_PATH,
     backend: str = "pyqtgraph",
     jsonl: str | Path | None = None,
-    timeout_s: float = 180.0,
+    timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
     max_tiles: int | None = None,
     scroll_max_tiles: int = 60,
     columns: int | None = None,
@@ -122,6 +125,8 @@ def run_profile_montage_workflow(
     sampling profiler such as ``py-spy``.  Returned and JSONL records contain
     enough app diagnostics to correlate profiler stacks with UI-visible phases.
     """
+
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
 
     from arrayscope.app.qt_binding import prefer_pyside6
 
@@ -301,7 +306,7 @@ def run_profile_montage_workflow(
                 win,
                 app,
                 QtCore,
-                budget_s=min(30.0, float(timeout_s)),
+                budget_s=timeout_s,
                 stall_grace_s=4.0,
             )
             if not fixture_startup_settled:
@@ -332,7 +337,7 @@ def run_profile_montage_workflow(
                     f"kernel={getattr(getattr(win, 'kernel', None), 'diagnostics', lambda: None)()!r} "
                     f"lifecycle={None if lifecycle is None else dict(lifecycle.counts)}"
                 )
-            geometry_deadline = perf_counter() + min(10.0, float(timeout_s))
+            geometry_deadline = perf_counter() + timeout_s
             while not (
                 _window_geometry_state(win)["session_viewport_shape_matches"]
                 and _window_geometry_state(win)["session_axis_orientation_matches"]
@@ -492,7 +497,7 @@ def run_profile_montage_workflow(
                 def _fft_scroll_action() -> dict[str, object]:
                     _set_operations(win, fft_operations)
                     _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                     return _apply_montage_scroll_pattern(
                         win,
                         montage_axis=montage_axis,
@@ -532,7 +537,7 @@ def run_profile_montage_workflow(
                 def _scalar_scroll_action() -> dict[str, object]:
                     _set_operations(win, ())
                     _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                     return _apply_montage_scroll_pattern(
                         win,
                         montage_axis=montage_axis,
@@ -567,7 +572,7 @@ def run_profile_montage_workflow(
             def _fft_zoompan_action() -> dict[str, object]:
                 _set_operations(win, ())
                 _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                 return _apply_montage_zoom_pan_stress(
                     win,
                     probe=probe,
@@ -606,7 +611,7 @@ def run_profile_montage_workflow(
             def _scalar_zoompan_action() -> dict[str, object]:
                 _set_operations(win, fft_operations)
                 _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                 return _apply_montage_zoom_pan_stress(
                     win,
                     probe=probe,
@@ -844,6 +849,10 @@ def _wait_for_target_lod(win, app, QtCore, *, budget_s: float, stall_grace_s: fl
     staring at a dead session for the whole budget.
     """
 
+    budget_s = bounded_interaction_settle_timeout_s(budget_s)
+    stall_grace_s = min(
+        bounded_interaction_settle_timeout_s(stall_grace_s), budget_s
+    )
     t0 = perf_counter()
     if _montage_at_target_lod(win):
         return True, 0.0
@@ -1756,7 +1765,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         prep_reached, prep_settle_ms = False, 0.0
@@ -1768,7 +1777,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         auto_reached, auto_settle_ms = False, 0.0
@@ -1784,7 +1793,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         fit_reached, fit_settle_ms = False, 0.0
@@ -1813,7 +1822,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         fast_recovery_reached, fast_recovery_settle_ms = False, 0.0
@@ -2292,7 +2301,11 @@ def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_
     session).  A montage still computing keeps the full budget.
     """
 
-    deadline = perf_counter() + float(budget_s)
+    budget_s = bounded_interaction_settle_timeout_s(budget_s)
+    stall_grace_s = min(
+        bounded_interaction_settle_timeout_s(stall_grace_s), budget_s
+    )
+    deadline = perf_counter() + budget_s
     stall_since = None
     last_sig = None
     while perf_counter() < deadline:
@@ -2940,7 +2953,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
                     app,
                     QtCore,
                     win,
-                    timeout_s=5.0,
+                    timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
                     start=preview_start,
                     draw_start=draw_start,
                     require_presentation_settled=True,
@@ -3082,6 +3095,7 @@ def _run_phase(
     backend: str = "",
     screenshot_dir: Path | None = None,
 ) -> dict[str, object]:
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     win._arrayscope_profile_phase = str(phase)
     visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
     if visual_probe is not None:
@@ -3278,7 +3292,8 @@ def _wait_for_montage_complete(
     predecessor_presentation_identity=None,
     predecessor_semantic_key=None,
 ) -> dict[str, float | int | bool | None]:
-    deadline = time.monotonic() + float(timeout_s)
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     first_materialized_tile_ms = None
     first_presented_tile_ms = None
     first_display_committed_ms = None
@@ -4030,7 +4045,8 @@ def _preview_floor_physical_rows(win) -> list[dict[str, object]]:
 
 
 def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> None:
-    deadline = time.monotonic() + float(timeout_s)
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if _vispy_tile_presentation_draw_count(win) >= _vispy_tile_presentation_request_count(win):
             _process_events(app, QtCore, count=2)
@@ -4042,7 +4058,8 @@ def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> No
 def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float = 3.0) -> None:
     """Drain restore-time paints before measured workflow phases start."""
 
-    deadline = perf_counter() + max(0.1, float(timeout_s))
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = perf_counter() + max(0.1, timeout_s)
     quiet_since = perf_counter()
     previous_draw_count = _vispy_draw_count(win)
     while perf_counter() < deadline:
@@ -6065,7 +6082,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "revision, and age snapshots in scroll_tile_trace (diagnostic; large JSONL)"
         ),
     )
-    parser.add_argument("--timeout-s", type=float, default=180.0)
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=INTERACTION_SETTLE_HARD_LIMIT_S,
+        help=(
+            "Per-interaction settlement deadline in seconds; values above the "
+            f"repository hard limit ({INTERACTION_SETTLE_HARD_LIMIT_S:g} s) are capped"
+        ),
+    )
     parser.add_argument("--max-tiles", type=int, default=0, help="Optional tile cap for local smoke runs; 0 means full dim 2")
     parser.add_argument(
         "--scroll-max-tiles",

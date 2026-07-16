@@ -3,6 +3,8 @@ import time
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -186,7 +188,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
         win.render(reason="test-prefetch-completion-guard")
         qtbot.waitUntil(
             lambda: win.renderer._frame_session is not None,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         session = win.renderer._frame_session
         assert session.document.enabled_operations
@@ -232,7 +234,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
         win.render(reason="test-prefetch-completion-superseded")
         qtbot.waitUntil(
             lambda: win.renderer._frame_session is not session,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         stale_before = win.operation_evaluator.display_cache_diagnostics().prefetch_stale
 
@@ -274,7 +276,7 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
         )
         win._set_view_state(state)
         win.render(reason="test-gpu-montage-prefetch-warm")
-        qtbot.waitUntil(lambda: win.renderer._frame_session is not None, timeout=5000)
+        qtbot.waitUntil(lambda: win.renderer._frame_session is not None, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         session = win.renderer._frame_session
         tile = session.plan.tiles[-1]
         image = np.full(tuple(session.plan.tile_shape), float(tile.source_index), dtype=np.float32)
@@ -539,7 +541,7 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
         # not parked behind real work under parallel test load.
         qtbot.waitUntil(
             lambda: not win.visible_evaluation_controller.is_busy(),
-            timeout=10000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         release_busy = _pin_visible_busy(win)
 
@@ -549,7 +551,7 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
         # The dispatch must actually hit the closed gate first...
         qtbot.waitUntil(
             lambda: win.prefetch_evaluation_controller.diagnostics().prefetch_visible_busy_blocked >= 1,
-            timeout=10000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == 0
         assert getattr(win.renderer, "_pending_prefetch_request", None) is not None, (
@@ -560,12 +562,12 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
         release_busy()
         qtbot.waitUntil(
             lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled >= 1,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         qtbot.waitUntil(
             lambda: win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
             or win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 3)) is not None,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         win.close()
@@ -591,7 +593,7 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
         win._active_slice_axis = 2
         qtbot.waitUntil(
             lambda: not win.visible_evaluation_controller.is_busy(),
-            timeout=10000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         release_busy = _pin_visible_busy(win)
 
@@ -608,7 +610,7 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
         release_busy()
         qtbot.waitUntil(
             lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled >= 1,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         _process_events(qtbot, count=40)
         diagnostics = win.operation_evaluator.display_cache_diagnostics()
@@ -696,7 +698,7 @@ def test_slice_change_schedules_nearby_prefetch_when_enabled(qtbot):
         )
         qtbot.waitUntil(
             lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > before,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         win.close()
@@ -720,7 +722,7 @@ def test_slice_change_without_setting_skips_prefetch(qtbot):
         )
         qtbot.waitUntil(
             lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_skipped > before,
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         win.close()

@@ -5,6 +5,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,10 +25,13 @@ def _process_events(app, count=8):
         app.processEvents()
 
 
-def _wait_until(app, predicate, timeout_s=5.0):
+def _wait_until(
+    app, predicate, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S
+):
     import time
 
-    deadline = time.monotonic() + float(timeout_s)
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         app.processEvents()
         if predicate():
@@ -386,7 +394,7 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
                 .name()
                 .endswith("d2=1")
             ),
-            timeout_s=10.0,
+            timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
         assert win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
 

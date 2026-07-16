@@ -22,9 +22,14 @@ Front page for test policy. Deep dives:
 3. **Implementation-detail tests are deletable** when they block a
    user-visible fix (say so in the commit) — but user-visible assertions are
    never weakened to green a suite ([ground rules](../ground-rules.md) #4).
-4. **No fixed-wait timing assertions.** The suite is parallel by default;
-   `qWait(220)`-style windows flake under load. Wait on the actual
-   signal/condition with a generous timeout.
+4. **No fixed-wait timing assertions and no permissive settle timeouts.** The
+   suite is parallel by default; `qWait(220)`-style windows flake under load.
+   Wait on the actual signal/condition. For every user-visible step the target
+   is 2 s and the hard failure is 5 s, per
+   `arrayscope.tools.interaction_budget`. A step-specific timeout may be
+   shorter and must remain capped by that owner; it may never be widened to
+   green a slow path. Longer whole-process deadlock guards are not settlement
+   success budgets.
 5. **Oracles must be proven able to fail.** A gate that passes on an empty
    trace or a clamped framebuffer rectangle is vacuous — pair new oracles
    with fault injection (`trace_verify` grew `trace_not_empty` /
@@ -40,6 +45,11 @@ Front page for test policy. Deep dives:
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`) |
 | 4 — real-GL/Wayland acceptance | `tests/gpu_interaction` pixel/heartbeat harness + live gate tests; the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
 | benchmarks/harness | `profile_montage_workflow`, `rendering_benchmarks`, `profile_scroll_input` + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow --backend {vispy,pyqtgraph}` (cwd = repo root for `data/` paths) |
+
+The 5 s interaction limit applies to each step in every ring and harness, not
+to the cumulative duration of a scenario with several steps. Profile CLI
+values above the limit are clamped, and the architecture guard rejects local
+settlement-timeout owners.
 
 **Enforcement gap, stated honestly:** rings 3–4 are machine-bound (real
 Wayland, real GPU, local data) and cannot run in CI — CI is entirely

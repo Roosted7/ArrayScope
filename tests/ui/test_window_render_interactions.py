@@ -3,6 +3,8 @@ import time
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
     assert_size_close as _assert_size_close,
@@ -257,7 +259,7 @@ def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monke
         win._set_view_state(state)
         win.render(reason="test-live-frame-effect-gate")
 
-        qtbot.waitUntil(lambda: bool(observed), timeout=5000)
+        qtbot.waitUntil(lambda: bool(observed), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         assert observed
         assert all(observed)
     finally:
@@ -344,7 +346,7 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 6.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
@@ -421,7 +423,7 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 19.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
@@ -453,7 +455,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 19.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
         win.operation_evaluator.clear_cache()
@@ -470,7 +472,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
                 tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
                 and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
             ),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         win.close()
@@ -510,7 +512,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
                 tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
                 and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
             ),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         win._on_slice_index_changed(2, 2)
@@ -520,7 +522,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
                 tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
                 and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
             ),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         # Cached path: revisiting slice 1 must reuse the stored tile without a
@@ -533,7 +535,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
                 tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
                 and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
             ),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         win.close()
@@ -555,7 +557,7 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 19.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
@@ -588,7 +590,7 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 19.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
@@ -629,7 +631,7 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         qtbot.waitUntil(
             lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
             == (0.0, 19.0),
-            timeout=5000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)

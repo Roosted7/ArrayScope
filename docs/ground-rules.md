@@ -15,7 +15,14 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
    — black tiles, wrong order, identity aliasing — was two owners of one
    truth drifting apart.)
 3. **GUI thread never hangs.** A synchronous GUI-thread step >50 ms is a
-   bug; pan/scrub heartbeat target ~16 ms.
+   bug; pan/scrub heartbeat target ~16 ms. Every user-visible open, render,
+   zoom, pan, scroll, scrub, level change, or refinement step targets 2 s and
+   **hard-fails at 5 s**. The limit is per step, so a multi-step scenario may
+   take longer in total. Tests and tools take this value only from
+   `arrayscope.tools.interaction_budget`; a local timeout may be shorter but
+   must be capped by that owner. Never widen a settlement timeout to make a
+   slow path green. A longer whole-process watchdog may only detect a dead
+   child and cannot turn late settlement into success.
 4. **Tests pin user-visible behavior.** A test that pins an implementation
    detail (upload counts, internal predicate scoping) may be deleted when it
    blocks a user-visible fix — say so in the commit message.

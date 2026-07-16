@@ -29,6 +29,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from arrayscope.gpu import DataChunkKey
 
 from tests.ui.helpers import (
@@ -41,7 +43,6 @@ from tests.ui.helpers import (
     use_vispy_backend,
 )
 
-_WAIT_TIMEOUT_MS = 15_000
 
 CHUNK = 256  # == display.frame_planner.ANCHORED_CHUNK_SHAPE[1]; asserted below
 # Four chunks wide so the shifted window keeps interior chunks strictly
@@ -89,7 +90,7 @@ def _window_settled(win, start: int) -> bool:
 
 
 def _wait_for_window(win, qtbot, start: int) -> None:
-    qtbot.waitUntil(lambda: _window_settled(win, start), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: _window_settled(win, start), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
 def _pool(win):
@@ -140,7 +141,7 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
         for view_x, view_y in probes:
             qtbot.waitUntil(
                 lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
-                timeout=_WAIT_TIMEOUT_MS,
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
             value = committed_value(win, view_x, view_y)
             expected = data[view_y, START_B + view_x]
@@ -282,7 +283,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         pool = _pool(win)
         assert _resident_chunks(pool), "plane 0 did not engage chunked residency"
@@ -301,7 +302,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         def plane_1_warm() -> bool:
             return len(_resident_chunk_keys_for_content(pool, plane_1_key)) >= expected_chunks
 
-        qtbot.waitUntil(plane_1_warm, timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(plane_1_warm, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         # The warm plane is residency only: tile 0 still presents plane 0.
         presented = _resident_chunks(pool)
         assert not (presented & _resident_chunk_keys_for_content(pool, plane_1_key)), (
@@ -311,7 +312,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         chunk_uploads_before = pool.chunk_upload_count
         uploads.clear()
         apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         # The scroll commit presented plane 1 through the chunked path...
         presented_now = _resident_chunks(pool)
@@ -358,14 +359,14 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         pool = _pool(win)
         chunks_plane_0 = _resident_chunks(pool)
         assert chunks_plane_0, "plane 0 did not engage chunked residency"
 
         apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         # Different plane, different content: plane 0's chunks are unlinked
         # from the tile but must SURVIVE as warm page-table residency
         # (grow-before-evict) while plane 1's arrive.
@@ -378,7 +379,7 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
 
         uploads.clear()
         apply_plane(win, 0, reason="test-plane-back")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
         assert not native_uploads, (
@@ -457,7 +458,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
 
         # A retained factor-16 floor may resolve first. It is honest fallback,
         # not the requested target; wait for the ladder's exact factor-2 rung.
-        qtbot.waitUntil(factor_two_converged, timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(factor_two_converged, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         chunks = {key for key in reduced_chunks() if int(key.lod.factor) == 2}
         # Factor-2 keys are the exact canonical page-plan keys. Boundary
         # pages may be clipped while interior pages stay globally aligned.
@@ -490,7 +491,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         for view_x, view_y in probes:
             qtbot.waitUntil(
                 lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
-                timeout=_WAIT_TIMEOUT_MS,
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
             value = committed_value(win, view_x, view_y)
             source_x = shifted_start + view_x

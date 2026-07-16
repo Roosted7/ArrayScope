@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 
@@ -828,7 +829,7 @@ def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
     qtbot.addWidget(window)
     try:
         window.show()
-        qtbot.waitUntil(window.isVisible, timeout=10_000)
+        qtbot.waitUntil(window.isVisible, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         viewport = window.img_view.graphicsView.viewport()
         view_range = window.img_view.getView().viewRange()
         tx = ViewportContinuityTransaction(
@@ -844,7 +845,7 @@ def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
 
         window.resize(max(window.minimumWidth(), window.width() - 40), window.height())
 
-        qtbot.waitUntil(lambda: tx.released, timeout=10_000)
+        qtbot.waitUntil(lambda: tx.released, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     finally:
         window.close()
         settings.setValue(
