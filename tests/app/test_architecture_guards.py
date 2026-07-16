@@ -26,6 +26,24 @@ def _constant_number(node):
     return None
 
 
+def _is_global_capped_interaction_budget(node):
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "min"
+        and len(node.args) == 2
+        and not node.keywords
+    ):
+        return False
+    has_local_limit = any(_constant_number(argument) is not None for argument in node.args)
+    has_global_limit = any(
+        isinstance(argument, ast.Name)
+        and argument.id == "INTERACTION_SETTLE_HARD_LIMIT_S"
+        for argument in node.args
+    )
+    return has_local_limit and has_global_limit
+
+
 def test_interaction_gates_have_one_bounded_timeout_owner():
     """No UI gate may turn a slow step green by widening its local timeout."""
 
@@ -58,15 +76,14 @@ def test_interaction_gates_have_one_bounded_timeout_owner():
                             and rel != Path("arrayscope/tools/interaction_budget.py")
                         ):
                             offenders.append(f"{rel}:{node.lineno}:local {name}")
-                        numeric = _constant_number(value)
                         if (
-                            numeric is not None
-                            and name.isupper()
+                            name.isupper()
                             and ("SETTLE" in name or "BUDGET" in name)
                             and rel != Path("arrayscope/tools/interaction_budget.py")
+                            and not _is_global_capped_interaction_budget(value)
                         ):
                             offenders.append(
-                                f"{rel}:{node.lineno}:unbounded {name}={numeric:g}"
+                                f"{rel}:{node.lineno}:uncapped {name}"
                             )
                 if not isinstance(node, ast.Call):
                     continue
