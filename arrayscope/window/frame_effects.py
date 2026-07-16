@@ -3076,6 +3076,18 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
         if current is None or not renderer._is_current_frame_session(session_id, session_key):
             return
         if not renderer._is_current_render_generation(current.render_generation):
+            # The candidate plan was computed under an older render
+            # generation and must not be applied — but the async flag is the
+            # in-flight marker ``complete_deferred_stage_fan_in`` defers to,
+            # and it must not outlive this task.  Leaving it set fabricated a
+            # phantom planner that parked the session's deferred stage work
+            # forever: 132-146 pending tiles with an idle kernel until the
+            # watchdog asserted (field stall 2026-07-16 09:14,
+            # /tmp/arrayscope-stall-1-1).  Clear it and hand ownership back
+            # to the retarget path, which rebuilds the plan for the current
+            # generation.
+            current.stage_planning_async = False
+            renderer.retarget_frame_pipeline(current)
             return
         current.stage_planning_async = False
         current.stage_planning_deferred = False

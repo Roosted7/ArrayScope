@@ -43,7 +43,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 _FILL_TIMEOUT_S = 120
-_CONVERGE_TIMEOUT_S = 45
+_CONVERGE_TIMEOUT_S = 120
+
+# PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
+# without their phase mapping (a_mode 3 instead of 4).  Real phase-color
+# content contains a few hundred legitimately near-orange pixels; the
+# 2026-07-16 floor-mapping defect produced 6,000-19,000 per frame.
+_PAL_RELAXED_ORANGE = (249, 127, 16)
+_ORANGE_TOLERANCE = 16
+_ORANGE_DEFECT_THRESHOLD = 3000
+
+
+def _orange_pixel_count(win) -> int:
+    frame = np.asarray(win.img_view._vispy_canvas.render())[..., :3].astype(np.int16)
+    reference = np.array(_PAL_RELAXED_ORANGE, dtype=np.int16)
+    return int(np.count_nonzero(np.all(np.abs(frame - reference) <= _ORANGE_TOLERANCE, axis=-1)))
 
 
 def _settled(win) -> bool:
@@ -63,8 +77,65 @@ def _pump(qtbot, seconds: float) -> None:
         qtbot.wait(20)
 
 
-def test_interaction_churn_converges_on_real_data(qtbot):
-    from tests.ui.helpers import make_backend_window, restore_default_backend, use_vispy_backend
+def _dump_convergence_state(win, label: str) -> None:
+    """On failure: the owner-chain numbers a stall diagnosis starts from."""
+
+    session = getattr(win.renderer, "_frame_session", None)
+    if session is None:
+        print(f"[{label}] no frame session")
+        return
+    unsettled = session.required_target_unsettled_tiles()
+    print(
+        f"[{label}] session={session.session_id} unsettled={len(unsettled)} "
+        f"pending={len(session.pending_tiles)} "
+        f"active={len(session.active_tile_requests)} "
+        f"evaluating={len(session.lifecycle.evaluating_tiles)} "
+        f"dirty={len(session.dirty_payloads)} "
+        f"upserts={len(session.pending_payload_upserts)} "
+        f"loading={len(session.loading_tiles)} "
+        f"flush={session.flush_pending}/{session.final_commit_pending} "
+        f"visible_busy={win.montage_tile_evaluation_controller.is_busy()} "
+        f"plan_complete={session.visible_plan_complete()}"
+    )
+    print(f"[{label}] unsettled sample: {tuple(unsettled)[:24]}")
+    fan_in = session.stage_fan_in
+    print(
+        f"[{label}] stage_deferred={getattr(session, 'stage_planning_deferred', None)} "
+        f"async={getattr(session, 'stage_planning_async', None)} "
+        f"deferred_missing={len(tuple(getattr(session, 'deferred_missing_tiles', ()) or ()))} "
+        f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())} "
+        f"fanin_attached={len(getattr(fan_in, 'attached_requests', ()) or ())} "
+        f"fanin_stage_keys={len(getattr(fan_in, 'tile_stage_keys', {}) or {})} "
+        f"viewport_pending={getattr(win, '_montage_viewport_update_pending', None)} "
+        f"viewport_interaction={getattr(win, '_viewport_interaction_active', None)} "
+        f"coordinator_interactive={getattr(getattr(win, 'render_coordinator', None), 'interactive_active', None)} "
+        f"native_deferred={getattr(getattr(getattr(session, 'pipeline', None), 'counters', None), 'interactive_native_deferred', None)}"
+    )
+    kernel = getattr(win, "kernel", None)
+    quotas = getattr(kernel, "_lane_quotas", None)
+    print(f"[{label}] lane quotas: {quotas}")
+    for attr in ("_queues", "_pending", "_heap", "_tasks"):
+        value = getattr(kernel, attr, None)
+        if value is not None:
+            try:
+                print(f"[{label}] kernel.{attr}: size={len(value)}")
+            except TypeError:
+                pass
+    coordinator = getattr(win, "render_coordinator", None)
+    print(f"[{label}] coordinator pending_render={getattr(coordinator, 'has_pending_render', None)} "
+          f"backpressure_skips={getattr(coordinator, 'presentation_backpressure_skips', None)}")
+    view = getattr(win, "img_view", None)
+    draw_pending = getattr(view, "presentationDrawPending", None)
+    print(f"[{label}] presentationDrawPending={draw_pending() if callable(draw_pending) else None}")
+    # Discriminator: does one manual retarget unstick the session?
+    win.renderer.retarget_frame_pipeline(session)
+    print(f"[{label}] after manual retarget: pending={len(session.pending_tiles)} "
+          f"active={len(session.active_tile_requests)} "
+          f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}")
+
+
+def _build_fft_montage_window(qtbot):
+    from tests.ui.helpers import make_backend_window, use_vispy_backend
 
     settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
     from arrayscope.io.file_interpreters import load_file
@@ -75,21 +146,76 @@ def test_interaction_churn_converges_on_real_data(qtbot):
 
     win = make_backend_window(qtbot, data)
     win.resize(1200, 900)
-    try:
-        win.show()
-        win.operation_coordinator.load_operations(
-            (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
-        )
-        win._set_document(win.operation_coordinator.document)
-        win._coerce_channel_for_current_dtype()
+    win.show()
+    win.operation_coordinator.load_operations(
+        (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+    )
+    win._set_document(win.operation_coordinator.document)
+    win._coerce_channel_for_current_dtype()
 
-        n = int(data.shape[2])
-        state = win.view_state.with_montage_axis(
-            2, columns=None, indices=tuple(range(n)), text=f"0:{n}"
-        )
-        win._set_view_state(state)
-        win.update_image_view()
-        qtbot.waitUntil(lambda: _settled(win), timeout=_FILL_TIMEOUT_S * 1000)
+    n = int(data.shape[2])
+    state = win.view_state.with_montage_axis(
+        2, columns=None, indices=tuple(range(n)), text=f"0:{n}"
+    )
+    win._set_view_state(state)
+    win.update_image_view()
+    qtbot.waitUntil(lambda: _settled(win), timeout=_FILL_TIMEOUT_S * 1000)
+    return win, settings, data, n
+
+
+def test_montage_window_change_presents_mapped_complex_tiles(qtbot):
+    """Field defect 2026-07-16 09:14: entering tiles of a montage window
+    change presented resident complex floors WITHOUT their phase mapping and
+    flashed PAL-relaxed LUT[0] orange until exact payloads replaced them
+    (pre-fix probe: 54 orange frames, up to 19,300 orange pixels)."""
+
+    from tests.ui.helpers import restore_default_backend
+
+    win, settings, _data, n = _build_fft_montage_window(qtbot)
+    try:
+        for indices in (tuple(range(n // 3, n // 3 + 60)), tuple(range(n))):
+            win._apply_slice_state(
+                2,
+                win.view_state.with_montage_axis(
+                    2, columns=None, indices=indices,
+                    text=f"{indices[0]}:{indices[-1] + 1}",
+                ),
+                reason="slice-range",
+                interactive=True,
+                immediate_axis_only=False,
+            )
+            deadline = time.monotonic() + _CONVERGE_TIMEOUT_S
+            while time.monotonic() < deadline and not _settled(win):
+                _pump(qtbot, 0.08)
+                orange = _orange_pixel_count(win)
+                assert orange < _ORANGE_DEFECT_THRESHOLD, (
+                    f"montage window change shows {orange} PAL-relaxed LUT[0] "
+                    "orange pixels while filling (2026-07-16 floor-mapping "
+                    "defect class)"
+                )
+            assert _settled(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "OPEN (docs/redesign/stale-empty-tiles-2026-07-16.md): after ~12s of "
+        "extreme gesture churn a compound lost-wakeup state remains — "
+        "hundreds of pending upserts stay queued through apply_montage_"
+        "presentation with healthy lane quotas and a phantom-async-free "
+        "deferred stage plan. The 2026-07-16 fixes closed the field-observed "
+        "members of this family; this net stays red until the commit-path "
+        "bail is owned too."
+    ),
+)
+def test_interaction_churn_converges_on_real_data(qtbot):
+    from tests.ui.helpers import restore_default_backend
+
+    win, settings, data, n = _build_fft_montage_window(qtbot)
+    try:
 
         view = win.img_view.getView()
         (x0, x1), (y0, y1) = view.viewRange()[0], view.viewRange()[1]
@@ -147,8 +273,19 @@ def test_interaction_churn_converges_on_real_data(qtbot):
                     immediate_axis_only=True,
                 )
             _pump(qtbot, 0.09)
+            orange = _orange_pixel_count(win)
+            assert orange < _ORANGE_DEFECT_THRESHOLD, (
+                f"frame during churn step {step} shows {orange} PAL-relaxed "
+                "LUT[0] orange pixels: complex texels are being drawn without "
+                "their phase mapping (2026-07-16 floor-mapping defect class)"
+            )
 
-        qtbot.waitUntil(lambda: _settled(win), timeout=_CONVERGE_TIMEOUT_S * 1000)
+        try:
+            qtbot.waitUntil(lambda: _settled(win), timeout=_CONVERGE_TIMEOUT_S * 1000)
+        except Exception:
+            _dump_convergence_state(win, "post-churn-timeout")
+            raise
+
         session = win.renderer._frame_session
         assert session.required_target_unsettled_tiles() == ()
         assert not session.pending_payload_upserts

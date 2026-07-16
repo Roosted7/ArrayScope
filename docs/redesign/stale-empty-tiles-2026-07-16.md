@@ -97,6 +97,64 @@ spelling flip had more corpses to leave behind).
   mismatch (reintroduces the R8A aliasing the typed contract exists to stop).
 - A watchdog that "repairs" the loop (V3 rule: watchdogs observe, owners fix).
 
+## Same-day follow-up: transient orange tiles during fill (09:14 field report)
+
+After the fixes above, the user reported ~4-tile clusters rendering
+PAL-relaxed orange (full-bright phase color over zero magnitude) transiently
+while a complex FFT montage loads, strongest when changing the montage index
+window. Framebuffer probe (`probe_orange.py`, Wayland, real data) reproduced
+it deterministically on a shrink/grow gesture: 54 orange frames, up to
+19,300 orange pixels; the orange pages carried per-quad ``a_mode=3``
+(magnitude through the cyclic LUT) with ``physical_page_divergences == {}``
+— wrong **desired** state, invisible to the audit by construction.
+
+Root cause: ``ensure_floor_payloads`` presented resident complex floor
+planes with ``shader_mapping=None`` because ``lod_preview_metadata`` is
+per-session while the pyramid cache persists — entering tiles of a new
+montage window reuse the previous session's planes without their mappings,
+and ``_payload_mode`` maps an unmapped COMPLEX_RG32F payload to mode 3.
+
+Fix: the mapping is a pure function of the current view state;
+``display.slice_engine.complex_texture_shader_mapping`` mints it and the
+floor builder uses it whenever the metadata mapping is gone. Probe post-fix:
+1 residual frame of 605 scattered pixels (legitimate near-orange phase
+content), zero solid tile blocks. Gates:
+``tests/window/test_floor_payload_mapping.py``.
+
+The same field session's stall (``/tmp/arrayscope-stall-1-1.trace.jsonl``:
+36 ``pending_tiles``, 55 required-unsettled, kernel idle ~3 s during an
+interactive fill) belongs to a **deferred-stage-planning lost-wakeup family**,
+three members of which are now fixed (churn-harness proven, each moved the
+stall to the next member):
+
+1. The interaction-quiet falling edge only replanned when
+   ``interactive_native_deferred > 0``; interactive montage retargets defer
+   STAGE planning (``stage_planning_deferred`` + tiles parked in
+   ``pending_tiles``) without touching that counter, so the deferred plan had
+   no owner after the gesture ended. ``replan_deferred_interactive_native_
+   quality`` now also triggers on a deferred (non-async) stage plan.
+2. ``submit_deferred_stage_fan_in_plan``'s ``done`` callback bailed on a
+   stale render generation WITHOUT clearing ``stage_planning_async`` — a
+   phantom in-flight planner that ``complete_deferred_stage_fan_in`` deferred
+   to forever. The bail now clears the flag and hands ownership back to
+   ``retarget_frame_pipeline``.
+3. Bounded commits can consume ``flush_pending``/``final_commit_pending``
+   while payload upserts remain queued; ``retarget_frame_pipeline`` now
+   treats non-empty ``pending_payload_upserts`` as its own flush obligation.
+
+**Still open** (xfail net:
+``tests/stress/test_interaction_convergence.py::test_interaction_churn_converges_on_real_data``):
+after ~12 s of extreme seeded churn, a compound state remains where ~200
+pending upserts stay queued although ``apply_ready_montage_display`` runs
+with ``flush=True``, lane quotas are healthy (preview/preparation 7),
+``presentationDrawPending`` is False, and a fresh deferred stage plan exists
+— the commit path itself bails somewhere between ``apply_montage_
+presentation`` and the backend. Next lead: instrument the commit chain's
+early returns the way the identity gate was instrumented (loud bail
+reasons), then bisect the churn script down to the minimal gesture pair.
+The realistic field gestures (fill, window shrink/grow, range flips at human
+pace) all converge with the fixes above.
+
 ## Follow-ups (other-lane / lower priority)
 
 - `montage_indices` has the same two-spellings hazard (explicit full tuple vs

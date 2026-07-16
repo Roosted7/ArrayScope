@@ -326,7 +326,18 @@ class FrameRuntimeMixin:
         pipeline.effects.release_display_owned_pending(scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
-        if force_commit or session.flush_pending or session.final_commit_pending:
+        if (
+            force_commit
+            or session.flush_pending
+            or session.final_commit_pending
+            or session.pending_payload_upserts
+        ):
+            # Queued payload upserts are their own flush obligation: bounded
+            # commits can consume the flush flags while upserts remain queued,
+            # and a session with upserts but no flush owner never presents
+            # them (2026-07-16 churn harness: 202 pending upserts, flush
+            # flags clear, kernel idle).  The bounded commit inside owns
+            # pacing; this only guarantees an owner exists.
             self.apply_ready_montage_display(session)
         if not submitted:
             self._finish_frame_session_if_complete(session)
@@ -355,15 +366,28 @@ class FrameRuntimeMixin:
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
         residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
+        # Interactive montage retargets also park their MISSING-tile producer:
+        # stage planning is deferred (``stage_planning_deferred``) and the
+        # tiles queue in ``pending_tiles``.  That deferral does not touch the
+        # interactive-native counter, so gating this edge on the counter alone
+        # left the deferred stage plan unowned after the gesture ended — 146
+        # pending tiles with an idle kernel until the watchdog asserted
+        # (field stall 2026-07-16 09:14, /tmp/arrayscope-stall-1-1).  The
+        # completion path (``complete_deferred_stage_fan_in``) is idempotent
+        # and runs first thing inside ``retarget_frame_pipeline``.
+        stage_deferred = bool(getattr(session, "stage_planning_deferred", False)) and not bool(
+            getattr(session, "stage_planning_async", False)
+        )
         deferred_generation = (
             int(getattr(session, "session_id", 0) or 0),
             id(pipeline),
             deferred,
         )
-        if not residency_deferred and deferred <= 0:
+        if not residency_deferred and not stage_deferred and deferred <= 0:
             return False
         if (
             not residency_deferred
+            and not stage_deferred
             and deferred_generation
             == getattr(self, "_montage_native_deferred_replanned", None)
         ):

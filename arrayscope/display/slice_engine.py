@@ -249,6 +249,30 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional
     )
 
 
+def complex_texture_shader_mapping(state, colormap_lut=None):
+    """Canonical shader mapping for a COMPLEX_RG32F texture under ``state``.
+
+    A complex texture is only displayable together with the mapping that says
+    HOW to read it; the mapping is a pure function of the current channel,
+    scale, and LUT — not of the plane's history.  Callers presenting a
+    resident complex plane whose recorded mapping is gone (metadata is
+    session-scoped; the pyramid cache is not) must mint the current mapping
+    here instead of presenting unmapped complex texels: drawn without
+    phase-color the magnitude runs through the cyclic LUT and zero magnitude
+    renders LUT[0] orange (field defect 2026-07-16 09:14).
+    """
+
+    channel = _channel_mode(state.channel)
+    phase_color = channel in {ChannelMode.COMPLEX, ChannelMode.ANGLE}
+    return ShaderMapping(
+        component=_shader_component_for_channel(channel),
+        scale=_shader_scale(state.scale),
+        display_mode=ShaderDisplayMode.PHASE_COLOR if phase_color else ShaderDisplayMode.SCALAR,
+        lut_identity=_lut_identity(colormap_lut) if phase_color else None,
+        lut_data=colormap_lut if phase_color else None,
+    )
+
+
 def with_slice_index(state, axis, index):
     return state.with_slice(axis, index)
 

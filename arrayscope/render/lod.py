@@ -1001,6 +1001,26 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         texture_kind = getattr(metadata, "texture_kind", None)
         if texture_kind is None:
             texture_kind = floor_texture_kind(key.component)
+        shader_mapping = getattr(metadata, "shader_mapping", None)
+        if (
+            shader_mapping is None
+            and texture_kind == TexturePlaneKind.COMPLEX_RG32F
+            and getattr(session, "view_state", None) is not None
+        ):
+            # A resident complex floor plane can outlive the session that
+            # recorded its preview metadata (the pyramid cache persists;
+            # ``lod_preview_metadata`` is per-session).  A complex texture
+            # presented WITHOUT its mapping draws magnitude through the
+            # cyclic LUT — zero magnitude renders LUT[0] orange (field
+            # defect 2026-07-16 09:14: entering tiles of a montage window
+            # change flashed orange until exact payloads replaced them).
+            # The mapping is a pure function of the current view state.
+            from arrayscope.display.slice_engine import complex_texture_shader_mapping
+
+            shader_mapping = complex_texture_shader_mapping(
+                session.view_state,
+                getattr(session, "colormap_lut", None),
+            )
         if texture_requires_display_histogram(plane, texture_kind) and not display_histogram_matches_texture(histogram, plane):
             continue
         factor_x = 1 << int(key.level_xy[0])
@@ -1036,7 +1056,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             texture_kind=texture_kind,
             lod=lod,
             quality=str(getattr(metadata, "quality", "preview") or "preview"),
-            shader_mapping=getattr(metadata, "shader_mapping", None),
+            shader_mapping=shader_mapping,
             source_anchor=source_anchor,
             level_data=getattr(metadata, "level_data", None),
             level_stats=getattr(metadata, "level_stats", None),
@@ -1044,13 +1064,11 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                 session.plan.tiles[int(tile_number)],
                 texture_data=np.asarray(plane),
                 texture_kind=texture_kind,
-                shader_mapping=getattr(metadata, "shader_mapping", None),
+                shader_mapping=shader_mapping,
                 lod=lod,
                 quality=str(getattr(metadata, "quality", "preview") or "preview"),
             ),
-            presentation_identity=session.tile_presentation_identity(
-                getattr(metadata, "shader_mapping", None)
-            ),
+            presentation_identity=session.tile_presentation_identity(shader_mapping),
         )
         session.display_tile_payloads[tile_number] = payload
         session.record_tile_payload(payload)
