@@ -19,9 +19,9 @@ import numpy as np
 
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-from arrayscope.display.pyramid import PyramidCache, reduce_box_mean
+from arrayscope.display.pyramid import LodPageCache, materialize_lod_page
 from arrayscope.display.source_anchoring import SourceAnchoring
-from arrayscope.window.frame_session import FrameSession, pyramid_key_for_rendered
+from arrayscope.window.frame_session import FrameSession
 
 TILE = 64
 ZOOMED_OUT_RANGE = ((0.0, 4.0 * 2 * TILE), (0.0, 4.0 * TILE))
@@ -81,7 +81,7 @@ def _session(*, montage_axis, source_anchoring=None, count=2):
         skipped_tiles=set(),
         pending_tiles=[],
         lod_policy_mode=LOD_POLICY_RESIDENT,
-        pyramid_cache=PyramidCache(max_bytes=1 << 24),
+        lod_page_cache=LodPageCache(max_bytes=1 << 24),
         source_anchoring=source_anchoring,
     )
     for index, tile in enumerate(tiles):
@@ -104,17 +104,24 @@ def _floor_payload_for_exact_reduced_level(session):
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     assert int(demand.desired_level) > 0
     rendered = session.rendered_tiles[1]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    key = pyramid_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=demand.desired_level,
-        semantic_source_id=semantic_id,
+    key = session._lod_page_set_key_for(
+        rendered, demand=demand, level=demand.desired_level
     )
-    plane = reduce_box_mean(np.asarray(rendered.image), key.factor_xy)
+    source_origin_yx = (
+        key.plans[0].valid_source_rect_yx[0],
+        key.plans[0].valid_source_rect_yx[2],
+    )
+    pages = tuple(
+        materialize_lod_page(
+            rendered.image,
+            source_origin_yx=source_origin_yx,
+            plan=plan,
+        )
+        for plan in key.plans
+    )
     del session.rendered_tiles[1]
     session.dirty_payloads.clear()
-    assert session.admit_preview_plane(1, key, plane, quality="exact")
+    assert session.admit_preview_plane(1, key, pages, quality="exact")
 
     session._ensure_floor_payloads((1,))
     payload = session.display_tile_payloads[1]
@@ -174,17 +181,24 @@ def test_preview_quality_floor_payload_never_carries_an_anchor():
     )
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     rendered = session.rendered_tiles[1]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    key = pyramid_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=demand.desired_level,
-        semantic_source_id=semantic_id,
+    key = session._lod_page_set_key_for(
+        rendered, demand=demand, level=demand.desired_level
     )
-    plane = reduce_box_mean(np.asarray(rendered.image), key.factor_xy)
+    source_origin_yx = (
+        key.plans[0].valid_source_rect_yx[0],
+        key.plans[0].valid_source_rect_yx[2],
+    )
+    pages = tuple(
+        materialize_lod_page(
+            rendered.image,
+            source_origin_yx=source_origin_yx,
+            plan=plan,
+        )
+        for plan in key.plans
+    )
     del session.rendered_tiles[1]
     session.dirty_payloads.clear()
-    assert session.admit_preview_plane(1, key, plane, quality="preview")
+    assert session.admit_preview_plane(1, key, pages, quality="preview")
 
     session._ensure_floor_payloads((1,))
     payload = session.display_tile_payloads[1]

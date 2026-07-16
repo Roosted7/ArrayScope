@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from arrayscope.core.view_state import ViewState
 from arrayscope.display.pyramid import (
     LodPageCache,
     MaterializedLodPage,
@@ -20,12 +21,15 @@ from arrayscope.display.pyramid import (
 )
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.backends.pyqtgraph.tiles import _assemble_page_backed_payload
+from arrayscope.display.montage import MontageTile, RenderedTile
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
     PageBackedPresentation,
     TiledValueSource,
 )
 from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
+from arrayscope.render import lod as render_lod
+from arrayscope.display.slice_engine import make_image
 
 
 CONTENT = ("src-anchored", ("doc", 4), ("op", "fft"))
@@ -56,6 +60,24 @@ def source(rect=(3, 12, 5, 18), *, complex_values=False):
     yy, xx = np.mgrid[y0:y1, x0:x1]
     values = (yy * 100 + xx).astype(np.float32)
     return values.astype(np.complex64) * (1 + 1j) if complex_values else values
+
+
+def _rendered_complex_channel(values: np.ndarray, channel: str) -> RenderedTile:
+    state = ViewState.from_shape(values.shape).with_channel(channel)
+    display = make_image(values, state)
+    tile = MontageTile(0, 0, 0, 0, 0, 0, values.shape[1], values.shape[0], state)
+    return RenderedTile(
+        tile=tile,
+        image=display.data,
+        histogram_data=display.histogram_data,
+        eval_ms=0.0,
+        slab_shape=values.shape,
+        slab_nbytes=values.nbytes,
+        shader_mapping=display.shader_mapping,
+        texture_kind=display.texture_kind,
+        semantic_data=display.semantic_data,
+        lod_source_data=display.lod_source_data,
+    )
 
 
 def test_plan_is_the_one_owner_of_key_geometry_and_route_lineage():
@@ -350,3 +372,46 @@ def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
             )
     np.testing.assert_array_equal(assembled.image, expected)
     assert assembled.lod == lod
+
+
+@pytest.mark.parametrize(
+    ("channel", "reducer"),
+    (
+        ("real", "mean"),
+        ("imag", "mean"),
+        ("abs", "mean_abs"),
+        ("angle", "phase_vector"),
+        ("complex", "phase_vector"),
+    ),
+)
+def test_live_complex_display_channels_select_canonical_reducer_family(channel, reducer):
+    values = np.asarray([[0.0j, 1.0 + 0.0j], [-1.0 + 0.0j, 0.0j]], dtype=np.complex64)
+    rendered = _rendered_complex_channel(values, channel)
+    source_values = render_lod.canonical_value_source_for_rendered(
+        rendered, shader_display=False
+    )
+    assert np.iscomplexobj(source_values)
+    observed, _dtype, _representation = render_lod._reducer_format_for_rendered(
+        rendered, source_values
+    )
+    assert observed == reducer
+
+
+def test_live_cpu_angle_route_preserves_zero_magnitude_phase_policy():
+    values = np.asarray([[0.0j, 1.0 + 0.0j], [-1.0 + 0.0j, 0.0j]], dtype=np.complex64)
+    rendered = _rendered_complex_channel(values, "angle")
+    demand = SimpleNamespace(desired_level=1, desired_factor_xy=(2, 2))
+    key = render_lod.page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=1,
+        semantic_source_id=("angle-source", 0),
+        shader_display=False,
+    )
+    page = materialize_lod_page(
+        render_lod.canonical_value_source_for_rendered(rendered, shader_display=False),
+        source_origin_yx=(0, 0),
+        plan=key.plans[0],
+    )
+    assert key.reducer == "phase_vector"
+    assert page.values[0, 0] == pytest.approx(0.0j)

@@ -31,6 +31,7 @@ class DisplayImage:
     shader_mapping: ShaderMapping | None = None
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None
+    lod_source_data: np.ndarray | None = None
     lod: LodInfo | None = None
     level_data: np.ndarray | None = None
     level_stats: object | None = None
@@ -99,12 +100,14 @@ def make_image(data, state, colormap_lut=None):
             ),
             texture_kind=TexturePlaneKind.COMPLEX_RG32F,
             semantic_data=image_data,
+            lod_source_data=image_data,
         )
 
     default_levels = None
     if channel == ChannelMode.ANGLE:
         default_levels = (-np.pi, np.pi)
 
+    lod_source_data = image_data if np.iscomplexobj(image_data) else None
     image_data = apply_channel(image_data, channel)
     image_data = _apply_scale(image_data, state.scale)
     image_data = _sanitize_nonfinite_for_display(image_data)
@@ -118,6 +121,7 @@ def make_image(data, state, colormap_lut=None):
         ),
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=image_data,
+        lod_source_data=lod_source_data,
     )
 
 
@@ -219,6 +223,7 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional
             shader_mapping=mapping,
             texture_kind=TexturePlaneKind.COMPLEX_RG32F,
             semantic_data=complex_data,
+            lod_source_data=complex_data,
             level_data=level_data,
         )
 
@@ -245,6 +250,11 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional
         shader_mapping=mapping,
         texture_kind=TexturePlaneKind.SCALAR_R32F,
         semantic_data=component,
+        lod_source_data=(
+            np.ascontiguousarray(image_data.astype(np.complex64, copy=False))
+            if np.iscomplexobj(image_data)
+            else None
+        ),
         level_data=level_data,
     )
 

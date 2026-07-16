@@ -19,7 +19,7 @@ from arrayscope.display.model.tile_identity import (
     plane_identity_record,
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
-from arrayscope.display.shader_mapping import TexturePlaneKind
+from arrayscope.display.shader_mapping import TexturePlaneKind, cpu_display_rgba
 from arrayscope.display.tile_layout import tile_layout_map
 
 from arrayscope.display.image_upload import rgb_display_for_levels
@@ -28,7 +28,11 @@ from arrayscope.display.image_upload import rgb_display_for_levels
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 
 
-def _assemble_page_backed_payload(payload: DisplayTilePayload) -> DisplayTilePayload:
+def _assemble_page_backed_payload(
+    payload: DisplayTilePayload,
+    *,
+    levels: tuple[float, float] | None = None,
+) -> DisplayTilePayload:
     """Assemble exact native geometry for PyQtGraph's one-item CPU path.
 
     Reduced samples are repeated over their exact planned source rectangles,
@@ -71,6 +75,33 @@ def _assemble_page_backed_payload(payload: DisplayTilePayload) -> DisplayTilePay
     if not np.all(coverage == 1):
         raise ValueError("page-backed PyQtGraph assembly has incomplete or overlapping geometry")
     assembled = np.ascontiguousarray(assembled)
+    if np.iscomplexobj(assembled):
+        mapping = payload.shader_mapping
+        if mapping is None:
+            if payload.semantic_data is None:
+                raise ValueError(
+                    "PyQtGraph cannot safely present canonical complex pages without a mapping or native fallback"
+                )
+            native = np.ascontiguousarray(payload.semantic_data)
+            return replace(
+                payload,
+                image=native,
+                texture_data=native,
+                source_id=(payload.source_id, "native-complex-page-fallback"),
+                lod=None,
+                page_backing=None,
+            )
+        if levels is not None:
+            mapping = replace(mapping, levels=levels)
+        display = np.ascontiguousarray(cpu_display_rgba(assembled, mapping)[..., :3])
+        return replace(
+            payload,
+            image=display,
+            texture_data=display,
+            histogram_data=None,
+            texture_kind=TexturePlaneKind.RGB8,
+            rgb_windowed_levels=levels,
+        )
     return replace(payload, image=assembled, texture_data=assembled)
 
 
@@ -335,7 +366,9 @@ class MontageTileLayer:
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
             ):
-                drawable_payloads[int(tile)] = _assemble_page_backed_payload(payload)
+                drawable_payloads[int(tile)] = _assemble_page_backed_payload(
+                    payload, levels=levels
+                )
             elif int(tile) in requested_upserts:
                 # Not presentable for this delta's typed target; the payload
                 # is dropped from this commit.  Report it loudly — a payload

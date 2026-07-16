@@ -7,6 +7,8 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
+from arrayscope.gpu.page_table import page_key_can_cover
+
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
@@ -72,7 +74,12 @@ class PageBackedPresentation:
         page_keys = tuple(page.key for page in pages)
         if len(set(page_keys)) != len(page_keys):
             raise ValueError("page-backed presentation has duplicate materialized pages")
-        unknown = tuple(key for key in page_keys if key not in set(keys))
+        unknown = tuple(
+            key
+            for key in page_keys
+            if key not in set(keys)
+            and not any(page_key_can_cover(target, key) for target in keys)
+        )
         if unknown:
             raise ValueError(f"materialized pages do not belong to requested targets: {unknown!r}")
         coverage = tuple(int(value) for value in self.source_coverage_yx)

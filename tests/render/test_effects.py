@@ -11,7 +11,7 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
 from arrayscope.display.montage import MontageTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload
-from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey
+from arrayscope.display.pyramid import LodPageCache, materialize_lod_page, plan_source_grid_pages
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -23,6 +23,7 @@ from arrayscope.operations.pipeline import (
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
+from arrayscope.render.lod import LodPageSetKey
 from arrayscope.render.stages import LodAdmissionScope
 
 
@@ -69,7 +70,7 @@ def _session(data=None):
         rendered_tiles={},
         display_tile_payloads={},
         tile_presentation_state=SimpleNamespace(payloads={}),
-        pyramid_cache=None,
+        lod_page_cache=None,
         tile_semantic_source_id=lambda source_index: ("semantic", int(source_index)),
     )
     from arrayscope.display.model.tile_priority import TilePriorityContext
@@ -79,6 +80,37 @@ def _session(data=None):
         visible_tiles=getattr(session, "visible_tile_numbers", ()),
     )
     return session
+
+
+def _page_set(*, tile=0, level=2, source_id=None):
+    source_id = ("semantic", int(tile)) if source_id is None else source_id
+    plans = plan_source_grid_pages(
+        content_key=("test-page-set", source_id),
+        valid_source_rect_yx=(0, 4, 0, 6),
+        reduction_yx=(int(level), int(level)),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    return LodPageSetKey(
+        source_id=source_id,
+        tile_id=int(tile),
+        level_xy=(int(level), int(level)),
+        reducer="mean",
+        plans=plans,
+    )
+
+
+def _admit_page_set(cache, key, source):
+    owner = ("test-page-set", key)
+    claimed = cache.claim_plans(key.plans, owner)
+    try:
+        for plan in claimed:
+            page = materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan)
+            cache.admit_as(plan.key, page, owner=owner)
+    finally:
+        cache.release_owner_claims(owner)
 
 
 def _assert_optional_array_equal(left, right):
@@ -229,9 +261,10 @@ def test_evaluate_target_tile_non_native_returns_display_payload_not_native_resu
     )
 
     assert not hasattr(payload, "value")
-    key, plane, _histogram, _mapping, _kind, _level_data, _level_stats = payload
+    key, pages, _histogram, _mapping, _kind, _level_data, _level_stats = payload
     assert key.level_xy == (1, 1)
-    assert plane.shape == (2, 3)
+    assert len(pages) == 1
+    assert pages[0].values.shape == (2, 3)
 
 
 def test_evaluate_preview_tile_returns_display_only_payload():
@@ -251,19 +284,20 @@ def test_evaluate_preview_tile_returns_display_only_payload():
     )
 
     assert preview is not None
-    key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = preview
+    key, pages, histogram, shader_mapping, texture_kind, level_data, level_stats = preview
     assert key.source_id == source_id
     assert key.tile_id == tile.source_index
     assert key.level_xy == (1, 1)
     np.testing.assert_allclose(
-        plane,
+        pages[0].values,
         np.asarray([[12.5, 18.5, 24.5], [48.5, 54.5, 60.5]], dtype=np.float32),
     )
     assert histogram is None
     assert shader_mapping is not None
     assert texture_kind is not None
     assert level_data is None
-    assert level_stats is None
+    assert level_stats is not None
+    assert level_stats.source_index == tile.source_index
 
 
 def test_evaluate_preview_tile_uses_requested_rung_level():
@@ -284,9 +318,9 @@ def test_evaluate_preview_tile_uses_requested_rung_level():
     )
 
     assert preview is not None
-    key, plane, *_rest = preview
+    key, pages, *_rest = preview
     assert key.level_xy == (2, 2)
-    assert plane.shape == (1, 2)
+    assert pages[0].values.shape == (1, 2)
 
 
 def test_evaluate_shared_preview_fans_out_display_only_payloads():
@@ -522,18 +556,8 @@ def test_reduce_nd_axis_mean_handles_integer_edges():
 
 def test_tile_lod_states_reads_lifecycle_and_presented_payload_level():
     session = _session()
-    level_key = PyramidLevelKey(
-        source_id=("semantic", 0),
-        tile_id=0,
-        component="scalar",
-        level_xy=(2, 2),
-    )
-    stale_level_key = PyramidLevelKey(
-        source_id=("semantic", 99),
-        tile_id=99,
-        component="scalar",
-        level_xy=(3, 3),
-    )
+    level_key = _page_set(tile=0, level=2)
+    stale_level_key = _page_set(tile=99, level=3)
     session.lifecycle.level_claimed(0, level_key, ClaimOwner.PREVIEW)
     session.lifecycle.level_resident(0, level_key)
     session.lifecycle.level_claimed(0, stale_level_key, ClaimOwner.PREVIEW)
@@ -613,12 +637,7 @@ def test_tile_lod_states_does_not_treat_resident_level_as_committable_behind_pre
     session = _session()
     tile = session.plan.tiles[0]
     semantic_source = session.tile_semantic_source_id(tile.source_index)
-    level_key = PyramidLevelKey(
-        source_id=semantic_source,
-        tile_id=int(tile.source_index),
-        component="scalar",
-        level_xy=(5, 5),
-    )
+    level_key = _page_set(tile=tile.source_index, level=5, source_id=semantic_source)
     session.lifecycle.level_claimed(0, level_key, ClaimOwner.PREVIEW)
     session.lifecycle.level_resident(0, level_key)
     preview = DisplayTilePayload(
@@ -642,11 +661,11 @@ def test_tile_lod_states_does_not_treat_resident_level_as_committable_behind_pre
     assert state.target_quality_available is False
 
 
-def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
+def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
     session = _session()
     demand = _demand(1)
     tile = session.plan.tiles[2]
-    session.pyramid_cache = PyramidCache(max_entries=8)
+    session.lod_page_cache = LodPageCache(max_entries=8)
     rendered = effects.rendered_tile_from_evaluation_result(
         tile,
         effects.evaluate_target_tile(
@@ -662,13 +681,15 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         ),
     )
     session.rendered_tiles[int(tile.montage_index)] = rendered
-    level_key = effects.render_lod.pyramid_key_for(
+    level_key = effects.render_lod.page_set_key_for(
         session,
         rendered,
         demand=demand,
         level=1,
     )
-    session.pyramid_cache.admit(level_key, np.ones((2, 3), dtype=np.float32))
+    _admit_page_set(session.lod_page_cache, level_key, rendered.image)
+    session.lifecycle.level_claimed(int(tile.montage_index), level_key, ClaimOwner.PREVIEW)
+    session.lifecycle.level_resident(int(tile.montage_index), level_key)
     preview_key = effects.preview_claim_key(
         session,
         tile,
@@ -676,41 +697,29 @@ def test_tile_lod_states_reads_pyramid_and_preview_floor_residency():
         semantic_source_id=session.tile_semantic_source_id(tile.source_index),
         shader_display=False,
     )
-    session.pyramid_cache.admit(preview_key, np.ones((2, 3), dtype=np.float32))
-    session.preview_floor_cache = lambda: session.pyramid_cache
-    peek_many_calls = []
-    peek_many = session.pyramid_cache.peek_many
-    session.pyramid_cache.peek_many = lambda keys: (
-        peek_many_calls.append(tuple(keys)) or peek_many(keys)
+    assert preview_key == level_key
+    session._best_floor_key = lambda *_args, **_kwargs: (
+        level_key,
+        level_key.level,
+        session.lod_page_cache,
     )
-
-    def unexpected_single_peek(_key):
-        raise AssertionError("tile LOD planning must batch floor probes")
-
-    session.pyramid_cache.peek = unexpected_single_peek
 
     state = {
         state.tile_number: state
         for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
     }[int(tile.montage_index)]
 
-    # Rendered native tiles are reduction sources, not resident/presented LOD
-    # evidence. Lifecycle acknowledgements are the ladder's resident truth.
-    assert state.resident_levels == ()
+    # Lifecycle acknowledgement plus complete exact page residency is the
+    # ladder's resident truth; the rendered native tile is only its source.
+    assert state.resident_levels == (1,)
     assert state.floor_available is True
-    assert peek_many_calls == [(preview_key,)]
 
 
 def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():
     from arrayscope.window.frame_effects import FramePipelineEffects
 
     session = _session()
-    level_key = PyramidLevelKey(
-        source_id=("semantic", 0),
-        tile_id=0,
-        component="scalar",
-        level_xy=(2, 2),
-    )
+    level_key = _page_set(tile=0, level=2)
     session.lifecycle.level_claimed(0, level_key, ClaimOwner.EVALUATION)
     session.lifecycle.level_resident(0, level_key)
     session.rendered_tiles[0] = object()

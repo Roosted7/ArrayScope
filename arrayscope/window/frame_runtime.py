@@ -22,7 +22,7 @@ from arrayscope.display.montage import MontageTileState, montage_rect_for_viewpo
 from arrayscope.display.model.tile_priority import prioritize_tiles
 from arrayscope.display.viewport import ViewportMode, view_ranges_near
 from arrayscope.display.planning import normalize_bounds
-from arrayscope.display.pyramid import PyramidCache
+from arrayscope.display.pyramid import LodPageCache
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.ladder import LadderPolicy, LodLadder
@@ -164,8 +164,8 @@ class FrameRuntimeMixin:
     def _montage_quality_policy_mode(self) -> str:
         return render_lod.policy_mode_for_renderer(self)
 
-    def _montage_pyramid_cache(self) -> PyramidCache:
-        return render_lod.pyramid_cache_for_renderer(self)
+    def _montage_lod_page_cache(self) -> LodPageCache:
+        return render_lod.lod_page_cache_for_renderer(self)
 
     def _montage_render_intent(self, session) -> RenderIntent:
         return RenderIntent(

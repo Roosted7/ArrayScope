@@ -15,7 +15,7 @@ from arrayscope.display.lod import (
     LodPolicyDecision,
     native_lod_policy,
 )
-from arrayscope.display.pyramid import PyramidLevelKey
+from arrayscope.display.pyramid import MaterializedLodPage
 from arrayscope.display.montage import (
     MontagePlan,
     MontageTile,
@@ -59,7 +59,7 @@ from arrayscope.display.model.tile_priority import (
 from arrayscope.render import lod as render_lod
 from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
     RungMaterializationRequest,
-    pyramid_key_for_rendered,
+    page_set_key_for_rendered,
     texture_source_for_rendered,
     viewport_identity as _viewport_identity,
 )
@@ -375,7 +375,7 @@ class LifecycleRungMaterializations:
         return self._lifecycle.pending_materializations()
 
     def append(self, request) -> None:
-        tile_number = int(getattr(request, "tile_number", request[0]))
+        tile_number = int(request.tile_number)
         self._lifecycle.materialization_planned(
             tile_number,
             request,
@@ -395,7 +395,12 @@ class LifecycleRungMaterializations:
         self._lifecycle.materialization_resident(request)
 
     def release(self, request) -> tuple[ReleaseClaim, ...]:
-        return self._lifecycle.materialization_released(request)
+        effects = self._lifecycle.materialization_released(request)
+        pyramid = getattr(self._session, "lod_page_cache", None)
+        release = getattr(pyramid, "release_owner_claims", None)
+        if callable(release):
+            release(request.owner)
+        return effects
 
     def clear(self) -> None:
         for request in self._snapshot():
@@ -430,11 +435,10 @@ class LifecycleRungMaterializations:
         return f"{type(self).__name__}({list(self._snapshot())!r})"
 
     def _apply_release_effects(self, effects) -> None:
-        pyramid = getattr(self._session, "pyramid_cache", None)
-        if pyramid is None:
-            return
-        for effect in tuple(effects or ()):
-            pyramid.end_pending(effect.level_key)
+        # Page claims release by request owner in ``release``. Lifecycle
+        # effects carry the tile/rung key and must never be reinterpreted as
+        # cache keys.
+        tuple(effects or ())
 
 
 def _stage_tile_index(tile_or_index) -> int:
@@ -620,7 +624,7 @@ class FrameSession:
     # Why native-only applies when the desired factor exceeds 1 (user policy
     # choice vs. resident LOD not yet adopted on the active backend).
     lod_native_reason: str | None = None
-    pyramid_cache: object | None = None
+    lod_page_cache: object | None = None
     # List-like view over lifecycle-owned rung materialization claims.  Filled
     # only under the "resident" policy after a singleflight claim on the
     # pyramid cache; the lifecycle record, not this attribute, owns truth.
@@ -1464,7 +1468,7 @@ class FrameSession:
         semantic = exact_image if semantic is None else np.asarray(semantic)
         semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
         semantic_histogram = exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
-        texture_data, texture_histogram, lod, texture_kind = self._texture_for_rendered_tile(rendered)
+        texture_data, texture_histogram, lod, texture_kind, page_backing = self._texture_for_rendered_tile(rendered)
         texture_data = _debug_lod_pass_texture(texture_data, quality="exact")
         display_image = np.asarray(texture_data)
         display_histogram = None if texture_histogram is None else np.asarray(texture_histogram)
@@ -1525,6 +1529,7 @@ class FrameSession:
             source_anchor=self._payload_source_anchor(
                 lod.source_shape if lod is not None else exact_image.shape[:2]
             ),
+            page_backing=page_backing,
             level_data=exact_level_data,
             level_stats=level_stats,
             tile_identity=self.tile_payload_identity(
@@ -1603,7 +1608,7 @@ class FrameSession:
             if previous is None:
                 previous = by_base.get(base_source_id)
                 if previous is None:
-                    texture_data, _texture_histogram, lod, texture_kind = self._texture_for_rendered_tile(rendered)
+                    texture_data, _texture_histogram, lod, texture_kind, _page_backing = self._texture_for_rendered_tile(rendered)
                     source_id = self._payload_source_id(
                         base_source_id,
                         texture_kind=texture_kind,
@@ -1874,8 +1879,8 @@ class FrameSession:
         base = self.semantic_key if self.semantic_key is not None else self.key
         return ("montage-tile", base, int(source_index))
 
-    def _pyramid_key_for(self, rendered: RenderedTile, *, demand, level: int) -> PyramidLevelKey:
-        return render_lod.pyramid_key_for(self, rendered, demand=demand, level=level)
+    def _lod_page_set_key_for(self, rendered: RenderedTile, *, demand, level: int):
+        return render_lod.page_set_key_for(self, rendered, demand=demand, level=level)
 
     def _lod_materialization_request(
         self,
@@ -1883,15 +1888,12 @@ class FrameSession:
         *,
         demand,
         level: int,
-        key: PyramidLevelKey,
+        key,
         native_source: np.ndarray | None = None,
     ) -> RungMaterializationRequest:
         return render_lod.plan_materialization(
             self, rendered, demand=demand, level=level, key=key, native_source=native_source
         )
-
-    def _floor_component_tags(self) -> tuple[str, ...]:
-        return render_lod.floor_component_tags(self)
 
     def _best_floor_key(self, source_index: int, *, tile_number: int | None = None):
         return render_lod.best_floor_key(self, source_index, tile_number=tile_number)
@@ -1918,27 +1920,24 @@ class FrameSession:
         level_stats=None,
         quality: str = "preview",
     ) -> bool:
-        if (
-            bool(getattr(self, "shader_display", False))
-            and str(getattr(key, "component", "")) == str(TexturePlaneKind.RGB8.value)
-        ):
-            return False
-        cache = self.pyramid_cache
+        cache = self.lod_page_cache
         if cache is None:
             return False
-        resolved_kind = texture_kind
-        if resolved_kind is None:
-            try:
-                resolved_kind = render_lod.floor_texture_kind(key.component)
-            except Exception:
-                resolved_kind = None
-        if render_lod.texture_requires_display_histogram(plane, resolved_kind) and not render_lod.display_histogram_matches_texture(
-            histogram, plane
-        ):
+        pages = tuple(plane) if isinstance(plane, (tuple, list)) else ()
+        if not pages or any(not isinstance(page, MaterializedLodPage) for page in pages):
+            raise TypeError("preview admission requires checked canonical materialized pages")
+        if tuple(page.key for page in pages) != tuple(plan.key for plan in key.plans):
+            raise ValueError("preview page values disagree with the requested canonical plan")
+        owner = ("preview-page-admission", id(self), int(tile_number), key)
+        claimed = {plan.key for plan in cache.claim_plans(key.plans, owner)}
+        try:
+            for page in pages:
+                if page.key in claimed:
+                    cache.admit_as(page.key, page, owner=owner)
+        finally:
+            cache.release_owner_claims(owner)
+        if not render_lod._page_set_complete(cache, key):
             return False
-        cache.admit(key, plane)
-        if histogram is not None:
-            cache.admit(render_lod.histogram_key_for_level_key(key), histogram)
         metadata = PreviewFloorMetadata(
             shader_mapping=shader_mapping,
             texture_kind=texture_kind,
@@ -1962,11 +1961,7 @@ class FrameSession:
         self.lod_preview_floor_scope.update(int(tile) for tile in tuple(tile_numbers or ()))
 
     def release_preview_claim(self, tile_number: int, key) -> None:
-        cache = self.pyramid_cache
-        effects = self.lifecycle.level_declined(int(tile_number), key)
-        if cache is not None:
-            for effect in effects:
-                cache.end_pending(effect.level_key)
+        self.lifecycle.level_declined(int(tile_number), key)
         self.lod_preview_metadata.pop(key, None)
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
@@ -2013,24 +2008,36 @@ class FrameSession:
         *,
         source: np.ndarray,
         histogram: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray | None, LodInfo]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray | None,
+        LodInfo,
+        object | None,
+        TexturePlaneKind | None,
+    ]:
         return render_lod.resident_texture_for_rendered_tile(self, rendered, source=source, histogram=histogram)
 
     def _texture_for_rendered_tile(
         self,
         rendered: RenderedTile,
-    ) -> tuple[np.ndarray, np.ndarray | None, LodInfo, TexturePlaneKind | None]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray | None,
+        LodInfo,
+        TexturePlaneKind | None,
+        object | None,
+    ]:
         source, histogram, texture_kind = self._texture_source_for(rendered)
         if self._resident_lod_active():
-            texture, texture_histogram, lod = self._resident_texture_for_rendered_tile(
+            texture, texture_histogram, lod, page_backing, actual_kind = self._resident_texture_for_rendered_tile(
                 rendered,
                 source=source,
                 histogram=histogram,
             )
-            return texture, texture_histogram, lod, texture_kind
+            return texture, texture_histogram, lod, actual_kind, page_backing
         source_shape = tuple(int(value) for value in source.shape[:2])
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
-        return source, histogram, lod, texture_kind
+        return source, histogram, lod, texture_kind, None
 
     def _paced_pending_presentation_followup(
         self,

@@ -1644,6 +1644,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
         semantic_histogram_data=semantic_histogram,
+        lod_source_data=getattr(payload, "lod_source_data", None),
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),

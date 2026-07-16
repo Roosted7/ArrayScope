@@ -50,7 +50,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
-    pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
+    lod_page_cache = None if session is None else getattr(session, "lod_page_cache", None)
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
     lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
@@ -133,16 +133,16 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_reason=_presented_lod_reason(lod_decision, presented_lod),
         tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
-        tile_lod_pyramid_bytes=0 if pyramid_cache is None else int(getattr(pyramid_cache, "bytes_used", 0) or 0),
-        tile_lod_pyramid_entries=0 if pyramid_cache is None else len(pyramid_cache),
-        tile_lod_pyramid_hits=0 if pyramid_cache is None else int(getattr(pyramid_cache, "hits", 0) or 0),
-        tile_lod_pyramid_misses=0 if pyramid_cache is None else int(getattr(pyramid_cache, "misses", 0) or 0),
-        tile_lod_pyramid_evictions=0 if pyramid_cache is None else int(getattr(pyramid_cache, "evictions", 0) or 0),
+        tile_lod_pyramid_bytes=0 if lod_page_cache is None else int(getattr(lod_page_cache, "bytes_used", 0) or 0),
+        tile_lod_pyramid_entries=0 if lod_page_cache is None else len(lod_page_cache),
+        tile_lod_pyramid_hits=0 if lod_page_cache is None else int(getattr(lod_page_cache, "hits", 0) or 0),
+        tile_lod_pyramid_misses=0 if lod_page_cache is None else int(getattr(lod_page_cache, "misses", 0) or 0),
+        tile_lod_pyramid_evictions=0 if lod_page_cache is None else int(getattr(lod_page_cache, "evictions", 0) or 0),
         tile_lod_pending_materializations=(
             0
             if session is None
             else len(getattr(session, "pending_rung_materializations", ()) or ())
-            + (0 if pyramid_cache is None else int(getattr(pyramid_cache, "pending_count", 0) or 0))
+            + (0 if lod_page_cache is None else int(getattr(lod_page_cache, "pending_count", 0) or 0))
         ),
         tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
         tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0),

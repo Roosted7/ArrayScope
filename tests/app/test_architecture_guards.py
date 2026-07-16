@@ -927,3 +927,41 @@ def test_bounded_caches_share_the_core_eviction_implementation():
         assert "bounded_cache import BoundedCache" in text, rel
         assert "def _evict" not in text, rel
         assert "popitem(" not in text, rel
+
+
+def test_live_lod_modules_cannot_import_legacy_whole_plane_ownership():
+    """ADR 0056 G5: live LOD ownership is canonical DataChunkKey pages only."""
+
+    legacy_names = {"PyramidLevelKey", "PyramidCache"}
+    live_modules = (
+        "render/lod.py",
+        "render/effects.py",
+        "window/frame_effects.py",
+        "window/frame_session.py",
+        "window/montage_prefetch.py",
+        "presentation/tile_lifecycle.py",
+        "display/backends/vispy/tiles.py",
+        "display/backends/pyqtgraph/tiles.py",
+    )
+    offenders = []
+    for rel in live_modules:
+        path = ROOT / "arrayscope" / rel
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported = {alias.name for alias in node.names}
+                for name in sorted(imported.intersection(legacy_names)):
+                    offenders.append(f"{rel}:{node.lineno}:{name}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.rsplit(".", 1)[-1] in legacy_names:
+                        offenders.append(f"{rel}:{node.lineno}:{alias.name}")
+    assert offenders == []
+
+    pyramid_tree = ast.parse((ROOT / "arrayscope" / "display" / "pyramid.py").read_text())
+    definitions = {
+        node.name
+        for node in pyramid_tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert definitions.isdisjoint(legacy_names)

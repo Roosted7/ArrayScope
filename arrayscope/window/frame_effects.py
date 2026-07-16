@@ -24,7 +24,7 @@ from arrayscope.display.model.tile_identity import acknowledged_identity_satisfi
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
-from arrayscope.display.pyramid import reduce_box_mean
+from arrayscope.display.pyramid import materialize_lod_page
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.operations.chunked_stage import (
@@ -236,17 +236,28 @@ class FramePipelineEffects:
         if step.rung == Rung.DESIRED:
             request = self.session.lifecycle.materialization_request_for(tile_number, self._level_key_for_step(tile, step))
         if step.rung == Rung.DESIRED and request is not None:
-            pyramid = getattr(session, "pyramid_cache", None)
+            pyramid = getattr(session, "lod_page_cache", None)
 
             def evaluate_materialization(token=None, request=request, pyramid=pyramid):
                 if pyramid is None:
                     return None
-                plane = request.source
-                for level_key, rel in tuple(getattr(request, "chain", ()) or ((request.key, request.reduce_factor_xy),)):
-                    plane = reduce_box_mean(plane, rel)
-                    if level_key is not None:
-                        plane = pyramid.admit(level_key, plane)
-                return ("materialized", request)
+                try:
+                    for plan in request.claimed_plans:
+                        if token is not None and bool(getattr(token, "cancelled", False)):
+                            from arrayscope.operations.cancellation import EvaluationCancelled
+
+                            raise EvaluationCancelled()
+                        page = materialize_lod_page(
+                            request.source,
+                            source_origin_yx=request.source_origin_yx,
+                            plan=plan,
+                        )
+                        pyramid.admit_as(plan.key, page, owner=request.owner)
+                    if not all(pyramid.resolve(plan.key) is not None for plan in request.plans):
+                        raise RuntimeError("materialized LOD page set is not completely resolvable")
+                    return ("materialized", request)
+                finally:
+                    pyramid.release_owner_claims(request.owner)
 
             return evaluate_materialization
 
@@ -376,18 +387,21 @@ class FramePipelineEffects:
             )
         if step.rung == Rung.DESIRED and int(step.level) > 0 and tile_number in self.session.rendered_tiles:
             materialization_key = (tile_number, int(step.rung), int(step.level))
-            pyramid = getattr(self.session, "pyramid_cache", None)
+            pyramid = getattr(self.session, "lod_page_cache", None)
             if pyramid is None:
                 return False
             rendered = self.session.rendered_tiles.get(tile_number)
             demand = self.session.lod_policy_decision.demand
-            level_key = self.session._pyramid_key_for(rendered, demand=demand, level=int(step.level))
+            try:
+                level_key = self.session._lod_page_set_key_for(
+                    rendered, demand=demand, level=int(step.level)
+                )
+            except ValueError:
+                return False
             if self.session.lifecycle.materialization_request_for(tile_number, level_key) is not None:
                 return False
-            if pyramid.peek(level_key) is not None:
+            if render_lod._page_set_complete(pyramid, level_key):
                 self.session.lifecycle.level_resident(tile_number, level_key)
-                return False
-            if not pyramid.begin_pending(level_key):
                 return False
             request = self.session._lod_materialization_request(
                 rendered,
@@ -395,6 +409,8 @@ class FramePipelineEffects:
                 level=int(step.level),
                 key=level_key,
             )
+            if not request.claimed_plans:
+                return False
             self.session.pending_rung_materializations.append(request)
             self.session.pending_rung_materializations.mark_started(request)
             return True
@@ -1288,6 +1304,9 @@ class FramePipelineEffects:
             # was running (for example an index-window retarget). It cannot
             # build a current payload, so a new producer must be planned.
             self.renderer.request_montage_replan(self.session)
+        # Newly resident pages can complete target sets owned by other tiles
+        # or shifted-window requests that attached to the same singleflight.
+        self.renderer.request_montage_replan(self.session)
         # This is the DESIRED rung's terminal materialization. The dirty
         # payload and presentation wake below are sufficient to select and
         # acknowledge the resident level; replanning every completed tile
@@ -2739,7 +2758,7 @@ class FramePipelineEffects:
         if rendered is None:
             return None
         demand = self.session.lod_policy_decision.demand
-        return self.session._pyramid_key_for(rendered, demand=demand, level=int(step.level))
+        return self.session._lod_page_set_key_for(rendered, demand=demand, level=int(step.level))
 
     def _shared_claim_rung(self, *, level: int, lane) -> int:
         if WorkLane(str(lane)) == WorkLane.DISPLAY_PREVIEW:

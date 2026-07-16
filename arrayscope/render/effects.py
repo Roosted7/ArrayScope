@@ -26,7 +26,6 @@ from arrayscope.display.model.tile_identity import (
     tile_ack_identity,
 )
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
-from arrayscope.display.pyramid import PyramidLevelKey
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
     apply_scale as apply_shader_scale,
@@ -247,85 +246,17 @@ def evaluate_preview_tile(
 ):
     """Evaluate a display-only payload for a cold tile."""
 
-    _check_render_cancelled(cancellation_token)
-    if not can_evaluate_preview(session, tile):
-        return None
-    level = preview_evaluation_level(session, demand) if level is None else int(level)
-    if not can_evaluate_reduced_preview(session, tile):
-        return _evaluate_tile_native_output_preview(
-            session,
-            tile,
-            demand=demand,
-            semantic_source_id=semantic_source_id,
-            level=level,
-            cancellation_token=cancellation_token,
-            shader_display=shader_display,
-            evaluation_context=evaluation_context,
-            stage_cache=stage_cache,
-            stage_materializer=stage_materializer,
-        )
-    factor_xy = factor_xy_for_level(demand, level)
-    reduced_base, preview_state = read_reduced_preview_base_and_state(
-        session.document,
-        tile.view_state,
-        factor_xy=factor_xy,
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
-    )
-    _check_render_cancelled(cancellation_token)
-    preview_document = ArrayDocument(
-        reduced_base,
-        steps=session.document.steps,
-        revision=session.document.revision,
-    )
-    result = evaluate_image_snapshot(
-        preview_document,
-        preview_state,
-        colormap_lut=session.colormap_lut,
-        cancellation_token=cancellation_token,
-        degraded=True,
-        shader_display=bool(shader_display),
-        provisional_histogram=True,
-        evaluation_context=evaluation_context,
-    )
-    _check_render_cancelled(cancellation_token)
-    value = replace(
-        result.value,
-        semantic_data=None,
-        level_data=getattr(result.value, "level_data", None),
-        level_stats=getattr(result.value, "level_stats", None),
-        lod=LodInfo(
-            level=level,
-            factor=max(int(factor_xy[0]), int(factor_xy[1])),
-            source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
-            texture_shape=tuple(int(value) for value in np.shape(result.value.data)[:2]),
-            gutter=0,
-        ),
-    )
-    rendered = rendered_tile_from_evaluation_result(
+    return _evaluate_tile_native_output_preview(
+        session,
         tile,
-        replace(result, value=value, compute_path="preview_reduced_input"),
-    )
-    key = render_lod.pyramid_key_for_rendered(
-        rendered,
         demand=demand,
-        level=level,
         semantic_source_id=semantic_source_id,
-        shader_display=bool(shader_display),
-    )
-    source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
-        rendered,
-        shader_display=bool(shader_display),
-    )
-    histogram = _preview_display_histogram(rendered, source, texture_kind, getattr(value, "histogram_data", None))
-    return (
-        key,
-        np.asarray(source),
-        None if histogram is None else np.asarray(histogram),
-        getattr(value, "shader_mapping", None),
-        texture_kind,
-        getattr(value, "level_data", None),
-        getattr(value, "level_stats", None),
+        level=level,
+        cancellation_token=cancellation_token,
+        shader_display=shader_display,
+        evaluation_context=evaluation_context,
+        stage_cache=stage_cache,
+        stage_materializer=stage_materializer,
     )
 
 
@@ -435,7 +366,7 @@ def evaluate_shared_preview(
             level_stats=getattr(value, "level_stats", None),
             quality="preview",
         )
-        key = render_lod.pyramid_key_for_rendered(
+        key = render_lod.page_set_key_for_rendered(
             rendered,
             demand=demand,
             level=level,
@@ -480,27 +411,8 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
     active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
     presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
-    preview_cache = getattr(session, "pyramid_cache", None)
+    preview_cache = getattr(session, "lod_page_cache", None)
     plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-    floor_keys = {}
-    if preview_cache is not None and demand is not None:
-        for tile in plan_tiles:
-            tile_number = int(tile.montage_index)
-            if allowed is not None and tile_number not in allowed:
-                continue
-            floor_keys[tile_number] = preview_claim_key(
-                session,
-                tile,
-                demand=demand,
-                semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-                shader_display=bool(getattr(session, "shader_display", False)),
-            )
-    peek_many = getattr(preview_cache, "peek_many", None)
-    resident_floor_keys = (
-        set(peek_many(tuple(floor_keys.values())))
-        if callable(peek_many) and floor_keys
-        else set()
-    )
     for tile in plan_tiles:
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
@@ -515,6 +427,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
                 record,
                 source_id=session.tile_semantic_source_id(int(tile.source_index)),
                 tile_id=int(tile.source_index),
+                page_cache=preview_cache,
             )
         )
         payload = payloads.get(tile_number)
@@ -574,10 +487,8 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
                 current_presentation_quality=presented_quality,
                 allow_preview=allow_preview,
                 target_quality_available=target_quality_available,
-                floor_available=(
-                    floor_keys.get(tile_number) in resident_floor_keys
-                    if callable(peek_many)
-                    else _floor_available(session, tile, demand, preview_cache=preview_cache)
+                floor_available=_floor_available(
+                    session, tile, demand, preview_cache=preview_cache
                 ),
             )
         )
@@ -609,13 +520,20 @@ def rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=getattr(value, "semantic_data", None),
         semantic_histogram_data=getattr(value, "semantic_histogram_data", None),
+        lod_source_data=getattr(value, "lod_source_data", None),
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
     )
 
 
-def _resident_levels_from_lifecycle(record, *, source_id=None, tile_id=None) -> tuple[int, ...]:
+def _resident_levels_from_lifecycle(
+    record,
+    *,
+    source_id=None,
+    tile_id=None,
+    page_cache=None,
+) -> tuple[int, ...]:
     if record is None:
         return ()
     levels = []
@@ -634,6 +552,8 @@ def _resident_levels_from_lifecycle(record, *, source_id=None, tile_id=None) -> 
             continue
         if tile_id is not None and int(getattr(key, "tile_id", -1)) != int(tile_id):
             continue
+        if page_cache is not None and not render_lod._page_set_complete(page_cache, key):
+            continue
         level_xy = tuple(getattr(key, "level_xy", ()) or ())
         if level_xy:
             levels.append(max(int(value) for value in level_xy))
@@ -643,15 +563,9 @@ def _resident_levels_from_lifecycle(record, *, source_id=None, tile_id=None) -> 
 def _floor_available(session, tile, demand, *, preview_cache) -> bool:
     if preview_cache is None or demand is None:
         return False
-    semantic_id = session.tile_semantic_source_id(tile.source_index)
-    key = preview_claim_key(
-        session,
-        tile,
-        demand=demand,
-        semantic_source_id=semantic_id,
-        shader_display=bool(getattr(session, "shader_display", False)),
-    )
-    return preview_cache.peek(key) is not None
+    return session._best_floor_key(
+        int(tile.source_index), tile_number=int(tile.montage_index)
+    ) is not None
 
 
 def can_evaluate_preview(session, tile) -> bool:
@@ -691,6 +605,8 @@ def preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = Fa
 
 
 def shared_preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
+    if str(getattr(session, "lod_policy_mode", "")) == "resident":
+        return False
     if not can_evaluate_reduced_preview(session, tile):
         return False
     if demand is None:
@@ -1187,13 +1103,18 @@ def _preview_display_histogram(rendered, source, texture_kind, histogram):
 
 
 def preview_claim_key(session, tile, *, demand, semantic_source_id, shader_display: bool):
+    record = session.lifecycle.peek(int(tile.montage_index))
+    if record is None:
+        return None
     level = preview_evaluation_level(session, demand)
-    return PyramidLevelKey(
-        source_id=semantic_source_id,
-        tile_id=int(tile.source_index),
-        component=_preview_claim_component(session, shader_display=shader_display),
-        level_xy=(int(level), int(level)),
-    )
+    for key in record.levels:
+        if (
+            getattr(key, "source_id", None) == semantic_source_id
+            and int(getattr(key, "tile_id", -1)) == int(tile.source_index)
+            and max(tuple(getattr(key, "level_xy", (0, 0)))) == int(level)
+        ):
+            return key
+    return None
 
 
 def _evaluate_tile_native_output_preview(
@@ -1210,7 +1131,6 @@ def _evaluate_tile_native_output_preview(
     stage_materializer=None,
 ):
     level = preview_evaluation_level(session, demand) if level is None else int(level)
-    factor_xy = factor_xy_for_level(demand, level)
     result = _evaluate_native_tile_result(
         session,
         tile,
@@ -1220,46 +1140,32 @@ def _evaluate_tile_native_output_preview(
         evaluation_context=evaluation_context,
     )
     _check_render_cancelled(cancellation_token)
-    reduced_data = reduce_display_payload_axes(result.value.data, factor_xy)
-    histogram = getattr(result.value, "histogram_data", None)
-    reduced_histogram = None if histogram is None else reduce_display_payload_axes(histogram, factor_xy)
-    _check_render_cancelled(cancellation_token)
-    value = replace(
-        result.value,
-        data=reduced_data,
-        histogram_data=reduced_histogram,
-        semantic_data=None,
-        level_data=getattr(result.value, "level_data", None),
-        level_stats=getattr(result.value, "level_stats", None),
-        lod=LodInfo(
-            level=level,
-            factor=max(int(factor_xy[0]), int(factor_xy[1])),
-            source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
-            texture_shape=tuple(int(value) for value in np.shape(reduced_data)[:2]),
-            gutter=0,
-        ),
-    )
-    rendered = rendered_tile_from_evaluation_result(
-        tile,
-        replace(result, value=value, compute_path="preview_native_output_reduction"),
-    )
-    key = render_lod.pyramid_key_for_rendered(
+    value = result.value
+    rendered = rendered_tile_from_evaluation_result(tile, result)
+    key = render_lod.page_set_key_for_rendered(
         rendered,
         demand=demand,
         level=level,
         semantic_source_id=semantic_source_id,
         shader_display=bool(shader_display),
     )
-    source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
-        rendered,
-        shader_display=bool(shader_display),
+    source = render_lod.canonical_value_source_for_rendered(
+        rendered, shader_display=bool(shader_display)
     )
-    reduced_histogram = _preview_display_histogram(rendered, source, texture_kind, reduced_histogram)
+    pages = tuple(
+        render_lod.materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan)
+        for plan in key.plans
+    )
+    texture_kind = (
+        TexturePlaneKind.COMPLEX_RG32F
+        if pages[0].key.representation == "complex_rg32f"
+        else TexturePlaneKind.SCALAR_R32F
+    )
     _check_render_cancelled(cancellation_token)
     return (
         key,
-        np.asarray(source),
-        None if reduced_histogram is None else np.asarray(reduced_histogram),
+        pages,
+        None,
         getattr(value, "shader_mapping", None),
         texture_kind,
         getattr(value, "level_data", None),

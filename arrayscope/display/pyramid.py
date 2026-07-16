@@ -27,6 +27,7 @@ from arrayscope.gpu.keys import (
     ChunkLod,
     DataChunkKey,
 )
+from arrayscope.gpu.page_table import PageSlot, PageTable
 
 
 ALGO_VERSION = 1
@@ -889,184 +890,6 @@ def _reduce_axis(values: np.ndarray, factor: int, *, axis: int) -> np.ndarray:
     return sums / counts.reshape(shape)
 
 
-@dataclass(frozen=True)
-class PyramidLevelKey:
-    """Identity of one materialized pyramid level (ADR 0050 key contract)."""
-
-    source_id: object
-    tile_id: object
-    component: str
-    level_xy: tuple[int, int]
-    algo_version: int = ALGO_VERSION
-
-    def __post_init__(self) -> None:
-        level_x, level_y = (int(self.level_xy[0]), int(self.level_xy[1]))
-        if level_x < 0 or level_y < 0:
-            raise ValueError("pyramid levels must be non-negative")
-        object.__setattr__(self, "component", str(self.component))
-        object.__setattr__(self, "level_xy", (level_x, level_y))
-        object.__setattr__(self, "algo_version", int(self.algo_version))
-
-    @property
-    def factor_xy(self) -> tuple[int, int]:
-        return (2 ** int(self.level_xy[0]), 2 ** int(self.level_xy[1]))
-
-    @property
-    def level(self) -> int:
-        return max(int(self.level_xy[0]), int(self.level_xy[1]))
-
-
-class PyramidCache:
-    """Bounded, byte-accounted pyramid level cache with singleflight requests.
-
-    Workers ``admit`` completed levels; the GUI thread only performs
-    dictionary lookups.  ``begin_pending``/``end_pending`` provide the
-    singleflight bookkeeping so duplicate materialization requests for the
-    same key coalesce into one scheduled reduction.
-    """
-
-    def __init__(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        self._cache = BoundedCache(max_bytes=max_bytes, max_entries=max_entries)
-        self._pending: set[PyramidLevelKey] = set()
-        self._by_source: dict[tuple[object, int, str], set[PyramidLevelKey]] = {}
-        self._lock = RLock()
-        self._revision = 0
-
-    @property
-    def revision(self) -> int:
-        """Monotonic counter bumped whenever residency can change.
-
-        GUI-side callers memoize per-tile resident-level scans against this:
-        a memo guarded by ``revision`` is exact because admissions (and the
-        evictions they trigger inside the same ``put``), explicit clears, and
-        resizes bump it, while lookups/peeks/claims leave it unchanged.
-        """
-
-        return self._revision
-
-    def lookup(self, key: PyramidLevelKey):
-        """Return the cached level array, counting hit/miss."""
-
-        return self._cache.get(key)
-
-    def peek(self, key: PyramidLevelKey):
-        """Return the cached level array without touching counters/recency."""
-
-        return self._cache.peek(key)
-
-    def peek_many(self, keys) -> dict[PyramidLevelKey, np.ndarray]:
-        """Snapshot several resident levels with one cache-lock acquisition."""
-
-        return self._cache.peek_many(keys)
-
-    def admit(self, key: PyramidLevelKey, array) -> np.ndarray:
-        """Admit a completed level and clear its pending claim."""
-
-        values = np.asarray(array)
-        with self._lock:
-            if self._cache.would_fit(int(values.nbytes)):
-                self._cache.put(key, values, nbytes=int(values.nbytes))
-                self._by_source.setdefault(self._source_group(key), set()).add(key)
-                self._revision += 1
-            self._pending.discard(key)
-        return values
-
-    @staticmethod
-    def _source_group(key: PyramidLevelKey) -> tuple[object, int, str]:
-        return (key.source_id, int(key.tile_id), str(key.component))
-
-    def resident_keys_for(self, source_id, tile_id, component) -> tuple[PyramidLevelKey, ...]:
-        """All currently cached level keys for one semantic tile.
-
-        The index is pruned lazily against the bounded cache, so evicted
-        levels disappear on the next enumeration; no eviction hook is
-        required and the GUI-thread cost stays a few dictionary probes.
-        """
-
-        group = (source_id, int(tile_id), str(component))
-        with self._lock:
-            keys = self._by_source.get(group)
-            if not keys:
-                return ()
-            live = tuple(key for key in keys if self._cache.peek(key) is not None)
-            if len(live) != len(keys):
-                if live:
-                    self._by_source[group] = set(live)
-                else:
-                    self._by_source.pop(group, None)
-            return live
-
-    def begin_pending(self, key: PyramidLevelKey) -> bool:
-        """Claim a materialization request; False when already cached/claimed."""
-
-        with self._lock:
-            if key in self._pending or self._cache.peek(key) is not None:
-                return False
-            self._pending.add(key)
-            return True
-
-    def end_pending(self, key: PyramidLevelKey) -> None:
-        """Release a claim without admitting (cancelled/superseded/failed)."""
-
-        with self._lock:
-            self._pending.discard(key)
-
-    def pending(self, key: PyramidLevelKey) -> bool:
-        with self._lock:
-            return key in self._pending
-
-    @property
-    def pending_count(self) -> int:
-        with self._lock:
-            return len(self._pending)
-
-    @property
-    def max_bytes(self) -> int | None:
-        return self._cache.max_bytes
-
-    @property
-    def bytes_used(self) -> int:
-        return int(self._cache.bytes_used)
-
-    @property
-    def hits(self) -> int:
-        return int(self._cache.hits)
-
-    @property
-    def misses(self) -> int:
-        return int(self._cache.misses)
-
-    @property
-    def evictions(self) -> int:
-        return int(self._cache.evictions)
-
-    def __len__(self) -> int:
-        return len(self._cache)
-
-    def __contains__(self, key) -> bool:
-        return key in self._cache
-
-    def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
-        with self._lock:
-            self._revision += 1
-
-    def resident_level_counts(self) -> dict[int, int]:
-        """Return {scalar level: cached entry count} for diagnostics."""
-
-        counts: dict[int, int] = {}
-        for key, _value in self._cache.items():
-            level = int(getattr(key, "level", 0))
-            counts[level] = counts.get(level, 0) + 1
-        return counts
-
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._pending.clear()
-            self._revision += 1
-
-
 class LodPageCache:
     """Renderer-shared, byte-bounded logical page cache with owned claims."""
 
@@ -1088,6 +911,38 @@ class LodPageCache:
 
     def peek_many(self, keys) -> dict[DataChunkKey, MaterializedLodPage]:
         return self._cache.peek_many(keys)
+
+    def resolve(self, key: DataChunkKey):
+        """Resolve through the shared PageTable ancestry contract."""
+
+        table = PageTable()
+        for index, (resident_key, page) in enumerate(self._cache.items()):
+            table.bind(
+                resident_key,
+                PageSlot("cpu-lod-page-cache", 0, index),
+                nbytes=page.nbytes,
+            )
+        return table.resolve(key)
+
+    def resolved_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
+        """Return the complete actual page set, or None for missing coverage."""
+
+        requested = tuple(plans)
+        table = PageTable()
+        pages_by_key = dict(self._cache.items())
+        for index, (resident_key, page) in enumerate(pages_by_key.items()):
+            table.bind(
+                resident_key,
+                PageSlot("cpu-lod-page-cache", 0, index),
+                nbytes=page.nbytes,
+            )
+        resolved = tuple(table.resolve(plan.key) for plan in requested)
+        if any(item is None for item in resolved):
+            return None
+        return tuple(
+            pages_by_key[key]
+            for key in dict.fromkeys(item.actual_key for item in resolved)
+        )
 
     def begin_claim(self, key: DataChunkKey, owner: object) -> bool:
         """Own the one producer claim for ``key`` if it is missing."""
@@ -1203,6 +1058,9 @@ class LodPageCache:
     def __contains__(self, key) -> bool:
         return key in self._cache
 
+    def resident_pages(self) -> tuple[MaterializedLodPage, ...]:
+        return tuple(page for _key, page in self._cache.items())
+
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
         with self._lock:
@@ -1228,8 +1086,6 @@ __all__ = [
     "LodPageCache",
     "LodPagePlan",
     "MaterializedLodPage",
-    "PyramidLevelKey",
-    "PyramidCache",
     "SourceGridBinIdentity",
     "SourceGridDrawBlock",
     "SourceGridPage",

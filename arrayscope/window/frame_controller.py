@@ -38,7 +38,6 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
-from arrayscope.presentation import ClaimOwner
 from arrayscope.display.pyramid import preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
@@ -702,8 +701,8 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             lod_preview_level=lod_preview_level,
             lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
-            pyramid_cache=(
-                self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+            lod_page_cache=(
+                self._montage_lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
         )
         stage_planning_deferred = bool(
@@ -1801,6 +1800,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
         semantic_histogram_data=semantic_histogram,
+        lod_source_data=getattr(payload, "lod_source_data", None),
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
@@ -1826,6 +1826,7 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
         texture_kind=getattr(cached, "texture_kind", None),
         semantic_data=getattr(cached, "semantic_data", None),
         semantic_histogram_data=getattr(cached, "semantic_histogram_data", None),
+        lod_source_data=getattr(cached, "lod_source_data", None),
         lod=getattr(cached, "lod", None),
         level_data=getattr(cached, "level_data", None),
         level_stats=getattr(cached, "level_stats", None),
@@ -1846,6 +1847,7 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=getattr(value, "semantic_data", None),
         semantic_histogram_data=getattr(value, "semantic_histogram_data", None),
+        lod_source_data=getattr(value, "lod_source_data", None),
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
@@ -1908,22 +1910,6 @@ def _preview_floor_blocks_exact_submission(session, tile) -> bool:
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
     payload = payloads.get(tile_number)
     return str(getattr(payload, "quality", "")) not in {"preview", "exact"}
-
-
-def _claim_preview_floor(session, tile_number: int, key) -> bool:
-    cache = getattr(session, "pyramid_cache", None)
-    if cache is None:
-        return False
-    tile_number = int(tile_number)
-    if cache.peek(key) is not None:
-        session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
-        session.lifecycle.level_resident(tile_number, key)
-        return True
-    if not cache.begin_pending(key):
-        return False
-    session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
-    session.lifecycle.level_materializing(tile_number, key)
-    return True
 
 
 def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:

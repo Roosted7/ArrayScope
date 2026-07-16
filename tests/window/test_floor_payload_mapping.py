@@ -23,13 +23,13 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.backends.vispy.tiles import _payload_mode
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-from arrayscope.display.pyramid import PyramidCache, reduce_box_mean
+from arrayscope.display.pyramid import LodPageCache, materialize_lod_page
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
     TexturePlaneKind,
 )
-from arrayscope.window.frame_session import FrameSession, pyramid_key_for_rendered
+from arrayscope.window.frame_session import FrameSession
 
 TILE = 64
 ZOOMED_OUT_RANGE = ((0.0, 4.0 * 2 * TILE), (0.0, 4.0 * TILE))
@@ -86,7 +86,7 @@ def _session(*, dtype, view_state, shader_display: bool, count=2):
         skipped_tiles=set(),
         pending_tiles=[],
         lod_policy_mode=LOD_POLICY_RESIDENT,
-        pyramid_cache=PyramidCache(max_bytes=1 << 24),
+        lod_page_cache=LodPageCache(max_bytes=1 << 24),
     )
     session.shader_display = shader_display
     complex_input = bool(np.issubdtype(np.dtype(dtype), np.complexfloating))
@@ -113,20 +113,26 @@ def _admit_metadata_free_floor(session, tile_number: int):
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     assert int(demand.desired_level) > 0
     rendered = session.rendered_tiles[tile_number]
-    key = pyramid_key_for_rendered(
+    key = session._lod_page_set_key_for(
         rendered,
         demand=demand,
         level=demand.desired_level,
-        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
-        shader_display=bool(session.shader_display),
     )
-    plane = reduce_box_mean(np.asarray(rendered.image), key.factor_xy)
-    histogram = None
-    if np.iscomplexobj(plane):
-        histogram = np.abs(plane).astype(np.float32)
+    source_origin_yx = (
+        key.plans[0].valid_source_rect_yx[0],
+        key.plans[0].valid_source_rect_yx[2],
+    )
+    pages = tuple(
+        materialize_lod_page(
+            rendered.image,
+            source_origin_yx=source_origin_yx,
+            plan=plan,
+        )
+        for plan in key.plans
+    )
     del session.rendered_tiles[tile_number]
     session.dirty_payloads.clear()
-    assert session.admit_preview_plane(tile_number, key, plane, histogram)
+    assert session.admit_preview_plane(tile_number, key, pages)
     assert session.preview_floor_metadata(key) is None
     return key
 

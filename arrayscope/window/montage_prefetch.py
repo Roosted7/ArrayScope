@@ -17,7 +17,7 @@ from arrayscope.display.slice_engine import make_image_from_slab, make_shader_im
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
 from arrayscope.render.effects import rendered_tile_from_evaluation_result
-from arrayscope.render.lod import admit_retained_preview_level
+from arrayscope.render.lod import _page_set_complete, admit_retained_preview_level
 from arrayscope.window.frame_effects import interactive_active
 
 
@@ -448,7 +448,7 @@ def _invite_walk_continuation(window) -> None:
 
 def _preview_cache_active(session) -> bool:
     return (
-        getattr(session, "pyramid_cache", None) is not None
+        getattr(session, "lod_page_cache", None) is not None
         and int(getattr(session, "lod_preview_level", 0) or 0) > 0
     )
 
@@ -456,22 +456,22 @@ def _preview_cache_active(session) -> bool:
 def _preview_resident(session, tile) -> bool:
     """True when the pinned preview cache already holds this tile's plane."""
 
-    preview = getattr(session, "pyramid_cache", None)
+    preview = getattr(session, "lod_page_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
-    from arrayscope.display.pyramid import PyramidLevelKey
-    from arrayscope.render.lod import floor_component_tags
-
     semantic_id = session.tile_semantic_source_id(int(tile.source_index))
-    for component in floor_component_tags(session):
-        key = PyramidLevelKey(
-            source_id=semantic_id,
-            tile_id=int(tile.source_index),
-            component=component,
-            level_xy=(level, level),
-        )
-        if preview.peek(key) is not None:
+    rec = session.lifecycle.peek(int(tile.montage_index))
+    if rec is None:
+        return False
+    for key, entry in rec.levels.items():
+        if (
+            getattr(key, "source_id", None) == semantic_id
+            and int(getattr(key, "tile_id", -1)) == int(tile.source_index)
+            and max(tuple(getattr(key, "level_xy", (0, 0)))) == level
+            and entry.phase.value == "resident"
+            and _page_set_complete(preview, key)
+        ):
             return True
     return False
 
@@ -485,19 +485,21 @@ def _admit_walk_preview(session, tile, result) -> bool:
     index never duplicates the reduction.
     """
 
-    preview = getattr(session, "pyramid_cache", None)
+    preview = getattr(session, "lod_page_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
     rendered = rendered_tile_from_evaluation_result(tile, result)
-    return bool(
-        admit_retained_preview_level(
-            preview,
-            rendered,
-            semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
-            preview_level=level,
-        )
+    key = admit_retained_preview_level(
+        preview,
+        rendered,
+        semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
+        preview_level=level,
     )
+    if key is None:
+        return False
+    session.lifecycle.level_resident(int(tile.montage_index), key)
+    return True
 
 
 def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:

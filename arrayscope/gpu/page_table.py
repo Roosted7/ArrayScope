@@ -106,20 +106,8 @@ class PageTable:
             # can never satisfy a DataChunkKey target.
             if not isinstance(key, DataChunkKey):
                 continue
-            if not _same_value_family(target, key):
-                continue
             actual_reduction = _reduction_vector(key)
-            if any(actual < wanted for actual, wanted in zip(actual_reduction, target_reduction)):
-                continue
-            if any(
-                actual_start > target_start or actual_stop < target_stop
-                for actual_start, actual_stop, target_start, target_stop in zip(
-                    key.chunk_origin,
-                    key.stop,
-                    target.chunk_origin,
-                    target.stop,
-                )
-            ):
+            if not page_key_can_cover(target, key):
                 continue
             delta = tuple(
                 int(actual) - int(wanted)
@@ -314,6 +302,38 @@ def _same_value_family(target: DataChunkKey, actual: DataChunkKey) -> bool:
         and target.dtype == actual.dtype
         and target.representation == actual.representation
         and target.lod.reducer == actual.lod.reducer
+    )
+
+
+def page_key_can_cover(
+    target: DataChunkKey,
+    actual: DataChunkKey,
+    *,
+    require_coverage: bool = True,
+) -> bool:
+    """Return whether ``actual`` is a semantic/anisotropic ancestor of ``target``.
+
+    This is the single value-family and ancestry predicate used by resolution
+    and by checked page-backed payload admission.  Geometry stays in native
+    source axis order throughout.
+    """
+
+    if not _same_value_family(target, actual):
+        return False
+    target_reduction = _reduction_vector(target)
+    actual_reduction = _reduction_vector(actual)
+    if any(value < wanted for value, wanted in zip(actual_reduction, target_reduction)):
+        return False
+    if not require_coverage:
+        return True
+    return all(
+        actual_start <= target_start and actual_stop >= target_stop
+        for actual_start, actual_stop, target_start, target_stop in zip(
+            actual.chunk_origin,
+            actual.stop,
+            target.chunk_origin,
+            target.stop,
+        )
     )
 
 
