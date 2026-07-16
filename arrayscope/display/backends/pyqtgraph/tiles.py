@@ -277,14 +277,30 @@ class MontageTileLayer:
             if int(tile) in tile_payloads
         } if tile_delta is not None else set()
         target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
-        drawable_payloads = {
-            int(tile): payload
-            for tile, payload in tile_payloads.items()
+        requested_upserts = (
+            set(int(tile) for tile in tile_payloads)
+            if tile_delta is None
+            else set(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {}))
+        )
+        drawable_payloads: dict[int, DisplayTilePayload] = {}
+        identity_rejected_tiles: list[int] = []
+        for tile, payload in tile_payloads.items():
             if acknowledged_identity_satisfies_target(
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
-            )
-        }
+            ):
+                drawable_payloads[int(tile)] = payload
+            elif int(tile) in requested_upserts:
+                # Not presentable for this delta's typed target; the payload
+                # is dropped from this commit.  Report it loudly — a payload
+                # that can NEVER satisfy its target re-appears here on every
+                # flush, and silence turned that into a starvation stall
+                # (2026-07-16, session 148).  Retained non-upsert payloads a
+                # newer target has outrun are excluded: the presenter is not
+                # looping on them, so counting them would false-trip the
+                # re-commit backoff and the trace invariant.
+                identity_rejected_tiles.append(int(tile))
+        identity_rejected_tiles.sort()
         active = {
             int(tile)
             for tile in requested_active
@@ -323,11 +339,6 @@ class MontageTileLayer:
         level_updates = 0
         storage_evictions = 0
         updated_tiles: list[int] = []
-        requested_upserts = (
-            set(int(tile) for tile in tile_payloads)
-            if tile_delta is None
-            else set(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {}))
-        )
         committed_upserts: set[int] = set()
         tile_order = _direct_tile_order(
             layout,
@@ -675,6 +686,8 @@ class MontageTileLayer:
             presented_tiles=physically_presented,
             presented_identities=_direct_presented_identities(self._states, drawable_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
+            identity_rejected_items=len(identity_rejected_tiles),
+            identity_rejected_tiles=tuple(identity_rejected_tiles),
             updated_tiles=tuple(int(tile) for tile in updated_tiles),
             items_created=int(items_created),
             items_updated=int(items_updated),

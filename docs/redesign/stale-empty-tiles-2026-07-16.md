@@ -182,3 +182,13 @@ pace) all converge with the fixes above.
   `identity_rejected` (invariant `no_identity_rejected_commits`), even when
   every target eventually settles.
   Gate: `tests/core/test_trace.py::test_trace_verify_rejects_identity_rejected_commits`.
+- The pyqtgraph backend had the silent form of the same rejection: its
+  drawable-payload filter dropped identity-dead upserts without filling
+  `identity_rejected_items`/`identity_rejected_tiles`, so a dead-payload
+  re-emit loop on that backend was invisible to the commit_batch trace,
+  immune to the presenter backoff, and undetectable by trace_verify. The
+  filter now counts rejected **delta upserts** (retained non-upsert payloads
+  a newer target has outrun are deliberately excluded — the presenter is not
+  looping on them, and counting them would false-trip the backoff and the
+  trace invariant).
+  Gate: `tests/display/test_pyqtgraph_physical_presentation.py::test_identity_rejected_upserts_are_reported_not_silent`.
