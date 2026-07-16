@@ -3976,19 +3976,35 @@ def plan_presentation_transition(
         return reject("shader-display")
     if getattr(previous_session, "lod_policy_mode", None) != getattr(session, "lod_policy_mode", None):
         return reject("lod-policy")
-    # Layout geometry is derived from the semantic view plus the live viewport.
-    # Auto columns can legitimately oscillate while scrollbars settle (the
-    # saved-session failure changed 13 -> 14 columns for the same 100 tiles).
-    # The predecessor keeps its own physical geometry, and the successor
-    # geometry crosses the backend boundary only in the complete transaction;
-    # comparing the two here was a second, drifting compatibility owner.
-    # View state is successor intent, not the identity of the already
-    # committed predecessor. Channel, flips, slice, montage window, camera,
-    # and auto layout may all change while the previous physical frame remains
-    # explicitly stale. Semantic reads stay generation-gated, and the new
-    # state becomes physical truth only at the complete handoff below.
+    # The surface contract permits retained pixels only for a slice/source
+    # index successor.  Normalize exactly that source-selection field, then
+    # compare the remaining semantic view state here, in the one transition
+    # owner.  In particular, image axes and flips change where source samples
+    # are drawn; keeping their old mappings visible is not a stale preview but
+    # the wrong presentation.  Auto-derived layout geometry remains outside
+    # ViewState, so harmless scrollbar/column settling does not participate.
+    previous_state = previous_session.view_state
+    state = session.view_state
+    if type(previous_state) is not type(state):
+        return reject("view-state-type")
     if axis is None:
+        try:
+            aligned = replace(state, slice_indices=previous_state.slice_indices)
+        except (AttributeError, TypeError, ValueError):
+            return reject("slice-state")
+        if aligned != previous_state:
+            return reject("view-state")
         return PresentationTransitionDecision(True, False, "slice-compatible")
+    try:
+        aligned = replace(
+            state,
+            montage_indices=previous_state.montage_indices,
+            montage_text=previous_state.montage_text,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return reject("montage-state")
+    if aligned != previous_state:
+        return reject("view-state")
     first_pixels = getattr(previous_session, "required_first_pixels_presented", None)
     complete_predecessor = bool(
         bool(callable(first_pixels) and first_pixels())

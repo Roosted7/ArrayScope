@@ -4093,6 +4093,34 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     assert decision.atomic_successor
 
 
+def test_transposed_axes_cannot_retain_predecessor_mappings():
+    """Resident pixels survive, but their old source-to-world mapping is hidden."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    previous.view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    successor.view_state = previous.view_state.transposed_image_axes()
+    _state, previous_delta = previous.build_tile_presentation({})
+    _acknowledge(previous, previous_delta)
+    previous.mark_presented(tuple(previous_delta.upserts))
+    assert previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "view-state"
+
+
 def test_same_stage_operation_successor_hides_incompatible_predecessor():
     """Same base storage does not make different operation pixels compatible."""
 
@@ -4205,6 +4233,11 @@ def test_visible_partial_montage_cannot_arm_atomic_handoff():
     document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
     previous.document = document
     successor.document = document
+    view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    previous.view_state = view_state
+    successor.view_state = view_state
     _state, delta = previous.build_tile_presentation({})
     partial = TileCommitReport(
         presented_tiles=frozenset({0}),
@@ -4233,6 +4266,11 @@ def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
     document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
     previous.document = document
     successor.document = document
+    view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    previous.view_state = view_state
+    successor.view_state = view_state
     previous.atomic_successor_pending = True
 
     decision = plan_presentation_transition(

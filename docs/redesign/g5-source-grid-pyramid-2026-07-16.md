@@ -189,6 +189,19 @@ has no post-start sample with drawn coverage below the visible set and the
 `presentation_continuity` gate is green. Its remaining failures are LOD
 checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
 
+The semantic-compatibility boundary is now explicit in that same transition
+owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
+visible after transposing the image axes. `plan_presentation_transition`
+therefore normalizes only the source-selection field that retention is allowed
+to bridge: `slice_indices` for a single image, or
+`montage_indices`/`montage_text` for a montage. Axes, flips, channel/view mode,
+and every other `ViewState` difference reject predecessor retention. Rejection
+hides the old mapping through the existing surface invalidation while leaving
+its CPU/GPU residency reusable for a later revert; it does not clear caches or
+add a second freshness set. The full real-Wayland semantic transition matrix
+(operation, real channel, complex mode, and axes on both backends) passes 8/8,
+and the full montage LOD residency file passes 181/181.
+
 A later 500 ms framebuffer sequence caught a stricter atomicity violation that
 the tile-count gates missed: during raw-to-FFT replacement, canonical successor
 pages could be uploaded and rebound while the layer still held predecessor

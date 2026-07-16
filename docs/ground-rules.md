@@ -45,9 +45,13 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
    tile mappings must be hidden immediately. Never-black semantic fallback
    applies only when the complete source identity matches. A slice-only
    predecessor may remain as an explicitly non-semantic preview, but it is
-   never acknowledged as current and cannot answer probes or reads. Channel,
-   levels, LUT, and other shader-only changes that keep the source texels cross
-   with their uniforms atomically; a representation/source change does not.
+   never acknowledged as current and cannot answer probes or reads. Levels,
+   LUT, and other shader-only updates within one encoded presentation identity
+   cross with their uniforms atomically. A channel/view-mode change must still
+   be encoded in the target identity: it may reuse resident texels only when
+   the backend commits the new mapping atomically, otherwise the old mapping is
+   hidden. Image-axis, flip, representation, and source changes never retain
+   the predecessor mapping.
    An acknowledged finer compatible LOD remains visible for a later coarser
    demand. Neither demand nor a logical payload/cache byte estimate authorizes
    demotion. Only backend-owned physical capacity pressure may replace it,
