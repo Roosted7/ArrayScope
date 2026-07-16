@@ -312,6 +312,24 @@ class MontageTileLayer:
     def states(self) -> dict[int, TileLayerItemState]:
         return self._states
 
+    @property
+    def physically_visible_tile_count(self) -> int:
+        """Number of tile ImageItems that can contribute pixels right now.
+
+        The shell's selected montage mode is desired routing state, not
+        physical evidence: it is assigned before an update and can remain
+        ``tile_layer`` after a zero-item candidate.  Derive visibility from
+        the concrete item and its installed image instead.
+        """
+
+        return sum(
+            1
+            for state in self._states.values()
+            if _state_is_physically_visible(state)
+            and getattr(state.item, "image", None) is not None
+            and int(np.size(state.item.image)) > 0
+        )
+
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         """Describe the arrays and mapping the visible ImageItems draw now."""
 

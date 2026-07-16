@@ -422,6 +422,11 @@ class TilePresentationDelta:
     near_tiles: tuple[int, ...] = ()
     near_tile_source_ids: Mapping[int, object] = field(default_factory=dict)
     target_identities: Mapping[int, TileIdentity] = field(default_factory=dict)
+    # A compatible predecessor remains the complete physical frame until
+    # every payload in this successor can cross the backend boundary.  This
+    # travels with the immutable command so the backend cannot advance shared
+    # geometry/uniform state while retaining predecessor page bindings.
+    atomic_handoff: bool = False
     force_refresh: bool = False
     clear_reason: str = ""
 
@@ -462,6 +467,7 @@ class TilePresentationDelta:
         object.__setattr__(self, "near_tiles", near)
         object.__setattr__(self, "near_tile_source_ids", near_sources)
         object.__setattr__(self, "target_identities", target_identities)
+        object.__setattr__(self, "atomic_handoff", bool(self.atomic_handoff))
         object.__setattr__(self, "force_refresh", bool(self.force_refresh))
         object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))
 

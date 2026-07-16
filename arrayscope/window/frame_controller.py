@@ -28,7 +28,7 @@ from arrayscope.display.montage import (
     make_montage_plan,
 )
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.backends.base import surface_for_view
+from arrayscope.display.backends.base import surface_for_view, tiled_presentation_visible
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.stages import RenderIntent
@@ -746,9 +746,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # It rejects a different staged document or surface/backend contract;
         # derived representation, view state, and auto layout belong to the
         # complete successor transaction and cannot justify a black flash.
+        surface = surface_for_view(self.win.img_view)
         transition = plan_presentation_transition(
             dying_session,
             session,
+            predecessor_visible=tiled_presentation_visible(surface),
         )
         retain_stale_pixels = bool(transition.retain_pixels)
         session.atomic_successor_pending = bool(transition.atomic_successor)
@@ -781,7 +783,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         else:
             self._slice_retention_started_at = None
             self._slice_retention_session_id = None
-        surface_for_view(self.win.img_view).invalidate_tiled_presentation(
+        surface.invalidate_tiled_presentation(
             "frame-session-transition",
             hide_pixels=not retain_stale_pixels,
         )

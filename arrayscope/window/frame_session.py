@@ -1031,6 +1031,10 @@ class FrameSession:
         old_rendered_tiles = dict(self.rendered_tiles)
         old_display_payloads = dict(self.display_tile_payloads)
         old_state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        had_complete_predecessor = bool(
+            self.atomic_successor_pending
+            or self.required_first_pixels_presented()
+        )
         old_indices_by_source = {
             source_id: int(index)
             for index, source_id in old_source_ids.items()
@@ -1191,7 +1195,7 @@ class FrameSession:
             # index scrolling changes semantic sources without changing layout
             # geometry, so the former geometry-only arming missed the exact
             # full -> subset -> full transition seen on screen.
-            self.atomic_successor_pending = True
+            self.atomic_successor_pending = bool(had_complete_predecessor)
             retained_state = {
                 int(tile): payload
                 for tile, payload in old_state_payloads.items()
@@ -3095,6 +3099,7 @@ class FrameSession:
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
             target_identities=self.tile_target_identities(planned),
+            atomic_handoff=True,
         )
         return previous_state.apply_delta(delta), delta
 
@@ -3911,7 +3916,12 @@ class PresentationTransitionDecision:
     detail: str = ""
 
 
-def plan_presentation_transition(previous_session, session) -> PresentationTransitionDecision:
+def plan_presentation_transition(
+    previous_session,
+    session,
+    *,
+    predecessor_visible: bool,
+) -> PresentationTransitionDecision:
     """Plan truthful predecessor retention across a compatible rebirth.
 
     This is the deciding owner for retaining drawn (stale-but-honest) pixels
@@ -3922,17 +3932,20 @@ def plan_presentation_transition(previous_session, session) -> PresentationTrans
     four-tile preview commit to collapse a complete 100-tile VisPy surface.
 
     The predicate is deliberately
-    conservative (ADR 0051 correctness history): the staged base document,
+    conservative (ADR 0051 correctness history): the exact document/operation
+    source,
     colormap, window/levels mode, shader/CPU backend semantics, and LOD policy
     must match exactly.
-    Operation steps may differ because ADR 0012 explicitly keeps the previous
-    committed image visible during reevaluation; its actual presentation
-    identity remains predecessor truth until the atomic successor commits.
+    Operation steps may not differ: they change the semantic source. The old
+    residency remains reusable, but its mappings are hidden until the new
+    source presents. This is distinct from compatible LOD fallback, which may
+    retain a coarser rendering only under the same semantic source identity.
     The camera deliberately does not participate (see the note inline).
-    Comparing against the DYING session (not the last committed
-    frame) is chain-safe: a predecessor that itself blanked left the surface
-    hidden, so retention degenerates to today's behavior, and a predecessor
-    that retained satisfied this same predicate transitively.
+    Comparing semantic intent against the DYING session is chain-safe only
+    when the physical surface still draws a predecessor.  The surface-owned
+    ``predecessor_visible`` fact makes that condition explicit: a session
+    born after an incompatible blank cannot resurrect an atomic handoff and
+    wait forever for coverage that no longer exists.
 
     Retention is presentation-only.  It can never resurrect the ADR 0051
     stale-acknowledgement class because nothing here touches the session:
@@ -3942,13 +3955,15 @@ def plan_presentation_transition(previous_session, session) -> PresentationTrans
     advances.
     """
 
-    from arrayscope.operations.evaluator import stage_document_key
+    from arrayscope.operations.evaluator import _document_key
 
     def reject(reason: str, detail: str = "") -> PresentationTransitionDecision:
         return PresentationTransitionDecision(False, False, str(reason), str(detail))
 
     if previous_session is None or session is None:
         return reject("missing-session")
+    if not bool(predecessor_visible):
+        return reject("predecessor-hidden")
     previous_axis = getattr(previous_session, "montage_axis", None)
     axis = getattr(session, "montage_axis", None)
     if previous_axis != axis:
@@ -3957,11 +3972,10 @@ def plan_presentation_transition(previous_session, session) -> PresentationTrans
         return reject("force-auto")
     if getattr(session, "skipped_tiles", None) or getattr(previous_session, "skipped_tiles", None):
         return reject("skipped-tiles")
-    # Operations are successor semantics over the same staged source, not a
-    # reason to flash black. ADR 0012 requires the committed predecessor to
-    # remain visible while reevaluation runs. Its physical identity remains
-    # predecessor truth until the complete atomic handoff below.
-    if stage_document_key(previous_session.document) != stage_document_key(session.document):
+    # Exact document identity includes operation steps without hashing the
+    # array. Residency may outlive this boundary for fast reverts, but visible
+    # fallback may not: old operation pixels are the wrong semantic source.
+    if _document_key(previous_session.document) != _document_key(session.document):
         return reject("document")
     if previous_session.window_mode != session.window_mode:
         return reject("window-mode")
@@ -3988,6 +4002,13 @@ def plan_presentation_transition(previous_session, session) -> PresentationTrans
     # state becomes physical truth only at the complete handoff below.
     if axis is None:
         return PresentationTransitionDecision(True, False, "slice-compatible")
+    first_pixels = getattr(previous_session, "required_first_pixels_presented", None)
+    complete_predecessor = bool(
+        bool(callable(first_pixels) and first_pixels())
+        or getattr(previous_session, "atomic_successor_pending", False)
+    )
+    if not complete_predecessor:
+        return reject("predecessor-incomplete")
     # A montage rebirth has a cold lifecycle even though the physical surface
     # still owns a compatible predecessor. Arm the existing all-slot handoff
     # so no partial successor can replace that complete coverage.

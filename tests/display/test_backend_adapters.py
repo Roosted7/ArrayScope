@@ -8,6 +8,7 @@ import pytest
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import VISPY_CAPABILITIES
 from arrayscope.display.backends import surface_for_view
+from arrayscope.display.backends.base import tiled_presentation_visible
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.model.commit import DisplayTiledPresentation
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
@@ -20,6 +21,7 @@ class _FakeSurface:
         self.capabilities = VISPY_CAPABILITIES
         self.widget = object()
         self.calls = []
+        self.physically_visible_tile_count = 0
 
     def present_tiled(self, presentation):
         self.calls.append(("tiled", None, presentation))
@@ -55,6 +57,8 @@ class _FakeSurface:
         return {
             "backend": self.capabilities.name,
             "interaction_event_owner": self.interaction_event_owner(),
+            "montage_display_mode": "vispy_tile_layer",
+            "physically_visible_tile_count": self.physically_visible_tile_count,
         }
 
     def interaction_event_owner(self):
@@ -139,6 +143,16 @@ def test_surface_resolver_explains_nonconforming_surface():
         surface_for_view(view)
 
 
+def test_tiled_visibility_uses_physical_draw_count_not_selected_mode():
+    surface = _FakeSurface()
+
+    assert surface.presentation_diagnostics()["montage_display_mode"] == "vispy_tile_layer"
+    assert tiled_presentation_visible(surface) is False
+
+    surface.physically_visible_tile_count = 1
+    assert tiled_presentation_visible(surface) is True
+
+
 def test_surface_contract_commits_tiled_semantics():
     surface = _FakeSurface()
     tiled = _tiled_presentation()
@@ -194,8 +208,19 @@ def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
         diagnostics = surface.presentation_diagnostics()
         assert diagnostics["backend"] == "pyqtgraph"
         assert diagnostics["interaction_event_owner"] == "shared-controller"
+        assert diagnostics["physically_visible_tile_count"] == 0
+
+        # Selecting the tiled route before any ImageItem commits must not be
+        # mistaken for physical predecessor coverage.
+        view._montage_display_mode = "tile_layer"
+        assert tiled_presentation_visible(surface) is False
+
+        surface.present_tiled(_tiled_presentation())
+        assert surface.presentation_diagnostics()["physically_visible_tile_count"] == 1
+        assert tiled_presentation_visible(surface) is True
 
         surface.reset_surface("test-context-loss")
+        assert surface.presentation_diagnostics()["physically_visible_tile_count"] == 0
         assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
         surface.teardown_surface()
         surface.teardown_surface()

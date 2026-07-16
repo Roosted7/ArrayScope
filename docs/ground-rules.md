@@ -40,12 +40,20 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
 7. **Speculative work never changes visible outcomes.** Warming, prefetch,
    and priority biasing reorder or pre-place work that was already admitted;
    they never manufacture lifecycle/presentation state.
-8. **Bounded sessions.** End every working session with the app visibly
+8. **Residency is not visibility.** GPU/CPU pages may remain resident across an
+   operation/value-source change so a later revert can reuse them, but the old
+   tile mappings must be hidden immediately. Never-black semantic fallback
+   applies only when the complete source identity matches. A slice-only
+   predecessor may remain as an explicitly non-semantic preview, but it is
+   never acknowledged as current and cannot answer probes or reads. Channel,
+   levels, LUT, and other shader-only changes that keep the source texels cross
+   with their uniforms atomically; a representation/source change does not.
+9. **Bounded sessions.** End every working session with the app visibly
    better or the change reverted. Update [`queue.md`](queue.md); a reverted
    experiment gets a [`graveyard.md`](graveyard.md) row. New process
    documents require Thomas's explicit ask.
-9. **Backends: both first-class for correctness.** VisPy is the Linux
+10. **Backends: both first-class for correctness.** VisPy is the Linux
    certification bar; PyQtGraph targets GPU-headless/remote use and gets 2×
    the performance allowance (Thomas, 2026-07-14).
-10. **One scheduler.** No new scheduling systems beside the kernel, no new
+11. **One scheduler.** No new scheduling systems beside the kernel, no new
     pacing timers, no parallel tile-state collections (ADR 0053).

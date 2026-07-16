@@ -173,16 +173,39 @@ first bounded successor batch was acknowledged. Retention and atomic handoff
 had drifted across a source-window flag, an independent completion generation,
 derived dtype/RGB/geometry/ViewState vetoes, and a backend atomic query that no
 backend implemented. One immutable presentation-transition decision now owns
-retention, atomic obligation, reason, and trace detail. A same staged document
-and surface may keep its explicitly stale predecessor while operation, channel,
-representation, camera, and auto-column intent change; only one complete
-backend acknowledgement clears `atomic_successor_pending`. The redundant
+retention, atomic obligation, reason, and trace detail. Its initial rule was too
+broad: it allowed a common staged base to retain pixels across an operation
+change. The corrected contract separates residency from visibility. Old pages
+may remain resident for a later revert, but a document/operation source change
+hides their mappings and shows black/placeholder until successor pixels present.
+Never-black retention and coarse fallback are allowed only under the same full
+semantic source identity; shader-only levels/LUT/mapping state crosses with the
+compatible pixels atomically. The redundant
 completion generation, lifecycle-based clear, and dead backend query are gone.
 The real-Wayland artifact
 `tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-atomic-view-fixed/`
 has no post-start sample with drawn coverage below the visible set and the
 `presentation_continuity` gate is green. Its remaining failures are LOD
 checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
+
+A later 500 ms framebuffer sequence caught a stricter atomicity violation that
+the tile-count gates missed: during raw-to-FFT replacement, canonical successor
+pages could be uploaded and rebound while the layer still held predecessor
+levels/mapping (or vice versa), briefly producing white-background grayscale or
+psychedelic complex tiles. The real-Wayland artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-atomic-handoff-fixed/`
+is retained as a **red** diagnostic: its scalar frames proved that
+cross-operation predecessor retention could present stale complex values under
+scalar target state. Page-backed warming remains residency-only, but operation
+changes now hide the incompatible presentation; only same-source LOD and
+shader-presentation handoffs may retain visible predecessor bindings. The
+replacement real-Wayland saved-session sequence is retained at
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/scalar-freshness-storage-pressure-fixed/`.
+Its periodic framebuffer/physical-truth record keeps one storage/mapping family
+per sample across FFT-to-scalar replacement, ends with 60/60 exact scalar L0
+bindings and settled target coverage, and was visually confirmed onscreen. Its
+three red gates are explicitly performance-only (GUI callback, heartbeat, and
+warm-input latency); they do not weaken this semantic correctness result.
 
 The full resident-LOD matrix is green again after translating eight legacy
 level-swap assertions that required native/finer pixels to be replaced by a

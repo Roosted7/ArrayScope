@@ -1681,6 +1681,8 @@ class FramePipelineEffects:
                         cold_deadline_ms=cold_deadline_ms,
                         **limits,
                     )
+                    if shader_atomic_successor:
+                        tile_delta = replace(tile_delta, atomic_handoff=True)
             active_payloads = tile_state.active_payloads(tile_delta)
             acknowledged_payloads = dict(
                 getattr(session.tile_presentation_state, "payloads", {}) or {}
@@ -3741,11 +3743,32 @@ def _warm_atomic_successor_residency(
             tile_residency_budget_bytes=tile_residency_budget_bytes(renderer._memory_policy()),
             frame_plan=getattr(session, "frame_plan", None),
         )
+        resident = getattr(
+            getattr(renderer.win, "img_view", None),
+            "atomicTiledPayloadResident",
+            None,
+        )
+        unresolved = tuple(
+            int(tile)
+            for tile in admitted
+            if callable(resident) and not bool(resident(job["payloads"][int(tile)]))
+        )
         for tile in admitted:
+            if int(tile) in unresolved:
+                continue
             payload = job["payloads"][int(tile)]
             marker = (getattr(payload, "source_id", None), level_key)
             warmed[int(tile)] = marker
             warmed_identities.add(marker)
+        if unresolved:
+            job["pending"].extend(unresolved)
+            if len(unresolved) == len(admitted):
+                # No page became resident: stop this bounded job instead of
+                # spinning a low-priority callback forever. The predecessor
+                # stays presented and the existing settlement guard reports
+                # the capacity/residency failure within the global deadline.
+                session._atomic_warm_job = None
+                return
         if job["pending"]:
             _post_low_priority_callback(renderer, continue_warm)
             return

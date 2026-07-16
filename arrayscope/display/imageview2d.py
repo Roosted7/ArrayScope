@@ -1114,12 +1114,17 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def presentation_diagnostics(self) -> dict[str, object]:
         timing = self.lastImageUploadTiming()
+        tile_layer = getattr(self, "_montage_tile_layer", None)
+        physically_visible_tile_count = int(
+            getattr(tile_layer, "physically_visible_tile_count", 0) or 0
+        )
         return {
             "backend": self.capabilities.name,
             "mode": str(getattr(timing, "mode", "")),
             "interaction_event_owner": self.interaction_event_owner(),
             "native_pointer_interaction": bool(self.capabilities.native_pointer_interaction),
             "montage_display_mode": self.montageDisplayMode(),
+            "physically_visible_tile_count": physically_visible_tile_count,
             "last_reset_reason": str(getattr(self, "_last_surface_reset_reason", "")),
         }
 

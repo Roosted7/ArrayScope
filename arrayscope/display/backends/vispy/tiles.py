@@ -42,7 +42,11 @@ from arrayscope.gpu.keys import (
     ChunkLod,
     DataChunkKey,
 )
-from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable
+from arrayscope.gpu.page_table import (
+    PageResolution,
+    PageSlot,
+    PageTable,
+)
 
 try:
     from vispy.visuals import Visual
@@ -119,6 +123,18 @@ class _ChunkCommit:
     prepare_ms: float
     submit_ms: float
     uploaded_any: bool
+
+
+@dataclass(frozen=True)
+class _PageUpload:
+    """Residency-only result for checked canonical page values."""
+
+    uploads: int
+    upload_bytes: int
+    complex_uploads: int
+    prepare_ms: float
+    submit_ms: float
+    uploaded_keys: tuple[DataChunkKey, ...]
 
 
 def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
@@ -743,14 +759,6 @@ class TextureAtlasPool:
         return self.pages[0].color_texture if self.pages else None
 
     @property
-    def scalar_is_atlas(self) -> bool:
-        return bool(self.pages and self.pages[0].scalar_is_atlas)
-
-    @property
-    def color_is_atlas(self) -> bool:
-        return bool(self.pages and self.pages[0].color_is_atlas)
-
-    @property
     def cpu_shadow_bytes(self) -> int:
         # Atlas storage is allocated by shape on the GPU.  Only per-tile
         # staging arrays exist during a sub-upload.
@@ -759,6 +767,54 @@ class TextureAtlasPool:
     @property
     def estimated_gpu_bytes(self) -> int:
         return sum(int(page.estimated_gpu_bytes) for page in self.pages)
+
+    def diagnostics_snapshot(self) -> dict[str, object]:
+        """Derived atlas/page-table state for live physical-truth traces.
+
+        Keep this as a read-only projection of the pool's canonical maps.  In
+        particular, candidate-missing counts come from the resolver result and
+        residency comes from the page table; no presentation/session cache is
+        allowed to infer either value independently.
+        """
+
+        classes: dict[tuple[tuple[int, int], str], dict[str, object]] = {}
+        for page_index, page in enumerate(self.pages):
+            key = (tuple(int(value) for value in page.tile_shape), str(page.storage_mode))
+            row = classes.setdefault(
+                key,
+                {
+                    "shape": key[0],
+                    "storage_mode": key[1],
+                    "page_count": 0,
+                    "page_indices": [],
+                    "capacity": 0,
+                    "occupied": 0,
+                    "bytes": 0,
+                },
+            )
+            row["page_count"] = int(row["page_count"]) + 1
+            row["page_indices"].append(int(page_index))
+            row["capacity"] = int(row["capacity"]) + int(page.capacity)
+            row["occupied"] = int(row["occupied"]) + sum(
+                owner is not None for owner in page.slot_owners
+            )
+            row["bytes"] = int(row["bytes"]) + int(page.estimated_gpu_bytes)
+        page_classes = tuple(
+            {
+                **row,
+                "page_indices": tuple(int(index) for index in row["page_indices"]),
+            }
+            for _key, row in sorted(classes.items(), key=lambda item: item[0])
+        )
+        missing = tuple(self.tile_page_candidate_missing.values())
+        return {
+            "page_candidate_missing_tile_count": len(missing),
+            "page_candidate_missing_key_count": sum(len(keys) for keys in missing),
+            "page_table_resident_count": len(self._page_table),
+            "atlas_page_classes": page_classes,
+            "atlas_estimated_gpu_bytes": int(self.estimated_gpu_bytes),
+            "atlas_budget_bytes": int(self.budget_bytes),
+        }
 
     def ensure_layout(
         self,
@@ -769,7 +825,7 @@ class TextureAtlasPool:
         budget_bytes: int | None = None,
     ) -> bool:
         tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
-        requested = max(1, int(count))
+        requested = max(0, int(count))
         if budget_bytes is not None:
             self.budget_bytes = max(0, int(budget_bytes))
         max_columns = self.max_texture_size // tile_w
@@ -789,12 +845,16 @@ class TextureAtlasPool:
 
         storage_mode = _normalize_storage_mode(storage_mode)
         shape_changed = self.tile_shape != (tile_h, tile_w)
-        mode_changed = self.storage_mode != storage_mode
-        if not shape_changed and not mode_changed and requested <= self._class_capacity((tile_h, tile_w)):
+        if (
+            not shape_changed
+            and requested
+            <= self._class_capacity((tile_h, tile_w), storage_mode=storage_mode)
+        ):
+            self.storage_mode = storage_mode
             return False
 
         self.tile_shape = (tile_h, tile_w)
-        if shape_changed or mode_changed:
+        if shape_changed:
             self.pages.clear()
             self._page_table = PageTable()
             self.page_target_resolutions.clear()
@@ -817,23 +877,45 @@ class TextureAtlasPool:
             self.active_resident_keys.clear()
             self.superseded_keys.clear()
         self.storage_mode = storage_mode
-        while self._class_capacity((tile_h, tile_w)) < requested:
-            remaining = requested - self._class_capacity((tile_h, tile_w))
-            page_capacity = min(max_slots_per_page, remaining)
-            self.pages.append(
-                TextureAtlasPage(
-                    self._gloo,
-                    tile_shape=(tile_h, tile_w),
-                    capacity=page_capacity,
-                    storage_mode=storage_mode,
-                    max_texture_size=self.max_texture_size,
+        if shape_changed:
+            # The shape reset above emptied the pool, so this initial class
+            # cannot exceed the total budget after the per-class check.
+            while self._class_capacity((tile_h, tile_w), storage_mode=storage_mode) < requested:
+                remaining = requested - self._class_capacity(
+                    (tile_h, tile_w), storage_mode=storage_mode
                 )
+                page_capacity = min(max_slots_per_page, remaining)
+                self.pages.append(
+                    TextureAtlasPage(
+                        self._gloo,
+                        tile_shape=(tile_h, tile_w),
+                        capacity=page_capacity,
+                        storage_mode=storage_mode,
+                        max_texture_size=self.max_texture_size,
+                    )
+                )
+        else:
+            capacity = self._ensure_class_capacity(
+                (tile_h, tile_w),
+                requested,
+                storage_mode=storage_mode,
             )
+            if capacity < requested:
+                raise AtlasCapacityError(
+                    f"atlas cannot allocate {requested} active slots of shape "
+                    f"{(tile_h, tile_w)} and storage {storage_mode} within "
+                    f"{self.budget_bytes} bytes"
+                )
         self.serial += 1
         self.rebuild_count += 1
         return True
 
-    def _class_capacity(self, tile_shape: tuple[int, int]) -> int:
+    def _class_capacity(
+        self,
+        tile_shape: tuple[int, int],
+        *,
+        storage_mode: str | None = None,
+    ) -> int:
         """Slot count of the pages whose slot shape matches ``tile_shape``.
 
         Pages are classed by texture shape (ADR 0050): a reduced-level tile
@@ -842,9 +924,21 @@ class TextureAtlasPool:
         """
 
         shape = (int(tile_shape[0]), int(tile_shape[1]))
-        return sum(int(page.capacity) for page in self.pages if page.tile_shape == shape)
+        mode = None if storage_mode is None else _normalize_storage_mode(storage_mode)
+        return sum(
+            int(page.capacity)
+            for page in self.pages
+            if page.tile_shape == shape
+            and (mode is None or page.storage_mode == mode)
+        )
 
-    def _ensure_class_capacity(self, tile_shape: tuple[int, int], requested: int) -> int:
+    def _ensure_class_capacity(
+        self,
+        tile_shape: tuple[int, int],
+        requested: int,
+        *,
+        storage_mode: str | None = None,
+    ) -> int:
         """Append pages for a non-base shape class within the byte budget.
 
         Returns the class capacity after growth.  The base class is owned by
@@ -854,13 +948,14 @@ class TextureAtlasPool:
 
         shape = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
         requested = max(1, int(requested))
-        capacity = self._class_capacity(shape)
-        if capacity >= requested or self.storage_mode is None:
+        mode = _normalize_storage_mode(storage_mode or self.storage_mode or "scalar")
+        capacity = self._class_capacity(shape, storage_mode=mode)
+        if capacity >= requested:
             return capacity
         max_columns = max(1, self.max_texture_size // shape[1])
         max_rows = max(1, self.max_texture_size // shape[0])
         max_slots_per_page = max(1, int(max_columns * max_rows))
-        bytes_per_slot = max(1, _storage_mode_bytes_per_pixel(self.storage_mode) * shape[0] * shape[1])
+        bytes_per_slot = max(1, _storage_mode_bytes_per_pixel(mode) * shape[0] * shape[1])
         while capacity < requested:
             remaining_slots = requested - capacity
             page_capacity = min(
@@ -877,7 +972,13 @@ class TextureAtlasPool:
                     # Before budget-limiting the class, reclaim slots whose
                     # tiles now present a different class and drop pages that
                     # become empty; retry only when bytes were recovered.
-                    if self._release_superseded_capacity(protect_shape=shape):
+                    if self._release_superseded_capacity(
+                        protect_class=(shape, mode)
+                    ):
+                        continue
+                    if self._release_inactive_page_capacity(
+                        protect_class=(shape, mode)
+                    ):
                         continue
                     break
             self.pages.append(
@@ -885,7 +986,7 @@ class TextureAtlasPool:
                     self._gloo,
                     tile_shape=shape,
                     capacity=int(page_capacity),
-                    storage_mode=self.storage_mode,
+                    storage_mode=mode,
                     max_texture_size=self.max_texture_size,
                 )
             )
@@ -893,7 +994,11 @@ class TextureAtlasPool:
             capacity += int(page_capacity)
         return capacity
 
-    def _release_superseded_capacity(self, *, protect_shape: tuple[int, int] | None = None) -> bool:
+    def _release_superseded_capacity(
+        self,
+        *,
+        protect_class: tuple[tuple[int, int], str] | None = None,
+    ) -> bool:
         """Free superseded slots and drop emptied pages to recover budget bytes.
 
         A slot is superseded when its tile presents an acknowledged payload of
@@ -906,7 +1011,14 @@ class TextureAtlasPool:
         i.e. GPU budget bytes were actually recovered.
         """
 
-        protect = None if protect_shape is None else (int(protect_shape[0]), int(protect_shape[1]))
+        protect = (
+            None
+            if protect_class is None
+            else (
+                (int(protect_class[0][0]), int(protect_class[0][1])),
+                _normalize_storage_mode(protect_class[1]),
+            )
+        )
         active_bases = self.active_base_source_ids
         # Reclaim in LRU order among superseded slots, keeping the retained
         # adjacent level of active tiles for a second pass: losing it costs a
@@ -937,7 +1049,7 @@ class TextureAtlasPool:
                     continue
                 page_index, slot = (slot_ref.page_index, slot_ref.slot_index)
                 page = self.pages[page_index]
-                if protect is not None and page.tile_shape == protect:
+                if protect is not None and (page.tile_shape, page.storage_mode) == protect:
                     # Same-class slots are useful as-is: ordinary eviction
                     # reuses them without any byte recovery, so keep them.
                     continue
@@ -960,6 +1072,60 @@ class TextureAtlasPool:
                 self._drop_pages(empties)
                 return True
         return False
+
+    def _release_inactive_page_capacity(
+        self,
+        *,
+        protect_class: tuple[tuple[int, int], str],
+    ) -> bool:
+        """Drop one wholly inactive physical page to fund another class.
+
+        Storage mode is a page property.  A hidden complex page cannot lend a
+        slot to a scalar value, so under a hard byte budget the only truthful
+        operation transition is to release an entire inactive page and create
+        the requested class.  Pages with a drawn tile, an active target, a
+        chunk owner, or any owner pin are ineligible.  With budget headroom no
+        page is touched, preserving fast operation reverts.
+        """
+
+        protected_shape = (
+            int(protect_class[0][0]),
+            int(protect_class[0][1]),
+        )
+        protected_mode = _normalize_storage_mode(protect_class[1])
+        candidates: list[tuple[int, int]] = []
+        for page_index, page in enumerate(self.pages):
+            if (page.tile_shape, page.storage_mode) == (
+                protected_shape,
+                protected_mode,
+            ):
+                continue
+            owners = tuple(owner for owner in page.slot_owners if owner is not None)
+            if any(
+                owner in self.active_resident_keys
+                or owner in self.active_chunk_keys
+                or bool(self.resident_tiles.get(owner))
+                or bool(self.chunk_resident_tiles.get(owner))
+                or self._page_table.is_pinned(owner)
+                for owner in owners
+            ):
+                continue
+            oldest_use = max(
+                (int(self._page_table.last_use(owner)) for owner in owners),
+                default=-1,
+            )
+            candidates.append((oldest_use, int(page_index)))
+        if not candidates:
+            return False
+        _last_use, page_index = min(candidates)
+        page = self.pages[int(page_index)]
+        for slot, owner in enumerate(tuple(page.slot_owners)):
+            if owner is None:
+                continue
+            page.slot_owners[int(slot)] = None
+            self._release_victim(owner, near_keys=set())
+        self._drop_pages((int(page_index),))
+        return True
 
     def _drop_pages(self, page_indices) -> None:
         dropped = {int(index) for index in page_indices}
@@ -1144,19 +1310,20 @@ class TextureAtlasPool:
             # base class is sized by the payloads that actually need native
             # slots, so an ingest-reduced cold fill does not allocate a full
             # native atlas it never uploads to.
-            base_active_count = max(1, base_class_items)
+            base_active_count = int(base_class_items)
             base_reserve_count = base_active_count
-        requested_capacity = self.requested_capacity(
-            active_count=base_active_count,
-            reserve_count=base_reserve_count,
-            storage_mode=storage_mode,
-            tile_shape=tile_shape,
-            budget_bytes=budget_bytes,
+        requested_capacity = (
+            0
+            if base_active_count <= 0
+            else self.requested_capacity(
+                active_count=base_active_count,
+                reserve_count=base_reserve_count,
+                storage_mode=storage_mode,
+                tile_shape=tile_shape,
+                budget_bytes=budget_bytes,
+            )
         )
-        layout_invalidates_residency = (
-            self.tile_shape != (tile_h, tile_w)
-            or self.storage_mode != _normalize_storage_mode(storage_mode)
-        )
+        layout_invalidates_residency = self.tile_shape != (tile_h, tile_w)
         rebuilt = self.ensure_layout(
             tile_shape=tile_shape,
             count=requested_capacity,
@@ -1244,7 +1411,7 @@ class TextureAtlasPool:
         uploaded_keys: set[object] = set()
         tile_h, tile_w = self.tile_shape or tile_shape
         base_shape = (int(tile_h), int(tile_w))
-        class_counts: dict[tuple[int, int], int] = {}
+        class_counts: dict[tuple[tuple[int, int], str], int] = {}
         for tile_number, payload in payload_items:
             if int(tile_number) in chunk_plans or int(tile_number) in page_backed_tiles:
                 # Chunk slots live in their own shape class; the chunk
@@ -1252,9 +1419,18 @@ class TextureAtlasPool:
                 continue
             class_shape = _payload_class_shape(payload)
             if class_shape != base_shape:
-                class_counts[class_shape] = class_counts.get(class_shape, 0) + 1
-        for class_shape, class_count in class_counts.items():
-            self._ensure_class_capacity(class_shape, class_count)
+                class_mode = _atlas_storage_mode(
+                    ((int(tile_number), payload),),
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+                class_key = (class_shape, class_mode)
+                class_counts[class_key] = class_counts.get(class_key, 0) + 1
+        for (class_shape, class_mode), class_count in class_counts.items():
+            self._ensure_class_capacity(
+                class_shape,
+                class_count,
+                storage_mode=class_mode,
+            )
         capacity_skipped_tiles: set[int] = set()
 
         for tile_number, payload in payload_items:
@@ -1325,12 +1501,17 @@ class TextureAtlasPool:
                         skipped += 1
                     continue
             class_shape = _payload_class_shape(payload)
+            class_mode = _atlas_storage_mode(
+                ((int(tile_number), payload),),
+                rgb_already_windowed=rgb_already_windowed,
+            )
             try:
                 page_index, slot, newly_assigned = self._slot_for(
                     resident_key,
                     active_keys=protected_keys,
                     near_keys=near_keys,
                     tile_shape=class_shape,
+                    storage_mode=class_mode,
                 )
             except AtlasCapacityError:
                 if class_shape == base_shape:
@@ -1376,8 +1557,8 @@ class TextureAtlasPool:
                 payload,
                 tile_shape=page.tile_shape,
                 rgb_already_windowed=rgb_already_windowed,
-                need_scalar=self.scalar_is_atlas,
-                need_color=self.color_is_atlas,
+                need_scalar=page.scalar_is_atlas,
+                need_color=page.color_is_atlas,
             )
             texture_prepare_ms += prepare_ms
             y0, x0 = page.offset_for_slot(slot)
@@ -1579,20 +1760,21 @@ class TextureAtlasPool:
             )
         payload_items = tuple((int(key), value) for key, value in payloads.items())
         requested_mode = _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
-        if self.storage_mode is not None and self.storage_mode != requested_mode:
-            # Warm work must never replace the active atlas layout.  A later
-            # visible commit can deliberately switch storage modes.
-            return TileLayerUpdateStats(
-                resident_items=self.resident_count,
-                storage_capacity=self.capacity,
-                items_skipped=len(payload_items),
-                estimated_gpu_bytes=self.estimated_gpu_bytes,
-                cpu_shadow_bytes=self.cpu_shadow_bytes,
-                page_count=len(self.pages),
-                device_max_texture_size=self.max_texture_size,
-                budget_bytes=self.budget_bytes,
-                warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
-                capacity_warning="warm payload storage mode differs from the active atlas",
+        page_warm = None
+        if any(getattr(payload, "page_backing", None) is not None for _tile, payload in payload_items):
+            page_items = tuple(
+                (tile_number, payload)
+                for tile_number, payload in payload_items
+                if getattr(payload, "page_backing", None) is not None
+            )
+            payload_items = tuple(
+                (tile_number, payload)
+                for tile_number, payload in payload_items
+                if getattr(payload, "page_backing", None) is None
+            )
+            page_warm = self._warm_page_backed_items(
+                page_items,
+                rgb_already_windowed=rgb_already_windowed,
             )
         # ADR 0055 G4c: anchored payloads warm as pure chunk residency — the
         # later visible commit finds their chunks via _chunk_slots_for and
@@ -1614,31 +1796,27 @@ class TextureAtlasPool:
                 chunk_items,
                 rgb_already_windowed=rgb_already_windowed,
             )
-            if not payload_items:
-                return TileLayerUpdateStats(
-                    resident_items=self.resident_count,
-                    storage_capacity=self.capacity,
-                    texture_uploads=chunk_warm["uploads"],
-                    texture_upload_bytes=chunk_warm["upload_bytes"],
-                    items_updated=chunk_warm["updated"],
-                    items_skipped=chunk_warm["skipped"],
-                    estimated_gpu_bytes=self.estimated_gpu_bytes,
-                    cpu_shadow_bytes=self.cpu_shadow_bytes,
-                    upload_ms=(perf_counter() - start) * 1000.0 if chunk_warm["updated"] else 0.0,
-                    texture_prepare_ms=chunk_warm["prepare_ms"],
-                    texture_submit_ms=chunk_warm["submit_ms"],
-                    page_count=len(self.pages),
-                    device_max_texture_size=self.max_texture_size,
-                    budget_bytes=self.budget_bytes,
-                    warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
-                    complex_texture_uploads=chunk_warm["complex_uploads"],
-                    capacity_warning=(
-                        f"skipped {chunk_warm['skipped_denied']} warm anchored payloads because "
-                        "chunk capacity/budget is full"
-                        if chunk_warm["skipped_denied"]
-                        else ""
-                    ),
-                )
+        residency_warm = _merge_warm_counters(page_warm, chunk_warm)
+        if not payload_items:
+            return TileLayerUpdateStats(
+                resident_items=self.resident_count,
+                storage_capacity=self.capacity,
+                texture_uploads=residency_warm["uploads"],
+                texture_upload_bytes=residency_warm["upload_bytes"],
+                items_updated=residency_warm["updated"],
+                items_skipped=residency_warm["skipped"],
+                estimated_gpu_bytes=self.estimated_gpu_bytes,
+                cpu_shadow_bytes=self.cpu_shadow_bytes,
+                upload_ms=(perf_counter() - start) * 1000.0 if residency_warm["updated"] else 0.0,
+                texture_prepare_ms=residency_warm["prepare_ms"],
+                texture_submit_ms=residency_warm["submit_ms"],
+                page_count=len(self.pages),
+                device_max_texture_size=self.max_texture_size,
+                budget_bytes=self.budget_bytes,
+                warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
+                complex_texture_uploads=residency_warm["complex_uploads"],
+                capacity_warning=_warm_capacity_warning(page_warm, chunk_warm),
+            )
         target_count = len(set(self.active_resident_keys).union(_resident_key(payload) for _tile, payload in payload_items))
         tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
         bytes_per_slot = _storage_mode_bytes_per_pixel(requested_mode) * tile_h * tile_w
@@ -1669,13 +1847,13 @@ class TextureAtlasPool:
         near_keys = self._near_resident_keys(near_tile_source_ids)
         near_keys.update(_resident_key(payload) for _tile, payload in payload_items)
         # Mixed batches fold the (already completed) chunk-warm counters in.
-        uploads = 0 if chunk_warm is None else int(chunk_warm["uploads"])
-        upload_bytes = 0 if chunk_warm is None else int(chunk_warm["upload_bytes"])
-        complex_uploads = 0 if chunk_warm is None else int(chunk_warm["complex_uploads"])
-        texture_prepare_ms = 0.0 if chunk_warm is None else float(chunk_warm["prepare_ms"])
-        texture_submit_ms = 0.0 if chunk_warm is None else float(chunk_warm["submit_ms"])
-        updated = 0 if chunk_warm is None else int(chunk_warm["updated"])
-        skipped = 0 if chunk_warm is None else int(chunk_warm["skipped"])
+        uploads = int(residency_warm["uploads"])
+        upload_bytes = int(residency_warm["upload_bytes"])
+        complex_uploads = int(residency_warm["complex_uploads"])
+        texture_prepare_ms = float(residency_warm["prepare_ms"])
+        texture_submit_ms = float(residency_warm["submit_ms"])
+        updated = int(residency_warm["updated"])
+        skipped = int(residency_warm["skipped"])
         evictions_before = self.eviction_count
         evicted_near_before = self.evicted_near_count
         tile_h, tile_w = self.tile_shape or tile_shape
@@ -1687,7 +1865,15 @@ class TextureAtlasPool:
         new_warm_budget = available_warm_keys
         skipped_budget = 0
         for _tile_number, payload in payload_items:
-            if not _payload_supported_by_storage_mode(payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed):
+            payload_mode = _atlas_storage_mode(
+                ((_tile_number, payload),),
+                rgb_already_windowed=rgb_already_windowed,
+            )
+            if not _payload_supported_by_storage_mode(
+                payload,
+                payload_mode,
+                rgb_already_windowed=rgb_already_windowed,
+            ):
                 skipped += 1
                 continue
             resident_key = _resident_key(payload)
@@ -1707,13 +1893,18 @@ class TextureAtlasPool:
                 new_warm_budget -= 1
             class_shape = _payload_class_shape(payload)
             if class_shape != (tile_h, tile_w):
-                self._ensure_class_capacity(class_shape, 1)
+                self._ensure_class_capacity(
+                    class_shape,
+                    1,
+                    storage_mode=payload_mode,
+                )
             try:
                 page_index, slot, _newly_assigned = self._slot_for(
                     resident_key,
                     active_keys=set(self.active_resident_keys) | set(self.active_chunk_keys),
                     near_keys=near_keys,
                     tile_shape=class_shape,
+                    storage_mode=payload_mode,
                 )
             except AtlasCapacityError:
                 # Warm work is speculative; never let a full shape class stop
@@ -1810,6 +2001,43 @@ class TextureAtlasPool:
             ),
         )
 
+    def _warm_page_backed_items(
+        self,
+        payload_items: tuple[tuple[int, DisplayTilePayload], ...],
+        *,
+        rgb_already_windowed: bool,
+    ) -> dict[str, object]:
+        """Upload canonical pages without changing tile mappings or owner pins."""
+
+        counters = _empty_warm_counters()
+        protected = set(self.active_resident_keys) | set(self.active_chunk_keys)
+        for _tile_number, payload in payload_items:
+            if not self.pages or self.storage_mode is None:
+                counters["skipped"] += 1
+                counters["skipped_denied"] += 1
+                continue
+            uploaded = self._upload_page_backed_values(
+                payload,
+                protected_keys=protected,
+                near_keys=set(),
+                rgb_already_windowed=rgb_already_windowed,
+                allow_eviction=False,
+            )
+            if uploaded is None:
+                counters["skipped"] += 1
+                counters["skipped_denied"] += 1
+                continue
+            counters["uploads"] += uploaded.uploads
+            counters["upload_bytes"] += uploaded.upload_bytes
+            counters["complex_uploads"] += uploaded.complex_uploads
+            counters["prepare_ms"] += uploaded.prepare_ms
+            counters["submit_ms"] += uploaded.submit_ms
+            if uploaded.uploaded_keys:
+                counters["updated"] += 1
+            else:
+                counters["skipped"] += 1
+        return counters
+
     def _warm_anchored_chunk_items(
         self,
         payload_items: tuple[tuple[int, DisplayTilePayload], ...],
@@ -1829,16 +2057,7 @@ class TextureAtlasPool:
         and is deliberately not reconfigured here.
         """
 
-        counters: dict[str, object] = {
-            "uploads": 0,
-            "upload_bytes": 0,
-            "complex_uploads": 0,
-            "prepare_ms": 0.0,
-            "submit_ms": 0.0,
-            "updated": 0,
-            "skipped": 0,
-            "skipped_denied": 0,
-        }
+        counters = _empty_warm_counters()
         protected = set(self.active_resident_keys) | set(self.active_chunk_keys)
         for _tile_number, payload in payload_items:
             if not self.pages or self.storage_mode is None:
@@ -1847,8 +2066,12 @@ class TextureAtlasPool:
                 counters["skipped"] += 1
                 counters["skipped_denied"] += 1
                 continue
+            payload_mode = _atlas_storage_mode(
+                ((_tile_number, payload),),
+                rgb_already_windowed=rgb_already_windowed,
+            )
             if not _payload_supported_by_storage_mode(
-                payload, self.storage_mode, rgb_already_windowed=rgb_already_windowed
+                payload, payload_mode, rgb_already_windowed=rgb_already_windowed
             ):
                 counters["skipped"] += 1
                 continue
@@ -1864,6 +2087,7 @@ class TextureAtlasPool:
                     protected_keys=protected,
                     near_keys=set(),
                     allow_eviction=False,
+                    storage_mode=payload_mode,
                 )
             except AtlasCapacityError:
                 counters["skipped"] += 1
@@ -1878,8 +2102,8 @@ class TextureAtlasPool:
                 payload,
                 tile_shape=_payload_class_shape(payload),
                 rgb_already_windowed=rgb_already_windowed,
-                need_scalar=self.scalar_is_atlas,
-                need_color=self.color_is_atlas,
+                need_scalar=page.scalar_is_atlas,
+                need_color=page.color_is_atlas,
             )
             counters["prepare_ms"] += prepare_ms
             for chunk in need_upload:
@@ -1922,16 +2146,29 @@ class TextureAtlasPool:
         active_keys: set[object],
         near_keys: set[object],
         tile_shape: tuple[int, int] | None = None,
+        storage_mode: str | None = None,
+        allow_eviction: bool = True,
     ) -> tuple[int, int, bool]:
         current = self._page_table.lookup(resident_key)
         if current is not None:
+            expected_mode = _normalize_storage_mode(
+                storage_mode or self.storage_mode or "scalar"
+            )
+            actual_mode = self.pages[int(current.page_index)].storage_mode
+            if actual_mode != expected_mode:
+                raise ValueError(
+                    "resident key aliases incompatible atlas storage modes: "
+                    f"{resident_key!r} is {actual_mode}, requested {expected_mode}"
+                )
             return current.page_index, current.slot_index, False
 
         shape = self.tile_shape if tile_shape is None else (int(tile_shape[0]), int(tile_shape[1]))
+        mode = _normalize_storage_mode(storage_mode or self.storage_mode or "scalar")
         class_pages = tuple(
             (page_index, page)
             for page_index, page in enumerate(self.pages)
             if shape is None or page.tile_shape == shape
+            if page.storage_mode == mode
         )
         for page_index, page in class_pages:
             slot = page.take_free_slot(resident_key)
@@ -1944,15 +2181,24 @@ class TextureAtlasPool:
             # Budgeted pools grow before evicting warm residency: reclaiming
             # a warm slot while byte headroom remains would silently destroy
             # cross-plane reuse (index scroll-back re-uploads).
-            self._ensure_class_capacity(shape, self._class_capacity(shape) + 1)
+            self._ensure_class_capacity(
+                shape,
+                self._class_capacity(shape, storage_mode=mode) + 1,
+                storage_mode=mode,
+            )
             for page_index, page in enumerate(self.pages):
-                if page.tile_shape != shape:
+                if page.tile_shape != shape or page.storage_mode != mode:
                     continue
                 slot = page.take_free_slot(resident_key)
                 if slot is None:
                     continue
                 self._bind_resident_slot(resident_key, page_index, slot, page)
                 return int(page_index), int(slot), True
+
+        if not allow_eviction:
+            raise AtlasCapacityError(
+                f"atlas has no free speculative slot of shape {shape}"
+            )
 
         candidates = []
         active_bases = self.active_base_source_ids
@@ -1985,7 +2231,8 @@ class TextureAtlasPool:
                     candidates.append((rank, self._page_table.last_use(owner), owner, int(page_index), int(slot)))
         if not candidates:
             raise AtlasCapacityError(
-                f"atlas has {self._class_capacity(shape) if shape else self.capacity} slots of shape {shape} "
+                f"atlas has {self._class_capacity(shape, storage_mode=mode) if shape else self.capacity} "
+                f"slots of shape {shape} and storage {mode} "
                 f"but {len(active_keys)} active tiles require residency"
             )
         _priority, _last, victim, page_index, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
@@ -2031,6 +2278,7 @@ class TextureAtlasPool:
         near_keys: set[object],
         allow_eviction: bool = True,
         slot_shape: tuple[int, int] | None = None,
+        storage_mode: str | None = None,
     ) -> dict[object, tuple[int, int, bool]]:
         """Place one tile's chunk set, all on the SAME page.
 
@@ -2049,11 +2297,23 @@ class TextureAtlasPool:
             int(value)
             for value in (slot_shape or ANCHORED_CHUNK_SHAPE)
         )
+        mode = _normalize_storage_mode(storage_mode or self.storage_mode or "scalar")
         if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
             raise ValueError(f"chunk slot shape must be positive 2D, got {shape}")
         keys = tuple(chunk_keys)
         key_set = set(keys)
         lookups = {key: self._page_table.lookup(key) for key in keys}
+        incompatible = tuple(
+            key
+            for key, slot_ref in lookups.items()
+            if slot_ref is not None
+            and self.pages[int(slot_ref.page_index)].storage_mode != mode
+        )
+        if incompatible:
+            raise ValueError(
+                "chunk keys alias incompatible atlas storage modes: "
+                f"{incompatible!r} requested {mode}"
+            )
         votes: dict[int, int] = {}
         for slot_ref in lookups.values():
             if slot_ref is not None:
@@ -2061,7 +2321,9 @@ class TextureAtlasPool:
 
         def class_page_indices() -> tuple[int, ...]:
             return tuple(
-                index for index, page in enumerate(self.pages) if page.tile_shape == shape
+                index
+                for index, page in enumerate(self.pages)
+                if page.tile_shape == shape and page.storage_mode == mode
             )
 
         def page_headroom(page_index: int, *, allow_eviction: bool) -> bool:
@@ -2098,7 +2360,11 @@ class TextureAtlasPool:
             )
 
         def grow_and_rescan(*, allow_eviction: bool) -> int | None:
-            self._ensure_class_capacity(shape, self._class_capacity(shape) + len(keys))
+            self._ensure_class_capacity(
+                shape,
+                self._class_capacity(shape, storage_mode=mode) + len(keys),
+                storage_mode=mode,
+            )
             return scan(allow_eviction=allow_eviction)
 
         # Placement preference: a page (ideally already holding most of this
@@ -2215,23 +2481,26 @@ class TextureAtlasPool:
         self._release_victim(victim, near_keys=near_keys)
         return int(slot)
 
-    def _commit_page_backed_payload(
+    def _upload_page_backed_values(
         self,
-        tile_number: int,
         payload: DisplayTilePayload,
         *,
-        world_region: tuple[int, int, int, int],
         protected_keys: set[object],
         near_keys: set[object],
         rgb_already_windowed: bool,
-    ) -> "_ChunkCommit | None":
-        """Upload checked pages by canonical key, then resolve/draw targets."""
+        allow_eviction: bool,
+    ) -> "_PageUpload | None":
+        """Upload checked canonical pages without changing presentation state."""
 
         backing = payload.page_backing
         if backing is None:
-            raise ValueError("page-backed commit requires page_backing")
+            raise ValueError("page-backed upload requires page_backing")
         plans = tuple(backing.requested_plans)
         slot_shape = tuple(int(value) for value in plans[0].stored_page_shape)
+        storage_mode = _atlas_storage_mode(
+            ((int(payload.tile_number), payload),),
+            rgb_already_windowed=rgb_already_windowed,
+        )
         if any(tuple(plan.stored_page_shape) != slot_shape for plan in plans):
             raise ValueError("one page-backed payload cannot mix physical page shapes")
 
@@ -2249,7 +2518,9 @@ class TextureAtlasPool:
             try:
                 self._ensure_class_capacity(
                     slot_shape,
-                    self._class_capacity(slot_shape) + int(missing_count),
+                    self._class_capacity(slot_shape, storage_mode=storage_mode)
+                    + int(missing_count),
+                    storage_mode=storage_mode,
                 )
             except AtlasCapacityError:
                 return None
@@ -2264,6 +2535,8 @@ class TextureAtlasPool:
                         active_keys=protected_keys | set(backing.requested_keys),
                         near_keys=near_keys,
                         tile_shape=slot_shape,
+                        storage_mode=storage_mode,
+                        allow_eviction=allow_eviction,
                     )
                 else:
                     page_index, slot = int(slot_ref.page_index), int(slot_ref.slot_index)
@@ -2338,6 +2611,43 @@ class TextureAtlasPool:
                     "physical_imag_plane_identity": plane_identity_record(imag_plane),
                 }
             uploaded_keys.append(key)
+
+        self.chunk_upload_count += len(uploaded_keys)
+        self.chunk_reuse_count += max(0, len(backing.materialized_pages) - len(uploaded_keys))
+        return _PageUpload(
+            uploads=uploads,
+            upload_bytes=upload_bytes,
+            complex_uploads=complex_uploads,
+            prepare_ms=prepare_ms,
+            submit_ms=submit_ms,
+            uploaded_keys=tuple(uploaded_keys),
+        )
+
+    def _commit_page_backed_payload(
+        self,
+        tile_number: int,
+        payload: DisplayTilePayload,
+        *,
+        world_region: tuple[int, int, int, int],
+        protected_keys: set[object],
+        near_keys: set[object],
+        rgb_already_windowed: bool,
+    ) -> "_ChunkCommit | None":
+        """Admit checked pages, then atomically resolve and bind targets."""
+
+        backing = payload.page_backing
+        if backing is None:
+            raise ValueError("page-backed commit requires page_backing")
+        plans = tuple(backing.requested_plans)
+        uploaded = self._upload_page_backed_values(
+            payload,
+            protected_keys=protected_keys,
+            near_keys=near_keys,
+            rgb_already_windowed=rgb_already_windowed,
+            allow_eviction=True,
+        )
+        if uploaded is None:
+            return None
 
         owner_scope = (
             "presentation",
@@ -2414,20 +2724,18 @@ class TextureAtlasPool:
         )
         if first_record is not None:
             self.physical_upload_records[resident_key] = dict(first_record)
-        self.chunk_upload_count += len(uploaded_keys)
-        self.chunk_reuse_count += max(0, len(backing.materialized_pages) - len(uploaded_keys))
         first = resolved[0]
         first_page = self.pages[int(first.slot.page_index)]
         return _ChunkCommit(
             page_index=int(first.slot.page_index),
             slot=int(first.slot.slot_index),
             uv=first_page.uv_for_slot(int(first.slot.slot_index)),
-            uploads=uploads,
-            upload_bytes=upload_bytes,
-            complex_uploads=complex_uploads,
-            prepare_ms=prepare_ms,
-            submit_ms=submit_ms,
-            uploaded_any=bool(uploaded_keys),
+            uploads=uploaded.uploads,
+            upload_bytes=uploaded.upload_bytes,
+            complex_uploads=uploaded.complex_uploads,
+            prepare_ms=uploaded.prepare_ms,
+            submit_ms=uploaded.submit_ms,
+            uploaded_any=bool(uploaded.uploaded_keys),
         )
 
     def _commit_chunked_payload(
@@ -2451,10 +2759,15 @@ class TextureAtlasPool:
 
         tile_number = int(tile_number)
         try:
+            storage_mode = _atlas_storage_mode(
+                ((tile_number, payload),),
+                rgb_already_windowed=rgb_already_windowed,
+            )
             slots = self._chunk_slots_for(
                 tuple(chunk.key for chunk in chunks),
                 protected_keys=protected_keys,
                 near_keys=near_keys,
+                storage_mode=storage_mode,
             )
         except AtlasCapacityError:
             return None
@@ -2470,8 +2783,8 @@ class TextureAtlasPool:
                 payload,
                 tile_shape=_payload_class_shape(payload),
                 rgb_already_windowed=rgb_already_windowed,
-                need_scalar=self.scalar_is_atlas,
-                need_color=self.color_is_atlas,
+                need_scalar=page.scalar_is_atlas,
+                need_color=page.color_is_atlas,
             )
         submit_ms = 0.0
         uploads = 0
@@ -2675,6 +2988,29 @@ class TextureAtlasPool:
         self.tile_uvs.pop(tile_number, None)
         self._release_tile_chunks(tile_number)
 
+    def clear_presentation(self) -> None:
+        """Drop every visible mapping and owner pin, preserving resident bytes.
+
+        A semantic-source invalidation is a visibility boundary, not a cache
+        flush. Keeping ``tile_resident_keys`` after visuals are hidden lets a
+        later compatible rebirth accidentally resurrect stale pages under new
+        uniforms. Clear the presentation maps at the same boundary while the
+        page table and atlas slots remain available for a genuine revert.
+        """
+
+        mapped_tiles = set(self.tile_resident_keys)
+        mapped_tiles.update(self.tile_page_target_resolutions)
+        mapped_tiles.update(self.tile_chunk_residency)
+        for tile_number in tuple(mapped_tiles):
+            self._clear_tile_mapping(int(tile_number))
+        for tile_number in tuple(self._page_target_pin_tiles):
+            self._page_table.replace_pin_set(_page_target_pin_owner(tile_number), ())
+        self._page_target_pin_tiles.clear()
+        self.page_target_resolutions.clear()
+        self.active_resident_keys.clear()
+        self.active_chunk_keys.clear()
+        self.active_base_source_ids.clear()
+
     def _set_tile_mapping(
         self,
         tile_number: int,
@@ -2802,6 +3138,55 @@ class GpuMontageLayer:
     @property
     def last_stats(self) -> TileLayerUpdateStats:
         return self._last_stats
+
+    def diagnostics_snapshot(self) -> dict[str, object]:
+        """Physical drawability plus the pool's canonical residency snapshot."""
+
+        visible_tiles: set[int] = set()
+        visible_pages = 0
+        orphan_visible_pages = 0
+        for page_index, visual in enumerate(self._visuals_by_page):
+            if not bool(getattr(visual, "visible", False)):
+                continue
+            vertices = np.asarray(
+                getattr(visual, "vertex_data", getattr(visual, "vertices", ()))
+            ).reshape((-1, 2))
+            texcoords = np.asarray(
+                getattr(visual, "texcoord_data", getattr(visual, "texcoords", ()))
+            ).reshape((-1, 2))
+            modes = np.asarray(
+                getattr(visual, "mode_data", getattr(visual, "modes", ()))
+            ).reshape((-1,))
+            drawable_vertices = min(len(vertices), len(texcoords), len(modes))
+            if drawable_vertices < 3 or not _visual_textures_ready(visual):
+                continue
+            visible_pages += 1
+            page_tiles = {
+                int(tile)
+                for tile, offset, count, _mode in self._page_mode_spans_for(page_index)
+                if int(count) > 0
+                and int(offset) >= 0
+                and int(offset) + int(count) <= int(drawable_vertices)
+            }
+            if page_tiles:
+                visible_tiles.update(page_tiles)
+            else:
+                # A visible non-empty buffer without a current tile span is
+                # itself important physical evidence: stale/orphan geometry
+                # still contributes pixels even though it cannot be named as
+                # a current tile. Count the page conservatively so callers do
+                # not mistake it for a black surface.
+                orphan_visible_pages += 1
+        physically_visible_tile_count = len(visible_tiles) + orphan_visible_pages
+        return {
+            **self._pool.diagnostics_snapshot(),
+            "presented_tiles": tuple(sorted(visible_tiles)),
+            "presented_tile_count": physically_visible_tile_count,
+            "physically_visible_tile_count": physically_visible_tile_count,
+            "tile_visual_visible_pages": visible_pages,
+            "physical_visible_page_count": visible_pages,
+            "orphan_visible_page_count": orphan_visible_pages,
+        }
 
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         rows = self._pool.tile_truth_physical_rows()
@@ -3050,6 +3435,7 @@ class GpuMontageLayer:
     def clear(self) -> None:
         # Hiding a layer must not discard useful GPU residency.  A later
         # viewport/session can reuse the same source identities.
+        self._pool.clear_presentation()
         for visual in self._visuals_by_page:
             visual.visible = False
         self._geometry_keys.clear()
@@ -3199,6 +3585,29 @@ class GpuMontageLayer:
             if raw_active_tiles is not None
             else tuple(sorted(payloads))
         )
+        if bool(getattr(tile_delta, "atomic_handoff", False)):
+            candidate_missing = _atomic_page_candidate_missing(
+                self._pool,
+                dict(getattr(tile_delta, "upserts", {}) or {}),
+            )
+            if candidate_missing:
+                # Page resolution may truthfully retain a predecessor for one
+                # incomplete tile.  Levels and shader mapping are shared by
+                # every page visual, though, so advancing them would reinterpret
+                # those predecessor texels as the successor (raw pages under a
+                # complex shader was the field failure).  Reject the whole
+                # immutable handoff before touching pool mappings or uniforms.
+                self._pool.tile_page_candidate_missing.update(candidate_missing)
+                self._changed_pages = ()
+                self._last_stats = _clean_layer_stats(
+                    self._last_stats,
+                    visible_items=self._visible_items,
+                    presented_tiles=self._last_stats.presented_tiles,
+                    committed_upserts=(),
+                    pool=self._pool,
+                    page_visibility=self._page_visibility,
+                )
+                return self._last_stats
         active_mapping_key = _active_mapping_key(
             payloads,
             active_tiles=active_tiles,
@@ -3567,6 +3976,40 @@ class GpuMontageLayer:
                 warm_resident_items=max(0, self._pool.resident_count - len(self._pool.active_resident_keys)),
                 capacity_warning=str(exc),
             )
+
+    def payload_resident(self, payload: DisplayTilePayload) -> bool:
+        """Return physical residency truth without changing bindings or LRU."""
+
+        backing = getattr(payload, "page_backing", None)
+        if backing is not None:
+            return all(
+                self._pool._page_table.resolve(target) is not None
+                for target in backing.requested_keys
+            )
+        resident_key = _resident_key(payload)
+        return bool(
+            self._pool.source_ids.get(resident_key) == payload.source_id
+            and self._pool.acknowledged_identities.get(resident_key)
+            == (getattr(payload, "tile_identity", None) or payload.source_id)
+            and self._pool._page_table.lookup(resident_key) is not None
+        )
+
+
+def _visual_textures_ready(visual) -> bool:
+    """Whether a real or test visual has the textures required to draw."""
+
+    if hasattr(visual, "_scalar_texture") or hasattr(visual, "_color_texture"):
+        return bool(
+            getattr(visual, "_scalar_texture", None) is not None
+            and getattr(visual, "_color_texture", None) is not None
+        )
+    textures = getattr(visual, "textures", None)
+    return bool(
+        isinstance(textures, tuple)
+        and len(textures) == 2
+        and textures[0] is not None
+        and textures[1] is not None
+    )
 
 
 class GpuWindowedTileVisual(Visual):
@@ -4285,6 +4728,68 @@ def _active_mapping_key(payloads, *, active_tiles, pool, rgb_already_windowed: b
             )
         )
     return tuple(items)
+
+
+def _atomic_page_candidate_missing(pool, payloads) -> dict[int, tuple[DataChunkKey, ...]]:
+    """Preflight an atomic page handoff without changing physical state."""
+
+    missing_by_tile: dict[int, tuple[DataChunkKey, ...]] = {}
+    for tile, payload in dict(payloads or {}).items():
+        backing = getattr(payload, "page_backing", None)
+        if backing is None:
+            continue
+        missing = tuple(
+            target
+            for target in backing.requested_keys
+            if pool._page_table.resolve(target) is None
+        )
+        if missing:
+            missing_by_tile[int(tile)] = missing
+    return missing_by_tile
+
+
+def _empty_warm_counters() -> dict[str, object]:
+    return {
+        "uploads": 0,
+        "upload_bytes": 0,
+        "complex_uploads": 0,
+        "prepare_ms": 0.0,
+        "submit_ms": 0.0,
+        "updated": 0,
+        "skipped": 0,
+        "skipped_denied": 0,
+    }
+
+
+def _merge_warm_counters(*parts) -> dict[str, object]:
+    merged = _empty_warm_counters()
+    for part in parts:
+        if part is None:
+            continue
+        for key in merged:
+            merged[key] += part[key]
+    return merged
+
+
+def _warm_capacity_warning(page_warm, chunk_warm) -> str:
+    page_denied = 0 if page_warm is None else int(page_warm["skipped_denied"])
+    chunk_denied = 0 if chunk_warm is None else int(chunk_warm["skipped_denied"])
+    if page_denied and chunk_denied:
+        return (
+            f"skipped {page_denied + chunk_denied} warm page/chunk payloads because "
+            "atlas capacity/budget is full"
+        )
+    if page_denied:
+        return (
+            f"skipped {page_denied} warm page-backed payloads because "
+            "page capacity/budget is full"
+        )
+    if chunk_denied:
+        return (
+            f"skipped {chunk_denied} warm anchored payloads because "
+            "chunk capacity/budget is full"
+        )
+    return ""
 
 
 def _clean_layer_stats(

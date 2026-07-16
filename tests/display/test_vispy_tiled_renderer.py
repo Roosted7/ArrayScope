@@ -28,7 +28,11 @@ from arrayscope.display.backends.vispy.tiles import (
 from arrayscope.display.tile_layout import TileLayoutRegion
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    PageBackedPresentation,
+    TilePresentationDelta,
+)
 from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
 
 from tests.display.vispy_test_utils import (
@@ -615,6 +619,183 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
         for texture in (page.scalar_texture, page.color_texture)
     ) == texture_updates
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
+
+
+def test_storage_classes_coexist_and_visibility_clear_preserves_page_residency():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=(0,),
+        tile_width=4,
+        tile_height=4,
+        columns=1,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",))
+    lod = LodInfo(level=1, factor=2, source_shape=(4, 4), texture_shape=(2, 2), gutter=0)
+
+    def page_payload(content_key, *, values, supplied, mapping, representation, dtype):
+        plans = plan_source_grid_pages(
+            content_key=content_key,
+            valid_source_rect_yx=(0, 4, 0, 4),
+            reduction_yx=(1, 1),
+            stored_page_shape=(2, 2),
+            dtype=dtype,
+            representation=representation,
+            reducer="mean",
+        )
+        pages = (
+            tuple(materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans)
+            if supplied
+            else ()
+        )
+        image = pages[0].values if pages else np.zeros((2, 2), dtype=dtype)
+        return DisplayTilePayload(
+            tile_number=0,
+            source_index=0,
+            image=image,
+            histogram_data=None,
+            source_id=("page-frame", content_key),
+            lod=lod,
+            shader_mapping=mapping,
+            page_backing=PageBackedPresentation(plans, pages, (0, 4, 0, 4), lod),
+        )
+
+    complex_mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+    )
+    scalar_mapping = ShaderMapping(component=ShaderComponent.REAL)
+    predecessor = page_payload(
+        ("complex", 1),
+        values=np.arange(16, dtype=np.float32).reshape(4, 4).astype(np.complex64),
+        supplied=True,
+        mapping=complex_mapping,
+        representation="complex_rg32f",
+        dtype="complex64",
+    )
+    first_delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=1,
+        visibility_revision=0,
+        level_revision=0,
+        histogram_revision=0,
+        viewport_revision=0,
+        upserts={0: predecessor},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+    )
+    layer.update(
+        payloads={0: predecessor},
+        geometry=geometry,
+        levels=(-1.0, 1.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=complex_mapping,
+        tile_delta=first_delta,
+    )
+    predecessor_resident_key = layer._pool.tile_resident_keys[0]
+
+    successor = page_payload(
+        ("scalar", 2),
+        values=np.zeros((4, 4), dtype=np.float32),
+        supplied=False,
+        mapping=scalar_mapping,
+        representation="scalar_r32f",
+        dtype="float32",
+    )
+    atomic_delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=2,
+        visibility_revision=0,
+        level_revision=1,
+        histogram_revision=0,
+        viewport_revision=0,
+        base_revision=1,
+        upserts={0: successor},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        atomic_handoff=True,
+    )
+    rejected = layer.update(
+        payloads={0: successor},
+        geometry=geometry,
+        levels=(0.0, 15.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=scalar_mapping,
+        tile_delta=atomic_delta,
+    )
+
+    assert rejected.committed_upserts == ()
+    assert layer._pool.tile_resident_keys[0] == predecessor_resident_key
+    assert layer._levels == (-1.0, 1.0)
+    assert layer._shader_mapping is complex_mapping
+    assert layer._visuals_by_page[0].mappings[-1][1] is complex_mapping
+    assert layer._pool.tile_page_candidate_missing[0] == successor.page_backing.requested_keys
+
+    supplied_successor = page_payload(
+        ("scalar", 2),
+        values=np.ones((4, 4), dtype=np.float32),
+        supplied=True,
+        mapping=scalar_mapping,
+        representation="scalar_r32f",
+        dtype="float32",
+    )
+    predecessor_draw_parts = layer._pool.tile_draw_parts[0]
+    warmed = layer.warm_residency(
+        payloads={0: supplied_successor},
+        geometry=geometry,
+        rgb_already_windowed=False,
+        tile_delta=atomic_delta,
+    )
+
+    assert warmed.texture_uploads > 0
+    assert layer._pool.tile_resident_keys[0] == predecessor_resident_key
+    assert layer._pool.tile_draw_parts[0] == predecessor_draw_parts
+    assert layer._levels == (-1.0, 1.0)
+    assert layer._shader_mapping is complex_mapping
+    assert all(
+        layer._pool._page_table.resolve(key) is not None
+        for key in supplied_successor.page_backing.requested_keys
+    )
+    assert layer.payload_resident(supplied_successor) is True
+
+    admitted_delta = replace(atomic_delta, upserts={0: supplied_successor})
+    admitted = layer.update(
+        payloads={0: supplied_successor},
+        geometry=geometry,
+        levels=(0.0, 15.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=scalar_mapping,
+        tile_delta=admitted_delta,
+    )
+
+    assert admitted.committed_upserts == (0,)
+    assert admitted.texture_uploads == 0
+    assert layer._levels == (0.0, 15.0)
+    assert layer._shader_mapping is scalar_mapping
+
+    resident_page_keys = {
+        *predecessor.page_backing.requested_keys,
+        *supplied_successor.page_backing.requested_keys,
+    }
+    assert {page.storage_mode for page in layer._pool.pages} >= {"complex", "scalar"}
+
+    layer.clear()
+
+    assert not layer._pool.tile_resident_keys
+    assert not layer._pool.tile_draw_parts
+    assert not any(visual.visible for visual in layer._visuals_by_page)
+    assert all(key in layer._pool._page_table for key in resident_page_keys)
 
 
 def test_touched_atlas_page_repairs_stale_local_mapping_when_global_key_is_unchanged():

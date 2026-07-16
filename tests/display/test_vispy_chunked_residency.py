@@ -463,16 +463,58 @@ def test_warm_payloads_denied_by_budget_skips_without_evicting():
     assert not any(key in pool.resident_slots for key in warm_keys)
 
 
-def test_layout_reset_clears_chunk_maps():
+def test_storage_mode_class_coexists_but_shape_reset_clears_chunk_maps():
     data = _data()
     pool = TextureAtlasPool(FakeGloo())
     commit(pool, {0: anchored_payload(data, 100)})
-    assert pool.tile_chunk_residency
-    # A storage-mode change rebuilds the atlas and drops all residency.
+    chunk_residency = dict(pool.tile_chunk_residency)
+
+    # Storage is a physical page class, not a pool-wide identity. Adding a
+    # complex class must leave scalar residency available for a later revert.
     pool.ensure_layout(tile_shape=(HEIGHT, EXTENT), count=1, storage_mode="complex")
+    assert pool.tile_chunk_residency == chunk_residency
+    assert {page.storage_mode for page in pool.pages} >= {"scalar", "complex"}
+
+    # A base slot-shape change remains a real layout reset.
+    pool.ensure_layout(tile_shape=(HEIGHT // 2, EXTENT), count=1, storage_mode="scalar")
     assert not pool.tile_chunk_residency
     assert not pool.chunk_resident_tiles
     assert not pool._chunked_tile_keys
+
+
+def test_inactive_storage_class_is_reclaimed_only_under_byte_pressure():
+    """A hidden old source funds its successor; active pixels never do."""
+
+    shape = (2, 2)
+    complex_slot_bytes = shape[0] * shape[1] * 8
+    old_key = ("old-complex-page",)
+    pool = TextureAtlasPool(FakeGloo(), budget_bytes=complex_slot_bytes)
+    pool.tile_shape = shape
+    pool.storage_mode = "complex"
+    assert pool._ensure_class_capacity(shape, 1, storage_mode="complex") == 1
+    page_index, slot, newly = pool._slot_for(
+        old_key,
+        active_keys=set(),
+        near_keys=set(),
+        tile_shape=shape,
+        storage_mode="complex",
+    )
+    assert newly
+    pool.source_ids[old_key] = old_key
+
+    # A currently active page is never sacrificed for an incompatible class.
+    pool.active_chunk_keys.add(old_key)
+    assert pool._ensure_class_capacity(shape, 1, storage_mode="scalar") == 0
+    assert pool._page_table.lookup(old_key) is not None
+    assert pool.pages[page_index].slot_owners[slot] == old_key
+
+    # Hiding the presentation removes the active/pin protection. Under the
+    # same hard budget the old physical class is now the correct victim.
+    pool.active_chunk_keys.clear()
+    assert pool._ensure_class_capacity(shape, 1, storage_mode="scalar") >= 1
+    assert pool._page_table.lookup(old_key) is None
+    assert {page.storage_mode for page in pool.pages} == {"scalar"}
+    assert pool.estimated_gpu_bytes <= complex_slot_bytes
 
 
 # ---------------------------------------------------------------------------

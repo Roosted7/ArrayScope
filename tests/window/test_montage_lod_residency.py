@@ -2946,6 +2946,10 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     previous.view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
         1, 2
     ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    _state, previous_delta = previous.build_tile_presentation({})
+    _acknowledge(previous, previous_delta)
+    previous.mark_presented(tuple(previous_delta.upserts))
+    assert previous.required_first_pixels_presented()
     successor.view_state = previous.view_state.with_montage_axis(
         0,
         columns=4,
@@ -2971,13 +2975,17 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     )
     successor.visible_tiles = successor_tiles
 
-    decision = plan_presentation_transition(previous, successor)
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
     assert decision.retain_pixels
     assert decision.atomic_successor
 
 
-def test_same_stage_operation_successor_retains_complete_predecessor_atomically():
-    """Operation reevaluation follows ADR 0012 instead of flashing black."""
+def test_same_stage_operation_successor_hides_incompatible_predecessor():
+    """Same base storage does not make different operation pixels compatible."""
 
     previous = _session(count=4)
     successor = _session(count=4)
@@ -2987,9 +2995,9 @@ def test_same_stage_operation_successor_retains_complete_predecessor_atomically(
         base,
         operations=(CenteredFFT(axis=2),),
     )
-    # The operation pipeline may change the inferred representation. The old
-    # committed frame remains independently truthful until the complete new
-    # storage transaction replaces it.
+    # The operation pipeline changes both values and inferred representation.
+    # Its pages may remain resident for a later revert, but they cannot remain
+    # visible as fallback for the successor target.
     successor.output_dtype = np.dtype("complex64")
     successor.rgb = True
     view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
@@ -3010,10 +3018,14 @@ def test_same_stage_operation_successor_retains_complete_predecessor_atomically(
         columns=14,
     )
 
-    decision = plan_presentation_transition(previous, successor)
-    assert decision.retain_pixels
-    assert decision.atomic_successor
-    assert decision.reason == "montage-compatible"
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "document"
 
 
 def test_different_base_document_cannot_retain_predecessor():
@@ -3027,7 +3039,11 @@ def test_different_base_document_cannot_retain_predecessor():
     previous.view_state = view_state
     successor.view_state = view_state
 
-    decision = plan_presentation_transition(previous, successor)
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
     assert not decision.retain_pixels
     assert not decision.atomic_successor
     assert decision.reason == "document"
@@ -3041,9 +3057,84 @@ def test_different_surface_axis_cannot_retain_predecessor():
     successor.document = document
     previous.montage_axis = 1
 
-    decision = plan_presentation_transition(previous, successor)
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
     assert not decision.retain_pixels
     assert not decision.atomic_successor
+
+
+def test_hidden_operation_successor_cannot_resurrect_atomic_handoff():
+    """A compatible rebirth after an incompatible blank has no predecessor."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    previous.session_id = 2
+    successor.session_id = 3
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=False,
+    )
+
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "predecessor-hidden"
+
+
+def test_visible_partial_montage_cannot_arm_atomic_handoff():
+    """One streamed tile is visibility, not complete predecessor coverage."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    _state, delta = previous.build_tile_presentation({})
+    partial = TileCommitReport(
+        presented_tiles=frozenset({0}),
+        committed_upserts=frozenset({0}),
+    )
+    previous.acknowledge_tile_presentation(delta, partial)
+    previous.mark_presented((0,))
+    assert not previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "predecessor-incomplete"
+
+
+def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
+    """The pending atomic obligation is the transitive coverage proof."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    previous.atomic_successor_pending = True
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert decision.atomic_successor
+    assert decision.reason == "montage-compatible"
 
 
 def test_atomic_handoff_does_not_depend_on_successor_wrappers():
@@ -3115,6 +3206,7 @@ def test_index_window_retarget_arms_atomic_successor_pending():
     atomic = session.build_atomic_successor_presentation()
     assert atomic is not None, session._atomic_fast_reject_reason
     _state, successor_delta = atomic
+    assert successor_delta.atomic_handoff is True
     assert tuple(successor_delta.upserts) == (0, 1, 2, 3)
     assert tuple(
         successor_delta.upserts[index].source_index for index in successor_delta.upserts
@@ -3127,6 +3219,7 @@ def test_atomic_successor_requires_complete_backend_acknowledgement():
     _state, delta = session.build_tile_presentation(
         {0: ("src", 0), 1: ("src", 1)}
     )
+    assert delta.atomic_handoff is False
     partial = TileCommitReport(
         presented_tiles=frozenset({0}),
         committed_upserts=frozenset({0}),
