@@ -83,7 +83,7 @@ Status terminology:
 | [0053](0053-execution-kernel-and-modular-pipeline.md) | Execution kernel and modular rendering pipeline | Accepted; kernel, pipeline, ladder, and frame control-plane landed (R1–R7). Remaining visible-truth work is queued in `docs/redesign/README.md`. |
 | [0054](0054-montage-level-evidence-phasing.md) | Montage level evidence phasing | Implemented for montage level/histogram evidence ordering; rough preview, rough target, and refined stats are ranked explicitly. |
 | [0055](0055-view-tiles-data-chunks-residency-pages.md) | View tiles / data chunks / residency pages | Accepted on `codex/gpu-engine`; G1–G3 and G4a implemented (chunked content-keyed residency live, real-GL verified). |
-| [0056](0056-sparse-virtual-multiresolution-pyramid.md) | Sparse virtual multiresolution pyramid | Accepted (design) on `codex/gpu-engine`; anisotropic reduction/reducer identity implemented; pyramid staging in revised G5. |
+| [0056](0056-sparse-virtual-multiresolution-pyramid.md) | Sparse virtual multiresolution pyramid | Accepted; canonical page route/cache/backend cutover implemented on the G5 landing candidate; final real-Wayland/stress acceptance pending. |
 
 ## Adding or changing a decision
 

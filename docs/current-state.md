@@ -1,10 +1,10 @@
 # Current state
 
-**Snapshot: `main`, 2026-07-16.** The GPU engine branch (`codex/gpu-engine`)
-is fully merged; `main` is the single line of development again. Keep this
-file a *short* snapshot — history belongs to the archives, direction to
-[`queue.md`](queue.md). Update by replacement, not by layering dated
-correction blocks.
+**Snapshot: G5 landing candidate, 2026-07-16.** The GPU engine branch
+(`codex/gpu-engine`) is fully merged; the sparse-pyramid work is completing
+row 1 of [`queue.md`](queue.md) on its dedicated worktree. Keep this file a
+*short* snapshot — history belongs to the archives, direction to the queue.
+Update by replacement, not by layering dated correction blocks.
 
 ## Architecture (what stands)
 
@@ -12,11 +12,13 @@ correction blocks.
   (`arrayscope/render/`), one tile lifecycle machine (ADR 0051);
   orchestration on `RenderOrchestrator` over
   `frame_controller/frame_session/frame_effects/frame_runtime` (ADR 0045).
-- The GPU engine (ADR 0055/0056, G1–G5 slice 1): Qt-free `arrayscope/gpu/`
-  (chunk keys/grid, page table, chunk store); content-keyed chunked VisPy
-  residency with window-shift/scroll-back/warm fast paths; reduced-LOD
-  uniform plane-pixel pages; physical presentation truth as a standing
-  audited invariant.
+- The GPU engine (ADR 0055/0056, G1–G5): Qt-free `arrayscope/gpu/` chunk
+  keys/grid, page table, and chunk store; one source-grid route plans
+  anisotropic reduced pages and exact clipped draw geometry; the shared
+  bounded page cache and both backends consume checked `DataChunkKey`
+  materializations. Requested targets remain distinct from resolved physical
+  pages, with complete coarse fallback and physical presentation truth as
+  standing audited invariants.
 - Visible-truth machinery: schema-v1 trace bus, `trace_verify` invariants
   (stalls, ack churn, identity-rejected commits), the V3 stall watchdog,
   import-health and architecture guards.
@@ -33,10 +35,10 @@ correction blocks.
 
 ## Known open work
 
-The ordered list with exit gates is [`queue.md`](queue.md). Headlines:
-extreme-churn convergence xfail (step 1), G5 remainder (step 2), the
-performance bars — FFT scroll is ~4 fps vs the ~17 fps scalar target
-(step 3), then G6/renderer-protocol/G7. Standing debt: trace
+The ordered list with exit gates is [`queue.md`](queue.md). Headlines: G5
+final real-Wayland/stress acceptance (row 1), then the performance bars —
+FFT scroll is ~4 fps vs the ~17 fps scalar target (row 2), followed by
+G6/renderer-protocol/G7. Standing debt: trace
 `target_satisfied_retained`, framebuffer-to-CPU oracle, complex64 PyQtGraph
 deadlock, ImageViewShell duplication, montage key-owner consolidation.
 

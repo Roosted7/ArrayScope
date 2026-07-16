@@ -48,6 +48,26 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
    never acknowledged as current and cannot answer probes or reads. Channel,
    levels, LUT, and other shader-only changes that keep the source texels cross
    with their uniforms atomically; a representation/source change does not.
+   An acknowledged finer compatible LOD remains visible for a later coarser
+   demand. Neither demand nor a logical payload/cache byte estimate authorizes
+   demotion. Only backend-owned physical capacity pressure may replace it,
+   after hidden, speculative, superseded, and otherwise less-important
+   residency has been reclaimed, and only through an acknowledged complete
+   replacement that preserves same-source fallback coverage. An unacknowledged
+   candidate has no such protection because it is not physical presentation
+   truth.
+   A complete same-source target that the backend can already resolve through
+   resident pages is a presentation rebind, not cold work: pan/zoom must bind
+   the whole set immediately even while the gesture remains active. Only a
+   physically cold successor may wait for the interaction-stop edge.
+   Reduced pages may expose an explicitly presentation-qualified sample so a
+   diagnostic can explain the pixel that was drawn. That is not permission to
+   answer an exact hover, histogram, ROI, measurement, or export read: those
+   require explicit native semantic data or must fall through to exact
+   evaluation. Geometry truth and value exactness are separate facts.
+   Page-table scale/offset is the nominal aligned-grid transform. It cannot
+   represent a clipped boundary bin by itself; exact presentation uses the
+   canonical target and actual draw blocks and reports the submitted geometry.
 9. **Bounded sessions.** End every working session with the app visibly
    better or the change reverted. Update [`queue.md`](queue.md); a reverted
    experiment gets a [`graveyard.md`](graveyard.md) row. New process

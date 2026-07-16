@@ -1,14 +1,13 @@
 # 0050 — Asynchronous multi-resolution tile residency
 
-**Status:** Accepted and implemented for VisPy montage/tiled scenes (2026-07-04); default
-policy is `resident` on VisPy (Performance → Montage LOD), `native-only` elsewhere. R3
-(2026-07-07) made the LOD ladder first-class: `render/ladder.py` owns FLOOR → PREVIEW →
-DESIRED → EXACT planning, `window/montage_lod.py` is deleted, montage residency uses one
-`PyramidCache`, and demanded-level completion wakes the pipeline through lifecycle events instead
-of a side pending-request list. The retained preview level below is implemented in the shared
-pyramid cache. Transforming/opaque input-LOD routes and PyQtGraph default enablement remain
-evidence-gated. The defect inventory from these landings motivated
-[ADR 0051](0051-single-owner-tile-lifecycle.md), which now owns the tile lifecycle.
+**Status:** Accepted and implemented for montage/tiled scenes. The 2026-07-04
+whole-plane implementation below is retained as decision history; ADR 0056 G5
+supersedes its materialization/cache identity with checked canonical
+`DataChunkKey` pages in one renderer-shared bounded cache. `render/ladder.py`
+still owns FLOOR → PREVIEW → DESIRED → EXACT policy, while page claims and
+physical residency remain cache/backend state rather than a second lifecycle.
+The defect inventory from these landings motivated
+[ADR 0051](0051-single-owner-tile-lifecycle.md), which owns tile lifecycle.
 
 ## Context
 
@@ -79,6 +78,16 @@ closest to the demanded level within `acceptable_levels`, never blocking on mate
   the pyramid cache instead of rebuilding (ADR 0041 gate 4).
 - A level change with unchanged content never re-uploads source pixels for already-resident
   levels (gate 6).
+
+**Implementation clarification (2026-07-16):** "closest" governs selection
+before a candidate is physically committed; it is not permission to demote an
+acknowledged finer presentation when zooming out. Logical payload byte sums and
+CPU cache budgets do not describe atlas pressure and therefore cannot authorize
+visible quality loss. The backend alone owns physical-capacity reclamation: it
+reclaims hidden/speculative/superseded residency first and retains the previous
+complete pinned coverage when a replacement cannot be admitted. Requested
+target LOD and resolved actual LOD stay separate, and every physical report
+names the page actually sampled.
 
 ### Residency (backend-owned)
 

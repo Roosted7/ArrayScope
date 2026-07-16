@@ -131,17 +131,14 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    events measure retained-transition replacement latency. Full evidence,
    exit gates, and rejected timer/session/warming shortcuts are in
    `docs/redesign/slice-retention-staleness-2026-07-16.md`.
-4. **G5 remaining**: the pure best-resident-ancestor binding, owner-scoped
-   coarse pins, source-grid mean geometry, and VisPy CPU-resolution/actual
-   physical-truth seam are landed and gated. Next migrate the live ladder from
-   whole-plane keys to logical chunks so it feeds that seam, then finish
-   source-grid materialization and reducer families. The formerly missing
-   route-canonicalization contract is
-   explicit in `docs/redesign/g5-source-grid-pyramid-2026-07-16.md`; every
-   remaining consumer must use it rather than infer a second reduction route.
-   The pure ladder target planner is now landed; do not attach it to payloads
-   until window-local reduction and non-uniform clipped-boundary draw geometry
-   migrate in the same correctness slice.
+4. **G5 landing candidate**: the live ladder/cache/producers and both backends
+   now consume the canonical source-grid `DataChunkKey` page route, including
+   reducer families, clipped draw geometry, exact page-set claims, physical
+   ancestor truth, and complete coarse fallback. Legacy whole-plane ownership
+   is structurally forbidden. The authoritative contract is
+   `docs/redesign/g5-source-grid-pyramid-2026-07-16.md`; only its remaining
+   focused/broad/stress and real-Wayland exit gates stand between this candidate
+   and moving queue row 1 to Done.
 5. **G6**: GPU histogram/levels over the chunk store with the ADR 0056
    coverage frontier (per-chunk summaries; workgroup-local bins); GPU LOD
    generation from resident chunks.

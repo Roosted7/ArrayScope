@@ -1,8 +1,9 @@
 # ADR 0056: Sparse virtual multiresolution pyramid
 
-- **Status:** Accepted (design); implementation staged in
-  [`docs/proposals/gpu-engine-plan.md`](../proposals/gpu-engine-plan.md)
-  (revised G5); identity groundwork implemented with this ADR.
+- **Status:** Accepted; canonical source-grid planning, CPU materialization,
+  shared logical-page caching, backend resolution, and physical-truth wiring
+  implemented on the G5 landing candidate. Final real-Wayland/stress
+  acceptance is tracked by row 1 of [`docs/queue.md`](../queue.md).
 - **Date:** 2026-07-15
 - **Branch note:** authored on `codex/gpu-engine`; renumber on integration if
   a parallel branch claimed 0056.
@@ -79,6 +80,30 @@ zero-on-missing is indistinguishable from a genuine zero in scientific data).
 9. **Bricks may retain non-displayed depth** (e.g. 128×128×4×4): backend
    policy, not semantic identity — chunk keys stay N-D-capable, transfer
    sizing stays private to the backend.
+
+**Implementation clarification (2026-07-16):** exact residency and resolvable
+coverage are deliberately different queries. Producers, singleflight claims,
+prefetch, and lifecycle `RESIDENT` admission require every exact planned
+`DataChunkKey`; a compatible coarse ancestor is presentation fallback only and
+must not suppress finer materialization. Floor selection ranks the actual
+resolved physical LOD, not a hypothetical target rung. VisPy and PyQtGraph both
+delegate ancestor choice to `PageTable.resolve`, including anisotropic ranking
+and full value-family rejection (including reducer and gutter). A page-cache claim attaches to the complete
+requested set, touches shared resident members before admitting missing
+boundaries, and therefore evicts outgoing pages before the requested set's own
+interior. An exact set larger than the configured cache is ineligible until the
+budget changes; it is not repeatedly materialized into an impossible cache.
+Reduced page values remain presentation-qualified unless a payload also carries
+explicit native semantic data; exact histogram/ROI/measurement/export reads
+must not silently consume display fallback.
+
+The page table's scale/offset is a nominal aligned-grid transform. Clipped
+boundary bins require the immutable target and actual page-plan draw blocks;
+both backends use those exact source rectangles rather than uniformly
+stretching the nominal transform. A complete same-source target already
+resolvable through physical pages rebinds atomically during pan/zoom, including
+while the interaction remains active; only a physically cold successor may be
+deferred to the stop edge.
 
 ## Consequences
 

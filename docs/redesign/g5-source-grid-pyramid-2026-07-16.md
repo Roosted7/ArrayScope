@@ -1,10 +1,10 @@
 # G5 source-grid sparse pyramid contract — 2026-07-16
 
-**Status:** authoritative implementation contract for the remaining ADR 0056
-work; pure page resolution/pins, source-grid mean geometry, and the VisPy
-CPU-resolution/physical-truth seam implemented.
-This closes the dangling “route-canonicalization” reference in the GPU handoff
-before production code chooses an accidental second reduction route.
+**Status:** authoritative implementation contract and landing dossier for ADR
+0056 G5. The canonical live page route, reducer families, renderer-shared
+cache, producer migration, and both backend consumers are implemented on the
+landing candidate; the remaining broad/stress and real-Wayland acceptance
+matrix still gates queue row 1.
 
 ## One canonical reduction route
 
@@ -52,10 +52,11 @@ A target virtual page resolves once on the CPU to either:
   target, including actual key/LOD, physical slot, target-to-resident sample
   scale and offset, and that binding's generation.
 
-Document/operation generation, representation, dtype, spatial coverage, and
-reducer family must all match. Anisotropic reductions use componentwise
-ancestry; reducer mismatch never aliases. The shader consumes the resolved
-binding and does not walk an ancestor ladder per fragment.
+Document/operation generation, representation, dtype, spatial coverage,
+reducer family, and gutter must all match. Anisotropic reductions use
+componentwise ancestry; a semantic-family mismatch never aliases. The shader
+consumes the resolved binding and does not walk an ancestor ladder per
+fragment.
 
 Pins are owner-scoped sets, replaced atomically. Several active target pages
 may share one coarse ancestor; one target leaving must not unpin coverage still
@@ -130,8 +131,8 @@ coupling:
 - physical presentation rows report target key, actual key/LOD, exact versus
   fallback quality, and binding generation; presented identity is the actual
   resident page, never the requested fine page;
-- 111 focused GPU/pyramid/VisPy tests pass. The next slice is the live
-  ladder/cache migration that emits logical page targets into this seam.
+- The initial seam landed with 111 focused GPU/pyramid/VisPy tests; the live
+  ladder/cache migration and later evidence are recorded below.
 
 The live page-backed VisPy cutover now also has a restored-session geometry
 guard. A field reproduction using the saved 100-tile complex session found
@@ -225,15 +226,111 @@ operation switch is explicitly hidden before scalar pixels arrive; the final
 frame has 60/60 scalar scene bindings. Its three remaining reds are the same
 performance-only gates and remain work, not widened timeouts.
 
-The full resident-LOD matrix is green again after translating eight legacy
-level-swap assertions that required native/finer pixels to be replaced by a
-newly requested coarse level. The policy is now explicit in both directions:
-without pressure, a finer compatible presentation satisfies later coarser
-demand and produces no swap/candidate work; with an explicit residency budget,
-the coarse transaction still exercises distinct page identity, per-tile mixed
-availability, bounded deferral without removals, native semantic-stat reuse,
-and stable histogram identity. `tests/window/test_montage_lod_residency.py`
-passes 156 tests serially.
+The resident-LOD matrix now separates candidate construction from physical
+truth. An unacknowledged native wrapper may be replaced by the first legitimate
+reduced commit, while an acknowledged finer compatible presentation satisfies
+later coarser demand and cannot be demoted by a logical payload/cache byte
+estimate. Only the backend's physical-capacity owner may reclaim it, after
+less-important residency and with complete same-source fallback retained.
+Translated level-swap coverage still proves distinct page identity, per-tile
+mixed availability, bounded deferral without removals, native semantic-stat
+reuse, and stable histogram identity without manufacturing logical pressure.
+
+Producer success is also exact now: ingest/worker materialization, retained
+preview admission, prefetch, lifecycle residency, and terminal claim handling
+require the precise planned `DataChunkKey` set. A coarse ancestor can keep a
+target drawable but cannot suppress a finer claim or mark it resident. Floor
+candidates are ranked by the actual physical page set returned by the same
+resolver, so an L2 fallback can no longer win by masquerading as a hypothetical
+L1 request. PyQtGraph's independent ancestry scan was deleted; both PyQtGraph
+and VisPy use `PageTable.resolve` and report requested-to-actual identity,
+anisotropic scale/offset, and exact/fallback quality. The focused serial ring
+covering keys, chunk store, page-table resolution, source-grid geometry,
+materialization, both backend routes, target planning, and the resident matrix
+passes **283 tests** in 1.16 s on the current slice.
+
+The page cache now attaches an owner to the whole requested set, not just its
+new boundary claims. Before each admission it touches resident members of that
+set, so a two-page-budget shift in either direction retains the shared interior
+and evicts the outgoing boundary. Cache-ineligible exact sets are rejected
+before worker scheduling and remembered until resize; the former completion →
+eviction → GUI-admission race declines normally and balances every claim rather
+than throwing or immediately recomputing an impossible set. Requested and
+actual `LodInfo` source/stored shapes are checked against immutable plans and
+resolved values, structurally rejecting the malformed payload class that made
+tiles draw at mixed sizes. Native two-dimensional `uint8` is likewise a scalar
+page family; only actual three/four-component `uint8` values may claim `RGB8`.
+
+History identifies two earlier false-truth seams. Commit `6ffce57a` let
+`build_tile_presentation` copy an unacknowledged lifecycle fallback directly
+into `TilePresentationState`; that duplicate acknowledgement path is deleted.
+The initial G5 cutover `56d1cc0a` then preserved a requested L2 identity over
+physically sampled L4 values; floor payloads now keep requested geometry and
+actual sampled LOD as separate typed facts.
+
+Those two correctness gates are now closed at their existing owners. One
+`tiledPayloadResident` seam reports page-backed ancestor resolution,
+source-anchored native chunks, and classic residency; the session treats only
+that physical proof as exempt from cold admission caps. A complete already-
+resident coarse set therefore rebinds in one presentation transaction instead
+of streaming tile by tile after pan/zoom. Hidden warming uses the same seam,
+and first-display rough level evidence remains visible correctness work until
+the first frame commits instead of parking on the optional histogram lane.
+The five-node live window-shift ring passes in 4.54 s. An integrated
+`FrameSession → FramePipelineEffects → DisplayCommitter → VisPy` gate
+keeps interaction active, defeats a one-item/one-byte cold cap, and commits all
+three L2 targets through resident L4 ancestors with no removals and zero
+uploads before the stop edge. Its physically cold same-source control still
+defers. This deleted a duplicate unconditional interaction-time LOD gate; the
+backend-residency predicate now owns the decision once. The field failure is
+preserved at
+`tests/artifacts/g5-resident-fallback-field-2026-07-16/`: several transitions
+reported 100 visible tiles but only 78, 92, 85, 97, or 80 presented while
+compatible L0/L1/L2 residency existed. Prefetch page claims/admission are GUI-owned;
+workers return checked pages only, and success, stale, cancellation, partial
+fanout, and teardown all release claims and wake the standing replan path.
+
+That live ring also caught one last route split rather than being weakened for
+the new semantic-read contract. Cold reduced-target evaluation planned and
+materialized at local `(0, 0)` while its payload advertised a shifted native
+source anchor. The stored values could therefore be offset from their page
+keys and draw geometry by the window origin. Cold-target evaluation now asks
+the same session source-origin owner used by ladder materialization; the live
+factor-two gate asserts shifted native coverage and samples recognizable bins
+through the exact page plan.
+
+Presentation sampling and scientific reads are now separate typed APIs.
+`PageBackedPresentation.sample_presented_*` maps native coordinates through
+clipped/nonuniform target bins and actual ancestor pages exactly, but those
+reduced values do not thereby become native semantic data. `TiledValueSource`
+admits only explicit native `semantic_data` (and optional native histogram
+data); exact ROI/measurement/export region demand falls through display pages
+to the evaluator/cache. Preview, fallback, or reduced display pages can no
+longer silently satisfy an exact scientific read.
+
+Runtime JSONL now reports resident page counts by anisotropic reduction vector
+and reducer family. Together with requested-to-actual physical binding rows,
+this distinguishes “already resident but not rebound” from “not resident”
+without inferring state from logical acknowledgement.
+
+`PageResolution.scale/offset` remains the nominal aligned-grid transform used
+for ancestry diagnostics. One affine transform cannot represent a clipped
+leading/trailing bin: the real factor-two target through a factor-eight
+ancestor maps its first three-native-sample coarse bin to one third of a stored
+sample, not the nominal one quarter. Both backends therefore consume the
+canonical target and actual `SourceGridDrawBlock`s for exact boundary mapping;
+the clipped VisPy gate proves the intentional divergence from the nominal
+transform so a future simplification cannot reintroduce uniform stretching.
+
+The dedicated real-Wayland gate
+`tests/gpu_interaction/test_g5_page_fallback.py` drives missing fine → pinned
+coarse → fine arrival → fine eviction → pinned coarse on a real VisPy
+surface and samples the framebuffer at every state. Fine resolution and
+eviction fallback take 35.5 ms and 23.3 ms with zero uploads; binding
+generations are coarse 1, fine 2, fallback 1. Its fault injection hides the
+actual GL visual and produces a genuinely black framebuffer, proving the
+never-black oracle can fail. The green run and PNG/JSON evidence are under
+`tests/artifacts/g5-never-black-real-gl-2026-07-17/`.
 
 The ladder-side target planner is also now explicit:
 
@@ -243,11 +340,10 @@ The ladder-side target planner is also now explicit:
 - factor-2 windows starting at 101 and 102 share the aligned interior page
   and keep both clipped boundaries distinct; desired mean-family identity
   stays separate from a coarser physical resolution;
-- the planner is not yet attached to `DisplayTilePayload`. Current reduced
-  ladder values are still binned from window-local zero, and attaching global
-  target names to those texels would be false identity. The next slice must
-  migrate materialization and boundary draw geometry together before feeding
-  these targets into the VisPy resolver.
+- the planner is attached to `DisplayTilePayload`, ladder materialization,
+  retained/floor queries, and backend resolution. Requested target geometry
+  stays distinct from actual sampled residency, so a coarse fallback cannot be
+  relabeled as its fine target.
 
 The pure boundary-geometry half of that atomic slice is now implemented:
 
@@ -263,8 +359,26 @@ The pure boundary-geometry half of that atomic slice is now implemented:
   `SourceGridDrawBlock`s; aligned interior pages are one block, while stored
   and native-source coverage both remain exactly once.
 
-The remaining live step is to carry these page values and spans through the
-ladder cache/payload contract and have VisPy build grouped quads from the spans.
+These values and spans now travel through the page-backed ladder/cache and
+payload contract. The stale live name `RungMaterializationRequest` is removed;
+`LodPageMaterializationRequest` carries the source coverage, canonical plans,
+and only the claims newly owned by one request. Named asymmetric gates now
+compare `(1, 2)` with `(2, 1)` across conversion, bin footprints, page shapes,
+and componentwise ancestry. PyQtGraph and VisPy share direct-oracle parity for
+clipped pages, anisotropy, `mean_abs` magnitude, and phase cancellation; a
+complex-mean page cannot resolve a magnitude target. Current focused evidence
+includes 70 pure geometry/key/page-table tests, 93 route/reducer/model tests,
+236 backend/offscreen page/physical/window/floor tests, and 129
+producer/model/semantic tests, the 18-node prefetch file, and the dedicated
+real-GL node above. The former order-dependent prefetch red was a circular test
+fixture: forged visible-busy also set the governor's speculative quota to zero
+while the test waited for that parked body before releasing busy. It now uses
+real bounded visible work and its actual drain; production ownership was not
+changed and no timeout was widened. Remaining G5 work is broader suite/stress
+cleanup, the required live real-data interaction-convergence run, full
+real-Wayland `gpu_interaction` baseline comparison, and the onscreen workflow
+on both backends. The queue row does not move to Done until every exit gate
+above is green.
 
 ## Rejected shortcuts
 

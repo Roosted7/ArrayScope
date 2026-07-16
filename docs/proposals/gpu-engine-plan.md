@@ -3,10 +3,12 @@
 **Date:** 2026-07-15. **Branch:** merged to `main` 2026-07-16.
 **Decision record:** [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md)
 (three-way separation of view tiles, data chunks, residency pages).
-**Status (2026-07-16):** G1–G4 and G5 slice 1 are implemented and
-real-GL verified; the physical-presentation-truth invariant is standing;
-seven field defects were root-caused from live traces and fixed with
-failing-pre-fix gates. **The remaining G-steps are ordered in
+**Status (2026-07-16):** G1–G4 are merged; the G5 canonical source-grid page
+route, reducer families, shared bounded cache, producer migration, and both
+backend consumers are implemented on the landing candidate. Final G5
+real-Wayland/stress acceptance remains row 1. The physical-presentation-truth
+invariant is standing; field defects were root-caused from live traces and
+fixed with failing-pre-fix gates. **The remaining G-steps are ordered in
 [`../queue.md`](../queue.md)** (the only active queue); this file stays the
 design/stage record. Historical status detail: this file's git history and
 the [continuation brief](gpu-port-continuation.md).
@@ -237,9 +239,8 @@ sets preserve shared coarse coverage and deny refinement rather than evicting
 an all-pinned fallback. `reduce_source_grid_mean` is the first consumer of the
 canonical route: anisotropic bins are globally anchored, shifted windows share
 full interiors, clipped boundaries retain distinct identities, and recursive
-reduction is accepted only from an aligned input grid. This slice is pure
-model only; VisPy actual-LOD fallback presentation and ladder chunk migration
-remain next.
+reduction is accepted only from an aligned input grid. This slice was pure
+model only; later slices below attach it to the live ladder and both backends.
 
 **Slice 3 landed (2026-07-16): VisPy resolved-page consumption seam.**
 Anchored atlas chunks now carry canonical `DataChunkKey` identities. The pool
@@ -247,9 +248,9 @@ resolves logical targets once on the CPU, owner-pins actual coverage, rebinds
 fine arrival/removal without a resolution upload or black intermediate, and
 reports actual coarse LOD/fallback quality plus binding generation in physical
 truth. Every atlas eviction route respects those pins. This is deliberately a
-pool/presentation seam, not a second layer update or scheduler: the live ladder
-still emits whole-plane `PyramidLevelKey` members, so its migration to logical
-page targets is the next G5 slice.
+pool/presentation seam, not a second layer update or scheduler. The later
+live-cutover slice replaces the former whole-plane ladder members with logical
+page targets.
 
 **Slice 4a landed (2026-07-16): live-ladder logical target planning.**
 The render-LOD layer now decomposes desired native source rectangles into
@@ -269,9 +270,25 @@ their exact widths, draw spans cover the valid source rectangle exactly once,
 and shifted windows share only complete interior page identity and values.
 The spans coalesce into at most 3-by-3 uniform draw blocks per page (one for a
 fully aligned interior), bounding later quad count. This remains pure and
-backend-free. The next live slice carries these pages
-through ladder cache/payload state and constructs grouped VisPy quads from the
-recorded spans; the old uniform whole-plane draw stays in place until then.
+backend-free. The live-cutover slice below carries these pages through ladder
+cache/payload state and constructs grouped backend geometry from the recorded
+spans.
+
+**Slice 5 implemented (2026-07-16): canonical live-page cutover.** One
+immutable page plan now owns source-grid bins, clipped footprints, draw blocks,
+anisotropic reduction, reducer lineage, dtype/representation, and value-source
+identity. Native, mean, mean-absolute, power, RMS, and circular phase-vector
+families materialize checked pages; only aligned complete mean routes recurse.
+The renderer-shared bounded cache is keyed directly by `DataChunkKey`, with
+page-set singleflight claims and exact producer admission. Ingest, rung,
+retained/floor, preview, and prefetch paths request those same plans. Typed
+page-backed payloads carry requested geometry separately from resolved actual
+pages; PyQtGraph assembles exact bounded draw blocks, while VisPy uploads
+canonical pages and resolves complete target sets through `PageTable` without
+inventing reduced keys. Legacy `PyramidLevelKey`/`PyramidCache` live ownership
+and factor>1 backend chunk inference are structurally forbidden. Final
+acceptance is the focused/broad/stress and real-Wayland gate matrix in the G5
+contract; it is not a timeout-widening or performance-optimization phase.
 
 ### G6 — GPU compute consumers
 
