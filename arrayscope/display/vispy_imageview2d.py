@@ -790,8 +790,8 @@ class VisPyImageView2D(ImageViewShell):
         )
         return None
 
-    def atomicTiledPayloadResident(self, payload) -> bool:
-        """Report atomic-warm completion without joining scheduling policy."""
+    def tiledPayloadResident(self, payload) -> bool:
+        """Report physical tile/page residency without changing backend state."""
 
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
         resident = getattr(layer, "payload_resident", None)

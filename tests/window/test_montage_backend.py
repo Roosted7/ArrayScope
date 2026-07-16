@@ -530,6 +530,7 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
         dirty_payloads={},
         pending_payload_upserts={0: None},
         pending_removals=set(),
+        display_committed=True,
         flush_pending=False,
         final_commit_pending=False,
         required_target_settled=lambda: True,
@@ -888,8 +889,13 @@ def test_preview_payloads_do_not_count_as_semantic_commits():
         ("exact", 1),
         semantic_data=image.copy(),
     )
+    reduced_presentation_only = SimpleNamespace(
+        quality="exact",
+        semantic_data=None,
+    )
 
     assert tiled_payloads_include_semantics({0: preview}) is False
+    assert tiled_payloads_include_semantics({0: reduced_presentation_only}) is False
     assert tiled_payloads_include_semantics({0: preview, 1: exact}) is True
 
 
@@ -1101,7 +1107,8 @@ def test_refined_evidence_resumes_parked_first_commit_with_dirty_payloads():
     assert requested == [True]
 
 
-def test_first_cpu_level_scan_continuation_uses_visible_lane():
+@pytest.mark.parametrize("shader_windowing", [False, True])
+def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowing):
     from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
     from arrayscope.render.level_stats import LevelStatsService
 
@@ -1116,7 +1123,10 @@ def test_first_cpu_level_scan_continuation_uses_visible_lane():
             raise AssertionError("first-frame correctness continuation must not use a speculative lane")
 
     image_view = SimpleNamespace(
-        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph", shader_windowing=False)
+        rendering_capabilities=ImageViewBackendCapabilities(
+            name="vispy" if shader_windowing else "pyqtgraph",
+            shader_windowing=shader_windowing,
+        )
     )
     service = LevelStatsService()
     service.win = SimpleNamespace(kernel=Kernel(), img_view=image_view)
@@ -1133,6 +1143,53 @@ def test_first_cpu_level_scan_continuation_uses_visible_lane():
     service._frame_session = session
 
     service._invite_montage_level_evidence_continuation(session)
+
+    assert len(submitted) == 1
+    spec, _callbacks = submitted[0]
+    assert spec.lane == Lane.VISIBLE_MATERIALIZATION
+    assert spec.priority == Priority.VISIBLE_IMAGE
+    assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+
+
+def test_first_shader_payload_level_evidence_uses_visible_lane():
+    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
+    from arrayscope.render.level_stats import LevelStatsService
+
+    submitted = []
+
+    class Kernel:
+        def submit(self, spec, **callbacks):
+            submitted.append((spec, callbacks))
+            return object()
+
+        def submit_speculative_batch(self, **_kwargs):
+            raise AssertionError("first-frame shader evidence must not use a speculative lane")
+
+    service = LevelStatsService()
+    service.win = SimpleNamespace(
+        kernel=Kernel(),
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True)
+        ),
+    )
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=1,
+        viewport_revision=0,
+        level_key=("levels",),
+        force_auto=True,
+        user_levels_override=None,
+        display_committed=False,
+        level_evidence_inflight=False,
+        pending_level_tiles=deque([object()]),
+        level_scan_remaining_tiles=0,
+    )
+    service._frame_session = session
+    service._frame_session_is_current = lambda candidate: candidate is session
+    service._montage_level_expected_indices = lambda _session: ()
+    service._take_montage_level_evidence_batch = lambda *_args, **_kwargs: (object(),)
+
+    service._process_montage_cached_level_stats()
 
     assert len(submitted) == 1
     spec, _callbacks = submitted[0]
@@ -1393,13 +1450,15 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace()
+    resident = lambda _payload: True
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
                 name="vispy",
                 persistent_tile_residency=True,
                 shader_windowing=True,
-            )
+            ),
+            tiledPayloadResident=resident,
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
@@ -1412,9 +1471,90 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
 
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
-    assert limits["max_free_retargets"] == 12
-    assert "max_item_free_upserts" not in limits
-    assert limits["pace_resident_retargets"] is True
+    assert limits["physical_resident_fn"] is resident
+    assert limits["pace_resident_retargets"] is False
+
+
+def test_hidden_target_warm_does_not_wait_for_visible_target_settlement(monkeypatch):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+    from arrayscope.window import frame_effects
+
+    resident: set[int] = set()
+    warm_deltas = []
+    payloads = {
+        tile: DisplayTilePayload(
+            tile,
+            tile,
+            np.full((2, 2), tile, dtype=np.float32),
+            None,
+            ("target", tile),
+        )
+        for tile in range(3)
+    }
+
+    def warm(**kwargs):
+        warm_deltas.append(kwargs["tile_delta"])
+        resident.update(id(payload) for payload in kwargs["payloads"].values())
+
+    view = SimpleNamespace(
+        warmTiledResidency=warm,
+        tiledPayloadResident=lambda payload: id(payload) in resident,
+    )
+    session = SimpleNamespace(
+        session_id=7,
+        key=("session",),
+        viewport_revision=3,
+        _atomic_warm_job=None,
+        final_commit_pending=False,
+        flush_pending=False,
+    )
+    replans = []
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(img_view=view),
+        _frame_session_is_current=lambda candidate: candidate is session,
+        _memory_policy=lambda: SimpleNamespace(
+            visible_render_budget_bytes=1 << 30,
+            display_cache_budget_bytes=1 << 30,
+            user_render_cap_bytes=1 << 30,
+        ),
+        request_montage_replan=lambda candidate: replans.append(candidate),
+    )
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_low_priority_callback",
+        lambda _renderer, callback: callback(),
+    )
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=3,
+        upserts=payloads,
+        active_tiles=tuple(payloads),
+        planned_tiles=tuple(payloads),
+    )
+
+    ready = frame_effects._warm_atomic_successor_residency(
+        renderer,
+        session,
+        _geometry(),
+        delta,
+        levels=(-1.0, 1.0),
+        rgb_already_windowed=False,
+        payloads=payloads,
+        batch_size=2,
+    )
+
+    assert ready is False
+    assert len(warm_deltas) == 2
+    assert all(candidate.atomic_handoff for candidate in warm_deltas)
+    assert resident == {id(payload) for payload in payloads.values()}
+    assert session._atomic_warm_job is None
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+    assert replans == [session]
 
 
 def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():

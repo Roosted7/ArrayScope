@@ -27,7 +27,7 @@ from arrayscope.gpu.keys import (
     ChunkLod,
     DataChunkKey,
 )
-from arrayscope.gpu.page_table import PageSlot, PageTable
+from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable
 
 
 ALGO_VERSION = 1
@@ -36,6 +36,14 @@ ALGO_VERSION = 1
 
 ROUTE_ID = "source-grid-page"
 """Canonical operation-identity tag for source-grid page values."""
+
+
+_PHASE_VECTOR_MEAN_ZERO_ATOL = np.float32(8.0 * np.finfo(np.float32).eps)
+"""Roundoff-scale tolerance for a normalized circular-vector mean.
+
+The reducer compares a *mean*, so this stays O(eps) as bin population grows.
+Scaling it by the bin count erases legitimate low-coherence resultants.
+"""
 
 
 def reduction_yx_to_xy(reduction_yx: tuple[int, int]) -> tuple[int, int]:
@@ -217,6 +225,10 @@ class MaterializedLodPage:
                 "materialized representation does not match reducer output: "
                 f"{self.plan.key.representation!r} != {expected_representation!r}"
             )
+        _validate_materialized_representation(
+            values,
+            representation=expected_representation,
+        )
         if not values.flags.c_contiguous:
             raise ValueError("materialized page values must be C-contiguous")
         object.__setattr__(self, "values", values)
@@ -228,6 +240,136 @@ class MaterializedLodPage:
     @property
     def nbytes(self) -> int:
         return int(self.values.nbytes)
+
+
+@dataclass(frozen=True)
+class ResolvedLodPageSet:
+    """One complete canonical target -> actual CPU page resolution."""
+
+    requested_plans: tuple[LodPagePlan, ...]
+    resolutions: tuple[PageResolution, ...]
+    materialized_pages: tuple[MaterializedLodPage, ...]
+
+    def __post_init__(self) -> None:
+        plans = tuple(self.requested_plans)
+        resolutions = tuple(self.resolutions)
+        pages = tuple(self.materialized_pages)
+        if not plans or len(plans) != len(resolutions):
+            raise ValueError("resolved LOD page set must cover every requested plan")
+        if tuple(item.target_key for item in resolutions) != tuple(plan.key for plan in plans):
+            raise ValueError("resolved LOD page rows disagree with requested plans")
+        page_keys = {page.key for page in pages}
+        if any(item.actual_key not in page_keys for item in resolutions):
+            raise ValueError("resolved LOD page set is missing an actual page value")
+        object.__setattr__(self, "requested_plans", plans)
+        object.__setattr__(self, "resolutions", resolutions)
+        object.__setattr__(self, "materialized_pages", pages)
+
+    @property
+    def exact(self) -> bool:
+        return all(item.target_key == item.actual_key for item in self.resolutions)
+
+    @property
+    def actual_keys(self) -> tuple[DataChunkKey, ...]:
+        return tuple(dict.fromkeys(item.actual_key for item in self.resolutions))
+
+    @property
+    def actual_reductions_yx(self) -> tuple[tuple[int, ...], ...]:
+        """Physical reduction of every target-aligned binding.
+
+        The tuple aligns one-for-one with :attr:`resolutions`.  A resolved
+        target set may legitimately mix ancestors (for example L3 on one
+        page and L4 on its neighbour), so no componentwise reduction vector
+        is synthesized for the tile as a whole.
+        """
+
+        return tuple(
+            tuple(int(value) for value in item.actual_key.lod.reduction)
+            for item in self.resolutions
+        )
+
+    @property
+    def actual_levels(self) -> tuple[int, ...]:
+        """Physical scalar level of every target-aligned binding."""
+
+        return tuple(
+            max(reduction, default=0)
+            for reduction in self.actual_reductions_yx
+        )
+
+    @property
+    def target_actual_levels(self) -> tuple[tuple[DataChunkKey, int], ...]:
+        """Canonical target key paired with its physically sampled level."""
+
+        return tuple(
+            (resolution.target_key, level)
+            for resolution, level in zip(
+                self.resolutions,
+                self.actual_levels,
+                strict=True,
+            )
+        )
+
+    @property
+    def uniform_actual_level(self) -> int | None:
+        """The physical level only when every target samples one level."""
+
+        levels = self.actual_levels
+        first = levels[0]
+        return first if all(level == first for level in levels[1:]) else None
+
+    @property
+    def coarsest_actual_level(self) -> int:
+        """Conservative physical-quality summary for floor policy ranking."""
+
+        return max(self.actual_levels)
+
+
+def resolve_materialized_page_targets(
+    plans,
+    pages,
+) -> tuple[PageResolution | None, ...]:
+    """Resolve supplied CPU page values with the canonical page-table rank."""
+
+    requested = tuple(plans)
+    materialized = tuple(pages)
+    if len({plan.key for plan in requested}) != len(requested):
+        raise ValueError("duplicate LOD page targets are not allowed")
+    if len({page.key for page in materialized}) != len(materialized):
+        raise ValueError("duplicate materialized LOD pages are not allowed")
+    table = PageTable()
+    for index, page in enumerate(materialized):
+        table.bind(
+            page.key,
+            PageSlot("cpu-materialized-page-set", 0, index),
+            nbytes=page.nbytes,
+        )
+    return tuple(table.resolve(plan.key) for plan in requested)
+
+
+def resolved_materialized_page_set(
+    plans,
+    pages,
+    *,
+    resolutions=None,
+) -> ResolvedLodPageSet | None:
+    """Return a checked complete supplied-page resolution, or ``None``."""
+
+    requested = tuple(plans)
+    materialized = tuple(pages)
+    resolutions = (
+        resolve_materialized_page_targets(requested, materialized)
+        if resolutions is None
+        else tuple(resolutions)
+    )
+    if len(resolutions) != len(requested):
+        raise ValueError("page resolution rows must align with requested plans")
+    if any(item is None for item in resolutions):
+        return None
+    resolved = tuple(item for item in resolutions if item is not None)
+    pages_by_key = {page.key: page for page in materialized}
+    actual_pages = tuple(pages_by_key[key] for key in dict.fromkeys(item.actual_key for item in resolved))
+    return ResolvedLodPageSet(requested, resolved, actual_pages)
 
 
 def plan_source_grid_pages(
@@ -651,7 +793,7 @@ def materialize_lod_page(
     ):
         raise ValueError("materialization source does not cover the planned valid footprint")
 
-    output_dtype, output_representation = _reducer_output_format(plan.reducer, source.dtype)
+    output_dtype, output_representation = _reducer_output_format(plan.reducer, source)
     if np.dtype(plan.key.dtype) != output_dtype:
         raise ValueError(
             f"planned dtype {plan.key.dtype!r} disagrees with reducer output {output_dtype}"
@@ -730,8 +872,11 @@ def _reduce_planned_bins(
     if reducer == REDUCER_RMS:
         result = np.sqrt(result, dtype=np.float32)
     elif reducer == REDUCER_PHASE_VECTOR:
-        tolerance = np.finfo(np.float32).eps * counts
-        result = np.where(np.abs(result) <= tolerance, np.complex64(0.0), result)
+        result = np.where(
+            np.abs(result) <= _PHASE_VECTOR_MEAN_ZERO_ATOL,
+            np.complex64(0.0),
+            result,
+        )
     return result.astype(output_dtype, copy=False)
 
 
@@ -778,7 +923,7 @@ def reduce_source_grid(
             len(_source_grid_axis_rects(valid_rect[0], valid_rect[1], factor_y)),
             len(_source_grid_axis_rects(valid_rect[2], valid_rect[3], factor_x)),
         )
-    output_dtype, representation = _reducer_output_format(str(reducer), source.dtype)
+    output_dtype, representation = _reducer_output_format(str(reducer), source)
     plans = plan_source_grid_pages(
         content_key=content_key,
         valid_source_rect_yx=valid_rect,
@@ -860,19 +1005,43 @@ def _reduce_sample(sample: np.ndarray, *, reducer: str):
         nonzero = magnitude > 0.0
         vectors[nonzero] = sample[nonzero].astype(np.complex64, copy=False) / magnitude[nonzero]
         result = np.mean(vectors, axis=(0, 1), dtype=np.complex64)
-        tolerance = np.finfo(np.float32).eps * max(1, int(sample.shape[0]) * int(sample.shape[1]))
-        return np.complex64(0.0) if abs(result) <= tolerance else np.complex64(result)
+        return (
+            np.complex64(0.0)
+            if abs(result) <= _PHASE_VECTOR_MEAN_ZERO_ATOL
+            else np.complex64(result)
+        )
     raise ValueError(f"unsupported source-grid reducer {reducer!r}")
 
 
-def _reducer_output_format(reducer: str, source_dtype) -> tuple[np.dtype, str]:
+def _reducer_output_format(reducer: str, source) -> tuple[np.dtype, str]:
+    """Return the canonical value format for one concrete source plane.
+
+    Representation is a value-shape contract, not a dtype alias.  In
+    particular, two-dimensional ``uint8`` scientific data is scalar; only a
+    native three/four-component ``uint8`` plane is RGB(A).  Reduced
+    component planes have no canonical sufficient-statistic representation
+    yet and are rejected rather than mislabeled as scalar.
+    """
+
     reducer = str(reducer)
-    dtype = np.dtype(source_dtype)
+    values = np.asarray(source)
+    dtype = values.dtype
+    if values.ndim == 3:
+        if (
+            reducer == REDUCER_NATIVE
+            and dtype == np.dtype(np.uint8)
+            and int(values.shape[-1]) in (3, 4)
+        ):
+            return dtype, RGB8
+        raise ValueError(
+            "canonical source-grid reducers require scalar or complex 2D values; "
+            "only native uint8 RGB(A) planes have a component representation"
+        )
+    if values.ndim != 2:
+        raise ValueError("canonical source-grid reducers require 2D source values")
     if reducer == REDUCER_NATIVE:
         if np.issubdtype(dtype, np.complexfloating):
             return np.dtype(np.complex64), COMPLEX_RG32F
-        if dtype == np.dtype(np.uint8):
-            return dtype, RGB8
         return dtype, SCALAR_R32F
     if reducer == REDUCER_MEAN:
         if np.issubdtype(dtype, np.complexfloating):
@@ -885,6 +1054,33 @@ def _reducer_output_format(reducer: str, source_dtype) -> tuple[np.dtype, str]:
     if reducer in (REDUCER_MEAN_ABS, REDUCER_POWER, REDUCER_RMS):
         return np.dtype(np.float32), SCALAR_R32F
     raise ValueError(f"unsupported source-grid reducer {reducer!r}")
+
+
+def _validate_materialized_representation(
+    values: np.ndarray,
+    *,
+    representation: str,
+) -> None:
+    """Reject a key/value pair whose physical component shape is dishonest."""
+
+    representation = str(representation)
+    if representation == RGB8:
+        if (
+            values.dtype != np.dtype(np.uint8)
+            or values.ndim != 3
+            or values.shape[-1] not in (3, 4)
+        ):
+            raise ValueError("rgb8 materialized pages require uint8 RGB(A) component values")
+        return
+    if representation == COMPLEX_RG32F:
+        if values.ndim != 2 or not np.iscomplexobj(values):
+            raise ValueError("complex_rg32f materialized pages require 2D complex values")
+        return
+    if representation == SCALAR_R32F:
+        if values.ndim != 2 or np.iscomplexobj(values):
+            raise ValueError("scalar_r32f materialized pages require 2D real scalar values")
+        return
+    raise ValueError(f"unsupported materialized representation {representation!r}")
 
 
 def _planned_value_format(reducer: str, dtype: str, representation: str) -> tuple[np.dtype, str]:
@@ -1031,6 +1227,18 @@ def _reduce_axis(values: np.ndarray, factor: int, *, axis: int) -> np.ndarray:
     return sums / counts.reshape(shape)
 
 
+def _planned_page_nbytes(plan: LodPagePlan) -> int:
+    """Conservative checked size used for exact-set cache eligibility."""
+
+    dtype, representation = _planned_value_format(
+        plan.reducer,
+        plan.key.dtype,
+        plan.key.representation,
+    )
+    components = 4 if representation == RGB8 else 1
+    return int(plan.stored_shape[0] * plan.stored_shape[1] * components * dtype.itemsize)
+
+
 class LodPageCache:
     """Renderer-shared, byte-bounded logical page cache with owned claims."""
 
@@ -1038,6 +1246,8 @@ class LodPageCache:
         self._cache = BoundedCache(max_bytes=max_bytes, max_entries=max_entries)
         self._claims: dict[DataChunkKey, object] = {}
         self._active_claim_owners: set[object] = set()
+        self._owner_requested_keys: dict[object, tuple[DataChunkKey, ...]] = {}
+        self._ineligible_plan_sets: set[tuple[DataChunkKey, ...]] = set()
         self._lock = RLock()
         self._revision = 0
         self._resolver_revision = -1
@@ -1063,18 +1273,59 @@ class LodPageCache:
         table, _pages_by_key = self._resolver_snapshot()
         return table.resolve(key)
 
-    def resolved_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
-        """Return the complete actual page set, or None for missing coverage."""
+    def resolve_plans(self, plans):
+        """Resolve one complete target set through the canonical page table.
+
+        The returned rows preserve requested -> actual identity for every
+        target.  ``None`` means incomplete coverage; resolution remains a
+        passive query and performs no materialization, upload, or claim work.
+        """
+
+        resolved = self.resolved_page_set(plans)
+        return None if resolved is None else resolved.resolutions
+
+    def resolved_page_set(self, plans) -> ResolvedLodPageSet | None:
+        """Return complete requested -> actual rows and their checked values."""
 
         requested = tuple(plans)
+        keys = tuple(plan.key for plan in requested)
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate LOD page targets are not allowed")
         table, pages_by_key = self._resolver_snapshot()
-        resolved = tuple(table.resolve(plan.key) for plan in requested)
-        if any(item is None for item in resolved):
+        resolutions = tuple(table.resolve(key) for key in keys)
+        if any(item is None for item in resolutions):
             return None
-        return tuple(
+        resolved = tuple(item for item in resolutions if item is not None)
+        actual_pages = tuple(
             pages_by_key[key]
             for key in dict.fromkeys(item.actual_key for item in resolved)
         )
+        return ResolvedLodPageSet(requested, resolved, actual_pages)
+
+    def resolved_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
+        """Return the complete actual page set, or None for missing coverage."""
+
+        resolved = self.resolved_page_set(plans)
+        return None if resolved is None else resolved.materialized_pages
+
+    def exact_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
+        """Return requested pages only when every exact key is resident.
+
+        Ancestor resolution is presentation truth: it can keep a target
+        drawable while its requested quality is absent.  Producers and
+        lifecycle admission must instead consult this exact-key query so a
+        coarse fallback can never suppress finer materialization or mark its
+        claim resident.
+        """
+
+        requested = tuple(plans)
+        keys = tuple(plan.key for plan in requested)
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate LOD page targets are not allowed")
+        pages_by_key = self._cache.peek_many(keys)
+        if len(pages_by_key) != len(keys):
+            return None
+        return tuple(pages_by_key[key] for key in keys)
 
     def _resolver_snapshot(
         self,
@@ -1109,12 +1360,39 @@ class LodPageCache:
             return True
 
     def claim_plans(self, plans, owner: object) -> tuple[LodPagePlan, ...]:
-        """Return only missing plans newly owned by this request."""
+        """Attach to a complete requested set and claim only its missing pages.
+
+        Resident members are touched as one transaction before any boundary
+        admission. This makes outgoing pages older than shared interior pages,
+        so a shifted set that fits the budget cannot evict its own coverage.
+        Exact sets that can never fit the configured cache are remembered and
+        produce no worker claim until the cache budget changes.
+        """
 
         requested = tuple(plans)
-        if len({plan.key for plan in requested}) != len(requested):
+        keys = tuple(plan.key for plan in requested)
+        if len(set(keys)) != len(requested):
             raise ValueError("duplicate LOD page targets are not allowed")
-        return tuple(plan for plan in requested if self.begin_claim(plan.key, owner))
+        with self._lock:
+            if not self._plan_set_fits_budget(requested):
+                self._ineligible_plan_sets.add(keys)
+                return ()
+            self._ineligible_plan_sets.discard(keys)
+            existing = self._owner_requested_keys.get(owner)
+            if existing is not None and existing != keys:
+                raise ValueError("one LOD page claim owner cannot attach to two target sets")
+            for key in keys:
+                self._cache.get(key, touch=True, count=False)
+            claimed = []
+            for plan in requested:
+                key = plan.key
+                if self._cache.peek(key) is not None or key in self._claims:
+                    continue
+                self._claims[key] = owner
+                claimed.append(plan)
+            if claimed:
+                self._owner_requested_keys[owner] = keys
+            return tuple(claimed)
 
     def admit(self, page: MaterializedLodPage, *, owner: object) -> MaterializedLodPage:
         """Admit the exact claimed page; every failure releases its claim."""
@@ -1133,11 +1411,13 @@ class LodPageCache:
                 if key != page.plan.key:
                     raise ValueError("LOD page admission key disagrees with materialized plan")
                 if self._cache.would_fit(page.nbytes):
+                    self._touch_protected_request_keys(owner)
                     self._cache.put(key, page, nbytes=page.nbytes)
                     self._revision += 1
             finally:
                 if claimed_owner == owner:
                     self._claims.pop(key, None)
+                    self._forget_owner_if_idle(owner)
         return page
 
     def admit_as(
@@ -1164,6 +1444,7 @@ class LodPageCache:
                     f"cannot release LOD page claim owned by {claimed_owner!r} as {owner!r}"
                 )
             self._claims.pop(key, None)
+            self._forget_owner_if_idle(owner)
 
     def begin_owner_work(self, owner: object) -> bool:
         """Atomically protect an owner's claims for one running worker."""
@@ -1184,6 +1465,7 @@ class LodPageCache:
             released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
             for key in released:
                 self._claims.pop(key, None)
+            self._owner_requested_keys.pop(owner, None)
             return released
 
     def release_owner_claims(self, owner: object) -> tuple[DataChunkKey, ...]:
@@ -1196,7 +1478,38 @@ class LodPageCache:
             released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
             for key in released:
                 self._claims.pop(key, None)
+            self._owner_requested_keys.pop(owner, None)
             return released
+
+    def plan_set_ineligible(self, plans) -> bool:
+        keys = tuple(plan.key for plan in tuple(plans))
+        with self._lock:
+            return keys in self._ineligible_plan_sets
+
+    def _plan_set_fits_budget(self, plans: tuple[LodPagePlan, ...]) -> bool:
+        max_entries = self._cache.max_entries
+        if max_entries is not None and len(plans) > int(max_entries):
+            return False
+        max_bytes = self._cache.max_bytes
+        if max_bytes is None:
+            return True
+        return sum(_planned_page_nbytes(plan) for plan in plans) <= int(max_bytes)
+
+    def _touch_protected_request_keys(self, owner: object) -> None:
+        other_owners = sorted(
+            (item for item in self._active_claim_owners if item != owner),
+            key=repr,
+        )
+        for protected_owner in (*other_owners, owner):
+            for key in self._owner_requested_keys.get(protected_owner, ()):
+                self._cache.get(key, touch=True, count=False)
+
+    def _forget_owner_if_idle(self, owner: object) -> None:
+        if owner in self._active_claim_owners:
+            return
+        if any(claimed_owner == owner for claimed_owner in self._claims.values()):
+            return
+        self._owner_requested_keys.pop(owner, None)
 
     def pending(self, key: DataChunkKey) -> bool:
         with self._lock:
@@ -1243,6 +1556,7 @@ class LodPageCache:
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         with self._lock:
             self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
+            self._ineligible_plan_sets.clear()
             self._revision += 1
 
     def resident_lod_reducer_counts(self) -> dict[tuple[tuple[int, ...], str], int]:
@@ -1257,6 +1571,8 @@ class LodPageCache:
             self._cache.clear()
             self._claims.clear()
             self._active_claim_owners.clear()
+            self._owner_requested_keys.clear()
+            self._ineligible_plan_sets.clear()
             self._revision += 1
 
 
@@ -1266,6 +1582,7 @@ __all__ = [
     "LodPageCache",
     "LodPagePlan",
     "MaterializedLodPage",
+    "ResolvedLodPageSet",
     "SourceGridBinIdentity",
     "SourceGridDrawBlock",
     "SourceGridPage",
@@ -1280,6 +1597,8 @@ __all__ = [
     "materialize_source_grid_pages",
     "reduction_xy_to_yx",
     "reduction_yx_to_xy",
+    "resolve_materialized_page_targets",
+    "resolved_materialized_page_set",
 ]
 
 

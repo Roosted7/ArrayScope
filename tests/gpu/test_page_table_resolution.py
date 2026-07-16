@@ -29,12 +29,13 @@ def chunk(
     shape=(256, 256),
     reduction=(0, 0),
     reducer="mean",
+    gutter=0,
     operation_key=("op", "identity"),
 ):
     return DataChunkKey(
         document_generation=("doc", 1),
         operation_key=operation_key,
-        lod=ChunkLod(reduction=reduction, reducer=reducer),
+        lod=ChunkLod(reduction=reduction, reducer=reducer, gutter=gutter),
         chunk_origin=origin,
         chunk_shape=shape,
         dtype="float32",
@@ -124,8 +125,10 @@ def test_finest_compatible_covering_ancestor_wins():
         chunk(origin=(0, 0), shape=(1024, 1024), reduction=(2, 0)),
         # Same geometry and reduction, but semantically different values.
         chunk(origin=(0, 0), shape=(1024, 1024), reduction=(2, 2), reducer="rms"),
+        # Atlas-border samples are a different stored-value family.
+        chunk(origin=(0, 0), shape=(1024, 1024), reduction=(2, 2), gutter=1),
     ],
-    ids=("spatial-coverage", "anisotropic-direction", "reducer-family"),
+    ids=("spatial-coverage", "anisotropic-direction", "reducer-family", "gutter-family"),
 )
 def test_incompatible_resident_pages_are_not_ancestors(incompatible):
     table = PageTable()
@@ -133,6 +136,40 @@ def test_incompatible_resident_pages_are_not_ancestors(incompatible):
     bind(table, incompatible, 0)
 
     assert table.resolve(target) is None
+
+
+@pytest.mark.parametrize(
+    ("target_reduction", "crossed_reduction", "expected_scale"),
+    [
+        ((1, 2), (2, 1), (0.5, 1.0)),
+        ((2, 1), (1, 2), (1.0, 0.5)),
+    ],
+)
+def test_asymmetric_yx_routes_use_componentwise_ancestry(
+    target_reduction,
+    crossed_reduction,
+    expected_scale,
+):
+    target = chunk(reduction=target_reduction)
+    crossed = chunk(reduction=crossed_reduction)
+
+    crossed_only = PageTable()
+    bind(crossed_only, crossed, 0)
+    assert crossed_only.resolve(target) is None, (
+        "(1, 2) and (2, 1) are not interchangeable ancestors"
+    )
+
+    table = PageTable()
+    ancestor = chunk(reduction=(2, 2))
+    slot = bind(table, ancestor, 1)
+    assert_resolution(
+        table.resolve(target),
+        target=target,
+        actual=ancestor,
+        slot=slot,
+        scale=expected_scale,
+        offset=(0.0, 0.0),
+    )
 
 
 def test_unbinding_fine_page_immediately_falls_back_to_coarse():

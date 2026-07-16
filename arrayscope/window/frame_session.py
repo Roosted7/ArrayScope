@@ -58,7 +58,7 @@ from arrayscope.display.model.tile_priority import (
 )
 from arrayscope.render import lod as render_lod
 from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
-    RungMaterializationRequest,
+    LodPageMaterializationRequest,
     page_set_key_for_rendered,
     texture_source_for_rendered,
     viewport_identity as _viewport_identity,
@@ -210,6 +210,33 @@ def _resident_retarget_upsert_tiles(
         for tile, payload in upserts.items()
         if any(previous_tile != int(tile) for previous_tile in previous_tiles_by_key.get(_payload_residency_key(payload), set()))
     }
+
+
+def _free_retarget_tiles(
+    payloads: dict[int, DisplayTilePayload],
+    *,
+    logical_resident_tiles,
+    physical_resident_fn,
+    pace_resident_retargets: bool,
+) -> frozenset[int]:
+    """Return retargets proven to bypass every backend admission cap.
+
+    A backend physical-residency seam is authoritative when present.  The
+    scheduler's acknowledged source identities are intentionally not used as
+    a substitute: an acknowledged atlas page may since have been evicted.
+    Backends without physical residency truth retain the existing policy in
+    which only explicitly unpaced logical remaps are free.
+    """
+
+    if callable(physical_resident_fn):
+        return frozenset(
+            int(tile)
+            for tile, payload in payloads.items()
+            if bool(physical_resident_fn(payload))
+        )
+    if pace_resident_retargets:
+        return frozenset()
+    return frozenset(int(tile) for tile in logical_resident_tiles)
 
 
 class LifecycleRenderedTiles(dict):
@@ -403,8 +430,13 @@ class LifecycleRungMaterializations:
     def mark_started(self, request) -> None:
         self._lifecycle.materialization_started(request)
 
-    def mark_resident(self, request) -> None:
+    def mark_resident(self, request) -> bool:
+        pyramid = getattr(self._session, "lod_page_cache", None)
+        if not render_lod._page_set_exact(pyramid, request.key):
+            self.release(request)
+            return False
         self._lifecycle.materialization_resident(request)
+        return True
 
     def release(self, request) -> tuple[ReleaseClaim, ...]:
         effects = self._lifecycle.materialization_released(request)
@@ -923,8 +955,6 @@ class FrameSession:
         """
 
         self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
-        viewport_identity = _viewport_identity(view_range, self.viewport_shape)
-        viewport_changed = viewport_identity != self._last_viewport_identity
         self.view_range = view_range
         layout_changed = False
         if plan is not None:
@@ -937,7 +967,6 @@ class FrameSession:
                 self._remap_queued_tiles_to_plan()
         self.priority_focus = priority_focus
         self._selected_lod_factor()
-        plan_tiles = tuple(getattr(self.plan, "tiles", ()) or ())
         active = _viewport_tiles(
             self.plan,
             view_range=view_range,
@@ -964,7 +993,6 @@ class FrameSession:
         additions = tuple(tile for tile in coverage if int(tile.montage_index) not in known)
         active_numbers = tuple(int(tile.montage_index) for tile in active)
         near_numbers = tuple(int(tile.montage_index) for tile in near)
-        planned_numbers = tuple(int(tile.montage_index) for tile in plan_tiles)
         previous_visible_numbers = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         has_presented_payloads = bool(
             getattr(self.tile_presentation_state, "payloads", None)
@@ -1490,7 +1518,16 @@ class FrameSession:
         acknowledged_previous = dict(
             getattr(self.tile_presentation_state, "payloads", {}) or {}
         ).get(tile_number)
-        preserve_candidate = acknowledged_previous or previous
+        backend_identity = dict(self.lifecycle.backend_presented_identities).get(tile_number)
+        if (
+            acknowledged_previous is not None
+            and backend_identity != tile_ack_identity(acknowledged_previous)
+        ):
+            acknowledged_previous = None
+        # Quality preservation protects physical presentation truth, not a
+        # wrapper merely built for a prior candidate.  An unacknowledged
+        # native wrapper must not block a legitimate first reduced commit.
+        preserve_candidate = acknowledged_previous
         if (
             preserve_candidate is not None
             and _base_source_id(preserve_candidate.source_id) == base_source_id
@@ -1932,7 +1969,7 @@ class FrameSession:
         level: int,
         key,
         native_source: np.ndarray | None = None,
-    ) -> RungMaterializationRequest:
+    ) -> LodPageMaterializationRequest:
         return render_lod.plan_materialization(
             self, rendered, demand=demand, level=level, key=key, native_source=native_source
         )
@@ -1971,14 +2008,19 @@ class FrameSession:
         if tuple(page.key for page in pages) != tuple(plan.key for plan in key.plans):
             raise ValueError("preview page values disagree with the requested canonical plan")
         owner = ("preview-page-admission", id(self), int(tile_number), key)
-        claimed = {plan.key for plan in cache.claim_plans(key.plans, owner)}
-        try:
-            for page in pages:
-                if page.key in claimed:
-                    cache.admit_as(page.key, page, owner=owner)
-        finally:
-            cache.release_owner_claims(owner)
-        if not render_lod._page_set_complete(cache, key):
+        claimed = cache.claim_plans(key.plans, owner)
+        if claimed:
+            if not cache.begin_owner_work(owner):
+                cache.release_owner_claims(owner)
+                raise RuntimeError("preview page claims disappeared before admission")
+            claimed_keys = {plan.key for plan in claimed}
+            try:
+                for page in pages:
+                    if page.key in claimed_keys:
+                        cache.admit_as(page.key, page, owner=owner)
+            finally:
+                cache.finish_owner_work(owner)
+        if not render_lod._page_set_exact(cache, key):
             return False
         metadata = PreviewFloorMetadata(
             shader_mapping=shader_mapping,
@@ -2088,9 +2130,7 @@ class FrameSession:
         max_upserts: int | None,
         max_upsert_bytes: int | None,
         upsert_cost_fn,
-        item_free_upsert_fn,
-        max_item_free_upserts: int | None,
-        max_free_retargets: int | None,
+        physical_resident_fn,
         pace_resident_retargets: bool,
     ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
         """Emit the next already-built backend transaction slice.
@@ -2180,24 +2220,22 @@ class FrameSession:
             plan_tiles_by_number.get(int(tile), int(tile))
             for tile in payloads
         )
+        free_retarget_tiles = _free_retarget_tiles(
+            payloads,
+            logical_resident_tiles=resident_retargets,
+            physical_resident_fn=physical_resident_fn,
+            pace_resident_retargets=pace_resident_retargets,
+        )
         admission = TileAdmissionQueue(self.tile_priority_context()).admit(
             admission_candidates,
             retained=(),
-            free_fn=(
-                (lambda tile: int(tile) in resident_retargets)
-                if resident_retargets and not pace_resident_retargets
-                else None
-            ),
-            item_free_fn=(
-                (lambda tile: bool(item_free_upsert_fn(payloads[int(tile)])))
-                if item_free_upsert_fn is not None
-                else None
-            ),
-            max_item_free=max_item_free_upserts,
+            free_fn=(lambda tile: int(tile) in free_retarget_tiles)
+            if free_retarget_tiles
+            else None,
             cost_fn=(
                 lambda tile: (
                     0
-                    if int(tile) in resident_retargets
+                    if int(tile) in free_retarget_tiles
                     else int(
                         upsert_cost_fn(payloads[int(tile)])
                         if upsert_cost_fn is not None
@@ -2252,9 +2290,7 @@ class FrameSession:
         max_upserts: int | None = None,
         max_upsert_bytes: int | None = None,
         upsert_cost_fn=None,
-        item_free_upsert_fn=None,
-        max_item_free_upserts: int | None = None,
-        max_free_retargets: int | None = None,
+        physical_resident_fn=None,
         pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
         source_ids = dict(source_ids or {})
@@ -2263,9 +2299,7 @@ class FrameSession:
             max_upserts=max_upserts,
             max_upsert_bytes=max_upsert_bytes,
             upsert_cost_fn=upsert_cost_fn,
-            item_free_upsert_fn=item_free_upsert_fn,
-            max_item_free_upserts=max_item_free_upserts,
-            max_free_retargets=max_free_retargets,
+            physical_resident_fn=physical_resident_fn,
             pace_resident_retargets=pace_resident_retargets,
         )
         if pending_followup is not None:
@@ -2301,34 +2335,6 @@ class FrameSession:
                 continue
             self.display_tile_payloads[int(tile_number)] = payload
             materialized.add(int(tile_number))
-        fallback_payloads = None
-        target_level = int(
-            getattr(getattr(getattr(self, "lod_policy_decision", None), "demand", None), "desired_level", 0)
-            or 0
-        )
-        for tile_number in sorted(planned_numbers):
-            if int(tile_number) in previous_payloads:
-                continue
-            tile = plan_tiles_by_number.get(int(tile_number))
-            if tile is None:
-                continue
-            fallback = self.lifecycle.best_presentable(
-                int(tile_number),
-                self.tile_semantic_source_id(int(tile.source_index)),
-                target_level,
-            )
-            if fallback is None:
-                continue
-            if fallback_payloads is None:
-                fallback_payloads = dict(previous_payloads)
-            fallback_payloads[int(tile_number)] = fallback
-            previous_payloads[int(tile_number)] = fallback
-        if fallback_payloads is not None:
-            previous_state = TilePresentationState(
-                fallback_payloads,
-                revision=int(getattr(previous_state, "revision", 0)),
-            )
-            self.tile_presentation_state = previous_state
         for stale in tuple(self.display_tile_payloads):
             if int(stale) not in materialized:
                 payload = self.display_tile_payloads.get(int(stale))
@@ -2408,38 +2414,6 @@ class FrameSession:
             # active tile with no active payload and clears a perfectly correct
             # atlas mapping.  Rehydrate the acknowledged state from the one
             # allowed source of truth: backend identity == current payload.
-            identity_payloads = None
-            confirmed_from_backend: list[int] = []
-            for tile_number in planned_numbers:
-                current = self.display_tile_payloads.get(int(tile_number))
-                if current is None:
-                    continue
-                if backend_identities.get(int(tile_number)) != tile_ack_identity(current):
-                    continue
-                if previous_payloads.get(int(tile_number)) is current:
-                    continue
-                if identity_payloads is None:
-                    identity_payloads = dict(previous_payloads)
-                identity_payloads[int(tile_number)] = current
-                previous_payloads[int(tile_number)] = current
-                confirmed_from_backend.append(int(tile_number))
-            if identity_payloads is not None:
-                previous_state = TilePresentationState(
-                    identity_payloads,
-                    revision=int(getattr(previous_state, "revision", 0)),
-                )
-                self.tile_presentation_state = previous_state
-            if confirmed_from_backend:
-                self.lifecycle.presentation_confirmed(confirmed_from_backend)
-        # A capped follow-up commit must never shrink the active payload set
-        # when the backend has already reported the current identity on
-        # screen.  The previous backend identity block handles the common
-        # revision split before dirty/upsert classification; this second pass
-        # also consumes stale pending-upsert markers so an already-presented
-        # coarse/startup floor is retained instead of trickled back through
-        # the cold upload cap (field trace 2026-07-09: 272 presented dropped
-        # to 28/47/88 during startup).
-        if backend_identities:
             retained_payloads = None
             retained_tiles: list[int] = []
             for tile_number in planned_numbers:
@@ -2454,6 +2428,10 @@ class FrameSession:
                     retained_payloads[int(tile_number)] = current
                     previous_payloads[int(tile_number)] = current
                 retained_tiles.append(int(tile_number))
+            # The same canonical pass also consumes stale pending-upsert
+            # markers. A capped follow-up commit must not trickle an already
+            # presented coarse/startup floor back through the cold upload cap
+            # (field trace 2026-07-09: 272 presented dropped to 28/47/88).
             for tile_number in retained_tiles:
                 if _preview_upgrade_owed(self, int(tile_number), self.display_tile_payloads.get(int(tile_number))):
                     self.dirty_payloads[int(tile_number)] = None
@@ -2465,6 +2443,7 @@ class FrameSession:
                     revision=int(getattr(previous_state, "revision", 0)),
                 )
                 self.tile_presentation_state = previous_state
+            if retained_tiles:
                 self.lifecycle.presentation_confirmed(retained_tiles)
         if backend_identities:
             for tile_number, shown_identity in backend_identities.items():
@@ -2861,7 +2840,22 @@ class FrameSession:
                 if int(tile) in coverage_upserts
             }
             resident_retarget_tiles.intersection_update(coverage_upserts)
-        free_retarget_tiles = frozenset() if pace_resident_retargets else frozenset(resident_retarget_tiles)
+        free_retarget_tiles = _free_retarget_tiles(
+            all_candidate_upserts,
+            logical_resident_tiles=resident_retarget_tiles,
+            physical_resident_fn=physical_resident_fn,
+            pace_resident_retargets=pace_resident_retargets,
+        )
+        zero_byte_retarget_tiles = (
+            free_retarget_tiles
+            if physical_resident_fn is not None
+            else frozenset(resident_retarget_tiles)
+        )
+        cold_upserts = {
+            int(tile): payload
+            for tile, payload in all_candidate_upserts.items()
+            if int(tile) not in zero_byte_retarget_tiles
+        }
         plan_tiles_by_number = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(self.plan, "tiles", ()) or ())
@@ -2874,17 +2868,11 @@ class FrameSession:
             admission_candidates,
             retained=(),
             free_fn=(lambda tile: int(tile) in free_retarget_tiles) if free_retarget_tiles else None,
-            item_free_fn=(
-                (lambda tile: bool(item_free_upsert_fn(all_candidate_upserts[int(tile)])))
-                if item_free_upsert_fn is not None
-                else None
-            ),
-            max_item_free=max_item_free_upserts,
             cost_fn=(
                 (
                     lambda tile: (
                         0
-                        if int(tile) in resident_retarget_tiles
+                        if int(tile) in zero_byte_retarget_tiles
                         else int(upsert_cost_fn(cold_upserts[int(tile)]))
                     )
                 )
@@ -2892,7 +2880,7 @@ class FrameSession:
                 else (
                     lambda tile: (
                         0
-                        if int(tile) in resident_retarget_tiles
+                        if int(tile) in zero_byte_retarget_tiles
                         else int(getattr(cold_upserts[int(tile)], "nbytes", 0) or 0)
                     )
                 )
@@ -3023,7 +3011,6 @@ class FrameSession:
             for tile in tuple(getattr(self.plan, "tiles", ()) or ())
         }
         previous_state = self.tile_presentation_state
-        previous_payloads = dict(previous_state.payloads)
         # Cache-hit scroll windows commonly have 58-59 payload mirrors ready
         # and one entering edge represented only by a resident LOD floor.
         # Materialize only those missing wrappers; scanning/rebuilding all 60

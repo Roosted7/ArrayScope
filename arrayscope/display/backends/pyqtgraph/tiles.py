@@ -11,9 +11,11 @@ import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 from pyqtgraph.Qt import QtGui
 
+from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
 from arrayscope.display.model.tile_identity import (
+    TileLodIdentity,
     acknowledged_identity_satisfies_target,
     array_plane_identities,
     plane_identity_record,
@@ -28,7 +30,8 @@ from arrayscope.display.shader_mapping import (
     mapped_scalar,
 )
 from arrayscope.display.tile_layout import tile_layout_map
-from arrayscope.gpu.page_table import page_key_can_cover
+from arrayscope.gpu.keys import DataChunkKey, REDUCER_PHASE_VECTOR
+from arrayscope.gpu.page_table import PageResolution
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 
@@ -36,54 +39,58 @@ from arrayscope.display.image_upload import rgb_display_for_levels
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 
 
-def _assemble_page_backed_payload(
+@dataclass(frozen=True)
+class _PageAssembly:
+    payload: DisplayTilePayload
+    resolutions: tuple[PageResolution, ...] = ()
+    missing: tuple[DataChunkKey, ...] = ()
+    fallback_reason: str | None = None
+
+
+def _resolve_page_backed_payload(
     payload: DisplayTilePayload,
     *,
     levels: tuple[float, float] | None = None,
-) -> DisplayTilePayload:
-    """Assemble exact native geometry for PyQtGraph's one-item CPU path.
-
-    Reduced samples are repeated over their exact planned source rectangles,
-    not uniformly stretched. This is nearest-neighbour presentation with the
-    same clipped-bin geometry as VisPy.
-    """
+) -> _PageAssembly:
+    """Resolve supplied CPU pages through the canonical page table once."""
 
     backing = payload.page_backing
     if backing is None:
-        return payload
+        return _PageAssembly(payload)
     resident_pages = tuple(backing.materialized_pages)
-    resolved_pages = []
-    missing = []
-    for target in backing.requested_keys:
-        candidates = tuple(
-            page for page in resident_pages if page_key_can_cover(target, page.key)
-        )
-        if not candidates:
-            missing.append(target)
-            continue
-        resolved_pages.append(
-            min(
-                candidates,
-                key=lambda page: (
-                    sum(int(step) for step in page.key.lod.reduction),
-                    tuple(int(step) for step in page.key.lod.reduction),
-                ),
-            )
-        )
+    pages_by_key = {page.key: page for page in resident_pages}
+    resolutions = backing.candidate_resolutions
+    missing = tuple(
+        target
+        for target, resolution in zip(backing.requested_keys, resolutions, strict=True)
+        if resolution is None
+    )
     if missing:
         if payload.semantic_data is None:
             raise ValueError(
                 "PyQtGraph cannot present incomplete page-backed coverage and no native fallback exists"
             )
         native = np.ascontiguousarray(payload.semantic_data)
-        return replace(
-            payload,
-            image=native,
-            texture_data=native,
-            source_id=(payload.source_id, "native-page-fallback"),
-            lod=None,
-            page_backing=None,
+        return _PageAssembly(
+            _native_page_fallback(
+                payload,
+                native,
+                marker="native-page-fallback",
+                levels=levels,
+            ),
+            missing=missing,
+            fallback_reason="incomplete-page-coverage-native",
         )
+    resolved_page_set = backing.resolved_page_set
+    if resolved_page_set is None:
+        raise RuntimeError("complete page targets have no resolved page-set record")
+    resolved = resolved_page_set.resolutions
+    # Assembly is target-aligned even when several targets share one coarse
+    # actual page. Storage stays deduplicated in ``resolved_page_set``.
+    resolved_pages = tuple(
+        pages_by_key[resolution.actual_key] for resolution in resolved
+    )
+
     y0, y1, x0, x1 = backing.source_coverage_yx
     sample = resolved_pages[0].values
     trailing = tuple(np.shape(sample)[2:])
@@ -121,56 +128,150 @@ def _assemble_page_backed_payload(
         raise ValueError("page-backed PyQtGraph assembly has incomplete or overlapping geometry")
     assembled = np.ascontiguousarray(assembled)
     if np.iscomplexobj(assembled):
-        mapping = payload.shader_mapping
-        if mapping is None:
-            if payload.semantic_data is None:
-                raise ValueError(
-                    "PyQtGraph cannot safely present canonical complex pages without a mapping or native fallback"
-                )
-            native = np.ascontiguousarray(payload.semantic_data)
-            return replace(
-                payload,
-                image=native,
-                texture_data=native,
-                source_id=(payload.source_id, "native-complex-page-fallback"),
-                lod=None,
-                page_backing=None,
-            )
-        if levels is not None:
-            mapping = replace(mapping, levels=levels)
-        if mapping.display_mode != ShaderDisplayMode.PHASE_COLOR:
-            scalar = np.ascontiguousarray(mapped_scalar(assembled, mapping))
-            return replace(
-                payload,
-                image=scalar,
-                texture_data=scalar,
-                histogram_data=scalar,
-                texture_kind=TexturePlaneKind.SCALAR_R32F,
-            )
-        if mapping.component not in {
-            ShaderComponent.ANGLE,
-            ShaderComponent.COMPLEX_PHASE,
-        }:
-            display, _magnitude = apply_phase_lut(assembled, mapping.lut_data)
-            histogram = np.ascontiguousarray(mapped_scalar(assembled, mapping))
-            return replace(
-                payload,
-                image=np.ascontiguousarray(display),
-                texture_data=np.ascontiguousarray(display),
-                histogram_data=histogram,
-                texture_kind=TexturePlaneKind.RGB8,
-                rgb_windowed_levels=None,
-            )
-        display = np.ascontiguousarray(cpu_display_rgba(assembled, mapping)[..., :3])
+        return _PageAssembly(
+            _map_complex_cpu_payload(payload, assembled, levels=levels),
+            resolutions=resolved,
+        )
+    return _PageAssembly(
+        replace(payload, image=assembled, texture_data=assembled),
+        resolutions=resolved,
+    )
+
+
+def _native_page_fallback(
+    payload: DisplayTilePayload,
+    native: np.ndarray,
+    *,
+    marker: str,
+    levels: tuple[float, float] | None,
+) -> DisplayTilePayload:
+    """Return an honestly native payload when CPU page assembly is unsafe."""
+
+    native = np.ascontiguousarray(native)
+    if np.iscomplexobj(native):
+        mapped = _map_complex_cpu_payload(payload, native, levels=levels)
+    else:
+        if native.ndim >= 3 and native.shape[-1] in (3, 4):
+            kind = TexturePlaneKind.RGB8
+        else:
+            kind = TexturePlaneKind.SCALAR_R32F
+        histogram = getattr(payload, "semantic_histogram_data", None)
+        mapped = replace(
+            payload,
+            image=native,
+            texture_data=native,
+            histogram_data=None if histogram is None else np.asarray(histogram),
+            texture_kind=kind,
+        )
+    native_lod = LodInfo(
+        level=0,
+        factor=1,
+        source_shape=tuple(int(value) for value in native.shape[:2]),
+        texture_shape=tuple(int(value) for value in native.shape[:2]),
+        gutter=0,
+    )
+    identity = getattr(payload, "tile_identity", None)
+    if identity is not None:
+        identity = replace(
+            identity,
+            lod=TileLodIdentity(level=0, factor=1, gutter=0),
+            quality="exact",
+        )
+    return replace(
+        mapped,
+        source_id=(payload.source_id, marker),
+        source_shape=tuple(int(value) for value in native.shape[:2]),
+        lod=native_lod,
+        quality="exact",
+        tile_identity=identity,
+        page_backing=None,
+    )
+
+
+def _map_complex_cpu_payload(
+    payload: DisplayTilePayload,
+    values: np.ndarray,
+    *,
+    levels: tuple[float, float] | None,
+) -> DisplayTilePayload:
+    """Apply the payload's complex view semantics to CPU-resident values."""
+
+    mapping = payload.shader_mapping
+    if mapping is None:
+        raise ValueError(
+            "PyQtGraph cannot safely present complex values without a shader mapping"
+        )
+    if levels is not None:
+        mapping = replace(mapping, levels=levels)
+    if mapping.display_mode != ShaderDisplayMode.PHASE_COLOR:
+        scalar = np.ascontiguousarray(mapped_scalar(values, mapping))
         return replace(
             payload,
-            image=display,
-            texture_data=display,
-            histogram_data=None,
-            texture_kind=TexturePlaneKind.RGB8,
-            rgb_windowed_levels=levels,
+            image=scalar,
+            texture_data=scalar,
+            histogram_data=scalar,
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
         )
-    return replace(payload, image=assembled, texture_data=assembled)
+    if mapping.component not in {
+        ShaderComponent.ANGLE,
+        ShaderComponent.COMPLEX_PHASE,
+    }:
+        display, _magnitude = apply_phase_lut(values, mapping.lut_data)
+        histogram = np.ascontiguousarray(mapped_scalar(values, mapping))
+        return replace(
+            payload,
+            image=np.ascontiguousarray(display),
+            texture_data=np.ascontiguousarray(display),
+            histogram_data=histogram,
+            texture_kind=TexturePlaneKind.RGB8,
+            rgb_windowed_levels=None,
+        )
+    backing = payload.page_backing
+    plans = tuple(getattr(backing, "requested_plans", ()) or ())
+    phase_vector = bool(
+        plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans)
+    )
+    if phase_vector:
+        # Match VisPy's phase-vector shader mode exactly: page magnitude is
+        # circular-resultant coherence in [0, 1], not native amplitude, and
+        # hue spans the canonical phase range rather than the amplitude level
+        # window.  Opposed/all-zero bins therefore stay visibly undefined
+        # (black) on both backends instead of acquiring an arbitrary hue.
+        phase_mapping = replace(mapping, levels=(-np.pi, np.pi))
+        rgba = cpu_display_rgba(values, phase_mapping)
+        coherence = np.clip(np.abs(values), 0.0, 1.0).astype(np.float32, copy=False)
+        display = np.ascontiguousarray(
+            np.clip(
+                rgba[..., :3].astype(np.float32) * coherence[..., np.newaxis],
+                0.0,
+                255.0,
+            ).astype(np.uint8)
+        )
+    else:
+        display = np.ascontiguousarray(cpu_display_rgba(values, mapping)[..., :3])
+    return replace(
+        payload,
+        image=display,
+        texture_data=display,
+        histogram_data=None,
+        texture_kind=TexturePlaneKind.RGB8,
+        rgb_windowed_levels=levels,
+    )
+
+
+def _assemble_page_backed_payload(
+    payload: DisplayTilePayload,
+    *,
+    levels: tuple[float, float] | None = None,
+) -> DisplayTilePayload:
+    """Assemble exact native geometry for PyQtGraph's one-item CPU path.
+
+    Reduced samples are repeated over their exact planned source rectangles,
+    not uniformly stretched. This is nearest-neighbour presentation with the
+    same clipped-bin geometry as VisPy.
+    """
+
+    return _resolve_page_backed_payload(payload, levels=levels).payload
 
 
 def _payload_direct_dims(region, tile_data, payload):
@@ -281,6 +382,11 @@ class TileLayerItemState:
     # phase 3): (1.0, 1.0) means native and an identity item transform.
     lod_scale: tuple[float, float] = (1.0, 1.0)
     acknowledged_identity: object = None
+    page_resolutions: tuple[PageResolution, ...] = ()
+    page_candidate_missing: tuple[DataChunkKey, ...] = ()
+    physical_lod: LodInfo | None = None
+    physical_quality: str | None = None
+    page_fallback_reason: str | None = None
 
 
 class MontageTileLayer:
@@ -362,7 +468,38 @@ class MontageTileLayer:
                 "physical_component_mode": None,
                 "physical_levels": tuple(float(value) for value in state.levels),
                 "physical_acknowledged_identity": state.acknowledged_identity,
+                "physical_lod_level": (
+                    None if state.physical_lod is None else int(state.physical_lod.level)
+                ),
+                "physical_lod_factor": (
+                    None if state.physical_lod is None else int(state.physical_lod.factor)
+                ),
+                "physical_quality": state.physical_quality,
             }
+            if state.page_resolutions:
+                rows[int(tile_number)]["physical_page_bindings"] = tuple(
+                    {
+                        "target_key": resolution.target_key,
+                        "actual_key": resolution.actual_key,
+                        "actual_lod": resolution.actual_key.lod,
+                        "scale": tuple(float(value) for value in resolution.scale),
+                        "offset": tuple(float(value) for value in resolution.offset),
+                        "quality": (
+                            "exact"
+                            if resolution.actual_key == resolution.target_key
+                            else "fallback"
+                        ),
+                    }
+                    for resolution in state.page_resolutions
+                )
+            if state.page_candidate_missing:
+                rows[int(tile_number)]["physical_page_candidate_missing"] = (
+                    state.page_candidate_missing
+                )
+            if state.page_fallback_reason is not None:
+                rows[int(tile_number)]["physical_page_fallback_reason"] = (
+                    state.page_fallback_reason
+                )
         return rows
 
     def set_lookup_table(self, lut) -> None:
@@ -446,15 +583,16 @@ class MontageTileLayer:
             else set(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {}))
         )
         drawable_payloads: dict[int, DisplayTilePayload] = {}
+        page_assemblies: dict[int, _PageAssembly] = {}
         identity_rejected_tiles: list[int] = []
         for tile, payload in tile_payloads.items():
             if acknowledged_identity_satisfies_target(
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
             ):
-                drawable_payloads[int(tile)] = _assemble_page_backed_payload(
-                    payload, levels=levels
-                )
+                assembly = _resolve_page_backed_payload(payload, levels=levels)
+                drawable_payloads[int(tile)] = assembly.payload
+                page_assemblies[int(tile)] = assembly
             elif int(tile) in requested_upserts:
                 # Not presentable for this delta's typed target; the payload
                 # is dropped from this commit.  Report it loudly — a payload
@@ -765,6 +903,14 @@ class MontageTileLayer:
                 )
                 item_state.world_rect = world_rect
                 item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
+                assembly = page_assemblies.get(int(tile_number), _PageAssembly(payload))
+                item_state.page_resolutions = assembly.resolutions
+                item_state.page_candidate_missing = assembly.missing
+                item_state.physical_lod = getattr(assembly.payload, "lod", None)
+                item_state.physical_quality = str(
+                    getattr(assembly.payload, "quality", "exact") or "exact"
+                )
+                item_state.page_fallback_reason = assembly.fallback_reason
                 items_updated += int(updated)
                 if updated:
                     updated_tiles.append(int(tile_number))
@@ -971,6 +1117,8 @@ class MontageTileLayer:
             if region is None or not isinstance(payload, DisplayTilePayload):
                 items_skipped += 1
                 continue
+            assembly = _resolve_page_backed_payload(payload, levels=levels)
+            payload = assembly.payload
             tile_data = np.asarray(payload.image)
             if tile_data.ndim < 2:
                 items_skipped += 1
@@ -1067,6 +1215,13 @@ class MontageTileLayer:
                 if updated:
                     updated_tiles.append(int(tile_number))
                 item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
+                item_state.page_resolutions = assembly.resolutions
+                item_state.page_candidate_missing = assembly.missing
+                item_state.physical_lod = getattr(assembly.payload, "lod", None)
+                item_state.physical_quality = str(
+                    getattr(assembly.payload, "quality", "exact") or "exact"
+                )
+                item_state.page_fallback_reason = assembly.fallback_reason
             else:
                 items_skipped += 1
             item_state.item.setVisible(False)
@@ -1463,6 +1618,11 @@ class MontageTileLayer:
         state.source_array_id = 0
         state.acknowledged_identity = None
         state.histogram_array_id = None
+        state.page_resolutions = ()
+        state.page_candidate_missing = ()
+        state.physical_lod = None
+        state.physical_quality = None
+        state.page_fallback_reason = None
 
 
 def _source_cache_nbytes(state: TileLayerItemState) -> int:
@@ -1638,6 +1798,27 @@ def _direct_payload_source_id(base_source_id: object, payload: DisplayTilePayloa
         None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
         "rgb_windowed_levels",
         getattr(payload, "rgb_windowed_levels", None),
+        "page_bindings",
+        _page_binding_source_token(payload),
+    )
+
+
+def _page_binding_source_token(payload: DisplayTilePayload) -> object | None:
+    """Canonical CPU residency identity for PyQtGraph item reuse."""
+
+    backing = getattr(payload, "page_backing", None)
+    if backing is None:
+        return None
+    return tuple(
+        (
+            target,
+            None if resolution is None else resolution.actual_key,
+        )
+        for target, resolution in zip(
+            backing.requested_keys,
+            backing.candidate_resolutions,
+            strict=True,
+        )
     )
 
 

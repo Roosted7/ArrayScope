@@ -258,8 +258,13 @@ class FramePipelineEffects:
                             plan=plan,
                         )
                         pyramid.admit_as(plan.key, page, owner=request.owner)
-                    if not all(pyramid.resolve(plan.key) is not None for plan in request.plans):
-                        raise RuntimeError("materialized LOD page set is not completely resolvable")
+                    # Some requested pages may be owned by a concurrent
+                    # prefetch/shifted-window singleflight. This worker is
+                    # terminal once *its* pages are admitted; GUI admission
+                    # below checks whole-set exactness and declines/replans if
+                    # the foreign subset has not landed yet. Raising here made
+                    # a normal partial attachment look like worker failure and
+                    # could strand the set without a visible replan wakeup.
                     return ("materialized", request)
                 finally:
                     pyramid.finish_owner_work(request.owner)
@@ -391,7 +396,6 @@ class FramePipelineEffects:
                 semantic_key,
             )
         if step.rung == Rung.DESIRED and int(step.level) > 0 and tile_number in self.session.rendered_tiles:
-            materialization_key = (tile_number, int(step.rung), int(step.level))
             pyramid = getattr(self.session, "lod_page_cache", None)
             if pyramid is None:
                 return False
@@ -405,7 +409,7 @@ class FramePipelineEffects:
                 return False
             if self.session.lifecycle.materialization_request_for(tile_number, level_key) is not None:
                 return False
-            if render_lod._page_set_complete(pyramid, level_key):
+            if render_lod._page_set_exact(pyramid, level_key):
                 self.session.lifecycle.level_resident(tile_number, level_key)
                 return False
             request = self.session._lod_materialization_request(
@@ -643,6 +647,15 @@ class FramePipelineEffects:
     def rung_dropped(self, intent, step) -> None:
         tile = self._tile_for_step(step)
         if tile is None:
+            if step.rung == Rung.DESIRED:
+                tile_number = int(step.tile_number)
+                pending = self.session.pending_rung_materializations
+                request = self.session.lifecycle.materialization_request_for(tile_number)
+                while request is not None:
+                    pending._apply_release_effects(pending.release(request))
+                    request = self.session.lifecycle.materialization_request_for(tile_number)
+            if self._session_is_current(intent):
+                self.renderer.request_montage_replan(self.session)
             return
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
@@ -882,7 +895,6 @@ class FramePipelineEffects:
         """
 
         session = self.session
-        renderer = self.renderer
         demand = session.ingest_lod_demand()
         if demand is None or not self._session_is_current():
             return 0
@@ -1294,6 +1306,9 @@ class FramePipelineEffects:
         tile_number = int(step.tile_number)
         tile = self._tile_for_step(step)
         if tile is None:
+            pending = self.session.pending_rung_materializations
+            pending._apply_release_effects(pending.release(request))
+            self.renderer.request_montage_replan(self.session)
             return
         claim_identity = self._preview_claim_identity(None, tile)
         self.session.lifecycle.preview_released(
@@ -1302,7 +1317,13 @@ class FramePipelineEffects:
             int(step.level),
             claim_identity,
         )
-        self.session.pending_rung_materializations.mark_resident(request)
+        if not self.session.pending_rung_materializations.mark_resident(request):
+            # A bounded cache may evict the exact pages after the worker has
+            # completed but before this GUI-thread admission runs.  That is a
+            # normal declined result: release the lifecycle claim and let the
+            # existing planner decide whether to retry or use an ancestor.
+            self.renderer.request_montage_replan(self.session)
+            return
         self.session.lod_materializations_completed = (
             int(getattr(self.session, "lod_materializations_completed", 0) or 0) + 1
         )
@@ -1684,28 +1705,6 @@ class FramePipelineEffects:
                     if shader_atomic_successor:
                         tile_delta = replace(tile_delta, atomic_handoff=True)
             active_payloads = tile_state.active_payloads(tile_delta)
-            acknowledged_payloads = dict(
-                getattr(session.tile_presentation_state, "payloads", {}) or {}
-            )
-            lod_handoff = bool(
-                capabilities.shader_windowing
-                and getattr(session, "display_committed", False)
-                and any(
-                    previous is not None
-                    and _base_source_id(getattr(previous, "source_id", None))
-                    == _base_source_id(getattr(payload, "source_id", None))
-                    and int(getattr(getattr(previous, "lod", None), "level", 0) or 0)
-                    != int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-                    for tile, payload in dict(tile_delta.upserts or {}).items()
-                    for previous in (acknowledged_payloads.get(int(tile)),)
-                )
-            )
-            if lod_handoff and interactive_active(renderer):
-                session._interactive_residency_deferred = True
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._note_commit_bail("interactive-lod-handoff-deferred", wakeup="interaction-stop-edge")
-                return
             first_display_commit = not bool(session.display_committed)
             renderer._last_montage_commit_first_display = bool(first_display_commit)
             renderer._last_montage_commit_delta_upserts = len(tile_delta.upserts)
@@ -3734,18 +3733,29 @@ def _warm_atomic_successor_residency(
         admitted = tuple(job["pending"][: max(1, int(batch_size))])
         del job["pending"][: len(admitted)]
         batch = {int(tile): job["payloads"][int(tile)] for tile in admitted}
+        # This coordinator already owns the bounded GUI-thread continuation.
+        # Tell the backend to complete this batch synchronously instead of
+        # queueing it behind the background warm scheduler, whose admission
+        # correctly requires a settled visible target.  Queueing a target
+        # successor there created a cycle: target settlement waited for warm
+        # residency while warm residency waited for target settlement.
+        warm_delta = (
+            tile_delta
+            if bool(getattr(tile_delta, "atomic_handoff", False))
+            else replace(tile_delta, atomic_handoff=True)
+        )
         warm(
             payloads=batch,
             geometry=geometry,
             levels=level_key,
             rgb_already_windowed=bool(rgb_already_windowed),
-            tile_delta=tile_delta,
+            tile_delta=warm_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes(renderer._memory_policy()),
             frame_plan=getattr(session, "frame_plan", None),
         )
         resident = getattr(
             getattr(renderer.win, "img_view", None),
-            "atomicTiledPayloadResident",
+            "tiledPayloadResident",
             None,
         )
         unresolved = tuple(
@@ -4052,20 +4062,15 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
         "upsert_cost_fn": vispy_payload_upload_nbytes,
-        # Zero-upload remaps bypass the cold item cap, but they are not
-        # literally free: page geometry and lifecycle publication still scale
-        # with count. Bound that separate work class without letting cold
-        # feedback collapse it to one tile.
-        "max_free_retargets": 8 if interactive else 12,
-        # Resident swaps still publish identities and page geometry. Pace
-        # them separately from cold uploads so a broad LOD transition yields
-        # between bounded physical commits.
-        "pace_resident_retargets": True,
+        # Physical atlas/page-table residency is the only proof that a retarget
+        # can bypass every cold admission cap.  The complete resident set must
+        # bind atomically; streaming it through the upload cohort is what made
+        # already-loaded coarse tiles pop in after every pan/zoom.
+        "pace_resident_retargets": False,
     }
     resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
     if callable(resident):
-        limits["item_free_upsert_fn"] = resident
-        limits["max_item_free_upserts"] = 8 if interactive else 12
+        limits["physical_resident_fn"] = resident
     return limits
 
 

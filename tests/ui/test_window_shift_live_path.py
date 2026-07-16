@@ -146,7 +146,7 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
             value = committed_value(win, view_x, view_y)
             expected = data[view_y, START_B + view_x]
             assert value == pytest.approx(float(expected)), (
-                f"committed value at view ({view_x}, {view_y}) is {value!r}, "
+                f"presented value at view ({view_x}, {view_y}) is {value!r}, "
                 f"expected source pixel data[{view_y}, {START_B + view_x}] = {expected!r}"
             )
     finally:
@@ -406,9 +406,10 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
     change: shifting the data window while zoomed out materializes the
     demanded level-1 plane, and the exact reduced payload presents through
     ``tile_chunk_residency`` with factor-2 keys in uniform 256^2 plane-pixel
-    slots (the same shape class native chunks use) instead of the classic
-    one-giant-slot-per-plane-size path.  Committed hover truth follows the
-    reduced plane exactly (the established floor-presentation contract).
+        slots (the same shape class native chunks use) instead of the classic
+        one-giant-slot-per-plane-size path. Presentation-qualified lookup
+        follows the canonical bins while exact semantic probes reject the
+        display-only reduced values.
     """
 
     pytest.importorskip("vispy")
@@ -467,6 +468,12 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         } == {(2, 1, 0)}
         payload = win.renderer._frame_session.display_tile_payloads[0]
         assert payload.page_backing is not None
+        assert payload.page_backing.source_coverage_yx == (
+            0,
+            2 * CHUNK,
+            shifted_start,
+            shifted_start + EXTENT,
+        )
         expected_keys = {
             plan.key for plan in payload.page_backing.requested_plans
         }
@@ -484,25 +491,27 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         assert str(payload.quality) == "exact"
         assert int(payload.lod.factor) == 2
 
-        # Committed value truth maps native tile coordinates through the exact
-        # globally aligned source-grid bin. It must not use the old
-        # window-local reduced-plane pixel convention.
+        # Presentation-qualified sampling maps native coordinates through the
+        # exact globally aligned source-grid bin. It must not use the old
+        # window-local reduced-plane pixel convention. The committed semantic
+        # probe stays unavailable: a reduced display page without an explicit
+        # native semantic plane cannot answer hover/measurement/export truth.
         probes = ((CHUNK // 2, CHUNK // 2), (CHUNK + 11, CHUNK // 2 + 7))
         for view_x, view_y in probes:
-            qtbot.waitUntil(
-                lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
-                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-            )
-            value = committed_value(win, view_x, view_y)
             source_x = shifted_start + view_x
             source_y = view_y
+            value = payload.page_backing.sample_presented_value_at_native(
+                source_y,
+                source_x,
+            )
             bin_x = (source_x // 2) * 2
             bin_y = (source_y // 2) * 2
             expected = np.mean(data[bin_y : bin_y + 2, bin_x : bin_x + 2])
             assert value == pytest.approx(float(expected)), (
-                f"committed value at view ({view_x}, {view_y}) is {value!r}, "
+                f"presented value at view ({view_x}, {view_y}) is {value!r}, "
                 f"expected canonical source-grid bin {expected!r}"
             )
+            assert committed_value(win, view_x, view_y) is None
     finally:
         win.close()
         restore_default_backend(settings)

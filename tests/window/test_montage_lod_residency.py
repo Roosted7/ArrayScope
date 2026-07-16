@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from arrayscope.core.view_state import ChannelMode, ViewState
-from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
+from arrayscope.display.lod import (
+    LOD_POLICY_NATIVE_ONLY,
+    LOD_POLICY_RESIDENT,
+    LodDemand,
+    LodInfo,
+    select_lod_demand,
+)
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
-from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-from arrayscope.display.pyramid import LodPageCache, materialize_lod_page, reduce_box_mean
+from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile, make_montage_plan
+from arrayscope.display.pyramid import (
+    LodPageCache,
+    MaterializedLodPage,
+    materialize_lod_page,
+    reduce_box_mean,
+)
+from arrayscope.display.slice_engine import make_shader_image_from_slab
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.kernel import Lane, Priority
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
@@ -106,6 +119,38 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
     return session
 
 
+def _phase_shader_rendered(session, values: np.ndarray) -> RenderedTile:
+    """Install one live complex/angle tile without bypassing display routing."""
+
+    values = np.ascontiguousarray(values, dtype=np.complex64)
+    state = ViewState.from_shape(values.shape).with_channel(ChannelMode.ANGLE)
+    display = make_shader_image_from_slab(
+        values,
+        SimpleNamespace(view_state=state, ranged_axes=()),
+    )
+    tile = session.plan.tiles[0]
+    rendered = RenderedTile(
+        tile=tile,
+        image=display.data,
+        histogram_data=display.histogram_data,
+        eval_ms=0.0,
+        slab_shape=values.shape,
+        slab_nbytes=values.nbytes,
+        shader_mapping=display.shader_mapping,
+        texture_kind=display.texture_kind,
+        semantic_data=display.semantic_data,
+        lod_source_data=display.lod_source_data,
+        level_data=display.level_data,
+    )
+    session.output_dtype = np.dtype(np.complex64)
+    session.view_state = state
+    session.shader_display = True
+    session.rendered_tiles[0] = rendered
+    session.display_tile_payloads.clear()
+    session.dirty_payloads[0] = None
+    return rendered
+
+
 def _materialize(session, request):
     """Run one request through the canonical checked page route."""
 
@@ -130,10 +175,8 @@ def _materialize(session, request):
 def _release(session, request):
     """Drop one request the way every non-run scheduling path must: all claims."""
 
-    from arrayscope.render.lod import _apply_release_effects
-
     if hasattr(session.pending_rung_materializations, "release"):
-        _apply_release_effects(session.lod_page_cache, session.pending_rung_materializations.release(request))
+        session.pending_rung_materializations.release(request)
 
 
 def _claim_preview_resident(session, tile_number: int, key) -> None:
@@ -235,6 +278,18 @@ def _exact_step(tile_number=0):
         lane=Lane.VISIBLE_MATERIALIZATION,
         priority=Priority.VISIBLE_IMAGE,
         reason="test",
+    )
+
+
+def _desired_materialization_step(tile_number=0, *, level=2):
+    return RungStep(
+        tile_number=int(tile_number),
+        rung=Rung.DESIRED,
+        level=int(level),
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="desired display level",
     )
 
 
@@ -430,6 +485,412 @@ def test_page_singleflight_attaches_without_stealing_foreign_claim():
     assert pyramid.pending_count == len(target.plans)
     pyramid.release_owner_claims(foreign_owner)
     assert pyramid.pending_count == 0
+
+
+def _exercise_visible_request_attached_to_prefetch_claims(*, resident_prefix: int) -> None:
+    """Complete one retained prefetch while visible planning is attached."""
+
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.window import montage_prefetch
+
+    size = 1028  # L2 yields 257x257 stored samples: four canonical pages.
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    old_tile = session.plan.tiles[0]
+    tile = replace(old_tile, width=size, height=size)
+    session.plan = replace(
+        session.plan,
+        tile_shape=(size, size),
+        tiles=(tile,),
+    )
+    session.visible_tiles = (tile,)
+    session.visible_tile_numbers = frozenset({0})
+    source = np.arange(size * size, dtype=np.float32).reshape(size, size)
+    rendered = replace(
+        session.rendered_tiles[0],
+        tile=tile,
+        image=source,
+        histogram_data=source,
+        slab_shape=source.shape,
+        slab_nbytes=source.nbytes,
+    )
+    session.rendered_tiles = {0: rendered}
+    session.lod_preview_level = 2
+    demand = session.lod_policy_decision.demand
+    key = render_lod.page_set_key_for_tile(
+        session,
+        tile,
+        demand=demand,
+        level=2,
+    )
+    assert len(key.plans) == 4
+    assert page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(0),
+    ) == key
+
+    if resident_prefix:
+        setup_owner = ("prefetch-race-resident-prefix", int(resident_prefix))
+        prefix_plans = key.plans[:resident_prefix]
+        assert pyramid.claim_plans(prefix_plans, setup_owner) == prefix_plans
+        for plan in prefix_plans:
+            pyramid.admit_as(
+                plan.key,
+                materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan),
+                owner=setup_owner,
+            )
+        pyramid.release_owner_claims(setup_owner)
+
+    claim = montage_prefetch._claim_walk_preview(session, tile)
+    assert claim is not None
+    assert claim.key == key
+    assert len(claim.claimed_plans) == len(key.plans) - resident_prefix
+
+    # Visible planning attaches to the same complete target. All of its
+    # non-resident pages are foreign prefetch claims, so it must wait for the
+    # prefetch terminal wake instead of duplicating work or raising.
+    visible_request = render_lod.plan_materialization(
+        session,
+        rendered,
+        demand=demand,
+        level=2,
+        key=key,
+    )
+    assert visible_request.claimed_plans == ()
+    assert pyramid.pending_count == len(claim.claimed_plans)
+
+    result = EvaluationResult(
+        value=DisplayImage(data=source, histogram_data=source),
+        eval_ms=0.0,
+        slab_shape=source.shape,
+        slab_nbytes=source.nbytes,
+    )
+    residents_before = tuple(page.key for page in pyramid.resident_pages())
+    pages = montage_prefetch._materialize_walk_preview(
+        session,
+        tile,
+        result,
+        claim,
+        shader_display=False,
+    )
+    assert all(isinstance(page, MaterializedLodPage) for page in pages)
+    assert tuple(page.key for page in pyramid.resident_pages()) == residents_before
+    assert pyramid.pending_count == len(claim.claimed_plans)
+
+    assert montage_prefetch._admit_walk_preview_result(
+        session,
+        tile,
+        claim,
+        pages,
+    )
+    montage_prefetch._release_walk_preview_claim(session, claim)
+    assert pyramid.exact_pages(key.plans) is not None
+    assert pyramid.pending_count == 0
+    record = session.lifecycle.peek(0)
+    assert record is not None and record.levels[key].phase.value == "resident"
+
+    presentation_wakes = []
+    session.pipeline = SimpleNamespace(
+        effects=SimpleNamespace(
+            request_presentation=lambda: presentation_wakes.append("presentation")
+        )
+    )
+    renderer = _RungPrepareRenderer()
+    montage_prefetch._wake_walk_preview_admission(renderer, session)
+    assert session._test_replan_requested is True
+    assert presentation_wakes == ["presentation"]
+
+
+def test_visible_request_converges_after_all_pages_are_foreign_prefetch_claims():
+    _exercise_visible_request_attached_to_prefetch_claims(resident_prefix=0)
+
+
+def test_visible_request_converges_after_partial_foreign_prefetch_claims():
+    _exercise_visible_request_attached_to_prefetch_claims(resident_prefix=1)
+
+
+def test_visible_worker_declines_until_partially_foreign_prefetch_pages_arrive():
+    """An overlapping target may own boundaries while prefetch owns interior."""
+
+    size = 1028
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    tile = replace(session.plan.tiles[0], width=size, height=size)
+    session.plan = replace(session.plan, tile_shape=(size, size), tiles=(tile,))
+    session.visible_tiles = (tile,)
+    session.visible_tile_numbers = frozenset({0})
+    source = np.arange(size * size, dtype=np.float32).reshape(size, size)
+    rendered = replace(
+        session.rendered_tiles[0],
+        tile=tile,
+        image=source,
+        histogram_data=source,
+        slab_shape=source.shape,
+        slab_nbytes=source.nbytes,
+    )
+    session.rendered_tiles = {0: rendered}
+    demand = session.lod_policy_decision.demand
+    key = render_lod.page_set_key_for_tile(
+        session,
+        tile,
+        demand=demand,
+        level=2,
+    )
+    assert len(key.plans) == 4
+
+    prefetch_owner = ("overlapping-prefetch", key)
+    prefetch_plans = key.plans[:2]
+    assert pyramid.claim_plans(prefetch_plans, prefetch_owner) == prefetch_plans
+
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _desired_materialization_step(level=2)
+    assert effects.prepare_rung(intent, step)
+    request = session.lifecycle.materialization_request_for(0, key)
+    assert request is not None
+    assert request.claimed_plans == key.plans[2:]
+
+    # The visible worker completes only what it owns. Whole-set exactness is a
+    # GUI admission decision, so the foreign interior is a declined/replan
+    # state rather than a worker exception.
+    worker_result = effects.evaluate_rung(intent, step)()
+    assert worker_result == ("materialized", request)
+    assert pyramid.exact_pages(key.plans) is None
+    assert pyramid.pending_count == len(prefetch_plans)
+    effects._admit_ready_payloads(((step, worker_result),))
+    assert session.lifecycle.materialization_request_for(0, key) is None
+    assert session.lifecycle.dangling_claims() == ()
+    assert session._test_replan_requested is True
+
+    for plan in prefetch_plans:
+        pyramid.admit_as(
+            plan.key,
+            materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan),
+            owner=prefetch_owner,
+        )
+    pyramid.release_owner_claims(prefetch_owner)
+    exact_pages = pyramid.exact_pages(key.plans)
+    assert exact_pages is not None
+    assert session.admit_preview_plane(0, key, exact_pages)
+    assert pyramid.pending_count == 0
+
+
+def test_coarse_ancestor_does_not_suppress_finer_materialization_claim():
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(0)
+    coarse = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=4,
+        semantic_source_id=semantic_id,
+    )
+    target = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=semantic_id,
+    )
+    _admit_page_set(pyramid, coarse, np.asarray(rendered.image))
+    assert render_lod._page_set_complete(pyramid, target)
+    assert not render_lod._page_set_exact(pyramid, target)
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="finer target",
+    )
+
+    assert effects.prepare_rung(_pipeline_intent_for(session), step)
+    request = session.lifecycle.materialization_request_for(0, target)
+    assert request is not None
+    assert request.key == target
+    assert tuple(plan.key for plan in request.claimed_plans) == target.page_keys
+    session.pending_rung_materializations.release(request)
+    assert pyramid.pending_count == 0
+
+
+def test_coarse_ancestor_does_not_skip_retained_finer_preview():
+    preview = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=preview, count=1)
+    rendered = session.rendered_tiles[0]
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(0)
+    coarse = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=4,
+        semantic_source_id=semantic_id,
+    )
+    target = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=semantic_id,
+    )
+    _admit_page_set(preview, coarse, np.asarray(rendered.image))
+    assert render_lod._page_set_complete(preview, target)
+    assert not render_lod._page_set_exact(preview, target)
+
+    admitted = admit_retained_preview_level(
+        preview,
+        rendered,
+        semantic_source_id=semantic_id,
+        preview_level=2,
+    )
+
+    assert admitted == target
+    assert render_lod._page_set_exact(preview, target)
+
+
+def test_oversized_finer_page_releases_claim_instead_of_admitting_coarse_fallback():
+    # L4 is 4x4 float32 (64 bytes), while the requested L2 page is 16x16
+    # (1024 bytes).  The target is drawable through L4 but cannot be admitted
+    # exactly under this cache budget.
+    pyramid = LodPageCache(max_bytes=64)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(0)
+    coarse = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=4,
+        semantic_source_id=semantic_id,
+    )
+    target = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=semantic_id,
+    )
+    _admit_page_set(pyramid, coarse, np.asarray(rendered.image))
+    request = render_lod.plan_materialization(
+        session,
+        rendered,
+        demand=demand,
+        level=2,
+        key=target,
+    )
+    session.pending_rung_materializations.append(request)
+    session.pending_rung_materializations.mark_started(request)
+    for page_plan in request.claimed_plans:
+        page = materialize_lod_page(
+            request.source,
+            source_origin_yx=request.source_origin_yx,
+            plan=page_plan,
+        )
+        pyramid.admit_as(page_plan.key, page, owner=request.owner)
+
+    assert render_lod._page_set_complete(pyramid, target)
+    assert not render_lod._page_set_exact(pyramid, target)
+    assert session.pending_rung_materializations.mark_resident(request) is False
+    assert pyramid.pending_count == 0
+    assert session.lifecycle.dangling_claims() == ()
+
+
+def test_exact_page_eviction_before_gui_admission_declines_and_replans():
+    """A completed worker may lose bounded-cache residency before GUI admission."""
+
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _desired_materialization_step()
+
+    assert effects.prepare_rung(intent, step)
+    request = session.lifecycle.materialization_request_for(0)
+    assert request is not None
+    for page_plan in request.claimed_plans:
+        page = materialize_lod_page(
+            request.source,
+            source_origin_yx=request.source_origin_yx,
+            plan=page_plan,
+        )
+        pyramid.admit_as(page_plan.key, page, owner=request.owner)
+    assert render_lod._page_set_exact(pyramid, request.key)
+
+    pyramid.resize(max_entries=0)
+    assert not render_lod._page_set_exact(pyramid, request.key)
+
+    effects._admit_ready_payloads(((step, ("materialized", request)),))
+
+    assert session.lifecycle.materialization_request_for(0) is None
+    assert session.lifecycle.dangling_claims() == ()
+    assert pyramid.pending_count == 0
+    assert session.lod_materializations_completed == 0
+    assert session._test_replan_requested is True
+
+
+def test_materialized_rung_for_removed_tile_releases_lifecycle_claim():
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _desired_materialization_step()
+
+    assert effects.prepare_rung(intent, step)
+    request = session.lifecycle.materialization_request_for(0)
+    assert request is not None
+    for page_plan in request.claimed_plans:
+        page = materialize_lod_page(
+            request.source,
+            source_origin_yx=request.source_origin_yx,
+            plan=page_plan,
+        )
+        pyramid.admit_as(page_plan.key, page, owner=request.owner)
+    assert render_lod._page_set_exact(pyramid, request.key)
+
+    old_tile = session.plan.tiles[0]
+    session.plan = replace(
+        session.plan,
+        tiles=(replace(old_tile, montage_index=9, source_index=9),),
+    )
+    effects._admit_ready_payloads(((step, ("materialized", request)),))
+
+    assert session.lifecycle.materialization_request_for(0) is None
+    assert session.lifecycle.dangling_claims() == ()
+    assert pyramid.pending_count == 0
+    assert session.lod_materializations_completed == 0
+    assert session._test_replan_requested is True
+
+
+def test_dropped_rung_for_removed_tile_releases_page_and_lifecycle_claims():
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = _desired_materialization_step()
+
+    assert effects.prepare_rung(intent, step)
+    request = session.lifecycle.materialization_request_for(0)
+    assert request is not None
+    assert pyramid.pending_count == len(request.claimed_plans)
+
+    old_tile = session.plan.tiles[0]
+    session.plan = replace(
+        session.plan,
+        tiles=(replace(old_tile, montage_index=9, source_index=9),),
+    )
+    effects.rung_dropped(intent, step)
+
+    assert session.lifecycle.materialization_request_for(0) is None
+    assert session.lifecycle.dangling_claims() == ()
+    assert pyramid.pending_count == 0
+    assert session._test_replan_requested is True
 
 
 def test_memory_pressure_admits_reduced_level_with_distinct_identity_and_shape():
@@ -633,11 +1094,17 @@ def test_demand_flip_materialization_cannot_demote_finer_native_without_pressure
     assert request.tile_number == 0
     assert request.key.factor_xy == (2, 2)
 
+    # No-demotion protects physical truth.  Make the native candidate a real
+    # backend acknowledgement before the later materialization completes.
+    _acknowledge(session, delta)
+
     _materialize(session, request)
     session.dirty_payloads[0] = None
     _state, delta = session.build_tile_presentation({})
-    assert delta.upserts[0].lod.level == 0
-    assert delta.upserts[0].texture_data.shape[:2] == (TILE, TILE)
+    assert not delta.upserts, "resident coarse arrival must not churn acknowledged native pixels"
+    presented = session.tile_presentation_state.payloads[0]
+    assert presented.lod.level == 0
+    assert presented.texture_data.shape[:2] == (TILE, TILE)
 
 
 def _acknowledge(session, delta):
@@ -804,8 +1271,8 @@ def test_camera_only_retarget_keeps_finer_native_without_residency_pressure():
     assert int(session.viewport_revision) >= revision_before
 
 
-def test_camera_only_retarget_demotes_finer_level_under_residency_pressure():
-    """Visible quality demotion is a memory-pressure decision, not zoom churn."""
+def test_logical_payload_budget_never_authorizes_visible_demotion():
+    """Only physical backend pressure may replace finer visible pixels."""
 
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
@@ -818,17 +1285,13 @@ def test_camera_only_retarget_demotes_finer_level_under_residency_pressure():
     session.tile_residency_budget_bytes = native_bytes - 1
 
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
-    assert session.mark_ladder_swaps_for_viewport() is True
-    assert sorted(session.dirty_payloads) == [0, 1]
+    assert session.mark_ladder_swaps_for_viewport() is False
+    assert not session.dirty_payloads
 
-    _state, delta = session.build_tile_presentation({})
-    assert set(delta.upserts) == {0, 1}
+    state, delta = session.build_tile_presentation({})
+    assert delta.upserts == {}
     assert delta.removals == ()
-    assert {payload.lod.level for payload in delta.upserts.values()} == {2}
-    assert all(
-        payload.texture_data.shape[:2] == (TILE // 4, TILE // 4)
-        for payload in delta.upserts.values()
-    )
+    assert {payload.lod.level for payload in state.payloads.values()} == {0}
 
 
 def test_camera_only_retarget_requests_missing_levels_with_new_lod_revision():
@@ -864,13 +1327,8 @@ def test_refresh_is_native_only_noop():
     assert not session.dirty_payloads
 
 
-def test_pressure_level_change_replaces_atomically_and_deferral_keeps_old():
-    """ADR 0050 contract: a LOD swap never blanks or placeholders a tile.
-
-    A commit that changes only the presented level of an acknowledged tile
-    must emit an upsert (never a removal), and when the budget defers the
-    upsert the previously presented payload stays committed unchanged.
-    """
+def test_logical_budget_cannot_turn_dirty_rebuild_into_demotion():
+    """Unrelated dirty work preserves acknowledged finer payloads."""
 
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
@@ -885,30 +1343,16 @@ def test_pressure_level_change_replaces_atomically_and_deferral_keeps_old():
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     session.dirty_payloads.update({0: None, 1: None})
 
-    # Budget admits only one swap this commit.
+    # A session-side byte estimate cannot decide that native pixels should be
+    # replaced. The backend owns physical reclaim and keeps this complete
+    # predecessor if a candidate cannot fit.
     state, delta = session.build_tile_presentation({}, max_upserts=1)
     assert delta.removals == ()
-    assert len(delta.upserts) == 1
-    swapped = next(iter(delta.upserts))
-    deferred = ({0, 1} - {swapped}).pop()
-    # At the commit boundary both tiles are mapped: one at the new level, the
-    # deferred one still at its old (acknowledged) payload.
-    assert state.payloads[swapped].lod.level == 2
-    assert state.payloads[deferred] is native_payloads[deferred]
-    # Neither tile regressed to a loading/placeholder presentation state.
+    assert delta.upserts == {}
+    assert dict(state.payloads) == native_payloads
     states = session.ensure_tile_states()
     assert str(states[0].value) == "loaded"
     assert str(states[1].value) == "loaded"
-
-    _acknowledge(session, delta)
-    session.mark_presented(tuple(delta.upserts))
-    # The deferred tile stays dirty and swaps on the next commit, again with
-    # no removal and no gap.
-    state, delta = session.build_tile_presentation({})
-    assert delta.removals == ()
-    assert set(delta.upserts) == {deferred}
-    assert state.payloads[deferred].lod.level == 2
-    assert state.payloads[swapped].lod.level == 2
 
 
 def test_previous_payloads_keep_visible_tiles_active_when_replacement_not_ready():
@@ -1031,13 +1475,13 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
     _attach_native_stats(session)
-    _present_native(session)
+    _state, native_delta = session.build_tile_presentation({})
+    assert native_delta.upserts
     assert session.lod_stats_recomputes == 0
-    session.tile_residency_budget_bytes = sum(
-        int(np.asarray(payload.texture_data).nbytes)
-        for payload in session.tile_presentation_state.payloads.values()
-    ) - 1
 
+    # Exercise a legitimate initial reduced presentation: the native wrappers
+    # above were never acknowledged, so resident L2 may become the first
+    # physical commit.  Logical byte estimates are deliberately irrelevant.
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     _admit_zoomed_out_levels(session)
     session.dirty_payloads.update({0: None, 1: None})
@@ -1054,6 +1498,7 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
         assert payload.semantic_data is np.asarray(rendered.image)
     assert session.lod_stats_cross_level_reuses == len(delta.upserts) > 0
     assert session.lod_stats_recomputes == 0
+    _acknowledge(session, delta)
 
     # Moving finer (level 2 -> native) reuses the same stats objects too.
     session.retarget_viewport(view_range=ZOOMED_IN_RANGE, viewport_shape=VIEWPORT)
@@ -1075,13 +1520,12 @@ def test_level_swap_keeps_semantic_histogram_identity():
 
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
-    _present_native(session)
-    native_payloads = dict(session.tile_presentation_state.payloads)
-    session.tile_residency_budget_bytes = sum(
-        int(np.asarray(payload.texture_data).nbytes)
-        for payload in native_payloads.values()
-    ) - 1
+    _state, native_delta = session.build_tile_presentation({})
+    native_payloads = dict(native_delta.upserts)
+    assert native_payloads
 
+    # The unacknowledged native candidates may be replaced by the first
+    # reduced commit; histogram identity must still remain semantic/native.
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     _admit_zoomed_out_levels(session)
     session.dirty_payloads.update({0: None, 1: None})
@@ -1200,6 +1644,10 @@ def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholde
         local_y = 0
         local_x = 0
     assert source.value_at(_Mapping()) is None
+
+    # Survival/no-flicker is a physical claim; acknowledge the first floor
+    # before checking later presentation builds.
+    _acknowledge(session, delta)
 
     # The floor payload survives subsequent builds while the tile stays
     # planned-but-unrendered (no flicker back to placeholder).
@@ -1665,7 +2113,11 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     session.mark_presented(tuple(delta.upserts))
     initial = session.display_tile_payloads[1]
     assert initial.lod.level == 2
+    assert initial.page_backing.requested_lod.level == 2
+    assert initial.page_backing.resolved_page_set.coarsest_actual_level == 4
     assert initial.page_backing.materialized_pages[0].key.lod.reduction == (4, 4)
+    record = session.lifecycle.peek(1)
+    assert record is not None and not record.target_settled
 
     # The demanded level 2 materializes later; the floor upgrades to it.
     better = page_set_key_for_rendered(
@@ -1681,7 +2133,321 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     upgraded = session.display_tile_payloads[1]
     assert upgraded.quality == "preview"
     assert upgraded.lod.level == 2
+    assert upgraded.page_backing.requested_lod.level == 2
+    assert upgraded.page_backing.resolved_page_set.coarsest_actual_level == 2
     assert upgraded.page_backing.materialized_pages[0].key.lod.reduction == (2, 2)
+
+
+def test_vispy_pan_zoom_rebinds_complete_page_backed_coarse_set_atomically(qt_app, monkeypatch):
+    """A resident coarse floor bypasses every cold cohort cap as one frame.
+
+    This crosses the live ownership seam instead of testing either half in
+    isolation: FrameSession plans a zoomed-in L2 target from L4 floor pages,
+    DisplayCommitter presents its one transaction, and the real VisPy surface
+    resolves every requested page to the already-resident L4 ancestor.  The
+    finer target may remain pending, but no visible tile may stream in or go
+    black while that work continues.
+    """
+
+    pytest.importorskip("vispy")
+
+    from arrayscope.display.commit import DisplayCommitter
+    from arrayscope.display.geometry import DisplayGeometry
+    from arrayscope.display.model.commit import DisplayTiledPresentation
+    from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.viewport import ViewportPolicy
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    count = 3
+    visible = frozenset(range(count))
+    semantic_key = ("page-backed-coarse-rebind",)
+    cache = LodPageCache(max_bytes=1 << 24)
+    coarse_range = (
+        (0.0, 16.0 * VIEWPORT[1]),
+        (0.0, 16.0 * VIEWPORT[0]),
+    )
+
+    def seed_coarse_floor(session):
+        session.semantic_key = semantic_key
+        demand = session.lod_policy_decision.demand
+        assert int(demand.desired_level) == 4
+        for tile_number, rendered in tuple(session.rendered_tiles.items()):
+            key = page_set_key_for_rendered(
+                rendered,
+                demand=demand,
+                level=4,
+                semantic_source_id=session.tile_semantic_source_id(
+                    rendered.tile.source_index
+                ),
+            )
+            pages = _materialized_page_set(key, np.asarray(rendered.image))
+            assert session.admit_preview_plane(
+                tile_number,
+                key,
+                pages,
+                quality="exact",
+            )
+            del session.rendered_tiles[tile_number]
+        session.dirty_payloads.clear()
+
+    predecessor = _session(
+        pyramid=cache,
+        view_range=coarse_range,
+        count=count,
+    )
+    seed_coarse_floor(predecessor)
+    predecessor_state, predecessor_delta = predecessor.build_tile_presentation({})
+    assert set(predecessor_delta.upserts) == visible
+    assert {
+        payload.page_backing.requested_lod.level
+        for payload in predecessor_delta.upserts.values()
+    } == {4}
+
+    view_state = ViewState.from_shape((TILE, TILE, count)).with_montage_axis(
+        2,
+        columns=count,
+        indices=tuple(range(count)),
+        text=":",
+    )
+    geometry = DisplayGeometry(
+        view_state=view_state,
+        display_shape=predecessor.plan.display_shape,
+        montage=predecessor.plan.geometry,
+        montage_tile_states=(MontageTileState.LOADED,) * count,
+    )
+
+    def presentation(session, state, delta):
+        return DisplayTiledPresentation(
+            geometry=geometry,
+            levels=(0.0, float(TILE * TILE + count)),
+            histogram_range=(0.0, float(TILE * TILE + count)),
+            viewport_policy=ViewportPolicy.PRESERVE,
+            tile_state=state,
+            base_tile_state=session.tile_presentation_state,
+            tile_delta=delta,
+            tile_residency_budget_bytes=64 * 1024 * 1024,
+        )
+
+    view = VisPyImageView2D()
+    committer = DisplayCommitter(view)
+    try:
+        predecessor_report = committer.commit_tiled_delta(
+            presentation(predecessor, predecessor_state, predecessor_delta)
+        )
+        predecessor.acknowledge_tile_presentation(
+            predecessor_delta,
+            predecessor_report,
+        )
+        predecessor.mark_presented(predecessor_report.presented_tiles)
+        assert predecessor_report.presented_tiles == visible
+        assert predecessor_report.texture_uploads == count
+
+        pool = view._vispy_gpu_montage_layer._pool
+        coarse_keys = {
+            resolution.actual_key
+            for resolutions in pool.tile_page_target_resolutions.values()
+            for resolution in resolutions
+        }
+        assert coarse_keys
+        assert {key.lod.reduction for key in coarse_keys} == {(4, 4)}
+
+        class _InteractiveCommitRenderer(_RungPrepareRenderer):
+            def __init__(self):
+                super().__init__()
+                self.win = SimpleNamespace(
+                    img_view=view,
+                    render_coordinator=SimpleNamespace(interactive_active=True),
+                    kernel=SimpleNamespace(visible_backlog=0),
+                    _committed_display_frame=None,
+                )
+
+            def _montage_tile_source_ids(self, session):
+                return {
+                    int(tile.montage_index): session.tile_semantic_source_id(tile.source_index)
+                    for tile in session.plan.tiles
+                }
+
+            def _retained_tiled_payload_store(self):
+                return SimpleNamespace(payloads_by_base_source=lambda **_kwargs: {})
+
+            def _montage_level_stats_for_session(self, _session):
+                return None
+
+            def _first_pass_level_evidence_complete(self, _session):
+                return False
+
+            def _montage_level_source_for_session(self, _session, *, allow_partial):
+                return None
+
+        monkeypatch.setattr(montage_commit, "_commit_should_queue_level_stats", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            montage_commit,
+            "tile_layer_first_pixels_wait_for_level_source",
+            lambda *_args, **_kwargs: False,
+        )
+
+        def commit_through_frame_effects(session, state, delta):
+            renderer = _InteractiveCommitRenderer()
+            effects = FramePipelineEffects(renderer, session)
+            session.display_committed = True
+            monkeypatch.setattr(
+                session,
+                "build_tile_presentation",
+                lambda *_args, **_kwargs: (state, delta),
+            )
+            monkeypatch.setattr(effects, "_side_work_visible_settled", lambda: False)
+            monkeypatch.setattr(effects, "_install_warm_residency_scheduler", lambda _geometry: None)
+
+            def present(_display_image, geometry, *, tile_state, base_tile_state, tile_delta, **_kwargs):
+                renderer.report = committer.commit_tiled_delta(
+                    DisplayTiledPresentation(
+                        geometry=geometry,
+                        levels=(0.0, float(TILE * TILE + count)),
+                        histogram_range=(0.0, float(TILE * TILE + count)),
+                        viewport_policy=ViewportPolicy.PRESERVE,
+                        tile_state=tile_state,
+                        base_tile_state=base_tile_state,
+                        tile_delta=tile_delta,
+                        tile_residency_budget_bytes=64 * 1024 * 1024,
+                    )
+                )
+                return True
+
+            monkeypatch.setattr(effects, "_present_tile_delta", present)
+            monkeypatch.setattr(effects, "_acknowledge_and_publish", lambda *_args, **_kwargs: None)
+            effects._commit_tile_layer(effects.direct_tile_layer_presentation(), commit_start=0.0)
+            return renderer
+
+        # A zoom-in rebirth requests L2 while only the predecessor's complete
+        # L4 coverage exists. This is a resident rebind, not a cold upload
+        # cohort: even a one-item/one-byte cold budget must admit all tiles.
+        successor = _session(
+            pyramid=cache,
+            view_range=ZOOMED_OUT_RANGE,
+            count=count,
+        )
+        successor.session_id = 2
+        successor.key = ("test", "zoomed-in")
+        successor.semantic_key = semantic_key
+        for tile_number, rendered in tuple(successor.rendered_tiles.items()):
+            key = page_set_key_for_rendered(
+                rendered,
+                demand=successor.lod_policy_decision.demand,
+                level=4,
+                semantic_source_id=successor.tile_semantic_source_id(
+                    rendered.tile.source_index
+                ),
+            )
+            _claim_preview_resident(successor, tile_number, key)
+            del successor.rendered_tiles[tile_number]
+        successor.dirty_payloads.clear()
+        successor.tile_presentation_state = predecessor.tile_presentation_state
+        successor.display_committed = True
+
+        successor_state, successor_delta = successor.build_tile_presentation(
+            {},
+            max_upserts=1,
+            max_upsert_bytes=1,
+            upsert_cost_fn=lambda payload: payload.nbytes,
+            physical_resident_fn=view.tiledPayloadResident,
+            pace_resident_retargets=False,
+        )
+
+        assert set(successor_delta.upserts) == visible
+        assert successor_delta.removals == ()
+        for payload in successor_delta.upserts.values():
+            backing = payload.page_backing
+            assert backing.requested_lod.level == 2
+            assert backing.resolved_page_set.coarsest_actual_level == 4
+            assert view.tiledPayloadResident(payload)
+            assert all(
+                pool._page_table.lookup(target) is None
+                for target in backing.requested_keys
+            ), "the finer L2 materialization must be allowed to remain pending"
+        assert all(
+            _base_source_id(predecessor.tile_presentation_state.payloads[tile].source_id)
+            == _base_source_id(payload.source_id)
+            and predecessor.tile_presentation_state.payloads[tile].lod.level
+            != payload.lod.level
+            for tile, payload in successor_delta.upserts.items()
+        ), "exercise the same-source LOD handoff that the removed blanket gate deferred"
+
+        uploads_before = int(pool.chunk_upload_count)
+        renderer = commit_through_frame_effects(successor, successor_state, successor_delta)
+        successor_report = renderer.report
+
+        assert renderer.win.render_coordinator.interactive_active is True
+        assert successor_report.presented_tiles == visible
+        assert successor_report.committed_upserts == visible
+        assert successor_report.removed_tiles == frozenset()
+        assert successor_report.texture_uploads == 0
+        assert successor_report.texture_upload_bytes == 0
+        assert pool.chunk_upload_count == uploads_before
+        assert set(view._vispy_gpu_montage_layer.last_stats.presented_tiles) == visible
+        truth = pool.tile_truth_physical_rows()
+        assert set(truth) == visible
+        assert all(
+            binding["quality"] == "fallback"
+            and binding["requested_lod"].reduction == (2, 2)
+            and binding["actual_lod"].reduction == (4, 4)
+            for row in truth.values()
+            for binding in row["physical_page_bindings"]
+        )
+
+        # Control: a logically acknowledged same-source L4 -> L2 handoff with
+        # no physical page coverage is genuinely cold. The same coordinator
+        # must keep the acknowledged frame until the interaction-stop edge.
+        cold = _session(
+            pyramid=LodPageCache(max_bytes=1 << 24),
+            view_range=coarse_range,
+            count=count,
+        )
+        cold.session_id = 3
+        cold.key = ("test", "cold-zoom")
+        cold.semantic_key = ("page-backed-cold-control",)
+        for tile_number, rendered in tuple(cold.rendered_tiles.items()):
+            key = page_set_key_for_rendered(
+                rendered,
+                demand=cold.lod_policy_decision.demand,
+                level=4,
+                semantic_source_id=cold.tile_semantic_source_id(rendered.tile.source_index),
+            )
+            _admit_page_set(cold.lod_page_cache, key, np.asarray(rendered.image))
+            _claim_preview_resident(cold, tile_number, key)
+            del cold.rendered_tiles[tile_number]
+        cold.dirty_payloads.clear()
+        _cold_predecessor_state, cold_predecessor_delta = cold.build_tile_presentation({})
+        assert {
+            payload.page_backing.requested_lod.level
+            for payload in cold_predecessor_delta.upserts.values()
+        } == {4}
+        _acknowledge(cold, cold_predecessor_delta)
+        cold.mark_presented(cold_predecessor_delta.upserts)
+        cold.display_committed = True
+        cold.view_range = ZOOMED_OUT_RANGE
+        cold.mark_ladder_swaps_for_viewport()
+        cold_state, cold_delta = cold.build_tile_presentation(
+            {},
+            max_upserts=1,
+            max_upsert_bytes=1,
+            upsert_cost_fn=lambda payload: payload.nbytes,
+            physical_resident_fn=view.tiledPayloadResident,
+            pace_resident_retargets=False,
+        )
+        assert cold_delta.upserts
+        assert not any(view.tiledPayloadResident(payload) for payload in cold_delta.upserts.values())
+        assert all(
+            _base_source_id(cold.tile_presentation_state.payloads[tile].source_id)
+            == _base_source_id(payload.source_id)
+            and cold.tile_presentation_state.payloads[tile].lod.level != payload.lod.level
+            for tile, payload in cold_delta.upserts.items()
+        )
+        cold_renderer = commit_through_frame_effects(cold, cold_state, cold_delta)
+        assert not hasattr(cold_renderer, "report")
+        assert cold_renderer._last_montage_commit_outcome == "interactive-residency-deferred"
+        assert cold._interactive_residency_deferred is True
+    finally:
+        view.close()
 
 
 def test_reduced_target_payload_is_not_preview_when_target_lod_is_reduced():
@@ -1978,6 +2744,89 @@ def test_retained_preview_uses_the_same_direct_canonical_route():
     )
 
 
+def test_retained_preview_protects_its_claim_until_checked_admission(monkeypatch):
+    preview = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=preview, count=1)
+    rendered = session.rendered_tiles[0]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    original_materialize = render_lod.materialize_lod_page
+    cancellation_results = []
+
+    def materialize_while_cancelled(*args, plan, **kwargs):
+        owner = preview.claimed_by(plan.key)
+        assert owner is not None
+        cancellation_results.append(preview.release_owner_claims(owner))
+        return original_materialize(*args, plan=plan, **kwargs)
+
+    monkeypatch.setattr(render_lod, "materialize_lod_page", materialize_while_cancelled)
+
+    key = admit_retained_preview_level(
+        preview,
+        rendered,
+        semantic_source_id=semantic_id,
+        preview_level=3,
+    )
+
+    assert key is not None
+    assert cancellation_results
+    assert all(result == () for result in cancellation_results)
+    assert preview.exact_pages(key.plans) is not None
+    assert preview.pending_count == 0
+
+
+def test_retained_preview_wrong_page_is_loud_and_releases_its_claim(monkeypatch):
+    preview = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=preview, count=1)
+    rendered = session.rendered_tiles[0]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    wrong_key = page_set_key_for_rendered(
+        rendered,
+        demand=session.lod_policy_decision.demand,
+        level=3,
+        semantic_source_id=semantic_id,
+    )
+    wrong_page = materialize_lod_page(
+        np.asarray(rendered.image),
+        source_origin_yx=(0, 0),
+        plan=wrong_key.plans[0],
+    )
+    monkeypatch.setattr(render_lod, "materialize_lod_page", lambda *args, **kwargs: wrong_page)
+
+    with pytest.raises(ValueError, match="wrong key"):
+        admit_retained_preview_level(
+            preview,
+            rendered,
+            semantic_source_id=semantic_id,
+            preview_level=2,
+        )
+
+    assert len(preview) == 0
+    assert preview.pending_count == 0
+
+
+def test_ineligible_retained_preview_never_leaves_an_owner_claim():
+    preview = LodPageCache(max_bytes=8)
+    session = _session(pyramid=preview, count=1)
+    rendered = session.rendered_tiles[0]
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=session.lod_policy_decision.demand,
+        level=2,
+        semantic_source_id=semantic_id,
+    )
+
+    assert admit_retained_preview_level(
+        preview,
+        rendered,
+        semantic_source_id=semantic_id,
+        preview_level=2,
+    ) is None
+    assert preview.plan_set_ineligible(key.plans)
+    assert preview.pending_count == 0
+    assert len(preview) == 0
+
+
 def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
     """Scroll-back contract: main-cache churn can never blank a tile that was
     ever computed — the pinned preview level floors it."""
@@ -2003,7 +2852,8 @@ def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
     payload = delta.upserts.get(1) or session.display_tile_payloads.get(1)
     assert payload is not None, "preview level must floor the tile"
     assert payload.quality == "preview"
-    assert payload.lod.level == 3
+    assert payload.lod.level == 2
+    assert payload.page_backing.resolved_page_set.coarsest_actual_level == 3
     assert payload.texture_data.shape[:2] == (TILE // 8, TILE // 8)
 
 
@@ -2134,6 +2984,112 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     assert set(exact_delta.upserts) == {0, 1}
     assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
     assert {payload.lod.level for payload in exact_delta.upserts.values()} == {2}
+
+
+def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
+    """The real worker result must cross the GUI seam as checked pages."""
+
+    data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=2, indices=(0, 1), text=":")
+    )
+    plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=(0, 1),
+        tile_shape=(TILE, TILE),
+        columns=2,
+        viewport_shape=VIEWPORT,
+    )
+    cache = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=cache, count=2)
+    session.document = ArrayDocument(data)
+    session.view_state = state
+    session.plan = plan
+    session.montage_axis = 2
+    session.visible_tiles = plan.tiles
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.lod_policy_mode = LOD_POLICY_NATIVE_ONLY
+    session.lod_preview_level = 1
+    demand = LodDemand(
+        desired_level=0,
+        desired_factor=1,
+        desired_factor_xy=(1, 1),
+        acceptable_levels=(0, 1, 2),
+        source_texels_per_pixel_xy=(1.0, 1.0),
+        reason="shared-preview-admission-test",
+    )
+
+    rows = render_effects.evaluate_shared_preview(
+        session,
+        plan.tiles[0],
+        plan.tiles,
+        demand=demand,
+        level=1,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+        upload_preview_useful=True,
+    )
+    renderer = _RungPrepareRenderer()
+    renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
+    renderer._admit_first_pass_level_evidence = lambda *_args, **_kwargs: None
+    frame_effects = FramePipelineEffects(renderer, session)
+
+    assert rows and all(
+        all(isinstance(page, MaterializedLodPage) for page in row[2])
+        for row in rows
+    )
+    assert frame_effects._admit_reduced_display_payload(
+        None,
+        int(rows[0][0]),
+        rows,
+        quality="preview",
+    )
+
+    for tile_number, key, pages, *_rest in rows:
+        assert cache.exact_pages(key.plans) is not None
+        assert tuple(page.key for page in pages) == tuple(plan.key for plan in key.plans)
+        record = session.lifecycle.peek(int(tile_number))
+        assert record is not None
+        assert record.levels[key].phase.name == "RESIDENT"
+
+    # A later direct route at the same physical level has a different value
+    # identity and outranks the non-semantic preview instead of being
+    # suppressed by its residency.
+    tile = plan.tiles[0]
+    source = np.ascontiguousarray(data[..., int(tile.source_index)])
+    rendered = RenderedTile(
+        tile=tile,
+        image=source,
+        histogram_data=source,
+        eval_ms=0.0,
+        slab_shape=source.shape,
+        slab_nbytes=source.nbytes,
+    )
+    exact_key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=1,
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+    )
+    exact_pages = _materialized_page_set(exact_key, source)
+    assert exact_key.page_keys != rows[0][1].page_keys
+    assert session.admit_preview_plane(
+        int(tile.montage_index),
+        exact_key,
+        exact_pages,
+        quality="exact",
+    )
+    session.lod_policy_mode = LOD_POLICY_RESIDENT
+    best = session._best_floor_key(
+        int(tile.source_index),
+        tile_number=int(tile.montage_index),
+    )
+    assert best is not None and best[0] == exact_key
 
 
 def test_presented_preview_keeps_active_exact_work_loading():
@@ -2520,6 +3476,86 @@ def test_vispy_shader_floor_uses_canonical_complex_pages():
     assert best[0] == complex_key
 
 
+def test_floor_prefers_resident_l2_over_l4_for_coarser_l6_demand():
+    """Unrendered floor selection obeys the same no-demotion rank."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    tile = session.plan.tiles[0]
+    rendered = session.rendered_tiles[0]
+    demand = select_lod_demand(
+        ((0.0, 8192.0), (0.0, 4096.0)),
+        VIEWPORT,
+        (TILE, TILE),
+    )
+    assert demand.desired_level == 6
+    session.lod_policy_decision = replace(session.lod_policy_decision, demand=demand)
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+    keys = []
+    for level in (2, 4):
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=level,
+            semantic_source_id=semantic_id,
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        _claim_preview_resident(session, tile.montage_index, key)
+        keys.append(key)
+
+    best = render_lod.best_floor_key(
+        session,
+        int(tile.source_index),
+        tile_number=int(tile.montage_index),
+    )
+
+    assert best is not None
+    assert best[0] == keys[0]
+    assert best[1] == 2
+
+
+def test_floor_ranks_better_physical_fallback_ahead_of_coarser_exact_target():
+    """Exact requested identity cannot outrank the pixels actually sampled."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    tile = session.plan.tiles[0]
+    rendered = session.rendered_tiles[0]
+    demand = LodDemand(
+        desired_level=6,
+        desired_factor=64,
+        desired_factor_xy=(64, 64),
+        # Keep L7 out of the exact target scan: its resident pages are the
+        # physical ancestor for desired L6, not a requested rung identity.
+        acceptable_levels=(8,),
+        source_texels_per_pixel_xy=(64.0, 64.0),
+        reason="physical fallback rank regression",
+    )
+    session.lod_policy_decision = replace(session.lod_policy_decision, demand=demand)
+    semantic_id = session.tile_semantic_source_id(tile.source_index)
+    keys = {}
+    for level in (7, 8):
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=level,
+            semantic_source_id=semantic_id,
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        keys[level] = key
+    _claim_preview_resident(session, tile.montage_index, keys[8])
+
+    best = render_lod.best_floor_key(
+        session,
+        int(tile.source_index),
+        tile_number=int(tile.montage_index),
+    )
+
+    assert best is not None
+    assert best[0].level == 6
+    assert best[1] == 7
+
+
 def test_preview_admission_rejects_unchecked_whole_plane_values():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=1)
@@ -2537,6 +3573,77 @@ def test_preview_admission_rejects_unchecked_whole_plane_values():
     with pytest.raises(TypeError, match="checked canonical"):
         session.admit_preview_plane(0, key, np.zeros((TILE // 4, TILE // 4)))
     assert not render_lod._page_set_complete(pyramid, key)
+
+
+def test_preview_page_admission_protects_claims_until_the_set_is_complete(monkeypatch):
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE)),
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+    original_admit = pyramid.admit_as
+    cancellation_results = []
+
+    def admit_while_cancelled(page_key, page, *, owner):
+        cancellation_results.append(pyramid.release_owner_claims(owner))
+        return original_admit(page_key, page, owner=owner)
+
+    monkeypatch.setattr(pyramid, "admit_as", admit_while_cancelled)
+
+    assert session.admit_preview_plane(0, key, pages)
+    assert cancellation_results
+    assert all(result == () for result in cancellation_results)
+    assert pyramid.exact_pages(key.plans) is not None
+    assert pyramid.pending_count == 0
+
+
+def test_preview_page_admission_failure_is_loud_and_releases_all_claims(monkeypatch):
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE)),
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+
+    def reject_checked_page(*args, **kwargs):
+        raise ValueError("forced checked page admission failure")
+
+    monkeypatch.setattr(pyramid, "admit_as", reject_checked_page)
+
+    with pytest.raises(ValueError, match="forced checked page admission failure"):
+        session.admit_preview_plane(0, key, pages)
+
+    assert pyramid.pending_count == 0
+    retry_owner = ("preview-admission-retry",)
+    assert pyramid.claim_plans(key.plans, retry_owner) == key.plans
+    assert pyramid.release_owner_claims(retry_owner) == key.page_keys
+
+
+def test_ineligible_preview_page_set_is_declined_without_claim_or_lifecycle_state():
+    pyramid = LodPageCache(max_bytes=8)
+    session = _session(pyramid=pyramid, count=1)
+    rendered = session.rendered_tiles[0]
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE)),
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+
+    assert not session.admit_preview_plane(0, key, pages)
+    assert pyramid.plan_set_ineligible(key.plans)
+    assert pyramid.pending_count == 0
+    assert session.lifecycle.dangling_claims() == ()
 
 
 def test_acknowledged_preview_floor_stays_active_until_exact_refinement():
@@ -2628,7 +3735,11 @@ def test_preview_floor_target_prefers_preview_cache_over_requested_level():
     _state, delta = session.build_tile_presentation({}, max_upserts=1)
 
     assert delta.upserts[0].quality == "preview"
-    assert delta.upserts[0].lod.level == 4
+    assert delta.upserts[0].lod.level == 2
+    assert (
+        delta.upserts[0].page_backing.resolved_page_set.coarsest_actual_level
+        == 4
+    )
     assert delta.upserts[0].texture_data.shape[:2] == (TILE // 16, TILE // 16)
 
 
@@ -2858,11 +3969,9 @@ def test_paced_followup_rejects_same_slots_with_new_source_mapping():
         max_upserts=1,
         max_upsert_bytes=None,
         upsert_cost_fn=None,
-            item_free_upsert_fn=None,
-            max_item_free_upserts=None,
-            max_free_retargets=None,
-            pace_resident_retargets=False,
-        )
+        physical_resident_fn=None,
+        pace_resident_retargets=False,
+    )
 
     assert followup is None
 
@@ -3407,12 +4516,103 @@ def test_presentation_backlog_signature_distinguishes_same_size_retarget():
     assert first != second
 
 
-def test_phase_vector_display_stays_native_until_amplitude_statistic_exists():
-    session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
-    session.view_state = type("View", (), {"channel": "angle"})()
+def test_live_phase_vector_ladder_builds_cancellation_preserving_page_payload():
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    cancellation_cell = np.asarray(
+        [[1.0 + 0.0j, -1.0 + 0.0j], [0.0j, 0.0j]],
+        dtype=np.complex64,
+    )
+    values = np.tile(cancellation_cell, (TILE // 2, TILE // 2))
+    rendered = _phase_shader_rendered(session, values)
 
-    assert render_lod.resident_lod_active(session) is False
+    assert render_lod.resident_lod_active(session) is True
     assert render_lod.selected_lod_factor(session) == 1
+    demand = session.lod_policy_decision.demand
+    assert demand.desired_level == 2
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=demand.desired_level,
+        semantic_source_id=session.tile_semantic_source_id(0),
+        shader_display=True,
+    )
+    assert key.reducer == "phase_vector"
+    _admit_page_set(pyramid, key, values)
+
+    assert render_lod.selected_lod_factor(session) == 4
+    payload = session._ensure_display_tile_payload(0, rendered, {}, lod_factor=4)
+
+    assert payload.lod.level == 2
+    assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert payload.page_backing is not None
+    assert {plan.reducer for plan in payload.page_backing.requested_plans} == {
+        "phase_vector"
+    }
+    assert payload.histogram_data is None
+    assert payload.shader_mapping == rendered.shader_mapping
+    np.testing.assert_array_equal(payload.texture_data, np.zeros((16, 16), np.complex64))
+    np.testing.assert_array_equal(
+        payload.semantic_histogram_data,
+        rendered.histogram_data,
+    )
+
+
+def test_live_phase_ladder_does_not_accept_resident_mean_family_as_floor():
+    pyramid = LodPageCache(max_bytes=1 << 20)
+    session = _session(pyramid=pyramid, count=1)
+    yy, xx = np.mgrid[:TILE, :TILE]
+    values = ((1.0 + yy + xx) * np.exp(1j * (xx - yy) / 7.0)).astype(np.complex64)
+    phase_rendered = _phase_shader_rendered(session, values)
+    render_lod.selected_lod_factor(session)
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(0)
+    phase_key = page_set_key_for_rendered(
+        phase_rendered,
+        demand=demand,
+        level=demand.desired_level,
+        semantic_source_id=semantic_id,
+        shader_display=True,
+    )
+
+    complex_state = ViewState.from_shape(values.shape).with_channel(ChannelMode.COMPLEX)
+    complex_display = make_shader_image_from_slab(
+        values,
+        SimpleNamespace(view_state=complex_state, ranged_axes=()),
+    )
+    mean_rendered = replace(
+        phase_rendered,
+        image=complex_display.data,
+        histogram_data=complex_display.histogram_data,
+        shader_mapping=complex_display.shader_mapping,
+        texture_kind=complex_display.texture_kind,
+        semantic_data=complex_display.semantic_data,
+        lod_source_data=complex_display.lod_source_data,
+    )
+    mean_key = page_set_key_for_rendered(
+        mean_rendered,
+        demand=demand,
+        level=demand.desired_level,
+        semantic_source_id=semantic_id,
+        shader_display=True,
+    )
+    assert phase_key.reducer == "phase_vector"
+    assert mean_key.reducer == "mean"
+    _admit_page_set(pyramid, mean_key, values)
+
+    assert not render_lod._page_set_complete(pyramid, phase_key)
+    assert render_lod.best_floor_key(session, 0, tile_number=0) is None
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    assert effects.prepare_rung(
+        _pipeline_intent_for(session),
+        _desired_materialization_step(level=demand.desired_level),
+    )
+    request = session.lifecycle.materialization_request_for(0, phase_key)
+    assert request is not None
+    assert request.key.reducer == "phase_vector"
+    assert tuple(plan.key for plan in request.claimed_plans) == phase_key.page_keys
+    session.pending_rung_materializations.release(request)
+    assert pyramid.pending_count == 0
 
 
 def test_complex_display_keeps_resident_mean_complex_lod_active():
@@ -4981,8 +6181,12 @@ def test_deferred_stage_plan_applies_after_unrelated_render_generation_advance(m
     assert session.deferred_missing_tiles == ()
 
 
-def test_preview_payloads_bypass_item_cap_but_keep_byte_budget():
-    session = _session(mode=LOD_POLICY_NATIVE_ONLY, count=4, pyramid=LodPageCache(max_bytes=1 << 20))
+@pytest.mark.parametrize(("physical_resident", "expected_upserts"), ((True, 16), (False, 1)))
+def test_only_physically_resident_payloads_bypass_all_cold_caps_in_one_delta(
+    physical_resident,
+    expected_upserts,
+):
+    session = _session(mode=LOD_POLICY_NATIVE_ONLY, count=16, pyramid=LodPageCache(max_bytes=1 << 20))
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
     session.pending_payload_upserts.clear()
@@ -5005,14 +6209,14 @@ def test_preview_payloads_bypass_item_cap_but_keep_byte_budget():
     _state, delta = session.build_tile_presentation(
         {},
         max_upserts=1,
-        max_upsert_bytes=sum(payload.nbytes for payload in session.display_tile_payloads.values()),
+        max_upsert_bytes=1,
         upsert_cost_fn=lambda payload: payload.nbytes,
-        item_free_upsert_fn=lambda payload: str(getattr(payload, "quality", "")) == "preview",
-        max_item_free_upserts=2,
+        physical_resident_fn=lambda _payload: physical_resident,
     )
 
-    assert len(delta.upserts) == 2
-    assert set(delta.active_tiles) == {0, 1, 2, 3}
+    assert len(delta.upserts) == expected_upserts
+    if physical_resident:
+        assert set(delta.active_tiles) == set(range(16))
 
 
 def test_visible_parked_payload_rearms_instead_of_settling_missing():
@@ -5117,6 +6321,17 @@ def test_stale_materialized_desired_admission_does_not_invent_native_claim():
         key=level_key,
     )
     session.pending_rung_materializations.append(request)
+    for page_plan in request.claimed_plans:
+        page = materialize_lod_page(
+            request.source,
+            source_origin_yx=request.source_origin_yx,
+            plan=page_plan,
+        )
+        session.lod_page_cache.admit_as(
+            page_plan.key,
+            page,
+            owner=request.owner,
+        )
     del session.rendered_tiles[0]
     session.dirty_payloads.pop(0, None)
 

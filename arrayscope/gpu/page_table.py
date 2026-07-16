@@ -40,11 +40,14 @@ class ResidencyEntry:
 class PageResolution:
     """One CPU-resolved target → resident-page binding (ADR 0056 §5).
 
-    ``scale`` and ``offset`` map coordinates in the target page's stored
-    sample space into the actual resident page's stored sample space.  The
-    binding generation belongs to that physical association, so compaction
-    or slot reuse invalidates a cached resolution even when the logical key
-    survives.
+    ``scale`` and ``offset`` describe the nominal aligned-grid transform from
+    target stored samples into actual stored samples.  They are exact for
+    complete interior bins.  A clipped boundary bin is not representable by
+    one affine transform, so presentation must use the immutable target and
+    actual ``LodPagePlan`` draw blocks for exact edges; physical truth reports
+    both this nominal transform and the submitted draw geometry.  The binding
+    generation belongs to that physical association, so compaction or slot
+    reuse invalidates a cached resolution even when the logical key survives.
     """
 
     target_key: DataChunkKey
@@ -295,6 +298,7 @@ def _same_value_family(target: DataChunkKey, actual: DataChunkKey) -> bool:
         and target.dtype == actual.dtype
         and target.representation == actual.representation
         and target.lod.reducer == actual.lod.reducer
+        and target.lod.gutter == actual.lod.gutter
     )
 
 
@@ -306,6 +310,7 @@ def _value_family_key(key: DataChunkKey) -> tuple[object, ...]:
         key.dtype,
         key.representation,
         key.lod.reducer,
+        key.lod.gutter,
     )
 
 

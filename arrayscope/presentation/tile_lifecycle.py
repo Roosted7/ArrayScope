@@ -1613,10 +1613,17 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
     texture_kind = getattr(payload, "texture_kind", None)
     shader_mapping = getattr(payload, "shader_mapping", None)
     quality = str(getattr(payload, "quality", "exact") or "exact")
+    policy_lod_level = int(
+        getattr(
+            payload,
+            "conservative_actual_lod_level",
+            int(getattr(lod, "level", 0) or 0),
+        )
+    )
     return TilePayloadRef(
         source_id=getattr(payload, "source_id", None),
         quality="fallback" if quality == "preview" else quality,
-        lod_level=int(getattr(lod, "level", 0) or 0),
+        lod_level=policy_lod_level,
         source_index=int(getattr(payload, "source_index", -1)),
         texture_kind=None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
         shader_mapping_key=None if shader_mapping is None else getattr(shader_mapping, "identity_key", shader_mapping),

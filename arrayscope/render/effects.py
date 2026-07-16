@@ -26,6 +26,7 @@ from arrayscope.display.model.tile_identity import (
     tile_ack_identity,
 )
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
+from arrayscope.display.pyramid import MaterializedLodPage, plan_source_grid_pages
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
     apply_scale as apply_shader_scale,
@@ -52,6 +53,9 @@ from arrayscope.operations.source_read import read_base_region
 from arrayscope.presentation import LevelPhase
 from arrayscope.render.ladder import TileLodState
 from arrayscope.render import lod as render_lod
+
+
+SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 1, "sample-display-axes-before-operations")
 
 
 def _check_render_cancelled(token) -> None:
@@ -366,23 +370,53 @@ def evaluate_shared_preview(
             level_stats=getattr(value, "level_stats", None),
             quality="preview",
         )
-        key = render_lod.page_set_key_for_rendered(
+        semantic_source_id = session.tile_semantic_source_id(tile.source_index)
+        format_key = render_lod.page_set_key_for_rendered(
             rendered,
             demand=demand,
             level=level,
-            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+            semantic_source_id=semantic_source_id,
             shader_display=bool(shader_display),
         )
         source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
             rendered,
             shader_display=bool(shader_display),
         )
+        template_plan = format_key.plans[0]
+        source_height, source_width = (
+            int(value) for value in session.plan.tile_shape[:2]
+        )
+        plans = plan_source_grid_pages(
+            # Reduced-before-operation shared values are deliberately
+            # non-semantic.  Keep their value identity separate from direct
+            # canonical display-plane pages so residency can provide a floor
+            # without suppressing or aliasing later exact materialization.
+            content_key=(
+                "src-anchored",
+                semantic_source_id,
+                ("display-plane", SHARED_PREVIEW_ROUTE),
+            ),
+            valid_source_rect_yx=(0, source_height, 0, source_width),
+            reduction_yx=template_plan.reduction_yx,
+            stored_page_shape=template_plan.stored_page_shape,
+            dtype=template_plan.key.dtype,
+            representation=template_plan.key.representation,
+            reducer=template_plan.reducer,
+        )
+        key = render_lod.LodPageSetKey(
+            source_id=semantic_source_id,
+            tile_id=int(tile.source_index),
+            level_xy=format_key.level_xy,
+            reducer=format_key.reducer,
+            plans=plans,
+        )
+        pages = _materialize_shared_preview_pages(source, plans=plans)
         histogram = _preview_display_histogram(rendered, source, texture_kind, getattr(value, "histogram_data", None))
         previews.append(
             (
                 int(tile.montage_index),
                 key,
-                np.asarray(source),
+                pages,
                 None if histogram is None else np.asarray(histogram),
                 getattr(value, "shader_mapping", None),
                 texture_kind,
@@ -391,6 +425,53 @@ def evaluate_shared_preview(
             )
         )
     return tuple(previews)
+
+
+def _materialize_shared_preview_pages(
+    values,
+    *,
+    plans,
+) -> tuple[MaterializedLodPage, ...]:
+    """Partition one worker-computed stored plane under its exact page plans.
+
+    Shared-transform preview performs its bounded numeric work before fan-out;
+    reducing each row again during GUI admission would both block Qt and
+    shrink its native geometry twice.  This check maps that already-stored
+    plane to the canonical global stored rectangles, proving complete,
+    non-overlapping coverage before any page reaches the cache.
+    """
+
+    source = np.asarray(values)
+    requested = tuple(plans)
+    if not requested:
+        raise ValueError("shared preview requires at least one canonical page plan")
+    stored_y0 = min(plan.stored_rect_yx[0] for plan in requested)
+    stored_y1 = max(plan.stored_rect_yx[1] for plan in requested)
+    stored_x0 = min(plan.stored_rect_yx[2] for plan in requested)
+    stored_x1 = max(plan.stored_rect_yx[3] for plan in requested)
+    expected_shape = (stored_y1 - stored_y0, stored_x1 - stored_x0)
+    if tuple(source.shape[:2]) != expected_shape:
+        raise ValueError(
+            "shared preview stored shape disagrees with canonical page coverage: "
+            f"{source.shape[:2]} != {expected_shape}"
+        )
+    covered = np.zeros(expected_shape, dtype=np.bool_)
+    pages = []
+    for plan in requested:
+        y0, y1, x0, x1 = plan.stored_rect_yx
+        rows = slice(y0 - stored_y0, y1 - stored_y0)
+        columns = slice(x0 - stored_x0, x1 - stored_x0)
+        if np.any(covered[rows, columns]):
+            raise ValueError("shared preview canonical page plans overlap")
+        covered[rows, columns] = True
+        page_values = np.ascontiguousarray(
+            source[rows, columns],
+            dtype=np.dtype(plan.key.dtype),
+        )
+        pages.append(MaterializedLodPage(plan, page_values))
+    if not np.all(covered):
+        raise ValueError("shared preview canonical page plans leave incomplete stored coverage")
+    return tuple(pages)
 
 
 def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> tuple[TileLodState, ...]:
@@ -406,7 +487,6 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
     allowed = None if tile_numbers is None else {int(value) for value in tuple(tile_numbers)}
     states: list[TileLodState] = []
     payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
-    visible_numbers = set(getattr(session, "visible_tile_numbers", ()) or ())
     skipped_numbers = set(getattr(session, "skipped_tiles", ()) or ())
     active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
@@ -552,7 +632,7 @@ def _resident_levels_from_lifecycle(
             continue
         if tile_id is not None and int(getattr(key, "tile_id", -1)) != int(tile_id):
             continue
-        if page_cache is not None and not render_lod._page_set_complete(page_cache, key):
+        if page_cache is not None and not render_lod._page_set_exact(page_cache, key):
             continue
         level_xy = tuple(getattr(key, "level_xy", ()) or ())
         if level_xy:
@@ -1142,18 +1222,24 @@ def _evaluate_tile_native_output_preview(
     _check_render_cancelled(cancellation_token)
     value = result.value
     rendered = rendered_tile_from_evaluation_result(tile, result)
-    key = render_lod.page_set_key_for_rendered(
+    key = render_lod.page_set_key_for(
+        session,
         rendered,
         demand=demand,
         level=level,
-        semantic_source_id=semantic_source_id,
-        shader_display=bool(shader_display),
     )
+    if key.source_id != semantic_source_id:
+        raise ValueError("reduced target source identity disagrees with its session route")
     source = render_lod.canonical_value_source_for_rendered(
         rendered, shader_display=bool(shader_display)
     )
+    source_origin_yx = render_lod.source_origin_yx_for_session(session, source)
     pages = tuple(
-        render_lod.materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan)
+        render_lod.materialize_lod_page(
+            source,
+            source_origin_yx=source_origin_yx,
+            plan=plan,
+        )
         for plan in key.plans
     )
     texture_kind = (

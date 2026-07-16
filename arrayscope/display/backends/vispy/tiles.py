@@ -25,6 +25,7 @@ from arrayscope.display.shader_mapping import (
     shader_component_uniform,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.pyramid import LodPagePlan
 from arrayscope.display.model.tile_identity import (
     acknowledged_identity_satisfies_target,
     array_plane_identities,
@@ -35,7 +36,6 @@ from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
-    REDUCER_MEAN,
     REDUCER_NATIVE,
     REDUCER_PHASE_VECTOR,
     RGB8,
@@ -138,22 +138,16 @@ class _PageUpload:
 
 
 def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
-    """Whether a payload may take the chunked-residency path (ADR 0055 G3b-2).
+    """Whether a native payload may take the legacy chunk-residency path.
 
-    Gating: exact, gutter-free payloads whose plane spans the anchor rect at
-    the payload's LOD factor and is strictly larger than one chunk.  At
-    factor 1 the plane must equal the anchor extent.  At factor > 1
-    (ADR 0056 G5 slice 1: uniform plane-pixel pages) the plane must be
-    exactly the isotropic box reduction of the anchor extent —
-    ``ceil(extent / factor)`` per axis, the shape
-    :func:`arrayscope.display.pyramid.reduce_box_mean` produces — and the
-    payload's ``LodInfo`` must agree (``source_shape`` == anchor extent,
-    ``texture_shape`` == plane shape).  Anisotropic reductions (an axis
-    reduced by less than the scalar factor) and any payload whose
-    plane/native relation does not hold exactly fall back to the classic
-    whole-tile path — never guessed; montage payloads (no anchor) always do.
+    ADR 0056 G5 permits this backend-local partition only for native samples.
+    Reduced values must carry canonical ``page_backing`` planned by the
+    source-grid route; VisPy consumes those keys and must never reconstruct
+    reduced-page identity from a whole-plane payload or ``LodInfo``.
     """
 
+    if getattr(payload, "page_backing", None) is not None:
+        return False
     anchor = getattr(payload, "source_anchor", None)
     if anchor is None:
         return False
@@ -161,12 +155,8 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
         return False
     lod = getattr(payload, "lod", None)
     factor = 1 if lod is None else int(getattr(lod, "factor", 1) or 1)
-    if factor < 1:
-        return False
-    if factor & (factor - 1):
-        # DataChunkKey reduction vectors are exact log2 source-grid steps.
-        # A non-power-of-two legacy factor has no honest page ancestry in
-        # that model and stays on the classic whole-payload path.
+    level = 0 if lod is None else int(getattr(lod, "level", 0) or 0)
+    if factor != 1 or level != 0:
         return False
     if lod is not None and int(getattr(lod, "gutter", 0) or 0) != 0:
         return False
@@ -178,9 +168,9 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
         return False
     plane_h, plane_w = _payload_class_shape(payload)
     native_h, native_w = (y1 - y0, x1 - x0)
-    if (plane_h, plane_w) != (-(-native_h // factor), -(-native_w // factor)):
+    if (plane_h, plane_w) != (native_h, native_w):
         return False
-    if lod is not None and factor > 1:
+    if lod is not None:
         if tuple(int(value) for value in lod.source_shape) != (native_h, native_w):
             return False
         if tuple(int(value) for value in lod.texture_shape) != (plane_h, plane_w):
@@ -192,68 +182,34 @@ def _payload_chunked_eligible(payload: DisplayTilePayload) -> bool:
 
 
 def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...]:
-    """Origin-anchored chunk partition of an eligible payload plane.
+    """Origin-anchored chunk partition of an eligible native payload plane.
 
-    Factor 1 (native): chunk boundaries fall at integer multiples of the
+    Chunk boundaries fall at integer multiples of the
     chunk shape in NATIVE source coordinates; interior chunks keep
     full-chunk rects (shift-invariant identity), chunks clipped by the
     window edge carry the clipped rect.
 
-    Factor > 1 (ADR 0056 G5 slice 1, uniform plane-pixel pages): the grid
-    runs over the payload PLANE from its origin — a chunk slot holds up to
-    ``ANCHORED_CHUNK_SHAPE`` *stored samples* at any LOD, so reduced planes
-    share the native planes' shape class.  Key rects stay NATIVE source
-    coordinates (anchor origin + plane rect scaled by the factor, clipped to
-    the anchor rect), and the key keeps the LOD triple, so an identical
-    plane revisited at the same LOD reuses every chunk.  HONEST LIMIT: a
-    ±1 NATIVE-pixel window shift RESAMPLES the reduced plane (reduction
-    bins are anchored to the window origin and move with it), so texels
-    genuinely differ and chunks must NOT be reused across such shifts —
-    this falls out automatically because the shifted anchor rect shifts
-    every native key rect.  True shift-reuse at factor > 1 needs
-    source-anchored reduction binning (a later ladder-migration slice; see
-    docs/proposals/gpu-engine-plan.md G5).
+    Reduced payloads are rejected: their exact partition and keys come from
+    ``PageBackedPresentation.requested_plans``.
     """
 
+    _require_native_chunk_payload(payload)
     anchor = payload.source_anchor
     y0, y1, x0, x1 = (int(value) for value in anchor.source_rect)
     chunk_h, chunk_w = (int(ANCHORED_CHUNK_SHAPE[0]), int(ANCHORED_CHUNK_SHAPE[1]))
     kind = _payload_texture_kind(payload).value
     texture = np.asarray(payload.texture_data if payload.texture_data is not None else payload.image)
     dtype = str(texture.dtype)
-    lod = getattr(payload, "lod", None)
-    factor = 1 if lod is None else max(1, int(getattr(lod, "factor", 1) or 1))
     chunks: list[_PayloadChunk] = []
-    if factor == 1:
-        for cy in range((y0 // chunk_h) * chunk_h, y1, chunk_h):
-            ry0, ry1 = (max(cy, y0), min(cy + chunk_h, y1))
-            for cx in range((x0 // chunk_w) * chunk_w, x1, chunk_w):
-                rx0, rx1 = (max(cx, x0), min(cx + chunk_w, x1))
-                rect = (ry0, ry1, rx0, rx1)
-                chunks.append(
-                    _PayloadChunk(
-                        key=_data_chunk_key(
-                            content_key=anchor.content_key,
-                            rect=rect,
-                            representation=kind,
-                            dtype=dtype,
-                            lod=lod,
-                        ),
-                        rect=rect,
-                        plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
-                    )
-                )
-        return tuple(chunks)
-    plane_h, plane_w = _payload_class_shape(payload)
-    for py0 in range(0, plane_h, chunk_h):
-        py1 = min(py0 + chunk_h, plane_h)
-        for px0 in range(0, plane_w, chunk_w):
-            px1 = min(px0 + chunk_w, plane_w)
+    for cy in range((y0 // chunk_h) * chunk_h, y1, chunk_h):
+        ry0, ry1 = (max(cy, y0), min(cy + chunk_h, y1))
+        for cx in range((x0 // chunk_w) * chunk_w, x1, chunk_w):
+            rx0, rx1 = (max(cx, x0), min(cx + chunk_w, x1))
             rect = (
-                y0 + py0 * factor,
-                min(y0 + py1 * factor, y1),
-                x0 + px0 * factor,
-                min(x0 + px1 * factor, x1),
+                ry0,
+                ry1,
+                rx0,
+                rx1,
             )
             chunks.append(
                 _PayloadChunk(
@@ -262,13 +218,84 @@ def _payload_chunk_plan(payload: DisplayTilePayload) -> tuple[_PayloadChunk, ...
                         rect=rect,
                         representation=kind,
                         dtype=dtype,
-                        lod=lod,
                     ),
                     rect=rect,
-                    plane_rect=(py0, py1, px0, px1),
+                    plane_rect=(ry0 - y0, ry1 - y0, rx0 - x0, rx1 - x0),
                 )
             )
     return tuple(chunks)
+
+
+def _payload_lod_is_reduced(payload: DisplayTilePayload) -> bool:
+    """Whether payload metadata describes anything other than native L0."""
+
+    lod = getattr(payload, "lod", None)
+    if lod is None:
+        return False
+    return (
+        int(getattr(lod, "factor", 1) or 1) != 1
+        or int(getattr(lod, "level", 0) or 0) != 0
+    )
+
+
+def _require_canonical_reduced_payload(
+    payload: DisplayTilePayload,
+    *,
+    action: str,
+) -> None:
+    """Reject the deleted window-local reduced-payload compatibility path."""
+
+    if _payload_lod_is_reduced(payload) and getattr(payload, "page_backing", None) is None:
+        raise ValueError(
+            f"VisPy cannot {action} a reduced payload without canonical page_backing; "
+            "factor>1 values must be planned and keyed by the source-grid route"
+        )
+
+
+def _require_native_chunk_payload(payload: DisplayTilePayload) -> None:
+    """Guard the sole remaining backend-local key construction (native L0)."""
+
+    if getattr(payload, "page_backing", None) is not None:
+        raise ValueError(
+            "page-backed payloads must consume their canonical requested plans; "
+            "backend chunk planning is forbidden"
+        )
+    _require_canonical_reduced_payload(payload, action="partition")
+    if not _payload_chunked_eligible(payload):
+        raise ValueError("payload is not eligible for native chunk planning")
+
+
+def _rect_intersection_yx(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    y0 = max(int(left[0]), int(right[0]))
+    y1 = min(int(left[1]), int(right[1]))
+    x0 = max(int(left[2]), int(right[2]))
+    x1 = min(int(left[3]), int(right[3]))
+    if y1 <= y0 or x1 <= x0:
+        return None
+    return (y0, y1, x0, x1)
+
+
+def _stored_edge_for_source(
+    source_edge: int,
+    *,
+    source_start: int,
+    source_stop: int,
+    stored_start: int,
+    stored_stop: int,
+) -> float:
+    """Map an exact native edge through one uniform canonical draw block."""
+
+    source_extent = int(source_stop) - int(source_start)
+    if source_extent <= 0:
+        raise ValueError("source draw-block extent must be positive")
+    return float(stored_start) + (
+        (int(source_edge) - int(source_start))
+        * (int(stored_stop) - int(stored_start))
+        / float(source_extent)
+    )
 
 
 def _data_chunk_key(
@@ -277,14 +304,14 @@ def _data_chunk_key(
     rect: tuple[int, int, int, int],
     representation: str,
     dtype: str,
-    lod,
 ) -> DataChunkKey:
-    """Canonical logical page identity for one anchored atlas chunk.
+    """Canonical native-page identity for one anchored atlas chunk.
 
     ``SourceAnchoring`` already separates the immutable document/evaluation
     identity from the window-free request.  Test/foreign anchors that do not
     carry that tagged shape remain one opaque document generation rather than
-    being guessed apart.
+    being guessed apart. Reduced keys are constructed only by the source-grid
+    planner and arrive through ``page_backing``.
     """
 
     if (
@@ -295,28 +322,16 @@ def _data_chunk_key(
         document_generation, operation_key = content_key[1], content_key[2]
     else:
         document_generation, operation_key = content_key, None
-    factor = 1 if lod is None else max(1, int(getattr(lod, "factor", 1) or 1))
-    level = 0 if lod is None else max(0, int(getattr(lod, "level", 0) or 0))
-    gutter = 0 if lod is None else max(0, int(getattr(lod, "gutter", 0) or 0))
-    if factor == 1:
-        reduction = (0, 0)
-        reducer = REDUCER_NATIVE
-    else:
-        reduction_step = factor.bit_length() - 1
-        if (1 << reduction_step) != factor:
-            raise ValueError(f"chunked LOD factor must be a power of two, got {factor}")
-        reduction = (reduction_step, reduction_step)
-        reducer = REDUCER_MEAN
     y0, y1, x0, x1 = (int(value) for value in rect)
     return DataChunkKey(
         document_generation=document_generation,
         operation_key=operation_key,
         lod=ChunkLod(
-            level=level,
-            factor=factor,
-            gutter=gutter,
-            reduction=reduction,
-            reducer=reducer,
+            level=0,
+            factor=1,
+            gutter=0,
+            reduction=(0, 0),
+            reducer=REDUCER_NATIVE,
         ),
         chunk_origin=(y0, x0),
         chunk_shape=(y1 - y0, x1 - x0),
@@ -532,6 +547,10 @@ class TextureAtlasPool:
         self.source_ids: dict[object, object] = {}
         self.acknowledged_identities: dict[object, object] = {}
         self.physical_upload_records: dict[object, dict[str, object]] = {}
+        # Checked canonical geometry travels with each resident logical page.
+        # PageTable selects the actual key/slot; this plan maps clipped native
+        # bins into that slot without reconstructing route geometry here.
+        self.page_plans: dict[DataChunkKey, LodPagePlan] = {}
         self.active_resident_keys: set[object] = set()
         # Keys whose tile(s) now present a different residency class (ADR
         # 0050): the acknowledged replacement makes these slots reclaimable.
@@ -706,6 +725,7 @@ class TextureAtlasPool:
                         "physical_page_bindings": tuple(
                             {
                                 "target_key": item.target_key,
+                                "requested_lod": item.target_key.lod,
                                 "actual_key": item.actual_key,
                                 "actual_lod": item.actual_key.lod,
                                 "scale": tuple(float(value) for value in item.scale),
@@ -730,6 +750,33 @@ class TextureAtlasPool:
     @property
     def resident_count(self) -> int:
         return len(self.source_ids)
+
+    def payload_resident(self, payload: DisplayTilePayload) -> bool:
+        """Return exact physical payload residency without touching LRU state."""
+
+        _require_canonical_reduced_payload(payload, action="resolve residency for")
+        backing = getattr(payload, "page_backing", None)
+        if backing is not None:
+            return all(
+                self._page_table.resolve(target) is not None
+                for target in backing.requested_keys
+            )
+        if _payload_chunked_eligible(payload):
+            # Native source-anchored planes are physically partitioned into
+            # DataChunkKey pages. Hidden warming intentionally creates no
+            # tile-level mapping/acknowledgement, so only this exact chunk set
+            # can describe the state consumed by the zero-upload commit.
+            return all(
+                self._page_table.lookup(chunk.key) is not None
+                for chunk in _payload_chunk_plan(payload)
+            )
+        resident_key = _resident_key(payload)
+        return bool(
+            self.source_ids.get(resident_key) == payload.source_id
+            and self.acknowledged_identities.get(resident_key)
+            == (getattr(payload, "tile_identity", None) or payload.source_id)
+            and self._page_table.lookup(resident_key) is not None
+        )
 
     @property
     def capacity(self) -> int:
@@ -874,6 +921,7 @@ class TextureAtlasPool:
             self.source_ids.clear()
             self.acknowledged_identities.clear()
             self.physical_upload_records.clear()
+            self.page_plans.clear()
             self.active_resident_keys.clear()
             self.superseded_keys.clear()
         self.storage_mode = storage_mode
@@ -1059,6 +1107,7 @@ class TextureAtlasPool:
                 self.source_ids.pop(key, None)
                 self.acknowledged_identities.pop(key, None)
                 self.physical_upload_records.pop(key, None)
+                self.page_plans.pop(key, None)
                 self.superseded_keys.discard(key)
                 self.eviction_count += 1
                 self.superseded_reclaimed_count += 1
@@ -1212,6 +1261,8 @@ class TextureAtlasPool:
         start = perf_counter()
         tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
         payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
+        for payload in payload_map.values():
+            _require_canonical_reduced_payload(payload, action="present")
         explicit_upserts = {
             int(key): value
             for key, value in dict(getattr(tile_delta, "upserts", {}) or {}).items()
@@ -1330,7 +1381,6 @@ class TextureAtlasPool:
             storage_mode=storage_mode,
             budget_bytes=budget_bytes,
         )
-        active = {int(tile_number) for tile_number, _payload in payload_items}
         active_keys = {_resident_key(payload) for _tile_number, payload in payload_items}
         active_keys.update(retained_active_keys.values())
         self.active_resident_keys = set(active_keys)
@@ -1759,6 +1809,8 @@ class TextureAtlasPool:
                 warm_resident_items=max(0, self.resident_count - len(self.active_resident_keys)),
             )
         payload_items = tuple((int(key), value) for key, value in payloads.items())
+        for _tile_number, payload in payload_items:
+            _require_canonical_reduced_payload(payload, action="warm")
         requested_mode = _atlas_storage_mode(payload_items, rgb_already_windowed=rgb_already_windowed)
         page_warm = None
         if any(getattr(payload, "page_backing", None) is not None for _tile, payload in payload_items):
@@ -2255,6 +2307,7 @@ class TextureAtlasPool:
         self.source_ids.pop(victim, None)
         self.acknowledged_identities.pop(victim, None)
         self.physical_upload_records.pop(victim, None)
+        self.page_plans.pop(victim, None)
         if victim in self.superseded_keys:
             self.superseded_reclaimed_count += 1
         self.superseded_keys.discard(victim)
@@ -2526,6 +2579,11 @@ class TextureAtlasPool:
                 return None
         for materialized in backing.materialized_pages:
             key = materialized.key
+            existing_plan = self.page_plans.get(key)
+            if existing_plan is not None and existing_plan != materialized.plan:
+                raise RuntimeError(
+                    "resident page key was supplied with different canonical geometry"
+                )
             slot_ref = self._page_table.lookup(key)
             newly_assigned = slot_ref is None
             try:
@@ -2544,6 +2602,7 @@ class TextureAtlasPool:
             except AtlasCapacityError:
                 return None
             if not newly_assigned:
+                self.page_plans[key] = materialized.plan
                 continue
             page = self.pages[int(page_index)]
             texture_kind = (
@@ -2610,6 +2669,7 @@ class TextureAtlasPool:
                     "physical_real_plane_identity": plane_identity_record(real_plane),
                     "physical_imag_plane_identity": plane_identity_record(imag_plane),
                 }
+            self.page_plans[key] = materialized.plan
             uploaded_keys.append(key)
 
         self.chunk_upload_count += len(uploaded_keys)
@@ -2670,33 +2730,90 @@ class TextureAtlasPool:
         parts: list[TileDrawPart] = []
         for resolution in resolved:
             plan = plan_by_key[resolution.target_key]
+            actual_plan = self.page_plans.get(resolution.actual_key)
+            if actual_plan is None:
+                raise RuntimeError(
+                    "resolved page has no checked canonical geometry; "
+                    "page-less reduced residency is forbidden"
+                )
             page_index = int(resolution.slot.page_index)
             page = self.pages[page_index]
             u0, v0, u1, v1 = page.uv_for_slot(int(resolution.slot.slot_index))
             slot_h, slot_w = page.tile_shape
-            scale_y, scale_x = resolution.scale
-            offset_y, offset_x = resolution.offset
+            mapped_area = 0
+            target_area = sum(
+                (block.source_rect_yx[1] - block.source_rect_yx[0])
+                * (block.source_rect_yx[3] - block.source_rect_yx[2])
+                for block in plan.draw_blocks
+            )
             for block in plan.draw_blocks:
-                sy0, sy1, sx0, sx1 = block.stored_rect_yx
-                by0, by1, bx0, bx1 = block.source_rect_yx
-                actual_y0, actual_y1 = sy0 * scale_y + offset_y, sy1 * scale_y + offset_y
-                actual_x0, actual_x1 = sx0 * scale_x + offset_x, sx1 * scale_x + offset_x
-                parts.append(
-                    TileDrawPart(
-                        world_rect=(
-                            region_x + ((bx0 - coverage_x0) * region_w) / float(coverage_w),
-                            region_y + ((by0 - coverage_y0) * region_h) / float(coverage_h),
-                            region_x + ((bx1 - coverage_x0) * region_w) / float(coverage_w),
-                            region_y + ((by1 - coverage_y0) * region_h) / float(coverage_h),
-                        ),
-                        uv_rect=(
-                            u0 + (u1 - u0) * (actual_x0 / float(slot_w)),
-                            v0 + (v1 - v0) * (actual_y0 / float(slot_h)),
-                            u0 + (u1 - u0) * (actual_x1 / float(slot_w)),
-                            v0 + (v1 - v0) * (actual_y1 / float(slot_h)),
-                        ),
-                        page_index=page_index,
+                for actual_block in actual_plan.draw_blocks:
+                    intersection = _rect_intersection_yx(
+                        block.source_rect_yx,
+                        actual_block.source_rect_yx,
                     )
+                    if intersection is None:
+                        continue
+                    by0, by1, bx0, bx1 = intersection
+                    asy0, asy1, asx0, asx1 = actual_block.stored_rect_yx
+                    aby0, aby1, abx0, abx1 = actual_block.source_rect_yx
+                    actual_y0 = _stored_edge_for_source(
+                        by0,
+                        source_start=aby0,
+                        source_stop=aby1,
+                        stored_start=asy0,
+                        stored_stop=asy1,
+                    )
+                    actual_y1 = _stored_edge_for_source(
+                        by1,
+                        source_start=aby0,
+                        source_stop=aby1,
+                        stored_start=asy0,
+                        stored_stop=asy1,
+                    )
+                    actual_x0 = _stored_edge_for_source(
+                        bx0,
+                        source_start=abx0,
+                        source_stop=abx1,
+                        stored_start=asx0,
+                        stored_stop=asx1,
+                    )
+                    actual_x1 = _stored_edge_for_source(
+                        bx1,
+                        source_start=abx0,
+                        source_stop=abx1,
+                        stored_start=asx0,
+                        stored_stop=asx1,
+                    )
+                    mapped_area += (by1 - by0) * (bx1 - bx0)
+                    parts.append(
+                        TileDrawPart(
+                            world_rect=(
+                                region_x
+                                + ((bx0 - coverage_x0) * region_w)
+                                / float(coverage_w),
+                                region_y
+                                + ((by0 - coverage_y0) * region_h)
+                                / float(coverage_h),
+                                region_x
+                                + ((bx1 - coverage_x0) * region_w)
+                                / float(coverage_w),
+                                region_y
+                                + ((by1 - coverage_y0) * region_h)
+                                / float(coverage_h),
+                            ),
+                            uv_rect=(
+                                u0 + (u1 - u0) * (actual_x0 / float(slot_w)),
+                                v0 + (v1 - v0) * (actual_y0 / float(slot_h)),
+                                u0 + (u1 - u0) * (actual_x1 / float(slot_w)),
+                                v0 + (v1 - v0) * (actual_y1 / float(slot_h)),
+                            ),
+                            page_index=page_index,
+                        )
+                    )
+            if mapped_area != target_area:
+                raise RuntimeError(
+                    "resolved canonical page geometry does not completely cover target"
                 )
 
         actual_keys = tuple(dict.fromkeys(item.actual_key for item in resolved))
@@ -3937,6 +4054,8 @@ class GpuMontageLayer:
     ) -> TileLayerUpdateStats:
         montage = getattr(geometry, "montage", None)
         payload_map = {int(key): value for key, value in dict(payloads or {}).items()}
+        for payload in payload_map.values():
+            _require_canonical_reduced_payload(payload, action="warm")
         if montage is None:
             # ADR 0055 G4c: non-montage geometries warm only source-anchored
             # payloads, and only as chunk residency (the pool's chunk-warm
@@ -3980,19 +4099,7 @@ class GpuMontageLayer:
     def payload_resident(self, payload: DisplayTilePayload) -> bool:
         """Return physical residency truth without changing bindings or LRU."""
 
-        backing = getattr(payload, "page_backing", None)
-        if backing is not None:
-            return all(
-                self._pool._page_table.resolve(target) is not None
-                for target in backing.requested_keys
-            )
-        resident_key = _resident_key(payload)
-        return bool(
-            self._pool.source_ids.get(resident_key) == payload.source_id
-            and self._pool.acknowledged_identities.get(resident_key)
-            == (getattr(payload, "tile_identity", None) or payload.source_id)
-            and self._pool._page_table.lookup(resident_key) is not None
-        )
+        return self._pool.payload_resident(payload)
 
 
 def _visual_textures_ready(visual) -> bool:

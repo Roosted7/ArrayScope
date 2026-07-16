@@ -1030,7 +1030,7 @@ class LevelStatsService:
         stats_start = perf_counter()
         expected = self._montage_level_expected_indices(session)
         require_refined = _montage_level_evidence_requires_refined(self, session)
-        visible_level_dependency = bool(require_refined and not getattr(session, "display_committed", False))
+        visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         batch = self._take_montage_level_evidence_batch(
             session,
             expected=expected,
@@ -1290,15 +1290,12 @@ class LevelStatsService:
             handle_ui_exception("montage level evidence continuation", exc)
 
         task_key = ("montage_level_evidence_continuation", session.key, int(session.session_id), generation)
-        visible_level_dependency = bool(
-            _montage_level_evidence_requires_refined(self, session)
-            and not getattr(session, "display_committed", False)
-        )
+        visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         if visible_level_dependency:
-            # This continuation advances the scan that gates PyQtGraph's very
-            # first pixels. It is correctness work, not speculative histogram
-            # refinement; parking it behind the optional-lane quota leaves the
-            # app with histogram/ROI metadata but zero tiles forever.
+            # This continuation advances the backend-required evidence scan
+            # that gates the first pixels. It is correctness work, not
+            # speculative histogram refinement; parking it behind the
+            # optional-lane quota leaves the app with metadata but zero tiles.
             handle = self.win.kernel.submit(
                 TaskSpec(
                     key=task_key,
@@ -1748,6 +1745,18 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
             or (requested_levels is None and getattr(session, "force_auto", False))
         )
     )
+
+
+def _montage_payload_level_evidence_is_visible_dependency(session) -> bool:
+    """Return whether payload evidence still gates the session's first pixels.
+
+    CPU presentation needs refined evidence and shader presentation needs only
+    rough evidence, but both are visible correctness dependencies until the
+    first display commits.  Evidence quality and scheduling criticality are
+    intentionally separate decisions.
+    """
+
+    return not bool(getattr(session, "display_committed", False))
 
 
 def _viewport_interaction_active(window) -> bool:

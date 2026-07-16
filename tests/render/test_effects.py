@@ -9,9 +9,14 @@ import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
-from arrayscope.display.montage import MontageTile, make_montage_plan
+from arrayscope.display.montage import MontageTile, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload
-from arrayscope.display.pyramid import LodPageCache, materialize_lod_page, plan_source_grid_pages
+from arrayscope.display.pyramid import (
+    LodPageCache,
+    MaterializedLodPage,
+    materialize_lod_page,
+    plan_source_grid_pages,
+)
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -23,6 +28,7 @@ from arrayscope.operations.pipeline import (
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
+from arrayscope.render import lod as render_lod
 from arrayscope.render.lod import LodPageSetKey
 from arrayscope.render.stages import LodAdmissionScope
 
@@ -52,7 +58,7 @@ def _session(data=None):
         state,
         axis=2,
         indices=(0, 1, 2),
-        tile_shape=(4, 6),
+        tile_shape=(int(data.shape[0]), int(data.shape[1])),
         columns=3,
         viewport_shape=(100, 100),
     )
@@ -128,6 +134,20 @@ def _assert_preview_rows_equal(left, right):
     assert left[4] == right[4]
     _assert_optional_array_equal(left[5], right[5])
     assert left[6] == right[6]
+
+
+def _stored_preview_values(pages) -> np.ndarray:
+    pages = tuple(pages)
+    assert pages and all(isinstance(page, MaterializedLodPage) for page in pages)
+    y0 = min(page.plan.stored_rect_yx[0] for page in pages)
+    y1 = max(page.plan.stored_rect_yx[1] for page in pages)
+    x0 = min(page.plan.stored_rect_yx[2] for page in pages)
+    x1 = max(page.plan.stored_rect_yx[3] for page in pages)
+    values = np.empty((y1 - y0, x1 - x0), dtype=pages[0].values.dtype)
+    for page in pages:
+        py0, py1, px0, px1 = page.plan.stored_rect_yx
+        values[py0 - y0 : py1 - y0, px0 - x0 : px1 - x0] = page.values
+    return values
 
 
 def test_evaluate_target_tile_level_zero_returns_native_tile_payload():
@@ -340,10 +360,10 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
 
     assert [row[0] for row in previews] == [0, 1]
     for row in previews:
-        tile_number, key, plane, histogram, shader_mapping, texture_kind, level_data, level_stats = row
+        tile_number, key, pages, histogram, shader_mapping, texture_kind, level_data, level_stats = row
         assert key.source_id == ("semantic", int(tile_number))
         assert key.level_xy == (1, 1)
-        assert plane.shape == (2, 3)
+        assert _stored_preview_values(pages).shape == (2, 3)
         assert histogram is None
         assert shader_mapping is not None
         assert texture_kind is not None
@@ -438,6 +458,62 @@ def test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input():
     assert effects.shared_preview_is_useful(session, tile, _demand(1)) is True
 
 
+def test_noncommuting_shared_preview_cannot_alias_direct_exact_pages():
+    data = np.arange(8 * 10 * 3, dtype=np.float32).reshape(8, 10, 3)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.shader_display = True
+    session.lod_preview_level = 2
+    demand = _demand(1)
+    tile = session.plan.tiles[0]
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        tile,
+        (tile,),
+        demand=demand,
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+    preview_key = rows[0][1]
+    preview_pages = rows[0][2]
+    exact_volume = evaluate_pipeline(data, session.document.enabled_operations)
+    exact_plane = np.ascontiguousarray(exact_volume[..., int(tile.source_index)], dtype=np.complex64)
+    exact_rendered = RenderedTile(
+        tile=tile,
+        image=exact_plane,
+        histogram_data=np.abs(exact_plane).astype(np.float32),
+        eval_ms=0.0,
+        slab_shape=exact_plane.shape,
+        slab_nbytes=exact_plane.nbytes,
+        semantic_data=exact_plane,
+        lod_source_data=exact_plane,
+    )
+    exact_key = render_lod.page_set_key_for_rendered(
+        exact_rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        shader_display=True,
+    )
+
+    assert preview_key.source_id == exact_key.source_id
+    assert preview_key.page_keys != exact_key.page_keys
+    assert preview_key.plans[0].key.operation_key != exact_key.plans[0].key.operation_key
+    cache = LodPageCache(max_bytes=1 << 20)
+    owner = ("noncommuting-preview", 0)
+    assert cache.claim_plans(preview_key.plans, owner) == preview_key.plans
+    try:
+        for page in preview_pages:
+            cache.admit_as(page.key, page, owner=owner)
+    finally:
+        cache.release_owner_claims(owner)
+    assert cache.exact_pages(preview_key.plans) is not None
+    assert cache.exact_pages(exact_key.plans) is None
+
+
 def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
     data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
     session = _session(data)
@@ -463,9 +539,9 @@ def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
     exact = evaluate_pipeline(data, operations)
 
     assert len(rows) == 3
-    for tile_number, _key, plane, *_rest in rows:
+    for tile_number, _key, pages, *_rest in rows:
         np.testing.assert_allclose(
-            np.asarray(plane),
+            _stored_preview_values(pages),
             np.asarray(exact)[::4, ::4, int(tile_number)],
             rtol=1e-5,
             atol=1e-5,
@@ -513,7 +589,7 @@ def test_shared_fft_preview_maps_shifted_flipped_window_by_source_index():
     assert [int(row[0]) for row in rows] == [0, 1, 2]
     for row, source_index in zip(rows, (5, 6, 7), strict=True):
         np.testing.assert_allclose(
-            np.asarray(row[2]),
+            _stored_preview_values(row[2]),
             np.asarray(exact)[::4, ::4, int(source_index)],
             rtol=1e-5,
             atol=1e-5,
@@ -542,7 +618,8 @@ def test_shared_complex_preview_rows_include_display_histogram():
 
     assert len(rows) == 2
     for row in rows:
-        _tile_number, _key, plane, histogram, *_rest = row
+        _tile_number, _key, pages, histogram, *_rest = row
+        plane = _stored_preview_values(pages)
         assert np.iscomplexobj(plane)
         assert histogram is not None
         assert np.shape(histogram) == np.shape(plane)

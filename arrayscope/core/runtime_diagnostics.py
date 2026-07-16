@@ -138,6 +138,8 @@ class MontageRuntimeDiagnostics:
     tile_lod_pyramid_hits: int = 0
     tile_lod_pyramid_misses: int = 0
     tile_lod_pyramid_evictions: int = 0
+    # ((anisotropic reduction vector, reducer family, resident page count), ...)
+    tile_lod_page_families: tuple[tuple[tuple[int, ...], str, int], ...] = ()
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
     tile_lod_ingest_reductions: int = 0
@@ -924,6 +926,7 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_pyramid_hits",
         "tile_lod_pyramid_misses",
         "tile_lod_pyramid_evictions",
+        "tile_lod_page_families",
         "tile_lod_pending_materializations",
         "tile_lod_materializations_completed",
         "tile_lod_ingest_reductions",
@@ -1093,6 +1096,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"pyramid={format_bytes(montage.tile_lod_pyramid_bytes)}/{montage.tile_lod_pyramid_entries}e "
             f"hit/miss/evict={montage.tile_lod_pyramid_hits}/{montage.tile_lod_pyramid_misses}/"
             f"{montage.tile_lod_pyramid_evictions} "
+            f"page_families={montage.tile_lod_page_families} "
             f"pending={montage.tile_lod_pending_materializations} "
             f"completed={montage.tile_lod_materializations_completed} "
             f"ingest={montage.tile_lod_ingest_reductions} "

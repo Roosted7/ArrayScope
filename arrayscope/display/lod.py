@@ -226,7 +226,29 @@ def choose_resident_level(demand: LodDemand, resident_levels) -> int:
     resident = {int(level) for level in tuple(resident_levels or ()) if int(level) > 0}
     desired = max(0, int(demand.desired_level))
     candidates = [level for level in resident if level <= desired]
-    return min(candidates) if candidates else 0
+    return (
+        min(candidates, key=lambda level: resident_presentation_rank(level, desired))
+        if candidates
+        else 0
+    )
+
+
+def resident_presentation_rank(level: int, desired: int) -> tuple[int, int]:
+    """Rank presentable resident levels without authorizing quality loss.
+
+    A level finer than the current demand remains strictly preferable to every
+    coarser level: zooming out is a camera/coverage change, not permission to
+    replace higher-quality pixels.  If no finer/equal level exists, the nearest
+    coarser fallback wins so complete coverage remains preferable to black.
+    Physical eviction pressure is backend-owned and therefore does not enter
+    this pure presentation rank.
+    """
+
+    level = max(0, int(level))
+    desired = max(0, int(desired))
+    if level <= desired:
+        return (0, level)
+    return (1, level - desired)
 
 
 def resident_lod_policy(

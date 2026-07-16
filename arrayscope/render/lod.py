@@ -36,6 +36,7 @@ from arrayscope.display.lod import (
     choose_resident_level,
     factor_xy_for_level,
     native_lod_policy,
+    resident_presentation_rank,
     resident_lod_policy,
     select_lod_demand,
 )
@@ -45,6 +46,7 @@ from arrayscope.display.pyramid import (
     LodPageCache,
     LodPagePlan,
     MaterializedLodPage,
+    ResolvedLodPageSet,
     materialize_lod_page,
     plan_source_grid_pages,
 )
@@ -298,15 +300,24 @@ def _page_route_format(
 
     if any(int(step) for step in reduction_yx):
         return reduced_format
+    if source.ndim != 2:
+        raise ValueError("canonical live LOD pages require scalar or complex source values")
     dtype = np.dtype(source.dtype)
     if np.issubdtype(dtype, np.complexfloating):
         return REDUCER_NATIVE, "complex64", COMPLEX_RG32F
-    if dtype == np.dtype(np.uint8):
-        return REDUCER_NATIVE, "uint8", RGB8
     return REDUCER_NATIVE, dtype.name, SCALAR_R32F
 
 
-def _page_source_origin(session, source: np.ndarray) -> tuple[int, int]:
+def source_origin_yx_for_session(session, source: np.ndarray) -> tuple[int, int]:
+    """Locate a rendered source plane on the canonical native source grid.
+
+    Every live producer must pair its precomputed page plans and numeric
+    materialization with this same origin.  Falling back to ``(0, 0)`` is
+    correct only when the session has no source anchor (ordinary montage
+    tiles); applying it to a shifted source window labels window-local values
+    with the wrong canonical bins.
+    """
+
     anchor_fn = getattr(session, "_payload_source_anchor", None)
     anchor = anchor_fn(tuple(np.shape(source)[:2])) if callable(anchor_fn) else None
     if anchor is None:
@@ -328,7 +339,7 @@ def page_plans_for_rendered(session, rendered, *, demand, level: int, native_sou
         reduction_yx=reduction_yx,
         reduced_format=(reducer, dtype, representation),
     )
-    origin_y, origin_x = _page_source_origin(session, source)
+    origin_y, origin_x = source_origin_yx_for_session(session, source)
     height, width = (int(value) for value in source.shape[:2])
     anchor_fn = getattr(session, "_payload_source_anchor", None)
     anchor = anchor_fn((height, width)) if callable(anchor_fn) else None
@@ -375,9 +386,9 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
         reducer = REDUCER_NATIVE
         if np.issubdtype(dtype, np.complexfloating):
             planned_dtype, representation = "complex64", COMPLEX_RG32F
-        elif dtype == np.dtype(np.uint8):
-            planned_dtype, representation = "uint8", RGB8
         else:
+            # Session tile geometry is two-dimensional.  ``uint8`` is a
+            # scalar scientific value here, not evidence of RGB components.
             planned_dtype, representation = dtype.name, SCALAR_R32F
     height, width = (int(value) for value in session.plan.tile_shape[:2])
     semantic_source_id = session.tile_semantic_source_id(int(tile.source_index))
@@ -423,24 +434,7 @@ def resident_lod_active(session) -> bool:
     return bool(
         str(session.lod_policy_mode) == LOD_POLICY_RESIDENT
         and session.lod_page_cache is not None
-        and not _phase_vector_display_requires_native(session)
     )
-
-
-def _phase_vector_display_requires_native(session) -> bool:
-    """Keep phase/cyclic display native until amplitude statistics are paired.
-
-    A canonical phase-vector page stores circular direction and resultant
-    coherence, not native complex amplitude. Reusing the native amplitude
-    level window makes it black; normalizing it to [0, 1] makes the public
-    level control and histogram describe different values. Native is the only
-    truthful live presentation until a paired amplitude sufficient statistic
-    is part of the page contract.
-    """
-
-    channel = getattr(getattr(session, "view_state", None), "channel", None)
-    channel = str(getattr(channel, "value", channel) or "")
-    return channel == "angle"
 
 
 def selected_lod_factor(session) -> int:
@@ -485,17 +479,14 @@ def _demand_key_sig(demand) -> tuple:
 def _page_set_complete(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
     return bool(
         isinstance(cache, LodPageCache)
-        and all(cache.resolve(page_key) is not None for page_key in key.page_keys)
+        and cache.resolve_plans(key.plans) is not None
     )
 
 
 def _page_set_exact(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
-    if not isinstance(cache, LodPageCache):
-        return False
-    resolutions = tuple(cache.resolve(page_key) for page_key in key.page_keys)
     return bool(
-        all(item is not None for item in resolutions)
-        and all(item.actual_key == item.target_key for item in resolutions)
+        isinstance(cache, LodPageCache)
+        and cache.exact_pages(key.plans) is not None
     )
 
 
@@ -506,6 +497,35 @@ def _page_set_materialized_pages(
     if not isinstance(cache, LodPageCache):
         return None
     return cache.resolved_pages(key.plans)
+
+
+def _page_set_resolution(
+    cache: LodPageCache | None,
+    key: LodPageSetKey,
+) -> ResolvedLodPageSet | None:
+    """Canonical complete requested -> actual page-set truth."""
+
+    if not isinstance(cache, LodPageCache):
+        return None
+    return cache.resolved_page_set(key.plans)
+
+
+def _conservative_actual_level_for_payload(payload) -> int:
+    """Coarsest physical page binding used by presentation policy.
+
+    ``DisplayTilePayload.lod`` is the requested semantic page geometry.  It
+    cannot describe heterogeneous target bindings, so floor/no-demotion
+    decisions consult the canonical resolved page set instead.  Non-page
+    payloads retain their ordinary singular LOD meaning.
+    """
+
+    return int(
+        getattr(
+            payload,
+            "conservative_actual_lod_level",
+            int(getattr(getattr(payload, "lod", None), "level", 0) or 0),
+        )
+    )
 
 
 def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[int, ...]:
@@ -585,13 +605,15 @@ def session_resident_levels(session, previous_factor: int) -> tuple[int, ...]:
 
 
 def presented_lod_summary(session) -> tuple[int, int, tuple[int, int]]:
-    """(level, factor, (factor_x, factor_y)) shown by the plurality of tiles.
+    """Physical LOD shown by the plurality of target page bindings.
 
     The session-wide policy decision only claims a level once every
     rendered tile can present it, which reads as "native" while any tile
     is still streaming.  Diagnostics report what the committed
-    presentation actually shows, so the JSONL A/B stays truthful during
-    partial residency (ADR 0050).  Ties prefer the finer level.
+    presentation actually samples, so heterogeneous page ancestors remain
+    separate observations instead of becoming one fictional tile level.
+    Non-page payloads contribute their ordinary singular LOD.  Ties prefer
+    the finer level (ADR 0050).
     """
 
     payloads = dict(getattr(session.tile_presentation_state, "payloads", {}) or {})
@@ -606,22 +628,41 @@ def presented_lod_summary(session) -> tuple[int, int, tuple[int, int]]:
             int(decision.applied_factor),
             tuple(int(value) for value in decision.applied_factor_xy),
         )
-    counts: dict[int, int] = {}
-    samples: dict[int, object] = {}
+    counts: dict[tuple[int, int, int, int], int] = {}
     for payload in payloads.values():
+        backing = getattr(payload, "page_backing", None)
+        resolved = getattr(backing, "resolved_page_set", None)
+        if isinstance(resolved, ResolvedLodPageSet):
+            for reduction_yx in resolved.actual_reductions_yx:
+                factor_y = 1 << int(reduction_yx[0])
+                factor_x = 1 << int(reduction_yx[1])
+                level = max(tuple(int(value) for value in reduction_yx), default=0)
+                row = (level, max(factor_x, factor_y), factor_x, factor_y)
+                counts[row] = counts.get(row, 0) + 1
+            continue
         lod = getattr(payload, "lod", None)
         level = int(getattr(lod, "level", 0) or 0)
-        counts[level] = counts.get(level, 0) + 1
-        samples.setdefault(level, lod)
-    level = min(counts, key=lambda candidate: (-counts[candidate], candidate))
-    lod = samples.get(level)
-    if lod is None or level <= 0:
-        return (0, 1, (1, 1))
-    source_shape = tuple(getattr(lod, "source_shape", (1, 1)))
-    texture_shape = tuple(getattr(lod, "texture_shape", (1, 1)))
-    factor_y = max(1, round(int(source_shape[0]) / max(1, int(texture_shape[0]))))
-    factor_x = max(1, round(int(source_shape[1]) / max(1, int(texture_shape[1]))))
-    return (int(level), int(getattr(lod, "factor", 1) or 1), (int(factor_x), int(factor_y)))
+        factor = int(getattr(lod, "factor", 1) or 1)
+        if lod is None or level <= 0:
+            row = (0, 1, 1, 1)
+        else:
+            source_shape = tuple(getattr(lod, "source_shape", (1, 1)))
+            texture_shape = tuple(getattr(lod, "texture_shape", (1, 1)))
+            factor_y = max(
+                1,
+                round(int(source_shape[0]) / max(1, int(texture_shape[0]))),
+            )
+            factor_x = max(
+                1,
+                round(int(source_shape[1]) / max(1, int(texture_shape[1]))),
+            )
+            row = (level, factor, factor_x, factor_y)
+        counts[row] = counts.get(row, 0) + 1
+    level, factor, factor_x, factor_y = min(
+        counts,
+        key=lambda candidate: (-counts[candidate], candidate),
+    )
+    return (level, factor, (factor_x, factor_y))
 
 
 def ingest_lod_demand(session) -> object | None:
@@ -696,7 +737,7 @@ class LodPageSetKey:
 
 
 @dataclass(frozen=True)
-class RungMaterializationRequest:
+class LodPageMaterializationRequest:
     """One page-set request with only the CPU claims it newly owns."""
 
     tile_number: int
@@ -726,7 +767,7 @@ def plan_materialization(
     level: int,
     key: LodPageSetKey,
     native_source: np.ndarray | None = None,
-) -> RungMaterializationRequest:
+) -> LodPageMaterializationRequest:
     """Claim only missing canonical pages; numeric work stays direct-source."""
 
     if native_source is None:
@@ -740,11 +781,14 @@ def plan_materialization(
     plans = key.plans
     owner = ("lod-page-request", id(session), tile_number, key)
     claimed = cache.claim_plans(plans, owner)
-    return RungMaterializationRequest(
+    return LodPageMaterializationRequest(
         tile_number=tile_number,
         key=key,
         source=native_source,
-        source_origin_yx=_page_source_origin(session, np.asarray(native_source)),
+        source_origin_yx=source_origin_yx_for_session(
+            session,
+            np.asarray(native_source),
+        ),
         plans=plans,
         claimed_plans=claimed,
         owner=owner,
@@ -757,8 +801,9 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
     Camera changes never restart evaluation. They only request presentation
     work when the current payload is too coarse for the new demand, still a
     preview, or absent. A coarser demand never replaces an exact finer
-    presentation unless visible finer payloads alone exceed the residency
-    budget. This recomputes the decision from the current
+    presentation. Physical eviction pressure belongs to the backend that can
+    first reclaim hidden/speculative residency; a logical payload-byte sum is
+    not authority to lower visible quality. This recomputes the decision from the current
     ``view_range``/``viewport_shape`` (demand math plus pyramid peeks; never
     reduction or other bulk work), queues singleflight materializations for
     missing display payloads, and dirties tiles only when a swap improves
@@ -796,14 +841,12 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
     if not resident_lod_active(session):
         return False
     demand = session.lod_policy_decision.demand
-    pyramid = session.lod_page_cache
     desired = int(demand.desired_level)
     commit_needed = False
     visible_by_number = {int(t.montage_index): t for t in tuple(session.visible_tiles)}
     acknowledged_payloads = dict(
         getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
     )
-    residency_pressure_demote = _visible_residency_pressure_demands_demote(session, demand)
     # Priority order, not row order: materializations start immediately
     # for the demanded level, and whatever the workers complete before a
     # newer viewport supersedes the rest is the work nearest the
@@ -826,7 +869,7 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
             int(tile_number),
             session.display_tile_payloads.get(int(tile_number)),
         )
-        presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        presented_level = _conservative_actual_level_for_payload(payload)
         resident = set(tile_resident_levels(session, rendered, demand=demand))
         if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
             # The presented texture itself is materialized and resident;
@@ -847,7 +890,7 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
             continue
-        if presented_level <= desired and not residency_pressure_demote:
+        if presented_level <= desired:
             continue
         applied = int(choose_resident_level(demand, tuple(sorted(resident))))
         if presented_level != applied:
@@ -867,44 +910,9 @@ def preserve_finer_presented_payload(session, payload) -> bool:
     if payload is None or str(getattr(payload, "quality", "exact")) != "exact":
         return False
     demand = session.lod_policy_decision.demand
-    presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+    presented = _conservative_actual_level_for_payload(payload)
     desired = int(getattr(demand, "desired_level", 0) or 0)
-    return bool(
-        presented < desired
-        and not _visible_residency_pressure_demands_demote(session, demand)
-    )
-
-
-def _visible_residency_pressure_demands_demote(session, demand) -> bool:
-    """Return True when exact/finer active payloads exceed GPU residency budget.
-
-    Demand by itself is not pressure: a fully resident native montage should
-    zoom as a camera transform.  This predicate is the explicit escape hatch
-    for wider zoomed-out views that reveal enough tiles that keeping active
-    exact/finer payloads would exceed the presentation residency budget.
-    """
-
-    budget = int(getattr(session, "tile_residency_budget_bytes", 0) or 0)
-    desired = int(getattr(demand, "desired_level", 0) or 0)
-    if budget <= 0 or desired <= 0:
-        return False
-    total = 0
-    payloads = dict(
-        getattr(getattr(session, "tile_presentation_state", None), "payloads", {})
-        or getattr(session, "display_tile_payloads", {})
-        or {}
-    )
-    for tile_number in tuple(getattr(session, "visible_tile_numbers", ()) or ()):
-        payload = payloads.get(int(tile_number))
-        if payload is None:
-            continue
-        level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        if level > desired:
-            continue
-        total += int(getattr(payload, "nbytes", 0) or 0)
-        if total > budget:
-            return True
-    return False
+    return presented < desired
 
 
 # --------------------------------------------------------------------------
@@ -954,20 +962,22 @@ def admit_retained_preview_level(
         reducer=reducer,
         plans=plans,
     )
-    if _page_set_complete(preview_pyramid, key):
+    if _page_set_exact(preview_pyramid, key):
         return None
     owner = ("retained-preview-pages", semantic_source_id, key)
     claimed = preview_pyramid.claim_plans(plans, owner)
     if not claimed:
         return None
+    if not preview_pyramid.begin_owner_work(owner):
+        preview_pyramid.release_owner_claims(owner)
+        raise RuntimeError("retained preview page claims disappeared before admission")
     try:
         for plan in claimed:
             page = materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan)
             preview_pyramid.admit_as(plan.key, page, owner=owner)
-    except Exception:
-        preview_pyramid.release_owner_claims(owner)
-        return None
-    if not _page_set_complete(preview_pyramid, key):
+    finally:
+        preview_pyramid.finish_owner_work(owner)
+    if not _page_set_exact(preview_pyramid, key):
         return None
     return key
 
@@ -977,20 +987,48 @@ def admit_retained_preview_level(
 # --------------------------------------------------------------------------
 
 
-def _floor_key_presentable(session, key, cache) -> bool:
-    """A floor is presentable only with complete exact/coarse page coverage."""
-
-    return isinstance(key, LodPageSetKey) and _page_set_complete(cache, key)
-
-
 def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
-    """Best *presentable* resident pyramid key: nearest demand, finer ties."""
+    """Best complete floor, ranked by physical rather than requested quality."""
 
     pyramid = session.lod_page_cache
     demand = session.lod_policy_decision.demand
     desired = int(demand.desired_level)
     semantic_id = session.tile_semantic_source_id(int(source_index))
     candidates = []
+    seen: set[LodPageSetKey] = set()
+
+    def add_candidate(
+        key: LodPageSetKey,
+        resolved: ResolvedLodPageSet,
+        *,
+        owner=None,
+    ) -> None:
+        if key in seen:
+            return
+        seen.add(key)
+        coarsest_actual_level = int(resolved.coarsest_actual_level)
+        target_level = int(key.level)
+        metadata_fn = getattr(session, "preview_floor_metadata", None)
+        metadata = metadata_fn(key) if callable(metadata_fn) else None
+        if owner is ClaimOwner.PREVIEW:
+            semantic_quality = str(getattr(metadata, "quality", "preview") or "preview")
+        else:
+            semantic_quality = "exact"
+        row = (
+            (
+                resident_presentation_rank(coarsest_actual_level, desired),
+                0 if semantic_quality == "exact" else 1,
+                0 if resolved.exact else 1,
+                abs(target_level - desired),
+                target_level,
+                len(seen),
+            ),
+            key,
+            coarsest_actual_level,
+            pyramid,
+        )
+        candidates.append(row)
+
     records = () if tile_number is None else (session.lifecycle.peek(int(tile_number)),)
     for rec in records:
         if rec is None:
@@ -1000,50 +1038,83 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
                 continue
             if key.source_id != semantic_id or int(key.tile_id) != int(source_index):
                 continue
-            if not _floor_key_presentable(session, key, pyramid):
-                continue
-            level = key.level
-            candidates.append((_resident_floor_rank(level, desired), key, level, pyramid))
-    if not candidates:
-        tile = next(
-            (
-                value
-                for value in tuple(getattr(session.plan, "tiles", ()) or ())
-                if int(value.source_index) == int(source_index)
-                and (tile_number is None or int(value.montage_index) == int(tile_number))
-            ),
-            None,
+            resolved = _page_set_resolution(pyramid, key)
+            if resolved is not None:
+                add_candidate(key, resolved, owner=entry.owner)
+
+    tile = next(
+        (
+            value
+            for value in tuple(getattr(session.plan, "tiles", ()) or ())
+            if int(value.source_index) == int(source_index)
+            and (tile_number is None or int(value.montage_index) == int(tile_number))
         )
-        if tile is not None:
-            levels = tuple(
-                dict.fromkeys(
-                    (
-                        int(getattr(session, "lod_preview_level", 0) or 0),
-                        desired,
-                        *tuple(int(value) for value in demand.acceptable_levels),
-                    )
+        ,
+        None,
+    )
+    if tile is not None:
+        preview_level = int(getattr(session, "lod_preview_level", 0) or 0)
+        exact_levels = tuple(
+            dict.fromkeys(
+                (
+                    preview_level,
+                    desired,
+                    *tuple(int(value) for value in demand.acceptable_levels),
                 )
             )
-            for level in levels:
-                if level <= 0:
-                    continue
-                key = page_set_key_for_tile(session, tile, demand=demand, level=level)
-                if _floor_key_presentable(session, key, pyramid):
-                    candidates.append(
-                        (_resident_floor_rank(level, desired), key, level, pyramid)
-                    )
+        )
+        for level in exact_levels:
+            if level <= 0:
+                continue
+            key = page_set_key_for_tile(session, tile, demand=demand, level=level)
+            resolved = _page_set_resolution(pyramid, key)
+            if resolved is not None and resolved.exact:
+                add_candidate(key, resolved)
+
+        # If no exact known rung covers this source, resolve only the semantic
+        # target (or the retained preview for native demand). Scanning every
+        # acceptable hypothetical target let one physical L4 page masquerade
+        # as L1/L2/L3 and made requested identity decide visible quality.
+        positive_acceptable = tuple(
+            int(value) for value in demand.acceptable_levels if int(value) > 0
+        )
+        fallback_level = (
+            desired
+            if desired > 0
+            else preview_level
+            if preview_level > 0
+            else min(positive_acceptable, default=0)
+        )
+        if fallback_level > 0:
+            key = page_set_key_for_tile(
+                session,
+                tile,
+                demand=demand,
+                level=fallback_level,
+            )
+            resolved = _page_set_resolution(pyramid, key)
+            if resolved is not None:
+                add_candidate(key, resolved)
+
     if not candidates:
         return None
-    _rank, key, level, owning_cache = min(candidates, key=lambda item: item[0])
-    return (key, level, owning_cache)
+    _rank, key, coarsest_actual_level, owning_cache = min(
+        candidates,
+        key=lambda item: item[0],
+    )
+    return (key, coarsest_actual_level, owning_cache)
 
 
-def _resident_floor_rank(level: int, desired: int) -> tuple[int, int]:
-    level = int(level)
-    desired = int(desired)
-    if level <= desired:
-        return (0, desired - level)
-    return (1, level - desired)
+def _floor_resolution_and_quality(session, key, cache):
+    resolved = _page_set_resolution(cache, key)
+    if resolved is None:
+        return None, None, "preview"
+    metadata_fn = getattr(session, "preview_floor_metadata", None)
+    metadata = metadata_fn(key) if callable(metadata_fn) else None
+    quality = str(getattr(metadata, "quality", "preview") or "preview")
+    if not resolved.exact:
+        quality = "preview"
+    return resolved, metadata, quality
 
 
 def floor_can_progress(session, tile_number: int, tile=None) -> bool:
@@ -1069,18 +1140,28 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         return False
     if payload is None:
         return True
-    presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-    best_level = int(best[1])
-    metadata_fn = getattr(session, "preview_floor_metadata", None)
-    metadata = metadata_fn(best[0]) if callable(metadata_fn) else None
-    best_quality = str(getattr(metadata, "quality", "preview") or "preview")
-    if best_level == presented:
-        best_pages = _page_set_materialized_pages(best[2], best[0]) or ()
+    presented_actual_level = _conservative_actual_level_for_payload(payload)
+    best_actual_level = int(best[1])
+    resolved, _metadata, best_quality = _floor_resolution_and_quality(
+        session,
+        best[0],
+        best[2],
+    )
+    if resolved is None:
+        return False
+    if best_actual_level == presented_actual_level:
         current_backing = getattr(payload, "page_backing", None)
-        current_keys = tuple(
-            page.key for page in tuple(getattr(current_backing, "materialized_pages", ()) or ())
+        current_resolved = getattr(current_backing, "resolved_page_set", None)
+        current_actual_keys = tuple(
+            getattr(current_resolved, "actual_keys", ()) or ()
         )
-        if current_keys != tuple(page.key for page in best_pages):
+        current_requested_keys = tuple(
+            getattr(current_backing, "requested_keys", ()) or ()
+        )
+        if (
+            current_actual_keys != tuple(resolved.actual_keys)
+            or current_requested_keys != tuple(best[0].page_keys)
+        ):
             return True
     if str(getattr(payload, "quality", "exact")) != "preview":
         # "Exact" describes the reduced target's semantic quality, not native
@@ -1089,9 +1170,12 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         # floor left the ladder with zero work (target resident) while the
         # backend stayed permanently coarse.
         desired = int(session.lod_policy_decision.demand.desired_level)
-        return bool(presented > desired and best_level < presented)
+        return bool(
+            presented_actual_level > desired
+            and best_actual_level < presented_actual_level
+        )
     return bool(
-        best_level != presented
+        best_actual_level != presented_actual_level
         or best_quality != str(getattr(payload, "quality", "preview") or "preview")
     )
 
@@ -1137,33 +1221,39 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         best = best_floor_key(session, source_index, tile_number=int(tile_number))
         if best is None:
             continue
-        key, level, owning_cache = best
-        metadata = None
-        metadata_fn = getattr(session, "preview_floor_metadata", None)
-        if callable(metadata_fn):
-            metadata = metadata_fn(key)
-        best_quality = str(getattr(metadata, "quality", "preview") or "preview")
+        key, coarsest_actual_level, owning_cache = best
+        resolved, metadata, best_quality = _floor_resolution_and_quality(
+            session,
+            key,
+            owning_cache,
+        )
+        if resolved is None:
+            continue
         if existing is not None:
-            presented = int(getattr(getattr(existing, "lod", None), "level", 0) or 0)
-            best_pages = _page_set_materialized_pages(owning_cache, key) or ()
+            presented_actual_level = _conservative_actual_level_for_payload(existing)
             existing_backing = getattr(existing, "page_backing", None)
-            existing_keys = tuple(
-                page.key
-                for page in tuple(getattr(existing_backing, "materialized_pages", ()) or ())
+            existing_resolved = getattr(existing_backing, "resolved_page_set", None)
+            existing_actual_keys = tuple(
+                getattr(existing_resolved, "actual_keys", ()) or ()
+            )
+            existing_requested_keys = tuple(
+                getattr(existing_backing, "requested_keys", ()) or ()
             )
             if (
-                presented == int(level)
+                presented_actual_level == int(coarsest_actual_level)
                 and str(getattr(existing, "quality", "preview") or "preview") == best_quality
-                and existing_keys == tuple(page.key for page in best_pages)
+                and existing_actual_keys == tuple(resolved.actual_keys)
+                and existing_requested_keys == tuple(key.page_keys)
             ):
                 continue
             if str(getattr(existing, "quality", "exact")) != "preview":
                 desired = int(session.lod_policy_decision.demand.desired_level)
-                if presented <= desired or int(level) >= presented:
+                if (
+                    presented_actual_level <= desired
+                    or int(coarsest_actual_level) >= presented_actual_level
+                ):
                     continue
-        pages = _page_set_materialized_pages(owning_cache, key)
-        if not pages:
-            continue
+        pages = resolved.materialized_pages
         texture_kind = getattr(metadata, "texture_kind", None)
         if texture_kind is None:
             texture_kind = (
@@ -1191,12 +1281,12 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                 session.view_state,
                 getattr(session, "colormap_lut", None),
             )
-        factor_x = 1 << int(key.level_xy[0])
-        factor_y = 1 << int(key.level_xy[1])
+        requested_factor_x = 1 << int(key.level_xy[0])
+        requested_factor_y = 1 << int(key.level_xy[1])
         tile_shape = tuple(int(value) for value in session.plan.tile_shape)
-        lod = LodInfo(
-            level=level,
-            factor=max(factor_x, factor_y),
+        requested_lod = LodInfo(
+            level=key.level,
+            factor=max(requested_factor_x, requested_factor_y),
             source_shape=tile_shape,
             texture_shape=(
                 max(plan.stored_rect_yx[1] for plan in key.plans)
@@ -1215,7 +1305,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         # planes do not honor.  ``_payload_source_anchor`` itself returns
         # None for montage sessions and unanchorable chains.
         source_anchor = None
-        if best_quality == "exact":
+        if best_quality == "exact" and resolved.exact:
             anchor_fn = getattr(session, "_payload_source_anchor", None)
             if callable(anchor_fn):
                 source_anchor = anchor_fn(tile_shape)
@@ -1224,11 +1314,16 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             source_index=source_index,
             image=np.asarray(pages[0].values),
             histogram_data=None,
-            source_id=(*semantic_id, "floor", key.reducer, key.level_xy),
+            source_id=(
+                *semantic_id,
+                "floor",
+                key.reducer,
+                ("actual-pages", resolved.actual_keys),
+            ),
             texture_data=np.asarray(pages[0].values),
             texture_kind=texture_kind,
-            lod=lod,
-            quality=str(getattr(metadata, "quality", "preview") or "preview"),
+            lod=requested_lod,
+            quality=best_quality,
             shader_mapping=shader_mapping,
             source_anchor=source_anchor,
             page_backing=PageBackedPresentation(
@@ -1240,7 +1335,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                     min(plan.valid_source_rect_yx[2] for plan in key.plans),
                     max(plan.valid_source_rect_yx[3] for plan in key.plans),
                 ),
-                requested_lod=lod,
+                requested_lod=requested_lod,
             ),
             level_data=getattr(metadata, "level_data", None),
             level_stats=getattr(metadata, "level_stats", None),
@@ -1254,8 +1349,8 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                     else texture_kind
                 ),
                 shader_mapping=shader_mapping,
-                lod=lod,
-                quality=str(getattr(metadata, "quality", "preview") or "preview"),
+                lod=requested_lod,
+                quality=best_quality,
             ),
             presentation_identity=session.tile_presentation_identity(shader_mapping),
         )
@@ -1345,54 +1440,6 @@ def resident_texture_for_rendered_tile(
         else TexturePlaneKind.SCALAR_R32F
     )
     return np.asarray(pages[0].values), None, lod, page_backing, texture_kind
-
-
-def _release_chain_claims(pyramid, chain) -> bool:
-    """End every unadmitted claim in a chain; True when any step is resident.
-
-    The single place claim balancing happens for scheduling paths that did
-    not run (blocked admission, stale session, supersession) or failed:
-    admitted levels are results and stay; everything else releases its
-    singleflight claim so the next refresh can re-request it.
-    """
-
-    return any(
-        isinstance(step_key, LodPageSetKey) and _page_set_complete(pyramid, step_key)
-        for step_key, _rel in tuple(chain or ())
-    )
-
-
-def _apply_release_effects(pyramid, effects) -> int:
-    # CPU page claims are owner-scoped and released from the request, never
-    # inferred from lifecycle's tile/rung key.
-    return len(tuple(effects or ())) if pyramid is not None else 0
-
-
-def _finish_request_claims(session, request, pyramid) -> bool:
-    """Mark a drained request's claims resident or released from pyramid truth."""
-
-    if isinstance(pyramid, LodPageCache):
-        pyramid.release_owner_claims(request.owner)
-    admitted = _page_set_complete(pyramid, request.key)
-    if admitted:
-        session.lifecycle.level_resident(int(request.tile_number), request.key)
-    else:
-        session.lifecycle.level_declined(int(request.tile_number), request.key)
-    return admitted
-
-
-def _release_request_claims(session, request, pyramid) -> bool:
-    """Release one request through the lifecycle machine and pyramid cache."""
-
-    admitted = _page_set_complete(pyramid, request.key)
-    if isinstance(pyramid, LodPageCache):
-        pyramid.release_owner_claims(request.owner)
-    # `pending_rung_materializations` is always the lifecycle-backed view (ADR 0051
-    # P3); the pre-P3 chain fallback was deleted in the redesign.
-    _apply_release_effects(pyramid, session.pending_rung_materializations.release(request))
-    if admitted:
-        session.lifecycle.level_resident(int(request.tile_number), request.key)
-    return admitted
 
 
 def release_session_claims(session) -> int:

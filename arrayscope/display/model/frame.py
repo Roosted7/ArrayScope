@@ -7,14 +7,20 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from arrayscope.gpu.page_table import page_key_can_cover
+from arrayscope.gpu.page_table import PageResolution, page_key_can_cover
 
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.model.tile_identity import TileIdentity, TilePresentationIdentity
-from arrayscope.display.pyramid import LodPagePlan, MaterializedLodPage
+from arrayscope.display.pyramid import (
+    LodPagePlan,
+    MaterializedLodPage,
+    ResolvedLodPageSet,
+    resolve_materialized_page_targets,
+    resolved_materialized_page_set,
+)
 
 
 def array_value_at(data, y_i: int, x_i: int):
@@ -52,12 +58,30 @@ class PayloadSourceAnchor:
 
 @dataclass(frozen=True)
 class PageBackedPresentation:
-    """Backend-neutral logical pages and supplied CPU residency values."""
+    """Backend-neutral logical pages and supplied CPU residency values.
+
+    This is presentation state, not an exact semantic value source.  Its
+    values may be reduced or may come from a coarser covering page.  The
+    sampling helpers below preserve exact native-to-stored *geometry* for
+    display probes, but their returned values remain presentation-qualified
+    and must never satisfy hover, histogram, measurement, ROI, or export
+    reads through :class:`TiledValueSource`.
+    """
 
     requested_plans: tuple[LodPagePlan, ...]
     materialized_pages: tuple[MaterializedLodPage, ...]
     source_coverage_yx: tuple[int, int, int, int]
     requested_lod: LodInfo
+    _candidate_resolutions: tuple[PageResolution | None, ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _resolved_page_set: ResolvedLodPageSet | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         plans = tuple(self.requested_plans)
@@ -91,40 +115,172 @@ class PageBackedPresentation:
         )
         if not isinstance(self.requested_lod, LodInfo):
             raise TypeError("page-backed requested_lod must be LodInfo")
+        coverage_shape = (coverage[1] - coverage[0], coverage[3] - coverage[2])
+        if tuple(self.requested_lod.source_shape) != coverage_shape:
+            raise ValueError(
+                "requested page LOD source shape disagrees with native source coverage"
+            )
+        requested_stored_shape = _stored_rect_extent(
+            tuple(plan.stored_rect_yx for plan in plans)
+        )
+        if tuple(self.requested_lod.texture_shape) != requested_stored_shape:
+            raise ValueError(
+                "requested page LOD texture shape disagrees with target stored coverage"
+            )
         requested_reductions = {tuple(plan.reduction_yx) for plan in plans}
         if len(requested_reductions) != 1:
             raise ValueError("page-backed targets must share one requested reduction")
         reduction_y, reduction_x = next(iter(requested_reductions))
-        if int(self.requested_lod.factor) != 1 << max(reduction_y, reduction_x):
+        requested_level = max(reduction_y, reduction_x)
+        if (
+            int(self.requested_lod.level) != requested_level
+            or int(self.requested_lod.factor) != 1 << requested_level
+        ):
             raise ValueError("requested semantic LOD disagrees with target page reduction")
+        candidate_resolutions = resolve_materialized_page_targets(plans, pages)
+        resolved_page_set = resolved_materialized_page_set(
+            plans,
+            pages,
+            resolutions=candidate_resolutions,
+        )
         object.__setattr__(self, "requested_plans", plans)
         object.__setattr__(self, "materialized_pages", pages)
         object.__setattr__(self, "source_coverage_yx", coverage)
+        object.__setattr__(self, "_candidate_resolutions", candidate_resolutions)
+        object.__setattr__(self, "_resolved_page_set", resolved_page_set)
 
     @property
     def requested_keys(self) -> tuple[object, ...]:
         return tuple(plan.key for plan in self.requested_plans)
 
+    @property
+    def candidate_resolutions(self) -> tuple[PageResolution | None, ...]:
+        return self._candidate_resolutions
+
+    @property
+    def resolved_page_set(self) -> ResolvedLodPageSet | None:
+        return self._resolved_page_set
+
     def materialized_by_key(self) -> dict[object, MaterializedLodPage]:
         return {page.key: page for page in self.materialized_pages}
 
-    def value_at_native(self, y_i: int, x_i: int):
-        """Map native coordinates through exact clipped-bin geometry."""
+    def sample_presented_value_at_native(self, y_i: int, x_i: int):
+        """Sample displayed page values through exact clipped-bin geometry."""
 
         y_i, x_i = int(y_i), int(x_i)
+        y0, y1, x0, x1 = self.source_coverage_yx
+        if not (y0 <= y_i < y1 and x0 <= x_i < x1):
+            return None
+        if self.resolved_page_set is None:
+            return None
+        values = self.sample_presented_values_at_native_coordinates(
+            np.asarray((y_i,), dtype=np.int64),
+            np.asarray((x_i,), dtype=np.int64),
+        )
+        return array_value_at(values, 0, 0)
+
+    def sample_presented_values_at_native_coordinates(
+        self,
+        y_coordinates,
+        x_coordinates,
+    ) -> np.ndarray:
+        """Assemble presentation-qualified values for native coordinates.
+
+        The returned plane has one value per requested native coordinate.
+        Reduced samples are therefore repeated over their exact planned source
+        bins.  This is the CPU counterpart of backend draw-block mapping:
+        target plans own clipped bin geometry, while
+        :class:`PageResolution` owns target-to-actual ancestor mapping.
+
+        The geometry is exact; the values are not thereby native/exact.  Exact
+        semantic consumers use :class:`TiledValueSource`, which deliberately
+        does not call this method.
+        """
+
+        resolved_page_set = self.resolved_page_set
+        if resolved_page_set is None:
+            raise RuntimeError(
+                "incomplete page-backed coverage cannot satisfy a presentation sample"
+            )
+        y_coordinates = _native_coordinate_vector(y_coordinates, "Y")
+        x_coordinates = _native_coordinate_vector(x_coordinates, "X")
+        coverage_y0, coverage_y1, coverage_x0, coverage_x1 = self.source_coverage_yx
+        if (
+            np.any(y_coordinates < coverage_y0)
+            or np.any(y_coordinates >= coverage_y1)
+            or np.any(x_coordinates < coverage_x0)
+            or np.any(x_coordinates >= coverage_x1)
+        ):
+            raise ValueError("presentation page coordinates fall outside native source coverage")
+
         pages = self.materialized_by_key()
+        actual_pages = tuple(
+            pages[item.actual_key] for item in resolved_page_set.resolutions
+        )
+        first_values = np.asarray(actual_pages[0].values)
+        component_shape = tuple(first_values.shape[2:])
+        if any(
+            np.asarray(page.values).dtype != first_values.dtype
+            or tuple(np.asarray(page.values).shape[2:]) != component_shape
+            for page in actual_pages[1:]
+        ):
+            raise RuntimeError(
+                "resolved page set has incompatible value dtypes or component shapes"
+            )
+        result = np.empty(
+            (int(y_coordinates.size), int(x_coordinates.size), *component_shape),
+            dtype=first_values.dtype,
+        )
+        filled = np.zeros(result.shape[:2], dtype=bool)
+        resolution_by_target = {
+            item.target_key: item for item in resolved_page_set.resolutions
+        }
         for plan in self.requested_plans:
-            y0, y1, x0, x1 = plan.valid_source_rect_yx
-            if not (y0 <= y_i < y1 and x0 <= x_i < x1):
+            plan_y0, plan_y1, plan_x0, plan_x1 = plan.valid_source_rect_yx
+            output_rows = np.flatnonzero(
+                (y_coordinates >= plan_y0) & (y_coordinates < plan_y1)
+            )
+            output_columns = np.flatnonzero(
+                (x_coordinates >= plan_x0) & (x_coordinates < plan_x1)
+            )
+            if output_rows.size == 0 or output_columns.size == 0:
                 continue
-            page = pages.get(plan.key)
+            resolution = resolution_by_target[plan.key]
+            page = pages.get(resolution.actual_key)
             if page is None:
-                return None
-            stored_index = plan.stored_index_for_source(y_i, x_i)
-            if stored_index is None:
-                raise RuntimeError("planned page source coverage has no containing stored sample")
-            return array_value_at(page.values, *stored_index)
-        return None
+                raise RuntimeError("resolved presentation page value is unavailable")
+            # The resolution selects the canonical actual ancestor.  Map the
+            # native coordinates through that page's own bins instead of
+            # reapplying scale/offset arithmetic: a clipped leading bin is
+            # intentionally narrower than its nominal reduction factor.
+            actual_rows = _stored_indices_for_source_coordinates(
+                y_coordinates[output_rows],
+                page.plan.source_y_bins,
+                axis="Y",
+            )
+            actual_columns = _stored_indices_for_source_coordinates(
+                x_coordinates[output_columns],
+                page.plan.source_x_bins,
+                axis="X",
+            )
+            page_values = np.asarray(page.values)
+            if (
+                np.any(actual_rows < 0)
+                or np.any(actual_rows >= page_values.shape[0])
+                or np.any(actual_columns < 0)
+                or np.any(actual_columns >= page_values.shape[1])
+            ):
+                raise RuntimeError(
+                    "resolved page mapping falls outside the actual stored values"
+                )
+            output_index = np.ix_(output_rows, output_columns)
+            if np.any(filled[output_index]):
+                raise RuntimeError("presentation page target cover overlaps")
+            result[output_index] = page_values[np.ix_(actual_rows, actual_columns)]
+            filled[output_index] = True
+        if not np.all(filled):
+            raise RuntimeError("presentation page target cover is incomplete")
+        return np.ascontiguousarray(result)
 
 
 @dataclass(frozen=True)
@@ -226,8 +382,23 @@ class DisplayTilePayload:
                 raise TypeError("display tile page_backing must be PageBackedPresentation")
             if self.lod is None:
                 raise ValueError("page-backed payload requires requested semantic LOD")
-            if page_backing.requested_lod != self.lod:
-                raise ValueError("payload LOD disagrees with page-backed requested LOD")
+            requested_lod = page_backing.requested_lod
+            if tuple(self.lod.source_shape) != tuple(requested_lod.source_shape):
+                raise ValueError(
+                    "payload LOD source shape disagrees with requested page coverage"
+                )
+            if tuple(self.lod.texture_shape) != tuple(requested_lod.texture_shape):
+                raise ValueError(
+                    "payload LOD texture shape disagrees with requested page coverage"
+                )
+            if (
+                int(self.lod.level) != int(requested_lod.level)
+                or int(self.lod.factor) != int(requested_lod.factor)
+                or int(self.lod.gutter) != int(requested_lod.gutter)
+            ):
+                raise ValueError(
+                    "payload LOD disagrees with the page set's requested semantic LOD"
+                )
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -236,6 +407,21 @@ class DisplayTilePayload:
     @property
     def dtype(self) -> np.dtype:
         return np.asarray(self.image).dtype
+
+    @property
+    def conservative_actual_lod_level(self) -> int:
+        """Coarsest physically sampled level for scalar policy decisions.
+
+        Presentation geometry remains :attr:`lod` (the requested semantic
+        target).  Policies that must answer a singular yes/no question, such
+        as whether fallback pixels satisfy a later demand, conservatively use
+        the coarsest canonical target binding instead.
+        """
+
+        resolved = getattr(self.page_backing, "resolved_page_set", None)
+        if isinstance(resolved, ResolvedLodPageSet):
+            return int(resolved.coarsest_actual_level)
+        return int(getattr(self.lod, "level", 0) or 0)
 
     @property
     def nbytes(self) -> int:
@@ -261,7 +447,10 @@ class DisplayTilePayload:
 def display_tile_payload_has_semantics(payload) -> bool:
     """Return whether a tiled payload can update committed semantic state."""
 
-    return str(getattr(payload, "quality", "exact") or "exact") == "exact"
+    return bool(
+        str(getattr(payload, "quality", "exact") or "exact") == "exact"
+        and getattr(payload, "semantic_data", None) is not None
+    )
 
 
 def _validate_exact_rect_cover(
@@ -286,6 +475,17 @@ def _validate_exact_rect_cover(
             if owners != 1:
                 reason = "gap" if owners == 0 else "overlap"
                 raise ValueError(f"page-backed target cover has a {reason} at {(y0, y1, x0, x1)}")
+
+
+def _stored_rect_extent(
+    rectangles: tuple[tuple[int, int, int, int], ...],
+) -> tuple[int, int]:
+    if not rectangles:
+        raise ValueError("stored page coverage requires at least one rectangle")
+    return (
+        max(rect[1] for rect in rectangles) - min(rect[0] for rect in rectangles),
+        max(rect[3] for rect in rectangles) - min(rect[2] for rect in rectangles),
+    )
 
 
 @dataclass(frozen=True)
@@ -552,28 +752,16 @@ class TiledValueSource(FrameValueSource):
         payload = self.payloads.get(int(tile_number))
         if payload is None:
             return None
-        if payload.quality != "exact":
+        if not display_tile_payload_has_semantics(payload):
             # Preview payloads (coarser-LOD floor while the exact plane
-            # computes) draw pixels but never provide semantic values.
+            # computes), and page-backed display payloads without a native
+            # semantic plane, draw pixels but never provide semantic values.
             return None
         source = (
             payload.semantic_histogram_data
             if payload.semantic_histogram_data is not None
-            else (payload.semantic_data if payload.semantic_data is not None else payload.image)
+            else payload.semantic_data
         )
-        page_backing = payload.page_backing
-        if (
-            page_backing is not None
-            and payload.semantic_histogram_data is None
-            and payload.semantic_data is None
-        ):
-            local_y = int(getattr(mapping, "local_y", -1))
-            local_x = int(getattr(mapping, "local_x", -1))
-            coverage_y0, _coverage_y1, coverage_x0, _coverage_x1 = page_backing.source_coverage_yx
-            return page_backing.value_at_native(
-                coverage_y0 + local_y,
-                coverage_x0 + local_x,
-            )
         data = np.asarray(source)
         y_i = int(getattr(mapping, "local_y", -1))
         x_i = int(getattr(mapping, "local_x", -1))
@@ -594,12 +782,11 @@ class TiledValueSource(FrameValueSource):
         payload = self.payloads.get(int(tile_number))
         if payload is None:
             return None
-        if payload.quality != "exact":
+        if not display_tile_payload_has_semantics(payload):
             return None
         y_slice, x_slice = region
-        semantic = payload.semantic_data if payload.semantic_data is not None else payload.image
-        data = np.asarray(semantic)[y_slice, x_slice, ...]
-        hist_source = payload.semantic_histogram_data if payload.semantic_histogram_data is not None else payload.histogram_data
+        data = np.asarray(payload.semantic_data)[y_slice, x_slice, ...]
+        hist_source = payload.semantic_histogram_data
         hist = None if hist_source is None else np.asarray(hist_source)[y_slice, x_slice]
         return data, hist, "committed_tile_payload"
 
@@ -608,6 +795,34 @@ def _coerce_tile_payload(payload) -> DisplayTilePayload:
     if not isinstance(payload, DisplayTilePayload):
         raise TypeError("tiled display presentations require DisplayTilePayload values")
     return payload
+
+
+def _native_coordinate_vector(values, axis: str) -> np.ndarray:
+    coordinates = np.asarray(values)
+    if coordinates.ndim != 1:
+        raise ValueError(f"native {axis} coordinates must be one-dimensional")
+    if not np.issubdtype(coordinates.dtype, np.integer):
+        raise TypeError(f"native {axis} coordinates must be integers")
+    return coordinates.astype(np.int64, copy=False)
+
+
+def _stored_indices_for_source_coordinates(
+    coordinates: np.ndarray,
+    bins: tuple[tuple[int, int], ...],
+    *,
+    axis: str,
+) -> np.ndarray:
+    starts = np.fromiter((item[0] for item in bins), dtype=np.int64, count=len(bins))
+    stops = np.fromiter((item[1] for item in bins), dtype=np.int64, count=len(bins))
+    indices = np.searchsorted(stops, coordinates, side="right")
+    if (
+        np.any(indices < 0)
+        or np.any(indices >= len(bins))
+        or np.any(coordinates < starts[indices])
+        or np.any(coordinates >= stops[indices])
+    ):
+        raise RuntimeError(f"planned source {axis} bins do not cover presentation coordinates")
+    return indices.astype(np.int64, copy=False)
 
 
 def _unique_int_tuple(values, label: str) -> tuple[int, ...]:

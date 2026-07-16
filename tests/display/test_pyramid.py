@@ -13,6 +13,7 @@ from arrayscope.display.lod import (
     LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     choose_resident_level,
     factor_xy_for_level,
+    resident_presentation_rank,
     resident_lod_policy,
     select_lod_demand,
 )
@@ -411,6 +412,11 @@ class TestResidentSelectionHelpers:
         assert choose_resident_level(demand, ()) == 0
         assert choose_resident_level(demand, (2,)) == 2
         assert choose_resident_level(demand, (1, 3)) == 1
+
+    def test_resident_rank_keeps_finest_compatible_level_and_nearest_fallback(self):
+        assert resident_presentation_rank(2, 6) < resident_presentation_rank(4, 6)
+        assert resident_presentation_rank(6, 6) < resident_presentation_rank(7, 6)
+        assert resident_presentation_rank(7, 6) < resident_presentation_rank(8, 6)
 
     def test_factor_xy_for_level_shifts_anisotropy_with_the_level(self):
         demand = select_lod_demand(((0.0, 2048.0), (0.0, 512.0)), (256, 256), TILE)

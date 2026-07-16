@@ -51,6 +51,20 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
     lod_page_cache = None if session is None else getattr(session, "lod_page_cache", None)
+    lod_page_families = (
+        ()
+        if lod_page_cache is None
+        else tuple(
+            sorted(
+                (
+                    tuple(int(step) for step in reduction),
+                    str(reducer),
+                    int(count),
+                )
+                for (reduction, reducer), count in lod_page_cache.resident_lod_reducer_counts().items()
+            )
+        )
+    )
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
     lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
@@ -139,6 +153,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_pyramid_hits=0 if lod_page_cache is None else int(getattr(lod_page_cache, "hits", 0) or 0),
         tile_lod_pyramid_misses=0 if lod_page_cache is None else int(getattr(lod_page_cache, "misses", 0) or 0),
         tile_lod_pyramid_evictions=0 if lod_page_cache is None else int(getattr(lod_page_cache, "evictions", 0) or 0),
+        tile_lod_page_families=lod_page_families,
         tile_lod_pending_materializations=(
             0
             if session is None
