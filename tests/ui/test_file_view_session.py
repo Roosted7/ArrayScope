@@ -986,6 +986,39 @@ def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatc
     assert not image_view._viewport_wheel_range_pending
 
 
+def test_montage_range_change_during_commit_joins_post_commit_retarget(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    retargeted = []
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False),
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _committed_display_frame=SimpleNamespace(
+            scene=object(),
+            value_source=SimpleNamespace(payloads={}),
+        ),
+        _montage_presentation_commit_active=True,
+        _frame_viewport_retarget_after_commit=False,
+        retarget_montage_viewport=lambda: retargeted.append(True),
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    owner.win = owner
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert owner._frame_viewport_retarget_after_commit is True
+    assert retargeted == []
+
+
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):
     import arrayscope.window.file_view_session as file_view_session
     from arrayscope.core.view_session import ViewportSession
