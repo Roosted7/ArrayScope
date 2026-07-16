@@ -1283,6 +1283,42 @@ def test_page_backed_draw_parts_cover_exact_clipped_geometry_and_report_all_bind
     assert len(bindings) == len(payload.page_backing.requested_plans)
     assert all(row["quality"] == "exact" for row in bindings)
     assert all(row["actual_key"] == row["target_key"] for row in bindings)
+    assert all(row["scale"] == (1.0, 1.0) for row in bindings)
+    assert all(row["offset"] == (0.0, 0.0) for row in bindings)
+
+
+def test_page_backed_multi_tile_commit_preserves_every_tiles_page_mapping():
+    """A later tile must not clear earlier tiles' UV crops in one frame.
+
+    Reduced pages occupy only their valid stored footprint inside the fixed
+    physical page slot.  Losing ``tile_draw_parts`` therefore stretches the
+    whole padded slot over the montage cell and makes the image appear at a
+    different size (the last committed tile was the only correct one).
+    """
+
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=12)
+    payloads = {
+        0: page_backed_payload(101, tile_number=0),
+        1: page_backed_payload(101, tile_number=1),
+    }
+
+    _uvs, stats = pool.update_payloads(
+        payloads,
+        tile_shape=(2, 3),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=2,
+        tile_world_regions={0: (0, 0, 12, 4), 1: (12, 0, 12, 4)},
+    )
+
+    assert stats.presented_tiles == (0, 1)
+    assert set(pool.tile_page_target_resolutions) == {0, 1}
+    assert set(pool.tile_draw_parts) >= {0, 1}
+    assert all(pool.tile_draw_parts[tile] for tile in (0, 1))
+    assert all(
+        pool.tile_truth_physical_rows()[tile]["physical_page_bindings"]
+        for tile in (0, 1)
+    )
 
 
 def test_missing_fine_target_binds_resident_coarse_page_without_upload():

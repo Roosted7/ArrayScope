@@ -133,6 +133,24 @@ coupling:
 - 111 focused GPU/pyramid/VisPy tests pass. The next slice is the live
   ladder/cache migration that emits logical page targets into this seam.
 
+The live page-backed VisPy cutover now also has a restored-session geometry
+guard. A field reproduction using the saved 100-tile complex session found
+that each per-tile resolver call treated its one-tile input as a complete
+frame and cleared all earlier tiles' page mappings. Ninety-nine L2 tiles then
+sampled a padded 336-by-336 slot instead of their valid 84-by-84 UV crop; only
+the last committed tile kept the correct size. Multi-page resolution input is
+now explicitly partial across tiles, while frame-boundary removal remains the
+only owner that clears omitted tiles. The regression commits two page-backed
+tiles in one frame and requires both complete binding sets and draw parts.
+The real-Wayland saved-session artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/repro-fixed/` records 100/100
+bound tiles with one consistent UV span and uniform framebuffer geometry by
+1.23 s. The accompanying zoom/pan artifact remains a red convergence gate:
+it preserved page bindings but correctly hard-failed when an L6 target had
+only complete L2/L4 fallback and no materialization work in flight. That
+lost-wakeup is follow-on work, not a timeout exception or a reason to weaken
+the never-black fallback.
+
 The ladder-side target planner is also now explicit:
 
 - `render.lod.plan_lod_page_targets` is a Qt-free deterministic transform

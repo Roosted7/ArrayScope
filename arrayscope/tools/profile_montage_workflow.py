@@ -2699,15 +2699,51 @@ def _visual_physical_draw_rows(physical_rows, requested) -> dict[str, dict[str, 
                 dict(row or {}).get("physical_draw_world_rects", ()) or ()
             ),
             "draw_world_bounds": dict(row or {}).get("physical_draw_world_bounds"),
+            "draw_uv_rects": tuple(
+                dict(row or {}).get("physical_draw_uv_rects", ()) or ()
+            ),
             "expected_world_rect": dict(row or {}).get(
                 "physical_expected_world_rect"
             ),
             "bounds_match_layout": dict(row or {}).get(
                 "physical_draw_bounds_match_layout"
             ),
+            "page_bindings": tuple(
+                _visual_page_binding_row(binding)
+                for binding in tuple(
+                    dict(row or {}).get("physical_page_bindings", ()) or ()
+                )
+            ),
         }
         for tile, row in dict(physical_rows or {}).items()
         if int(tile) in requested
+    }
+
+
+def _visual_page_binding_row(binding) -> dict[str, object]:
+    binding = dict(binding or {})
+    target = binding.get("target_key")
+    actual = binding.get("actual_key")
+    slot = binding.get("slot")
+    return {
+        "target_key": _trace_identity(target, limit=500),
+        "actual_key": _trace_identity(actual, limit=500),
+        "target_origin_yx": tuple(getattr(target, "chunk_origin", ()) or ()),
+        "target_shape_yx": tuple(getattr(target, "chunk_shape", ()) or ()),
+        "target_reduction_yx": tuple(
+            getattr(getattr(target, "lod", None), "reduction", ()) or ()
+        ),
+        "actual_origin_yx": tuple(getattr(actual, "chunk_origin", ()) or ()),
+        "actual_shape_yx": tuple(getattr(actual, "chunk_shape", ()) or ()),
+        "actual_reduction_yx": tuple(
+            getattr(getattr(actual, "lod", None), "reduction", ()) or ()
+        ),
+        "scale_yx": tuple(float(value) for value in tuple(binding.get("scale", ()) or ())),
+        "offset_yx": tuple(float(value) for value in tuple(binding.get("offset", ()) or ())),
+        "quality": str(binding.get("quality", "")),
+        "page_index": None if slot is None else int(getattr(slot, "page_index", -1)),
+        "slot_index": None if slot is None else int(getattr(slot, "slot_index", -1)),
+        "binding_generation": int(binding.get("binding_generation", 0) or 0),
     }
 
 

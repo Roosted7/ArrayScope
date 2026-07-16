@@ -611,6 +611,9 @@ class TextureAtlasPool:
     ) -> dict[int, tuple[PageResolution, ...] | None]:
         """Atomically replace each tile's complete multi-page resolution set.
 
+        ``targets`` is a partial per-commit map, not the complete frame.  An
+        omitted tile retains its mapping and owner pins; presentation removal
+        flows through :meth:`_clear_tile_mapping` at the frame boundary.
         Missing candidate coverage never clears the previous complete pinned
         set. Resolution is pure CPU page-table work: no upload or scheduling.
         """
@@ -621,13 +624,6 @@ class TextureAtlasPool:
                 raise ValueError("tile page targets must be non-empty and unique")
             if any(not isinstance(key, DataChunkKey) for key in keys):
                 raise TypeError("tile page targets must be DataChunkKey values")
-        for tile in set(self._tile_page_pin_owners).difference(requested):
-            owner = self._tile_page_pin_owners.pop(tile)
-            self._page_table.replace_pin_set(owner, ())
-            self.tile_page_target_resolutions.pop(tile, None)
-            self.tile_page_candidate_missing.pop(tile, None)
-            self._clear_tile_mapping(tile)
-
         results: dict[int, tuple[PageResolution, ...] | None] = {}
         for tile, keys in requested.items():
             candidate = tuple(self._page_table.resolve(key) for key in keys)
@@ -696,6 +692,8 @@ class TextureAtlasPool:
                                 "target_key": item.target_key,
                                 "actual_key": item.actual_key,
                                 "actual_lod": item.actual_key.lod,
+                                "scale": tuple(float(value) for value in item.scale),
+                                "offset": tuple(float(value) for value in item.offset),
                                 "quality": (
                                     "exact"
                                     if item.actual_key == item.target_key
@@ -2835,6 +2833,7 @@ class GpuMontageLayer:
                 self._pool.tile_draw_parts,
             )
             draw_rects = tuple(tuple(float(value) for value in world) for world, _uv in quads)
+            draw_uv_rects = tuple(tuple(float(value) for value in uv) for _world, uv in quads)
             draw_bounds = (
                 None
                 if not draw_rects
@@ -2869,6 +2868,7 @@ class GpuMontageLayer:
                         getattr(visual, "_shader_mapping_key", None)
                     ),
                     "physical_draw_world_rects": draw_rects,
+                    "physical_draw_uv_rects": draw_uv_rects,
                     "physical_draw_world_bounds": draw_bounds,
                     "physical_expected_world_rect": expected_rect,
                     "physical_draw_bounds_match_layout": bool(

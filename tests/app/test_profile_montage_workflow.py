@@ -117,6 +117,7 @@ def test_visual_timeline_preserves_physical_draw_geometry():
         {
             3: {
                 "physical_draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
+                "physical_draw_uv_rects": ((0.1, 0.2, 0.5, 0.6),),
                 "physical_draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
                 "physical_expected_world_rect": (1.0, 2.0, 5.0, 6.0),
                 "physical_draw_bounds_match_layout": True,
@@ -130,8 +131,10 @@ def test_visual_timeline_preserves_physical_draw_geometry():
         "3": {
             "draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
             "draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
+            "draw_uv_rects": ((0.1, 0.2, 0.5, 0.6),),
             "expected_world_rect": (1.0, 2.0, 5.0, 6.0),
             "bounds_match_layout": True,
+            "page_bindings": (),
         }
     }
 
