@@ -47,7 +47,11 @@ def test_ladder_target_decomposes_on_canonical_global_source_grid():
     }
     for key in targets:
         assert key.document_generation == ("doc", 7)
-        assert key.operation_key == ("request", "window-free")
+        assert key.operation_key == (
+            "source-grid-page",
+            1,
+            ("request", "window-free"),
+        )
         assert key.dtype == "float32"
         assert key.representation == "scalar_r32f"
         assert key.lod.reduction == (1, 1)
@@ -113,4 +117,3 @@ def test_page_target_planning_is_a_deterministic_value_transform():
     assert first == second
     assert first is not second
     assert all(isinstance(key, DataChunkKey) for key in first)
-

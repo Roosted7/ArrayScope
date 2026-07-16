@@ -42,9 +42,14 @@ from arrayscope.display.lod import (
 )
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.frame import DisplayTilePayload
-from arrayscope.display.pyramid import PyramidCache, PyramidLevelKey, reduce_box_mean
+from arrayscope.display.pyramid import (
+    PyramidCache,
+    PyramidLevelKey,
+    plan_source_grid_pages,
+    reduce_box_mean,
+)
 from arrayscope.display.shader_mapping import TexturePlaneKind
-from arrayscope.gpu import ChunkLod, DataChunkKey
+from arrayscope.gpu import DataChunkKey
 from arrayscope.presentation import ClaimOwner, LevelPhase
 
 
@@ -69,52 +74,18 @@ def plan_lod_page_targets(
     aligned interiors therefore share identity across shifted windows.
     """
 
-    y0, y1, x0, x1 = (int(value) for value in source_rect)
-    if y0 < 0 or x0 < 0 or y1 <= y0 or x1 <= x0:
-        raise ValueError(f"source_rect must be a non-empty positive rectangle, got {source_rect}")
-    reduction_y, reduction_x = (int(value) for value in reduction)
-    if reduction_y < 0 or reduction_x < 0:
-        raise ValueError(f"reduction steps must be non-negative, got {reduction}")
-    stored_h, stored_w = (int(value) for value in stored_page_shape)
-    if stored_h <= 0 or stored_w <= 0:
-        raise ValueError(f"stored page shape must be positive, got {stored_page_shape}")
-    if (
-        isinstance(content_key, tuple)
-        and len(content_key) == 3
-        and content_key[0] == "src-anchored"
-    ):
-        document_generation, operation_key = content_key[1], content_key[2]
-    else:
-        document_generation, operation_key = content_key, None
-    source_page_h = stored_h * (1 << reduction_y)
-    source_page_w = stored_w * (1 << reduction_x)
-    level = max(reduction_y, reduction_x)
-    factor = 1 << level
-    lod = ChunkLod(
-        level=level,
-        factor=factor,
-        reduction=(reduction_y, reduction_x),
-        reducer=str(reducer),
+    return tuple(
+        plan.key
+        for plan in plan_source_grid_pages(
+            content_key=content_key,
+            valid_source_rect_yx=source_rect,
+            reduction_yx=reduction,
+            stored_page_shape=stored_page_shape,
+            dtype=dtype,
+            representation=representation,
+            reducer=reducer,
+        )
     )
-    targets: list[DataChunkKey] = []
-    first_y = (y0 // source_page_h) * source_page_h
-    first_x = (x0 // source_page_w) * source_page_w
-    for page_y in range(first_y, y1, source_page_h):
-        rect_y0, rect_y1 = max(y0, page_y), min(y1, page_y + source_page_h)
-        for page_x in range(first_x, x1, source_page_w):
-            rect_x0, rect_x1 = max(x0, page_x), min(x1, page_x + source_page_w)
-            targets.append(
-                DataChunkKey(
-                    document_generation=document_generation,
-                    operation_key=operation_key,
-                    lod=lod,
-                    chunk_origin=(rect_y0, rect_x0),
-                    chunk_shape=(rect_y1 - rect_y0, rect_x1 - rect_x0),
-                    dtype=dtype,
-                    representation=representation,
-                )
-            )
-    return tuple(targets)
 
 
 def texture_requires_display_histogram(texture, texture_kind) -> bool:
