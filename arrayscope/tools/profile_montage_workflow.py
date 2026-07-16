@@ -1905,6 +1905,7 @@ def _apply_montage_zoom_pan_stress(
     record.update(fit_metrics)
 
     def _glide(label: str, target_range, frames: int, *, frame_action=None) -> None:
+        win._arrayscope_profile_action = str(label)
         stats = _glide_view_range(
             win,
             app,
@@ -1924,6 +1925,7 @@ def _apply_montage_zoom_pan_stress(
     record["zoompan_available"] = True
 
     # 1) Hit the real enforced zoom-out limit, not a guessed span multiplier.
+    win._arrayscope_profile_action = "maximum-zoomout-probe"
     maximum_out = _maximum_zoomout_view_range(win, app, QtCore, base)
     record["zoompan_input_fps"] = float(ZOOMPAN_INPUT_FPS)
     record["zoompan_max_out_request_scale"] = float(ZOOMPAN_MAX_OUT_REQUEST_SCALE)
@@ -1934,9 +1936,8 @@ def _apply_montage_zoom_pan_stress(
     # 2) Toggle the op pipeline at the tiny-tile vantage point (no settle; the
     #    following glides pump the document swap through as they run).
     if callable(mid_toggle):
+        win._arrayscope_profile_action = "operation-toggle"
         mid_toggle()
-
-    limit_range = _montage_view_range(win) or base
 
     # 3) From the deliberately distant limit, make roughly the whole grid fill
     #    the viewport. This is the broadest useful LOD transition: many tiles
@@ -1945,9 +1946,16 @@ def _apply_montage_zoom_pan_stress(
     record["lod_full_grid_checkpoint_available"] = full_grid_range is not None
     if full_grid_range is not None:
         _glide("full_grid_zoomin", full_grid_range, frames=4)
+        win._arrayscope_profile_action = "full-grid-target-settle"
         full_grid_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_full_grid_checkpoint"] = full_grid_checkpoint
         record["lod_full_grid_active_count"] = len(tuple(full_grid_checkpoint.get("active_tiles", ()) or ()))
+
+    # The correctness storm must keep some content in view.  Basing the next
+    # off-centre zoom on ``maximum_out`` can put its entire target tens of
+    # thousands of source pixels outside the montage, where a black framebuffer
+    # is correct and therefore proves nothing about retained coverage.
+    interaction_range = full_grid_range or base
 
     # 4) Rapid, deterministic impulses repeatedly supersede unfinished LOD
     #    requests. Alternating off-centre zooms and opposing pans deliberately
@@ -1955,34 +1963,34 @@ def _apply_montage_zoom_pan_stress(
     record["zoompan_zoomin_span_scale"] = float(ZOOMPAN_CENTRAL_SPAN_SCALE)
     _glide(
         "zoomin",
-        _scaled_view_range(limit_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+        _scaled_view_range(interaction_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
         frames=4,
     )
     # 5) Churn the visible set in opposing directions.
     record["zoompan_pan_right_dx_frac"] = float(ZOOMPAN_PAN_FRACTION)
     record["zoompan_pan_right_dy_frac"] = 0.0
-    _glide("pan_right", _panned_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_PAN_FRACTION, -0.21), frames=3)
+    _glide("pan_right", _panned_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_PAN_FRACTION, -0.21), frames=3)
     record["zoompan_pan_down_dx_frac"] = 0.0
     record["zoompan_pan_down_dy_frac"] = float(ZOOMPAN_PAN_FRACTION)
-    _glide("pan_down", _panned_view_range(_montage_view_range(win) or limit_range, -0.41, ZOOMPAN_PAN_FRACTION), frames=3)
+    _glide("pan_down", _panned_view_range(_montage_view_range(win) or interaction_range, -0.41, ZOOMPAN_PAN_FRACTION), frames=3)
     _glide(
         "erratic_zoomout",
-        _scaled_view_range(_montage_view_range(win) or limit_range, 5.0, center_frac=(0.81, 0.18)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, 5.0, center_frac=(0.81, 0.18)),
         frames=3,
     )
     _glide(
         "erratic_zoomin",
-        _scaled_view_range(_montage_view_range(win) or limit_range, 0.11, center_frac=(0.74, 0.31)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, 0.11, center_frac=(0.74, 0.31)),
         frames=3,
     )
     # 6) Deep zoom into roughly one tile, then jump to the opposite side.
     record["zoompan_deep_zoom_span_scale"] = float(ZOOMPAN_DEEP_SPAN_SCALE)
     _glide(
         "deep_zoom",
-        _scaled_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_DEEP_SPAN_SCALE, center_frac=(0.18, 0.82)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_DEEP_SPAN_SCALE, center_frac=(0.18, 0.82)),
         frames=3,
     )
-    _glide("opposite_pan", _panned_view_range(_montage_view_range(win) or limit_range, 0.72, -0.64), frames=2)
+    _glide("opposite_pan", _panned_view_range(_montage_view_range(win) or interaction_range, 0.72, -0.64), frames=2)
     # 7) End at the same real maximum-out constraint for comparable recovery.
     _glide("zoomout_return", maximum_out, frames=4)
 
@@ -2052,50 +2060,50 @@ def _apply_montage_zoom_pan_stress(
             )
         _glide(
             "combined_zoomin",
-            _scaled_view_range(maximum_out, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+            _scaled_view_range(interaction_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
             frames=4,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_zoom_scroll_pause",
-            _montage_view_range(win) or maximum_out,
+            _montage_view_range(win) or interaction_range,
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_right",
-            _panned_view_range(_montage_view_range(win) or maximum_out, ZOOMPAN_PAN_FRACTION, -0.21),
+            _panned_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_PAN_FRACTION, -0.21),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_scroll_pause",
-            _montage_view_range(win) or maximum_out,
+            _montage_view_range(win) or interaction_range,
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_down",
-            _panned_view_range(_montage_view_range(win) or maximum_out, -0.41, ZOOMPAN_PAN_FRACTION),
+            _panned_view_range(_montage_view_range(win) or interaction_range, -0.41, ZOOMPAN_PAN_FRACTION),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_erratic_zoomout",
-            _scaled_view_range(_montage_view_range(win) or maximum_out, 5.0, center_frac=(0.81, 0.18)),
+            _scaled_view_range(_montage_view_range(win) or interaction_range, 5.0, center_frac=(0.81, 0.18)),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_erratic_zoomin",
-            _scaled_view_range(_montage_view_range(win) or maximum_out, 0.11, center_frac=(0.74, 0.31)),
+            _scaled_view_range(_montage_view_range(win) or interaction_range, 0.11, center_frac=(0.74, 0.31)),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_deep_zoom",
             _scaled_view_range(
-                _montage_view_range(win) or maximum_out,
+                _montage_view_range(win) or interaction_range,
                 ZOOMPAN_DEEP_SPAN_SCALE,
                 center_frac=(0.18, 0.82),
             ),
@@ -2104,7 +2112,7 @@ def _apply_montage_zoom_pan_stress(
         )
         _glide(
             "combined_opposite_pan",
-            _panned_view_range(_montage_view_range(win) or maximum_out, 0.72, -0.64),
+            _panned_view_range(_montage_view_range(win) or interaction_range, 0.72, -0.64),
             frames=2,
             frame_action=advance_center_window,
         )
@@ -2113,6 +2121,7 @@ def _apply_montage_zoom_pan_stress(
         for name, values in combined_scroll_costs.items():
             record[f"combined_scroll_{name}_max_ms"] = float(max(values) if values else 0.0)
             record[f"combined_scroll_{name}_p95_ms"] = float(_percentile(tuple(values), 95.0))
+        win._arrayscope_profile_action = "combined-target-settle"
         combined_reached, combined_settle_ms = _wait_for_target_lod(
             win,
             app,
@@ -2132,6 +2141,7 @@ def _apply_montage_zoom_pan_stress(
     record["lod_checkpoint_available"] = checkpoint_range is not None
     if checkpoint_range is not None:
         _glide("lod_checkpoint_zoomin", checkpoint_range, frames=3)
+        win._arrayscope_profile_action = "lod-checkpoint-zoom-settle"
         first_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_checkpoint_zoom"] = first_checkpoint
         first_active = set(int(tile) for tile in first_checkpoint["active_tiles"])
@@ -2139,6 +2149,7 @@ def _apply_montage_zoom_pan_stress(
 
         pan_target = _panned_view_range(_montage_view_range(win) or checkpoint_range, 0.78, 0.34)
         _glide("lod_checkpoint_pan", pan_target, frames=3)
+        win._arrayscope_profile_action = "lod-checkpoint-pan-settle"
         second_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_checkpoint_pan_result"] = second_checkpoint
         second_active = set(int(tile) for tile in second_checkpoint["active_tiles"])
@@ -2150,6 +2161,7 @@ def _apply_montage_zoom_pan_stress(
         _glide("lod_checkpoint_zoomout_return", maximum_out, frames=3)
 
     # Single final settle after restoring the full montage.
+    win._arrayscope_profile_action = "final-target-settle"
     reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=ZOOMPAN_FINAL_SETTLE_S)
     record["final_settle_ms"] = float(settle_ms)
     record["final_reached_target_lod"] = bool(reached)
@@ -2552,18 +2564,32 @@ class _VisualTimelineProbe:
         backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
         physical_rows_fn = getattr(getattr(self._win, "img_view", None), "tileTruthPhysicalRows", None)
         physical_rows = dict(physical_rows_fn() or {}) if callable(physical_rows_fn) else {}
+        presentation_diagnostics = dict(
+            getattr(getattr(self._win, "img_view", None), "presentation_diagnostics", lambda: {})()
+            or {}
+        )
         physical_acknowledged = frozenset(
             int(tile)
             for tile, row in physical_rows.items()
             if dict(row or {}).get("physical_acknowledged_identity") is not None
         )
-        drawn = frozenset(int(tile) for tile in backend_identities) | physical_acknowledged
-        drawn &= requested
-        identity_text = {
-            int(tile): _trace_identity(identity, limit=500) or ""
-            for tile, identity in backend_identities.items()
-            if int(tile) in requested
-        }
+        acknowledged = (
+            frozenset(int(tile) for tile in backend_identities) | physical_acknowledged
+        ) & requested
+        scene_presented = _visual_scene_presented_tiles(
+            self._backend,
+            presentation_diagnostics=presentation_diagnostics,
+            physical_rows=physical_rows,
+        )
+        drawn = scene_presented & requested
+        identity_text: dict[int, str] = {}
+        for tile in drawn:
+            identity = backend_identities.get(int(tile))
+            if identity is None:
+                identity = dict(physical_rows.get(int(tile), {}) or {}).get(
+                    "physical_acknowledged_identity"
+                )
+            identity_text[int(tile)] = _trace_identity(identity, limit=500) or ""
         changed = frozenset(
             tile
             for tile, identity in identity_text.items()
@@ -2574,14 +2600,46 @@ class _VisualTimelineProbe:
         fallback_bindings = 0
         exact_bindings = 0
         binding_rows = 0
-        for row in physical_rows.values():
+        for tile, row in physical_rows.items():
+            if int(tile) not in drawn:
+                continue
             for binding in tuple(dict(row or {}).get("physical_page_bindings", ()) or ()):
                 binding_rows += 1
                 if str(dict(binding or {}).get("quality", "")) == "exact":
                     exact_bindings += 1
                 else:
                     fallback_bindings += 1
-        physical_draw_rows = _visual_physical_draw_rows(physical_rows, requested)
+        physical_draw_rows = _visual_physical_draw_rows(physical_rows, drawn)
+        geometry_state = _window_geometry_state(self._win)
+        view_range = _montage_view_range(self._win)
+        content_range = _full_montage_view_range(self._win)
+        onscreen = frozenset(
+            int(tile)
+            for tile in drawn
+            if _view_range_intersects_world_bounds(
+                view_range,
+                dict(physical_rows.get(int(tile), {}) or {}).get(
+                    "physical_draw_world_bounds"
+                ),
+            )
+        )
+        physical_visible_pages = int(
+            presentation_diagnostics.get("physical_visible_page_count", 0)
+            or presentation_diagnostics.get("tile_visual_visible_pages", 0)
+            or 0
+        )
+        backend_presented_count = int(
+            presentation_diagnostics.get("presented_tile_count", 0) or 0
+        )
+        physically_visible_tile_count = int(
+            presentation_diagnostics.get("physically_visible_tile_count", 0) or 0
+        )
+        physical_visible = physically_visible_tile_count > 0
+        camera_state = _visual_camera_state(
+            self._win,
+            session=session,
+            live_view_range=view_range,
+        )
         elapsed_ms = (now_ns - self._started_ns) / 1_000_000.0
         gap_ms = (now_ns - self._last_sample_ns) / 1_000_000.0
         record = {
@@ -2590,6 +2648,7 @@ class _VisualTimelineProbe:
             "sample": int(self._index),
             "reason": str(reason),
             "phase": str(getattr(self._win, "_arrayscope_profile_phase", "setup") or "setup"),
+            "action": str(getattr(self._win, "_arrayscope_profile_action", "idle") or "idle"),
             "monotonic_ns": int(now_ns),
             "elapsed_ms": float(elapsed_ms),
             "sample_gap_ms": float(gap_ms),
@@ -2607,19 +2666,70 @@ class _VisualTimelineProbe:
                 getattr(lifecycle_snapshot, "counts", {}) or {}
             ),
             "payload_tiles": sorted(int(tile) for tile in payloads if int(tile) in requested),
+            "acknowledged_tiles": sorted(acknowledged),
+            "resident_physical_row_tiles": sorted(
+                set(int(tile) for tile in physical_rows).intersection(requested)
+            ),
+            "scene_presented_tiles": sorted(drawn),
+            "onscreen_tiles": sorted(onscreen),
             "drawn_tiles": sorted(drawn),
             "appeared_tiles": sorted(appeared),
             "disappeared_tiles": sorted(disappeared),
             "changed_tiles": sorted(changed),
             "missing_draw_tiles": sorted(requested - drawn),
+            "missing_visible_draw_tiles": sorted(visible - drawn),
             "requested_count": len(requested),
             "visible_count": len(visible),
             "payload_count": len(set(payloads).intersection(requested)),
             "drawn_count": len(drawn),
+            "onscreen_count": len(onscreen),
+            "acknowledged_count": len(acknowledged),
+            "resident_physical_row_count": len(
+                set(int(tile) for tile in physical_rows).intersection(requested)
+            ),
             "exact_page_binding_count": int(exact_bindings),
             "fallback_page_binding_count": int(fallback_bindings),
             "page_binding_count": int(binding_rows),
             "physical_draw_rows": physical_draw_rows,
+            "view_range": view_range,
+            "content_range": content_range,
+            "camera_intersects_content": _view_ranges_intersect(
+                view_range, content_range
+            ),
+            "camera_state": camera_state,
+            "window_geometry": geometry_state,
+            "montage_display_mode": str(
+                presentation_diagnostics.get("montage_display_mode", "none")
+            ),
+            "physical_visible": physical_visible,
+            "physically_visible_tile_count": physically_visible_tile_count,
+            "backend_presented_tile_count": backend_presented_count,
+            "physical_visible_page_count": physical_visible_pages,
+            "physical_geometry": _visual_geometry_summary(
+                physical_draw_rows,
+                view_range=view_range,
+                viewport_shape=geometry_state.get("viewport_shape"),
+            ),
+            "page_candidate_missing_tile_count": int(
+                presentation_diagnostics.get("page_candidate_missing_tile_count", 0)
+                or 0
+            ),
+            "page_candidate_missing_key_count": int(
+                presentation_diagnostics.get("page_candidate_missing_key_count", 0)
+                or 0
+            ),
+            "page_table_resident_count": int(
+                presentation_diagnostics.get("page_table_resident_count", 0) or 0
+            ),
+            "atlas_page_classes": tuple(
+                presentation_diagnostics.get("atlas_page_classes", ()) or ()
+            ),
+            "atlas_estimated_gpu_bytes": int(
+                presentation_diagnostics.get("atlas_estimated_gpu_bytes", 0) or 0
+            ),
+            "atlas_budget_bytes": int(
+                presentation_diagnostics.get("atlas_budget_bytes", 0) or 0
+            ),
             "presentation_revision": int(
                 getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0
             ),
@@ -2638,8 +2748,16 @@ class _VisualTimelineProbe:
             disappeared_tiles=tuple(sorted(disappeared)),
             changed_tiles=tuple(sorted(changed)),
             missing_draw_tiles=tuple(sorted(requested - drawn)),
+            onscreen_tiles=tuple(sorted(onscreen)),
+            acknowledged_tiles=tuple(sorted(acknowledged)),
             event_loop_freeze=bool(record["event_loop_freeze"]),
             sample_gap_ms=float(gap_ms),
+            action=record["action"],
+            physical_visible=bool(record["physical_visible"]),
+            physical_visible_page_count=int(record["physical_visible_page_count"]),
+            page_candidate_missing_tile_count=int(
+                record["page_candidate_missing_tile_count"]
+            ),
         )
         self._images.append((path, record))
         self._last_sample_ns = now_ns
@@ -2651,7 +2769,7 @@ class _VisualTimelineProbe:
         if not images:
             return
         columns = min(4, len(images))
-        thumb_w, thumb_h, label_h = 320, 200, 44
+        thumb_w, thumb_h, label_h = 320, 200, 58
         rows = int(math.ceil(len(images) / columns))
         sheet = self._QtGui.QPixmap(columns * thumb_w, rows * (thumb_h + label_h))
         sheet.fill(self._QtCore.Qt.GlobalColor.black)
@@ -2670,13 +2788,35 @@ class _VisualTimelineProbe:
             label = (
                 f"{record['sample']:04d} {record['elapsed_ms'] / 1000.0:.1f}s "
                 f"{record['phase']}\n"
-                f"draw {record['drawn_count']}/{record['requested_count']} "
+                f"{record['action']}\n"
+                f"scene {record['drawn_count']}/{record['requested_count']} "
+                f"onscreen {record['onscreen_count']} "
                 f"+{len(record['appeared_tiles'])} -{len(record['disappeared_tiles'])} "
                 f"gap {record['sample_gap_ms']:.0f}ms"
             )
             painter.drawText(x + 4, y + thumb_h + 2, thumb_w - 8, label_h - 4, 0, label)
         painter.end()
         sheet.save(str(self.contact_sheet_path))
+
+
+def _visual_scene_presented_tiles(
+    backend: str,
+    *,
+    presentation_diagnostics,
+    physical_rows,
+) -> frozenset[int]:
+    """Return named scene primitives, never residency/acknowledgement rows."""
+
+    if str(backend) == "vispy":
+        return frozenset(
+            int(tile)
+            for tile in tuple(
+                dict(presentation_diagnostics or {}).get("presented_tiles", ())
+                or ()
+            )
+        )
+    # PyQtGraph's physical rows already exclude hidden/empty ImageItems.
+    return frozenset(int(tile) for tile in dict(physical_rows or {}))
 
 
 def _visual_lod_level_counts(payloads, requested) -> dict[str, int]:
@@ -2695,6 +2835,16 @@ def _visual_lod_level_counts(payloads, requested) -> dict[str, int]:
 def _visual_physical_draw_rows(physical_rows, requested) -> dict[str, dict[str, object]]:
     return {
         str(int(tile)): {
+            "texture_kind": dict(row or {}).get("physical_texture_kind"),
+            "storage_mode": dict(row or {}).get("physical_storage_mode"),
+            "texture_dtype": dict(row or {}).get("physical_texture_dtype"),
+            "texture_shape": dict(row or {}).get("physical_texture_shape"),
+            "mapping_mode": dict(row or {}).get("physical_mapping_mode"),
+            "component_mode": dict(row or {}).get("physical_component_mode"),
+            "levels": dict(row or {}).get("physical_levels"),
+            "shader_mapping_key": dict(row or {}).get(
+                "physical_shader_mapping_key"
+            ),
             "draw_world_rects": tuple(
                 dict(row or {}).get("physical_draw_world_rects", ()) or ()
             ),
@@ -2718,6 +2868,152 @@ def _visual_physical_draw_rows(physical_rows, requested) -> dict[str, dict[str, 
         for tile, row in dict(physical_rows or {}).items()
         if int(tile) in requested
     }
+
+
+def _visual_geometry_summary(
+    physical_draw_rows,
+    *,
+    view_range,
+    viewport_shape,
+) -> dict[str, object]:
+    """Compact world/screen geometry oracle for periodic visual evidence.
+
+    The source of truth remains the physical draw rows.  Projecting their
+    bounds through the live PyQtGraph camera range makes a mixed-size defect
+    searchable in JSONL without trying to infer geometry from a screenshot.
+    It also records enough context to distinguish a deliberate maximum-out or
+    deep-zoom gesture from stale VisPy vertices/camera state.
+    """
+
+    world_sizes: list[tuple[float, float]] = []
+    projected_sizes: list[tuple[float, float]] = []
+    mismatched_tiles: list[int] = []
+    x_span = y_span = 0.0
+    viewport_height = viewport_width = 0
+    try:
+        (x0, x1), (y0, y1) = view_range
+        x_span = abs(float(x1) - float(x0))
+        y_span = abs(float(y1) - float(y0))
+    except Exception:
+        pass
+    try:
+        viewport_height = max(0, int(viewport_shape[0]))
+        viewport_width = max(0, int(viewport_shape[1]))
+    except Exception:
+        pass
+    for tile_text, row in dict(physical_draw_rows or {}).items():
+        row = dict(row or {})
+        if row.get("bounds_match_layout") is False:
+            mismatched_tiles.append(int(tile_text))
+        bounds = tuple(row.get("draw_world_bounds", ()) or ())
+        if len(bounds) != 4:
+            continue
+        width = abs(float(bounds[2]) - float(bounds[0]))
+        height = abs(float(bounds[3]) - float(bounds[1]))
+        world_sizes.append((width, height))
+        if x_span > 0.0 and y_span > 0.0 and viewport_width > 0 and viewport_height > 0:
+            projected_sizes.append(
+                (
+                    width * float(viewport_width) / x_span,
+                    height * float(viewport_height) / y_span,
+                )
+            )
+
+    def unique(values) -> tuple[tuple[float, float], ...]:
+        return tuple(
+            sorted(
+                {
+                    (round(float(width), 6), round(float(height), 6))
+                    for width, height in values
+                }
+            )
+        )
+
+    unique_world = unique(world_sizes)
+    unique_projected = unique(projected_sizes)
+    return {
+        "world_size_classes": unique_world,
+        "projected_pixel_size_classes": unique_projected,
+        "mixed_world_sizes": len(unique_world) > 1,
+        "mixed_projected_pixel_sizes": len(unique_projected) > 1,
+        "bounds_mismatch_tiles": tuple(sorted(mismatched_tiles)),
+    }
+
+
+def _visual_camera_state(win, *, session, live_view_range) -> dict[str, object]:
+    """Record every camera representation without making one a new owner."""
+
+    session_range = _normalized_view_range(getattr(session, "view_range", None))
+    live_range = _normalized_view_range(live_view_range)
+    image_view = getattr(win, "img_view", None)
+    raw_key = getattr(image_view, "_vispy_camera_key", None)
+    vispy_key_range = _normalized_view_range(
+        None if raw_key is None else tuple(raw_key[:2])
+    )
+    camera_rect = None
+    try:
+        rect = image_view._vispy_view.camera.rect
+        camera_rect = (
+            float(rect.left),
+            float(rect.bottom),
+            float(rect.right),
+            float(rect.top),
+        )
+    except Exception:
+        pass
+    return {
+        "session_view_range": session_range,
+        "live_view_range": live_range,
+        "vispy_camera_key": _trace_identity(raw_key, limit=500),
+        "vispy_camera_key_range": vispy_key_range,
+        "vispy_camera_rect": camera_rect,
+        "session_matches_live": _view_ranges_close(session_range, live_range),
+        "vispy_key_matches_live": _view_ranges_close(vispy_key_range, live_range),
+    }
+
+
+def _normalized_view_range(value):
+    try:
+        return (
+            (float(value[0][0]), float(value[0][1])),
+            (float(value[1][0]), float(value[1][1])),
+        )
+    except Exception:
+        return None
+
+
+def _view_ranges_close(left, right, *, tolerance: float = 1e-6) -> bool | None:
+    left = _normalized_view_range(left)
+    right = _normalized_view_range(right)
+    if left is None or right is None:
+        return None
+    return all(
+        abs(float(a) - float(b)) <= float(tolerance) * max(1.0, abs(float(a)), abs(float(b)))
+        for left_axis, right_axis in zip(left, right)
+        for a, b in zip(left_axis, right_axis)
+    )
+
+
+def _view_ranges_intersect(left, right) -> bool:
+    left = _normalized_view_range(left)
+    right = _normalized_view_range(right)
+    if left is None or right is None:
+        return False
+    return all(
+        max(min(a0, a1), min(b0, b1)) < min(max(a0, a1), max(b0, b1))
+        for (a0, a1), (b0, b1) in zip(left, right)
+    )
+
+
+def _view_range_intersects_world_bounds(view_range, bounds) -> bool:
+    try:
+        world_range = (
+            (float(bounds[0]), float(bounds[2])),
+            (float(bounds[1]), float(bounds[3])),
+        )
+    except Exception:
+        return False
+    return _view_ranges_intersect(view_range, world_range)
 
 
 def _visual_page_binding_row(binding) -> dict[str, object]:
@@ -4393,6 +4689,13 @@ def _window_geometry_state(win) -> dict[str, object]:
         viewport_shape = [int(viewport.height()), int(viewport.width())]
     except Exception:
         viewport_shape = None
+    try:
+        canvas = win.img_view._vispy_canvas_native
+        vispy_canvas_shape = [int(canvas.height()), int(canvas.width())]
+        vispy_canvas_device_pixel_ratio = float(canvas.devicePixelRatioF())
+    except Exception:
+        vispy_canvas_shape = None
+        vispy_canvas_device_pixel_ratio = None
     raw_target = getattr(win, "_profile_session_fixture_viewport_shape", None)
     target = None if raw_target is None else [int(raw_target[0]), int(raw_target[1])]
     shape_matches = bool(
@@ -4412,6 +4715,8 @@ def _window_geometry_state(win) -> dict[str, object]:
         "window_size": window_size,
         "window_minimum_size": minimum_size,
         "viewport_shape": viewport_shape,
+        "vispy_canvas_shape": vispy_canvas_shape,
+        "vispy_canvas_device_pixel_ratio": vispy_canvas_device_pixel_ratio,
         "session_viewport_shape_target": target,
         "session_viewport_shape_matches": shape_matches,
         "image_axes": current_image_axes,

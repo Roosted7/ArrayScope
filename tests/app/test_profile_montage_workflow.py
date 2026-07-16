@@ -121,6 +121,14 @@ def test_visual_timeline_preserves_physical_draw_geometry():
                 "physical_draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
                 "physical_expected_world_rect": (1.0, 2.0, 5.0, 6.0),
                 "physical_draw_bounds_match_layout": True,
+                "physical_texture_kind": "scalar_r32f",
+                "physical_storage_mode": "scalar",
+                "physical_texture_dtype": "float32",
+                "physical_texture_shape": (4, 4),
+                "physical_mapping_mode": 0.0,
+                "physical_component_mode": 0.0,
+                "physical_levels": (2.0, 6.0),
+                "physical_shader_mapping_key": "linear-real",
             },
             9: {"physical_draw_bounds_match_layout": False},
         },
@@ -129,6 +137,14 @@ def test_visual_timeline_preserves_physical_draw_geometry():
 
     assert rows == {
         "3": {
+            "texture_kind": "scalar_r32f",
+            "storage_mode": "scalar",
+            "texture_dtype": "float32",
+            "texture_shape": (4, 4),
+            "mapping_mode": 0.0,
+            "component_mode": 0.0,
+            "levels": (2.0, 6.0),
+            "shader_mapping_key": "linear-real",
             "draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
             "draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
             "draw_uv_rects": ((0.1, 0.2, 0.5, 0.6),),
@@ -137,6 +153,86 @@ def test_visual_timeline_preserves_physical_draw_geometry():
             "page_bindings": (),
         }
     }
+
+
+def test_visual_geometry_summary_projects_physical_bounds_through_live_camera():
+    from arrayscope.tools.profile_montage_workflow import _visual_geometry_summary
+
+    summary = _visual_geometry_summary(
+        {
+            "3": {
+                "draw_world_bounds": (0.0, 0.0, 336.0, 336.0),
+                "bounds_match_layout": True,
+            },
+            "4": {
+                "draw_world_bounds": (336.0, 0.0, 672.0, 336.0),
+                "bounds_match_layout": False,
+            },
+        },
+        view_range=((0.0, 672.0), (0.0, 336.0)),
+        viewport_shape=(500, 1000),
+    )
+
+    assert summary == {
+        "world_size_classes": ((336.0, 336.0),),
+        "projected_pixel_size_classes": ((500.0, 500.0),),
+        "mixed_world_sizes": False,
+        "mixed_projected_pixel_sizes": False,
+        "bounds_mismatch_tiles": (4,),
+    }
+
+
+def test_visual_scene_presented_tiles_does_not_treat_residency_as_drawn():
+    from arrayscope.tools.profile_montage_workflow import _visual_scene_presented_tiles
+
+    resident_rows = {tile: {} for tile in range(60)}
+
+    assert _visual_scene_presented_tiles(
+        "vispy",
+        presentation_diagnostics={"presented_tiles": (40, 41, 50, 51)},
+        physical_rows=resident_rows,
+    ) == frozenset({40, 41, 50, 51})
+    assert _visual_scene_presented_tiles(
+        "pyqtgraph",
+        presentation_diagnostics={},
+        physical_rows={4: {}, 8: {}},
+    ) == frozenset({4, 8})
+
+
+def test_visual_camera_state_reports_session_live_and_vispy_key_drift():
+    from types import SimpleNamespace
+
+    from arrayscope.tools.profile_montage_workflow import _visual_camera_state
+
+    rect = SimpleNamespace(left=1.0, bottom=2.0, right=11.0, top=22.0)
+    image_view = SimpleNamespace(
+        _vispy_camera_key=((1.0, 11.0), (2.0, 22.0), False, True),
+        _vispy_view=SimpleNamespace(camera=SimpleNamespace(rect=rect)),
+    )
+    state = _visual_camera_state(
+        SimpleNamespace(img_view=image_view),
+        session=SimpleNamespace(view_range=((0.0, 10.0), (0.0, 20.0))),
+        live_view_range=((1.0, 11.0), (2.0, 22.0)),
+    )
+
+    assert state["session_matches_live"] is False
+    assert state["vispy_key_matches_live"] is True
+    assert state["vispy_camera_rect"] == (1.0, 2.0, 11.0, 22.0)
+
+
+def test_view_intersection_distinguishes_off_content_camera_and_visible_tile():
+    from arrayscope.tools.profile_montage_workflow import (
+        _view_range_intersects_world_bounds,
+        _view_ranges_intersect,
+    )
+
+    content = ((0.0, 100.0), (0.0, 80.0))
+    assert _view_ranges_intersect(((20.0, 40.0), (10.0, 30.0)), content)
+    assert not _view_ranges_intersect(((-90.0, -10.0), (100.0, 180.0)), content)
+    assert _view_range_intersects_world_bounds(
+        ((20.0, 40.0), (10.0, 30.0)),
+        (0.0, 0.0, 30.0, 20.0),
+    )
 
 
 def test_synthetic_geometry_scene_is_indexed_and_spatially_recognizable():

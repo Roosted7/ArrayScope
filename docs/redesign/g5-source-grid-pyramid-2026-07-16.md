@@ -207,6 +207,24 @@ bindings and settled target coverage, and was visually confirmed onscreen. Its
 three red gates are explicitly performance-only (GUI callback, heartbeat, and
 warm-input latency); they do not weaken this semantic correctness result.
 
+The periodic screenshot/JSONL probe now separates lifecycle acknowledgement,
+resident physical rows, scene-presented primitives, and primitives that
+actually intersect the camera. It records the scripted action, live/session/
+VisPy camera ranges, content intersection, projected tile sizes, exact/fallback
+bindings, missing candidates, page-table occupancy, and atlas storage classes;
+the generated contact sheet labels scene and onscreen counts. The earlier
+stress path also derived an off-centre zoom from the maximum-out range, putting
+the entire camera tens of thousands of samples outside the montage and making
+correct black frames look like renderer failures. Non-limit gestures now start
+from the content range. The real-Wayland evidence at
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/visual-truth-camera-fixed/`
+contains 23 periodic frames: every sample has one 336×336 world-size class, no
+layout-bound mismatch, no mixed scalar/complex storage/mapping/levels among
+scene primitives, and a VisPy camera key matching the live range. The semantic
+operation switch is explicitly hidden before scalar pixels arrive; the final
+frame has 60/60 scalar scene bindings. Its three remaining reds are the same
+performance-only gates and remain work, not widened timeouts.
+
 The full resident-LOD matrix is green again after translating eight legacy
 level-swap assertions that required native/finer pixels to be replaced by a
 newly requested coarse level. The policy is now explicit in both directions:
