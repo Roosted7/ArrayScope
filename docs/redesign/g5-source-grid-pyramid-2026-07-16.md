@@ -303,6 +303,16 @@ compatible L0/L1/L2 residency existed. Prefetch page claims/admission are GUI-ow
 workers return checked pages only, and success, stale, cancellation, partial
 fanout, and teardown all release claims and wake the standing replan path.
 
+The broader memory-stress gate initially appeared to show a roughly 216 MiB
+G5 residency increase, but reproduced with a roughly 178 MiB increase on
+`main`. Its baseline was taken before the one-time Qt/PyQtGraph window/backend
+allocation. The corrected gate takes its RSS baseline after backend
+initialization and separately asserts the deterministic owners: in the failing
+scenario the logical page cache plateaued at 129 pages / 1,115,136 bytes with
+zero pending claims and the display cache plateaued at 16 entries / 4,194,304
+bytes; repeated viewport walks did not grow either owner. This correction does
+not widen a cache budget or excuse unbounded RSS growth.
+
 That live ring also caught one last route split rather than being weakened for
 the new semantic-read contract. Cold reduced-target evaluation planned and
 materialized at local `(0, 0)` while its payload advertised a shifted native
