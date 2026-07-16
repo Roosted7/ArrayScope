@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.model.tile_identity import tile_ack_identity
@@ -26,7 +27,9 @@ from arrayscope.render.lod import LodPageSetKey, admit_retained_preview_level
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window.frame_session import (
     FrameSession,
+    _base_source_id,
     page_set_key_for_rendered,
+    prepare_retained_source_transition,
     texture_source_for_rendered,
 )
 
@@ -703,8 +706,8 @@ def _admit_zoomed_out_levels(session, level=2):
         _admit_page_set(session.lod_page_cache, key, np.asarray(rendered.image))
 
 
-def test_camera_only_retarget_consolidates_to_resident_demand_without_upload():
-    """A resident demanded level may replace finer pixels without evaluation."""
+def test_camera_only_retarget_keeps_finer_native_without_residency_pressure():
+    """Resident coarse data cannot demote exact finer pixels for bookkeeping."""
 
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=ZOOMED_IN_RANGE)
@@ -712,26 +715,76 @@ def test_camera_only_retarget_consolidates_to_resident_demand_without_upload():
     assert all(payload.lod.level == 0 for payload in session.tile_presentation_state.payloads.values())
     _admit_zoomed_out_levels(session)
 
-    # Camera-only zoom out: retarget alone, no pan, no dimension scroll, no
-    # tile results. The demanded level is already resident, so presenting it
-    # consolidates atlas classes without evaluating or uploading pixels.
+    # Camera-only zoom out: the demanded coarse level is already resident,
+    # but atlas-class consolidation is not authority to lower visible quality.
     session.retarget_viewport(view_range=ZOOMED_OUT_RANGE, viewport_shape=VIEWPORT)
     revision_before = int(session.viewport_revision)
     swap_ready = session.mark_ladder_swaps_for_viewport()
 
-    assert swap_ready is True
+    assert swap_ready is False
     assert session.pending_rung_materializations == [], "cached levels must not be re-requested"
-    assert sorted(session.dirty_payloads) == [0, 1]
+    assert not session.dirty_payloads
+
+    # A worker may have built the coarse desired wrapper before the backend
+    # acknowledges it. Desired bookkeeping is not physical presentation
+    # truth: the acknowledged native payload must still win.
+    acknowledged_native = session.tile_presentation_state.payloads[0]
+    rendered = session.rendered_tiles[0]
+    source, histogram, _kind = session._texture_source_for(rendered)
+    coarse, coarse_histogram, coarse_lod, coarse_pages, coarse_kind = (
+        session._resident_texture_for_rendered_tile(
+            rendered,
+            source=source,
+            histogram=histogram,
+        )
+    )
+    assert coarse_lod.level == 2
+    coarse_source_id = session._payload_source_id(
+        _base_source_id(acknowledged_native.source_id),
+        texture_kind=coarse_kind,
+        lod=coarse_lod,
+    )
+    coarse_identity = session.tile_payload_identity(
+        rendered.tile,
+        texture_data=coarse,
+        texture_kind=coarse_kind,
+        shader_mapping=rendered.shader_mapping,
+        lod=coarse_lod,
+        quality="exact",
+    )
+    session.display_tile_payloads[0] = replace(
+        acknowledged_native,
+        image=coarse,
+        texture_data=coarse,
+        histogram_data=coarse_histogram,
+        source_id=coarse_source_id,
+        texture_kind=coarse_kind,
+        lod=coarse_lod,
+        page_backing=coarse_pages,
+        tile_identity=coarse_identity,
+    )
+    assert session.mark_ladder_swaps_for_viewport() is False
+    assert render_lod.preserve_finer_presented_payload(session, acknowledged_native)
 
     cache_revision = pyramid.revision
+    # Unrelated level/lifecycle work may rebuild a wrapper, but it still may
+    # not select the coarser resident texture in the absence of pressure.
+    ensure_payload = session._ensure_display_tile_payload
+    ensured_levels = []
+
+    def record_ensure(*args, **kwargs):
+        payload = ensure_payload(*args, **kwargs)
+        ensured_levels.append(int(payload.lod.level))
+        return payload
+
+    session._ensure_display_tile_payload = record_ensure
+    session.dirty_payloads[0] = None
     _state, delta = session.build_tile_presentation({})
-    assert set(delta.upserts) == {0, 1}
-    assert {payload.lod.level for payload in delta.upserts.values()} == {2}
+    assert ensured_levels == [0]
+    assert not delta.upserts
     assert delta.removals == ()
     assert pyramid.revision == cache_revision
-
-    _acknowledge(session, delta)
-    session.mark_presented(tuple(delta.upserts))
+    assert {payload.lod.level for payload in session.display_tile_payloads.values()} == {0}
 
     # A second refresh with the same viewport is a no-op (no revision creep,
     # no commit request, no dirty tiles).
@@ -2858,6 +2911,74 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert session.source_window_changed_pending is True
 
 
+def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
+    """Rapid churn may rebirth before the ordinary in-place retarget is eligible."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    previous.view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    successor.view_state = previous.view_state.with_montage_axis(
+        0,
+        columns=4,
+        indices=(3, 4, 5, 6),
+        text="3:7",
+    )
+    # Auto-level intent is successor presentation metadata. The old pixels
+    # and old uniform remain an honest fallback until the atomic handoff.
+    successor.force_auto = True
+    successor.session_id = 2
+    successor_tiles = tuple(
+        replace(tile, source_index=index + 3)
+        for index, tile in enumerate(_tiles(4))
+    )
+    successor.plan = MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(1, 4),
+        columns=4,
+        rows=1,
+        gap=0,
+        tiles=successor_tiles,
+    )
+    successor.visible_tiles = successor_tiles
+
+    assert prepare_retained_source_transition(previous, successor)
+    assert successor.source_window_changed_pending is True
+
+
+def test_montage_rebirth_with_different_layout_cannot_retain_predecessor():
+    previous = _session(count=4)
+    successor = _session(count=3)
+    document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+
+    assert not prepare_retained_source_transition(previous, successor)
+    assert successor.source_window_changed_pending is False
+
+
+def test_source_window_atomic_handoff_does_not_depend_on_successor_wrappers():
+    """The first bounded commit must guard before it has built any payloads."""
+
+    from arrayscope.display.model.frame import TiledValueSource
+    from arrayscope.window.frame_effects import _source_window_atomic_handoff_pending
+
+    session = _session(count=4)
+    session.source_window_changed_pending = True
+    predecessor_payload = session.snapshot_display_tile_payloads(
+        {0: ("source", 0)}
+    )[0]
+    session.display_tile_payloads.clear()
+    predecessor = TiledValueSource({0: predecessor_payload})
+
+    assert _source_window_atomic_handoff_pending(session, predecessor)
+
+
 def test_index_window_retarget_invalidates_atomic_successor_generation():
     """An in-place session retarget cannot inherit the prior atomic handoff."""
 
@@ -3105,6 +3226,49 @@ def test_presentation_backlog_signature_distinguishes_same_size_retarget():
     second = effects._backlog_signature()
 
     assert first != second
+
+
+def test_phase_vector_display_stays_native_until_amplitude_statistic_exists():
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
+    session.view_state = type("View", (), {"channel": "angle"})()
+
+    assert render_lod.resident_lod_active(session) is False
+    assert render_lod.selected_lod_factor(session) == 1
+
+
+def test_complex_display_keeps_resident_mean_complex_lod_active():
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
+    session.view_state = type("View", (), {"channel": "complex"})()
+
+    assert render_lod.resident_lod_active(session) is True
+
+
+def test_stale_presentation_gate_cannot_clear_successor_wakeup():
+    from types import SimpleNamespace
+
+    predecessor = SimpleNamespace(session_id=7)
+    successor = SimpleNamespace(session_id=8)
+    successor_owner = (8, id(successor))
+    renderer = SimpleNamespace(
+        _montage_presentation_gate_armed=True,
+        _montage_presentation_gate_owner=successor_owner,
+    )
+    stale = FramePipelineEffects(renderer, predecessor)
+    current = FramePipelineEffects(renderer, successor)
+    commits = []
+    stale.commit_pending_session = lambda: commits.append("stale")
+    current.commit_pending_session = lambda: commits.append("current")
+    current._session_is_current = lambda: True
+
+    stale._on_presentation_gate()
+    assert renderer._montage_presentation_gate_armed is True
+    assert renderer._montage_presentation_gate_owner == successor_owner
+    assert commits == []
+
+    current._on_presentation_gate()
+    assert renderer._montage_presentation_gate_armed is False
+    assert renderer._montage_presentation_gate_owner is None
+    assert commits == ["current"]
 
 
 def test_rebuilt_payload_wrapper_with_same_source_identity_is_not_reemitted():

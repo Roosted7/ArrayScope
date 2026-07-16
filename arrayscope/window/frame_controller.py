@@ -70,7 +70,7 @@ from arrayscope.window.montage_viewport import (
     square_montage_fit_view_range,
 )
 from arrayscope.render import lod as render_lod
-from arrayscope.window.frame_session import FrameSession, slice_only_session_transition
+from arrayscope.window.frame_session import FrameSession, prepare_retained_source_transition
 from arrayscope.window.render_contract import (
     session_token_is_current as _session_token_is_current,
 )
@@ -745,7 +745,24 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # window/levels mode, backend, dtype) keeps today's full blank,
         # because stale pixels from a different target are lies, not
         # previews.
-        retain_stale_pixels = slice_only_session_transition(dying_session, session)
+        retain_stale_pixels = prepare_retained_source_transition(
+            dying_session,
+            session,
+        )
+        emit_trace(
+            "source_transition_retention",
+            session_id=int(session.session_id),
+            predecessor_session_id=int(
+                getattr(dying_session, "session_id", 0) or 0
+            ),
+            retained=bool(retain_stale_pixels),
+            reason=str(
+                getattr(session, "retained_source_transition_reason", "") or ""
+            ),
+            force_auto=bool(session.force_auto),
+            montage_axis=getattr(session, "montage_axis", None),
+            source_window_pending=bool(session.source_window_changed_pending),
+        )
         self._frame_session_transition_retained_pixels = bool(retain_stale_pixels)
         if retain_stale_pixels:
             self._frame_session_transitions_retained = (

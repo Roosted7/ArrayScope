@@ -54,7 +54,9 @@ from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN,
     REDUCER_MEAN_ABS,
+    REDUCER_NATIVE,
     REDUCER_PHASE_VECTOR,
+    RGB8,
     SCALAR_R32F,
 )
 from arrayscope.presentation import ClaimOwner, LevelPhase
@@ -227,6 +229,11 @@ def page_set_key_for_rendered(
     reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
     reduction_yx = (int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1)
+    reducer, dtype, representation = _page_route_format(
+        source,
+        reduction_yx=reduction_yx,
+        reduced_format=(reducer, dtype, representation),
+    )
     height, width = (int(value) for value in np.shape(source)[:2])
     content_key = ("src-anchored", semantic_source_id, ("display-plane",))
     plans = plan_source_grid_pages(
@@ -266,9 +273,12 @@ def _reducer_format_for_rendered(rendered: RenderedTile, source: np.ndarray) -> 
     if np.iscomplexobj(source):
         display_mode = getattr(mapping, "display_mode", ShaderDisplayMode.SCALAR)
         display_mode = ShaderDisplayMode(getattr(display_mode, "value", display_mode))
-        if display_mode == ShaderDisplayMode.PHASE_COLOR:
-            return REDUCER_PHASE_VECTOR, "complex64", COMPLEX_RG32F
         if component == ShaderComponent.ABS:
+            if display_mode == ShaderDisplayMode.PHASE_COLOR:
+                # Complex presentation uses phase for hue and component
+                # magnitude for intensity. Preserve both; phase_vector
+                # deliberately discards the amplitude used by levels.
+                return REDUCER_MEAN, "complex64", COMPLEX_RG32F
             return REDUCER_MEAN_ABS, "float32", SCALAR_R32F
         if component in (ShaderComponent.ANGLE, ShaderComponent.COMPLEX_PHASE):
             return REDUCER_PHASE_VECTOR, "complex64", COMPLEX_RG32F
@@ -276,6 +286,24 @@ def _reducer_format_for_rendered(rendered: RenderedTile, source: np.ndarray) -> 
     if source.ndim != 2:
         raise ValueError("canonical live LOD pages require scalar or complex source values")
     return REDUCER_MEAN, "float32", SCALAR_R32F
+
+
+def _page_route_format(
+    source: np.ndarray,
+    *,
+    reduction_yx: tuple[int, int],
+    reduced_format: tuple[str, str, str],
+) -> tuple[str, str, str]:
+    """Select native identity at level zero and reducer families above it."""
+
+    if any(int(step) for step in reduction_yx):
+        return reduced_format
+    dtype = np.dtype(source.dtype)
+    if np.issubdtype(dtype, np.complexfloating):
+        return REDUCER_NATIVE, "complex64", COMPLEX_RG32F
+    if dtype == np.dtype(np.uint8):
+        return REDUCER_NATIVE, "uint8", RGB8
+    return REDUCER_NATIVE, dtype.name, SCALAR_R32F
 
 
 def _page_source_origin(session, source: np.ndarray) -> tuple[int, int]:
@@ -294,6 +322,12 @@ def page_plans_for_rendered(session, rendered, *, demand, level: int, native_sou
     source = np.asarray(native_source)
     reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
+    reduction_yx = (int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1)
+    reducer, dtype, representation = _page_route_format(
+        source,
+        reduction_yx=reduction_yx,
+        reduced_format=(reducer, dtype, representation),
+    )
     origin_y, origin_x = _page_source_origin(session, source)
     height, width = (int(value) for value in source.shape[:2])
     anchor_fn = getattr(session, "_payload_source_anchor", None)
@@ -310,7 +344,7 @@ def page_plans_for_rendered(session, rendered, *, demand, level: int, native_sou
     return plan_source_grid_pages(
         content_key=content_key,
         valid_source_rect_yx=(origin_y, origin_y + height, origin_x, origin_x + width),
-        reduction_yx=(int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1),
+        reduction_yx=reduction_yx,
         stored_page_shape=(256, 256),
         dtype=dtype,
         representation=representation,
@@ -327,38 +361,86 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
     if np.issubdtype(dtype, np.complexfloating):
         if channel == "abs":
             reducer, planned_dtype, representation = REDUCER_MEAN_ABS, "float32", SCALAR_R32F
-        elif channel in {"angle", "complex"}:
+        elif channel == "angle":
             reducer, planned_dtype, representation = REDUCER_PHASE_VECTOR, "complex64", COMPLEX_RG32F
+        elif channel == "complex":
+            reducer, planned_dtype, representation = REDUCER_MEAN, "complex64", COMPLEX_RG32F
         else:
             reducer, planned_dtype, representation = REDUCER_MEAN, "complex64", COMPLEX_RG32F
     else:
         reducer, planned_dtype, representation = REDUCER_MEAN, "float32", SCALAR_R32F
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
+    reduction_yx = (int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1)
+    if not any(reduction_yx):
+        reducer = REDUCER_NATIVE
+        if np.issubdtype(dtype, np.complexfloating):
+            planned_dtype, representation = "complex64", COMPLEX_RG32F
+        elif dtype == np.dtype(np.uint8):
+            planned_dtype, representation = "uint8", RGB8
+        else:
+            planned_dtype, representation = dtype.name, SCALAR_R32F
     height, width = (int(value) for value in session.plan.tile_shape[:2])
     semantic_source_id = session.tile_semantic_source_id(int(tile.source_index))
+    cache_key = (
+        semantic_source_id,
+        int(tile.source_index),
+        (height, width),
+        reduction_yx,
+        reducer,
+        planned_dtype,
+        representation,
+    )
+    route_cache = getattr(session, "_lod_page_set_key_cache", None)
+    if route_cache is not None:
+        cached = route_cache.get(cache_key)
+        if cached is not None:
+            return cached
     plans = plan_source_grid_pages(
         content_key=("src-anchored", semantic_source_id, ("display-plane",)),
         valid_source_rect_yx=(0, height, 0, width),
-        reduction_yx=(int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1),
+        reduction_yx=reduction_yx,
         stored_page_shape=(256, 256),
         dtype=planned_dtype,
         representation=representation,
         reducer=reducer,
     )
-    return LodPageSetKey(
+    key = LodPageSetKey(
         source_id=semantic_source_id,
         tile_id=int(tile.source_index),
         level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
         reducer=reducer,
         plans=plans,
     )
+    if route_cache is not None:
+        route_cache[cache_key] = key
+    return key
 # --------------------------------------------------------------------------
 # Policy & demand (session-side)
 # --------------------------------------------------------------------------
 
 
 def resident_lod_active(session) -> bool:
-    return str(session.lod_policy_mode) == LOD_POLICY_RESIDENT and session.lod_page_cache is not None
+    return bool(
+        str(session.lod_policy_mode) == LOD_POLICY_RESIDENT
+        and session.lod_page_cache is not None
+        and not _phase_vector_display_requires_native(session)
+    )
+
+
+def _phase_vector_display_requires_native(session) -> bool:
+    """Keep phase/cyclic display native until amplitude statistics are paired.
+
+    A canonical phase-vector page stores circular direction and resultant
+    coherence, not native complex amplitude. Reusing the native amplitude
+    level window makes it black; normalizing it to [0, 1] makes the public
+    level control and histogram describe different values. Native is the only
+    truthful live presentation until a paired amplitude sufficient statistic
+    is part of the page contract.
+    """
+
+    channel = getattr(getattr(session, "view_state", None), "channel", None)
+    channel = str(getattr(channel, "value", channel) or "")
+    return channel == "angle"
 
 
 def selected_lod_factor(session) -> int:
@@ -674,8 +756,9 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
 
     Camera changes never restart evaluation. They only request presentation
     work when the current payload is too coarse for the new demand, still a
-    preview, absent, or an already-resident demanded level can consolidate
-    active atlas classes without an upload. This recomputes the decision from the current
+    preview, or absent. A coarser demand never replaces an exact finer
+    presentation unless visible finer payloads alone exceed the residency
+    budget. This recomputes the decision from the current
     ``view_range``/``viewport_shape`` (demand math plus pyramid peeks; never
     reduction or other bulk work), queues singleflight materializations for
     missing display payloads, and dirties tiles only when a swap improves
@@ -697,11 +780,29 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
         # work identities without replanning, churning work at idle.
         session.lod_target_revision += 1
     selected_lod_factor(session)
+    return mark_ladder_swaps_for_current_demand(session)
+
+
+def mark_ladder_swaps_for_current_demand(session) -> bool:
+    """Dirty resident swaps for the policy decision already on ``session``.
+
+    The pipeline retarget boundary recomputes LOD demand before it retargets
+    lifecycle identities.  That final decision can differ from the earlier
+    viewport callback's decision (for example while the camera is still
+    delivering zoom updates).  Marking here keeps the target update and its
+    presentation obligation atomic without scheduling or recomputing demand.
+    """
+
+    if not resident_lod_active(session):
+        return False
     demand = session.lod_policy_decision.demand
     pyramid = session.lod_page_cache
     desired = int(demand.desired_level)
     commit_needed = False
     visible_by_number = {int(t.montage_index): t for t in tuple(session.visible_tiles)}
+    acknowledged_payloads = dict(
+        getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+    )
     residency_pressure_demote = _visible_residency_pressure_demands_demote(session, demand)
     # Priority order, not row order: materializations start immediately
     # for the demanded level, and whatever the workers complete before a
@@ -721,7 +822,10 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
             if floor_can_progress(session, int(tile_number), tile=visible_by_number.get(int(tile_number))):
                 commit_needed = True
             continue
-        payload = session.display_tile_payloads.get(int(tile_number))
+        payload = acknowledged_payloads.get(
+            int(tile_number),
+            session.display_tile_payloads.get(int(tile_number)),
+        )
         presented_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
         resident = set(tile_resident_levels(session, rendered, demand=demand))
         if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
@@ -743,24 +847,32 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
             continue
-        consolidate_to_resident_demand = bool(
-            desired > presented_level and desired in resident
-        )
-        if (
-            presented_level <= desired
-            and not residency_pressure_demote
-            and not consolidate_to_resident_demand
-        ):
+        if presented_level <= desired and not residency_pressure_demote:
             continue
-        applied = (
-            desired
-            if consolidate_to_resident_demand
-            else int(choose_resident_level(demand, tuple(sorted(resident))))
-        )
+        applied = int(choose_resident_level(demand, tuple(sorted(resident))))
         if presented_level != applied:
             session.dirty_payloads[int(tile_number)] = None
             commit_needed = True
     return commit_needed
+
+
+def preserve_finer_presented_payload(session, payload) -> bool:
+    """Whether an exact finer payload must survive an unrelated rebuild.
+
+    LOD materialization, levels, and lifecycle repair can dirty a tile for
+    reasons other than an authorized resolution change. Texture selection
+    must not turn those bookkeeping events into quality demotion.
+    """
+
+    if payload is None or str(getattr(payload, "quality", "exact")) != "exact":
+        return False
+    demand = session.lod_policy_decision.demand
+    presented = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+    desired = int(getattr(demand, "desired_level", 0) or 0)
+    return bool(
+        presented < desired
+        and not _visible_residency_pressure_demands_demote(session, demand)
+    )
 
 
 def _visible_residency_pressure_demands_demote(session, demand) -> bool:
@@ -777,7 +889,11 @@ def _visible_residency_pressure_demands_demote(session, demand) -> bool:
     if budget <= 0 or desired <= 0:
         return False
     total = 0
-    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    payloads = dict(
+        getattr(getattr(session, "tile_presentation_state", None), "payloads", {})
+        or getattr(session, "display_tile_payloads", {})
+        or {}
+    )
     for tile_number in tuple(getattr(session, "visible_tile_numbers", ()) or ()):
         payload = payloads.get(int(tile_number))
         if payload is None:

@@ -1037,6 +1037,7 @@ class LodPageCache:
     def __init__(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         self._cache = BoundedCache(max_bytes=max_bytes, max_entries=max_entries)
         self._claims: dict[DataChunkKey, object] = {}
+        self._active_claim_owners: set[object] = set()
         self._lock = RLock()
         self._revision = 0
         self._resolver_revision = -1
@@ -1164,8 +1165,34 @@ class LodPageCache:
                 )
             self._claims.pop(key, None)
 
+    def begin_owner_work(self, owner: object) -> bool:
+        """Atomically protect an owner's claims for one running worker."""
+
+        with self._lock:
+            if owner in self._active_claim_owners:
+                raise ValueError(f"LOD page claim owner {owner!r} already has active work")
+            if not any(claimed_owner == owner for claimed_owner in self._claims.values()):
+                return False
+            self._active_claim_owners.add(owner)
+            return True
+
+    def finish_owner_work(self, owner: object) -> tuple[DataChunkKey, ...]:
+        """Terminal worker cleanup, including claims not yet admitted."""
+
+        with self._lock:
+            self._active_claim_owners.discard(owner)
+            released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
+            for key in released:
+                self._claims.pop(key, None)
+            return released
+
     def release_owner_claims(self, owner: object) -> tuple[DataChunkKey, ...]:
         with self._lock:
+            if owner in self._active_claim_owners:
+                # Cancellation/supersession may arrive while the worker is
+                # inside its numeric kernel. Keep exact claim ownership until
+                # that worker reaches its terminal finally block.
+                return ()
             released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
             for key in released:
                 self._claims.pop(key, None)
@@ -1229,6 +1256,7 @@ class LodPageCache:
         with self._lock:
             self._cache.clear()
             self._claims.clear()
+            self._active_claim_owners.clear()
             self._revision += 1
 
 

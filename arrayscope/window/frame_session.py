@@ -637,6 +637,10 @@ class FrameSession:
     # choice vs. resident LOD not yet adopted on the active backend).
     lod_native_reason: str | None = None
     lod_page_cache: object | None = None
+    # Immutable canonical routes are reused across viewport retargets. Physical
+    # residency has its own cache revision; changing it must not rebuild page
+    # geometry for every floor query.
+    _lod_page_set_key_cache: dict[object, object] = field(default_factory=dict)
     # List-like view over lifecycle-owned rung materialization claims.  Filled
     # only under the "resident" policy after a singleflight claim on the
     # pyramid cache; the lifecycle record, not this attribute, owns truth.
@@ -1480,7 +1484,27 @@ class FrameSession:
         semantic = exact_image if semantic is None else np.asarray(semantic)
         semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
         semantic_histogram = exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
-        texture_data, texture_histogram, lod, texture_kind, page_backing = self._texture_for_rendered_tile(rendered)
+        previous = self.display_tile_payloads.get(tile_number)
+        acknowledged_previous = dict(
+            getattr(self.tile_presentation_state, "payloads", {}) or {}
+        ).get(tile_number)
+        preserve_candidate = acknowledged_previous or previous
+        if (
+            preserve_candidate is not None
+            and _base_source_id(preserve_candidate.source_id) == base_source_id
+            and render_lod.preserve_finer_presented_payload(self, preserve_candidate)
+        ):
+            texture_data = np.asarray(
+                preserve_candidate.texture_data
+                if preserve_candidate.texture_data is not None
+                else preserve_candidate.image
+            )
+            texture_histogram = preserve_candidate.histogram_data
+            lod = preserve_candidate.lod
+            texture_kind = preserve_candidate.texture_kind
+            page_backing = preserve_candidate.page_backing
+        else:
+            texture_data, texture_histogram, lod, texture_kind, page_backing = self._texture_for_rendered_tile(rendered)
         texture_data = _debug_lod_pass_texture(texture_data, quality="exact")
         display_image = np.asarray(texture_data)
         display_histogram = None if texture_histogram is None else np.asarray(texture_histogram)
@@ -1489,7 +1513,6 @@ class FrameSession:
             texture_kind=texture_kind,
             lod=lod,
         )
-        previous = self.display_tile_payloads.get(tile_number)
         if (
             previous is not None
             and _base_source_id(previous.source_id) == base_source_id
@@ -3888,11 +3911,17 @@ class FrameSession:
         )
 
 
-def slice_only_session_transition(previous_session, session) -> bool:
-    """True when a session rebirth changed nothing but ``slice_indices``.
+def prepare_retained_source_transition(previous_session, session) -> bool:
+    """Retain honest predecessor pixels across a source-only session rebirth.
 
-    Deciding predicate for retaining the drawn (stale-but-honest) plane
-    across the transition instead of blanking the surface.  Deliberately
+    This is the deciding owner for retaining drawn (stale-but-honest) pixels
+    across the transition instead of blanking the surface. It covers both a
+    plain sliced-image change and a same-layout montage source-window change.
+    The latter normally reuses ``retarget_index_window``, but rapid churn may
+    replace an unfinished session; excluding that rebirth allowed a bounded
+    four-tile preview commit to collapse a complete 100-tile VisPy surface.
+
+    The predicate is deliberately
     conservative (ADR 0051 correctness history): every axis that could make
     the retained pixels a lie for the new target — document revision and
     operation steps, montage layout geometry, colormap, window/levels mode,
@@ -3914,40 +3943,43 @@ def slice_only_session_transition(previous_session, session) -> bool:
 
     from arrayscope.operations.evaluator import _document_key
 
+    def reject(reason: str) -> bool:
+        if session is not None:
+            session.retained_source_transition_reason = str(reason)
+        return False
+
     if previous_session is None or session is None:
-        return False
-    # Scope: plain sliced images only. True montage sessions never reach the
-    # rebirth path for index scrubs (retarget_index_window owns those).
-    if getattr(session, "montage_axis", None) is not None:
-        return False
-    if getattr(previous_session, "montage_axis", None) is not None:
-        return False
-    if bool(getattr(session, "force_auto", False)):
-        return False
+        return reject("missing-session")
+    previous_axis = getattr(previous_session, "montage_axis", None)
+    axis = getattr(session, "montage_axis", None)
+    if previous_axis != axis:
+        return reject("montage-axis")
+    if axis is None and bool(getattr(session, "force_auto", False)):
+        return reject("force-auto")
     if getattr(session, "skipped_tiles", None) or getattr(previous_session, "skipped_tiles", None):
-        return False
+        return reject("skipped-tiles")
     if _document_key(previous_session.document) != _document_key(session.document):
-        return False
+        return reject("document")
     if previous_session.window_mode != session.window_mode:
-        return False
+        return reject("window-mode")
     if previous_session.user_levels_override != session.user_levels_override:
-        return False
+        return reject("user-levels")
     if previous_session.colormap_lut is not session.colormap_lut:
-        return False
+        return reject("colormap")
     if bool(getattr(previous_session, "shader_display", False)) != bool(
         getattr(session, "shader_display", False)
     ):
-        return False
+        return reject("shader-display")
     if previous_session.output_dtype != session.output_dtype:
-        return False
+        return reject("dtype")
     if bool(previous_session.rgb) != bool(session.rgb):
-        return False
+        return reject("rgb")
     if getattr(previous_session, "lod_policy_mode", None) != getattr(session, "lod_policy_mode", None):
-        return False
+        return reject("lod-policy")
     previous_geometry = getattr(getattr(previous_session, "plan", None), "geometry", None)
     geometry = getattr(getattr(session, "plan", None), "geometry", None)
     if previous_geometry is None or geometry is None:
-        return False
+        return reject("geometry-missing")
     if (
         tuple(previous_geometry.tile_shape) != tuple(geometry.tile_shape)
         or int(previous_geometry.columns) != int(geometry.columns)
@@ -3955,11 +3987,11 @@ def slice_only_session_transition(previous_session, session) -> bool:
         or int(previous_geometry.gap) != int(geometry.gap)
         or len(previous_geometry.indices) != len(geometry.indices)
     ):
-        return False
+        return reject("geometry")
     if tuple(getattr(previous_session.plan, "display_shape", ()) or ()) != tuple(
         getattr(session.plan, "display_shape", ()) or ()
     ):
-        return False
+        return reject("display-shape")
     # Viewport shape / camera range deliberately do NOT participate: retained
     # tiles are anchored in scene coordinates, so a camera change (or the
     # startup scrollbar/layout drift that shifts the viewport a few pixels
@@ -3968,12 +4000,32 @@ def slice_only_session_transition(previous_session, session) -> bool:
     previous_state = previous_session.view_state
     state = session.view_state
     if type(previous_state) is not type(state):
-        return False
+        return reject("view-state-type")
+    if axis is None:
+        try:
+            aligned = replace(state, slice_indices=previous_state.slice_indices)
+        except (TypeError, ValueError):
+            return reject("slice-state")
+        if aligned != previous_state:
+            return reject("view-state")
+        session.retained_source_transition_reason = "slice-source-only"
+        return True
     try:
-        aligned = replace(state, slice_indices=previous_state.slice_indices)
-    except (TypeError, ValueError):
-        return False
-    return aligned == previous_state
+        aligned = replace(
+            state,
+            montage_indices=previous_state.montage_indices,
+            montage_text=previous_state.montage_text,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return reject("montage-state")
+    if aligned != previous_state:
+        return reject("view-state")
+    # A montage rebirth has a cold lifecycle even though the physical surface
+    # still owns a compatible predecessor. Arm the existing all-slot handoff
+    # so no partial successor can replace that complete coverage.
+    session.source_window_changed_pending = True
+    session.retained_source_transition_reason = "montage-source-window"
+    return True
 
 
 def _base_source_id(source_id) -> object:

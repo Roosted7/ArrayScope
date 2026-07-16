@@ -241,6 +241,11 @@ class FramePipelineEffects:
             def evaluate_materialization(token=None, request=request, pyramid=pyramid):
                 if pyramid is None:
                     return None
+                if not pyramid.begin_owner_work(request.owner):
+                    # A request cancelled before worker entry owns no claims.
+                    # If another producer completed its set meanwhile, the
+                    # normal resident path will observe it on the next replan.
+                    return None
                 try:
                     for plan in request.claimed_plans:
                         if token is not None and bool(getattr(token, "cancelled", False)):
@@ -257,7 +262,7 @@ class FramePipelineEffects:
                         raise RuntimeError("materialized LOD page set is not completely resolvable")
                     return ("materialized", request)
                 finally:
-                    pyramid.release_owner_claims(request.owner)
+                    pyramid.finish_owner_work(request.owner)
 
             return evaluate_materialization
 
@@ -814,9 +819,11 @@ class FramePipelineEffects:
         lost-wakeup rule: every deferral leaves a wakeup armed).
         """
 
-        if bool(getattr(self.renderer, "_montage_presentation_gate_armed", False)):
+        owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        if getattr(self.renderer, "_montage_presentation_gate_owner", None) == owner:
             return
         self.renderer._montage_presentation_gate_armed = True
+        self.renderer._montage_presentation_gate_owner = owner
         receiver = _presentation_gate_receiver(self.renderer)
         if (
             not bool(image_view_backend_capabilities(self.renderer.win.img_view).shader_windowing)
@@ -844,6 +851,13 @@ class FramePipelineEffects:
         )
 
     def _on_presentation_gate(self) -> None:
+        owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        if getattr(self.renderer, "_montage_presentation_gate_owner", None) != owner:
+            # A successor session armed its own continuation while this stale
+            # callback was queued. It owns the shared gate now; this callback
+            # must neither clear nor consume that wakeup.
+            return
+        self.renderer._montage_presentation_gate_owner = None
         self.renderer._montage_presentation_gate_armed = False
         if not self._session_is_current():
             return
@@ -1477,14 +1491,16 @@ class FramePipelineEffects:
             ) + int(bool(fast_drain))
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
-            cpu_atomic_successor = bool(
-                cpu_backend
-                and bool(getattr(session, "source_window_changed_pending", False))
-                and not session.atomic_source_successor_committed()
-                and _compatible_successor_payload_count(session) > 0
-            )
             predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
             predecessor_source = getattr(predecessor_frame, "value_source", None)
+            source_window_atomic_pending = _source_window_atomic_handoff_pending(
+                session,
+                predecessor_source,
+            )
+            cpu_atomic_successor = bool(
+                cpu_backend
+                and source_window_atomic_pending
+            )
             shader_successor_candidate = bool(
                 capabilities.shader_windowing
                 and not bool(getattr(session, "display_committed", False))
@@ -1493,11 +1509,7 @@ class FramePipelineEffects:
             )
             shader_source_successor = bool(
                 capabilities.shader_windowing
-                and bool(getattr(session, "source_window_changed_pending", False))
-                and not session.atomic_source_successor_committed()
-                and isinstance(predecessor_source, TiledValueSource)
-                and bool(getattr(predecessor_source, "payloads", None))
-                and _compatible_successor_payload_count(session) > 0
+                and source_window_atomic_pending
             )
             renderer._last_montage_atomic_source_committed_before = (
                 session.atomic_source_successor_committed()
@@ -3601,6 +3613,23 @@ def _compatible_successor_payload_count(session) -> int:
         if int(tile_number) in plan_tiles
         and int(getattr(payload, "source_index", -1))
         == int(plan_tiles[int(tile_number)].source_index)
+    )
+
+
+def _source_window_atomic_handoff_pending(session, predecessor_source) -> bool:
+    """Whether a retained tiled predecessor requires one complete successor.
+
+    This decision intentionally does not inspect successor payload wrappers.
+    The first bounded commit can run before any wrapper exists; making the
+    guard depend on that derived cache state permits exactly one partial
+    commit before the next pass notices the transition.
+    """
+
+    return bool(
+        getattr(session, "source_window_changed_pending", False)
+        and not session.atomic_source_successor_committed()
+        and isinstance(predecessor_source, TiledValueSource)
+        and bool(getattr(predecessor_source, "payloads", None))
     )
 
 

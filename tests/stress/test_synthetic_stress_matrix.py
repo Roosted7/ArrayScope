@@ -13,12 +13,10 @@ Add datasets to ``DATASETS`` when a new feature adds a new input class
 (dtype, anisotropy, tiny axes, ...). Add invariants in ``verify_trace``, not
 here — this module should stay a thin matrix runner.
 
-KNOWN STATE (2026-07-15, dfa53db3): the matrix is NOT stable. Identical cells
-flip between settled and stalled across serial runs (small-float32 and
-anisotropic-odd-depth each passed and failed within the same hour), the
-complex64 cell deadlocks deterministically, and the tiny cell's level
-settlement is racy. That instability is the finding — do not add retries or
-widen timeouts to hide it; the matrix goes green by fixing convergence.
+KNOWN STATE (2026-07-16, G5 page cutover): native complex64 now converges on
+the canonical mean-complex page route. The tiny cell's level settlement
+remains a pre-existing non-strict xfail. Do not add retries or widen timeouts
+to hide any recurrence; the matrix goes green by fixing convergence.
 """
 
 from __future__ import annotations
@@ -75,19 +73,7 @@ DATASETS = (
             strict=False,
         ),
     ),
-    pytest.param(
-        (64, 64, 10),
-        "complex64",
-        6,
-        id="complex64",
-        marks=pytest.mark.xfail(
-            reason="FINDING 2026-07-15: native complex64 input (no operation)"
-            " deadlocks PyQtGraph presentation: 6/10 tiles stuck at"
-            " dirty/pending_upsert with report_committed=0 forever;"
-            " the float32+FFT-derived complex path is unaffected",
-            strict=True,
-        ),
-    ),
+    pytest.param((64, 64, 10), "complex64", 6, id="complex64"),
     pytest.param((48, 64, 40), "float64", 12, id="float64-deeper-axis"),
 )
 

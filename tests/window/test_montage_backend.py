@@ -93,6 +93,69 @@ def _committed_tiled_frame(geometry, *, key):
     )
 
 
+def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
+    """A demand recomputed at pipeline ownership cannot lose its draw wakeup."""
+
+    from arrayscope.render import lod as render_lod
+    from arrayscope.window import frame_effects as montage_commit
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    calls = []
+    session = SimpleNamespace(
+        lod_policy_decision=SimpleNamespace(demand=object()),
+        pending_level_tiles=(),
+        level_scan_remaining_tiles=0,
+        pending_tiles=(),
+        active_tile_requests=(),
+        loading_tiles=(),
+        dirty_payloads={7: None},
+        pending_payload_upserts={},
+        histogram_aggregate_inflight=False,
+        flush_pending=False,
+        final_commit_pending=False,
+        visible_first_pixels_presented=lambda: True,
+        stage_fan_in=SimpleNamespace(
+            active_requests=(),
+            attached_requests=(),
+            tile_stage_keys=(),
+        ),
+    )
+    effects = SimpleNamespace(
+        submit_shared_transform_floor=lambda _scope: 0,
+        release_display_owned_pending=lambda _scope: None,
+    )
+    pipeline = SimpleNamespace(
+        effects=effects,
+        retarget=lambda _intent, _demand, _scope: 0,
+        last_plan_states=(),
+        last_plan_steps=(),
+    )
+    runtime = SimpleNamespace()
+    runtime._frame_session_is_current = lambda candidate: candidate is session
+    runtime._montage_render_intent = lambda _session: object()
+    runtime._lod_admission_scope = lambda _session, _intent: object()
+    runtime._frame_pipeline_for_session = lambda _session: pipeline
+    runtime.apply_ready_montage_display = lambda _session: calls.append("commit")
+    runtime._finish_frame_session_if_complete = lambda _session: None
+    runtime._ensure_montage_watchdog = lambda: None
+    runtime._schedule_montage_cached_level_stats = lambda _session: None
+
+    monkeypatch.setattr(render_lod, "selected_lod_factor", lambda _session: calls.append("select") or 8)
+    monkeypatch.setattr(
+        render_lod,
+        "mark_ladder_swaps_for_current_demand",
+        lambda _session: calls.append("mark") or True,
+    )
+    monkeypatch.setattr(montage_commit, "complete_deferred_stage_fan_in", lambda *_args: False)
+    monkeypatch.setattr(montage_commit, "rearm_ready_stage_dependents", lambda *_args: None)
+
+    submitted = FrameRuntimeMixin.retarget_frame_pipeline(runtime, session)
+
+    assert submitted == 0
+    assert calls[:2] == ["select", "mark"]
+    assert calls.count("commit") == 1
+
+
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats

@@ -306,6 +306,11 @@ class FrameRuntimeMixin:
         if session is None or not self._frame_session_is_current(session):
             return 0
         render_lod.selected_lod_factor(session)
+        # This is the final demand snapshot used by lifecycle retargeting.
+        # A preceding viewport callback may have marked swaps for an earlier
+        # camera delivery; re-mark against this exact decision so resident
+        # TARGET_READY tiles cannot be stranded with no presentation owner.
+        lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
@@ -328,6 +333,7 @@ class FrameRuntimeMixin:
             self._schedule_montage_cached_level_stats(session)
         if (
             force_commit
+            or lod_swap_ready
             or session.flush_pending
             or session.final_commit_pending
             or session.pending_payload_upserts

@@ -21,7 +21,10 @@ from arrayscope.display.pyramid import (
     reduction_yx_to_xy,
 )
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.backends.pyqtgraph.tiles import _assemble_page_backed_payload
+from arrayscope.display.backends.pyqtgraph.tiles import (
+    _assemble_page_backed_payload,
+    _payload_rgb_already_windowed,
+)
 from arrayscope.display.montage import MontageTile, RenderedTile
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
@@ -317,6 +320,25 @@ def test_logical_page_cache_reuses_resolver_snapshot_until_residency_changes(mon
     assert bind_calls == 1
 
 
+def test_running_page_owner_defers_cancellation_release_until_worker_terminal():
+    page_plan = plan(rect=(0, 4, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(0, 0),
+        plan=page_plan,
+    )
+    cache = LodPageCache(max_bytes=1 << 20)
+    owner = "running-worker"
+    assert cache.begin_claim(page.key, owner)
+    assert cache.begin_owner_work(owner)
+
+    assert cache.release_owner_claims(owner) == ()
+    assert cache.claimed_by(page.key) == owner
+    cache.admit(page, owner=owner)
+    assert cache.finish_owner_work(owner) == ()
+    assert cache.pending_count == 0
+
+
 def test_wrong_key_admission_is_loud_and_releases_the_request_claim():
     first_plan = plan(rect=(0, 4, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
     second_plan = plan(rect=(0, 4, 4, 8), reduction=(1, 1), page_shape=(4, 4))[0]
@@ -438,7 +460,7 @@ def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
         ("imag", "mean"),
         ("abs", "mean_abs"),
         ("angle", "phase_vector"),
-        ("complex", "phase_vector"),
+        ("complex", "mean"),
     ),
 )
 def test_live_complex_display_channels_select_canonical_reducer_family(channel, reducer):
@@ -472,3 +494,127 @@ def test_live_cpu_angle_route_preserves_zero_magnitude_phase_policy():
     )
     assert key.reducer == "phase_vector"
     assert page.values[0, 0] == pytest.approx(0.0j)
+
+
+def test_live_level_zero_route_is_native_even_for_phase_display():
+    values = np.asarray([[0.0j, 1.0 + 0.0j], [-1.0 + 0.0j, 1.0j]], dtype=np.complex64)
+    rendered = _rendered_complex_channel(values, "complex")
+    demand = SimpleNamespace(desired_level=0, desired_factor_xy=(1, 1))
+
+    key = render_lod.page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=0,
+        semantic_source_id=("phase-source", 0),
+        shader_display=False,
+    )
+    page = materialize_lod_page(
+        render_lod.canonical_value_source_for_rendered(rendered, shader_display=False),
+        source_origin_yx=(0, 0),
+        plan=key.plans[0],
+    )
+
+    assert key.reducer == "native"
+    np.testing.assert_array_equal(page.values, values)
+
+
+def test_page_backed_complex_preview_preserves_pyqtgraph_rewindowing_semantics():
+    yy, xx = np.mgrid[:8, :8]
+    values = ((1.0 + xx + yy) * np.exp(1j * (xx - yy) / 3.0)).astype(np.complex64)
+    rendered = _rendered_complex_channel(values, "complex")
+    demand = SimpleNamespace(desired_level=1, desired_factor_xy=(2, 2))
+    key = render_lod.page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=1,
+        semantic_source_id=("complex-preview", 0),
+        shader_display=False,
+    )
+    pages = tuple(
+        materialize_lod_page(values, source_origin_yx=(0, 0), plan=page_plan)
+        for page_plan in key.plans
+    )
+    lod = LodInfo(1, 2, values.shape, pages[0].values.shape[:2], 0)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        pages[0].values,
+        None,
+        ("page-backed-complex-preview", 0),
+        semantic_data=None,
+        semantic_histogram_data=None,
+        texture_data=pages[0].values,
+        texture_kind="complex_rg32f",
+        lod=lod,
+        quality="preview",
+        shader_mapping=rendered.shader_mapping,
+        page_backing=PageBackedPresentation(key.plans, pages, (0, 8, 0, 8), lod),
+    )
+
+    assembled = _assemble_page_backed_payload(payload, levels=(0.0, 16.0))
+
+    assert assembled.texture_kind == "rgb8"
+    assert assembled.histogram_data is not None
+    assert assembled.histogram_data.shape == values.shape
+    assert assembled.semantic_data is None
+    assert assembled.semantic_histogram_data is None
+    assert not _payload_rgb_already_windowed(
+        assembled,
+        False,
+        levels=(0.0, 16.0),
+    ), "reduced complex RGB keeps its magnitude plane for later level drags"
+
+
+def test_oversized_page_admission_releases_active_owner_claim():
+    plans = plan_source_grid_pages(
+        content_key=("oversized",),
+        valid_source_rect_yx=(0, 8, 0, 8),
+        reduction_yx=(0, 0),
+        stored_page_shape=(8, 8),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="native",
+    )
+    page = materialize_lod_page(
+        np.ones((8, 8), dtype=np.float32),
+        source_origin_yx=(0, 0),
+        plan=plans[0],
+    )
+    cache = LodPageCache(max_bytes=8)
+    owner = ("oversized-worker", 1)
+
+    assert cache.claim_plans(plans, owner) == plans
+    assert cache.begin_owner_work(owner)
+    cache.admit_as(page.key, page, owner=owner)
+
+    assert cache.peek(page.key) is None
+    assert cache.pending_count == 0
+    assert cache.finish_owner_work(owner) == ()
+    assert cache.claim_plans(plans, owner) == plans
+    assert cache.release_owner_claims(owner) == (page.key,)
+
+
+def test_unrendered_tile_route_is_reused_across_floor_queries(monkeypatch):
+    tile = SimpleNamespace(source_index=7, montage_index=0)
+    session = SimpleNamespace(
+        output_dtype=np.dtype(np.float32),
+        view_state=SimpleNamespace(channel="real"),
+        plan=SimpleNamespace(tile_shape=(64, 48), tiles=(tile,)),
+        tile_semantic_source_id=lambda index: ("tile-source", int(index)),
+        _lod_page_set_key_cache={},
+    )
+    demand = SimpleNamespace(desired_level=2, desired_factor_xy=(4, 4))
+    original = render_lod.plan_source_grid_pages
+    calls = 0
+
+    def counted(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(render_lod, "plan_source_grid_pages", counted)
+    first = render_lod.page_set_key_for_tile(session, tile, demand=demand, level=2)
+    second = render_lod.page_set_key_for_tile(session, tile, demand=demand, level=2)
+
+    assert second is first
+    assert calls == 1
