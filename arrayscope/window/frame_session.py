@@ -146,16 +146,16 @@ def _payload_has_level_presentation_evidence(payload, *, shader_display: bool) -
     quality = str(getattr(payload, "quality", "exact") or "exact")
     if quality == "exact":
         return True
-    if quality == "preview":
-        # Preview is intentionally non-semantic and cannot join a level
-        # generation even when its pixels happen to come from canonical pages.
-        return False
     page_backing = getattr(payload, "page_backing", None)
     if page_backing is not None and tuple(
         getattr(page_backing, "materialized_pages", ()) or ()
     ):
-        # Canonical reduced values are sufficient to re-window the physical
-        # fallback even though preview quality cannot satisfy semantic reads.
+        if quality == "preview":
+            # A CPU/page floor preview is intentionally non-semantic. Shader
+            # previews below may instead carry explicit re-window evidence.
+            return False
+        # Canonical reduced values are sufficient to re-window a non-preview
+        # physical fallback without promoting it to exact semantic quality.
         return True
     if not bool(shader_display):
         return False
