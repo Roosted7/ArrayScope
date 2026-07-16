@@ -1463,7 +1463,7 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
                         "dirty": tuple(stalled.dirty_payloads),
                         "upserts": tuple(stalled.pending_payload_upserts),
                         "removals": tuple(stalled.pending_removals),
-                        "source_window": stalled.source_window_changed_pending,
+                        "atomic_successor_pending": stalled.atomic_successor_pending,
                         "atomic_reject": getattr(stalled, "_atomic_fast_reject_reason", None),
                         "unsettled": stalled.required_target_unsettled_tiles(),
                         "first_pass": (

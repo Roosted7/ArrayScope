@@ -617,16 +617,14 @@ class FrameSession:
     presented_order: list[int] = field(default_factory=list)
     presentation_geometry_changed: bool = False
     _layout_geometry_changed_pending: bool = False
-    source_window_changed_pending: bool = False
-    # A same-layout source-window successor needs one atomic physical handoff.
+    # A compatible successor needs one atomic physical handoff.
     # Quality convergence after that handoff must use ordinary per-tile deltas;
     # rebuilding the all-slot transaction re-acknowledges settled tiles and can
     # starve the entering tile's target rung indefinitely.
-    # The all-slot source handoff is owned by one retarget generation.  A
-    # boolean survives ``retarget_index_window()`` because that path reuses
-    # the FrameSession object; binding the acknowledgement to session_id
-    # makes the next semantic window unambiguously uncommitted.
-    atomic_source_successor_generation: int | None = None
+    # This is the sole owner of whether that handoff is still owed. It is
+    # armed by the transition decision and cleared only by a complete backend
+    # acknowledgement; lifecycle settlement is not a second completion owner.
+    atomic_successor_pending: bool = False
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -1193,7 +1191,7 @@ class FrameSession:
             # index scrolling changes semantic sources without changing layout
             # geometry, so the former geometry-only arming missed the exact
             # full -> subset -> full transition seen on screen.
-            self.source_window_changed_pending = True
+            self.atomic_successor_pending = True
             retained_state = {
                 int(tile): payload
                 for tile, payload in old_state_payloads.items()
@@ -2990,10 +2988,10 @@ class FrameSession:
         state = previous_state.apply_delta(delta)
         return state, delta
 
-    def build_atomic_source_successor_presentation(
+    def build_atomic_successor_presentation(
         self,
     ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
-        """Build a complete same-layout source remap without full reconciliation.
+        """Build a complete compatible successor without full reconciliation.
 
         The general builder repairs arbitrary lifecycle, visibility, removal,
         and level states. A VisPy scroll successor has a narrower contract:
@@ -3100,19 +3098,13 @@ class FrameSession:
         )
         return previous_state.apply_delta(delta), delta
 
-    def atomic_source_successor_committed(self) -> bool:
-        """Whether the current retarget generation completed its all-slot handoff."""
-
-        generation = self.atomic_source_successor_generation
-        return generation is not None and int(generation) == int(self.session_id)
-
-    def acknowledge_atomic_source_successor(
+    def acknowledge_atomic_successor(
         self,
         delta: TilePresentationDelta,
         report: TileCommitReport | None,
         acknowledged: TilePresentationState,
     ) -> bool:
-        """Record a complete backend-acknowledged source-window transaction."""
+        """Close the pending handoff after one complete backend transaction."""
 
         if (
             report is None
@@ -3133,7 +3125,7 @@ class FrameSession:
             for tile in required
         ):
             return False
-        self.atomic_source_successor_generation = int(self.session_id)
+        self.atomic_successor_pending = False
         return True
 
     def acknowledge_tile_presentation(
@@ -3911,23 +3903,32 @@ class FrameSession:
         )
 
 
-def prepare_retained_source_transition(previous_session, session) -> bool:
-    """Retain honest predecessor pixels across a source-only session rebirth.
+@dataclass(frozen=True)
+class PresentationTransitionDecision:
+    retain_pixels: bool
+    atomic_successor: bool
+    reason: str
+    detail: str = ""
+
+
+def plan_presentation_transition(previous_session, session) -> PresentationTransitionDecision:
+    """Plan truthful predecessor retention across a compatible rebirth.
 
     This is the deciding owner for retaining drawn (stale-but-honest) pixels
     across the transition instead of blanking the surface. It covers both a
-    plain sliced-image change and a same-layout montage source-window change.
+    sliced-image change and a montage semantic/layout successor.
     The latter normally reuses ``retarget_index_window``, but rapid churn may
     replace an unfinished session; excluding that rebirth allowed a bounded
     four-tile preview commit to collapse a complete 100-tile VisPy surface.
 
     The predicate is deliberately
-    conservative (ADR 0051 correctness history): every axis that could make
-    the retained pixels a lie for the new target — document revision and
-    operation steps, montage layout geometry, colormap, window/levels mode,
-    shader/CPU backend semantics, dtype, complex-RGB mode, LOD policy —
-    must match exactly, or the transition keeps the full blank (the camera
-    deliberately does not participate; see the note inline).
+    conservative (ADR 0051 correctness history): the staged base document,
+    colormap, window/levels mode, shader/CPU backend semantics, and LOD policy
+    must match exactly.
+    Operation steps may differ because ADR 0012 explicitly keeps the previous
+    committed image visible during reevaluation; its actual presentation
+    identity remains predecessor truth until the atomic successor commits.
+    The camera deliberately does not participate (see the note inline).
     Comparing against the DYING session (not the last committed
     frame) is chain-safe: a predecessor that itself blanked left the surface
     hidden, so retention degenerates to today's behavior, and a predecessor
@@ -3941,12 +3942,10 @@ def prepare_retained_source_transition(previous_session, session) -> bool:
     advances.
     """
 
-    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.evaluator import stage_document_key
 
-    def reject(reason: str) -> bool:
-        if session is not None:
-            session.retained_source_transition_reason = str(reason)
-        return False
+    def reject(reason: str, detail: str = "") -> PresentationTransitionDecision:
+        return PresentationTransitionDecision(False, False, str(reason), str(detail))
 
     if previous_session is None or session is None:
         return reject("missing-session")
@@ -3958,7 +3957,11 @@ def prepare_retained_source_transition(previous_session, session) -> bool:
         return reject("force-auto")
     if getattr(session, "skipped_tiles", None) or getattr(previous_session, "skipped_tiles", None):
         return reject("skipped-tiles")
-    if _document_key(previous_session.document) != _document_key(session.document):
+    # Operations are successor semantics over the same staged source, not a
+    # reason to flash black. ADR 0012 requires the committed predecessor to
+    # remain visible while reevaluation runs. Its physical identity remains
+    # predecessor truth until the complete atomic handoff below.
+    if stage_document_key(previous_session.document) != stage_document_key(session.document):
         return reject("document")
     if previous_session.window_mode != session.window_mode:
         return reject("window-mode")
@@ -3970,62 +3973,25 @@ def prepare_retained_source_transition(previous_session, session) -> bool:
         getattr(session, "shader_display", False)
     ):
         return reject("shader-display")
-    if previous_session.output_dtype != session.output_dtype:
-        return reject("dtype")
-    if bool(previous_session.rgb) != bool(session.rgb):
-        return reject("rgb")
     if getattr(previous_session, "lod_policy_mode", None) != getattr(session, "lod_policy_mode", None):
         return reject("lod-policy")
-    previous_geometry = getattr(getattr(previous_session, "plan", None), "geometry", None)
-    geometry = getattr(getattr(session, "plan", None), "geometry", None)
-    if previous_geometry is None or geometry is None:
-        return reject("geometry-missing")
-    if (
-        tuple(previous_geometry.tile_shape) != tuple(geometry.tile_shape)
-        or int(previous_geometry.columns) != int(geometry.columns)
-        or int(previous_geometry.rows) != int(geometry.rows)
-        or int(previous_geometry.gap) != int(geometry.gap)
-        or len(previous_geometry.indices) != len(geometry.indices)
-    ):
-        return reject("geometry")
-    if tuple(getattr(previous_session.plan, "display_shape", ()) or ()) != tuple(
-        getattr(session.plan, "display_shape", ()) or ()
-    ):
-        return reject("display-shape")
-    # Viewport shape / camera range deliberately do NOT participate: retained
-    # tiles are anchored in scene coordinates, so a camera change (or the
-    # startup scrollbar/layout drift that shifts the viewport a few pixels
-    # between session construction and settle) only re-crops the same honest
-    # plane; it cannot make the retained pixels describe different content.
-    previous_state = previous_session.view_state
-    state = session.view_state
-    if type(previous_state) is not type(state):
-        return reject("view-state-type")
+    # Layout geometry is derived from the semantic view plus the live viewport.
+    # Auto columns can legitimately oscillate while scrollbars settle (the
+    # saved-session failure changed 13 -> 14 columns for the same 100 tiles).
+    # The predecessor keeps its own physical geometry, and the successor
+    # geometry crosses the backend boundary only in the complete transaction;
+    # comparing the two here was a second, drifting compatibility owner.
+    # View state is successor intent, not the identity of the already
+    # committed predecessor. Channel, flips, slice, montage window, camera,
+    # and auto layout may all change while the previous physical frame remains
+    # explicitly stale. Semantic reads stay generation-gated, and the new
+    # state becomes physical truth only at the complete handoff below.
     if axis is None:
-        try:
-            aligned = replace(state, slice_indices=previous_state.slice_indices)
-        except (TypeError, ValueError):
-            return reject("slice-state")
-        if aligned != previous_state:
-            return reject("view-state")
-        session.retained_source_transition_reason = "slice-source-only"
-        return True
-    try:
-        aligned = replace(
-            state,
-            montage_indices=previous_state.montage_indices,
-            montage_text=previous_state.montage_text,
-        )
-    except (AttributeError, TypeError, ValueError):
-        return reject("montage-state")
-    if aligned != previous_state:
-        return reject("view-state")
+        return PresentationTransitionDecision(True, False, "slice-compatible")
     # A montage rebirth has a cold lifecycle even though the physical surface
     # still owns a compatible predecessor. Arm the existing all-slot handoff
     # so no partial successor can replace that complete coverage.
-    session.source_window_changed_pending = True
-    session.retained_source_transition_reason = "montage-source-window"
-    return True
+    return PresentationTransitionDecision(True, True, "montage-compatible")
 
 
 def _base_source_id(source_id) -> object:

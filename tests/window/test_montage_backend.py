@@ -320,7 +320,7 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
 def test_prepared_atomic_transaction_expires_when_level_generation_changes():
     from arrayscope.window.frame_effects import (
         _prepared_atomic_transaction_current,
-        _shader_source_transaction_payload_marker,
+        _shader_successor_transaction_payload_marker,
     )
 
     payload = SimpleNamespace(source_id=("source", 0), source_index=0)
@@ -335,9 +335,9 @@ def test_prepared_atomic_transaction_expires_when_level_generation_changes():
     prepared = {
         "session_id": 7,
         "level_revision": 3,
-        "marker_kind": "shader-source",
+        "marker_kind": "shader-successor",
         "tile_delta": SimpleNamespace(base_revision=11, active_tiles=(0,)),
-        "payload_markers": {0: _shader_source_transaction_payload_marker(payload)},
+        "payload_markers": {0: _shader_successor_transaction_payload_marker(payload)},
     }
 
     assert _prepared_atomic_transaction_current(session, prepared)
@@ -1417,7 +1417,7 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     assert limits["pace_resident_retargets"] is True
 
 
-def test_vispy_atomic_source_marker_ignores_lod_but_not_source_index():
+def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():
     from arrayscope.window import frame_effects as montage_commit
 
     coarse = SimpleNamespace(
@@ -1433,9 +1433,9 @@ def test_vispy_atomic_source_marker_ignores_lod_but_not_source_index():
         source_index=43,
     )
 
-    marker = montage_commit._shader_source_transaction_payload_marker(coarse)
-    assert montage_commit._shader_source_transaction_payload_marker(exact) == marker
-    assert montage_commit._shader_source_transaction_payload_marker(wrong_source) != marker
+    marker = montage_commit._shader_successor_transaction_payload_marker(coarse)
+    assert montage_commit._shader_successor_transaction_payload_marker(exact) == marker
+    assert montage_commit._shader_successor_transaction_payload_marker(wrong_source) != marker
 
 
 def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
@@ -3400,7 +3400,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     )
     session = SimpleNamespace(
         display_committed=False,
-        atomic_source_successor_committed=lambda: False,
+        atomic_successor_pending=False,
         force_auto=False,
         tile_presentation_state=TilePresentationState(),
         consume_dirty_tiles=lambda: (),

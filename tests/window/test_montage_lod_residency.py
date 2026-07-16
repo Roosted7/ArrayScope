@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from arrayscope.core.view_state import ViewState
+from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, LodInfo, select_lod_demand
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.model.tile_identity import tile_ack_identity
@@ -29,7 +29,7 @@ from arrayscope.window.frame_session import (
     FrameSession,
     _base_source_id,
     page_set_key_for_rendered,
-    prepare_retained_source_transition,
+    plan_presentation_transition,
     texture_source_for_rendered,
 )
 
@@ -2908,7 +2908,7 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert session.display_tile_payloads[0].source_index == 2
     assert session.display_tile_payloads[1].source_index == 3
     assert set(session.pending_payload_upserts) == {0, 1}
-    assert session.source_window_changed_pending is True
+    assert session.atomic_successor_pending is True
 
 
 def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
@@ -2947,39 +2947,99 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     )
     successor.visible_tiles = successor_tiles
 
-    assert prepare_retained_source_transition(previous, successor)
-    assert successor.source_window_changed_pending is True
+    decision = plan_presentation_transition(previous, successor)
+    assert decision.retain_pixels
+    assert decision.atomic_successor
 
 
-def test_montage_rebirth_with_different_layout_cannot_retain_predecessor():
+def test_same_stage_operation_successor_retains_complete_predecessor_atomically():
+    """Operation reevaluation follows ADR 0012 instead of flashing black."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    base = np.zeros((7, TILE, TILE), dtype=np.float32)
+    previous.document = ArrayDocument(base)
+    successor.document = ArrayDocument(
+        base,
+        operations=(CenteredFFT(axis=2),),
+    )
+    # The operation pipeline may change the inferred representation. The old
+    # committed frame remains independently truthful until the complete new
+    # storage transaction replaces it.
+    successor.output_dtype = np.dtype("complex64")
+    successor.rgb = True
+    view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    previous.view_state = view_state
+    successor.view_state = view_state
+    successor.view_state = replace(successor.view_state, channel=ChannelMode.COMPLEX)
+    successor.session_id = 2
+    successor.plan = replace(
+        successor.plan,
+        grid_shape=(1, 13),
+        columns=13,
+    )
+    previous.plan = replace(
+        previous.plan,
+        grid_shape=(1, 14),
+        columns=14,
+    )
+
+    decision = plan_presentation_transition(previous, successor)
+    assert decision.retain_pixels
+    assert decision.atomic_successor
+    assert decision.reason == "montage-compatible"
+
+
+def test_different_base_document_cannot_retain_predecessor():
+    previous = _session(count=4)
+    successor = _session(count=4)
+    previous.document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    successor.document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    view_state = ViewState.from_shape((7, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    previous.view_state = view_state
+    successor.view_state = view_state
+
+    decision = plan_presentation_transition(previous, successor)
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "document"
+
+
+def test_different_surface_axis_cannot_retain_predecessor():
     previous = _session(count=4)
     successor = _session(count=3)
     document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
     previous.document = document
     successor.document = document
+    previous.montage_axis = 1
 
-    assert not prepare_retained_source_transition(previous, successor)
-    assert successor.source_window_changed_pending is False
+    decision = plan_presentation_transition(previous, successor)
+    assert not decision.retain_pixels
+    assert not decision.atomic_successor
 
 
-def test_source_window_atomic_handoff_does_not_depend_on_successor_wrappers():
+def test_atomic_handoff_does_not_depend_on_successor_wrappers():
     """The first bounded commit must guard before it has built any payloads."""
 
     from arrayscope.display.model.frame import TiledValueSource
-    from arrayscope.window.frame_effects import _source_window_atomic_handoff_pending
+    from arrayscope.window.frame_effects import _atomic_successor_handoff_pending
 
     session = _session(count=4)
-    session.source_window_changed_pending = True
+    session.atomic_successor_pending = True
     predecessor_payload = session.snapshot_display_tile_payloads(
         {0: ("source", 0)}
     )[0]
     session.display_tile_payloads.clear()
     predecessor = TiledValueSource({0: predecessor_payload})
 
-    assert _source_window_atomic_handoff_pending(session, predecessor)
+    assert _atomic_successor_handoff_pending(session, predecessor)
 
 
-def test_index_window_retarget_invalidates_atomic_successor_generation():
+def test_index_window_retarget_arms_atomic_successor_pending():
     """An in-place session retarget cannot inherit the prior atomic handoff."""
 
     session = _session(count=4)
@@ -2993,12 +3053,13 @@ def test_index_window_retarget_invalidates_atomic_successor_generation():
         committed_upserts=frozenset(delta.upserts),
     )
     acknowledged = session.acknowledge_tile_presentation(delta, report)
-    assert session.acknowledge_atomic_source_successor(
+    session.atomic_successor_pending = True
+    assert session.acknowledge_atomic_successor(
         delta,
         report,
         acknowledged,
     )
-    assert session.atomic_source_successor_committed()
+    assert not session.atomic_successor_pending
     session.mark_presented(tuple(delta.upserts))
     session.tile_source_ids = dict(old_source_ids)
     session.rendered_tiles.clear()
@@ -3026,8 +3087,8 @@ def test_index_window_retarget_invalidates_atomic_successor_generation():
         semantic_key=session.semantic_key,
     )
 
-    assert not session.atomic_source_successor_committed()
-    atomic = session.build_atomic_source_successor_presentation()
+    assert session.atomic_successor_pending
+    atomic = session.build_atomic_successor_presentation()
     assert atomic is not None, session._atomic_fast_reject_reason
     _state, successor_delta = atomic
     assert tuple(successor_delta.upserts) == (0, 1, 2, 3)
@@ -3038,6 +3099,7 @@ def test_index_window_retarget_invalidates_atomic_successor_generation():
 
 def test_atomic_successor_requires_complete_backend_acknowledgement():
     session = _session(count=2)
+    session.atomic_successor_pending = True
     _state, delta = session.build_tile_presentation(
         {0: ("src", 0), 1: ("src", 1)}
     )
@@ -3047,12 +3109,12 @@ def test_atomic_successor_requires_complete_backend_acknowledgement():
     )
     acknowledged = session.acknowledge_tile_presentation(delta, partial)
 
-    assert not session.acknowledge_atomic_source_successor(
+    assert not session.acknowledge_atomic_successor(
         delta,
         partial,
         acknowledged,
     )
-    assert not session.atomic_source_successor_committed()
+    assert session.atomic_successor_pending
 
 
 def test_resident_only_remap_discards_stale_rendered_slot_owner():

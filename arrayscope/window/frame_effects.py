@@ -319,7 +319,7 @@ class FramePipelineEffects:
             )
         if (
             not bool(getattr(self.session, "shader_display", False))
-            and bool(getattr(self.session, "source_window_changed_pending", False))
+            and bool(getattr(self.session, "atomic_successor_pending", False))
             and _compatible_successor_payload_count(self.session) > 0
         ):
             # Preserve an already-compatible predecessor (notably a one-index
@@ -1445,7 +1445,7 @@ class FramePipelineEffects:
             flush=bool(getattr(session, "flush_pending", False)),
             final=bool(getattr(session, "final_commit_pending", False)),
             interactive=bool(interactive_active(renderer)),
-            source_window_pending=bool(getattr(session, "source_window_changed_pending", False)),
+            atomic_successor_pending=bool(getattr(session, "atomic_successor_pending", False)),
             **details,
         )
 
@@ -1493,32 +1493,23 @@ class FramePipelineEffects:
             cpu_backend = not bool(capabilities.shader_windowing)
             predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
             predecessor_source = getattr(predecessor_frame, "value_source", None)
-            source_window_atomic_pending = _source_window_atomic_handoff_pending(
+            atomic_successor_pending = _atomic_successor_handoff_pending(
                 session,
                 predecessor_source,
             )
             cpu_atomic_successor = bool(
                 cpu_backend
-                and source_window_atomic_pending
+                and atomic_successor_pending
             )
-            shader_successor_candidate = bool(
+            shader_atomic_successor = bool(
                 capabilities.shader_windowing
-                and not bool(getattr(session, "display_committed", False))
-                and isinstance(predecessor_source, TiledValueSource)
-                and bool(getattr(predecessor_source, "payloads", None))
+                and atomic_successor_pending
             )
-            shader_source_successor = bool(
-                capabilities.shader_windowing
-                and source_window_atomic_pending
+            renderer._last_montage_atomic_successor_pending_before = bool(
+                atomic_successor_pending
             )
-            renderer._last_montage_atomic_source_committed_before = (
-                session.atomic_source_successor_committed()
-            )
-            renderer._last_montage_source_window_pending_before = bool(
-                getattr(session, "source_window_changed_pending", False)
-            )
-            renderer._last_montage_shader_source_successor = bool(
-                shader_source_successor
+            renderer._last_montage_shader_atomic_successor = bool(
+                shader_atomic_successor
             )
             if cpu_atomic_successor:
                 lod_factor = int(session._selected_lod_factor())
@@ -1643,7 +1634,7 @@ class FramePipelineEffects:
                 if current_levels is not None:
                     session.bind_payloads_to_level_generation()
             limits = tile_layer_upsert_limits(renderer, session)
-            if cpu_atomic_successor or shader_source_successor:
+            if cpu_atomic_successor or shader_atomic_successor:
                 # Hidden warming bounds GPU uploads; the eventual source-slot
                 # handoff itself is one complete transaction and must not be
                 # built once under the upload cap and then rebuilt unbounded.
@@ -1674,8 +1665,8 @@ class FramePipelineEffects:
             else:
                 session._atomic_prepared_transaction = None
                 fast_atomic = (
-                    session.build_atomic_source_successor_presentation()
-                    if shader_source_successor
+                    session.build_atomic_successor_presentation()
+                    if shader_atomic_successor
                     else None
                 )
                 renderer._last_montage_atomic_fast_reject_reason = str(
@@ -1715,29 +1706,6 @@ class FramePipelineEffects:
                 return
             first_display_commit = not bool(session.display_committed)
             renderer._last_montage_commit_first_display = bool(first_display_commit)
-            atomic_query = getattr(renderer.win.img_view, "tiledSuccessorRequiresAtomicCommit", None)
-            shader_atomic_successor = bool(
-                shader_source_successor
-                or (
-                    shader_successor_candidate
-                    and callable(atomic_query)
-                    and atomic_query(
-                        tile_delta.upserts,
-                        rgb_already_windowed=bool(display_image.rgb_already_windowed),
-                    )
-                )
-            )
-            if shader_atomic_successor and not (
-                shader_source_successor or prepared_atomic_current
-            ):
-                # An incompatible atlas mode (scalar/complex/color) also needs
-                # a coverage-complete first transaction. Unlike a known source
-                # successor, this decision requires inspecting the initially
-                # bounded delta, so rebuild it once without the ordinary cap.
-                # A prepared transaction and source successor are already
-                # complete and must not pay this O(tiles) work twice.
-                tile_state, tile_delta = session.build_tile_presentation(tile_source_ids)
-                active_payloads = tile_state.active_payloads(tile_delta)
             renderer._last_montage_commit_delta_upserts = len(tile_delta.upserts)
             if persistent_tile_residency_backend(renderer, session):
                 upserted_tiles = set(int(tile) for tile in tile_delta.upserts)
@@ -1911,8 +1879,8 @@ class FramePipelineEffects:
             if warm_levels is None:
                 warm_levels = normalize_bounds(renderer.win.img_view.getLevels())
             cpu_backend = not bool(capabilities.shader_windowing)
-            atomic_successor = bool(cpu_atomic_successor or shader_source_successor)
-            renderer._last_montage_atomic_source_successor = bool(atomic_successor)
+            atomic_successor = bool(cpu_atomic_successor or shader_atomic_successor)
+            renderer._last_montage_atomic_successor = bool(atomic_successor)
             resident_predicate = getattr(renderer.win.img_view, "tiledPayloadResident", None)
             cold_gpu_successor = bool(
                 not cpu_backend
@@ -1960,7 +1928,7 @@ class FramePipelineEffects:
                         or 0
                     ),
                     "marker_kind": (
-                        "cpu-compatible" if cpu_atomic_successor else "shader-source"
+                        "cpu-compatible" if cpu_atomic_successor else "shader-successor"
                     ),
                     "base_tile_state": base_tile_state,
                     "tile_state": tile_state,
@@ -1970,7 +1938,7 @@ class FramePipelineEffects:
                             (
                                 _cpu_transaction_payload_marker(payload)
                                 if cpu_atomic_successor
-                                else _shader_source_transaction_payload_marker(payload)
+                                else _shader_successor_transaction_payload_marker(payload)
                             )
                         )
                         for tile, payload in active_payloads.items()
@@ -2017,7 +1985,7 @@ class FramePipelineEffects:
                 rendered_geometry,
                 active_payloads,
                 commit_start=commit_start,
-                atomic_source_successor=atomic_successor,
+                atomic_successor=atomic_successor,
                 first_pass_histogram_published=bool(
                     publish_first_pass_histogram and histogram_plot_data is not None
                 ),
@@ -2229,7 +2197,7 @@ class FramePipelineEffects:
         active_payloads,
         *,
         commit_start: float,
-        atomic_source_successor: bool,
+        atomic_successor: bool,
         first_pass_histogram_published: bool,
     ) -> None:
         renderer = self.renderer
@@ -2255,11 +2223,11 @@ class FramePipelineEffects:
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
-        if atomic_source_successor:
-            # A source successor is complete only after the lifecycle accepts
+        if atomic_successor:
+            # A successor is complete only after the lifecycle accepts
             # one coverage-complete backend report.  Backend submission alone
             # cannot suppress the next attempt after a stale/partial commit.
-            session.acknowledge_atomic_source_successor(
+            session.acknowledge_atomic_successor(
                 tile_delta,
                 report,
                 acknowledged,
@@ -2384,8 +2352,6 @@ class FramePipelineEffects:
             # completion follows the backend acknowledgement, so the quality
             # barrier needs an explicit receiver-owned replan wakeup.
             renderer.request_montage_replan(session)
-        if session.visible_plan_complete():
-            session.source_window_changed_pending = False
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
         geometry_start = perf_counter()
@@ -2468,31 +2434,19 @@ class FramePipelineEffects:
                     or ()
                 )
             ),
-            atomic_source_successor_committed=(
-                session.atomic_source_successor_committed()
-            ),
-            atomic_source_successor_generation=getattr(
-                session, "atomic_source_successor_generation", None
-            ),
-            atomic_source_committed_before=bool(
+            atomic_successor_pending=bool(session.atomic_successor_pending),
+            atomic_successor_pending_before=bool(
                 getattr(
                     renderer,
-                    "_last_montage_atomic_source_committed_before",
+                    "_last_montage_atomic_successor_pending_before",
                     False,
                 )
             ),
-            source_window_pending_before=bool(
-                getattr(
-                    renderer,
-                    "_last_montage_source_window_pending_before",
-                    False,
-                )
+            shader_atomic_successor=bool(
+                getattr(renderer, "_last_montage_shader_atomic_successor", False)
             ),
-            shader_source_successor=bool(
-                getattr(renderer, "_last_montage_shader_source_successor", False)
-            ),
-            atomic_source_successor=bool(
-                getattr(renderer, "_last_montage_atomic_source_successor", False)
+            atomic_successor=bool(
+                getattr(renderer, "_last_montage_atomic_successor", False)
             ),
             atomic_fast_built=bool(
                 getattr(renderer, "_last_montage_atomic_fast_built", False)
@@ -3616,7 +3570,7 @@ def _compatible_successor_payload_count(session) -> int:
     )
 
 
-def _source_window_atomic_handoff_pending(session, predecessor_source) -> bool:
+def _atomic_successor_handoff_pending(session, predecessor_source) -> bool:
     """Whether a retained tiled predecessor requires one complete successor.
 
     This decision intentionally does not inspect successor payload wrappers.
@@ -3626,8 +3580,7 @@ def _source_window_atomic_handoff_pending(session, predecessor_source) -> bool:
     """
 
     return bool(
-        getattr(session, "source_window_changed_pending", False)
-        and not session.atomic_source_successor_committed()
+        getattr(session, "atomic_successor_pending", False)
         and isinstance(predecessor_source, TiledValueSource)
         and bool(getattr(predecessor_source, "payloads", None))
     )
@@ -3660,8 +3613,8 @@ def _cpu_transaction_payload_marker(payload) -> tuple:
     )
 
 
-def _shader_source_transaction_payload_marker(payload) -> tuple:
-    """Stable source-window marker that deliberately ignores LOD upgrades."""
+def _shader_successor_transaction_payload_marker(payload) -> tuple:
+    """Stable successor marker that deliberately ignores LOD upgrades."""
 
     return (
         _base_source_id(getattr(payload, "source_id", None)),
@@ -3690,8 +3643,8 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
     markers = dict(prepared.get("payload_markers", {}) or {})
     payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
     marker_kind = prepared.get("marker_kind")
-    if marker_kind == "shader-source":
-        marker_fn = _shader_source_transaction_payload_marker
+    if marker_kind == "shader-successor":
+        marker_fn = _shader_successor_transaction_payload_marker
     elif marker_kind == "cpu-compatible":
         marker_fn = _cpu_transaction_payload_marker
     else:

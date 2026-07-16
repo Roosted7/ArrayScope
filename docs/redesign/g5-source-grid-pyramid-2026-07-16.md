@@ -167,6 +167,23 @@ The broader profile remains red for presentation continuity, deep-checkpoint
 coverage, and input/event-loop latency; those failures stay separate from the
 now-single-owner settlement rule.
 
+The saved-session zoom/pan/FFT trace then exposed a second correctness defect:
+the complete predecessor surface collapsed to 16 or 69 drawn tiles when the
+first bounded successor batch was acknowledged. Retention and atomic handoff
+had drifted across a source-window flag, an independent completion generation,
+derived dtype/RGB/geometry/ViewState vetoes, and a backend atomic query that no
+backend implemented. One immutable presentation-transition decision now owns
+retention, atomic obligation, reason, and trace detail. A same staged document
+and surface may keep its explicitly stale predecessor while operation, channel,
+representation, camera, and auto-column intent change; only one complete
+backend acknowledgement clears `atomic_successor_pending`. The redundant
+completion generation, lifecycle-based clear, and dead backend query are gone.
+The real-Wayland artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-atomic-view-fixed/`
+has no post-start sample with drawn coverage below the visible set and the
+`presentation_continuity` gate is green. Its remaining failures are LOD
+checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
+
 The ladder-side target planner is also now explicit:
 
 - `render.lod.plan_lod_page_targets` is a Qt-free deterministic transform

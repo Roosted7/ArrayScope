@@ -134,8 +134,7 @@ def _dump_convergence_state(win, label: str) -> None:
         f"fast_reject={getattr(renderer, '_last_montage_atomic_fast_reject_reason', None)!r}"
     )
     print(
-        f"[{label}] source_window_pending={getattr(session, 'source_window_changed_pending', None)} "
-        f"atomic_committed={session.atomic_source_successor_committed() if hasattr(session, 'atomic_source_successor_committed') else None} "
+        f"[{label}] atomic_successor_pending={getattr(session, 'atomic_successor_pending', None)} "
         f"residency_deferred={getattr(session, '_interactive_residency_deferred', None)} "
         f"prepared_atomic={getattr(session, '_atomic_prepared_transaction', None) is not None}"
     )

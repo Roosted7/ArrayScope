@@ -1380,7 +1380,7 @@ class _VerboseTileTrace:
                 "requested_start": None if requested_start is None else int(requested_start),
                 "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
                 "presentation_revision": revision,
-                "source_window_changed_pending": bool(session is not None and getattr(session, "source_window_changed_pending", False)),
+                "atomic_successor_pending": bool(session is not None and getattr(session, "atomic_successor_pending", False)),
                 "camera_view_range": _montage_view_range(self.win),
                 "composite_cache_reason": str(getattr(composite, "composite_cache_reason", "") or ""),
                 "composite_has_pixmap": bool(
@@ -1689,8 +1689,8 @@ def _slow_scroll_lod_paced(
                 "atomic_fast_reject_reason": str(
                     getattr(getattr(win, "renderer", None), "_last_montage_atomic_fast_reject_reason", "") or ""
                 ),
-                "source_window_changed_pending": bool(
-                    getattr(session, "source_window_changed_pending", False)
+                "atomic_successor_pending": bool(
+                    getattr(session, "atomic_successor_pending", False)
                 ),
                 "flush_pending": bool(getattr(session, "flush_pending", False)),
                 "final_commit_pending": bool(getattr(session, "final_commit_pending", False)),
