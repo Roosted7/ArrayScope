@@ -20,8 +20,16 @@ from arrayscope.display.backends.vispy.tiles import (
     _payload_chunked_eligible,
 )
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
-from arrayscope.display.pyramid import reduce_box_mean
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    PageBackedPresentation,
+    PayloadSourceAnchor,
+)
+from arrayscope.display.pyramid import (
+    materialize_source_grid_pages,
+    plan_source_grid_pages,
+    reduce_box_mean,
+)
 from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot
 
 from tests.display.vispy_test_utils import FakeGloo
@@ -37,6 +45,54 @@ def _data():
 
 
 CONTENT_KEY = ("src-anchored", "doc-rev-0", "windowless-view")
+
+
+def page_backed_payload(start, *, tile_number=0):
+    rect = (0, 4, int(start), int(start) + 12)
+    yy, xx = np.mgrid[rect[0] : rect[1], rect[2] : rect[3]]
+    source = (yy * 1000 + xx).astype(np.float32)
+    plans = plan_source_grid_pages(
+        content_key=CONTENT_KEY,
+        valid_source_rect_yx=rect,
+        reduction_yx=(1, 1),
+        stored_page_shape=(2, 3),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    pages = materialize_source_grid_pages(
+        source,
+        source_origin_yx=(rect[0], rect[2]),
+        plans=plans,
+    )
+    lod = LodInfo(
+        level=1,
+        factor=2,
+        source_shape=(4, 12),
+        texture_shape=(2, 7 if int(start) % 2 else 6),
+        gutter=0,
+    )
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=0,
+        image=pages[0].values,
+        histogram_data=None,
+        source_id=("page-backed-window", start),
+        lod=lod,
+        page_backing=PageBackedPresentation(plans, pages, rect, lod),
+    )
+
+
+def commit_page_backed(pool, payload):
+    _uvs, stats = pool.update_payloads(
+        {int(payload.tile_number): payload},
+        tile_shape=(2, 3),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+        tile_world_regions={int(payload.tile_number): (0, 0, 12, 4)},
+    )
+    return stats
 
 
 def anchored_payload(data, start, *, extent=EXTENT, content_key=CONTENT_KEY, tile_number=0, quality="exact"):
@@ -1177,6 +1233,56 @@ def virtual_page_family():
     coarse = virtual_page_key(origin=(0, 0), shape=(8, 8), reduction=(2, 2))
     fine = virtual_page_key(origin=(2, 2), shape=(2, 2), reduction=(0, 0))
     return target, coarse, fine
+
+
+def test_page_backed_shift_uploads_only_changed_boundary_and_revisit_is_zero():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=12)
+    first = page_backed_payload(101)
+    first_stats = commit_page_backed(pool, first)
+    first_uploads = first_stats.texture_uploads
+    assert first_uploads == 3
+    first_keys = set(first.page_backing.requested_keys)
+
+    shifted = page_backed_payload(102)
+    shifted_stats = commit_page_backed(pool, shifted)
+    shifted_keys = set(shifted.page_backing.requested_keys)
+    assert shifted_stats.texture_uploads == 1
+    assert len(first_keys & shifted_keys) == 1
+
+    revisit_stats = commit_page_backed(pool, first)
+    assert revisit_stats.texture_uploads == 0
+    assert set(pool.tile_chunk_residency[0]) == first_keys
+
+
+def test_page_backed_draw_parts_cover_exact_clipped_geometry_and_report_all_bindings():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=12)
+    payload = page_backed_payload(101)
+    stats = commit_page_backed(pool, payload)
+    assert stats.presented_tiles == (0,)
+    parts = pool.tile_draw_parts[0]
+    assert parts
+    assert all(part.page_index is not None for part in parts)
+
+    x_edges = sorted({edge for part in parts for edge in (part.world_rect[0], part.world_rect[2])})
+    y_edges = sorted({edge for part in parts for edge in (part.world_rect[1], part.world_rect[3])})
+    assert x_edges[0] == 0.0 and x_edges[-1] == 12.0
+    assert y_edges[0] == 0.0 and y_edges[-1] == 4.0
+    for x0, x1 in zip(x_edges, x_edges[1:]):
+        for y0, y1 in zip(y_edges, y_edges[1:]):
+            owners = sum(
+                int(
+                    part.world_rect[0] <= x0 < x1 <= part.world_rect[2]
+                    and part.world_rect[1] <= y0 < y1 <= part.world_rect[3]
+                )
+                for part in parts
+            )
+            assert owners == 1
+
+    truth = pool.tile_truth_physical_rows()[0]
+    bindings = truth["physical_page_bindings"]
+    assert len(bindings) == len(payload.page_backing.requested_plans)
+    assert all(row["quality"] == "exact" for row in bindings)
+    assert all(row["actual_key"] == row["target_key"] for row in bindings)
 
 
 def test_missing_fine_target_binds_resident_coarse_page_without_upload():

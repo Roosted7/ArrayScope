@@ -34,8 +34,10 @@ from arrayscope.display.model.tile_identity import (
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
 from arrayscope.gpu.keys import (
+    COMPLEX_RG32F,
     REDUCER_MEAN,
     REDUCER_NATIVE,
+    RGB8,
     ChunkLod,
     DataChunkKey,
 )
@@ -79,10 +81,13 @@ class TileDrawPart:
 
     world_rect: tuple[float, float, float, float]  # x0, y0, x1, y1
     uv_rect: tuple[float, float, float, float]  # u0, v0, u1, v1
+    page_index: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_rect", tuple(float(v) for v in self.world_rect))
         object.__setattr__(self, "uv_rect", tuple(float(v) for v in self.uv_rect))
+        if self.page_index is not None:
+            object.__setattr__(self, "page_index", int(self.page_index))
 
 
 @dataclass(frozen=True)
@@ -1171,8 +1176,17 @@ class TextureAtlasPool:
             for tile, rect in dict(tile_world_regions or {}).items()
         }
         chunk_plans: dict[int, tuple[_PayloadChunk, ...]] = {}
+        page_backed_tiles: set[int] = set()
         for tile_number, payload in payload_items:
             region = world_regions.get(int(tile_number))
+            if getattr(payload, "page_backing", None) is not None:
+                if region is None:
+                    raise ValueError(
+                        "page-backed payload requires an exact tile world region; "
+                        "legacy whole-plane fallback is forbidden"
+                    )
+                page_backed_tiles.add(int(tile_number))
+                continue
             if region is None or not _payload_chunked_eligible(payload):
                 continue
             ay0, ay1, ax0, ax1 = (int(value) for value in payload.source_anchor.source_rect)
@@ -1187,9 +1201,16 @@ class TextureAtlasPool:
         active_chunk_keys: set[object] = set()
         for chunks in chunk_plans.values():
             active_chunk_keys.update(chunk.key for chunk in chunks)
+        for tile_number, payload in payload_items:
+            if int(tile_number) in page_backed_tiles:
+                active_chunk_keys.update(payload.page_backing.requested_keys)
+                for target_key in payload.page_backing.requested_keys:
+                    resolution = self._page_table.resolve(target_key)
+                    if resolution is not None:
+                        active_chunk_keys.add(resolution.actual_key)
         for tile_number in active_set:
             tile_number = int(tile_number)
-            if tile_number in chunk_plans or tile_number in removed_tiles:
+            if tile_number in chunk_plans or tile_number in page_backed_tiles or tile_number in removed_tiles:
                 continue
             active_chunk_keys.update(self.tile_chunk_residency.get(tile_number, ()))
         self.active_chunk_keys = active_chunk_keys
@@ -1226,7 +1247,7 @@ class TextureAtlasPool:
         base_shape = (int(tile_h), int(tile_w))
         class_counts: dict[tuple[int, int], int] = {}
         for tile_number, payload in payload_items:
-            if int(tile_number) in chunk_plans:
+            if int(tile_number) in chunk_plans or int(tile_number) in page_backed_tiles:
                 # Chunk slots live in their own shape class; the chunk
                 # allocator grows it same-page as needed.
                 continue
@@ -1239,6 +1260,37 @@ class TextureAtlasPool:
 
         for tile_number, payload in payload_items:
             resident_key = _resident_key(payload)
+            if int(tile_number) in page_backed_tiles:
+                committed = self._commit_page_backed_payload(
+                    int(tile_number),
+                    payload,
+                    world_region=world_regions[int(tile_number)],
+                    protected_keys=protected_keys,
+                    near_keys=near_keys,
+                    rgb_already_windowed=rgb_already_windowed,
+                )
+                if committed is None:
+                    capacity_skipped_tiles.add(int(tile_number))
+                    skipped += 1
+                    continue
+                active_tile_slots[int(tile_number)] = (
+                    int(committed.page_index),
+                    int(committed.slot),
+                )
+                active_tile_keys[int(tile_number)] = resident_key
+                uvs[tile_number] = committed.uv
+                active_tile_uvs[int(tile_number)] = committed.uv
+                uploads += committed.uploads
+                upload_bytes += committed.upload_bytes
+                complex_uploads += committed.complex_uploads
+                texture_prepare_ms += committed.prepare_ms
+                texture_submit_ms += committed.submit_ms
+                if committed.uploaded_any:
+                    uploaded_keys.add(resident_key)
+                    updated += 1
+                else:
+                    skipped += 1
+                continue
             chunks = chunk_plans.get(int(tile_number))
             if chunks is not None:
                 committed = self._commit_chunked_payload(
@@ -1440,7 +1492,7 @@ class TextureAtlasPool:
                 active_tile_slots[int(tile)][0],
                 active_tile_slots[int(tile)][1],
                 active_tile_uvs[int(tile)],
-                chunked=int(tile) in chunk_plans,
+                chunked=int(tile) in chunk_plans or int(tile) in page_backed_tiles,
             )
         # Reclaim identity records of chunked keys that no tile presents
         # anymore, now that every mapping of this commit has settled (the
@@ -1979,6 +2031,7 @@ class TextureAtlasPool:
         protected_keys: set[object],
         near_keys: set[object],
         allow_eviction: bool = True,
+        slot_shape: tuple[int, int] | None = None,
     ) -> dict[object, tuple[int, int, bool]]:
         """Place one tile's chunk set, all on the SAME page.
 
@@ -1993,7 +2046,12 @@ class TextureAtlasPool:
         never destroy resident content, so denial raises instead of evicting.
         """
 
-        shape = (int(ANCHORED_CHUNK_SHAPE[0]), int(ANCHORED_CHUNK_SHAPE[1]))
+        shape = tuple(
+            int(value)
+            for value in (slot_shape or ANCHORED_CHUNK_SHAPE)
+        )
+        if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
+            raise ValueError(f"chunk slot shape must be positive 2D, got {shape}")
         keys = tuple(chunk_keys)
         key_set = set(keys)
         lookups = {key: self._page_table.lookup(key) for key in keys}
@@ -2157,6 +2215,221 @@ class TextureAtlasPool:
         _rank, _last, victim, slot = min(candidates, key=lambda item: (item[0], item[1], repr(item[2])))
         self._release_victim(victim, near_keys=near_keys)
         return int(slot)
+
+    def _commit_page_backed_payload(
+        self,
+        tile_number: int,
+        payload: DisplayTilePayload,
+        *,
+        world_region: tuple[int, int, int, int],
+        protected_keys: set[object],
+        near_keys: set[object],
+        rgb_already_windowed: bool,
+    ) -> "_ChunkCommit | None":
+        """Upload checked pages by canonical key, then resolve/draw targets."""
+
+        backing = payload.page_backing
+        if backing is None:
+            raise ValueError("page-backed commit requires page_backing")
+        plans = tuple(backing.requested_plans)
+        slot_shape = tuple(int(value) for value in plans[0].stored_page_shape)
+        if any(tuple(plan.stored_page_shape) != slot_shape for plan in plans):
+            raise ValueError("one page-backed payload cannot mix physical page shapes")
+
+        uploads = 0
+        upload_bytes = 0
+        complex_uploads = 0
+        prepare_ms = 0.0
+        submit_ms = 0.0
+        uploaded_keys: list[DataChunkKey] = []
+        missing_count = sum(
+            self._page_table.lookup(page.key) is None
+            for page in backing.materialized_pages
+        )
+        if missing_count:
+            try:
+                self._ensure_class_capacity(
+                    slot_shape,
+                    self._class_capacity(slot_shape) + int(missing_count),
+                )
+            except AtlasCapacityError:
+                return None
+        for materialized in backing.materialized_pages:
+            key = materialized.key
+            slot_ref = self._page_table.lookup(key)
+            newly_assigned = slot_ref is None
+            try:
+                if slot_ref is None:
+                    page_index, slot, newly_assigned = self._slot_for(
+                        key,
+                        active_keys=protected_keys | set(backing.requested_keys),
+                        near_keys=near_keys,
+                        tile_shape=slot_shape,
+                    )
+                else:
+                    page_index, slot = int(slot_ref.page_index), int(slot_ref.slot_index)
+                    self._page_table.touch(key)
+            except AtlasCapacityError:
+                return None
+            if not newly_assigned:
+                continue
+            page = self.pages[int(page_index)]
+            texture_kind = (
+                TexturePlaneKind.COMPLEX_RG32F
+                if key.representation == COMPLEX_RG32F
+                else (
+                    TexturePlaneKind.RGB8
+                    if key.representation == RGB8
+                    else TexturePlaneKind.SCALAR_R32F
+                )
+            )
+            page_payload = replace(
+                payload,
+                image=materialized.values,
+                texture_data=materialized.values,
+                texture_kind=texture_kind,
+                semantic_data=None,
+                semantic_histogram_data=None,
+                page_backing=None,
+                source_id=key,
+            )
+            scalar, color, elapsed = _prepare_payload_texture_data(
+                page_payload,
+                tile_shape=slot_shape,
+                rgb_already_windowed=rgb_already_windowed,
+                need_scalar=page.scalar_is_atlas,
+                need_color=page.color_is_atlas,
+            )
+            prepare_ms += elapsed
+            y_off, x_off = page.offset_for_slot(int(slot))
+            if scalar is not None:
+                submit_ms += _upload_texture_plane(
+                    page.scalar_texture,
+                    scalar,
+                    offset=(int(y_off), int(x_off)),
+                    copy=_upload_copy_required(
+                        scalar, page_payload, force=page.complex_is_atlas
+                    ),
+                )
+                uploads += 1
+                upload_bytes += int(scalar.nbytes)
+                complex_uploads += int(page.complex_is_atlas)
+            if color is not None:
+                submit_ms += _upload_texture_plane(
+                    page.color_texture,
+                    color,
+                    offset=(int(y_off), int(x_off)),
+                    copy=_upload_copy_required(color, page_payload),
+                )
+                uploads += 1
+                upload_bytes += int(color.nbytes)
+            if (scalar is not None or color is not None) and page.mipmap_levels:
+                page.mipmap_dirty = True
+            record_plane = scalar if scalar is not None else color
+            self.source_ids[key] = key
+            self.acknowledged_identities[key] = key
+            if record_plane is not None:
+                real_plane, imag_plane = array_plane_identities(record_plane)
+                self.physical_upload_records[key] = {
+                    "physical_texture_kind": texture_kind.value,
+                    "physical_storage_mode": str(page.storage_mode),
+                    "physical_texture_dtype": str(np.asarray(record_plane).dtype),
+                    "physical_texture_shape": tuple(np.asarray(record_plane).shape),
+                    "physical_real_plane_identity": plane_identity_record(real_plane),
+                    "physical_imag_plane_identity": plane_identity_record(imag_plane),
+                }
+            uploaded_keys.append(key)
+
+        owner_scope = (
+            "presentation",
+            getattr(payload, "presentation_identity", None),
+            getattr(payload, "tile_identity", None),
+        )
+        resolved = self.resolve_tile_page_targets(
+            {int(tile_number): backing.requested_keys},
+            owner_scope=owner_scope,
+        )[int(tile_number)]
+        if resolved is None:
+            # Candidate fine coverage is incomplete. The resolver retained
+            # the previous complete pinned set and draw mapping.
+            return None
+
+        plan_by_key = {plan.key: plan for plan in plans}
+        coverage_y0, coverage_y1, coverage_x0, coverage_x1 = backing.source_coverage_yx
+        region_x, region_y, region_w, region_h = (int(value) for value in world_region)
+        coverage_h, coverage_w = coverage_y1 - coverage_y0, coverage_x1 - coverage_x0
+        parts: list[TileDrawPart] = []
+        for resolution in resolved:
+            plan = plan_by_key[resolution.target_key]
+            page_index = int(resolution.slot.page_index)
+            page = self.pages[page_index]
+            u0, v0, u1, v1 = page.uv_for_slot(int(resolution.slot.slot_index))
+            slot_h, slot_w = page.tile_shape
+            scale_y, scale_x = resolution.scale
+            offset_y, offset_x = resolution.offset
+            for block in plan.draw_blocks:
+                sy0, sy1, sx0, sx1 = block.stored_rect_yx
+                by0, by1, bx0, bx1 = block.source_rect_yx
+                actual_y0, actual_y1 = sy0 * scale_y + offset_y, sy1 * scale_y + offset_y
+                actual_x0, actual_x1 = sx0 * scale_x + offset_x, sx1 * scale_x + offset_x
+                parts.append(
+                    TileDrawPart(
+                        world_rect=(
+                            region_x + ((bx0 - coverage_x0) * region_w) / float(coverage_w),
+                            region_y + ((by0 - coverage_y0) * region_h) / float(coverage_h),
+                            region_x + ((bx1 - coverage_x0) * region_w) / float(coverage_w),
+                            region_y + ((by1 - coverage_y0) * region_h) / float(coverage_h),
+                        ),
+                        uv_rect=(
+                            u0 + (u1 - u0) * (actual_x0 / float(slot_w)),
+                            v0 + (v1 - v0) * (actual_y0 / float(slot_h)),
+                            u0 + (u1 - u0) * (actual_x1 / float(slot_w)),
+                            v0 + (v1 - v0) * (actual_y1 / float(slot_h)),
+                        ),
+                        page_index=page_index,
+                    )
+                )
+
+        actual_keys = tuple(dict.fromkeys(item.actual_key for item in resolved))
+        previous_keys = set(self.tile_chunk_residency.get(int(tile_number), ()))
+        for key in previous_keys.difference(actual_keys):
+            owners = self.chunk_resident_tiles.get(key)
+            if owners is not None:
+                owners.discard(int(tile_number))
+                if not owners:
+                    self.chunk_resident_tiles.pop(key, None)
+        self.tile_chunk_residency[int(tile_number)] = actual_keys
+        for key in actual_keys:
+            self.chunk_resident_tiles.setdefault(key, set()).add(int(tile_number))
+        self.tile_draw_parts[int(tile_number)] = tuple(parts)
+
+        resident_key = _resident_key(payload)
+        self.source_ids[resident_key] = payload.source_id
+        self.acknowledged_identities[resident_key] = (
+            getattr(payload, "tile_identity", None) or payload.source_id
+        )
+        self._chunked_tile_keys.add(resident_key)
+        first_record = next(
+            (self.physical_upload_records.get(key) for key in actual_keys if key in self.physical_upload_records),
+            None,
+        )
+        if first_record is not None:
+            self.physical_upload_records[resident_key] = dict(first_record)
+        self.chunk_upload_count += len(uploaded_keys)
+        self.chunk_reuse_count += max(0, len(backing.materialized_pages) - len(uploaded_keys))
+        first = resolved[0]
+        first_page = self.pages[int(first.slot.page_index)]
+        return _ChunkCommit(
+            page_index=int(first.slot.page_index),
+            slot=int(first.slot.slot_index),
+            uv=first_page.uv_for_slot(int(first.slot.slot_index)),
+            uploads=uploads,
+            upload_bytes=upload_bytes,
+            complex_uploads=complex_uploads,
+            prepare_ms=prepare_ms,
+            submit_ms=submit_ms,
+            uploaded_any=bool(uploaded_keys),
+        )
 
     def _commit_chunked_payload(
         self,
@@ -2385,6 +2658,11 @@ class TextureAtlasPool:
 
     def _clear_tile_mapping(self, tile_number: int) -> None:
         tile_number = int(tile_number)
+        page_owner = self._tile_page_pin_owners.pop(tile_number, None)
+        if page_owner is not None:
+            self._page_table.replace_pin_set(page_owner, ())
+        self.tile_page_target_resolutions.pop(tile_number, None)
+        self.tile_page_candidate_missing.pop(tile_number, None)
         old_key = self.tile_resident_keys.pop(tile_number, None)
         if old_key is not None:
             tiles = self.resident_tiles.get(old_key)
@@ -2596,6 +2874,7 @@ class GpuMontageLayer:
             payloads,
             self._pool.tile_uvs,
             self._pool.tile_draw_parts,
+            page_index=int(page_index),
             rgb_already_windowed=self._rgb_already_windowed,
         )
 
@@ -2708,6 +2987,7 @@ class GpuMontageLayer:
                     self._pool.tile_uvs,
                     rgb_already_windowed=self._rgb_already_windowed,
                     draw_parts=self._pool.tile_draw_parts,
+                    page_index=int(page_index),
                 )
                 visual.set_geometry(vertices, texcoords, modes)
                 vertex_uploads += 1
@@ -3000,6 +3280,7 @@ class GpuMontageLayer:
                     self._pool,
                     page,
                     layout,
+                    page_index=int(page_index),
                     rgb_already_windowed=rgb_already_windowed,
                 )
             else:
@@ -3011,6 +3292,7 @@ class GpuMontageLayer:
                     uvs,
                     rgb_already_windowed=rgb_already_windowed,
                     draw_parts=self._pool.tile_draw_parts,
+                    page_index=int(page_index),
                 )
                 visual.set_geometry(vertices, texcoords, modes)
                 self._geometry_keys[page_index] = geometry_key
@@ -3158,9 +3440,17 @@ class GpuMontageLayer:
                 payload = previous_payloads.get(int(tile))
             if payload is None:
                 continue
-            page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))
-            if 0 <= int(page_index) < page_count:
-                page_payloads_by_index[int(page_index)][int(tile)] = payload
+            part_pages = {
+                int(part.page_index)
+                for part in self._pool.tile_draw_parts.get(int(tile), ())
+                if part.page_index is not None
+            }
+            if not part_pages:
+                page_index, _slot = self._pool.tile_slots.get(int(tile), (-1, -1))
+                part_pages = {int(page_index)}
+            for page_index in part_pages:
+                if 0 <= int(page_index) < page_count:
+                    page_payloads_by_index[int(page_index)][int(tile)] = payload
         dirty_pages: set[int] = set()
         active_pages = {int(index) for index, page_payloads in enumerate(page_payloads_by_index) if page_payloads}
         previous_active_pages = {
@@ -3180,6 +3470,7 @@ class GpuMontageLayer:
                 self._pool,
                 self._pool.pages[int(page_index)],
                 layout,
+                page_index=int(page_index),
                 rgb_already_windowed=rgb_already_windowed,
             ) != self._geometry_keys.get(int(page_index)):
                 dirty_pages.add(int(page_index))
@@ -3775,13 +4066,20 @@ def _upload_copy_required(staging: np.ndarray, payload: DisplayTilePayload, *, f
     return True
 
 
-def _tile_quad_rects(tile_number, layout, uvs, draw_parts):
+def _tile_quad_rects(tile_number, layout, uvs, draw_parts, *, page_index=None):
     """(world_rect, uv_rect) quads for one tile — registered parts, else the
     classic single full-slot quad; empty when the tile has no layout/UV."""
 
     parts = None if draw_parts is None else draw_parts.get(int(tile_number))
     if parts:
-        return tuple((part.world_rect, part.uv_rect) for part in parts)
+        selected = tuple(
+            part
+            for part in parts
+            if page_index is None
+            or part.page_index is None
+            or int(part.page_index) == int(page_index)
+        )
+        return tuple((part.world_rect, part.uv_rect) for part in selected)
     region = layout.get(int(tile_number))
     if region is None:
         return ()
@@ -3793,12 +4091,22 @@ def _tile_quad_rects(tile_number, layout, uvs, draw_parts):
     return (((x0, y0, x0 + float(region.width), y0 + float(region.height)), tuple(uv)),)
 
 
-def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool, draw_parts=None):
+def _quad_buffers(
+    layout,
+    payloads,
+    uvs,
+    *,
+    rgb_already_windowed: bool,
+    draw_parts=None,
+    page_index=None,
+):
     vertices = []
     texcoords = []
     modes = []
     for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads).items()):
-        quads = _tile_quad_rects(tile_number, layout, uvs, draw_parts)
+        quads = _tile_quad_rects(
+            tile_number, layout, uvs, draw_parts, page_index=page_index
+        )
         if not quads:
             continue
         mode = float(_payload_mode(payload, rgb_already_windowed=rgb_already_windowed))
@@ -3813,7 +4121,15 @@ def _quad_buffers(layout, payloads, uvs, *, rgb_already_windowed: bool, draw_par
     )
 
 
-def _page_mode_spans(layout, payloads, uvs, draw_parts, *, rgb_already_windowed: bool):
+def _page_mode_spans(
+    layout,
+    payloads,
+    uvs,
+    draw_parts,
+    *,
+    page_index=None,
+    rgb_already_windowed: bool,
+):
     """Ordered ``(tile, offset, count, mode)`` spans of a page's ``a_mode`` buffer.
 
     Mirrors ``_quad_buffers`` exactly — same sorted-tile order, same
@@ -3828,7 +4144,9 @@ def _page_mode_spans(layout, payloads, uvs, draw_parts, *, rgb_already_windowed:
     spans = []
     offset = 0
     for tile_number, payload in sorted((int(key), value) for key, value in dict(payloads or {}).items()):
-        quads = _tile_quad_rects(tile_number, layout, uvs, draw_parts)
+        quads = _tile_quad_rects(
+            tile_number, layout, uvs, draw_parts, page_index=page_index
+        )
         count = 6 * len(quads)
         spans.append(
             (
@@ -3842,7 +4160,15 @@ def _page_mode_spans(layout, payloads, uvs, draw_parts, *, rgb_already_windowed:
     return spans
 
 
-def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bool) -> tuple[object, ...]:
+def _page_geometry_key(
+    payloads,
+    pool,
+    page,
+    layout,
+    *,
+    page_index=None,
+    rgb_already_windowed: bool,
+) -> tuple[object, ...]:
     # Registered draw parts are keyed explicitly: their UV crops are geometry
     # inputs that slot/region/gutter alone no longer determine (a window
     # shift changes only the crop rects, and must rebuild the buffers).
@@ -3858,7 +4184,13 @@ def _page_geometry_key(payloads, pool, page, layout, *, rgb_already_windowed: bo
                 int(layout[int(key)].height),
                 _payload_mode(payload, rgb_already_windowed=rgb_already_windowed),
                 _payload_gutter(payload),
-                tuple((part.world_rect, part.uv_rect) for part in draw_parts.get(int(key), ())),
+                tuple(
+                    (part.world_rect, part.uv_rect, part.page_index)
+                    for part in draw_parts.get(int(key), ())
+                    if page_index is None
+                    or part.page_index is None
+                    or int(part.page_index) == int(page_index)
+                ),
             )
             for key, payload in sorted(dict(payloads or {}).items())
             if int(key) in pool.tile_slots and int(key) in layout

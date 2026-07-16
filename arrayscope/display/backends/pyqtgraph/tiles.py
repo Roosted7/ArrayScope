@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from time import perf_counter
 from typing import Callable, Mapping
@@ -20,12 +20,58 @@ from arrayscope.display.model.tile_identity import (
 )
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.shader_mapping import TexturePlaneKind
-from arrayscope.display.tile_layout import tile_layout_map, tile_layout_regions
+from arrayscope.display.tile_layout import tile_layout_map
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+
+
+def _assemble_page_backed_payload(payload: DisplayTilePayload) -> DisplayTilePayload:
+    """Assemble exact native geometry for PyQtGraph's one-item CPU path.
+
+    Reduced samples are repeated over their exact planned source rectangles,
+    not uniformly stretched. This is nearest-neighbour presentation with the
+    same clipped-bin geometry as VisPy.
+    """
+
+    backing = payload.page_backing
+    if backing is None:
+        return payload
+    pages = backing.materialized_by_key()
+    missing = tuple(key for key in backing.requested_keys if key not in pages)
+    if missing:
+        if payload.semantic_data is None:
+            raise ValueError(
+                "PyQtGraph cannot present incomplete page-backed coverage and no native fallback exists"
+            )
+        native = np.ascontiguousarray(payload.semantic_data)
+        return replace(
+            payload,
+            image=native,
+            texture_data=native,
+            source_id=(payload.source_id, "native-page-fallback"),
+            lod=None,
+            page_backing=None,
+        )
+    y0, y1, x0, x1 = backing.source_coverage_yx
+    sample = next(iter(pages.values())).values
+    trailing = tuple(np.shape(sample)[2:])
+    assembled = np.empty((y1 - y0, x1 - x0, *trailing), dtype=np.asarray(sample).dtype)
+    coverage = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    for plan in backing.requested_plans:
+        page = pages[plan.key]
+        for index, (sy0, sy1, sx0, sx1) in enumerate(plan.sample_source_rects_yx):
+            row, column = divmod(index, plan.stored_shape[1])
+            assembled[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0, ...] = page.values[
+                row, column
+            ]
+            coverage[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] += 1
+    if not np.all(coverage == 1):
+        raise ValueError("page-backed PyQtGraph assembly has incomplete or overlapping geometry")
+    assembled = np.ascontiguousarray(assembled)
+    return replace(payload, image=assembled, texture_data=assembled)
 
 
 def _payload_direct_dims(region, tile_data, payload):
@@ -289,7 +335,7 @@ class MontageTileLayer:
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
             ):
-                drawable_payloads[int(tile)] = payload
+                drawable_payloads[int(tile)] = _assemble_page_backed_payload(payload)
             elif int(tile) in requested_upserts:
                 # Not presentable for this delta's typed target; the payload
                 # is dropped from this commit.  Report it loudly — a payload

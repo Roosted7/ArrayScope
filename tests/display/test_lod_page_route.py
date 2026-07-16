@@ -19,6 +19,7 @@ from arrayscope.display.pyramid import (
     reduction_yx_to_xy,
 )
 from arrayscope.display.lod import LodInfo
+from arrayscope.display.backends.pyqtgraph.tiles import _assemble_page_backed_payload
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
     PageBackedPresentation,
@@ -320,3 +321,32 @@ def test_page_backed_value_lookup_uses_exact_clipped_bin_geometry():
     second = values.value_at(SimpleNamespace(tile_number=0, local_y=0, local_x=1))
     assert first == pytest.approx((10101 + 10201) / 2)
     assert second == pytest.approx((10102 + 10103 + 10202 + 10203) / 4)
+
+
+def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
+    rect = (100, 104, 101, 113)
+    plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
+    pages = materialize_source_grid_pages(
+        source(rect), source_origin_yx=(100, 101), plans=plans
+    )
+    lod = LodInfo(1, 2, (4, 12), (2, 7), 0)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        pages[0].values,
+        None,
+        ("page-backed", 0),
+        semantic_data=None,
+        lod=lod,
+        page_backing=PageBackedPresentation(plans, pages, rect, lod),
+    )
+    assembled = _assemble_page_backed_payload(payload)
+    expected = np.empty((4, 12), dtype=np.float32)
+    for page in pages:
+        for index, (y0, y1, x0, x1) in enumerate(page.plan.sample_source_rects_yx):
+            row, column = divmod(index, page.plan.stored_shape[1])
+            expected[y0 - rect[0] : y1 - rect[0], x0 - rect[2] : x1 - rect[2]] = (
+                page.values[row, column]
+            )
+    np.testing.assert_array_equal(assembled.image, expected)
+    assert assembled.lod == lod
