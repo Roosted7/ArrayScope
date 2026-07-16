@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,6 +17,12 @@ from arrayscope.display.pyramid import (
     reduce_source_grid,
     reduction_xy_to_yx,
     reduction_yx_to_xy,
+)
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    PageBackedPresentation,
+    TiledValueSource,
 )
 from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 
@@ -250,3 +257,66 @@ def test_plan_validation_rejects_key_geometry_or_route_drift():
     wrong_key = replace(page_plan.key, chunk_origin=(1, 0))
     with pytest.raises(ValueError, match="geometry"):
         replace(page_plan, key=wrong_key)
+
+
+def test_page_backed_payload_validates_cover_and_counts_aliases_once():
+    rect = (100, 104, 101, 113)
+    plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
+    pages = materialize_source_grid_pages(
+        source(rect), source_origin_yx=(100, 101), plans=plans
+    )
+    lod = LodInfo(
+        level=1,
+        factor=2,
+        source_shape=(4, 12),
+        texture_shape=(2, 7),
+        gutter=0,
+    )
+    backing = PageBackedPresentation(plans, pages, rect, lod)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        pages[0].values,
+        None,
+        ("tile", 0),
+        texture_data=pages[0].values,
+        semantic_data=None,
+        lod=lod,
+        page_backing=backing,
+    )
+    expected = sum(page.nbytes for page in pages)
+    assert payload.nbytes == expected
+
+    with pytest.raises(ValueError, match="gap"):
+        PageBackedPresentation(plans[:-1], pages[:-1], rect, lod)
+    with pytest.raises(ValueError, match="duplicate"):
+        PageBackedPresentation((*plans, plans[0]), pages, rect, lod)
+
+
+def test_page_backed_value_lookup_uses_exact_clipped_bin_geometry():
+    rect = (100, 104, 101, 113)
+    plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
+    pages = materialize_source_grid_pages(
+        source(rect), source_origin_yx=(100, 101), plans=plans
+    )
+    lod = LodInfo(1, 2, (4, 12), (2, 7), 0)
+    backing = PageBackedPresentation(plans, pages, rect, lod)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        pages[0].values,
+        None,
+        ("page-backed", 0),
+        semantic_data=None,
+        lod=lod,
+        page_backing=backing,
+    )
+    values = TiledValueSource({0: payload})
+
+    # x=101 is the one-sample clipped leading bin; x=102 begins the next
+    # full factor-two bin. Equal-width arithmetic would map one of these
+    # coordinates incorrectly.
+    first = values.value_at(SimpleNamespace(tile_number=0, local_y=0, local_x=0))
+    second = values.value_at(SimpleNamespace(tile_number=0, local_y=0, local_x=1))
+    assert first == pytest.approx((10101 + 10201) / 2)
+    assert second == pytest.approx((10102 + 10103 + 10202 + 10203) / 4)

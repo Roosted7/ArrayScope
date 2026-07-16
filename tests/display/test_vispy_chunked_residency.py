@@ -1230,6 +1230,60 @@ def test_resident_fine_arrival_supersedes_coarse_with_zero_resolution_uploads():
     assert sum(len(page.scalar_texture.uploads) for page in pool.pages) == uploads_before_resolution
 
 
+def test_multi_page_candidate_replaces_pins_only_when_every_target_resolves():
+    coarse = virtual_page_key(origin=(0, 0), shape=(8, 8), reduction=(2, 2))
+    left = virtual_page_key(origin=(0, 0), shape=(2, 2), reduction=(0, 0))
+    right = virtual_page_key(origin=(2, 0), shape=(2, 2), reduction=(0, 0))
+    missing_family = virtual_page_key(
+        origin=(0, 0), shape=(2, 2), reduction=(0, 0), document=("other", 1)
+    )
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+
+    first = pool.resolve_tile_page_targets(
+        {7: (left, right)}, owner_scope=("session", 1)
+    )[7]
+    assert first is not None
+    assert tuple(item.actual_key for item in first) == (coarse, coarse)
+    assert coarse not in pool._page_table.eviction_candidates()
+    uploads_before = sum(len(page.scalar_texture.uploads) for page in pool.pages)
+
+    incomplete = pool.resolve_tile_page_targets(
+        {7: (left, missing_family)}, owner_scope=("session", 1)
+    )[7]
+    assert incomplete is None
+    assert tuple(item.actual_key for item in pool.tile_page_target_resolutions[7]) == (
+        coarse,
+        coarse,
+    )
+    assert pool.tile_page_candidate_missing[7] == (missing_family,)
+    assert coarse not in pool._page_table.eviction_candidates()
+    assert sum(len(page.scalar_texture.uploads) for page in pool.pages) == uploads_before
+
+
+def test_multi_page_owner_scope_change_cannot_leave_or_steal_old_pins():
+    coarse = virtual_page_key(origin=(0, 0), shape=(8, 8), reduction=(2, 2))
+    target = virtual_page_key(origin=(0, 0), shape=(2, 2), reduction=(0, 0))
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
+    commit_virtual_pages(
+        pool,
+        {0: virtual_page_payload(coarse, 3.0, tile_number=0)},
+        reserve_count=2,
+    )
+    pool.resolve_tile_page_targets({7: (target,)}, owner_scope=("session", 1))
+    first_owner = pool._tile_page_pin_owners[7]
+    pool.resolve_tile_page_targets({7: (target,)}, owner_scope=("session", 2))
+    second_owner = pool._tile_page_pin_owners[7]
+
+    assert first_owner != second_owner
+    assert first_owner not in pool._page_table._pin_sets
+    assert pool._page_table._pin_sets[second_owner] == frozenset({coarse})
+
+
 def test_fine_unbind_re_resolves_pinned_coarse_without_clearing_target_tile():
     target, coarse, fine = virtual_page_family()
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)

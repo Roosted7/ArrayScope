@@ -12,6 +12,7 @@ from arrayscope.display.lod import LodInfo
 from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.model.tile_identity import TileIdentity, TilePresentationIdentity
+from arrayscope.display.pyramid import LodPagePlan, MaterializedLodPage
 
 
 def array_value_at(data, y_i: int, x_i: int):
@@ -48,6 +49,79 @@ class PayloadSourceAnchor:
 
 
 @dataclass(frozen=True)
+class PageBackedPresentation:
+    """Backend-neutral logical pages and supplied CPU residency values."""
+
+    requested_plans: tuple[LodPagePlan, ...]
+    materialized_pages: tuple[MaterializedLodPage, ...]
+    source_coverage_yx: tuple[int, int, int, int]
+    requested_lod: LodInfo
+
+    def __post_init__(self) -> None:
+        plans = tuple(self.requested_plans)
+        pages = tuple(self.materialized_pages)
+        if not plans:
+            raise ValueError("page-backed presentation requires at least one target plan")
+        if any(not isinstance(plan, LodPagePlan) for plan in plans):
+            raise TypeError("page-backed targets must be LodPagePlan instances")
+        if any(not isinstance(page, MaterializedLodPage) for page in pages):
+            raise TypeError("page-backed supplied values must be MaterializedLodPage instances")
+        keys = tuple(plan.key for plan in plans)
+        if len(set(keys)) != len(keys):
+            raise ValueError("page-backed presentation has duplicate targets")
+        page_keys = tuple(page.key for page in pages)
+        if len(set(page_keys)) != len(page_keys):
+            raise ValueError("page-backed presentation has duplicate materialized pages")
+        unknown = tuple(key for key in page_keys if key not in set(keys))
+        if unknown:
+            raise ValueError(f"materialized pages do not belong to requested targets: {unknown!r}")
+        coverage = tuple(int(value) for value in self.source_coverage_yx)
+        if len(coverage) != 4 or coverage[0] < 0 or coverage[2] < 0 or coverage[1] <= coverage[0] or coverage[3] <= coverage[2]:
+            raise ValueError("page-backed source coverage must be a non-empty native-source rectangle")
+        _validate_exact_rect_cover(
+            coverage,
+            tuple(plan.valid_source_rect_yx for plan in plans),
+        )
+        if not isinstance(self.requested_lod, LodInfo):
+            raise TypeError("page-backed requested_lod must be LodInfo")
+        requested_reductions = {tuple(plan.reduction_yx) for plan in plans}
+        if len(requested_reductions) != 1:
+            raise ValueError("page-backed targets must share one requested reduction")
+        reduction_y, reduction_x = next(iter(requested_reductions))
+        if int(self.requested_lod.factor) != 1 << max(reduction_y, reduction_x):
+            raise ValueError("requested semantic LOD disagrees with target page reduction")
+        object.__setattr__(self, "requested_plans", plans)
+        object.__setattr__(self, "materialized_pages", pages)
+        object.__setattr__(self, "source_coverage_yx", coverage)
+
+    @property
+    def requested_keys(self) -> tuple[object, ...]:
+        return tuple(plan.key for plan in self.requested_plans)
+
+    def materialized_by_key(self) -> dict[object, MaterializedLodPage]:
+        return {page.key: page for page in self.materialized_pages}
+
+    def value_at_native(self, y_i: int, x_i: int):
+        """Map native coordinates through exact clipped-bin geometry."""
+
+        y_i, x_i = int(y_i), int(x_i)
+        pages = self.materialized_by_key()
+        for plan in self.requested_plans:
+            y0, y1, x0, x1 = plan.valid_source_rect_yx
+            if not (y0 <= y_i < y1 and x0 <= x_i < x1):
+                continue
+            page = pages.get(plan.key)
+            if page is None:
+                return None
+            for index, (sy0, sy1, sx0, sx1) in enumerate(plan.sample_source_rects_yx):
+                if sy0 <= y_i < sy1 and sx0 <= x_i < sx1:
+                    row, column = divmod(index, plan.stored_shape[1])
+                    return array_value_at(page.values, row, column)
+            raise RuntimeError("planned page source coverage has no containing stored sample")
+        return None
+
+
+@dataclass(frozen=True)
 class DisplayTilePayload:
     tile_number: int
     source_index: int
@@ -71,6 +145,9 @@ class DisplayTilePayload:
     # sub-plane residency across display-window shifts. Never part of tile
     # semantic identity.
     source_anchor: PayloadSourceAnchor | None = None
+    # ADR 0056 G5: logical page targets and checked materialized values.
+    # Tile/presentation identity remains separate from every page key.
+    page_backing: PageBackedPresentation | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
@@ -93,8 +170,20 @@ class DisplayTilePayload:
             semantic = None
             semantic_histogram = None
         else:
-            semantic = image if self.semantic_data is None else np.asarray(self.semantic_data)
-            semantic_histogram = self.histogram_data if self.semantic_histogram_data is None else self.semantic_histogram_data
+            semantic = (
+                None
+                if self.semantic_data is None and self.page_backing is not None
+                else (image if self.semantic_data is None else np.asarray(self.semantic_data))
+            )
+            semantic_histogram = (
+                None
+                if self.semantic_histogram_data is None and self.page_backing is not None
+                else (
+                    self.histogram_data
+                    if self.semantic_histogram_data is None
+                    else self.semantic_histogram_data
+                )
+            )
             semantic_histogram = None if semantic_histogram is None else np.asarray(semantic_histogram)
         source_shape = tuple(int(value) for value in (self.source_shape or image.shape[:2])[:2])
         texture_kind = self.texture_kind
@@ -125,6 +214,14 @@ class DisplayTilePayload:
                 object.__setattr__(self, "rgb_windowed_levels", (float(low), float(high)))
             except Exception as exc:
                 raise ValueError("rgb_windowed_levels must be a 2-tuple of finite levels") from exc
+        page_backing = self.page_backing
+        if page_backing is not None:
+            if not isinstance(page_backing, PageBackedPresentation):
+                raise TypeError("display tile page_backing must be PageBackedPresentation")
+            if self.lod is None:
+                raise ValueError("page-backed payload requires requested semantic LOD")
+            if page_backing.requested_lod != self.lod:
+                raise ValueError("payload LOD disagrees with page-backed requested LOD")
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -136,25 +233,22 @@ class DisplayTilePayload:
 
     @property
     def nbytes(self) -> int:
-        total = int(np.asarray(self.texture_data if self.texture_data is not None else self.image).nbytes)
-        if self.histogram_data is not None:
-            total += int(np.asarray(self.histogram_data).nbytes)
-        if self.semantic_data is not None and self.semantic_data is not self.image and self.semantic_data is not self.texture_data:
-            total += int(np.asarray(self.semantic_data).nbytes)
-        if (
-            self.semantic_histogram_data is not None
-            and self.semantic_histogram_data is not self.histogram_data
-            and self.semantic_histogram_data is not self.semantic_data
-        ):
-            total += int(np.asarray(self.semantic_histogram_data).nbytes)
-        if (
-            self.level_data is not None
-            and self.level_data is not self.image
-            and self.level_data is not self.histogram_data
-            and self.level_data is not self.semantic_data
-            and self.level_data is not self.semantic_histogram_data
-        ):
-            total += int(np.asarray(self.level_data).nbytes)
+        arrays = [
+            self.texture_data if self.texture_data is not None else self.image,
+            self.histogram_data,
+            self.semantic_data,
+            self.semantic_histogram_data,
+            self.level_data,
+        ]
+        if self.page_backing is not None:
+            arrays.extend(page.values for page in self.page_backing.materialized_pages)
+        seen: set[int] = set()
+        total = 0
+        for value in arrays:
+            if value is None or id(value) in seen:
+                continue
+            seen.add(id(value))
+            total += int(np.asarray(value).nbytes)
         return total
 
 
@@ -162,6 +256,30 @@ def display_tile_payload_has_semantics(payload) -> bool:
     """Return whether a tiled payload can update committed semantic state."""
 
     return str(getattr(payload, "quality", "exact") or "exact") == "exact"
+
+
+def _validate_exact_rect_cover(
+    coverage: tuple[int, int, int, int],
+    rectangles: tuple[tuple[int, int, int, int], ...],
+) -> None:
+    """Reject page target gaps/overlaps without allocating a source-sized mask."""
+
+    y_edges = sorted({coverage[0], coverage[1], *(edge for rect in rectangles for edge in rect[:2])})
+    x_edges = sorted({coverage[2], coverage[3], *(edge for rect in rectangles for edge in rect[2:])})
+    for y0, y1 in zip(y_edges, y_edges[1:]):
+        for x0, x1 in zip(x_edges, x_edges[1:]):
+            if not (
+                coverage[0] <= y0 < y1 <= coverage[1]
+                and coverage[2] <= x0 < x1 <= coverage[3]
+            ):
+                continue
+            owners = sum(
+                int(ry0 <= y0 and y1 <= ry1 and rx0 <= x0 and x1 <= rx1)
+                for ry0, ry1, rx0, rx1 in rectangles
+            )
+            if owners != 1:
+                reason = "gap" if owners == 0 else "overlap"
+                raise ValueError(f"page-backed target cover has a {reason} at {(y0, y1, x0, x1)}")
 
 
 @dataclass(frozen=True)
@@ -431,6 +549,19 @@ class TiledValueSource(FrameValueSource):
             if payload.semantic_histogram_data is not None
             else (payload.semantic_data if payload.semantic_data is not None else payload.image)
         )
+        page_backing = payload.page_backing
+        if (
+            page_backing is not None
+            and payload.semantic_histogram_data is None
+            and payload.semantic_data is None
+        ):
+            local_y = int(getattr(mapping, "local_y", -1))
+            local_x = int(getattr(mapping, "local_x", -1))
+            coverage_y0, _coverage_y1, coverage_x0, _coverage_x1 = page_backing.source_coverage_yx
+            return page_backing.value_at_native(
+                coverage_y0 + local_y,
+                coverage_x0 + local_x,
+            )
         data = np.asarray(source)
         y_i = int(getattr(mapping, "local_y", -1))
         x_i = int(getattr(mapping, "local_x", -1))

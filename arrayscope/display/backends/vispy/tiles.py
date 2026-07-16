@@ -307,8 +307,8 @@ _ATLAS_GROWTH_TARGET_BYTES = 32 * 1024 * 1024
 _UNSET = object()
 
 
-def _page_target_pin_owner(tile_number: int) -> tuple[str, int]:
-    return ("vispy-page-target", int(tile_number))
+def _page_target_pin_owner(tile_number: int, scope: object = "legacy") -> tuple[object, ...]:
+    return ("vispy-page-target", scope, int(tile_number))
 
 # Raw-GL constants for atlas mipmaps (gloo has no mipmap support; the visual
 # generates them itself with the context current, see _refresh_mipmaps).
@@ -483,6 +483,9 @@ class TextureAtlasPool:
         self._page_table = PageTable()
         self.page_target_resolutions: dict[int, PageResolution] = {}
         self._page_target_pin_tiles: set[int] = set()
+        self.tile_page_target_resolutions: dict[int, tuple[PageResolution, ...]] = {}
+        self.tile_page_candidate_missing: dict[int, tuple[DataChunkKey, ...]] = {}
+        self._tile_page_pin_owners: dict[int, object] = {}
         self.tile_slots: dict[int, tuple[int, int]] = {}
         # ADR 0055 G3: optional per-tile quad list (UV-cropped sub-window
         # sampling). Tiles absent from this map draw one full-slot quad.
@@ -594,6 +597,56 @@ class TextureAtlasPool:
         self._page_target_pin_tiles = set(requested)
         return results
 
+    def resolve_tile_page_targets(
+        self,
+        targets: dict[int, tuple[DataChunkKey, ...]],
+        *,
+        owner_scope: object,
+    ) -> dict[int, tuple[PageResolution, ...] | None]:
+        """Atomically replace each tile's complete multi-page resolution set.
+
+        Missing candidate coverage never clears the previous complete pinned
+        set. Resolution is pure CPU page-table work: no upload or scheduling.
+        """
+
+        requested = {int(tile): tuple(keys) for tile, keys in dict(targets).items()}
+        for tile, keys in requested.items():
+            if not keys or len(set(keys)) != len(keys):
+                raise ValueError("tile page targets must be non-empty and unique")
+            if any(not isinstance(key, DataChunkKey) for key in keys):
+                raise TypeError("tile page targets must be DataChunkKey values")
+        for tile in set(self._tile_page_pin_owners).difference(requested):
+            owner = self._tile_page_pin_owners.pop(tile)
+            self._page_table.replace_pin_set(owner, ())
+            self.tile_page_target_resolutions.pop(tile, None)
+            self.tile_page_candidate_missing.pop(tile, None)
+            self._clear_tile_mapping(tile)
+
+        results: dict[int, tuple[PageResolution, ...] | None] = {}
+        for tile, keys in requested.items():
+            candidate = tuple(self._page_table.resolve(key) for key in keys)
+            missing = tuple(
+                key for key, resolution in zip(keys, candidate, strict=True) if resolution is None
+            )
+            if missing:
+                self.tile_page_candidate_missing[tile] = missing
+                results[tile] = None
+                continue
+            resolved = tuple(candidate)
+            owner = _page_target_pin_owner(tile, owner_scope)
+            previous_owner = self._tile_page_pin_owners.get(tile)
+            if previous_owner is not None and previous_owner != owner:
+                self._page_table.replace_pin_set(previous_owner, ())
+            actual_keys = tuple(dict.fromkeys(resolution.actual_key for resolution in resolved))
+            self._page_table.replace_pin_set(owner, actual_keys)
+            for key in actual_keys:
+                self._page_table.touch(key)
+            self._tile_page_pin_owners[tile] = owner
+            self.tile_page_target_resolutions[tile] = resolved
+            self.tile_page_candidate_missing.pop(tile, None)
+            results[tile] = resolved
+        return results
+
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         rows: dict[int, dict[str, object]] = {}
         for tile, resident_key in self.tile_resident_keys.items():
@@ -625,6 +678,30 @@ class TextureAtlasPool:
                         ),
                         "physical_page_binding_generation": int(
                             resolution.binding_generation
+                        ),
+                    }
+                )
+            multi_resolution = self.tile_page_target_resolutions.get(int(tile))
+            if multi_resolution is not None:
+                rows[int(tile)].update(
+                    {
+                        "physical_page_bindings": tuple(
+                            {
+                                "target_key": item.target_key,
+                                "actual_key": item.actual_key,
+                                "actual_lod": item.actual_key.lod,
+                                "quality": (
+                                    "exact"
+                                    if item.actual_key == item.target_key
+                                    else "fallback"
+                                ),
+                                "slot": item.slot,
+                                "binding_generation": int(item.binding_generation),
+                            }
+                            for item in multi_resolution
+                        ),
+                        "physical_page_candidate_missing": self.tile_page_candidate_missing.get(
+                            int(tile), ()
                         ),
                     }
                 )
@@ -718,6 +795,9 @@ class TextureAtlasPool:
             self._page_table = PageTable()
             self.page_target_resolutions.clear()
             self._page_target_pin_tiles.clear()
+            self.tile_page_target_resolutions.clear()
+            self.tile_page_candidate_missing.clear()
+            self._tile_page_pin_owners.clear()
             self.tile_slots.clear()
             self.tile_draw_parts.clear()
             self.tile_chunk_residency.clear()
