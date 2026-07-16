@@ -110,8 +110,11 @@ def run_profile_montage_workflow(
     profiler_artifact_paths: tuple[str | Path, ...] = (),
     stages: tuple[str, ...] | None = None,
     screenshot_dir: str | Path | None = None,
+    screenshot_interval_s: float = 0.0,
     session_fixture: str | Path | None = DEFAULT_SESSION_FIXTURE,
     verbose_tile_trace: bool = False,
+    synthetic_scene: str | None = None,
+    synthetic_shape: tuple[int, int, int] = (192, 256, 40),
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -124,7 +127,7 @@ def run_profile_montage_workflow(
 
     prefer_pyside6()
     import pyqtgraph as pg
-    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtCore, QtGui
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.core.view_session import (
@@ -158,11 +161,22 @@ def run_profile_montage_workflow(
 
     win = None
     probe = None
+    visual_probe = None
     try:
         stage_order = _resolve_profile_stages(stages)
         stage_enabled = set(stage_order)
         load_start = perf_counter()
-        data = _load_dataset(data_path, mode=load_mode)
+        synthetic_scene = str(synthetic_scene or "").strip().lower()
+        if synthetic_scene:
+            data = _synthetic_profile_data(synthetic_scene, synthetic_shape)
+            artifact_root = screenshot_dir or Path(os.environ.get("TMPDIR", "/tmp"))
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            data_path = artifact_root / f"synthetic-{synthetic_scene}-{'x'.join(str(v) for v in data.shape)}.npy"
+            np.save(data_path, data)
+            load_mode = "synthetic"
+            session_fixture = None
+        else:
+            data = _load_dataset(data_path, mode=load_mode)
         load_elapsed_ms = (perf_counter() - load_start) * 1000.0
         if np.ndim(data) < 3:
             raise ValueError(f"profile workflow requires at least 3 dimensions, got shape {np.shape(data)}")
@@ -235,6 +249,8 @@ def run_profile_montage_workflow(
             grid_kind="scroll",
             source_index_count=len(scroll_source_indices),
         )
+        base_large["synthetic_scene"] = synthetic_scene or None
+        base_scroll["synthetic_scene"] = synthetic_scene or None
         if "load_data" in stage_enabled:
             _append_record(
                 records,
@@ -267,6 +283,17 @@ def run_profile_montage_workflow(
         )
         win.show()
         _process_events(app, QtCore, count=20)
+        if screenshot_dir is not None and float(screenshot_interval_s) > 0.0:
+            visual_probe = _VisualTimelineProbe(
+                QtCore,
+                QtGui,
+                win,
+                backend=backend,
+                directory=screenshot_dir,
+                interval_s=float(screenshot_interval_s),
+            )
+            win._arrayscope_visual_timeline_probe = visual_probe
+            visual_probe.start()
         fixture_startup_settled = True
         fixture_startup_ms = 0.0
         if restored_fixture is not None:
@@ -612,6 +639,8 @@ def run_profile_montage_workflow(
     finally:
         if probe is not None:
             probe.stop()
+        if visual_probe is not None:
+            visual_probe.stop()
         if win is not None:
             win.close()
             _process_events(app, QtCore, count=10)
@@ -2446,6 +2475,229 @@ class _EventLoopProbe:
         return _percentile(tuple(self.gaps_ms), percentile)
 
 
+class _VisualTimelineProbe:
+    """Periodic framebuffer + physical tile truth for interaction diagnosis."""
+
+    def __init__(self, QtCore, QtGui, win, *, backend: str, directory: Path, interval_s: float):
+        self._QtCore = QtCore
+        self._QtGui = QtGui
+        self._win = win
+        self._backend = str(backend)
+        self._directory = Path(directory)
+        self._interval_ms = max(100, int(round(float(interval_s) * 1000.0)))
+        self._timer = QtCore.QTimer(win)
+        self._timer.setInterval(self._interval_ms)
+        self._timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(lambda: self.capture("interval"))
+        self._started_ns = time.monotonic_ns()
+        self._last_sample_ns = self._started_ns
+        self._last_drawn: frozenset[int] = frozenset()
+        self._last_identities: dict[int, str] = {}
+        self._images: list[tuple[Path, dict[str, object]]] = []
+        self._index = 0
+        self.timeline_path = self._directory / f"{self._backend}-visual-timeline.jsonl"
+        self.contact_sheet_path = self._directory / f"{self._backend}-visual-contact-sheet.png"
+
+    def start(self) -> None:
+        self._directory.mkdir(parents=True, exist_ok=True)
+        if self.timeline_path.exists():
+            self.timeline_path.unlink()
+        self.capture("start")
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.capture("stop")
+        self._write_contact_sheet()
+
+    def capture(self, reason: str) -> None:
+        now_ns = time.monotonic_ns()
+        self._index += 1
+        path = self._directory / f"{self._backend}-visual-{self._index:04d}.png"
+        saved = _save_view_screenshot(self._win, path)
+        session = getattr(self._win, "_frame_session", None)
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        requested = frozenset(int(tile.montage_index) for tile in plan_tiles)
+        visible = frozenset(int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ()))
+        payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+        lifecycle = getattr(session, "lifecycle", None)
+        required_tiles = tuple(
+            getattr(session, "required_tile_numbers", lambda: ())()
+            if session is not None
+            else ()
+        )
+        unsettled_tiles = tuple(
+            getattr(session, "required_target_unsettled_tiles", lambda: ())()
+            if session is not None
+            else ()
+        )
+        lifecycle_snapshot = (
+            getattr(session, "lifecycle_snapshot", lambda: None)()
+            if session is not None
+            else None
+        )
+        backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
+        physical_rows_fn = getattr(getattr(self._win, "img_view", None), "tileTruthPhysicalRows", None)
+        physical_rows = dict(physical_rows_fn() or {}) if callable(physical_rows_fn) else {}
+        physical_acknowledged = frozenset(
+            int(tile)
+            for tile, row in physical_rows.items()
+            if dict(row or {}).get("physical_acknowledged_identity") is not None
+        )
+        drawn = frozenset(int(tile) for tile in backend_identities) | physical_acknowledged
+        drawn &= requested
+        identity_text = {
+            int(tile): _trace_identity(identity, limit=500) or ""
+            for tile, identity in backend_identities.items()
+            if int(tile) in requested
+        }
+        changed = frozenset(
+            tile
+            for tile, identity in identity_text.items()
+            if self._last_identities.get(tile) not in (None, identity)
+        )
+        appeared = drawn - self._last_drawn
+        disappeared = self._last_drawn - drawn
+        fallback_bindings = 0
+        exact_bindings = 0
+        binding_rows = 0
+        for row in physical_rows.values():
+            for binding in tuple(dict(row or {}).get("physical_page_bindings", ()) or ()):
+                binding_rows += 1
+                if str(dict(binding or {}).get("quality", "")) == "exact":
+                    exact_bindings += 1
+                else:
+                    fallback_bindings += 1
+        physical_draw_rows = _visual_physical_draw_rows(physical_rows, requested)
+        elapsed_ms = (now_ns - self._started_ns) / 1_000_000.0
+        gap_ms = (now_ns - self._last_sample_ns) / 1_000_000.0
+        record = {
+            "record_type": "visual_sample",
+            "backend": self._backend,
+            "sample": int(self._index),
+            "reason": str(reason),
+            "phase": str(getattr(self._win, "_arrayscope_profile_phase", "setup") or "setup"),
+            "monotonic_ns": int(now_ns),
+            "elapsed_ms": float(elapsed_ms),
+            "sample_gap_ms": float(gap_ms),
+            "event_loop_freeze": bool(gap_ms > max(1500.0, self._interval_ms * 1.5)),
+            "screenshot_path": str(path),
+            "screenshot_saved": bool(saved),
+            "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
+            "requested_tiles": sorted(requested),
+            "visible_tiles": sorted(visible),
+            "required_tiles": sorted(int(tile) for tile in required_tiles),
+            "required_target_unsettled_tiles": sorted(
+                int(tile) for tile in unsettled_tiles
+            ),
+            "lifecycle_phase_counts": dict(
+                getattr(lifecycle_snapshot, "counts", {}) or {}
+            ),
+            "payload_tiles": sorted(int(tile) for tile in payloads if int(tile) in requested),
+            "drawn_tiles": sorted(drawn),
+            "appeared_tiles": sorted(appeared),
+            "disappeared_tiles": sorted(disappeared),
+            "changed_tiles": sorted(changed),
+            "missing_draw_tiles": sorted(requested - drawn),
+            "requested_count": len(requested),
+            "visible_count": len(visible),
+            "payload_count": len(set(payloads).intersection(requested)),
+            "drawn_count": len(drawn),
+            "exact_page_binding_count": int(exact_bindings),
+            "fallback_page_binding_count": int(fallback_bindings),
+            "page_binding_count": int(binding_rows),
+            "physical_draw_rows": physical_draw_rows,
+            "presentation_revision": int(
+                getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0
+            ),
+            "lod_level_counts": _visual_lod_level_counts(payloads, requested),
+        }
+        with self.timeline_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        emit_trace(
+            "visual_sample",
+            backend=self._backend,
+            phase=record["phase"],
+            sample=int(self._index),
+            screenshot_path=str(path),
+            drawn_tiles=tuple(sorted(drawn)),
+            appeared_tiles=tuple(sorted(appeared)),
+            disappeared_tiles=tuple(sorted(disappeared)),
+            changed_tiles=tuple(sorted(changed)),
+            missing_draw_tiles=tuple(sorted(requested - drawn)),
+            event_loop_freeze=bool(record["event_loop_freeze"]),
+            sample_gap_ms=float(gap_ms),
+        )
+        self._images.append((path, record))
+        self._last_sample_ns = now_ns
+        self._last_drawn = drawn
+        self._last_identities = identity_text
+
+    def _write_contact_sheet(self) -> None:
+        images = [(path, record) for path, record in self._images if path.exists()]
+        if not images:
+            return
+        columns = min(4, len(images))
+        thumb_w, thumb_h, label_h = 320, 200, 44
+        rows = int(math.ceil(len(images) / columns))
+        sheet = self._QtGui.QPixmap(columns * thumb_w, rows * (thumb_h + label_h))
+        sheet.fill(self._QtCore.Qt.GlobalColor.black)
+        painter = self._QtGui.QPainter(sheet)
+        painter.setPen(self._QtCore.Qt.GlobalColor.white)
+        for index, (path, record) in enumerate(images):
+            row, column = divmod(index, columns)
+            x, y = column * thumb_w, row * (thumb_h + label_h)
+            pixmap = self._QtGui.QPixmap(str(path)).scaled(
+                thumb_w,
+                thumb_h,
+                self._QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                self._QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(x + (thumb_w - pixmap.width()) // 2, y, pixmap)
+            label = (
+                f"{record['sample']:04d} {record['elapsed_ms'] / 1000.0:.1f}s "
+                f"{record['phase']}\n"
+                f"draw {record['drawn_count']}/{record['requested_count']} "
+                f"+{len(record['appeared_tiles'])} -{len(record['disappeared_tiles'])} "
+                f"gap {record['sample_gap_ms']:.0f}ms"
+            )
+            painter.drawText(x + 4, y + thumb_h + 2, thumb_w - 8, label_h - 4, 0, label)
+        painter.end()
+        sheet.save(str(self.contact_sheet_path))
+
+
+def _visual_lod_level_counts(payloads, requested) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for tile, payload in dict(payloads or {}).items():
+        if int(tile) not in requested:
+            continue
+        lod = getattr(payload, "lod", None)
+        level = int(getattr(lod, "level", 0) or 0)
+        quality = str(getattr(payload, "quality", "exact") or "exact")
+        key = f"{quality}:L{level}"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _visual_physical_draw_rows(physical_rows, requested) -> dict[str, dict[str, object]]:
+    return {
+        str(int(tile)): {
+            "draw_world_rects": tuple(
+                dict(row or {}).get("physical_draw_world_rects", ()) or ()
+            ),
+            "draw_world_bounds": dict(row or {}).get("physical_draw_world_bounds"),
+            "expected_world_rect": dict(row or {}).get(
+                "physical_expected_world_rect"
+            ),
+            "bounds_match_layout": dict(row or {}).get(
+                "physical_draw_bounds_match_layout"
+            ),
+        }
+        for tile, row in dict(physical_rows or {}).items()
+        if int(tile) in requested
+    }
+
+
 class _PresentationContinuityProbe:
     """Observe retained pixels while a successor frame is being prepared.
 
@@ -2830,6 +3082,10 @@ def _run_phase(
     backend: str = "",
     screenshot_dir: Path | None = None,
 ) -> dict[str, object]:
+    win._arrayscope_profile_phase = str(phase)
+    visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+    if visual_probe is not None:
+        visual_probe.capture("phase-start")
     emit_trace("input", action="phase_start", phase=str(phase), backend=str(backend))
     probe.reset()
     phase_start_geometry = _window_geometry_state(win)
@@ -2875,6 +3131,8 @@ def _run_phase(
         )
     finally:
         continuity_probe.stop()
+        if visual_probe is not None:
+            visual_probe.capture("phase-end")
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
     record = _phase_record(
@@ -4115,6 +4373,69 @@ def _window_geometry_state(win) -> dict[str, object]:
             )
         ),
     }
+
+
+def _synthetic_profile_data(kind: str, shape: tuple[int, int, int]) -> np.ndarray:
+    """Deterministic visual registration charts for live backend diagnosis."""
+
+    height, width, depth = (int(value) for value in shape)
+    if min(height, width, depth) < 4:
+        raise ValueError(f"synthetic profile shape must be at least 4 on every axis, got {shape}")
+    yy = np.linspace(-1.0, 1.0, height, dtype=np.float32)[:, None, None]
+    xx = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :, None]
+    zz = np.linspace(0.0, 1.0, depth, dtype=np.float32)[None, None, :]
+    z_index = np.arange(depth, dtype=np.int32)[None, None, :]
+
+    if kind == "geometry":
+        values = 0.12 + 0.30 * (xx + 1.0) / 2.0 + 0.18 * (yy + 1.0) / 2.0
+        center_x = -0.65 + 1.30 * zz
+        center_y = 0.32 * np.sin(zz * np.float32(2.0 * np.pi))
+        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+        values = values + np.where(radius < 0.24, 0.42, 0.0)
+        values = values + np.where((radius > 0.31) & (radius < 0.34), 0.28, 0.0)
+        diagonal = np.abs(yy - (0.72 * xx - 0.38 + 0.76 * zz)) < (3.0 / height)
+        values = values + np.where(diagonal, 0.38, 0.0)
+        border = (np.abs(xx) > 0.965) | (np.abs(yy) > 0.955)
+        values = np.where(border, 0.90 - 0.35 * (z_index % 2), values)
+        # Index-coded vertical and binary horizontal fiducials make a tile's
+        # source position recoverable from one screenshot.
+        bar_x = -0.86 + 0.22 * (z_index % 8)
+        values = values + np.where((np.abs(xx - bar_x) < 0.018) & (yy > 0.46), 0.38, 0.0)
+        for bit in range(6):
+            bit_on = ((z_index >> bit) & 1) != 0
+            band_y = -0.86 + bit * 0.11
+            values = values + np.where(bit_on & (np.abs(yy - band_y) < 0.022) & (xx < -0.45), 0.32, 0.0)
+        return np.ascontiguousarray(np.clip(values, 0.0, 1.0), dtype=np.float32)
+
+    if kind == "complex-phase":
+        center_x = -0.42 + 0.84 * zz
+        center_y = 0.28 * np.cos(zz * np.float32(2.0 * np.pi))
+        dx, dy = xx - center_x, yy - center_y
+        radius = np.sqrt(dx * dx + dy * dy)
+        amplitude = 0.12 + 0.38 * (xx + 1.0) / 2.0
+        amplitude = amplitude + 0.55 * np.exp(-((radius - 0.38) / 0.09) ** 2)
+        amplitude = amplitude + 0.28 * ((np.abs(xx) < 0.18) & (np.abs(yy) < 0.56))
+        phase = np.arctan2(dy, dx) + 5.0 * np.pi * xx + 2.0 * np.pi * zz
+        y_index = np.arange(height, dtype=np.int32)[:, None, None]
+        x_index = np.arange(width, dtype=np.int32)[None, :, None]
+        opposed_patch = (xx < -0.48) & (yy < -0.42)
+        opposed_phase = np.pi * ((x_index + y_index + z_index) & 1)
+        phase = np.where(opposed_patch, opposed_phase, phase)
+        zero_region = ((np.abs(xx) < 0.035) | (np.abs(yy) < 0.035)) & (radius > 0.18)
+        amplitude = np.where(zero_region, 0.0, amplitude)
+        values = amplitude * np.exp(1j * phase)
+        return np.ascontiguousarray(values, dtype=np.complex64)
+
+    raise ValueError("synthetic scene must be 'geometry' or 'complex-phase'")
+
+
+def _parse_synthetic_shape(value: str) -> tuple[int, int, int]:
+    parts = tuple(int(part.strip()) for part in str(value).lower().replace("x", ",").split(",") if part.strip())
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("synthetic shape must be HEIGHTxWIDTHxDEPTH")
+    if min(parts) < 4:
+        raise argparse.ArgumentTypeError("synthetic shape axes must each be at least 4")
+    return parts
 
 
 def _load_dataset(path: Path, *, mode: str):
@@ -5714,10 +6035,28 @@ def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT/shift/iFFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
+    parser.add_argument(
+        "--synthetic-scene",
+        choices=("geometry", "complex-phase"),
+        default=None,
+        help="Use a deterministic visual registration chart instead of --data",
+    )
+    parser.add_argument(
+        "--synthetic-shape",
+        type=_parse_synthetic_shape,
+        default=(192, 256, 40),
+        metavar="HEIGHTxWIDTHxDEPTH",
+    )
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")
+    parser.add_argument(
+        "--screenshot-interval-s",
+        type=float,
+        default=0.0,
+        help="Periodic framebuffer/physical-truth sampling interval; requires --screenshot-dir",
+    )
     parser.add_argument(
         "--verbose-tile-trace",
         action="store_true",
@@ -5818,8 +6157,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     profiler_artifact_paths=tuple(args.profiler_artifact or ()),
                     stages=stages,
                     screenshot_dir=args.screenshot_dir,
+                    screenshot_interval_s=float(args.screenshot_interval_s),
                     session_fixture=None if not str(args.session_fixture).strip() else args.session_fixture,
                     verbose_tile_trace=bool(args.verbose_tile_trace),
+                    synthetic_scene=args.synthetic_scene,
+                    synthetic_shape=tuple(args.synthetic_shape),
                 )
             )
     finally:

@@ -92,6 +92,79 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert "--nonblocking" in command
 
 
+def test_visual_timeline_groups_payload_lod_and_quality():
+    from types import SimpleNamespace
+
+    from arrayscope.tools.profile_montage_workflow import _visual_lod_level_counts
+
+    payloads = {
+        0: SimpleNamespace(lod=SimpleNamespace(level=0), quality="exact"),
+        1: SimpleNamespace(lod=SimpleNamespace(level=2), quality="preview"),
+        2: SimpleNamespace(lod=SimpleNamespace(level=2), quality="preview"),
+        3: SimpleNamespace(lod=SimpleNamespace(level=1), quality="exact"),
+    }
+
+    assert _visual_lod_level_counts(payloads, {0, 1, 2}) == {
+        "exact:L0": 1,
+        "preview:L2": 2,
+    }
+
+
+def test_visual_timeline_preserves_physical_draw_geometry():
+    from arrayscope.tools.profile_montage_workflow import _visual_physical_draw_rows
+
+    rows = _visual_physical_draw_rows(
+        {
+            3: {
+                "physical_draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
+                "physical_draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
+                "physical_expected_world_rect": (1.0, 2.0, 5.0, 6.0),
+                "physical_draw_bounds_match_layout": True,
+            },
+            9: {"physical_draw_bounds_match_layout": False},
+        },
+        {3},
+    )
+
+    assert rows == {
+        "3": {
+            "draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
+            "draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
+            "expected_world_rect": (1.0, 2.0, 5.0, 6.0),
+            "bounds_match_layout": True,
+        }
+    }
+
+
+def test_synthetic_geometry_scene_is_indexed_and_spatially_recognizable():
+    import numpy as np
+
+    from arrayscope.tools.profile_montage_workflow import _synthetic_profile_data
+
+    data = _synthetic_profile_data("geometry", (48, 64, 8))
+
+    assert data.shape == (48, 64, 8)
+    assert data.dtype == np.float32
+    assert data.flags.c_contiguous
+    assert float(data.min()) >= 0.0 and float(data.max()) <= 1.0
+    assert not np.array_equal(data[..., 0], data[..., 1])
+    assert not np.array_equal(data[0, :, :], data[-1, :, :])
+
+
+def test_synthetic_complex_scene_has_amplitude_phase_and_zero_fiducials():
+    import numpy as np
+
+    from arrayscope.tools.profile_montage_workflow import _synthetic_profile_data
+
+    data = _synthetic_profile_data("complex-phase", (48, 64, 8))
+
+    assert data.dtype == np.complex64
+    assert data.flags.c_contiguous
+    assert np.count_nonzero(data == 0) > 0
+    assert np.ptp(np.abs(data)) > 0.5
+    assert np.unique(np.round(np.angle(data[data != 0]), 2)).size > 20
+
+
 def test_profile_suite_commands_cover_required_profilers(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 

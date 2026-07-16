@@ -310,6 +310,7 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ("arrayscope/sync/bus.py", "SyncBus._schedule_retry", "QTimer", "anti-hang fallback"): 1,
             ("arrayscope/sync/controller.py", "WindowSyncController.schedule_publish", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_EventLoopProbe.__init__", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/tools/profile_montage_workflow.py", "_VisualTimelineProbe.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_PresentationContinuityProbe.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_glide_view_range", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_fast_scroll_60fps", "QTimer", "UI cosmetic"): 2,
