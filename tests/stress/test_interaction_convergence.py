@@ -124,6 +124,20 @@ def _dump_convergence_state(win, label: str) -> None:
     coordinator = getattr(win, "render_coordinator", None)
     print(f"[{label}] coordinator pending_render={getattr(coordinator, 'has_pending_render', None)} "
           f"backpressure_skips={getattr(coordinator, 'presentation_backpressure_skips', None)}")
+    renderer = win.renderer
+    print(
+        f"[{label}] commit outcome={getattr(renderer, '_last_montage_commit_outcome', None)} "
+        f"counts={getattr(renderer, '_montage_commit_outcome_counts', None)} "
+        f"gate_no_progress={getattr(renderer, '_montage_gate_no_progress', None)} "
+        f"delta_upserts={getattr(renderer, '_last_montage_commit_delta_upserts', None)} "
+        f"fast_reject={getattr(renderer, '_last_montage_atomic_fast_reject_reason', None)!r}"
+    )
+    print(
+        f"[{label}] source_window_pending={getattr(session, 'source_window_changed_pending', None)} "
+        f"atomic_committed={session.atomic_source_successor_committed() if hasattr(session, 'atomic_source_successor_committed') else None} "
+        f"residency_deferred={getattr(session, '_interactive_residency_deferred', None)} "
+        f"prepared_atomic={getattr(session, '_atomic_prepared_transaction', None) is not None}"
+    )
     view = getattr(win, "img_view", None)
     draw_pending = getattr(view, "presentationDrawPending", None)
     print(f"[{label}] presentationDrawPending={draw_pending() if callable(draw_pending) else None}")
@@ -136,6 +150,17 @@ def _dump_convergence_state(win, label: str) -> None:
 
 def _build_fft_montage_window(qtbot):
     from tests.ui.helpers import make_backend_window, use_vispy_backend
+
+    # Doctrine (docs/testing/stress-and-trace-strategy.md): every harness run
+    # records a complete trace. The bounded watchdog ring only covers the
+    # FIRST stall; the compound churn stalls need the full stream.
+    from arrayscope.core.trace import configure_trace
+
+    trace_path = Path(
+        os.environ.get("ARRAYSCOPE_ARTIFACT_DIR", "/tmp")
+    ) / f"arrayscope-churn-{os.getpid()}.trace.jsonl"
+    configure_trace(trace_path)
+    print(f"[harness] full trace: {trace_path}")
 
     settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
     from arrayscope.io.file_interpreters import load_file
@@ -199,19 +224,15 @@ def test_montage_window_change_presents_mapped_complex_tiles(qtbot):
         restore_default_backend(settings)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "OPEN (docs/redesign/stale-empty-tiles-2026-07-16.md): after ~12s of "
-        "extreme gesture churn a compound lost-wakeup state remains — "
-        "hundreds of pending upserts stay queued through apply_montage_"
-        "presentation with healthy lane quotas and a phantom-async-free "
-        "deferred stage plan. The 2026-07-16 fixes closed the field-observed "
-        "members of this family; this net stays red until the commit-path "
-        "bail is owned too."
-    ),
-)
 def test_interaction_churn_converges_on_real_data(qtbot):
+    """Closed 2026-07-16 (was an xfail net). Members 4 and 5 of the
+    deferred-stage lost-wakeup family: the stage-plan/stage-value completions
+    discarded session-current results on a stale render-generation stamp
+    (discard/resubmit livelock, 5,200 plan computations per churn run), and
+    the shared exact pass filtered out tiles holding non-exact payloads at
+    the target level (38 tiles parked with open targets). Post-fix the churn
+    converges in seconds, 3/3 runs. Dossier:
+    docs/redesign/stale-empty-tiles-2026-07-16.md."""
     from tests.ui.helpers import restore_default_backend
 
     win, settings, data, n = _build_fft_montage_window(qtbot)

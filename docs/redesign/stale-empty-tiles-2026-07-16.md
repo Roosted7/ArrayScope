@@ -142,18 +142,41 @@ stall to the next member):
    while payload upserts remain queued; ``retarget_frame_pipeline`` now
    treats non-empty ``pending_payload_upserts`` as its own flush obligation.
 
-**Still open** (xfail net:
-``tests/stress/test_interaction_convergence.py::test_interaction_churn_converges_on_real_data``):
-after ~12 s of extreme seeded churn, a compound state remains where ~200
-pending upserts stay queued although ``apply_ready_montage_display`` runs
-with ``flush=True``, lane quotas are healthy (preview/preparation 7),
-``presentationDrawPending`` is False, and a fresh deferred stage plan exists
-— the commit path itself bails somewhere between ``apply_montage_
-presentation`` and the backend. Next lead: instrument the commit chain's
-early returns the way the identity gate was instrumented (loud bail
-reasons), then bisect the churn script down to the minimal gesture pair.
-The realistic field gestures (fill, window shrink/grow, range flips at human
-pace) all converge with the fixes above.
+**Members 4 and 5 — CLOSED 2026-07-16 (the xfail net is now a hard gate).**
+The loud-bail instrumentation prescribed above was landed first
+(``commit_bail`` / ``commit_gate_no_progress`` / ``stage_plan_*`` trace
+events + per-outcome commit counters) and identified both members on the
+first instrumented runs:
+
+4. **Stale-stamp discard/resubmit livelock.** The deferred stage-plan
+   completion (and its stage-value sibling) validated the *session's*
+   ``render_generation`` stamp against the renderer's global counter — which
+   advances on every render request while the stamp only refreshes on
+   session build/retarget. After any unrelated repaint the stamp could never
+   match again: every completed plan was discarded and resubmitted (5,223
+   plan computations in one 4-minute churn run — the earlier phantom-flag
+   fix had turned this same wrong check from a deadlock into a livelock),
+   while the ~200 queued upserts waited on an atomic successor that needed
+   exactly those tiles' payloads. Fix: session currency has one owner,
+   ``(session_id, key)``; the render-generation bail is deleted from both
+   completions. Gate: ``tests/window/test_montage_lod_residency.py::
+   test_deferred_stage_plan_applies_after_unrelated_render_generation_advance``.
+5. **Exact-pass candidacy starvation.** With member 4 fixed, upserts drained
+   and stage planning went healthy, but ~38 tiles stayed pending forever:
+   they held retained floor payloads (``quality='preview'``, lifecycle
+   ``fallback``) AT the re-coarsened desired level, and
+   ``shared_transform_candidate_tiles`` excluded them from the exact pass
+   both via the ``quality != "preview"`` gate and the strictly-coarser level
+   rule — correct-looking pixels, open exact targets, no producer, immune to
+   retargets. Fix: on the exact pass (``exact_pass=True``), a non-exact
+   payload with an unsettled lifecycle target IS a candidate; the preview
+   pass keeps the old rule (unsettled-target candidacy there would
+   re-preview forever). Gate: ``tests/window/test_montage_lod_residency.py::
+   test_fallback_payload_at_target_level_is_still_an_exact_pass_candidate``.
+
+Post-fix the full churn scenario converges in ~23 s total (was: 120 s
+timeout), 3/3 live runs; the xfail marker is removed. The stress harness now
+records a complete JSONL trace per run (``/tmp/arrayscope-churn-<pid>``).
 
 ## Follow-ups (all landed 2026-07-16, each repro-first gated)
 

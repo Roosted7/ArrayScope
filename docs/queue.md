@@ -22,12 +22,11 @@ this file says *what, in what order, and when it counts as done*.
 
 | # | Step | Exit gate |
 |---|---|---|
-| 1 | **Close the churn-convergence stall net.** The extreme-churn live scenario still ends with ~200 upserts queued while `apply_ready` runs with healthy quotas. Add loud bail reasons to the commit chain, then root-cause from the trace. Follow-ups from the identity-aliasing dossier ride along (`montage_indices` two-spellings hazard; identical-delta re-commit burn). | `tests/stress/test_interaction_convergence.py::test_interaction_churn_converges_on_real_data` xfail flips to pass (live Wayland stress ring); `trace_verify` clean |
-| 2 | **G5 remainder — sparse multiresolution pyramid.** Migrate the live ladder from whole-plane keys to logical chunks feeding the resolution seam; finish source-grid materialization and reducer families. The implementation contract is [`redesign/g5-source-grid-pyramid-2026-07-16.md`](redesign/g5-source-grid-pyramid-2026-07-16.md) — use its route canonicalization, never infer a second reduction route. | Contract doc's exit gates; reduced-LOD revisit = 0 uploads stays green; real-GL gates green |
-| 3 | **Performance-bars program on the engine.** The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 4 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
-| 5 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
-| 6 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
+| 1 | **G5 remainder — sparse multiresolution pyramid.** Migrate the live ladder from whole-plane keys to logical chunks feeding the resolution seam; finish source-grid materialization and reducer families. The implementation contract is [`redesign/g5-source-grid-pyramid-2026-07-16.md`](redesign/g5-source-grid-pyramid-2026-07-16.md) — use its route canonicalization, never infer a second reduction route. | Contract doc's exit gates; reduced-LOD revisit = 0 uploads stays green; real-GL gates green |
+| 2 | **Performance-bars program on the engine.** The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
+| 3 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
+| 4 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
+| 5 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
 
@@ -68,6 +67,13 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-16 — **Churn-convergence stall net closed** (members 4+5 of the
+  deferred-stage lost-wakeup family: stale-render-generation discard/resubmit
+  livelock in stage-plan/stage-value completions; exact-pass candidacy
+  starvation for non-exact payloads at the target level). Commit chain and
+  stage-plan callbacks now emit loud bail/decision trace events; the live
+  churn scenario converges 3/3 in ~23 s and its xfail is removed. Dossier:
+  [stale-empty-tiles-2026-07-16](redesign/stale-empty-tiles-2026-07-16.md).
 - 2026-07-16 — PyQtGraph identity-rejected upserts made loud (`6f95ce70`).
 - 2026-07-16 — Session-148 identity-aliasing follow-ups: canonical full
   ranges, per-tile ack-vs-target coverage, re-commit backoff, trace_verify

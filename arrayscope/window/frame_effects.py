@@ -928,6 +928,7 @@ class FramePipelineEffects:
                 tile_numbers=visible_scope,
                 include_missing=True,
                 require_presented_preview=False,
+                exact_pass=True,
             )
         )
         return self._submit_shared_transform_target(
@@ -1190,6 +1191,19 @@ class FramePipelineEffects:
             self.renderer._montage_gate_no_progress = (
                 int(getattr(self.renderer, "_montage_gate_no_progress", 0) or 0) + 1
             )
+            # The gate stopping is a load-bearing decision: from here on only
+            # an external completion (or replan) re-arms presentation. Say so
+            # in the trace — a stall whose last events are repeated
+            # no-progress stops with queued upserts is a lost-wakeup proof.
+            emit_trace(
+                "commit_gate_no_progress",
+                count=int(self.renderer._montage_gate_no_progress),
+                outcome=str(getattr(self.renderer, "_last_montage_commit_outcome", "") or ""),
+                pending_upserts=len(getattr(session, "pending_payload_upserts", ()) or ()),
+                dirty_payloads=len(getattr(session, "dirty_payloads", ()) or ()),
+                flush=bool(getattr(session, "flush_pending", False)),
+                final=bool(getattr(session, "final_commit_pending", False)),
+            )
             return
         self.request_presentation()
 
@@ -1368,6 +1382,40 @@ class FramePipelineEffects:
 
     # ------------------------------------------------------------------ commit
 
+    def _note_commit_bail(self, outcome: str, *, wakeup: str, **details) -> None:
+        """Every early commit return names its outcome AND its armed wakeup.
+
+        The 2026-07-16 churn stall (dossier
+        docs/redesign/stale-empty-tiles-2026-07-16.md, open follow-up) sat
+        exactly in these returns: upserts stayed queued while commits ran
+        and bailed silently, so the trace showed healthy replans and no
+        reason. The renderer attribute feeds diagnostics, the counter feeds
+        the JSONL snapshots, and the ``commit_bail`` event makes a bail loop
+        visible on the first read of any stall trace.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        renderer._last_montage_commit_outcome = str(outcome)
+        counts = getattr(renderer, "_montage_commit_outcome_counts", None)
+        if counts is None:
+            counts = {}
+            renderer._montage_commit_outcome_counts = counts
+        counts[str(outcome)] = int(counts.get(str(outcome), 0)) + 1
+        emit_trace(
+            "commit_bail",
+            outcome=str(outcome),
+            wakeup=str(wakeup),
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            pending_upserts=len(getattr(session, "pending_payload_upserts", ()) or ()),
+            dirty_payloads=len(getattr(session, "dirty_payloads", ()) or ()),
+            flush=bool(getattr(session, "flush_pending", False)),
+            final=bool(getattr(session, "final_commit_pending", False)),
+            interactive=bool(interactive_active(renderer)),
+            source_window_pending=bool(getattr(session, "source_window_changed_pending", False)),
+            **details,
+        )
+
     def _commit_tile_layer(self, direct_presentation, *, commit_start: float) -> None:
         renderer = self.renderer
         session = self.session
@@ -1458,7 +1506,7 @@ class FramePipelineEffects:
                     renderer._last_montage_tile_payload_build_ms = (
                         perf_counter() - payload_start
                     ) * 1000.0
-                    renderer._last_montage_commit_outcome = "cpu-compatible-successor-wait"
+                    self._note_commit_bail("cpu-compatible-successor-wait", wakeup="replan")
                     renderer.request_montage_replan(session)
                     return
             requested_levels = session_requested_levels(session)
@@ -1632,7 +1680,7 @@ class FramePipelineEffects:
                 session._interactive_residency_deferred = True
                 session.final_commit_pending = False
                 session.flush_pending = False
-                renderer._last_montage_commit_outcome = "interactive-lod-handoff-deferred"
+                self._note_commit_bail("interactive-lod-handoff-deferred", wakeup="interaction-stop-edge")
                 return
             first_display_commit = not bool(session.display_committed)
             renderer._last_montage_commit_first_display = bool(first_display_commit)
@@ -1667,7 +1715,12 @@ class FramePipelineEffects:
                 session.final_commit_pending = False
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                renderer._last_montage_commit_outcome = "shader-atomic-successor-wait"
+                self._note_commit_bail(
+                    "shader-atomic-successor-wait",
+                    wakeup="replan",
+                    active_payloads=len(active_payloads),
+                    active_tiles=len(tuple(tile_delta.active_tiles)),
+                )
                 renderer.request_montage_replan(session)
                 return
             explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
@@ -1688,7 +1741,7 @@ class FramePipelineEffects:
                 session.final_commit_pending = False
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-                renderer._last_montage_commit_outcome = "empty-first-commit-wait"
+                self._note_commit_bail("empty-first-commit-wait", wakeup="replan")
                 renderer.request_montage_replan(session)
                 return
             prepare_apply_start = perf_counter()
@@ -1777,7 +1830,7 @@ class FramePipelineEffects:
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
                 session.note_committed()
-                renderer._last_montage_commit_outcome = "empty-progressive-settled"
+                self._note_commit_bail("empty-progressive-settled", wakeup="noop-finish")
                 self._finish_after_noop_commit()
                 return
             rendered_geometry = replace(rendered_geometry, montage_tile_states=session.ensure_tile_states())
@@ -1819,7 +1872,7 @@ class FramePipelineEffects:
                 if not getattr(session, "pending_level_tiles", None) and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0:
                     renderer._mark_montage_level_scan_pending(session)
                 renderer._schedule_montage_cached_level_stats(session)
-                renderer._last_montage_commit_outcome = "level-evidence-wait"
+                self._note_commit_bail("level-evidence-wait", wakeup="level-scan")
                 return
             warm_levels = normalize_bounds(requested_levels)
             if warm_levels is None and semantic_source is not None:
@@ -1847,7 +1900,7 @@ class FramePipelineEffects:
                 session._interactive_residency_deferred = True
                 session.final_commit_pending = False
                 session.flush_pending = False
-                renderer._last_montage_commit_outcome = "interactive-residency-deferred"
+                self._note_commit_bail("interactive-residency-deferred", wakeup="interaction-stop-edge")
                 return
             requires_hidden_warm = bool(atomic_successor or cold_gpu_successor)
             if (
@@ -1898,7 +1951,7 @@ class FramePipelineEffects:
                 # O(tiles^2) event-loop starvation loop during scroll churn.
                 session.final_commit_pending = False
                 session.flush_pending = False
-                renderer._last_montage_commit_outcome = "hidden-warm-residency-wait"
+                self._note_commit_bail("hidden-warm-residency-wait", wakeup="warm-residency-continuation")
                 return
             renderer._last_montage_tile_prepare_apply_ms = (perf_counter() - prepare_apply_start) * 1000.0
             # "Emitted" means handed across the backend boundary, not merely
@@ -1923,7 +1976,7 @@ class FramePipelineEffects:
                 decision_force_auto=decision_force_auto,
             )
             if not applied:
-                renderer._last_montage_commit_outcome = "backend-declined"
+                self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
                 return
             renderer._last_montage_commit_outcome = "backend-applied"
             session._atomic_prepared_transaction = None
@@ -3120,6 +3173,12 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
     session.stage_planning_deferred = True
     session.stage_planning_async = True
     session.deferred_missing_tiles = missing_tiles
+    emit_trace(
+        "stage_plan_submitted",
+        session_id=int(session.session_id),
+        session_obj=id(session),
+        missing=len(missing_tiles),
+    )
 
     def plan(token=None):
         return plan_stage_fan_in_candidates(session.document, missing_tiles, cancellation_token=token)
@@ -3127,24 +3186,37 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
     def done(candidate_plan, session_id=session.session_id, session_key=session.key):
         current = getattr(renderer, "_frame_session", None)
         if current is None or not renderer._is_current_frame_session(session_id, session_key):
+            emit_trace(
+                "stage_plan_done",
+                decision="bailed-session",
+                task_session_id=int(session_id),
+                current_session_id=int(getattr(current, "session_id", -1) or -1),
+                same_object=bool(current is session),
+                same_key=bool(getattr(current, "key", None) == session_key),
+                async_flag=bool(getattr(session, "stage_planning_async", False)),
+            )
             return
-        if not renderer._is_current_render_generation(current.render_generation):
-            # The candidate plan was computed under an older render
-            # generation and must not be applied — but the async flag is the
-            # in-flight marker ``complete_deferred_stage_fan_in`` defers to,
-            # and it must not outlive this task.  Leaving it set fabricated a
-            # phantom planner that parked the session's deferred stage work
-            # forever: 132-146 pending tiles with an idle kernel until the
-            # watchdog asserted (field stall 2026-07-16 09:14,
-            # /tmp/arrayscope-stall-1-1).  Clear it and hand ownership back
-            # to the retarget path, which rebuilds the plan for the current
-            # generation.
-            current.stage_planning_async = False
-            renderer.retarget_frame_pipeline(current)
-            return
+        # Session currency has exactly one owner: the ``(session_id, key)``
+        # check above.  This callback used to ALSO validate the session's
+        # ``render_generation`` stamp against the renderer's global counter —
+        # but that counter advances on every render request while the stamp
+        # only refreshes on session build/retarget, so after any unrelated
+        # repaint the stamp could never match again.  First that bail leaked
+        # the async flag (phantom planner, field stall 2026-07-16 09:14);
+        # then the flag-clearing repair turned it into a discard/resubmit
+        # livelock that starved the deferred tiles of producers forever
+        # (churn harness 2026-07-16: 5,200 plan computations, 46 pending
+        # tiles, kernel idle).  A completed plan for the current session
+        # applies unconditionally.
         current.stage_planning_async = False
         current.stage_planning_deferred = False
         current.deferred_missing_tiles = ()
+        emit_trace(
+            "stage_plan_done",
+            decision="applied",
+            task_session_id=int(session_id),
+            missing=len(missing_tiles),
+        )
         stage_plan = build_stage_fan_in_plan(
             renderer,
             current.document,
@@ -3167,8 +3239,16 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
 
     def stale(session_id=session.session_id, session_key=session.key):
         current = getattr(renderer, "_frame_session", None)
-        if current is not None and renderer._is_current_frame_session(session_id, session_key):
+        cleared = bool(current is not None and renderer._is_current_frame_session(session_id, session_key))
+        if cleared:
             current.stage_planning_async = False
+        emit_trace(
+            "stage_plan_stale",
+            cleared=cleared,
+            task_session_id=int(session_id),
+            same_object=bool(current is session),
+            async_flag=bool(getattr(session, "stage_planning_async", False)),
+        )
 
     handle = kernel.submit(
         TaskSpec(
@@ -3256,6 +3336,15 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
     if not bool(getattr(session, "stage_planning_deferred", False)):
         return False
     if bool(getattr(session, "stage_planning_async", False)):
+        # Deferring to an in-flight async planner. If no planner task exists
+        # this is the phantom-flag stall shape; the repeated event with a
+        # growing count is the trace signature.
+        emit_trace(
+            "stage_plan_async_defer",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            pending=len(tuple(getattr(session, "pending_tiles", ()) or ())),
+            deferred_missing=len(tuple(getattr(session, "deferred_missing_tiles", ()) or ())),
+        )
         return False
     missing_tiles = tuple(getattr(session, "deferred_missing_tiles", ()) or ())
     if submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles):
@@ -3307,8 +3396,11 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             renderer.win.operation_evaluator.stage_materializer.complete(key, value)
             if current is None or not renderer._is_current_frame_session(session_id, session_key):
                 return
-            if not renderer._is_current_render_generation(current.render_generation):
-                return
+            # No render-generation bail here either: the stage value is
+            # session-current by the check above, and the stale-stamp proxy
+            # (see submit_deferred_stage_fan_in_plan.done) silently skipped
+            # both activation and the replan wakeup after any unrelated
+            # repaint, parking the waiting tiles until the next replan.
             batch = current.stage_fan_in.activate_value(key, value)
             enqueue_stage_dependent_tiles(current, batch.tiles)
             # Per-completion: coalesced replan, never a direct O(tiles) one.

@@ -4161,6 +4161,70 @@ def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
     assert not effects.shared_first_pass_barrier_pending(None)
 
 
+def test_fallback_payload_at_target_level_is_still_an_exact_pass_candidate():
+    """2026-07-16 churn starvation — member 5 of the deferred-stage/commit
+    lost-wakeup family (docs/redesign/stale-empty-tiles-2026-07-16.md).
+    Tiles presented from retained FALLBACK floors at the (re-coarsened)
+    desired level were filtered out of the shared exact pass twice over: the
+    ``quality != "preview"`` gate dropped fallbacks entirely, and the
+    strictly-coarser level rule dropped same-level previews. 38 tiles parked
+    with correct-looking pixels and open exact targets, kernel idle, immune
+    to retargets. A non-exact payload can never settle an exact target — on
+    the exact pass, an unsettled target IS the candidacy fact."""
+
+    session = _session(count=2, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    desired = int(demand.desired_level)
+
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    # A retained floor presents as a preview-quality payload AT the desired
+    # level (the lifecycle records it as quality='fallback'; the display
+    # payload itself is labelled 'preview').
+    fallback = DisplayTilePayload(
+        0,
+        0,
+        np.ones((4, 4), dtype=np.float32),
+        None,
+        source_id,
+        lod=LodInfo(level=desired, factor=2**desired, source_shape=(TILE, TILE), texture_shape=(4, 4)),
+        quality="preview",
+    )
+    session.display_tile_payloads[0] = fallback
+    session.tile_presentation_state.payloads[0] = fallback
+    session.lifecycle.commit_emitted({0: fallback})
+    session.lifecycle.backend_ack({0: fallback})
+    assert session.lifecycle.target_unsettled_tiles((0,))
+
+    candidates = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=desired,
+            include_missing=True,
+            require_presented_preview=False,
+            exact_pass=True,
+        )
+    )
+
+    assert 0 in [int(candidate.montage_index) for candidate in candidates], (
+        "fallback-quality payload at the target level starved its tile out "
+        "of the shared exact pass (2026-07-16 churn member 5)"
+    )
+    # The preview pass must NOT adopt unsettled-target candidacy: a preview
+    # can never settle an exact target, so it would re-preview forever.
+    preview_candidates = tuple(
+        render_effects.shared_transform_candidate_tiles(
+            session,
+            level=desired,
+            include_missing=False,
+            require_presented_preview=False,
+        )
+    )
+    assert 0 not in [int(candidate.montage_index) for candidate in preview_candidates]
+
+
 def test_shared_first_pass_barrier_uses_required_scope_not_retained_active_rows():
     session = _session(count=3, pyramid=PyramidCache(max_bytes=1 << 20))
     session.shader_display = False
@@ -4543,6 +4607,66 @@ def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod
     assert montage_commit.complete_deferred_stage_fan_in(renderer, session)
     assert session.pending_tile_numbers() == ()
     assert getattr(session, "_test_retargeted", False) is True
+
+
+def test_deferred_stage_plan_applies_after_unrelated_render_generation_advance(monkeypatch):
+    """2026-07-16 churn livelock — member 4 of the deferred-stage lost-wakeup
+    family (docs/redesign/stale-empty-tiles-2026-07-16.md). The deferred
+    stage-plan completion validated the SESSION's render-generation stamp
+    against the renderer's global counter, which advances on every render
+    request; after any unrelated repaint the stamp could never match again.
+    Every completed plan was discarded and resubmitted (5,200 plan
+    computations in one 4-minute churn run) while the pending tiles it owed
+    producers to starved forever. Session currency has exactly one owner —
+    ``(session_id, key)`` — so a completed plan for the current session must
+    APPLY regardless of the global render generation."""
+
+    from types import SimpleNamespace
+
+    session = _session(count=4, pyramid=PyramidCache(max_bytes=1 << 20))
+    session.pending_tiles.clear()
+    session.stage_planning_deferred = True
+    session.stage_planning_async = False
+    session.deferred_missing_tiles = tuple(session.plan.tiles)
+
+    captured = {}
+
+    class _Kernel:
+        def submit(self, spec, *, on_done=None, on_stale=None, on_error=None):
+            captured["on_done"] = on_done
+            return object()
+
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(kernel=_Kernel(), _viewport_interaction_active=False),
+        _frame_session=session,
+        _frame_session_is_current=lambda current: current is session,
+        _is_current_frame_session=lambda sid, key: sid == session.session_id and key == session.key,
+        # An unrelated repaint advanced the global render generation after
+        # this plan was submitted — the exact churn-stall condition.
+        _is_current_render_generation=lambda generation: False,
+        retarget_frame_pipeline=lambda current: setattr(current, "_test_retargeted", True),
+    )
+
+    assert montage_commit.submit_deferred_stage_fan_in_plan(
+        renderer, session, tuple(session.plan.tiles)
+    )
+    assert session.stage_planning_async is True
+
+    monkeypatch.setattr(
+        montage_commit,
+        "build_stage_fan_in_plan",
+        lambda _renderer, _document, _missing, candidate_plan=None: montage_commit.deferred_stage_fan_in_plan(),
+    )
+    monkeypatch.setattr(montage_commit, "submit_stage_tasks", lambda *_args, **_kwargs: None)
+
+    captured["on_done"]({"candidates": ()})
+
+    assert session.stage_planning_async is False
+    assert session.stage_planning_deferred is False, (
+        "completed deferred stage plan was discarded on the stale session "
+        "render-generation stamp instead of applying (bailed-generation livelock)"
+    )
+    assert session.deferred_missing_tiles == ()
 
 
 def test_preview_payloads_bypass_item_cap_but_keep_byte_budget():

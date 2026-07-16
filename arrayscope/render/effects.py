@@ -738,6 +738,7 @@ def shared_transform_candidate_tiles(
     tile_numbers=None,
     include_missing: bool = True,
     require_presented_preview: bool = False,
+    exact_pass: bool = False,
 ):
     """Tiles whose shared reduced-volume target would improve presentation.
 
@@ -784,11 +785,24 @@ def shared_transform_candidate_tiles(
             # (field stall 2026-07-16, session 148). Regenerate it fresh.
             yield candidate
             continue
-        if str(getattr(payload, "quality", "exact")) != "preview":
-            continue
+        quality = str(getattr(payload, "quality", "exact"))
         payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        if payload_level > target_level:
+        if quality == "preview" and payload_level > target_level:
             yield candidate
+            continue
+        if exact_pass and quality != "exact":
+            # This pass produces quality="exact" payloads at ``level``. A
+            # non-exact payload — a retained FALLBACK floor, or a preview at
+            # (or finer than) the target level from a finer-demand
+            # generation — can never settle the tile's exact target, however
+            # correct its pixels look. Candidacy on this pass is therefore
+            # the target fact, not a level comparison: churn 2026-07-16
+            # parked 38 fallback-at-desired-level tiles with open targets
+            # and no producer, immune to retargets (dossier
+            # stale-empty-tiles-2026-07-16.md, member 5).
+            lifecycle = getattr(session, "lifecycle", None)
+            if lifecycle is not None and lifecycle.target_unsettled_tiles((tile_number,)):
+                yield candidate
 
 
 def payload_identity_dead(session, tile_number: int, payload) -> bool:
