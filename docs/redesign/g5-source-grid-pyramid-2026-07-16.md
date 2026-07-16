@@ -85,6 +85,19 @@ display is allowed only when no compatible resident ancestor exists.
 5. Reducer families and phase-cancellation correctness, followed by real
    Wayland GL certification.
 
+G5 is row **1** of [`docs/queue.md`](../queue.md); older plan text referring
+to queue step 2 is stale after the churn-convergence net landed. Each stage's
+commit message records the ring, exact pass/skip counts, and artifact paths;
+documentation evidence is not a substitute for commit-local evidence.
+
+Before row 1 can move to Done, the real-Wayland ring includes both the
+dedicated never-black `tests/gpu_interaction` coarse/fine arrival/eviction
+scenario and a live, real-data run of
+`tests/stress/test_interaction_convergence.py`. Performance evidence is valid
+only on real data and is stored under `tests/artifacts/<gate>-<date>/`; the
+synthetic registration charts diagnose placement, phase, and continuity but
+do not establish a performance number.
+
 ## Implementation progress
 
 The pure model and first VisPy consumption slice now stand without scheduler
