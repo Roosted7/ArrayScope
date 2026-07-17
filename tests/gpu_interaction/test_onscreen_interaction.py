@@ -108,11 +108,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
         # overlays before sampling the constant-tile framebuffer; two default
         # ROI/label shapes otherwise cover most of tiles 6 and 7 and turn a
         # correct texture ramp into an overlay-color assertion.
-        win._clear_rois()
-        win.img_view.clearMontageTileOverlays()
-        win.img_view.hideProfileMarker()
-        win._clear_image_hover_state()
-        h.pump(0.05)
+        h.prepare_image_layer_pixel_sampling()
         h.assert_vispy_visual_mapping_matches_pool()
         payload_means = {
             int(tile): float(
@@ -358,10 +354,12 @@ def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_wind
     for x_range, y_range in ranges:
         view.setRange(xRange=x_range, yRange=y_range, padding=0)
         assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), f"never settled after zoom range {x_range}/{y_range}"
+        h.assert_vispy_visual_mapping_matches_pool()
         h.assert_lifecycle_settled()
 
     h.fit_view()
     assert h.wait_settled()
+    h.assert_vispy_visual_mapping_matches_pool()
     h.assert_tile_identity_ramp()
     h.assert_lifecycle_settled()
 

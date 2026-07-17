@@ -39,6 +39,25 @@ ENABLED = os.environ.get("ARRAYSCOPE_GPU_TESTS", "") == "1" and _display_availab
 pytestmark = pytest.mark.gpu_interaction
 
 
+def wait_for_qt_condition(
+    app,
+    predicate,
+    *,
+    timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
+) -> bool:
+    """Pump Qt until one condition holds, bounded by the global hard limit."""
+
+    timeout = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        sleep(0.001)
+    app.processEvents()
+    return bool(predicate())
+
+
 def pytest_collection_modifyitems(config, items):
     if ENABLED:
         return
@@ -170,6 +189,29 @@ class Harness:
                     f"{actual.tolist()} (slot={layer._pool.tile_slots.get(tile)})"
                 )
 
+    def prepare_image_layer_pixel_sampling(self) -> None:
+        """Hide independent composition overlays before sampling image pixels.
+
+        The default restored ROIs/profile line cross tiles 6 and 7 in the GPU
+        harness.  They are valid composition pixels, but they must not turn a
+        tile-texture identity assertion into an ROI-colour assertion.
+        """
+
+        self.win._clear_rois()
+        self.win.img_view.setRoiInfoRows(())
+        self.win.img_view.clearMontageTileOverlays()
+        self.win.img_view.hideProfileMarker()
+        self.win._clear_image_hover_state()
+        from pyqtgraph.Qt import QtWidgets
+
+        for hints in self.win.img_view.findChildren(
+            QtWidgets.QWidget,
+            "FirstRunHints",
+        ):
+            hints.hide()
+        self.app.processEvents()
+        self.app.processEvents()
+
     # -- event loop ----------------------------------------------------------
 
     def pump(self, seconds: float) -> None:
@@ -180,19 +222,11 @@ class Harness:
     def wait_settled(
         self, timeout: float = INTERACTION_SETTLE_HARD_LIMIT_S
     ) -> bool:
-        timeout = bounded_interaction_settle_timeout_s(timeout)
-        deadline = monotonic() + timeout
-        while monotonic() < deadline:
-            self.app.processEvents()
-            if self.settled():
-                return True
-            # A tight Python/Qt poll can monopolize the client process long
-            # enough for Wayland/GL paint delivery to miss the very draw ack
-            # this condition is observing. This is still a condition wait,
-            # not a fixed timing assertion; yield one millisecond to the
-            # compositor between polls.
-            sleep(0.001)
-        return self.settled()
+        return wait_for_qt_condition(
+            self.app,
+            self.settled,
+            timeout_s=timeout,
+        )
 
     def settlement_diagnostics(self) -> dict[str, object]:
         session = self.session
@@ -371,12 +405,16 @@ class Harness:
         return modes
 
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:
-        """Every tile must show ITS OWN constant value: the measured gray
-        means must be strictly increasing with the tile number and close to
-        the analytic ramp.  Wrong-content tiles (previous atlas occupant,
-        stale mip/LOD of another window, wrong source index) violate this."""
+        """Every tile must show ITS OWN constant value.
 
-        means = self.tile_means()
+        Use the modal interior pixel rather than the mean: antialiased ROI or
+        profile composition can touch an image interior for one frame without
+        changing the dominant texture value.  A stale atlas slot changes the
+        dominant value and still fails this assertion.
+        """
+
+        self.prepare_image_layer_pixel_sampling()
+        means = self.tile_pixel_modes()
         expected = [255.0 * k / (COUNT - 1) for k in range(COUNT)]
         for k in range(1, COUNT):
             assert means[k] > means[k - 1] + 1.0, (

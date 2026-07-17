@@ -16,11 +16,10 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import (
-    INTERACTION_SETTLE_HARD_LIMIT_MS,
     INTERACTION_SETTLE_HARD_LIMIT_S,
-    bounded_interaction_settle_timeout_s,
-    interaction_settle_timeout_ms,
 )
+
+from tests.gpu_interaction.conftest import wait_for_qt_condition
 
 
 pytestmark = pytest.mark.gpu_interaction
@@ -168,7 +167,6 @@ def _binding(layer):
 
 def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
     qt_app,
-    qtbot,
     tmp_path,
 ):
     """G5 §9: resolution changes bindings, never pixels-to-black or uploads.
@@ -199,13 +197,13 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
             image_rendering_backend=ImageRenderingBackendChoice.VISPY,
         )
     )
-    qtbot.addWidget(view)
     view.resize(640, 560)
     view.show()
-    qtbot.waitExposed(
-        view,
-        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-    )
+
+    assert wait_for_qt_condition(
+        qt_app,
+        lambda: bool(view.windowHandle() and view.windowHandle().isExposed()),
+    ), "real-Wayland VisPy surface exposure exceeded the hard limit"
     assert type(view).__name__ == "VisPySurface"
     layer = view._vispy_gpu_montage_layer
     pool = layer._pool
@@ -217,10 +215,8 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
         start = perf_counter()
         result = action()
         if require_draw:
-            timeout = bounded_interaction_settle_timeout_s(
-                INTERACTION_SETTLE_HARD_LIMIT_S
-            )
-            qtbot.waitUntil(
+            assert wait_for_qt_condition(
+                qt_app,
                 lambda: (
                     not bool(view.presentationDrawPending())
                     and int(
@@ -228,8 +224,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
                     )
                     > before_draw
                 ),
-                timeout=interaction_settle_timeout_ms(timeout),
-            )
+            ), f"{name} physical draw exceeded the hard limit"
         elapsed = perf_counter() - start
         timings[name] = elapsed
         assert elapsed <= INTERACTION_SETTLE_HARD_LIMIT_S, (
