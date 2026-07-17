@@ -60,8 +60,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 - **PyQtGraph physical readback oracle** — the framebuffer-to-CPU oracle
   (Done, 2026-07-17) covers the VisPy canvas only; PyQtGraph scalar
   levels/LUT run in the Qt raster path and still have no pixels-vs-CPU gate.
-- **ImageViewShell duplication** (`imageview2d` 2723 / `vispy_imageview2d`
-  ~1840 lines).
 - **Consolidate montage cache-key derivation** behind one parity-tested
   owner (`evaluator.py` scalar + batch forms; keep the
   `montage_key_batch_fallbacks` guard).
@@ -84,6 +82,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `tests/gpu_interaction` ring 16/16 green on real Wayland 2026-07-17 —
   which also closes the "4 pre-existing P9-era baseline failures" row: none
   reproduce post-G5.
+- 2026-07-17 — **ImageViewShell duplication lane closed**
+  (`1bae618a..36f028c1`): the shell is now the single owner of ROI/
+  interaction emphasis, the tiled-commit skeleton, and tiled-layer queries;
+  PyQtGraph tile mechanics moved to `ImageView2D` behind declared backend
+  hooks; VisPy's seven override+mirror methods and its duplicate
+  hover/selection owners deleted. Behavior-preserving refactor gated on
+  ring 1 (full offscreen suite green); no ring 3–4 run — no rendering
+  behavior change intended.
 - 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
   route, reducer families, page cache, both-backend consumers, legacy
   whole-plane ownership deleted with a resurrection guard; the progressive

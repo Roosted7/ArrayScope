@@ -275,3 +275,12 @@ implementations with declared capabilities; `DisplayCommitter` commits semantic 
 directly to that surface contract. The contract also covers camera application, overlay
 coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
 declared shared interaction-event ownership.
+
+Since 2026-07-17 the shell is the single owner of the tiled-commit flow
+(prepare → backend apply → commit report), ROI/interaction emphasis state
+(`_roi_visual_style`), and tiled-layer queries; concrete surfaces implement the
+declared backend hooks (`_apply_backend_tiled_presentation`,
+`_after_tiled_commit`, `_tiled_presentation_layer`, and the ROI/profile visual
+hooks) with scene/texture mechanics only. `ImageView2D` carries the PyQtGraph
+tile-layer mechanics; `VisPySurface` no longer constructs a dormant PyQtGraph
+tile layer.
