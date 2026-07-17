@@ -202,7 +202,9 @@ class FramePipelineEffects:
         if tile is None:
             return lambda _token=None: None
 
-        if self._step_evaluates_reduced_display_payload(step, tile):
+        if self._step_produces_page_payload(step, tile) and not (
+            step.rung == Rung.DESIRED and bool(step.reduce_from_native)
+        ):
             # FLOOR/PREVIEW are degraded first-pixel rungs: whenever the tile
             # has nothing presentable yet, they must hand back their coarse
             # level so it is not left black — even at native scale (desired 0).
@@ -372,7 +374,12 @@ class FramePipelineEffects:
             return False
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
-        if self._step_evaluates_reduced_display_payload(step, tile):
+        if self._step_produces_page_payload(step, tile):
+            if step.rung == Rung.DESIRED:
+                if self._shared_transform_owns_display_target(tile, step):
+                    return False
+                if self._display_payload_covers_display_target(tile_number, tile, step):
+                    return False
             if self.session.lifecycle.preview_claim_matches(
                 tile_number,
                 int(step.rung),
@@ -424,21 +431,6 @@ class FramePipelineEffects:
             self.session.pending_rung_materializations.append(request)
             self.session.pending_rung_materializations.mark_started(request)
             return True
-        if step.rung == Rung.DESIRED and int(step.level) > 0 and bool(step.reduce_from_native):
-            if self._shared_transform_owns_display_target(tile, step):
-                self.session.discard_pending_tile(tile_number)
-                return False
-            if self.session.lifecycle.preview_claim_matches(
-                tile_number,
-                int(Rung.DESIRED),
-                int(step.level),
-                semantic_key,
-            ):
-                self.session.discard_pending_tile(tile_number)
-                return False
-            if self._display_payload_covers_display_target(tile_number, tile, step):
-                self.session.discard_pending_tile(tile_number)
-                return False
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             if self._shared_preview_claim_covers_cold_tile(tile_number):
                 return False
@@ -460,7 +452,7 @@ class FramePipelineEffects:
         if tile is None or not self._session_is_current(intent):
             return
         tile_number = int(tile.montage_index)
-        if self._step_evaluates_reduced_display_payload(step, tile):
+        if self._step_produces_page_payload(step, tile):
             return
         if step.rung in (Rung.DESIRED, Rung.EXACT) and tile_number not in self.session.rendered_tiles:
             stage_key = self.session.stage_fan_in.tile_stage_keys.get(tile_number)
@@ -476,7 +468,15 @@ class FramePipelineEffects:
                 stage_producer_key=stage_producer_key,
             )
 
-    def _step_evaluates_reduced_display_payload(self, step, tile) -> bool:
+    def _step_produces_page_payload(self, step, tile) -> bool:
+        """Whether this rung returns canonical display pages, not a native value.
+
+        ``reduce_from_native`` selects the numeric source route only.  It must
+        not select lifecycle ownership: every cold DESIRED rung above level
+        zero returns the same page-backed display contract, whether its pages
+        were derived from a retained reduction or directly from native data.
+        """
+
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
             return True
         tile_number = int(getattr(tile, "montage_index", getattr(step, "tile_number", -1)))
@@ -485,7 +485,6 @@ class FramePipelineEffects:
         return bool(
             step.rung == Rung.DESIRED
             and int(step.level) > 0
-            and not bool(getattr(step, "reduce_from_native", True))
         )
 
     def _display_payload_covers_display_target(self, tile_number: int, tile, step) -> bool:
@@ -661,7 +660,7 @@ class FramePipelineEffects:
             return
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
-        reduced_display_step = self._step_evaluates_reduced_display_payload(step, tile)
+        reduced_display_step = self._step_produces_page_payload(step, tile)
         if step.rung in (Rung.FLOOR, Rung.PREVIEW):
             self.session.lifecycle.preview_released(
                 tile_number,

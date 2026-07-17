@@ -362,6 +362,28 @@ semantic evidence frontier and has one final-publication owner. A regression
 requires zero intermediate presentation requests and exactly one request when
 the full population closes; timeout and quiescence guards remain unchanged.
 
+The next real-Wayland replay found exact L1 pages resident for all 60 visible
+tiles while every tile still reported a native semantic evaluation in flight.
+The result contract and numeric route had been conflated: a cold DESIRED rung
+with `reduce_from_native=True` still returns canonical display pages, but the
+pipeline labeled it as a native `RenderedTile` producer. That invented claim
+had no legal terminal event and also made floor selection preserve the existing
+same-level fallback instead of preparing the exact wrapper. Page-payload
+ownership now depends only on rung/output type; `reduce_from_native` selects
+where the page values are computed, never what lifecycle they own. The
+regression drives the complete `FramePipelineEffects` admission edge and
+requires the page claim released, no semantic evaluation/loading claim, the
+acknowledged fallback retained until replacement acknowledgement, and an exact
+upsert armed. The full LOD-residency file passes **183/183** and the supporting
+ladder/pipeline/render-effects/montage-backend ring passes **150/150**. The
+onscreen artifact
+`tests/artifacts/g5-resident-fallback-popin-2026-07-17/after-claim-terminal/`
+ends with 60/60 exact L1 payloads, zero preview payloads, zero loading tiles,
+zero pending materializations, and the required target settled. That workflow
+still reports its independent LOD-checkpoint and GUI/heartbeat gates red; this
+evidence closes the false-claim/exact-promotion defect only and does not relabel
+the whole workflow green.
+
 The broader memory-stress gate initially appeared to show a roughly 216 MiB
 G5 residency increase, but reproduced with a roughly 178 MiB increase on
 `main`. Its baseline was taken before the one-time Qt/PyQtGraph window/backend

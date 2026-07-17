@@ -5038,7 +5038,7 @@ def test_reduced_claim_identity_follows_source_when_scroll_reuses_same_slot_and_
     assert session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2, new_identity)
 
 
-def test_non_commuting_desired_with_retained_source_uses_evaluation_claim():
+def test_non_commuting_desired_with_retained_source_uses_page_claim():
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     stage_key = ("stage", "retained")
     session.stage_fan_in.tile_stage_keys[0] = stage_key
@@ -5062,12 +5062,13 @@ def test_non_commuting_desired_with_retained_source_uses_evaluation_claim():
     effects.rung_admitted(intent, step, ("task", "desired"))
 
     claim_identity = effects._preview_claim_identity(intent, session.plan.tiles[0])
-    assert not session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2, claim_identity)
-    assert 0 in session.active_tile_requests
-    assert 0 in session.loading_tiles
+    assert session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2, claim_identity)
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.lifecycle.evaluating_tiles == frozenset()
 
 
-def test_non_commuting_cold_desired_is_not_reduced_display_payload():
+def test_cold_desired_direct_source_produces_page_payload():
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
     tile = session.plan.tiles[0]
@@ -5082,7 +5083,82 @@ def test_non_commuting_cold_desired_is_not_reduced_display_payload():
         reason="desired display level",
     )
 
-    assert not effects._step_evaluates_reduced_display_payload(step, tile)
+    assert effects._step_produces_page_payload(step, tile)
+
+
+def test_cold_direct_source_page_completion_atomically_promotes_preview():
+    """A direct-source reduced target is still a display-page result.
+
+    Regression for the real-Wayland zoom/pan stall: the worker had finished
+    and its exact pages were resident, but ``reduce_from_native=True`` caused
+    the task to hold a native evaluation claim forever.  The active claim in
+    turn suppressed the exact wrapper while the acknowledged preview stayed
+    on screen.  Completion must release the page claim, prepare the exact
+    successor, and leave the acknowledged fallback intact until that
+    successor is physically acknowledged.
+    """
+
+    cache = LodPageCache(max_bytes=1 << 20)
+    session = _session(count=1, pyramid=cache)
+    rendered = session.rendered_tiles.pop(0)
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=int(demand.desired_level),
+        semantic_source_id=semantic_id,
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+
+    assert session.admit_preview_plane(0, key, pages, quality="preview")
+    session._ensure_floor_payloads((0,))
+    _state, preview_delta = session.build_tile_presentation({})
+    _acknowledge(session, preview_delta)
+    acknowledged_preview = session.tile_presentation_state.payloads[0]
+    assert acknowledged_preview.quality == "preview"
+    session.pending_payload_upserts.clear()
+
+    renderer = _RungPrepareRenderer()
+    renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
+    renderer._admit_first_pass_level_evidence = lambda *_args, **_kwargs: None
+    effects = FramePipelineEffects(renderer, session)
+    effects.request_presentation = lambda: None
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=int(demand.desired_level),
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="direct-source desired display level",
+    )
+
+    assert effects.prepare_rung(intent, step)
+    effects.rung_admitted(intent, step, ("task", "desired"))
+    effects.apply_commit(
+        CommitBatch(
+            semantic_key=session.key,
+            presentation_key=intent.presentation_key,
+            upserts=((step, (key, pages, None)),),
+        )
+    )
+
+    claim_identity = effects._preview_claim_identity(intent, session.plan.tiles[0])
+    assert not session.lifecycle.preview_claim_matches(
+        0,
+        int(Rung.DESIRED),
+        int(demand.desired_level),
+        claim_identity,
+    )
+    assert session.lifecycle.evaluating_tiles == frozenset()
+    assert 0 not in session.active_tile_requests
+    assert 0 not in session.loading_tiles
+    assert session.display_tile_payloads[0].quality == "exact"
+    assert 0 in session.pending_payload_upserts
+    assert session.tile_presentation_state.payloads[0] is acknowledged_preview
 
 
 def test_shared_target_in_flight_blocks_per_tile_desired_after_coarse_preview():
@@ -5128,7 +5204,6 @@ def test_shared_desired_claim_blocks_direct_tile_target():
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
     intent = _pipeline_intent_for(session)
     claim_identity = effects._preview_claim_identity(intent, tile)
@@ -5144,7 +5219,6 @@ def test_shared_desired_claim_blocks_direct_tile_target():
     )
 
     assert not effects.prepare_rung(intent, step)
-    assert not session.pending_tiles
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -5160,7 +5234,6 @@ def test_presented_equal_level_fallback_keeps_pixels_without_blocking_exact_targ
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     # A live typed identity: coverage now requires target satisfiability, not
     # just source currency (session-148 follow-up), and every production
     # payload in display_tile_payloads carries its mint identity.
@@ -5193,7 +5266,6 @@ def test_presented_equal_level_fallback_keeps_pixels_without_blocking_exact_targ
     )
 
     assert effects.prepare_rung(_pipeline_intent_for(session), step)
-    assert session.pending_tiles
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -5233,7 +5305,6 @@ def test_dead_identity_display_payload_does_not_cover_direct_tile_target():
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     source_id = session.tile_semantic_source_id(tile.source_index)
     session.display_tile_payloads[0] = DisplayTilePayload(
         0,
@@ -5279,11 +5350,9 @@ def test_dead_identity_display_payload_does_not_cover_direct_tile_target():
         quality="exact",
         tile_identity=identity(("range", None), quality="exact"),
     )
-    session.enqueue_pending_tile(tile)
 
     assert effects._display_payload_covers_display_target(0, tile, step)
     assert not effects.prepare_rung(_pipeline_intent_for(session), step)
-    assert not session.pending_tiles
 
 
 def test_shared_transform_pipeline_blocks_direct_display_target(monkeypatch):
@@ -5314,7 +5383,6 @@ def test_shared_transform_pipeline_blocks_direct_display_target(monkeypatch):
     )
 
     assert not effects.prepare_rung(_pipeline_intent_for(session), step)
-    assert not session.pending_tiles
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
