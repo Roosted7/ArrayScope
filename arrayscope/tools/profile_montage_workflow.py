@@ -270,6 +270,7 @@ def run_profile_montage_workflow(
             )
 
         win = ArrayScopeWindow(data, filepath=str(data_path))
+        win._arrayscope_profile_backend = str(backend)
         win._profile_session_fixture_viewport_shape = (
             None
             if restored_fixture is None or restored_fixture.viewport is None
@@ -840,6 +841,102 @@ def _montage_target_lod_evidence(win, *, tile_numbers=None) -> dict[str, object]
         "aggregate_coarser": bool(aggregate_coarser),
         "pending_materializations": int(pending_materializations),
     }
+
+
+def _journey_lod_trace_state(win) -> dict[str, object]:
+    """Snapshot live-camera demand and session/applied LOD without inference."""
+
+    session = getattr(win, "_frame_session", None)
+    if session is None:
+        return {
+            "session_id": 0,
+            "coverage_pass_open": False,
+            "camera_desired_level": None,
+            "session_desired_level": None,
+            "applied_level": None,
+        }
+    decision = getattr(session, "lod_policy_decision", None)
+    demand = getattr(decision, "demand", None)
+    camera_desired = None
+    view_range = _montage_view_range(win)
+    tile_shape = getattr(getattr(session, "plan", None), "tile_shape", None)
+    viewport_shape = getattr(session, "viewport_shape", None)
+    if view_range is not None and tile_shape is not None and viewport_shape is not None:
+        from arrayscope.display.lod import select_lod_demand
+
+        camera_desired = int(
+            select_lod_demand(
+                view_range,
+                tuple(viewport_shape),
+                tuple(tile_shape),
+            ).desired_level
+        )
+    return {
+        "session_id": int(getattr(session, "session_id", 0) or 0),
+        "coverage_pass_open": bool(
+            getattr(session, "_first_pixel_pass_open", lambda: False)()
+        ),
+        "camera_desired_level": camera_desired,
+        "session_desired_level": (
+            None
+            if demand is None
+            else int(getattr(demand, "desired_level", 0) or 0)
+        ),
+        "applied_level": (
+            None
+            if decision is None
+            else int(getattr(decision, "applied_level", 0) or 0)
+        ),
+    }
+
+
+def _start_journey_gesture(win, journey: str) -> str:
+    counter = int(getattr(win, "_arrayscope_journey_counter", 0) or 0) + 1
+    win._arrayscope_journey_counter = counter
+    gesture_id = f"{str(journey)}-{counter}"
+    win._arrayscope_active_journey = str(journey)
+    win._arrayscope_active_gesture_id = gesture_id
+    win._arrayscope_active_gesture_started_ns = time.monotonic_ns()
+    visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+    if visual_probe is not None:
+        visual_probe.capture("journey-start")
+    emit_trace(
+        "input",
+        action="journey_gesture",
+        edge="start",
+        journey=str(journey),
+        gesture_id=gesture_id,
+        backend=str(getattr(win, "_arrayscope_profile_backend", "") or ""),
+        **_journey_lod_trace_state(win),
+    )
+    return gesture_id
+
+
+def _finish_journey_gesture(win, gesture_id: str, *, reached: bool | None = None) -> None:
+    if str(getattr(win, "_arrayscope_active_gesture_id", "")) != str(gesture_id):
+        return
+    visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+    if visual_probe is not None:
+        visual_probe.capture("journey-end")
+    started_ns = int(getattr(win, "_arrayscope_active_gesture_started_ns", 0) or 0)
+    emit_trace(
+        "input",
+        action="journey_gesture",
+        edge="complete",
+        journey=str(getattr(win, "_arrayscope_active_journey", "") or ""),
+        gesture_id=str(gesture_id),
+        backend=str(getattr(win, "_arrayscope_profile_backend", "") or ""),
+        elapsed_ms=(
+            0.0
+            if started_ns <= 0
+            else (time.monotonic_ns() - started_ns) / 1_000_000.0
+        ),
+        reached=None if reached is None else bool(reached),
+        **_journey_lod_trace_state(win),
+    )
+    win._arrayscope_active_journey = ""
+    win._arrayscope_active_gesture_id = ""
+    win._arrayscope_active_gesture_started_ns = 0
 
 
 def _wait_for_target_lod(win, app, QtCore, *, budget_s: float, stall_grace_s: float = 2.5) -> tuple[bool, float]:
@@ -1629,6 +1726,7 @@ def _slow_scroll_lod_paced(
     max_start = max(0, tile_count - size)
     for _step_index in range(int(steps)):
         current = min(current + 1, max_start)
+        gesture_id = _start_journey_gesture(win, "index_scroll")
         if tile_trace is not None:
             tile_trace.capture("slow-before-input", requested_start=current)
         if probe is not None:
@@ -1644,6 +1742,7 @@ def _slow_scroll_lod_paced(
         if tile_trace is not None:
             tile_trace.capture("slow-after-input", requested_start=current)
         reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=SCROLL_SLOW_LOD_BUDGET_S)
+        _finish_journey_gesture(win, gesture_id, reached=bool(reached))
         if tile_trace is not None:
             tile_trace.capture("slow-settled", requested_start=current)
         settle_times.append(float(settle_ms))
@@ -1799,6 +1898,7 @@ def _apply_montage_scroll_pattern(
     else:
         fit_reached, fit_settle_ms = False, 0.0
 
+    shuffle_gesture_id = _start_journey_gesture(win, "scroll_shuffle")
     fast = _fast_scroll_60fps(
         win,
         montage_axis=montage_axis,
@@ -1827,6 +1927,11 @@ def _apply_montage_scroll_pattern(
         )
     else:
         fast_recovery_reached, fast_recovery_settle_ms = False, 0.0
+    _finish_journey_gesture(
+        win,
+        shuffle_gesture_id,
+        reached=bool(fast_recovery_reached),
+    )
     if tile_trace is not None:
         tile_trace.capture(
             "fast-recovery-settled",
@@ -2140,10 +2245,17 @@ def _apply_montage_zoom_pan_stress(
     # do not outrank unfinished visible target work.
     checkpoint_range = _few_tile_view_range(win, center_fraction=0.48)
     record["lod_checkpoint_available"] = checkpoint_range is not None
+    zoomout_gesture_id = None
     if checkpoint_range is not None:
+        zoomin_gesture_id = _start_journey_gesture(win, "zoom_in")
         _glide("lod_checkpoint_zoomin", checkpoint_range, frames=3)
         win._arrayscope_profile_action = "lod-checkpoint-zoom-settle"
         first_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+        _finish_journey_gesture(
+            win,
+            zoomin_gesture_id,
+            reached=bool(first_checkpoint.get("visible_target_reached", False)),
+        )
         record["lod_checkpoint_zoom"] = first_checkpoint
         first_active = set(int(tile) for tile in first_checkpoint["active_tiles"])
         record["lod_checkpoint_zoom_active_count"] = len(first_active)
@@ -2159,11 +2271,18 @@ def _apply_montage_zoom_pan_stress(
 
         # Preserve the workflow's full-montage end state for the following
         # scalar/FFT stage and for the user's visual inspection.
+        zoomout_gesture_id = _start_journey_gesture(win, "zoom_out")
         _glide("lod_checkpoint_zoomout_return", maximum_out, frames=3)
 
     # Single final settle after restoring the full montage.
     win._arrayscope_profile_action = "final-target-settle"
     reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=ZOOMPAN_FINAL_SETTLE_S)
+    if zoomout_gesture_id is not None:
+        _finish_journey_gesture(
+            win,
+            zoomout_gesture_id,
+            reached=bool(reached),
+        )
     record["final_settle_ms"] = float(settle_ms)
     record["final_reached_target_lod"] = bool(reached)
     record.update(
@@ -2665,6 +2784,7 @@ class _VisualTimelineProbe:
         )
         elapsed_ms = (now_ns - self._started_ns) / 1_000_000.0
         gap_ms = (now_ns - self._last_sample_ns) / 1_000_000.0
+        journey_lod_state = _journey_lod_trace_state(self._win)
         record = {
             "record_type": "visual_sample",
             "backend": self._backend,
@@ -2672,6 +2792,12 @@ class _VisualTimelineProbe:
             "reason": str(reason),
             "phase": str(getattr(self._win, "_arrayscope_profile_phase", "setup") or "setup"),
             "action": str(getattr(self._win, "_arrayscope_profile_action", "idle") or "idle"),
+            "journey": str(
+                getattr(self._win, "_arrayscope_active_journey", "") or ""
+            ),
+            "gesture_id": str(
+                getattr(self._win, "_arrayscope_active_gesture_id", "") or ""
+            ),
             "monotonic_ns": int(now_ns),
             "elapsed_ms": float(elapsed_ms),
             "sample_gap_ms": float(gap_ms),
@@ -2757,6 +2883,7 @@ class _VisualTimelineProbe:
                 getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0
             ),
             "lod_level_counts": _visual_lod_level_counts(payloads, requested),
+            **journey_lod_state,
         }
         with self.timeline_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
@@ -2776,11 +2903,17 @@ class _VisualTimelineProbe:
             event_loop_freeze=bool(record["event_loop_freeze"]),
             sample_gap_ms=float(gap_ms),
             action=record["action"],
+            journey=record["journey"],
+            gesture_id=record["gesture_id"],
             physical_visible=bool(record["physical_visible"]),
             physical_visible_page_count=int(record["physical_visible_page_count"]),
             page_candidate_missing_tile_count=int(
                 record["page_candidate_missing_tile_count"]
             ),
+            coverage_pass_open=bool(record["coverage_pass_open"]),
+            camera_desired_level=record["camera_desired_level"],
+            session_desired_level=record["session_desired_level"],
+            applied_level=record["applied_level"],
         )
         self._images.append((path, record))
         self._last_sample_ns = now_ns
@@ -3456,6 +3589,11 @@ def _run_phase(
     if visual_probe is not None:
         visual_probe.capture("phase-start")
     emit_trace("input", action="phase_start", phase=str(phase), backend=str(backend))
+    journey_gesture_id = (
+        _start_journey_gesture(win, "cold_fill")
+        if str(phase) == "raw_full_tiled_montage"
+        else None
+    )
     probe.reset()
     phase_start_geometry = _window_geometry_state(win)
     phase_start_controller = getattr(getattr(win, "img_view", None), "viewport_controller", None)
@@ -3499,6 +3637,8 @@ def _run_phase(
             predecessor_semantic_key=predecessor_semantic_key,
         )
     finally:
+        if journey_gesture_id is not None:
+            _finish_journey_gesture(win, journey_gesture_id)
         continuity_probe.stop()
         if visual_probe is not None:
             visual_probe.capture("phase-end")

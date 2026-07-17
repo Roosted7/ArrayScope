@@ -217,6 +217,59 @@ def test_trace_verify_rejects_identity_rejected_commits(tmp_path):
     assert clean["identity_rejected_commits"] == 0
 
 
+def test_trace_verify_rejects_phase2_kernel_submit_while_coverage_is_open(tmp_path):
+    """Progressive contract: compute phases are ordered at submission."""
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    rows = [
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 0,
+            "source_index": 8,
+            "target_level": 1,
+            "sequence": 1,
+        },
+        {
+            "kind": "kernel_submit",
+            "task_seq": 12,
+            "lane": "display_preparation",
+            "presentation_phase": 2,
+            "coverage_pass_open": True,
+            "session_id": 4,
+            "tile_number": 0,
+            "sequence": 2,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 0,
+            "source_index": 8,
+            "level": 1,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 3,
+        },
+    ]
+    path = tmp_path / "trace.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    failed = verify_trace(path)
+    assert not failed["ok"]
+    assert failed["phase2_submits_during_coverage"] == 1
+    assert {
+        "invariant": "no_phase2_submit_during_coverage",
+        "session_id": 4,
+        "task_seq": 12,
+        "lane": "display_preparation",
+        "tile": 0,
+    } in failed["violations"]
+
+    rows[1]["coverage_pass_open"] = False
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert verify_trace(path)["ok"]
+
+
 
 def test_trace_verify_rejects_empty_and_lifecycle_free_traces(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace

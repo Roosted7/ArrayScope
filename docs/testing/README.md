@@ -46,6 +46,7 @@ Front page for test policy. Deep dives:
 | 2 — serial artifact ring | canonical screenshot/JSONL artifacts | CI (`-n 0` steps); before UI-visual claims | `pytest tests/ui/test_qt_smoke_artifacts.py -n 0` |
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`) |
 | 4 — real-GL/Wayland acceptance | `tests/gpu_interaction` pixel/heartbeat harness + live gate tests; the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
+| journey matrix — real Wayland, serial | `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll} × {VisPy, PyQtGraph}`; JSONL phase ordering/priority/LOD plus screenshot-output latency | **pre-merge for every `display/`, `render/`, `kernel/`, or `window/` change** | `XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/journey-matrix-$(date +%F)` |
 | benchmarks/harness | `profile_montage_workflow`, `rendering_benchmarks`, `profile_scroll_input` + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow --backend {vispy,pyqtgraph}` (cwd = repo root for `data/` paths) |
 
 The 5 s interaction limit applies to each step in every ring and harness, not
@@ -62,13 +63,57 @@ the run in the commit or PR description. No background runner will catch
 it for you; an unrecorded ring-3/4 run means the claim is "compiles",
 not "fixed".
 
+### Journey-matrix trajectory gate
+
+The journey matrix is output-driven: `profile_montage_workflow` emits the
+gesture boundaries and structured work/commit facts, while its periodic
+visual timeline supplies the screenshot sequence. The verifier requires, for
+every applicable journey/backend cell:
+
+1. zero phase-2 `kernel_submit` events while lifecycle-owned phase-1 coverage
+   is open (`trace_verify` independently enforces
+   `no_phase2_submit_during_coverage`);
+2. at least the journey/backend's declared `N` payload commits, every commit
+   within its emitted cap (only an atomic successor or PyQtGraph's documented
+   first CPU frame may be unbounded), with rank correlation against the
+   canonical current-camera scheduling ranks when two or more ranked payloads make
+   ordering observable (minimum correlation `0.50`);
+3. session LOD demand matches demand recomputed from the live camera within
+   5 s — the strict xfail in `tests/ui/test_lod_demand_freshness.py` remains
+   the red pin for the open 2026-07-18 defect and must not be weakened;
+4. the screenshot pixels change within the 2 s interaction target after each
+   gesture (metadata-only progress is not accepted as new output); and
+5. applied LOD is no coarser than desired within 5 s after phase 1 closes.
+   A journey which never opens a coverage pass (for example a resident
+   zoom-out) uses gesture start as the close edge; once an open pass is
+   observed, its explicit close transition is mandatory.
+
+The `N` values live beside the oracle in
+`arrayscope.tools.journey_matrix.MIN_COMMITS`: cold VisPy and scroll shuffles
+must visibly progress through at least two bounded commits; PyQtGraph's first
+CPU-windowed frame is one complete transaction; zoom-out may legitimately
+reuse finer resident pixels without a payload commit. Every oracle has a
+fault-injection test in `tests/app/test_journey_matrix.py`.
+
+For a quick software-GL diagnostic, append `--offscreen-smoke`. It exercises
+the trace/replay plumbing and PyQtGraph output trajectory, but it is not a
+rendering, scheduling, timing, GPU, or Wayland acceptance result and never
+replaces the command above.
+
+The driver also reports the older `profile_montage_workflow` R8 verdicts as
+`driver_failures`. Those nonzero exits are diagnostic only when the owned
+journey artifacts are complete: the matrix verdict comes exclusively from
+the output oracles above. A 180 s whole-process watchdog remains a blocking
+failure, but it cannot turn a step that exceeded 5 s into a pass.
+
 ## Known suite state (2026-07-16)
 
 - ~2081 passed / 24 skipped (~124 s parallel). The skips are the opt-in
   rings.
 - Open xfails that are *tracked work, not noise*: churn-convergence
   (queue step 1, strict=False), complex64 PyQtGraph deadlock (standing
-  lane, strict=True), tiny-3-slices raciness (strict=False).
+  lane, strict=True), tiny-3-slices raciness (strict=False), and live-camera
+  LOD-demand freshness after zoom (strict=True).
 - `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
   serial run) — the 4 P9-era baseline failures no longer reproduce post-G5.
   The ring now includes the framebuffer-to-CPU reference oracle gate

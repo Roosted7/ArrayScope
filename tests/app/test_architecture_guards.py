@@ -388,6 +388,9 @@ _EVENTUAL_SETTLEMENT_BUDGET_ALLOWLIST = (
     ("arrayscope/tools/profile_montage_workflow.py", "_wait_for_vispy_tile_draw"),
     ("tests/stress/test_interaction_convergence.py", "_FILL_TIMEOUT_S"),
     ("tests/stress/test_interaction_convergence.py", "waitUntil"),
+    # Build-time cold-fill wait; the per-gesture wait uses the capped owner.
+    ("tests/ui/test_lod_demand_freshness.py", "_FILL_TIMEOUT_MS"),
+    ("tests/ui/test_lod_demand_freshness.py", "waitUntil"),
 )
 
 

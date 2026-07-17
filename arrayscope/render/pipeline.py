@@ -298,12 +298,33 @@ class FramePipeline:
     ) -> bool:
         if not self.effects.prepare_rung(intent, step):
             return False
+        session = getattr(self.effects, "session", None)
+        coverage_pass_open = bool(
+            getattr(session, "_first_pixel_pass_open", lambda: False)()
+        )
+        # Phase follows the work's role, not its historical rung name.
+        # DESIRED on a blank tile runs in DISPLAY_PREVIEW and is phase-1
+        # coverage; the same rung on an already-covered tile runs in
+        # DISPLAY_PREPARATION and is phase-2 refinement. Exact work admitted
+        # while another tile still lacks first pixels is refinement too.
+        presentation_phase = (
+            2
+            if step.lane == Lane.DISPLAY_PREPARATION
+            or (step.rung == Rung.EXACT and coverage_pass_open)
+            else 1
+        )
         spec = TaskSpec(
             key=step_key,
             fn=self.effects.evaluate_rung(intent, step),
             lane=step.lane,
             priority=step.priority,
             scheduling_rank=int(step.scheduling_rank),
+            presentation_phase=presentation_phase,
+            coverage_pass_open=coverage_pass_open,
+            session_id=int(
+                getattr(session, "session_id", 0) or 0
+            ),
+            tile_number=int(step.tile_number),
             scope=self._scope(intent.semantic_key),
             deps=self.effects.rung_deps(intent, step),
             # Latest-only per tile+rung: a *demand/level* change replaces the

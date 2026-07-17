@@ -121,6 +121,10 @@ class TaskSpec:
     expected_value: float = 0.0
     reusable: bool = False
     pass_token: bool = False
+    presentation_phase: int = 0
+    coverage_pass_open: bool = False
+    session_id: int = 0
+    tile_number: int = -1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(str(self.lane)))
@@ -135,6 +139,13 @@ class TaskSpec:
         object.__setattr__(self, "estimated_cpu_ms", max(0.0, float(self.estimated_cpu_ms or 0.0)))
         object.__setattr__(self, "estimated_bytes", max(0, int(self.estimated_bytes or 0)))
         object.__setattr__(self, "expected_value", max(0.0, float(self.expected_value or 0.0)))
+        presentation_phase = int(self.presentation_phase or 0)
+        if presentation_phase not in (0, 1, 2):
+            raise ValueError("presentation_phase must be 0, 1, or 2")
+        object.__setattr__(self, "presentation_phase", presentation_phase)
+        object.__setattr__(self, "coverage_pass_open", bool(self.coverage_pass_open))
+        object.__setattr__(self, "session_id", max(0, int(self.session_id or 0)))
+        object.__setattr__(self, "tile_number", int(self.tile_number))
 
     @property
     def visible(self) -> bool:

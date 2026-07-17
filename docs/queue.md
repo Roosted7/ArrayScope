@@ -68,6 +68,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-17 — **Output-driven journey matrix delivered** (standing lane):
+  `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll}` × both
+  backends now records gesture-scoped JSONL + screenshot timelines and gates
+  phase ordering, bounded priority-ordered commits, camera-demand freshness,
+  first-pixel latency, and post-coverage LOD convergence. Every oracle has a
+  fault injection; `trace_verify` independently rejects phase-2 submission
+  during coverage. The first real-Wayland run is intentionally red and
+  mechanically exposes the open 2026-07-17/18 defects (artifact:
+  `tests/artifacts/journey-matrix-2026-07-17-v3/`). Contract and pre-merge
+  command: [testing/README.md](testing/README.md#journey-matrix-trajectory-gate).
 - 2026-07-17 — **Framebuffer-to-CPU reference oracle + fault injection**
   (standing lane): `tests/oracles/framebuffer_reference.py` compares the
   live VisPy framebuffer per required tile against the CPU shader mirror;

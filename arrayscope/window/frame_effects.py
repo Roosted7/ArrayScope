@@ -10,7 +10,7 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
-from arrayscope.core.trace import emit_trace
+from arrayscope.core.trace import emit_trace, trace_enabled
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.kernel import Lane as WorkLane, Priority, Supersession, TaskSpec, WorkItem, complete_inline_work
@@ -1073,6 +1073,11 @@ class FramePipelineEffects:
                 supersession=Supersession(("shared-target", session.key, level), marker),
                 reusable=True,
                 pass_token=True,
+                presentation_phase=(
+                    2 if lane == WorkLane.DISPLAY_PREPARATION else 1
+                ),
+                coverage_pass_open=bool(session._first_pixel_pass_open()),
+                session_id=int(getattr(session, "session_id", 0) or 0),
             ),
             on_done=done,
             on_stale=dropped,
@@ -1616,6 +1621,17 @@ class FramePipelineEffects:
                 # handoff itself is one complete transaction and must not be
                 # built once under the upload cap and then rebuilt unbounded.
                 limits = {}
+            renderer._last_montage_commit_max_upserts = int(
+                dict(limits or {}).get("max_upserts", 0) or 0
+            )
+            renderer._last_montage_commit_unbounded_reason = (
+                "atomic_successor"
+                if cpu_atomic_successor or shader_atomic_successor
+                else "first_cpu_frame"
+                if not bool(getattr(session, "shader_display", False))
+                and not bool(getattr(session, "display_committed", False))
+                else ""
+            )
             cold_deadline_ms = None
             if limits:
                 limits = dict(limits)
@@ -2373,6 +2389,24 @@ class FramePipelineEffects:
             session.flush_pending = True
         rearmed_parked = tuple(getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ())
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
+        priority_ranks: dict[int, int] = {}
+        if trace_enabled():
+            plan_tiles = {
+                int(tile.montage_index): tile
+                for tile in tuple(
+                    getattr(getattr(session, "plan", None), "tiles", ()) or ()
+                )
+            }
+            priority_order = prioritize_tile_numbers(
+                plan_tiles,
+                plan_tiles=plan_tiles,
+                context=session.tile_priority_context(),
+            )
+            priority_ranks = {
+                int(tile): int(rank) for rank, tile in enumerate(priority_order)
+            }
+        lod_decision = getattr(session, "lod_policy_decision", None)
+        lod_demand = getattr(lod_decision, "demand", None)
         emit_trace(
             "commit_batch",
             phase="backend_complete",
@@ -2393,7 +2427,24 @@ class FramePipelineEffects:
                 )
                 for tile, payload in tile_delta.upserts.items()
             ),
+            delta_priority_ranks=tuple(
+                (int(tile), priority_ranks.get(int(tile)))
+                for tile in tile_delta.upserts
+            ),
+            max_upserts=int(
+                getattr(renderer, "_last_montage_commit_max_upserts", 0) or 0
+            ),
+            unbounded_reason=str(
+                getattr(renderer, "_last_montage_commit_unbounded_reason", "")
+                or ""
+            ),
+            first_display_commit=bool(
+                getattr(renderer, "_last_montage_commit_first_display", False)
+            ),
             preview_pass_open_before=bool(preview_pass_open_before),
+            coverage_pass_closed=bool(
+                preview_pass_open_before and not session._first_pixel_pass_open()
+            ),
             required_tile_count=len(session.required_tile_numbers()),
             preview_missing_tile_count=sum(
                 1
@@ -2402,6 +2453,16 @@ class FramePipelineEffects:
             ),
             first_pass_quality=getattr(session, "first_pass_quality", None),
             first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
+            desired_level=(
+                None
+                if lod_demand is None
+                else int(getattr(lod_demand, "desired_level", 0) or 0)
+            ),
+            applied_level=(
+                None
+                if lod_decision is None
+                else int(getattr(lod_decision, "applied_level", 0) or 0)
+            ),
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),

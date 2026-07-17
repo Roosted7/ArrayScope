@@ -15,6 +15,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
+# Build-time budget for the cold montage fill (see the churn harness):
+# the 5 s interaction cap governs per-gesture waits only.
+_FILL_TIMEOUT_MS = 30000
+
 from arrayscope.display.lod import select_lod_demand
 
 
@@ -59,7 +65,7 @@ def test_zoom_in_rederives_lod_demand(qtbot):
         session = win.renderer._frame_session
         qtbot.waitUntil(
             lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
-            timeout=30000,
+            timeout=_FILL_TIMEOUT_MS,
         )
         session = win.renderer._frame_session
         fit_desired = int(session.lod_policy_decision.demand.desired_level)
@@ -84,7 +90,7 @@ def test_zoom_in_rederives_lod_demand(qtbot):
             return int(current.lod_policy_decision.demand.desired_level) == wanted
 
         try:
-            qtbot.waitUntil(demand_fresh, timeout=5000)
+            qtbot.waitUntil(demand_fresh, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         except Exception:
             current = win.renderer._frame_session
             view = win.img_view.getView()

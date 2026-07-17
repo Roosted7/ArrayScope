@@ -198,6 +198,10 @@ class Kernel:
             lane=str(spec.lane),
             priority=int(spec.priority),
             scheduling_rank=int(spec.scheduling_rank),
+            presentation_phase=int(spec.presentation_phase),
+            coverage_pass_open=bool(spec.coverage_pass_open),
+            session_id=int(spec.session_id),
+            tile_number=int(spec.tile_number),
             scopes=spec.scope_prefixes(),
             deps=tuple(spec.deps),
             visible=bool(spec.visible),
@@ -224,6 +228,10 @@ class Kernel:
         key: object | None = None,
         max_items: int = 0,
         pass_token: bool = False,
+        presentation_phase: int = 0,
+        coverage_pass_open: bool = False,
+        session_id: int = 0,
+        tile_number: int = -1,
     ) -> TaskHandle | None:
         """Submit one supersedable speculative batch.
 
@@ -243,6 +251,10 @@ class Kernel:
                 supersession=Supersession((str(kind), str(scope)), value),
                 reusable=False,
                 pass_token=pass_token,
+                presentation_phase=presentation_phase,
+                coverage_pass_open=coverage_pass_open,
+                session_id=session_id,
+                tile_number=tile_number,
             ),
             on_done=on_done,
             on_error=on_error,

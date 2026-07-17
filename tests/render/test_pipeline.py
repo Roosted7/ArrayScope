@@ -362,6 +362,30 @@ def test_preview_at_non_native_demand_level_still_admits_target_rung():
     assert effects.evaluated == [(0, Rung.DESIRED, 3)]
 
 
+def test_trace_phase_follows_first_pixel_role_not_desired_rung_name():
+    blank_kernel = CaptureKernel()
+    blank_effects = StubEffects(tiles=1)
+    blank_pipeline = FramePipeline(blank_kernel, blank_effects, LodLadder())
+
+    assert blank_pipeline.retarget(intent(), demand(3), scope(0)) == 1
+    assert blank_kernel.specs[0].lane == Lane.DISPLAY_PREVIEW
+    assert blank_kernel.specs[0].presentation_phase == 1
+
+    covered_kernel = CaptureKernel()
+    covered_effects = StubEffects(tiles=1)
+    covered_effects.states[0] = TileLodState(
+        tile_number=0,
+        presented_level=3,
+        resident_levels=(3,),
+        presented_quality="preview",
+    )
+    covered_pipeline = FramePipeline(covered_kernel, covered_effects, LodLadder())
+
+    assert covered_pipeline.retarget(intent(), demand(3), scope(0)) == 1
+    assert covered_kernel.specs[0].lane == Lane.DISPLAY_PREPARATION
+    assert covered_kernel.specs[0].presentation_phase == 2
+
+
 def test_stale_done_from_previous_semantic_is_dropped_not_committed():
     kernel = CaptureKernel()
     effects = StubEffects(tiles=1)

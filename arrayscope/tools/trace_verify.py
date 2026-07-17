@@ -78,10 +78,11 @@ def verify_trace(
     re-emit loop behind the 2026-07-16 stale/empty-tile stall), which is a
     defect even when the run otherwise converges.
 
-    A backend commit must also report no exact upsert inside an open preview
-    pass. Retaining already-presented exact pixels is valid stronger coverage;
-    introducing new exact pixels while another slot still awaits its preview
-    is the mixed-quality race the plan-wide first-pixel pass forbids.
+    Phase-2 compute must never be submitted while the plan-wide phase-1
+    coverage pass is open. ``kernel_submit`` carries this classification from
+    the work owner; the verifier therefore does not infer scheduler state from
+    task-key reprs or mistake immediate presentation of already-ready better
+    pixels for forbidden compute.
     """
 
     targets: dict[int, dict[str, object]] = {}
@@ -91,6 +92,7 @@ def verify_trace(
     identical_commit_bail_counts: dict[tuple[tuple[str, object], ...], int] = {}
     stalls: list[dict[str, object]] = []
     identity_rejected_commits: list[dict[str, object]] = []
+    phase2_submits_during_coverage: list[dict[str, object]] = []
     lifecycle_events = 0
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -99,6 +101,13 @@ def verify_trace(
         event_count += 1
         event = json.loads(line)
         kind = str(event.get("kind", ""))
+        if kind == "kernel_submit":
+            if (
+                int(event.get("presentation_phase", 0) or 0) == 2
+                and bool(event.get("coverage_pass_open", False))
+            ):
+                phase2_submits_during_coverage.append(event)
+            continue
         if kind == "commit_bail":
             signature = _commit_bail_signature(event)
             identical_commit_bail_counts[signature] = (
@@ -214,6 +223,16 @@ def verify_trace(
         }
         for event in identity_rejected_commits
     )
+    violations.extend(
+        {
+            "invariant": "no_phase2_submit_during_coverage",
+            "session_id": int(event.get("session_id", 0) or 0),
+            "task_seq": int(event.get("task_seq", 0) or 0),
+            "lane": str(event.get("lane", "")),
+            "tile": int(event.get("tile_number", -1)),
+        }
+        for event in phase2_submits_during_coverage
+    )
     if event_count == 0:
         violations.append({"invariant": "trace_not_empty"})
     elif lifecycle_events == 0:
@@ -262,6 +281,7 @@ def verify_trace(
         "event_count": event_count,
         "lifecycle_events": lifecycle_events,
         "identity_rejected_commits": len(identity_rejected_commits),
+        "phase2_submits_during_coverage": len(phase2_submits_during_coverage),
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(
