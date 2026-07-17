@@ -123,6 +123,58 @@ def test_montage_tile_key_matches_single_slice_display_key():
     assert evaluator.montage_tile_key(state, montage_axis=2, source_index=3) == evaluator.display_tile_key(state)
 
 
+def test_montage_tile_key_batch_matches_scalar_owner_across_plan_tiles():
+    """Ring 1. The hoisted batch derivation must be byte-identical to the
+    scalar owner (``montage_tile_key``/``display_tile_key``) for every tile of
+    a real montage plan, with the ``montage_key_batch_fallbacks`` guard
+    staying silent. Pins the standing-lane consolidation (docs/queue.md,
+    ground rule 2: one owner per decision) — key drift here is wrong cache
+    identity, not just a slow path.
+    """
+    from arrayscope.display.montage import make_montage_plan
+
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+    indices = tuple(range(6))
+    state = ViewState.from_shape(data.shape).with_image_axes(0, 1).with_montage_axis(2, columns=3, indices=indices, text=":")
+    plan = make_montage_plan(state, axis=2, indices=indices, tile_shape=(4, 5), columns=3)
+    lut = np.linspace(0.0, 1.0, 12, dtype=np.float32).reshape(4, 3)
+
+    key_for = evaluator.montage_tile_key_batch(colormap_lut=lut, shader_display=True)
+    for tile in plan.tiles:
+        assert key_for(tile.view_state) == evaluator.montage_tile_key(
+            tile.view_state,
+            montage_axis=2,
+            source_index=tile.source_index,
+            colormap_lut=lut,
+            shader_display=True,
+        )
+    assert getattr(evaluator, "montage_key_batch_fallbacks", 0) == 0
+
+
+def test_montage_tile_key_batch_falls_back_when_tiles_vary_beyond_slices():
+    """Ring 1. A tile state violating the slices-only hoisting bet must flip
+    the batch into permanent scalar fallback — counted in
+    ``montage_key_batch_fallbacks`` — while every returned key still matches
+    the scalar owner. This is the runtime parity guard the consolidation
+    keeps until the single owner is proven (docs/queue.md standing lane).
+    """
+    data = np.zeros((4, 5, 6), dtype=np.float32)
+    evaluator = OperationEvaluator(ArrayDocument(data))
+    base = ViewState.from_shape(data.shape).with_image_axes(0, 1)
+    first = base.tile_state_for_slice(2, 0)
+    drifted = base.with_channel("abs").tile_state_for_slice(2, 1)
+    later = base.tile_state_for_slice(2, 2)
+
+    key_for = evaluator.montage_tile_key_batch()
+
+    assert key_for(first) == evaluator.display_tile_key(first)
+    assert key_for(drifted) == evaluator.display_tile_key(drifted)
+    assert evaluator.montage_key_batch_fallbacks == 1
+    assert key_for(later) == evaluator.display_tile_key(later)
+    assert evaluator.montage_key_batch_fallbacks == 1
+
+
 def test_apply_memory_policy_resizes_display_and_profile_caches():
     evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
     system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)

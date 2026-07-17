@@ -60,9 +60,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 - **PyQtGraph physical readback oracle** — the framebuffer-to-CPU oracle
   (Done, 2026-07-17) covers the VisPy canvas only; PyQtGraph scalar
   levels/LUT run in the Qt raster path and still have no pixels-vs-CPU gate.
-- **Consolidate montage cache-key derivation** behind one parity-tested
-  owner (`evaluator.py` scalar + batch forms; keep the
-  `montage_key_batch_fallbacks` guard).
+- **Remove the `montage_key_batch_fallbacks` runtime guard** once the
+  consolidated key owner is proven in the field. 2026-07-17: derivation is
+  consolidated — every layout has one owner
+  (`_display_tile_key_from_parts`/`_request_key_from_parts`/
+  `_view_state_key_with_slices` in `evaluator.py`; the batch's slow path *is*
+  `display_tile_key`) and parity + fallback are pinned in
+  `tests/operations/test_cache.py`. The runtime guard and counter stay until
+  a release cycle shows the counter at zero.
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
 - **Branch/worktree cleanup** — delete merged branches and stale worktrees

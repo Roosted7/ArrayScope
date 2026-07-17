@@ -281,8 +281,7 @@ class OperationEvaluator:
         shader_display: bool = False,
     ):
         document = self.document if document is None else document
-        return (
-            "display_tile",
+        return _display_tile_key_from_parts(
             _document_key(document),
             None if montage_axis is None else int(montage_axis),
             None if source_index is None else int(source_index),
@@ -329,6 +328,14 @@ class OperationEvaluator:
         and any mismatch flips the batch into permanent slow-path fallback
         (counted in ``montage_key_batch_fallbacks``) — key-format drift
         degrades to the old cost, never to wrong keys.
+
+        Key *layout* is owned elsewhere: the slow path is exactly
+        ``display_tile_key`` (the scalar owner), and the fast path assembles
+        through the same ``_display_tile_key_from_parts`` /
+        ``_request_key_from_parts`` / ``_view_state_key_with_slices`` helpers
+        that back the scalar derivation.  The only knowledge this closure adds
+        is the hoisting bet itself — that a plan's tile states vary solely in
+        ``slice_indices`` — and that bet is what the runtime check guards.
         """
 
         document = self.document if document is None else document
@@ -338,15 +345,11 @@ class OperationEvaluator:
         state: dict[str, object] = {"template": None, "validated": False}
 
         def _slow(tile_state):
-            return (
-                "display_tile",
-                doc_key,
-                None,
-                None,
-                0,
-                _request_key(request_for_image(tile_state)),
-                lut_key,
-                shader,
+            return self.display_tile_key(
+                tile_state,
+                colormap_lut=colormap_lut,
+                document=document,
+                shader_display=shader_display,
             )
 
         def key_for(tile_state):
@@ -361,14 +364,19 @@ class OperationEvaluator:
                 return _slow(tile_state)
             base_key, keep_axes, base_slices = template
             slices = tuple(int(index) for index in tile_state.slice_indices)
-            vs_key = base_key[:4] + (slices,) + base_key[5:]
-            fast = (
-                "display_tile",
+            fast = _display_tile_key_from_parts(
                 doc_key,
                 None,
                 None,
                 0,
-                ("image", vs_key, keep_axes, slices, None, None),
+                _request_key_from_parts(
+                    "image",
+                    _view_state_key_with_slices(base_key, slices),
+                    keep_axes,
+                    slices,
+                    None,
+                    None,
+                ),
                 lut_key,
                 shader,
             )
@@ -767,8 +775,27 @@ def _lut_key(colormap_lut):
     return (lut.shape, str(lut.dtype), lut.tobytes())
 
 
-def _request_key(request):
+def _display_tile_key_from_parts(document_key, montage_axis, source_index, tile_number, request_key, lut_key, shader_display):
+    """Sole owner of the display-tile key layout.
+
+    Every display/montage tile key — scalar (``display_tile_key``) and hoisted
+    (``montage_tile_key_batch``) — must assemble through this function so the
+    layout cannot drift between derivation paths.
+    """
     return (
+        "display_tile",
+        document_key,
+        montage_axis,
+        source_index,
+        tile_number,
+        request_key,
+        lut_key,
+        shader_display,
+    )
+
+
+def _request_key(request):
+    return _request_key_from_parts(
         request.kind,
         _view_state_key(request.view_state),
         tuple(request.keep_axes),
@@ -776,6 +803,11 @@ def _request_key(request):
         request.frame_axis,
         request.frame_index,
     )
+
+
+def _request_key_from_parts(kind, view_state_key, keep_axes, slice_indices, frame_axis, frame_index):
+    """Sole owner of the request-key layout (shared with ``montage_tile_key_batch``)."""
+    return (kind, view_state_key, keep_axes, slice_indices, frame_axis, frame_index)
 
 
 def _view_state_key(view_state):
@@ -797,6 +829,21 @@ def _view_state_key(view_state):
         None if getattr(view_state, "montage_columns", None) is None else int(view_state.montage_columns),
         _optional_int_tuple(getattr(view_state, "montage_indices", None)),
         _range_key(getattr(view_state, "axis_range_indices", ())),
+    )
+
+
+# Position of the slice_indices tuple inside _view_state_key's layout.  Keep
+# in lockstep with the tuple above; montage_tile_key_batch's runtime parity
+# check (and its regression test) trips if this slot drifts.
+_VIEW_STATE_KEY_SLICES_SLOT = 4
+
+
+def _view_state_key_with_slices(view_state_key, slice_indices):
+    """Return ``view_state_key`` with its slice_indices slot replaced."""
+    return (
+        view_state_key[:_VIEW_STATE_KEY_SLICES_SLOT]
+        + (slice_indices,)
+        + view_state_key[_VIEW_STATE_KEY_SLICES_SLOT + 1 :]
     )
 
 
