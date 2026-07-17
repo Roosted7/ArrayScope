@@ -193,6 +193,34 @@ def test_vispy_uses_background_batches_but_converges_to_the_same_population():
     assert session.display_tile_payloads == {}
 
 
+def test_vispy_semantic_background_batches_publish_once_after_full_population():
+    """Refinement batches must not replay the settled tiled presentation."""
+
+    data = np.arange(10 * 12 * 20, dtype=np.float32).reshape(10, 12, 20)
+    session = _session(data)
+    service, kernel = _service(session, capabilities=VISPY_CAPABILITIES)
+    publications = []
+    session.shader_display = True
+    session.display_committed = True
+    session.first_pass_histogram_published = True
+    session.required_target_settled = lambda: True
+    session.pipeline.effects.request_presentation = lambda: publications.append(
+        len(session.semantic_level_evidence_progress.covered_sources)
+    )
+
+    service._schedule_semantic_level_evidence(session)
+    first = kernel.run_next()
+
+    assert first["max_items"] == 2
+    assert len(session.semantic_level_evidence_progress.covered_sources) == 2
+    assert publications == []
+
+    while kernel.tasks:
+        kernel.run_next()
+
+    assert publications == [20]
+
+
 def test_semantic_evidence_diagnostics_are_constant_time_progress_truth():
     data = np.arange(12 * 16 * 20, dtype=np.float32).reshape(12, 16, 20)
     session = _session(data)

@@ -351,6 +351,17 @@ to cross before any cold member and require a dormant coverage hint to be
 rechecked when it becomes visible. Full removal of the remaining legacy
 `pending_tiles` state is still a one-owner cleanup before final acceptance.
 
+The same onscreen replay exposed a distinct idle-draw loop after coverage had
+already reached 100/100 exact pages. Semantic level evidence advances in small
+background batches; the level-statistics owner computed that the evidence
+frontier was incomplete but ignored that fact in its settled-session
+publication branch, so every batch requested a full VisPy tile-layer commit.
+Those commits carried zero upserts and zero uploads yet kept physical draw
+truth changing indefinitely. Metadata publication now waits for the complete
+semantic evidence frontier and has one final-publication owner. A regression
+requires zero intermediate presentation requests and exactly one request when
+the full population closes; timeout and quiescence guards remain unchanged.
+
 The broader memory-stress gate initially appeared to show a roughly 216 MiB
 G5 residency increase, but reproduced with a roughly 178 MiB increase on
 `main`. Its baseline was taken before the one-time Qt/PyQtGraph window/backend

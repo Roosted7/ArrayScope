@@ -704,15 +704,6 @@ class LevelStatsService:
                 progress.blocking_reason = "waiting-semantic-sources"
             self._maybe_publish_after_level_evidence(current, processed=int(merged))
             self._schedule_semantic_level_evidence(current)
-            if (
-                len(progress.covered_sources) >= target.target_population
-                and _montage_side_work_visible_settled(self, current)
-            ):
-                # Completion is the atomic refined levels+histogram edge.
-                # Request it directly from the guarded worker completion;
-                # there is no later payload transition guaranteed to wake the
-                # presentation gate.
-                self._request_level_metadata_presentation(current)
 
         def stale():
             if release(session):
@@ -1342,8 +1333,11 @@ class LevelStatsService:
         # explicit-auto flush waits on level evidence, committing after EVERY
         # budget slice re-runs the full payload build per handful of tiles
         # (~68 no-op commits for a 272-tile scene).  Commit when the evidence
-        # queue actually drained — the parked flush re-checks the rank then —
-        # or when nothing is parked (metadata refresh for a settled session).
+        # queue actually drained — the parked flush re-checks the rank then.
+        # A settled tile set does not make an incomplete semantic evidence
+        # frontier publishable: replaying the full tiled presentation for
+        # every background batch keeps the physical draw stream permanently
+        # busy without changing pixels.
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         semantic_remaining = bool(
             semantic_progress is not None
@@ -1387,7 +1381,9 @@ class LevelStatsService:
             flush_parked = True
         can_resume_parked_flush = bool(flush_parked and not evidence_remaining)
         can_refresh_settled_metadata = bool(
-            not flush_parked and _montage_side_work_visible_settled(self, session)
+            not flush_parked
+            and not evidence_remaining
+            and _montage_side_work_visible_settled(self, session)
         )
         payload_backlog_clear = bool(
             not getattr(session, "dirty_payloads", ())
