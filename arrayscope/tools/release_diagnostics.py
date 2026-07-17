@@ -9,6 +9,14 @@ import time
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
+from arrayscope.tools.presentation_settlement import (
+    PresentationTargetToken,
+    presentation_is_settled,
+    presentation_settlement_diagnostic,
+    presentation_target_token,
+)
+
 
 def capture_release_diagnostics(path, *, backend: str = "pyqtgraph", interval_ms: int = 500) -> Path:
     """Capture a small real-window diagnostics JSONL trace for RC evidence."""
@@ -36,19 +44,49 @@ def capture_release_diagnostics(path, *, backend: str = "pyqtgraph", interval_ms
     try:
         data = _release_dataset()
         win = ArrayScopeWindow(data)
+        # Physical draw completion is a capture prerequisite; a hidden widget
+        # can acknowledge payloads without ever receiving the paint that
+        # clears ``presentationDrawPending``.
+        win.show()
         _process_events(app, QtCore, count=20)
+
+        # A geometry object only proves that layout planning ran.  Release
+        # evidence starts after the current target has complete acknowledged
+        # backend coverage and the corresponding draw has reached the screen.
+        current_target = _wait_for_capture_presentation(
+            app,
+            QtCore,
+            win,
+            phase="initial image",
+        )
 
         logger.start(win.collect_runtime_diagnostics(), app_version=__version__, interval_ms=interval_ms)
 
-        win.operation_evaluator.image(win.view_state)
+        # Exercise a real image-target change.  Re-requesting the identical
+        # cached target can legitimately coalesce to no new pixels and is not
+        # useful release evidence.
+        image_index = (int(win.view_state.slice_indices[2]) + 1) % int(data.shape[2])
+        win._set_view_state(win.view_state.with_slice(2, image_index))
         win.render(reason="release-diagnostics-image")
-        _process_events(app, QtCore, count=30)
+        current_target = _wait_for_capture_presentation(
+            app,
+            QtCore,
+            win,
+            phase="image render",
+            previous_target=current_target,
+        )
         logger.write_snapshot(win.collect_runtime_diagnostics())
 
         state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(data.shape[2])), text=":")
         win._set_view_state(state)
         win.render(reason="release-diagnostics-montage")
-        _wait_until(app, QtCore, lambda: getattr(win, "_current_montage_geometry", None) is not None, timeout_s=3.0)
+        _wait_for_capture_presentation(
+            app,
+            QtCore,
+            win,
+            phase="montage render",
+            previous_target=current_target,
+        )
         logger.write_snapshot(win.collect_runtime_diagnostics())
     finally:
         logger.close()
@@ -84,13 +122,60 @@ def _process_events(app, QtCore, *, count: int) -> None:
         app.processEvents(flags, 50)
 
 
-def _wait_until(app, QtCore, predicate, *, timeout_s: float) -> None:
-    deadline = time.monotonic() + float(timeout_s)
+def _wait_for_capture_presentation(
+    app,
+    QtCore,
+    win,
+    *,
+    phase: str,
+    expected_target: PresentationTargetToken | None = None,
+    previous_target: PresentationTargetToken | None = None,
+) -> PresentationTargetToken:
+    observed_target: list[PresentationTargetToken | None] = [None]
+
+    def current_target_is_settled() -> bool:
+        target = presentation_target_token(win)
+        if target is None:
+            return False
+        if previous_target is not None and target == previous_target:
+            return False
+        if expected_target is not None and target != expected_target:
+            return False
+        observed_target[0] = target
+        return presentation_is_settled(win, expected_target=target)
+
+    try:
+        _wait_until(
+            app,
+            QtCore,
+            current_target_is_settled,
+            timeout_s=bounded_interaction_settle_timeout_s(),
+            description=f"{phase} physical presentation",
+        )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"{exc}; "
+            f"previous_target={previous_target!r}; "
+            f"{presentation_settlement_diagnostic(win, expected_target=expected_target)}"
+        ) from exc
+    target = observed_target[0]
+    if target is None:
+        raise RuntimeError(f"{phase} settled without a current presentation target")
+    return target
+
+
+def _wait_until(app, QtCore, predicate, *, timeout_s: float, description: str = "condition") -> None:
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         if predicate():
             return
         time.sleep(0.01)
+    _process_events(app, QtCore, count=2)
+    if predicate():
+        return
+    raise TimeoutError(f"{description} did not settle within {timeout_s:.3f} s")
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:

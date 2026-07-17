@@ -107,6 +107,15 @@ pass/skip counts, and artifact paths.
 
 ## Implementation progress
 
+Release capture and interaction probes now share one read-only settlement
+snapshot in `arrayscope.tools.presentation_settlement`. It combines the
+current frame/viewport target token, `TileLifecycle` target completion, commit
+debt, backend acknowledgement identity, exact required physical coverage,
+backend-qualified geometry truth, and draw completion without scheduling or
+mutating the live pipeline. Release diagnostics require a distinct target for
+the initial image, changed slice, and montage captures; geometry-only or stale
+physical rows fail loudly at the repository five-second cap.
+
 The pure model and first VisPy consumption slice now stand without scheduler
 coupling:
 
