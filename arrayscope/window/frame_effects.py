@@ -274,14 +274,16 @@ class FramePipelineEffects:
 
             return evaluate_materialization
 
-        def evaluate_target(token=None):
+        semantic_source_id = session.tile_semantic_source_id(tile.source_index)
+
+        def evaluate_target(token=None, semantic_source_id=semantic_source_id):
             demand = session.lod_policy_decision.demand
             return render_effects.evaluate_target_tile(
                 session,
                 tile,
                 level=int(step.level),
                 demand=demand,
-                semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+                semantic_source_id=semantic_source_id,
                 stage_cache=self.renderer.win.operation_evaluator.stage_cache,
                 stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
                 cancellation_token=token,

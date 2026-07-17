@@ -1222,14 +1222,13 @@ def _evaluate_tile_native_output_preview(
     _check_render_cancelled(cancellation_token)
     value = result.value
     rendered = rendered_tile_from_evaluation_result(tile, result)
-    key = render_lod.page_set_key_for(
-        session,
+    key = render_lod.page_set_key_for_rendered(
         rendered,
         demand=demand,
         level=level,
+        semantic_source_id=semantic_source_id,
+        shader_display=bool(shader_display),
     )
-    if key.source_id != semantic_source_id:
-        raise ValueError("reduced target source identity disagrees with its session route")
     source = render_lod.canonical_value_source_for_rendered(
         rendered, shader_display=bool(shader_display)
     )

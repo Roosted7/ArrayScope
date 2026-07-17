@@ -343,6 +343,33 @@ def test_evaluate_preview_tile_uses_requested_rung_level():
     assert pages[0].values.shape == (1, 2)
 
 
+def test_reusable_preview_finishes_under_its_captured_semantic_route():
+    """A reused session may retarget while an old reusable rung evaluates."""
+
+    session = _session()
+    tile = session.plan.tiles[2]
+    demand = _demand(0)
+    captured_source_id = session.tile_semantic_source_id(tile.source_index)
+    session.tile_semantic_source_id = lambda source_index: (
+        "new-semantic-route",
+        int(source_index),
+    )
+
+    preview = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=demand,
+        semantic_source_id=captured_source_id,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    key, _pages, *_rest = preview
+    assert key.source_id == captured_source_id
+
+
 def test_evaluate_shared_preview_fans_out_display_only_payloads():
     session = _session()
     demand = _demand(0)
