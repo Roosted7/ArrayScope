@@ -127,6 +127,28 @@ Three failure laws that session proved, now binding for oracle design:
    the oracle catches it. This is a required next testing slice, not a gate
    satisfied by the current harness. An oracle that has never failed on an
    injected fault is unproven.
+
+   **[Landed 2026-07-17]** The general oracle exists:
+   `tests/oracles/framebuffer_reference.py`
+   (`assert_frame_matches_cpu_reference`, surfaced on the GPU harness as
+   `Harness.assert_tile_matches_cpu_reference`). It reads the live VisPy
+   canvas framebuffer and compares every `required_tile_numbers()` tile
+   interior against `cpu_display_rgba` of the committed payload values —
+   component/scale/levels/LUT via `arrayscope.display.shader_mapping`,
+   geometry via the real camera transform — tolerating only GPU rounding
+   (healthy worst-case deviation measured at 1/255) with built-in vacuity
+   guards (set-equality tile coverage, per-tile sample floor). The
+   fault-injection audit lives in
+   `tests/gpu_interaction/test_framebuffer_cpu_reference.py` (real GL): a
+   wrong levels uniform, stale atlas-page texels behind fresh mapping keys,
+   and swapped tile texcoords each fail the oracle, and restoring the state
+   turns it green again. A default-ring smoke
+   (`tests/ui/test_framebuffer_cpu_reference.py`, offscreen software GL)
+   keeps the oracle honest per push but is never rendering acceptance.
+   Bounds, stated loudly: RGB payload modes raise `NotImplementedError`
+   rather than silently passing, and PyQtGraph has no equivalent physical
+   readback gate yet (its complex modes are CPU-mapped, but scalar
+   levels/LUT run in the Qt raster path and stay uncovered).
 3. **Small fixtures skip regimes.** `preview_level = max(base, desired)`
    means 64×64 fixtures never enter the two-stage preview path that 336×336
    data exercises; a green 6×6 harness said nothing about the 272-tile

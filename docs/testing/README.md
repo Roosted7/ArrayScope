@@ -69,8 +69,12 @@ not "fixed".
 - Open xfails that are *tracked work, not noise*: churn-convergence
   (queue step 1, strict=False), complex64 PyQtGraph deadlock (standing
   lane, strict=True), tiny-3-slices raciness (strict=False).
-- 4 pre-existing `tests/gpu_interaction` baseline failures (P9-era) —
-  re-triage queued.
+- `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
+  serial run) — the 4 P9-era baseline failures no longer reproduce post-G5.
+  The ring now includes the framebuffer-to-CPU reference oracle gate
+  (`test_framebuffer_cpu_reference.py`; oracle in
+  `tests/oracles/framebuffer_reference.py`, default-ring smoke in
+  `tests/ui/test_framebuffer_cpu_reference.py`).
 - Shared fakes: `tests/display/vispy_test_utils.py`; live-window harness:
   `tests/ui/helpers.py` — use these, don't re-roll.
 

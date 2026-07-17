@@ -55,13 +55,11 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   closes a target — until then `trace_verify`'s strongest invariant
   (`final_required_target_acknowledged`) stays tolerated in the stress
   matrix, i.e. effectively off.
-- **Framebuffer-to-CPU reference oracle + fault injection** (the
-  visible-truth gap named in
-  [testing/stress-and-trace-strategy.md](testing/stress-and-trace-strategy.md)).
 - **complex64 PyQtGraph presentation deadlock** (deterministic; strict xfail
   in the stress matrix).
-- **4 pre-existing `tests/gpu_interaction` baseline failures** (P9-era) —
-  re-triage now that the engine is merged.
+- **PyQtGraph physical readback oracle** — the framebuffer-to-CPU oracle
+  (Done, 2026-07-17) covers the VisPy canvas only; PyQtGraph scalar
+  levels/LUT run in the Qt raster path and still have no pixels-vs-CPU gate.
 - **ImageViewShell duplication** (`imageview2d` 2723 / `vispy_imageview2d`
   ~1840 lines).
 - **Consolidate montage cache-key derivation** behind one parity-tested
@@ -76,6 +74,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-17 — **Framebuffer-to-CPU reference oracle + fault injection**
+  (standing lane): `tests/oracles/framebuffer_reference.py` compares the
+  live VisPy framebuffer per required tile against the CPU shader mirror;
+  real-GL audit `tests/gpu_interaction/test_framebuffer_cpu_reference.py`
+  (wrong uniform / stale atlas page / swapped tile each fail the oracle,
+  restore turns it green) + default-ring smoke
+  `tests/ui/test_framebuffer_cpu_reference.py`. Evidence: full
+  `tests/gpu_interaction` ring 16/16 green on real Wayland 2026-07-17 —
+  which also closes the "4 pre-existing P9-era baseline failures" row: none
+  reproduce post-G5.
 - 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
   route, reducer families, page cache, both-backend consumers, legacy
   whole-plane ownership deleted with a resurrection guard; the progressive

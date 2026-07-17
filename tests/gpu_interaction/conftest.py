@@ -438,6 +438,24 @@ class Harness:
             modes.append(float(np.bincount(interior.reshape(-1), minlength=256).argmax()))
         return modes
 
+    def assert_tile_matches_cpu_reference(self, **kwargs):
+        """Framebuffer vs CPU semantic reference for every required tile.
+
+        The generalization of :meth:`assert_tile_identity_ramp` mandated by
+        docs/testing/stress-and-trace-strategy.md (addendum law 2): reads the
+        real VisPy canvas framebuffer and compares each required tile's
+        interior against ``cpu_display_rgba`` of the committed payload values
+        (component/scale/levels/LUT applied), tolerating only GPU rounding.
+        Returns the per-tile :class:`FrameReferenceReport`.
+        """
+
+        from tests.oracles.framebuffer_reference import (
+            assert_frame_matches_cpu_reference,
+        )
+
+        self.prepare_image_layer_pixel_sampling()
+        return assert_frame_matches_cpu_reference(self.win, **kwargs)
+
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:
         """Every tile must show ITS OWN constant value.
 
