@@ -63,7 +63,7 @@ def _presentation_trace_fields(session, phase: int) -> dict[str, object]:
     return {
         "presentation_phase": int(phase),
         "coverage_pass_open": bool(
-            getattr(session, "_first_pixel_pass_open", lambda: False)()
+            session.scheduling_policy.verdict.coverage_open
         ),
         "session_id": int(getattr(session, "session_id", 0) or 0),
     }

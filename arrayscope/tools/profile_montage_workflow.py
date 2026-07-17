@@ -874,7 +874,7 @@ def _journey_lod_trace_state(win) -> dict[str, object]:
     return {
         "session_id": int(getattr(session, "session_id", 0) or 0),
         "coverage_pass_open": bool(
-            getattr(session, "_first_pixel_pass_open", lambda: False)()
+            session.scheduling_policy.verdict.coverage_open
         ),
         "camera_desired_level": camera_desired,
         "session_desired_level": (

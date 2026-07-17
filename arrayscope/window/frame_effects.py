@@ -1063,7 +1063,9 @@ class FramePipelineEffects:
                 presentation_phase=(
                     2 if lane == WorkLane.DISPLAY_PREPARATION else 1
                 ),
-                coverage_pass_open=bool(session._first_pixel_pass_open()),
+                coverage_pass_open=bool(
+                    self.scheduling_verdict().coverage_open
+                ),
                 session_id=int(getattr(session, "session_id", 0) or 0),
             ),
             on_done=done,

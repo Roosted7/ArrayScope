@@ -279,7 +279,7 @@ class FramePipeline:
             return False
         session = getattr(self.effects, "session", None)
         coverage_pass_open = bool(
-            getattr(session, "_first_pixel_pass_open", lambda: False)()
+            self.effects.scheduling_verdict().coverage_open
         )
         # Phase follows the work's role, not its historical rung name.
         # DESIRED on a blank tile runs in DISPLAY_PREVIEW and is phase-1
