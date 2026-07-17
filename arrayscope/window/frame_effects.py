@@ -1514,12 +1514,7 @@ class FramePipelineEffects:
             ) + int(bool(fast_drain))
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
-            predecessor_frame = getattr(renderer.win, "_committed_display_frame", None)
-            predecessor_source = getattr(predecessor_frame, "value_source", None)
-            atomic_successor_pending = _atomic_successor_handoff_pending(
-                session,
-                predecessor_source,
-            )
+            atomic_successor_pending = _atomic_successor_handoff_pending(session)
             cpu_atomic_successor = bool(
                 cpu_backend
                 and atomic_successor_pending
@@ -3573,20 +3568,18 @@ def _compatible_successor_payload_count(session) -> int:
     )
 
 
-def _atomic_successor_handoff_pending(session, predecessor_source) -> bool:
+def _atomic_successor_handoff_pending(session) -> bool:
     """Whether a retained tiled predecessor requires one complete successor.
 
-    This decision intentionally does not inspect successor payload wrappers.
-    The first bounded commit can run before any wrapper exists; making the
-    guard depend on that derived cache state permits exactly one partial
-    commit before the next pass notices the transition.
+    ``FrameSession.atomic_successor_pending`` is armed only by the transition
+    owner after it proves complete predecessor coverage.  Do not re-decide
+    that physical obligation from the committed semantic frame or successor
+    payload wrappers: either can legitimately lag the persistent tile layer,
+    and doing so permits partial commits that can never acknowledge the
+    already-armed handoff.
     """
 
-    return bool(
-        getattr(session, "atomic_successor_pending", False)
-        and isinstance(predecessor_source, TiledValueSource)
-        and bool(getattr(predecessor_source, "payloads", None))
-    )
+    return bool(getattr(session, "atomic_successor_pending", False))
 
 
 def _cpu_successor_payloads_ready(session) -> bool:

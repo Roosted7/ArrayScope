@@ -4284,21 +4284,21 @@ def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
     assert decision.reason == "montage-compatible"
 
 
-def test_atomic_handoff_does_not_depend_on_successor_wrappers():
-    """The first bounded commit must guard before it has built any payloads."""
+def test_atomic_handoff_has_one_owner_after_transition_arms_it():
+    """Semantic-frame lag cannot override a physical handoff obligation."""
 
-    from arrayscope.display.model.frame import TiledValueSource
     from arrayscope.window.frame_effects import _atomic_successor_handoff_pending
 
     session = _session(count=4)
     session.atomic_successor_pending = True
-    predecessor_payload = session.snapshot_display_tile_payloads(
-        {0: ("source", 0)}
-    )[0]
+    # The persistent tile layer can still own the complete predecessor while
+    # the committed semantic frame is absent or non-tiled.  The transition
+    # owner already proved physical coverage when it armed this flag.
     session.display_tile_payloads.clear()
-    predecessor = TiledValueSource({0: predecessor_payload})
 
-    assert _atomic_successor_handoff_pending(session, predecessor)
+    assert _atomic_successor_handoff_pending(session)
+    session.atomic_successor_pending = False
+    assert not _atomic_successor_handoff_pending(session)
 
 
 def test_index_window_retarget_arms_atomic_successor_pending():

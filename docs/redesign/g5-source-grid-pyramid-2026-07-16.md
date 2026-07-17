@@ -206,6 +206,20 @@ has no post-start sample with drawn coverage below the visible set and the
 `presentation_continuity` gate is green. Its remaining failures are LOD
 checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
 
+A later 60-step real-Wayland scrub found the atomic obligation itself had
+acquired a second owner: commit code re-decided the already-armed
+`FrameSession.atomic_successor_pending` flag from the lagging committed semantic
+frame. When that derived check disagreed, commits ran without the atomic guard
+while the canonical flag could never be acknowledged, producing an idle
+`pipeline_plan steps=[]` loop. The transition owner now arms the flag and the
+backend acknowledgement alone clears it. The focused atomic ring passes 4/4,
+the montage LOD residency ring passes 181/181, and the montage backend ring
+passes 88/88. The replay at
+`tests/artifacts/g5-atomic-successor-owner-2026-07-17/stdout.log` retains complete
+64/64 physical coverage and clears all atomic commit debt. It remains a red
+exact-convergence gate: 31 L1 tasks were still in flight at the unchanged
+five-second cap, so this evidence does not claim the full scrub green.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`
