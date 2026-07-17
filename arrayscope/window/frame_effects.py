@@ -1837,14 +1837,11 @@ class FramePipelineEffects:
             atomic_successor = bool(cpu_atomic_successor or shader_atomic_successor)
             renderer._last_montage_atomic_successor = bool(atomic_successor)
             resident_predicate = getattr(renderer.win.img_view, "tiledPayloadResident", None)
-            cold_gpu_successor = bool(
-                not cpu_backend
-                and bool(getattr(session, "display_committed", False))
-                and callable(resident_predicate)
-                and any(
-                    not bool(resident_predicate(payload))
-                    for payload in dict(tile_delta.upserts or {}).values()
-                )
+            cold_gpu_successor = _cold_gpu_successor_requires_hidden_warm(
+                session=session,
+                cpu_backend=cpu_backend,
+                resident_predicate=resident_predicate,
+                upserts=dict(tile_delta.upserts or {}),
             )
             if cold_gpu_successor and interactive_active(renderer):
                 # Keep the acknowledged pixels during the gesture. The
@@ -3549,6 +3546,32 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
     )
 
 
+def _cold_gpu_successor_requires_hidden_warm(
+    *,
+    session,
+    cpu_backend: bool,
+    resident_predicate,
+    upserts,
+) -> bool:
+    """Whether a cold GPU transaction has complete pixels to preserve.
+
+    ``display_committed`` is intentionally not consulted: it becomes true
+    after any accepted tile and therefore cannot prove that a complete
+    predecessor covers the required scope.  Only lifecycle-confirmed first
+    pixels may transfer the remaining work to hidden successor warming.
+    """
+
+    first_pixels = getattr(session, "required_first_pixels_presented", None)
+    if cpu_backend or not callable(first_pixels) or not bool(first_pixels()):
+        return False
+    if not callable(resident_predicate):
+        return False
+    return any(
+        not bool(resident_predicate(payload))
+        for payload in dict(upserts or {}).values()
+    )
+
+
 def _warm_atomic_successor_residency(
     renderer,
     session,
@@ -3666,10 +3689,15 @@ def _warm_atomic_successor_residency(
             job["pending"].extend(unresolved)
             if len(unresolved) == len(admitted):
                 # No page became resident: stop this bounded job instead of
-                # spinning a low-priority callback forever. The predecessor
-                # stays presented and the existing settlement guard reports
-                # the capacity/residency failure within the global deadline.
+                # spinning a low-priority callback forever. Re-arm the visible
+                # presentation owner before returning: the settlement guard
+                # is observational and cannot own these dirty upserts. A
+                # later memory/interaction edge can now retry, and the global
+                # deadline still reports a persistent capacity failure.
                 session._atomic_warm_job = None
+                session.final_commit_pending = True
+                session.flush_pending = True
+                renderer.request_montage_replan(session)
                 return
         if job["pending"]:
             _post_low_priority_callback(renderer, continue_warm)
