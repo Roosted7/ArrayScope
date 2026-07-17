@@ -113,6 +113,10 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         flush_pending=False,
         final_commit_pending=False,
         visible_first_pixels_presented=lambda: True,
+        required_tile_numbers=lambda: (7,),
+        _first_pixel_pass_open=lambda: False,
+        first_pass_quality=None,
+        first_pass_pixels_presented=lambda: False,
         is_complete=lambda: False,
         stage_fan_in=SimpleNamespace(
             active_requests=(),

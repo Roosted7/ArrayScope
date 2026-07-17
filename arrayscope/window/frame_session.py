@@ -741,7 +741,6 @@ class FrameSession:
     lod_preview_min_level: int = 0
     tile_residency_budget_bytes: int = 0
     lod_preview_metadata: dict[object, PreviewFloorMetadata] = field(default_factory=dict)
-    lod_preview_floor_scope: set[int] = field(default_factory=set)
     # ADR 0050 WP1: a display-LOD level swap rebuilds the payload wrapper but
     # must carry the tile's finest already-computed semantic stats forward
     # unchanged.  `cross_level_reuses` counts swaps that reused the retained
@@ -2034,28 +2033,6 @@ class FrameSession:
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         return render_lod.floor_can_progress(self, tile_number, tile=tile)
 
-    def _preview_floor_owner_exists(self, tile_number: int, tile=None) -> bool:
-        """Whether a declared preview slot has a concrete complement owner."""
-
-        if self._tile_preview_floor_pending(int(tile_number)):
-            return True
-        if tile is None:
-            tile = next(
-                (
-                    candidate
-                    for candidate in tuple(self.visible_tiles)
-                    if int(candidate.montage_index) == int(tile_number)
-                ),
-                None,
-            )
-        return bool(
-            tile is not None
-            and self._best_floor_key(
-                int(tile.source_index), tile_number=int(tile_number)
-            )
-            is not None
-        )
-
     def _ensure_floor_payloads(self, tile_numbers, *, max_count: int | None = None) -> None:
         return render_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
 
@@ -2117,42 +2094,44 @@ class FrameSession:
         self.lifecycle.level_resident(int(tile_number), key)
         return True
 
-    def declare_preview_floor_scope(self, tile_numbers) -> tuple[int, ...]:
-        """Replace the preview-pass scope owned by the current ladder plan.
-
-        This is plan state, not an accumulating observation. A later plan
-        which no longer needs first-pixel previews must close the pass so
-        target-quality presentation can proceed; retaining tiles from an old
-        plan would turn the visual barrier into an ownerless wait.
-        """
-
-        required = set(self.required_tile_numbers())
-        declared = {
-            int(tile) for tile in tuple(tile_numbers or ()) if int(tile) in required
-        }
-        self.lod_preview_floor_scope = declared
-        return tuple(sorted(declared))
 
     def release_preview_claim(self, tile_number: int, key) -> None:
         self.lifecycle.level_declined(int(tile_number), key)
         self.lod_preview_metadata.pop(key, None)
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
+        """Whether a preview-floor fill is IN PROGRESS (scheduling preference).
+
+        This governs which payloads the builder prefers to construct while
+        preview claims are in flight — a wave-local scheduling fact. It is
+        deliberately NOT the correctness contract: the plan-wide visual
+        barrier is :meth:`_first_pixel_pass_open`, owned by lifecycle
+        first-pixel truth. Conflating the two made the barrier wave-local
+        (field report 2026-07-17: exact refinement marched across a black
+        field, 192 preview acknowledgements after the first exact ack).
+        """
+
         if not self._resident_lod_active():
             return False
         planned = tuple(int(tile) for tile in tuple(planned_numbers or ()))
         if not planned:
             return False
-        preview_scope = set(int(tile) for tile in getattr(self, "lod_preview_floor_scope", set()) or set())
-        if preview_scope:
-            payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
-            scoped_planned = preview_scope.intersection(planned)
-            if scoped_planned and any(
-                str(getattr(payloads.get(int(tile)), "quality", "")) not in {"preview", "exact"}
-                for tile in scoped_planned
-            ):
-                return True
         return any(self._tile_preview_floor_pending(tile) for tile in planned)
+
+    def _first_pixel_pass_open(self) -> bool:
+        """Whether the plan-wide first-pixel pass is still open (visual truth).
+
+        One owner: the lifecycle's physical first-pixel coverage of the
+        required set. While open, presentation may add pixels anywhere but
+        may not refine a tile that already shows pixels — that ordering is
+        the product promise (cheap coverage first, then refinement), and it
+        must not depend on which planning wave a tile happened to land in.
+        """
+
+        if not self._resident_lod_active():
+            return False
+        required = self.required_tile_numbers()
+        return bool(required) and not self.lifecycle.first_pixels_presented(required)
 
     def _tile_preview_floor_pending(self, tile_number: int) -> bool:
         payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
@@ -2225,21 +2204,29 @@ class FrameSession:
         retained or reusable exact payloads which require no new task.
         """
 
-        if not self._lod_preview_floor_first_fill_active(
-            self.required_tile_numbers()
-        ):
+        if not self._first_pixel_pass_open():
+            return dict(payloads)
+        if bool(self.atomic_successor_pending):
+            # An atomic successor swap presents complete coverage in one
+            # transaction — it IS the first-pixel pass for its window.
+            # Filtering any slot here would deadlock its completeness wait
+            # (the field-57 shader-atomic-successor-wait grammar; ground
+            # rule 11).
             return dict(payloads)
         return {
             int(tile): payload
             for tile, payload in payloads.items()
-            if int(tile) not in self.lod_preview_floor_scope
-            or str(getattr(payload, "quality", "exact") or "exact") != "exact"
-            or (
-                bool(self.atomic_successor_pending)
-                and not self._preview_floor_owner_exists(
-                    int(tile), tile=plan_tiles_by_number.get(int(tile))
-                )
-            )
+            # First pixels are always admissible, whatever their quality —
+            # an exact payload for a blank tile closes that tile's coverage
+            # with strictly stronger evidence. Only *refinement* of a tile
+            # whose first pixels are already acknowledged waits for the pass
+            # to close. Both sides of this gate read the SAME lifecycle
+            # first-pixel fact the pass predicate reads; mixing coverage
+            # notions here would let a tile be simultaneously "covered"
+            # (unrefinable) and "missing" (holding the pass open) — an
+            # ownerless wait (ground rule 11).
+            if str(getattr(payload, "quality", "exact") or "exact") != "exact"
+            or not self.lifecycle.first_pixels_presented((int(tile),))
         }
 
     def _paced_pending_presentation_followup(

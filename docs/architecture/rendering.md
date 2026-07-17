@@ -209,6 +209,46 @@ geometry for montage presentations.
 
 Widget close stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas.
 
+## Progressive presentation contract (Thomas, 2026-07-17 — binding)
+
+The purpose of preview/floor work is to reach **overall coverage** of the
+required scope as fast as possible; refinement exists to upgrade an already
+covered frame without ever showing black in between. The rules, in order of
+authority:
+
+1. **Coverage before refinement, plan-wide.** While any required tile lacks
+   first pixels, all admitted presentation work serves coverage. A tile that
+   already shows pixels (any quality) may only be *refined* to target
+   quality after every required tile shows something. The commit gate
+   (`FrameSession._quality_pass_admissible_upserts`, keyed on
+   `_first_pixel_pass_open`) enforces this physically; schedulers must not
+   rely on it as their ordering — they must not submit refinement ahead of
+   missing coverage in the first place.
+2. **Every unit of work obeys the priority system — preview and target
+   alike.** Within the coverage class and within the refinement class,
+   ordering is the canonical tile priority (viewport-distance/center-out
+   from the CURRENT camera). Coverage-class work for missing tiles always
+   outranks refinement-class work for covered tiles.
+3. **Priority re-targets on every view change** — user pan/zoom AND
+   programmatic/auto-fit transitions alike. A montage entered via auto-fit
+   orders its fill from the fitted viewport's center, not from the previous
+   view's corner and not in grid order. Tiles retained from the previous
+   view already show pixels and therefore sort behind every missing tile.
+4. **Quality upgrades never blank.** Refinement replaces pixels
+   atomically per tile; eviction/fallback returns to the coarse pixels,
+   never to black (ADR 0056 never-black rule).
+
+Levels/histogram interaction with the passes:
+
+5. **Refined level statistics are sampled only after the full
+   lower-quality pass has completed** (coverage settled) — never
+   concurrently with coverage work.
+6. **A CPU-LUT backend (PyQtGraph) running a single quality pass skips the
+   rough levels/histogram publication entirely**: it bakes levels into
+   pixels at commit, so the final levels must be decided before its first
+   tile renders. Rough-then-refined level phasing is a shader-windowing
+   (VisPy) behavior, where levels are a cheap uniform update.
+
 ## Presentation performance contract
 
 - Keep the last valid frame until a replacement is usable.

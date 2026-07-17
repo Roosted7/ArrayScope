@@ -3372,65 +3372,101 @@ def test_cold_preview_floor_uploads_obey_item_cap():
     assert set(session.pending_payload_upserts) == {0, 1, 2, 3}
 
 
-def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
-    pyramid = LodPageCache(max_bytes=1 << 24)
-    preview = LodPageCache(max_bytes=1 << 24)
-    session = _session(pyramid=pyramid, count=4)
-    # Exact wrappers can be admitted before a later plan declares the preview
-    # pass (retained/reusable work follows this same route). They still must
-    # cross the final physical delta gate rather than flash in as exact islands.
-    _exact_state, exact_delta = session.build_tile_presentation({}, max_upserts=4)
-    assert set(exact_delta.upserts) == {0, 1, 2, 3}
-    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
-    session.lod_page_cache = preview
-    session.lod_preview_level = 4
-    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
-    rendered = session.rendered_tiles[0]
-    key = page_set_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=4,
-        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+def test_quality_pass_admits_first_pixels_and_withholds_refinement():
+    """Field defect 2026-07-17 (PyQtGraph raw fill): the preview pass was
+    derived from declared planning WAVES, so a required tile whose preview
+    was simply not yet planned kept no pass open — exact refinement marched
+    across a black field (192 preview acks after the first exact ack). The
+    pass has one owner now: lifecycle first-pixel coverage of the required
+    set. While it is open, first pixels of ANY quality are admissible
+    (exact-as-first-pixels is stronger coverage), but a tile that already
+    shows pixels may not refine."""
+
+    from arrayscope.presentation.tile_lifecycle import TileTarget
+
+    session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 24))
+    plan_tiles_by_number = {
+        int(tile.montage_index): tile for tile in session.plan.tiles
+    }
+    session.lifecycle.retarget(
+        {
+            number: TileTarget(
+                tile_number=number,
+                source_index=int(tile.source_index),
+                semantic_source_id=session.tile_semantic_source_id(
+                    int(tile.source_index)
+                ),
+            )
+            for number, tile in plan_tiles_by_number.items()
+        }
     )
-    _admit_page_set(preview, key, np.asarray(rendered.image))
-    _claim_preview_resident(session, 0, key)
-    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
-
-    effects.tile_states(
-        _pipeline_intent_for(session),
-        session.lod_policy_decision.demand,
-        _pipeline_scope_for(session),
-    )
-
-    assert session.lod_preview_floor_scope == {0, 1, 2, 3}
-
-    _state, delta = session.build_tile_presentation({}, max_upserts=4)
-
-    assert set(delta.upserts) == {0}
-    assert delta.upserts[0].quality == "preview"
-    assert all(payload.quality != "exact" for payload in delta.upserts.values())
-    assert set(session.dirty_payloads) == {0, 1, 2, 3}
-
-
-def test_ladder_plan_closes_obsolete_preview_floor_scope():
-    session = _session(count=2)
-    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
-    intent = _pipeline_intent_for(session)
-
-    effects.tile_states(intent, session.lod_policy_decision.demand, _pipeline_scope_for(session))
-    assert session.lod_preview_floor_scope == {0, 1}
-
-    effects.tile_states(
-        intent,
-        session.lod_policy_decision.demand,
-        LodAdmissionScope(
-            visible_tile_numbers=(0, 1),
-            near_tile_numbers=(0, 1),
-            visible_missing_count=0,
-        ),
+    # Tiles 0 and 1 have acknowledged first pixels; 2 and 3 are still blank.
+    presented_sources = {
+        number: session.tile_semantic_source_id(
+            plan_tiles_by_number[number].source_index
+        )
+        for number in (0, 1)
+    }
+    session.lifecycle.backend_presented_snapshot(presented_sources)
+    session.lifecycle.presentation_confirmed((0, 1))
+    assert session.lifecycle.first_pixels_presented((0,))
+    assert not session.lifecycle.first_pixels_presented((2,))
+    assert session._first_pixel_pass_open(), (
+        "pass must stay open while any required tile lacks first pixels"
     )
 
-    assert session.lod_preview_floor_scope == set()
+    def payload_for(number, quality):
+        rendered = session.rendered_tiles[number]
+        return DisplayTilePayload(
+            number,
+            int(rendered.tile.source_index),
+            np.asarray(rendered.image),
+            None,
+            session.tile_semantic_source_id(int(rendered.tile.source_index)),
+            quality=quality,
+        )
+
+    candidates = {
+        0: payload_for(0, "exact"),  # refinement of a presented tile
+        1: payload_for(1, "preview"),  # preview rows always flow
+        2: payload_for(2, "exact"),  # exact-as-first-pixels for a blank tile
+        3: payload_for(3, "preview"),  # preview first pixels
+    }
+    admitted = session._quality_pass_admissible_upserts(
+        dict(candidates), plan_tiles_by_number=plan_tiles_by_number
+    )
+    assert set(admitted) == {1, 2, 3}, (
+        "refinement of a presented tile must wait for plan-wide first-pixel "
+        "coverage; first pixels (any quality) must flow"
+    )
+
+    # Atomic successor transactions present complete coverage in one swap —
+    # filtering any slot would deadlock their completeness wait (field
+    # stall 57 grammar; ground rule 11).
+    session.atomic_successor_pending = True
+    assert set(
+        session._quality_pass_admissible_upserts(
+            dict(candidates), plan_tiles_by_number=plan_tiles_by_number
+        )
+    ) == {0, 1, 2, 3}
+    session.atomic_successor_pending = False
+
+    # Pass closes on full physical coverage — refinements flow again.
+    session.lifecycle.backend_presented_snapshot(
+        {
+            number: session.tile_semantic_source_id(
+                plan_tiles_by_number[number].source_index
+            )
+            for number in (0, 1, 2, 3)
+        }
+    )
+    session.lifecycle.presentation_confirmed((0, 1, 2, 3))
+    assert not session._first_pixel_pass_open()
+    assert set(
+        session._quality_pass_admissible_upserts(
+            dict(candidates), plan_tiles_by_number=plan_tiles_by_number
+        )
+    ) == {0, 1, 2, 3}
 
 
 def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
@@ -3440,7 +3476,6 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     native_range = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
     session = _session(pyramid=pyramid, count=4, view_range=native_range)
     session.lod_preview_level = 4
-    session.declare_preview_floor_scope(range(4))
     session.atomic_successor_pending = True
 
     # Only one successor tile still has resolvable page coverage.  The other

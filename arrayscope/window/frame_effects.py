@@ -153,7 +153,6 @@ class FramePipelineEffects:
     def __init__(self, renderer, session) -> None:
         self.renderer = renderer
         self.session = session
-        self.last_preview_planned_scope: tuple[int, ...] = ()
 
     def _evaluation_claim(self, intent, step, tile) -> _EvaluationClaim:
         source_index_for_tile = getattr(intent, "source_index_for_tile", None)
@@ -299,17 +298,6 @@ class FramePipelineEffects:
             return ()
         self._release_inactive_evaluation_claims(getattr(scope, "visible_tile_numbers", ()))
         states = render_effects.tile_lod_states(self.session, demand, scope=scope)
-        # Preserve the pre-routing decision for diagnostics.  Shared-transform
-        # ownership suppresses ordinary per-tile preview work below, but it
-        # must not erase the fact that the frame planner required a preview
-        # coverage pass for this visible scope.
-        preview_pass_required = not bool(self.session.required_first_pixels_presented())
-        self.last_preview_planned_scope = (
-            tuple(int(state.tile_number) for state in states if bool(state.allow_preview))
-            if preview_pass_required
-            else ()
-        )
-        self.session.declare_preview_floor_scope(self.last_preview_planned_scope)
         plan_tiles = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ())
@@ -2168,8 +2156,16 @@ class FramePipelineEffects:
     ) -> None:
         renderer = self.renderer
         session = self.session
-        preview_pass_open_before = session._lod_preview_floor_first_fill_active(
-            session.required_tile_numbers()
+        preview_pass_open_before = session._first_pixel_pass_open()
+        # Captured with the pass flag so the trace oracle is independent of
+        # the admission gate: an exact upsert for a tile whose first pixels
+        # were ALREADY acknowledged before this delta is a refinement, and
+        # refinements inside an open pass are the violation trace_verify
+        # rejects. Same lifecycle fact as the pass predicate — one notion.
+        presented_before_commit = frozenset(
+            int(tile)
+            for tile in session.required_tile_numbers()
+            if session.lifecycle.first_pixels_presented((int(tile),))
         )
         report = getattr(renderer._display_committer(), "last_tile_commit_report", None)
         renderer._last_montage_report_presented = len(tuple(getattr(report, "presented_tiles", ()) or ()))
@@ -2336,6 +2332,7 @@ class FramePipelineEffects:
             commit_start=commit_start,
             preview_transition=preview_transition,
             preview_pass_open_before=preview_pass_open_before,
+            presented_before_commit=presented_before_commit,
         )
         if first_pass_publication_transition:
             renderer.request_montage_replan(session)
@@ -2349,6 +2346,7 @@ class FramePipelineEffects:
         commit_start: float,
         preview_transition: bool,
         preview_pass_open_before: bool = False,
+        presented_before_commit: frozenset[int] = frozenset(),
     ) -> None:
         renderer = self.renderer
         session = self.session
@@ -2386,18 +2384,16 @@ class FramePipelineEffects:
                 int(tile)
                 for tile, payload in tile_delta.upserts.items()
                 if preview_pass_open_before
-                and int(tile) in session.lod_preview_floor_scope
+                and not bool(session.atomic_successor_pending)
+                and int(tile) in presented_before_commit
                 and str(getattr(payload, "quality", "exact") or "exact") == "exact"
             ),
             required_tile_count=len(session.required_tile_numbers()),
-            preview_planned_tile_count=len(
-                getattr(
-                    getattr(getattr(session, "pipeline", None), "effects", None),
-                    "last_preview_planned_scope",
-                    (),
-                )
+            preview_missing_tile_count=sum(
+                1
+                for tile in session.required_tile_numbers()
+                if int(tile) not in presented_before_commit
             ),
-            preview_declared_tile_count=len(session.lod_preview_floor_scope),
             first_pass_quality=getattr(session, "first_pass_quality", None),
             first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
             uploads=int(getattr(report, "texture_uploads", 0) or 0),

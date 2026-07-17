@@ -1903,18 +1903,6 @@ def _preview_tile_shape(session, demand) -> tuple[int, int]:
     return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
 
 
-def _preview_floor_blocks_exact_submission(session, tile) -> bool:
-    if tile is None:
-        return False
-    scope = set(int(value) for value in getattr(session, "lod_preview_floor_scope", set()) or set())
-    tile_number = int(tile.montage_index)
-    if tile_number not in scope:
-        return False
-    payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
-    payload = payloads.get(tile_number)
-    return str(getattr(payload, "quality", "")) not in {"preview", "exact"}
-
-
 def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if bool(capabilities.shader_windowing):

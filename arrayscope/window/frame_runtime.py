@@ -326,10 +326,7 @@ class FrameRuntimeMixin:
             steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
             required_tile_count=len(session.required_tile_numbers()),
-            preview_planned_tile_count=len(
-                getattr(pipeline.effects, "last_preview_planned_scope", ()) or ()
-            ),
-            preview_declared_tile_count=len(session.lod_preview_floor_scope),
+            preview_pass_open=bool(session._first_pixel_pass_open()),
             first_pass_quality=getattr(session, "first_pass_quality", None),
             first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
         )
