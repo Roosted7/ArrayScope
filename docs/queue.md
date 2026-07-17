@@ -52,9 +52,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **complex64 PyQtGraph presentation deadlock** (deterministic; strict xfail
   in the stress matrix).
-- **PyQtGraph physical readback oracle** — the framebuffer-to-CPU oracle
-  (Done, 2026-07-17) covers the VisPy canvas only; PyQtGraph scalar
-  levels/LUT run in the Qt raster path and still have no pixels-vs-CPU gate.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -78,6 +75,17 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   mechanically exposes the open 2026-07-17/18 defects (artifact:
   `tests/artifacts/journey-matrix-2026-07-17-v3/`). Contract and pre-merge
   command: [testing/README.md](testing/README.md#journey-matrix-trajectory-gate).
+- 2026-07-17 — **PyQtGraph physical readback oracle** (standing lane):
+  `tests/oracles/framebuffer_reference.py` now reads the painted Qt graphics
+  viewport and compares every required scalar tile against
+  `cpu_display_rgba` under semantic levels/LUT, with exact-set and sample-floor
+  vacuity guards plus an independently calibrated 2/255 raster tolerance.
+  Default-ring smoke proves exact-set/sample-floor/wrong-level failures;
+  real-Wayland audit proves wrong levels, a stale cached tile `QImage`, and
+  swapped physical tile positions each fail and recover. Evidence:
+  `tests/ui/test_pyqtgraph_raster_cpu_reference.py` and
+  `tests/gpu_interaction/test_pyqtgraph_raster_cpu_reference.py`; full
+  both-backend real-Wayland ring 20/20 green.
 - 2026-07-17 — **Framebuffer-to-CPU reference oracle + fault injection**
   (standing lane): `tests/oracles/framebuffer_reference.py` compares the
   live VisPy framebuffer per required tile against the CPU shader mirror;

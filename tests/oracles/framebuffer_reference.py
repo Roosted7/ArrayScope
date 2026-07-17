@@ -1,11 +1,12 @@
-"""General framebuffer-to-CPU reference oracle.
+"""General physical-pixels-to-CPU reference oracle.
 
 Closes the "visibly wrong but every label truthful" gap named in
 docs/testing/stress-and-trace-strategy.md (addendum law 2: *intent is not
 pixels*): the tile-truth overlay and the trace report upload-intent only, so
 a frame can present stale or swapped physical texels while every CPU-side
-label stays correct.  This oracle reads the REAL VisPy canvas framebuffer and
-compares it, pixel by sampled pixel, against a CPU-computed reference of the
+label stays correct. This oracle reads the REAL VisPy canvas framebuffer or
+the PyQtGraph Qt-raster viewport and compares it, pixel by sampled pixel,
+against a CPU-computed reference of the
 same semantic values — component/scale/levels/LUT applied through
 ``arrayscope.display.shader_mapping`` (the pure-NumPy shader mirror) — using
 the live camera transform for geometry.  Nothing is taken from the backend's
@@ -22,11 +23,10 @@ testing law 5) are built in: the compared tile set must equal the required
 set exactly, and every tile must contribute a minimum sample population —
 a clamped rectangle or an off-screen tile cannot silently pass.
 
-Ring placement: the oracle itself is ring-agnostic (it needs a live VisPy
-canvas).  ``tests/gpu_interaction`` runs it on real GL (ring 4, the only
-acceptance evidence); ``tests/ui/test_framebuffer_cpu_reference.py`` runs a
-default-ring smoke on offscreen software GL, which is faithful for this
-shader path (precedent: tests/ui/test_vispy_phase_framebuffer.py).
+Ring placement: the oracle itself is ring-agnostic. ``tests/gpu_interaction``
+runs the VisPy path on real GL and the PyQtGraph path on a real Qt display
+(ring 4, the only acceptance evidence); default-ring smokes keep both
+readback/mapping paths honest offscreen without constituting acceptance.
 """
 
 from __future__ import annotations
@@ -65,6 +65,13 @@ DEFAULT_TEXEL_GUARD = 0.25
 # Framebuffer-pixel inset from each tile edge: keeps montage gap/seam pixels
 # and antialiased tile borders out of the interior comparison.
 DEFAULT_EDGE_INSET_PX = 2.0
+
+# Qt's raster conversion and the NumPy shader mirror differ only at integer
+# rounding boundaries. Keep this independently calibrated from the GL path:
+# widening the GPU tolerance must not silently weaken PyQtGraph's CPU-LUT
+# gate.
+QT_RASTER_TOLERANCE = 2
+QT_RASTER_MAX_MISMATCH_FRACTION = 0.0
 
 
 @dataclass(frozen=True)
@@ -195,6 +202,328 @@ def cpu_reference_tile_image(payload, mapping) -> tuple[np.ndarray, np.ndarray]:
     return rgba[..., :3], rgba[..., 3] == 0
 
 
+def qt_scalar_reference_tile_image(
+    payload, mapping
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Return expected PyQtGraph scalar RGB, alpha mask, and gutter.
+
+    Page-backed Qt presentation expands resolved page samples over their
+    exact native bins before QImage rasterization. Reconstruct that expansion
+    through the backend-neutral ``PageBackedPresentation`` sampler rather
+    than importing PyQtGraph's assembly code. Incomplete page coverage uses
+    the payload's native semantic fallback, matching the declared contract.
+    """
+
+    backing = payload.page_backing
+    if backing is None:
+        rgb, background = cpu_reference_tile_image(payload, mapping)
+        gutter = int(payload.lod.gutter) if payload.lod is not None else 0
+        return rgb, background, gutter
+
+    if backing.resolved_page_set is None:
+        values = payload.semantic_data
+        if values is None:
+            raise AssertionError(
+                f"tile {payload.tile_number}: incomplete page-backed Qt "
+                "presentation has no native semantic fallback"
+            )
+        values = np.asarray(values)
+    else:
+        y0, y1, x0, x1 = backing.source_coverage_yx
+        values = backing.sample_presented_values_at_native_coordinates(
+            np.arange(y0, y1, dtype=np.int64),
+            np.arange(x0, x1, dtype=np.int64),
+        )
+    rgba = cpu_display_rgba(values, mapping)
+    return rgba[..., :3], rgba[..., 3] == 0, 0
+
+
+def _required_payloads_and_plan(win, tiles=None):
+    session = win.renderer._frame_session
+    required = {int(number) for number in session.required_tile_numbers()}
+    if not required:
+        raise AssertionError(
+            "physical-pixel CPU-reference oracle invoked with an empty "
+            "required tile set -- a vacuous comparison is not evidence"
+        )
+    compared = required if tiles is None else {int(number) for number in tiles}
+    if compared != required:
+        raise AssertionError(
+            "physical-pixel CPU-reference oracle requires an exact tile set: "
+            f"required={sorted(required)}, requested={sorted(compared)}"
+        )
+    payloads = dict(session.display_tile_payloads)
+    missing = sorted(required - {int(key) for key in payloads})
+    if missing:
+        raise AssertionError(
+            f"required tiles have no committed display payload: {missing}"
+        )
+    plan_tiles = {int(t.montage_index): t for t in session.plan.tiles}
+    missing_plan = sorted(required - set(plan_tiles))
+    if missing_plan:
+        raise AssertionError(
+            f"required tiles missing from the montage plan: {missing_plan}"
+        )
+    return required, payloads, plan_tiles
+
+
+def _assert_exact_tile_coverage(required, reports) -> None:
+    compared = {int(report.tile_number) for report in reports}
+    if compared != set(required) or len(reports) != len(required):
+        raise AssertionError(
+            "physical-pixel CPU-reference oracle compared a non-exact tile "
+            f"set: required={sorted(required)}, compared={sorted(compared)}, "
+            f"records={len(reports)}"
+        )
+
+
+def _qimage_rgba_array(image) -> np.ndarray:
+    """Copy a QImage into a tightly packed ``(h, w, 4)`` RGBA array."""
+
+    from pyqtgraph.Qt import QtGui
+
+    converted = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+    width = int(converted.width())
+    height = int(converted.height())
+    if width <= 0 or height <= 0:
+        raise AssertionError(
+            f"Qt raster readback returned an empty image: {width}x{height}"
+        )
+    stride = int(converted.bytesPerLine())
+    raw = np.frombuffer(
+        converted.constBits(),
+        dtype=np.uint8,
+        count=int(converted.sizeInBytes()),
+    ).reshape(height, stride)
+    return raw[:, : width * 4].reshape(height, width, 4).copy()
+
+
+def _view_to_viewport_affine(img_view) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``viewport_xy = matrix @ view_xy + offset``.
+
+    PyQtGraph's ViewBox transform is affine for this 2-D image path. Sampling
+    three points through public Qt/PyQtGraph mappings avoids sharing any tile
+    item transform or cached-pixmap assumption with the renderer.
+    """
+
+    from pyqtgraph.Qt import QtCore
+
+    view_box = img_view.getView()
+    viewport_transform = img_view.graphicsView.viewportTransform()
+
+    def mapped(x: float, y: float) -> np.ndarray:
+        scene = view_box.mapViewToScene(QtCore.QPointF(float(x), float(y)))
+        point = viewport_transform.map(scene)
+        return np.asarray((float(point.x()), float(point.y())), dtype=np.float64)
+
+    origin = mapped(0.0, 0.0)
+    matrix = np.column_stack(
+        (mapped(1.0, 0.0) - origin, mapped(0.0, 1.0) - origin)
+    )
+    if not np.all(np.isfinite(matrix)) or abs(float(np.linalg.det(matrix))) < 1e-12:
+        raise AssertionError(f"degenerate PyQtGraph view transform: {matrix!r}")
+    return matrix, origin
+
+
+def qt_raster_matches_cpu_reference(
+    win,
+    *,
+    tiles=None,
+    tolerance: int = QT_RASTER_TOLERANCE,
+    max_mismatch_fraction: float = QT_RASTER_MAX_MISMATCH_FRACTION,
+    min_samples_per_tile: int = DEFAULT_MIN_SAMPLES_PER_TILE,
+    texel_guard: float = DEFAULT_TEXEL_GUARD,
+    edge_inset_px: float = DEFAULT_EDGE_INSET_PX,
+) -> FrameReferenceReport:
+    """Compare the live PyQtGraph Qt-raster viewport with the CPU mirror.
+
+    The readback is the graphics viewport's painted pixels. Expected values
+    come only from committed payloads and semantic levels/LUT owners; the
+    backend's ``ImageItem.image`` and cached ``ImageItem.qimage`` are never
+    consulted, so a stale pixmap remains observable as a divergence.
+
+    This first PyQtGraph gate deliberately covers scalar payloads, where Qt
+    owns levels/LUT rasterization. Unsupported RGB/complex modes fail loudly
+    instead of passing outside the oracle's calibrated regime.
+    """
+
+    img_view = win.img_view
+    if getattr(img_view, "_vispy_canvas", None) is not None:
+        raise AssertionError(
+            "Qt-raster CPU-reference oracle needs the PyQtGraph backend "
+            "(found a VisPy canvas)"
+        )
+    layer = getattr(img_view, "_montage_tile_layer", None)
+    if layer is None:
+        raise AssertionError(
+            "Qt-raster CPU-reference oracle needs the PyQtGraph montage "
+            "tile layer"
+        )
+    required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
+
+    viewport = img_view.graphicsView.viewport()
+    pixmap = viewport.grab()
+    if pixmap.isNull():
+        raise AssertionError("PyQtGraph viewport grab returned a null pixmap")
+    frame = _qimage_rgba_array(pixmap.toImage())
+    frame_rgb = frame[..., :3].astype(np.int16)
+    background_color = img_view.graphicsView.backgroundBrush().color()
+    background = np.asarray(
+        (
+            int(background_color.red()),
+            int(background_color.green()),
+            int(background_color.blue()),
+        ),
+        dtype=np.int16,
+    )
+    viewport_width = max(1, int(viewport.width()))
+    viewport_height = max(1, int(viewport.height()))
+    scale_x = frame.shape[1] / viewport_width
+    scale_y = frame.shape[0] / viewport_height
+    view_matrix, view_offset = _view_to_viewport_affine(img_view)
+    inverse_view_matrix = np.linalg.inv(view_matrix)
+
+    reports: list[TileComparison] = []
+    for tile_number in sorted(required):
+        tile = plan_tiles[tile_number]
+        payload = payloads[tile_number]
+        if payload_display_kind(payload) != "scalar":
+            raise NotImplementedError(
+                "Qt-raster CPU-reference oracle currently supports scalar "
+                f"payloads only (tile {tile_number}: {payload.texture_kind})"
+            )
+        mapping = resolve_reference_mapping(win, payload)
+        expected_rgb, background_mask, gutter = qt_scalar_reference_tile_image(
+            payload, mapping
+        )
+        expected_rgb = expected_rgb.astype(np.int16)
+        tex_h, tex_w = expected_rgb.shape[:2]
+        inner_w = max(1e-9, float(tex_w - 2 * gutter))
+        inner_h = max(1e-9, float(tex_h - 2 * gutter))
+
+        corners_world = np.asarray(
+            [
+                [float(tile.x0), float(tile.y0)],
+                [float(tile.x0 + tile.width), float(tile.y0)],
+                [float(tile.x0), float(tile.y0 + tile.height)],
+                [float(tile.x0 + tile.width), float(tile.y0 + tile.height)],
+            ],
+            dtype=np.float64,
+        )
+        corners_viewport = corners_world @ view_matrix.T + view_offset
+        xs_fb = np.sort(corners_viewport[:, 0] * scale_x)
+        ys_fb = np.sort(corners_viewport[:, 1] * scale_y)
+        x_first = max(0, int(np.ceil(xs_fb[0] + edge_inset_px - 0.5)))
+        x_last = min(
+            frame.shape[1] - 1,
+            int(np.floor(xs_fb[-1] - edge_inset_px - 0.5)),
+        )
+        y_first = max(0, int(np.ceil(ys_fb[0] + edge_inset_px - 0.5)))
+        y_last = min(
+            frame.shape[0] - 1,
+            int(np.floor(ys_fb[-1] - edge_inset_px - 0.5)),
+        )
+        if x_last < x_first or y_last < y_first:
+            reports.append(
+                TileComparison(
+                    tile_number=tile_number,
+                    samples=0,
+                    mismatched=0,
+                    worst_diff=0,
+                    mean_diff=0.0,
+                    detail="tile rect is off-viewport or degenerate",
+                )
+            )
+            continue
+
+        px = np.arange(x_first, x_last + 1, dtype=np.int64)
+        py = np.arange(y_first, y_last + 1, dtype=np.int64)
+        grid_x, grid_y = np.meshgrid(px, py)
+        grid_x = grid_x.ravel()
+        grid_y = grid_y.ravel()
+        centers_viewport = np.column_stack(
+            (
+                (grid_x + 0.5) / scale_x,
+                (grid_y + 0.5) / scale_y,
+            )
+        )
+        world = (centers_viewport - view_offset) @ inverse_view_matrix.T
+        frac_x = (world[:, 0] - float(tile.x0)) / float(tile.width)
+        frac_y = (world[:, 1] - float(tile.y0)) / float(tile.height)
+        inside = (
+            (frac_x > 0.0)
+            & (frac_x < 1.0)
+            & (frac_y > 0.0)
+            & (frac_y < 1.0)
+        )
+        texel_x = gutter + frac_x * inner_w
+        texel_y = gutter + frac_y * inner_h
+        frac_tx = texel_x - np.floor(texel_x)
+        frac_ty = texel_y - np.floor(texel_y)
+        guarded = (
+            (frac_tx >= texel_guard)
+            & (frac_tx <= 1.0 - texel_guard)
+            & (frac_ty >= texel_guard)
+            & (frac_ty <= 1.0 - texel_guard)
+        )
+        select = inside & guarded
+        if not np.any(select):
+            reports.append(
+                TileComparison(
+                    tile_number=tile_number,
+                    samples=0,
+                    mismatched=0,
+                    worst_diff=0,
+                    mean_diff=0.0,
+                    detail="no pixel centers survive the interior/texel guards",
+                )
+            )
+            continue
+        index_x = np.clip(
+            np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1
+        )
+        index_y = np.clip(
+            np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1
+        )
+        expected = expected_rgb[index_y, index_x]
+        is_background = background_mask[index_y, index_x]
+        if np.any(is_background):
+            expected = expected.copy()
+            expected[is_background] = background
+        actual = frame_rgb[grid_y[select], grid_x[select]]
+        diff = np.abs(actual - expected).max(axis=-1)
+        mismatched = diff > tolerance
+        worst_index = int(np.argmax(diff))
+        detail = ""
+        if np.any(mismatched):
+            detail = (
+                f"worst at viewport ({int(grid_x[select][worst_index])}, "
+                f"{int(grid_y[select][worst_index])}) texel "
+                f"({int(index_x[worst_index])}, {int(index_y[worst_index])}): "
+                f"actual={tuple(int(v) for v in actual[worst_index])} "
+                f"expected={tuple(int(v) for v in expected[worst_index])}"
+            )
+        reports.append(
+            TileComparison(
+                tile_number=tile_number,
+                samples=int(diff.size),
+                mismatched=int(np.count_nonzero(mismatched)),
+                worst_diff=int(diff[worst_index]),
+                mean_diff=float(diff.mean()),
+                detail=detail,
+            )
+        )
+
+    _assert_exact_tile_coverage(required, reports)
+    return FrameReferenceReport(
+        tiles=tuple(reports),
+        frame_shape=(int(frame.shape[0]), int(frame.shape[1])),
+        tolerance=int(tolerance),
+        max_mismatch_fraction=float(max_mismatch_fraction),
+        min_samples_per_tile=int(min_samples_per_tile),
+    )
+
+
 def frame_matches_cpu_reference(
     win,
     *,
@@ -220,29 +549,7 @@ def frame_matches_cpu_reference(
             "framebuffer CPU-reference oracle needs the VisPy backend "
             "(no _vispy_canvas on this image view)"
         )
-    session = win.renderer._frame_session
-    required = (
-        {int(number) for number in session.required_tile_numbers()}
-        if tiles is None
-        else {int(number) for number in tiles}
-    )
-    if not required:
-        raise AssertionError(
-            "framebuffer CPU-reference oracle invoked with an empty required "
-            "tile set — a vacuous comparison is not evidence"
-        )
-    payloads = dict(session.display_tile_payloads)
-    missing = sorted(required - {int(key) for key in payloads})
-    if missing:
-        raise AssertionError(
-            f"required tiles have no committed display payload: {missing}"
-        )
-    plan_tiles = {int(t.montage_index): t for t in session.plan.tiles}
-    missing_plan = sorted(required - set(plan_tiles))
-    if missing_plan:
-        raise AssertionError(
-            f"required tiles missing from the montage plan: {missing_plan}"
-        )
+    required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
 
     frame = np.asarray(canvas.render())
     if frame.ndim != 3 or frame.shape[-1] not in (3, 4):
@@ -374,6 +681,7 @@ def frame_matches_cpu_reference(
             )
         )
 
+    _assert_exact_tile_coverage(required, reports)
     return FrameReferenceReport(
         tiles=tuple(reports),
         frame_shape=(int(frame.shape[0]), int(frame.shape[1])),
@@ -396,6 +704,35 @@ def assert_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
     if failures:
         lines = [
             "framebuffer diverges from the CPU semantic reference "
+            f"(tolerance={report.tolerance}/255, "
+            f"max_mismatch_fraction={report.max_mismatch_fraction}, "
+            f"min_samples={report.min_samples_per_tile}):"
+        ]
+        for tile in failures:
+            lines.append(
+                f"  tile {tile.tile_number}: samples={tile.samples} "
+                f"mismatched={tile.mismatched} "
+                f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
+                f"mean={tile.mean_diff:.2f}"
+                + (f" [{tile.detail}]" if tile.detail else "")
+            )
+        healthy = len(report.tiles) - len(failures)
+        lines.append(
+            f"  ({healthy}/{len(report.tiles)} required tiles within "
+            "tolerance)"
+        )
+        raise AssertionError("\n".join(lines))
+    return report
+
+
+def assert_qt_raster_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
+    """Asserting form of :func:`qt_raster_matches_cpu_reference`."""
+
+    report = qt_raster_matches_cpu_reference(win, **kwargs)
+    failures = report.failures()
+    if failures:
+        lines = [
+            "Qt raster diverges from the CPU semantic reference "
             f"(tolerance={report.tolerance}/255, "
             f"max_mismatch_fraction={report.max_mismatch_fraction}, "
             f"min_samples={report.min_samples_per_tile}):"

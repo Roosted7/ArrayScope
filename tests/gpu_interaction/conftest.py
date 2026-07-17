@@ -442,18 +442,22 @@ class Harness:
         """Framebuffer vs CPU semantic reference for every required tile.
 
         The generalization of :meth:`assert_tile_identity_ramp` mandated by
-        docs/testing/stress-and-trace-strategy.md (addendum law 2): reads the
-        real VisPy canvas framebuffer and compares each required tile's
-        interior against ``cpu_display_rgba`` of the committed payload values
-        (component/scale/levels/LUT applied), tolerating only GPU rounding.
-        Returns the per-tile :class:`FrameReferenceReport`.
+        docs/testing/stress-and-trace-strategy.md (addendum law 2): reads
+        either the real VisPy canvas or PyQtGraph's painted Qt viewport and
+        compares each required tile's interior against ``cpu_display_rgba``
+        of the committed payload values (component/scale/levels/LUT applied),
+        tolerating only calibrated raster rounding. Returns the per-tile
+        :class:`FrameReferenceReport`.
         """
 
         from tests.oracles.framebuffer_reference import (
             assert_frame_matches_cpu_reference,
+            assert_qt_raster_matches_cpu_reference,
         )
 
         self.prepare_image_layer_pixel_sampling()
+        if getattr(self.win.img_view, "_vispy_canvas", None) is None:
+            return assert_qt_raster_matches_cpu_reference(self.win, **kwargs)
         return assert_frame_matches_cpu_reference(self.win, **kwargs)
 
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:

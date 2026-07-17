@@ -80,6 +80,24 @@ def use_vispy_backend(extra_settings=None):
     return settings
 
 
+def use_pyqtgraph_backend(extra_settings=None):
+    """Point QSettings at the PyQtGraph backend; returns the settings object."""
+
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+
+    clear_arrayscope_settings()
+    settings = QtCore.QSettings()
+    settings.setValue(
+        "image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value
+    )
+    for key, value in (extra_settings or {}).items():
+        settings.setValue(key, value)
+    settings.sync()
+    return settings
+
+
 def restore_default_backend(settings):
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
 

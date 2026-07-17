@@ -42,11 +42,12 @@ Front page for test policy. Deep dives:
 | Ring | What | Trigger | Command |
 |---|---|---|---|
 | 0 — fast Qt-free loop | kernel/render/presentation semantics (~0.5 s) | while editing | `pytest tests/kernel tests/render tests/presentation -q -n 0` |
-| 1 — default offscreen suite | everything except stress/gpu_interaction; ~2081 tests, xdist (workers capped at half cores — GL segfault guard) | every `pytest`; **CI on every push/PR** (`.github/workflows/ci.yml`, incl. 3.10–3.14 compat, coverage, strict-UI, 3-OS wheel validation) | `QT_QPA_PLATFORM=offscreen pytest tests -q` |
+| 1 — default offscreen suite | everything except stress/gpu_interaction; ~2300 tests, xdist (workers capped at half cores — GL segfault guard) | every `pytest`; **CI on every push/PR** (`.github/workflows/ci.yml`, incl. 3.10–3.14 compat, coverage, strict-UI, 3-OS wheel validation) | `QT_QPA_PLATFORM=offscreen pytest tests -q` |
 | 2 — serial artifact ring | canonical screenshot/JSONL artifacts | CI (`-n 0` steps); before UI-visual claims | `pytest tests/ui/test_qt_smoke_artifacts.py -n 0` |
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`) |
 | 4 — real-GL/Wayland acceptance | `tests/gpu_interaction` pixel/heartbeat harness + live gate tests; the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
 | journey matrix — real Wayland, serial | `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll} × {VisPy, PyQtGraph}`; JSONL phase ordering/priority/LOD plus screenshot-output latency | **pre-merge for every `display/`, `render/`, `kernel/`, or `window/` change** | `XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/journey-matrix-$(date +%F)` |
+| 4 — real-display/GL Wayland acceptance | `tests/gpu_interaction` physical-pixel/heartbeat harness + live gate tests (real GL for VisPy, real Qt raster for PyQtGraph); the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
 | benchmarks/harness | `profile_montage_workflow`, `rendering_benchmarks`, `profile_scroll_input` + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow --backend {vispy,pyqtgraph}` (cwd = repo root for `data/` paths) |
 
 The 5 s interaction limit applies to each step in every ring and harness, not
@@ -55,8 +56,8 @@ values above the limit are clamped, and the architecture guard rejects local
 settlement-timeout owners.
 
 **Enforcement gap, stated honestly:** rings 3–4 are machine-bound (real
-Wayland, real GPU, local data) and cannot run in CI — CI is entirely
-offscreen software-GL. The rule is therefore personal, not scheduled:
+Wayland, real GPU where applicable, local data) and cannot run in CI — CI is
+entirely offscreen software-GL. The rule is therefore personal, not scheduled:
 **whoever (human or agent) changes a display/render/kernel/window lane
 runs rings 3–4 themselves before claiming the change works**, and records
 the run in the commit or PR description. No background runner will catch
@@ -107,19 +108,27 @@ the output oracles above. A 180 s whole-process watchdog remains a blocking
 failure, but it cannot turn a step that exceeded 5 s into a pass.
 
 ## Known suite state (2026-07-16)
+## Known suite state (2026-07-17)
 
-- ~2081 passed / 24 skipped (~124 s parallel). The skips are the opt-in
-  rings.
+- 2026-07-17 branch run: 2277 passed / 34 skipped / 1 xfailed (~116 s
+  parallel), plus one pre-existing architecture-guard failure also reproduced
+  on untouched `main` (`test_lod_demand_freshness.py` owns two uncapped
+  `waitUntil` timeouts). The skips are the opt-in rings.
 - Open xfails that are *tracked work, not noise*: churn-convergence
   (queue step 1, strict=False), complex64 PyQtGraph deadlock (standing
   lane, strict=True), tiny-3-slices raciness (strict=False), and live-camera
   LOD-demand freshness after zoom (strict=True).
 - `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
+  lane, strict=True), tiny-3-slices raciness (strict=False).
+- `tests/gpu_interaction`: 20/20 green on real Wayland (2026-07-17 full
   serial run) — the 4 P9-era baseline failures no longer reproduce post-G5.
-  The ring now includes the framebuffer-to-CPU reference oracle gate
-  (`test_framebuffer_cpu_reference.py`; oracle in
-  `tests/oracles/framebuffer_reference.py`, default-ring smoke in
-  `tests/ui/test_framebuffer_cpu_reference.py`).
+  The ring now includes physical-pixels-to-CPU reference gates for both
+  first-class backends: VisPy framebuffer
+  (`test_framebuffer_cpu_reference.py`) and PyQtGraph Qt raster
+  (`test_pyqtgraph_raster_cpu_reference.py`). Their shared oracle is
+  `tests/oracles/framebuffer_reference.py`; default-ring smokes are
+  `tests/ui/test_framebuffer_cpu_reference.py` and
+  `tests/ui/test_pyqtgraph_raster_cpu_reference.py`.
 - Shared fakes: `tests/display/vispy_test_utils.py`; live-window harness:
   `tests/ui/helpers.py` — use these, don't re-roll.
 
