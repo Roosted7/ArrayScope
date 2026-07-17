@@ -22,11 +22,10 @@ this file says *what, in what order, and when it counts as done*.
 
 | # | Step | Exit gate |
 |---|---|---|
-| 1 | **G5 remainder — sparse multiresolution pyramid.** Migrate the live ladder from whole-plane keys to logical chunks feeding the resolution seam; finish source-grid materialization and reducer families. Implementation contract: [`redesign/g5-source-grid-pyramid-2026-07-16.md`](redesign/g5-source-grid-pyramid-2026-07-16.md). | MERGED 2026-07-17 — see Done log |
-| 2 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 3 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
-| 4 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
-| 5 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
+| 1 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
+| 2 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
+| 3 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
+| 4 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
 
@@ -66,10 +65,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   a release cycle shows the counter at zero.
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
-- **Branch/worktree cleanup** — delete merged branches and stale worktrees
-  (list in the 2026-07-16 restructure notes; `redesign-r8-marathon` stays
-  read-only until its Tier-2/3 salvage is decided per
-  [redesign/marathon-salvage.md](redesign/marathon-salvage.md)).
 
 ## Done (most recent first — one line each, evidence linked)
 
@@ -84,7 +79,7 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   which also closes the "4 pre-existing P9-era baseline failures" row: none
   reproduce post-G5.
 - 2026-07-17 — **ImageViewShell duplication lane closed**
-  (`1bae618a..36f028c1`): the shell is now the single owner of ROI/
+  (`b657bb5d..d71d4c8e`): the shell is now the single owner of ROI/
   interaction emphasis, the tiled-commit skeleton, and tiled-layer queries;
   PyQtGraph tile mechanics moved to `ImageView2D` behind declared backend
   hooks; VisPy's seven override+mirror methods and its duplicate
