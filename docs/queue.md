@@ -65,6 +65,19 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-18 — **One COVERAGE→REFINE scheduling-policy owner:**
+  `ProgressiveSchedulingPolicy` now owns the per-required-scope phase,
+  lifecycle first-pixel close predicate, and refinement replan edge. Ladder,
+  admission/lane quotas, level/histogram work, atomic handoff, and commit
+  batching read its verdict; duplicate first-pass derivations and the
+  PyQtGraph first-commit cap bypass are deleted. Red-first contract coverage:
+  [`test_progressive_scheduling.py`](../tests/render/test_progressive_scheduling.py)
+  and bounded PyQtGraph first-frame assertions in
+  [`test_montage_backend.py`](../tests/window/test_montage_backend.py).
+  Live evidence: real-Wayland raw fills settled exact targets 60/60 on both
+  backends with zero `trace_verify` violations; VisPy submitted zero phase-2
+  jobs before lifecycle coverage close; ring 3 4 passed/1 skipped/1 xpassed,
+  ring 4 20/20 passed.
 - 2026-07-17 — **Output-driven journey matrix delivered** (standing lane):
   `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll}` × both
   backends now records gesture-scoped JSONL + screenshot timelines and gates
@@ -117,8 +130,8 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 - 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
   route, reducer families, page cache, both-backend consumers, legacy
   whole-plane ownership deleted with a resurrection guard; the progressive
-  presentation contract (docs/architecture/rendering.md) is enforced at the
-  commit gate AND the scheduler (coverage before refinement, plan-wide);
+  presentation contract (docs/architecture/rendering.md) is enforced at work
+  submission (coverage before refinement, plan-wide);
   live evidence: PyQtGraph raw 272/272 in ~11.4 s coverage-then-refine,
   churn ring green, zero refinement-during-pass commits on both backends
   (tests/artifacts/g5-coverage-first-*-2026-07-17). Red and owned by the

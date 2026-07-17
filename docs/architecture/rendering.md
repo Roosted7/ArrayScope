@@ -242,16 +242,31 @@ COMPUTE GOES, never about what may be shown:
    tiles never outrank missing tiles.
 4. **Quality upgrades never blank.** Refinement replaces pixels atomically
    per tile; eviction returns to coarse pixels, never black (ADR 0056).
-5. **Phase-1 completion is a robust, owned fact** — lifecycle first-pixel
-   coverage of the required scope — with the phase-2 replan armed on its
-   closing edge. A stuck-open phase silently starves refinement forever
-   (PyQtGraph zoom regression, 2026-07-18: LOD never upgraded until a
-   reindex).
+5. **`ProgressiveSchedulingPolicy` is the one phase owner.** Each frame
+   session gives it the required lifecycle scope (slot plus semantic source)
+   and reads its immutable `SchedulingVerdict`; no ladder, admission wave,
+   kernel lane, level/histogram producer, atomic transaction, or commit batch
+   may derive coverage state independently. The machine opens `COVERAGE` for
+   a progressive required-scope generation and closes it only when
+   `TileLifecycle.first_pixels_presented(required_tiles)` is true. That close
+   edge changes the verdict to `REFINE` and owns the single refinement
+   replan. Shader-windowing scopes always open `COVERAGE`; CPU-LUT scopes do
+   so when resident LOD makes them progressive. A stuck-open phase silently
+   starves refinement forever (PyQtGraph
+   zoom regression, 2026-07-18: LOD never upgraded until a reindex).
 6. **CPU-LUT single-pass mode (PyQtGraph):** when the backend runs one
-   quality pass there is no phase 1: final levels are decided before the
-   first tile renders, and rough levels/histogram publication is skipped
-   entirely. Rough→refined level phasing is shader-windowing (VisPy)
-   behavior only.
+   quality pass there is no coverage/refinement split: final levels are
+   decided before the first tile renders, and rough levels/histogram
+   publication is skipped entirely. Rough→refined level phasing is
+   shader-windowing (VisPy) behavior only.
+
+Work classification follows the presentation dependency, not a historical
+function or lane name. In particular, PyQtGraph semantic level evidence and
+histogram aggregation required to make the first CPU-LUT pixels valid are
+`COVERAGE` work; the equivalent post-first-pixel updates are `REFINEMENT`.
+Both forms ask the policy owner. Presentation remains acknowledge-driven and
+bounded on both backends; it never advances the machine from evaluation,
+queue, or commit-emission counts.
 
 ## Presentation performance contract
 
