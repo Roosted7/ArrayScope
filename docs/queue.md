@@ -67,6 +67,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
+  route, reducer families, page cache, both-backend consumers, legacy
+  whole-plane ownership deleted with a resurrection guard; the progressive
+  presentation contract (docs/architecture/rendering.md) is enforced at the
+  commit gate AND the scheduler (coverage before refinement, plan-wide);
+  live evidence: PyQtGraph raw 272/272 in ~11.4 s coverage-then-refine,
+  churn ring green, zero refinement-during-pass commits on both backends
+  (tests/artifacts/g5-coverage-first-*-2026-07-17). Red and owned by the
+  perf-bars program: 50 ms GUI-callback, VisPy 4.5 s draw settle.
+
 - 2026-07-16 — **Churn-convergence stall net closed** (members 4+5 of the
   deferred-stage lost-wakeup family: stale-render-generation discard/resubmit
   livelock in stage-plan/stage-value completions; exact-pass candidacy
