@@ -1487,6 +1487,9 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
 
         assert current.tile_compute_cache_hits >= 59
         assert int(win.operation_evaluator.image_evaluations) - evaluations_before <= 1
+        if backend == "pyqtgraph":
+            assert current.atomic_successor_pending is False
+            assert getattr(current, "_atomic_prepared_transaction", None) is None
         assert observations
         visible_counts = [visible for _phase, visible, _compatible, _bad in observations]
         assert all(visible > 0 for visible in visible_counts), observations

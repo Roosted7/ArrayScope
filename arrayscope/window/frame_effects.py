@@ -1468,14 +1468,22 @@ class FramePipelineEffects:
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
             atomic_successor_pending = _atomic_successor_handoff_pending(session)
+            if cpu_backend and atomic_successor_pending:
+                # PyQtGraph presents a compatible successor cumulatively in
+                # bounded ImageItem batches. Retaining the old atomic marker
+                # until COVERAGE closed let a later, viewport-narrow batch
+                # reuse the prepared transaction as a complete handoff: the
+                # backend then hid every non-batch item and lifecycle lost 28
+                # physical identities at idle. Atomic handoff remains a
+                # shader-backend contract; the CPU backend consumes this
+                # transition as bounded progressive presentation.
+                session.atomic_successor_pending = False
+                session._atomic_prepared_transaction = None
+                atomic_successor_pending = False
             refinement_admissible = bool(
                 session.scheduling_policy.verdict.refinement_admissible
             )
-            cpu_atomic_successor = bool(
-                cpu_backend
-                and atomic_successor_pending
-                and refinement_admissible
-            )
+            cpu_atomic_successor = False
             shader_atomic_successor = bool(
                 capabilities.shader_windowing
                 and atomic_successor_pending
@@ -1636,9 +1644,12 @@ class FramePipelineEffects:
             )
             renderer._last_montage_commit_presented_before = len(session.lifecycle.presented_tiles)
             prepared_atomic = getattr(session, "_atomic_prepared_transaction", None)
-            prepared_atomic_current = _prepared_atomic_transaction_current(
-                session,
-                prepared_atomic,
+            prepared_atomic_current = bool(
+                (cpu_atomic_successor or shader_atomic_successor)
+                and _prepared_atomic_transaction_current(
+                    session,
+                    prepared_atomic,
+                )
             )
             renderer._last_montage_atomic_prepared_reused = bool(
                 prepared_atomic_current

@@ -75,8 +75,8 @@ every applicable journey/backend cell:
    is open (`trace_verify` independently enforces
    `no_phase2_submit_during_coverage`);
 2. at least the journey/backend's declared `N` payload commits, every commit
-   within its emitted cap (only an atomic successor or PyQtGraph's documented
-   first CPU frame may be unbounded), with rank correlation against the
+   within its emitted cap (only a shader-backend atomic successor may be
+   unbounded), with rank correlation against the
    canonical current-camera scheduling ranks when two or more ranked payloads make
    ordering observable (minimum correlation `0.50`);
 3. session LOD demand matches demand recomputed from the live camera within
@@ -91,10 +91,11 @@ every applicable journey/backend cell:
 
 The `N` values live beside the oracle in
 `arrayscope.tools.journey_matrix.MIN_COMMITS`: cold VisPy and scroll shuffles
-must visibly progress through at least two bounded commits; PyQtGraph's first
-CPU-windowed frame is one complete transaction; zoom-out may legitimately
-reuse finer resident pixels without a payload commit. Every oracle has a
-fault-injection test in `tests/app/test_journey_matrix.py`.
+must visibly progress through at least two bounded commits; PyQtGraph's cold
+CPU-windowed fill must do the same rather than appearing in one complete pop;
+zoom-out may legitimately reuse finer resident pixels without a payload
+commit. Every oracle has a fault-injection test in
+`tests/app/test_journey_matrix.py`.
 
 For a quick software-GL diagnostic, append `--offscreen-smoke`. It exercises
 the trace/replay plumbing and PyQtGraph output trajectory, but it is not a

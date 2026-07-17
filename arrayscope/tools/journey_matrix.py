@@ -28,7 +28,7 @@ MIN_PRIORITY_CORRELATION = 0.50
 DRIVER_WATCHDOG_S = 180.0
 MIN_COMMITS = {
     ("vispy", "cold_fill"): 2,
-    ("pyqtgraph", "cold_fill"): 1,  # CPU-LUT single-pass contract.
+    ("pyqtgraph", "cold_fill"): 2,
     ("vispy", "zoom_in"): 1,
     ("pyqtgraph", "zoom_in"): 1,
     ("vispy", "zoom_out"): 0,  # Finer retained pixels need no payload commit.

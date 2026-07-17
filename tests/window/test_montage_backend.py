@@ -1274,6 +1274,8 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
     assert spec.lane == Lane.DISPLAY_PREVIEW
     assert spec.priority == Priority.VISIBLE_IMAGE
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+    assert spec.presentation_phase == 1
+    assert spec.coverage_pass_open is True
 
 
 def test_first_shader_payload_level_evidence_uses_visible_lane():
@@ -1322,6 +1324,8 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
     assert spec.lane == Lane.DISPLAY_PREVIEW
     assert spec.priority == Priority.VISIBLE_IMAGE
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+    assert spec.presentation_phase == 1
+    assert spec.coverage_pass_open is True
 
 
 

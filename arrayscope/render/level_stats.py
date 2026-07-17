@@ -57,11 +57,17 @@ MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH = 16
 MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
 
 
-def _presentation_trace_fields(session, phase: int) -> dict[str, object]:
+def _presentation_trace_fields(
+    session,
+    work: SchedulingWork,
+) -> dict[str, object]:
     """Structured phase ownership for the trajectory trace oracle."""
 
+    work = SchedulingWork(work)
     return {
-        "presentation_phase": int(phase),
+        "presentation_phase": (
+            1 if work is SchedulingWork.COVERAGE else 2
+        ),
         "coverage_pass_open": bool(
             session.scheduling_policy.verdict.coverage_open
         ),
@@ -532,12 +538,7 @@ class LevelStatsService:
             handle_ui_exception("montage histogram aggregate", exc)
 
         task_key = ("montage_histogram_aggregate", generation)
-        trace_fields = _presentation_trace_fields(
-            session,
-            1
-            if not bool(getattr(session, "first_pass_histogram_published", False))
-            else 2,
-        )
+        trace_fields = _presentation_trace_fields(session, work_class)
         if visible_dependency:
             handle = self.win.kernel.submit(
                 TaskSpec(
@@ -777,7 +778,7 @@ class LevelStatsService:
                     ),
                     reusable=True,
                     pass_token=True,
-                    **_presentation_trace_fields(session, 2),
+                    **_presentation_trace_fields(session, work_class),
                 ),
                 on_done=done,
                 on_stale=stale,
@@ -797,7 +798,7 @@ class LevelStatsService:
                 lane=WorkLane.HISTOGRAM_REFINEMENT,
                 max_items=max_items,
                 pass_token=True,
-                **_presentation_trace_fields(session, 2),
+                **_presentation_trace_fields(session, work_class),
             )
         if handle is None:
             release(session)
@@ -1304,7 +1305,7 @@ class LevelStatsService:
                     supersession=Supersession(("montage-level-evidence", session.key), generation),
                     reusable=True,
                     pass_token=False,
-                    **_presentation_trace_fields(session, 2),
+                    **_presentation_trace_fields(session, work_class),
                 ),
                 on_done=done,
                 on_stale=stale,
@@ -1324,7 +1325,7 @@ class LevelStatsService:
                 priority=Priority.HISTOGRAM,
                 lane=WorkLane.HISTOGRAM_REFINEMENT,
                 max_items=len(batch),
-                **_presentation_trace_fields(session, 2),
+                **_presentation_trace_fields(session, work_class),
             )
         if handle is None:
             if release_generation(session):
@@ -1409,7 +1410,7 @@ class LevelStatsService:
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence-continuation", session.key), generation),
                     pass_token=False,
-                    **_presentation_trace_fields(session, 2),
+                    **_presentation_trace_fields(session, work_class),
                 ),
                 on_done=done,
                 on_stale=stale,
@@ -1428,7 +1429,7 @@ class LevelStatsService:
                 priority=Priority.HISTOGRAM,
                 lane=WorkLane.HISTOGRAM_REFINEMENT,
                 max_items=1,
-                **_presentation_trace_fields(session, 2),
+                **_presentation_trace_fields(session, work_class),
             )
         if handle is None:
             release_generation(session)
@@ -1654,7 +1655,7 @@ class LevelStatsService:
             priority=Priority.HISTOGRAM,
             lane=WorkLane.HISTOGRAM_REFINEMENT,
             max_items=len(batch),
-            **_presentation_trace_fields(session, 2),
+            **_presentation_trace_fields(session, SchedulingWork.REFINEMENT),
         )
         if handle is None:
             for _source_index, _source, rendered in reversed(batch):

@@ -982,6 +982,24 @@ class FrameSession:
                     continue
                 seen[key] = marker
                 self.record_tile_payload(payload)
+        self._rearm_required_first_pixel_payloads()
+
+    def _rearm_required_first_pixel_payloads(self) -> tuple[int, ...]:
+        """Arm retained payloads whose required slots are not physically drawn."""
+
+        rearmed: list[int] = []
+        for tile_number in self.required_tile_numbers():
+            index = int(tile_number)
+            record = self.lifecycle.peek(index)
+            if record is not None and record.first_pixel_presented:
+                continue
+            payload = self.display_tile_payloads.get(index)
+            if payload is None or not self.lifecycle.payload_is_current(index, payload):
+                continue
+            self.dirty_payloads[index] = None
+            self.pending_payload_upserts[index] = None
+            rearmed.append(index)
+        return tuple(rearmed)
 
     def record_tile_payload(self, payload) -> None:
         ref = payload_ref_from_display_payload(payload)
@@ -2604,8 +2622,12 @@ class FrameSession:
         unpresented_tiles = tuple(
             int(tile)
             for tile in active
-            if int(tile) not in self.lifecycle.presented_tiles
+            if (
+                (record := self.lifecycle.peek(int(tile))) is None
+                or not record.first_pixel_presented
+            )
         )
+        self._rearm_required_first_pixel_payloads()
         correctness_priority_tiles = tuple(
             dict.fromkeys(
                 (

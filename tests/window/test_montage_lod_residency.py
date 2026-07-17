@@ -6615,6 +6615,43 @@ def test_visible_parked_payload_rearms_instead_of_settling_missing():
     assert 2 not in session.lifecycle.parked_tiles
 
 
+def test_physically_hidden_presented_payload_rearms_on_scope_expansion():
+    session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 20))
+    _state, initial = session.build_tile_presentation({})
+    identities = {
+        int(tile): tile_ack_identity(payload)
+        for tile, payload in initial.upserts.items()
+    }
+    report = TileCommitReport(
+        presented_tiles=frozenset(initial.upserts),
+        committed_upserts=frozenset(initial.upserts),
+        presented_identities=identities,
+    )
+    session.acknowledge_tile_presentation(initial, report)
+    session.mark_presented(report.presented_tiles)
+    assert session.lifecycle.first_pixels_presented(range(4))
+
+    # A narrow backend visibility commit keeps only slot 0 physically drawn.
+    # The semantic payloads remain reusable when the required scope expands.
+    session.lifecycle.backend_presented_snapshot({0: identities[0]})
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    session.sync_lifecycle_scope()
+    assert set(session.pending_payload_upserts) == {1, 2, 3}
+
+    _state, repair = session.build_tile_presentation(
+        {},
+        max_upserts=2,
+        pace_resident_retargets=True,
+    )
+
+    assert set(repair.upserts).issubset({1, 2, 3})
+    assert len(repair.upserts) == 2
+    assert set(session.pending_payload_upserts).issuperset(
+        {1, 2, 3}.difference(repair.upserts)
+    )
+
+
 def test_source_changed_active_claim_does_not_block_retargeted_prepare():
     """Active request dedupe is source-aware, not montage-slot-only."""
 

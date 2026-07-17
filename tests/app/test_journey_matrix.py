@@ -120,6 +120,7 @@ def test_matrix_declares_all_ten_backend_journey_cells():
     assert set(MIN_COMMITS) == {
         (backend, journey) for backend in BACKENDS for journey in JOURNEYS
     }
+    assert MIN_COMMITS[("pyqtgraph", "cold_fill")] >= 2
 
 
 def test_phase_order_oracle_fault_injection(tmp_path):
