@@ -64,6 +64,10 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
    resident pages is a presentation rebind, not cold work: pan/zoom must bind
    the whole set immediately even while the gesture remains active. Only a
    physically cold successor may wait for the interaction-stop edge.
+   Backend-safe drawability is not target settlement. A same-source fallback
+   may stay visible to prevent black, but it must not suppress the exact
+   producer unless the lifecycle's canonical quality/LOD rule says the target
+   is satisfied.
    Reduced pages may expose an explicitly presentation-qualified sample so a
    diagnostic can explain the pixel that was drawn. That is not permission to
    answer an exact hover, histogram, ROI, measurement, or export read: those

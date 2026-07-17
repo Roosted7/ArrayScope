@@ -5149,7 +5149,13 @@ def test_shared_desired_claim_blocks_direct_tile_target():
     assert 0 not in session.loading_tiles
 
 
-def test_presented_shared_desired_payload_blocks_direct_tile_target():
+def test_presented_equal_level_fallback_keeps_pixels_without_blocking_exact_target():
+    """Drawable fallback and target settlement are separate contracts.
+
+    An equal-LOD fallback remains on screen while exact work runs, but it must
+    not be counted as exact coverage and suppress the target's only producer.
+    """
+
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
@@ -5186,8 +5192,8 @@ def test_presented_shared_desired_payload_blocks_direct_tile_target():
         reason="desired display level",
     )
 
-    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
-    assert not session.pending_tiles
+    assert effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert session.pending_tiles
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -5265,12 +5271,13 @@ def test_dead_identity_display_payload_does_not_cover_direct_tile_target():
     assert not effects._display_payload_covers_display_target(0, tile, step)
     assert effects.prepare_rung(_pipeline_intent_for(session), step)
 
-    # Control: the same payload minted under the CURRENT semantics is live
-    # fallback coverage at the requested level and must keep denying the
-    # duplicate per-tile producer.
+    # Control: an exact payload minted under the CURRENT semantics really
+    # satisfies the requested target and must keep denying the duplicate
+    # per-tile producer.
     session.display_tile_payloads[0] = replace(
         session.display_tile_payloads[0],
-        tile_identity=identity(("range", None), quality="fallback"),
+        quality="exact",
+        tile_identity=identity(("range", None), quality="exact"),
     )
     session.enqueue_pending_tile(tile)
 

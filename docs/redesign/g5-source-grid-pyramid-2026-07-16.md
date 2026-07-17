@@ -164,9 +164,17 @@ Equal-level and genuinely coarser fallback remain unsettled. The real-Wayland
 artifact
 `tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-settlement-fixed/`
 reaches `required_target_settled=True` without producing L6 replacement work.
-The broader profile remains red for presentation continuity, deep-checkpoint
-coverage, and input/event-loop latency; those failures stay separate from the
-now-single-owner settlement rule.
+The later real-data scrub gate exposed the complementary producer-side drift:
+`FramePipelineEffects` asked the backend identity rule whether an equal-level
+fallback was safe to draw, then treated that answer as proof that exact work
+was already covered. The fallback correctly prevented black while tiles 0--7
+were left with no exact claim or task. Producer suppression now delegates to
+the same `TilePayloadRef.satisfies_target` lifecycle rule as settlement;
+backend fallback drawability remains unchanged. A parsed 64-slice, 60-step
+real-Wayland scrub changes from 56/64 exact acknowledgements plus a stall to
+64/64, zero stalls, and zero identity rejections within the unchanged five-
+second step cap. Before/after traces and verifier output are preserved under
+`tests/artifacts/g5-probe-scrub-lost-wakeup-2026-07-17/`.
 
 The saved-session zoom/pan/FFT trace then exposed a second correctness defect:
 the complete predecessor surface collapsed to 16 or 69 drawn tiles when the

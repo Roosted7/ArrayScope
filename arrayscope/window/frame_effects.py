@@ -20,7 +20,7 @@ from arrayscope.display.model.commit import CommitKind, DisplayPayload, Presenta
 from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.display.model.presentation_generation import levels_match
-from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target, tile_ack_identity
+from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
@@ -36,6 +36,7 @@ from arrayscope.operations.planner import final_region_for_request
 from arrayscope.operations.regions import region_contains, region_is_full
 from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.stage_fanin import StageFanInState
+from arrayscope.presentation import payload_ref_from_display_payload
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import Rung
@@ -496,15 +497,16 @@ class FramePipelineEffects:
             return False
         if int(getattr(lod, "level", 0) or 0) > int(step.level):
             return False
-        # Currency is not satisfiability: a presented-but-retargeted payload
-        # whose typed identity can never satisfy the tile's current lifecycle
-        # target is rejected by every backend commit, so counting it as
-        # coverage would deny the tile its only producer — the per-tile
-        # analog of the shared-coverage starvation behind the session-148
-        # stall (render.effects.payload_identity_dead).
+        # Backend drawability and target settlement are intentionally
+        # different contracts.  A current equal-LOD fallback is safe to keep
+        # on screen, but it still owes exact target work.  Use the lifecycle's
+        # canonical quality/LOD predicate here; the backend identity predicate
+        # also accepts safe fallbacks and would deny this tile its only exact
+        # producer.
         record = self.session.lifecycle.peek(int(tile_number))
-        target = None if record is None or record.target is None else record.target.identity
-        return acknowledged_identity_satisfies_target(tile_ack_identity(payload), target)
+        if record is None or record.target is None:
+            return False
+        return payload_ref_from_display_payload(payload).satisfies_target(record.target)
 
     def _display_payload_is_current(self, tile_number: int, tile, *, payload=None) -> bool:
         payload = self.session.display_tile_payloads.get(int(tile_number)) if payload is None else payload
