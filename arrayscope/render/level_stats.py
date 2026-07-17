@@ -39,6 +39,7 @@ from arrayscope.operations.evaluator import (
     stage_document_key,
 )
 from arrayscope.render import effects as render_effects
+from arrayscope.render.progressive_scheduling import SchedulingWork
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_session import (
     SemanticLevelEvidenceProgress,
@@ -394,6 +395,11 @@ class LevelStatsService:
         histogram/window-level pass without competing with visible rendering.
         """
 
+        if not session.scheduling_policy.verdict.admits_lane(
+            WorkLane.HISTOGRAM_REFINEMENT
+        ):
+            return
+
         queued_tiles: set[int] = set()
         for tile_number, rendered in tuple((getattr(session, "rendered_tiles", {}) or {}).items()):
             if _rendered_level_evidence_quality_for_session(session, rendered, refined=True) == LevelEvidenceQuality.ROUGH_PREVIEW:
@@ -454,6 +460,14 @@ class LevelStatsService:
 
         if bool(getattr(session, "histogram_aggregate_inflight", False)):
             return True
+        visible_dependency = not bool(getattr(session, "display_committed", False))
+        work_class = (
+            SchedulingWork.COVERAGE
+            if visible_dependency
+            else SchedulingWork.REFINEMENT
+        )
+        if not session.scheduling_policy.verdict.admits(work_class):
+            return False
         tracker = self._montage_level_tracker()
         snapshot = tracker.histogram_aggregate_snapshot(session.level_key)
         if snapshot is None:
@@ -524,13 +538,12 @@ class LevelStatsService:
             if not bool(getattr(session, "first_pass_histogram_published", False))
             else 2,
         )
-        visible_dependency = not bool(getattr(session, "display_committed", False))
         if visible_dependency:
             handle = self.win.kernel.submit(
                 TaskSpec(
                     key=task_key,
                     fn=lambda samples=samples: aggregate_histogram_samples(samples),
-                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    lane=WorkLane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
@@ -646,6 +659,17 @@ class LevelStatsService:
     def _schedule_semantic_level_evidence(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
+        visible_dependency = bool(
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        )
+        work_class = (
+            SchedulingWork.COVERAGE
+            if visible_dependency
+            else SchedulingWork.REFINEMENT
+        )
+        if not session.scheduling_policy.verdict.admits(work_class):
+            return
         if bool(getattr(session, "shader_display", False)):
             if not bool(getattr(session, "first_pass_histogram_published", False)):
                 return
@@ -655,10 +679,6 @@ class LevelStatsService:
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
             return
-        visible_dependency = bool(
-            _montage_level_evidence_requires_refined(self, session)
-            and not bool(getattr(session, "display_committed", False))
-        )
         progress.current_batch_limit = int(
             target.blocking_batch_limit if visible_dependency else target.background_batch_limit
         )
@@ -747,7 +767,7 @@ class LevelStatsService:
                 TaskSpec(
                     key=task_key,
                     fn=evaluate,
-                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    lane=WorkLane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope="montage:semantic-level-evidence",
@@ -1097,6 +1117,13 @@ class LevelStatsService:
         expected = self._montage_level_expected_indices(session)
         require_refined = _montage_level_evidence_requires_refined(self, session)
         visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
+        work_class = (
+            SchedulingWork.COVERAGE
+            if visible_level_dependency
+            else SchedulingWork.REFINEMENT
+        )
+        if not session.scheduling_policy.verdict.admits(work_class):
+            return
         batch = self._take_montage_level_evidence_batch(
             session,
             expected=expected,
@@ -1270,7 +1297,7 @@ class LevelStatsService:
                 TaskSpec(
                     key=task_key,
                     fn=evaluate,
-                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    lane=WorkLane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
@@ -1359,6 +1386,14 @@ class LevelStatsService:
 
         task_key = ("montage_level_evidence_continuation", session.key, int(session.session_id), generation)
         visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
+        work_class = (
+            SchedulingWork.COVERAGE
+            if visible_level_dependency
+            else SchedulingWork.REFINEMENT
+        )
+        if not session.scheduling_policy.verdict.admits(work_class):
+            release_generation(session)
+            return
         if visible_level_dependency:
             # This continuation advances the backend-required evidence scan
             # that gates the first pixels. It is correctness work, not
@@ -1368,7 +1403,7 @@ class LevelStatsService:
                 TaskSpec(
                     key=task_key,
                     fn=lambda: True,
-                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    lane=WorkLane.DISPLAY_PREVIEW,
                     priority=Priority.VISIBLE_IMAGE,
                     scheduling_rank=UNRANKED_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
@@ -1529,6 +1564,10 @@ class LevelStatsService:
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
         if not self._frame_session_is_current(session):
+            return
+        if not session.scheduling_policy.verdict.admits_lane(
+            WorkLane.HISTOGRAM_REFINEMENT
+        ):
             return
         pending = getattr(session, "pending_refined_level_tiles", None)
         if not pending:

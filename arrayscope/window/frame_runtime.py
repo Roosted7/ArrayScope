@@ -326,7 +326,7 @@ class FrameRuntimeMixin:
             steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
             required_tile_count=len(session.required_tile_numbers()),
-            preview_pass_open=bool(session._first_pixel_pass_open()),
+            scheduling_phase=str(session.scheduling_policy.verdict.phase.value),
             first_pass_quality=getattr(session, "first_pass_quality", None),
             first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
         )

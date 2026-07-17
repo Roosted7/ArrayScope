@@ -7,6 +7,7 @@ import pytest
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.core.memory_policy import MemoryProfileChoice
 from arrayscope.core.resource_governor import ResourcePressure, ResourcePressureState
+from arrayscope.render.progressive_scheduling import SchedulingPhase, SchedulingVerdict
 from arrayscope.window.montage_prefetch import _owner_memory_pressure_blocks_prefetch, _owner_prefetch_batch_limit
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
@@ -25,6 +26,18 @@ def _window_ns(**kwargs):
     ns = SimpleNamespace(**kwargs)
     ns.win = ns
     return ns
+
+
+def _refine_scheduling_policy():
+    return SimpleNamespace(
+        verdict=SchedulingVerdict(1, SchedulingPhase.REFINE, ())
+    )
+
+
+def _coverage_scheduling_policy():
+    return SimpleNamespace(
+        verdict=SchedulingVerdict(1, SchedulingPhase.COVERAGE, ())
+    )
 
 
 def _geometry():
@@ -102,6 +115,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
 
     calls = []
     session = SimpleNamespace(
+        scheduling_policy=_refine_scheduling_policy(),
         lod_policy_decision=SimpleNamespace(demand=object()),
         pending_level_tiles=(),
         level_scan_remaining_tiles=0,
@@ -114,7 +128,6 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         final_commit_pending=False,
         visible_first_pixels_presented=lambda: True,
         required_tile_numbers=lambda: (7,),
-        _first_pixel_pass_open=lambda: False,
         first_pass_quality=None,
         first_pass_pixels_presented=lambda: False,
         is_complete=lambda: False,
@@ -263,6 +276,7 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
         session_id=3,
         level_key=("levels", "aggregate"),
         display_committed=True,
+        scheduling_policy=_refine_scheduling_policy(),
         histogram_aggregate_inflight=False,
         histogram_aggregate_generation=None,
         pending_level_tiles=deque(),
@@ -568,6 +582,7 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
         key=("session",),
         session_id=1,
         level_key=("levels", "pending-upsert"),
+        scheduling_policy=_refine_scheduling_policy(),
         level_revision=0,
         level_expected_indices=(0,),
         rendered_tiles={0: rendered},
@@ -827,6 +842,7 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
         level_data=np.asarray([100.0, 400.0], dtype=np.float32),
     )
     session = SimpleNamespace(
+        scheduling_policy=_refine_scheduling_policy(),
         level_key=("levels", "finish-refined"),
         level_expected_indices=(7,),
         plan=SimpleNamespace(tiles=(tile,)),
@@ -893,6 +909,7 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
         quality="preview",
     )
     session = SimpleNamespace(
+        scheduling_policy=_refine_scheduling_policy(),
         level_key=("levels", "finish-current"),
         level_expected_indices=(7,),
         plan=SimpleNamespace(tiles=(tile,)),
@@ -1245,6 +1262,7 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
         force_auto=True,
         user_levels_override=None,
         display_committed=False,
+        scheduling_policy=_coverage_scheduling_policy(),
         level_evidence_inflight=False,
     )
     service._frame_session = session
@@ -1253,7 +1271,7 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
 
     assert len(submitted) == 1
     spec, _callbacks = submitted[0]
-    assert spec.lane == Lane.VISIBLE_MATERIALIZATION
+    assert spec.lane == Lane.DISPLAY_PREVIEW
     assert spec.priority == Priority.VISIBLE_IMAGE
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
 
@@ -1287,6 +1305,7 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
         force_auto=True,
         user_levels_override=None,
         display_committed=False,
+        scheduling_policy=_coverage_scheduling_policy(),
         level_evidence_inflight=False,
         pending_level_tiles=deque([object()]),
         level_scan_remaining_tiles=0,
@@ -1300,7 +1319,7 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
 
     assert len(submitted) == 1
     spec, _callbacks = submitted[0]
-    assert spec.lane == Lane.VISIBLE_MATERIALIZATION
+    assert spec.lane == Lane.DISPLAY_PREVIEW
     assert spec.priority == Priority.VISIBLE_IMAGE
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
 
@@ -1991,10 +2010,11 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
     assert limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32))) == 8 * 8 * 4
 
 
-def test_pyqtgraph_first_frame_is_one_uncapped_refined_transaction():
+def test_pyqtgraph_first_frame_uses_bounded_batches():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(
+        scheduling_policy=_refine_scheduling_policy(),
         display_committed=False,
         dirty_payloads={0: None},
         pending_payload_upserts={0: None},
@@ -2009,11 +2029,23 @@ def test_pyqtgraph_first_frame_is_one_uncapped_refined_transaction():
                 persistent_tile_residency=False,
                 shader_windowing=False,
             )
-        )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=3,
+                byte_cap=4096,
+                budget_ms=2.0,
+            )
+        ),
     )
     window.win = window
 
-    assert montage_commit.tile_layer_upsert_limits(window, session) == {}
+    limits = montage_commit.tile_layer_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 3
+    assert limits["max_upsert_bytes"] == 4096
+    assert limits["cold_deadline_ms"] == 2.0
 
 
 def test_presentation_cold_walk_budget_keeps_callback_safety_margin():
@@ -3820,6 +3852,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         planned_tiles=(0,),
     )
     session = SimpleNamespace(
+        scheduling_policy=_refine_scheduling_policy(),
         display_committed=False,
         atomic_successor_pending=False,
         force_auto=False,

@@ -27,6 +27,7 @@ from typing import Any, Callable, Protocol
 
 from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
+from arrayscope.render.progressive_scheduling import SchedulingVerdict
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, PipelineCounters, RenderIntent
 
 
@@ -87,6 +88,11 @@ class PipelineEffects(Protocol):
 
     def retained_native_source_available(self, intent: RenderIntent, step: RungStep) -> bool:
         """Return whether a native rung can use retained/staged source data."""
+        ...
+
+    def scheduling_verdict(self) -> SchedulingVerdict:
+        """Return the current required-scope phase verdict."""
+
         ...
 
 
@@ -170,8 +176,9 @@ class FramePipeline:
                     self.effects.rung_dropped(queued_intent, step)
             self._ready_upserts.clear()
 
+        verdict = self.effects.scheduling_verdict()
         states = self.effects.tile_states(intent, demand, scope)
-        steps = self.ladder.plan(states, demand)
+        steps = self.ladder.plan(states, demand, verdict)
         self.last_plan_states = tuple(
             (
                 int(state.tile_number),
@@ -188,29 +195,16 @@ class FramePipeline:
         )
         self.counters.ladder_plans += 1
         submitted = 0
-        first_pixel_tiles = {
-            int(step.tile_number)
-            for step in steps
-            if step.rung in (Rung.FLOOR, Rung.PREVIEW)
-        }
         presented_preview_tiles = {
             int(state.tile_number)
             for state in states
             if str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
         }
-        must_supersede_deferred = bool(
-            previous is not None and previous.semantic_key == intent.semantic_key
-        )
         # Cross-rung/cross-tile ordering comes from priorities plus this
         # submission order (the kernel heap is FIFO within equal priority).
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
-            if self._defer_quality_behind_first_pixel(step, first_pixel_tiles):
-                if must_supersede_deferred:
-                    self._supersede_deferred_step(intent, step)
-                self.counters.first_pixel_quality_deferred += 1
-                continue
             if (
                 self._defer_native_quality_during_interaction(intent, step, presented_preview_tiles)
                 and not self.effects.retained_native_source_available(intent, step)
@@ -273,21 +267,6 @@ class FramePipeline:
         if step.rung != Rung.DESIRED:
             return False
         return int(step.level) <= 0 or bool(step.reduce_from_native)
-
-    def _defer_quality_behind_first_pixel(
-        self,
-        step: RungStep,
-        first_pixel_tiles: set[int],
-    ) -> bool:
-        """Keep every quality rung behind the plan-wide first-pixel pass."""
-
-        if not first_pixel_tiles:
-            return False
-        if step.rung == Rung.EXACT:
-            return True
-        if step.rung != Rung.DESIRED:
-            return False
-        return True
 
     def _submit_step(
         self,
@@ -415,19 +394,6 @@ class FramePipeline:
         )
         if handle is None:
             self._admission_continuation_armed = False
-
-    def _supersede_deferred_step(self, intent: RenderIntent, step: RungStep) -> None:
-        """Invalidate older work for a rung we intentionally delay."""
-
-        self.kernel.supersede(
-            ("rung", intent.semantic_key, step.tile_number, int(step.rung)),
-            (
-                "deferred",
-                intent.source_id_for_tile(int(step.tile_number)),
-                int(step.level),
-                int(self.counters.intents),
-            ),
-        )
 
     # Handlers run on the GUI thread (kernel bridge drain).
 

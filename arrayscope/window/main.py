@@ -414,7 +414,9 @@ class ArrayScopeWindow(
                     or int(semantic_progress.pending_batches) > 0
                 )
             )
-            first_pixel_pending = not bool(session.visible_first_pixels_presented())
+            first_pixel_pending = bool(
+                session.scheduling_policy.verdict.coverage_open
+            )
         kernel_visible_busy = bool(self.kernel.diagnostics().visible_backlog)
         return SchedulerBusyState(
             visible_busy=bool(
@@ -494,12 +496,28 @@ class ArrayScopeWindow(
         for lane, workers in quota_by_lane.items():
             self.kernel.set_lane_quota(lane, workers)
         if montage_worker_target is not None:
-            preview_target = min(1, montage_worker_target) if interactive else montage_worker_target
+            session = getattr(self, "_frame_session", None)
+            verdict = (
+                None if session is None else session.scheduling_policy.verdict
+            )
+            coverage_open = bool(
+                verdict is not None and verdict.coverage_open
+            )
+            preview_target = (
+                min(1, montage_worker_target) if interactive else montage_worker_target
+            )
             self.kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, preview_target)
             self.kernel.set_lane_quota(
                 Lane.DISPLAY_PREPARATION,
-                0 if interactive else montage_worker_target,
+                0 if coverage_open or interactive else montage_worker_target,
             )
+            if coverage_open:
+                for lane in (
+                    Lane.VISIBLE_MATERIALIZATION,
+                    Lane.HISTOGRAM_REFINEMENT,
+                    Lane.SPECULATIVE_RESIDENCY,
+                ):
+                    self.kernel.set_lane_quota(lane, 0)
         # R4: completions drain through one QtKernelBridge; the governor owns
         # only this drain knob plus commit batch bounds and kernel lane quotas.
         bridge = getattr(self, "kernel_bridge", None)

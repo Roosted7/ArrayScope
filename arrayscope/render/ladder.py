@@ -43,6 +43,7 @@ from enum import IntEnum
 
 from arrayscope.display.lod import LodDemand
 from arrayscope.kernel.task import Lane, Priority
+from arrayscope.render.progressive_scheduling import SchedulingVerdict
 
 
 class Rung(IntEnum):
@@ -75,12 +76,6 @@ class TileLodState:
     target_quality_available: bool = False
     exact_requested: bool = False  # inspection or user demanded native
     scheduling_rank: int = 0
-    # Plan-wide first-pixel pass state (progressive presentation contract):
-    # while some required tile still lacks first pixels, refinement of a
-    # covered tile is not scheduled at all — its workers would starve
-    # coverage (2026-07-17 field plateau: 108 refinement evaluations ran
-    # while 164 tiles stayed black for ~3 s).
-    coverage_pass_open: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,7 +118,12 @@ class LodLadder:
 
     # ------------------------------------------------------------ planning
 
-    def plan_tile(self, state: TileLodState, demand: LodDemand) -> tuple[RungStep, ...]:
+    def plan_tile(
+        self,
+        state: TileLodState,
+        demand: LodDemand,
+        verdict: SchedulingVerdict | None = None,
+    ) -> tuple[RungStep, ...]:
         """Return the ordered steps ``state`` still needs to satisfy ``demand``.
 
         An empty result means the tile is converged for this demand.
@@ -225,25 +225,6 @@ class LodLadder:
         ) or (presented == desired and not presented_preview)
         if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
-        if not desired_resident and bool(state.coverage_pass_open):
-            # Progressive presentation contract: DESIRED is phase-2 work,
-            # and phase 2 must not be SUBMITTED while the phase-1 coverage
-            # pass is open — parallel execution steals the workers that make
-            # preview cheap (2026-07-18 field report: scroll shuffles became
-            # a slideshow while exact work ran during coverage). The only
-            # exception is a blank tile with no phase-1 producer at all: its
-            # DESIRED is its first pixels, not refinement. The pass-close
-            # acknowledgement edge replans and re-emits deferred steps.
-            # Bare resident levels are NOT a producer: the ladder owns no
-            # step that turns them into pixels, so deferring on them would
-            # be an ownerless wait (rule 11).
-            has_phase1_producer = bool(
-                presented is not None
-                or ready is not None
-                or any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
-            )
-            if has_phase1_producer:
-                desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
             # DESIRED is usually refinement and belongs to preparation.  But
             # when no floor/preview/current payload exists it is also the
@@ -295,9 +276,16 @@ class LodLadder:
                 )
             )
 
+        if verdict is not None:
+            steps = [step for step in steps if verdict.admits_lane(step.lane)]
         return tuple(steps)
 
-    def plan(self, states, demand: LodDemand) -> tuple[RungStep, ...]:
+    def plan(
+        self,
+        states,
+        demand: LodDemand,
+        verdict: SchedulingVerdict | None = None,
+    ) -> tuple[RungStep, ...]:
         """Plan every tile, coarse rungs across tiles before fine rungs.
 
         Cross-tile ordering matters for perceived progress: every visible
@@ -305,7 +293,7 @@ class LodLadder:
         DESIRED/EXACT (Plan 05 floor-first-fill, generalized).
         """
 
-        per_tile = [self.plan_tile(state, demand) for state in states]
+        per_tile = [self.plan_tile(state, demand, verdict) for state in states]
         ordered: list[RungStep] = []
         for rung in Rung:
             for steps in per_tile:

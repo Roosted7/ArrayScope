@@ -55,6 +55,7 @@ from arrayscope.display.model.tile_priority import (
     prioritize_tile_numbers,
 )
 from arrayscope.render import lod as render_lod
+from arrayscope.render.progressive_scheduling import ProgressiveSchedulingPolicy
 from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
     LodPageMaterializationRequest,
     page_set_key_for_rendered,
@@ -731,6 +732,9 @@ class FrameSession:
     lod_floor_presentations: int = 0
     lod_target_revision: int = 0
     lifecycle: TileLifecycle = field(default_factory=TileLifecycle)
+    scheduling_policy: ProgressiveSchedulingPolicy = field(
+        default_factory=ProgressiveSchedulingPolicy
+    )
     # Window-agnostic texel identity base for pyramid floors/previews
     # (montage_tile_semantic_key); falls back to session key when unset.
     semantic_key: object = None
@@ -946,6 +950,15 @@ class FrameSession:
         if getattr(self, "_lifecycle_target_signature", None) != target_signature:
             self.lifecycle.retarget(targets)
             self._lifecycle_target_signature = target_signature
+        scheduling_scope_signature = tuple(
+            (tile, target.source_index, target.semantic_source_id)
+            for tile, target in sorted(targets.items())
+        )
+        self.scheduling_policy.retarget(
+            scheduling_scope_signature,
+            tuple(sorted(targets)),
+            progressive=bool(self.shader_display or self._resident_lod_active()),
+        )
 
         # Payload mutation sites report lifecycle events directly.  This scan
         # remains as a safety net for restored/cached presentation state, but
@@ -2104,9 +2117,8 @@ class FrameSession:
 
         This governs which payloads the builder prefers to construct while
         preview claims are in flight — a wave-local scheduling fact. It is
-        deliberately NOT the correctness contract: the plan-wide visual
-        barrier is :meth:`_first_pixel_pass_open`, owned by lifecycle
-        first-pixel truth. Conflating the two made the barrier wave-local
+        deliberately NOT the correctness contract: the required-generation
+        phase belongs to ``scheduling_policy``. Conflating the two made the barrier wave-local
         (field report 2026-07-17: exact refinement marched across a black
         field, 192 preview acknowledgements after the first exact ack).
         """
@@ -2117,21 +2129,6 @@ class FrameSession:
         if not planned:
             return False
         return any(self._tile_preview_floor_pending(tile) for tile in planned)
-
-    def _first_pixel_pass_open(self) -> bool:
-        """Whether the plan-wide first-pixel pass is still open (visual truth).
-
-        One owner: the lifecycle's physical first-pixel coverage of the
-        required set. While open, presentation may add pixels anywhere but
-        may not refine a tile that already shows pixels — that ordering is
-        the product promise (cheap coverage first, then refinement), and it
-        must not depend on which planning wave a tile happened to land in.
-        """
-
-        if not self._resident_lod_active():
-            return False
-        required = self.required_tile_numbers()
-        return bool(required) and not self.lifecycle.first_pixels_presented(required)
 
     def _tile_preview_floor_pending(self, tile_number: int) -> bool:
         payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})

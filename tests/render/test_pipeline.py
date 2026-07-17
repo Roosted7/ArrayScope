@@ -12,6 +12,7 @@ from arrayscope.display.lod import LodDemand
 from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane, TaskSpec
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
 from arrayscope.render.pipeline import FramePipeline
+from arrayscope.render.progressive_scheduling import SchedulingPhase, SchedulingVerdict
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 
 
@@ -49,6 +50,10 @@ class StubEffects:
         self.retained_native = set()
         self.last_intent = None
         self.last_demand = None
+        self.phase = SchedulingPhase.COVERAGE
+
+    def scheduling_verdict(self):
+        return SchedulingVerdict(1, self.phase, tuple(range(self.tiles)))
 
     def evaluate_rung(self, intent, step):
         self.last_intent = intent
@@ -196,7 +201,7 @@ def test_retarget_submits_ladder_work_and_commits_batches():
     total_upserts = sum(len(batch.upserts) for batch in effects.batches)
     assert total_upserts == 4
     assert all(len(batch.upserts) <= batch.max_items for batch in effects.batches)
-    assert pipeline.counters.first_pixel_quality_deferred == 2
+    assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
 
 def test_any_missing_preview_defers_quality_for_already_previewed_tiles():
@@ -216,7 +221,7 @@ def test_any_missing_preview_defers_quality_for_already_previewed_tiles():
         (1, int(Rung.FLOOR)),
         (1, int(Rung.PREVIEW)),
     ]
-    assert pipeline.counters.first_pixel_quality_deferred == 2
+    assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
 
 def test_converged_retarget_submits_nothing():
@@ -261,6 +266,7 @@ def test_camera_only_retarget_never_invalidates_rung_work():
 
 def test_demand_level_change_supersedes_stale_rung_targets():
     kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.phase = SchedulingPhase.REFINE
     effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
     pipeline.retarget(intent(viewport="vp-1"), demand(2), scope(0))
     # Before the GUI drains, the demand moves to a finer level.
@@ -272,12 +278,12 @@ def test_demand_level_change_supersedes_stale_rung_targets():
         for counters in lanes.values()
     )
     assert invalidated >= 1, "older level targets must not survive"
-    # The old desired-level-2 target existed but was classified stale even
-    # though the new desired-level-1 refinement is deferred behind preview.
+    # Ready improvements are never withheld at presentation; phase ordering
+    # governs compute admission, not which completed payload may commit.
     committed = sorted(
         step.level for batch in effects.batches for (step, _payload) in batch.upserts
     )
-    assert committed == [2]
+    assert committed == [1, 2]
     assert (0, 2, 2) in effects.dropped
 
 
@@ -290,9 +296,10 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
     # Native demand plans FLOOR, PREVIEW, DESIRED(0); DESIRED waits until the
     # first-pixel rungs have had a chance to present.
     assert effects.evaluated == [(0, 0, 4), (0, 1, 2)]
-    assert pipeline.counters.first_pixel_quality_deferred == 1
+    assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[0] = TileLodState(tile_number=0, presented_level=2, resident_levels=(2,), presented_quality="preview")
+    effects.phase = SchedulingPhase.REFINE
     assert pipeline.retarget(intent(interactive=False), demand(0), scope(0)) == 1
     drain(kernel)
     assert (0, 2, 0) in effects.evaluated
@@ -349,6 +356,7 @@ def test_zoom_out_over_presented_native_submits_no_display_demotions():
 
 def test_preview_at_non_native_demand_level_still_admits_target_rung():
     kernel, effects, pipeline = make_pipeline(tiles=1)
+    effects.phase = SchedulingPhase.REFINE
     effects.states[0] = TileLodState(
         tile_number=0,
         presented_level=3,
@@ -441,12 +449,13 @@ def test_same_frame_slot_source_change_supersedes_old_rung_identity():
 
 def test_dropped_queued_rung_releases_prepared_state():
     kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=1)
+    effects.phase = SchedulingPhase.REFINE
     effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
     assert pipeline.retarget(intent(viewport="vp-1"), demand(2), scope(0)) == 1
 
     # Supersede the queued desired-level rung before it can run.  The effects
     # already prepared lifecycle ownership; the drop callback must release it.
-    assert pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0)) == 2
     drain(kernel)
 
     assert (0, 2, 2) in effects.dropped

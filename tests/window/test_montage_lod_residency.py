@@ -658,6 +658,7 @@ def test_visible_worker_declines_until_partially_foreign_prefetch_pages_arrive()
     size = 1028
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     tile = replace(session.plan.tiles[0], width=size, height=size)
     session.plan = replace(session.plan, tile_shape=(size, size), tiles=(tile,))
     session.visible_tiles = (tile,)
@@ -722,6 +723,7 @@ def test_visible_worker_declines_until_partially_foreign_prefetch_pages_arrive()
 def test_coarse_ancestor_does_not_suppress_finer_materialization_claim():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     rendered = session.rendered_tiles[0]
     demand = session.lod_policy_decision.demand
     semantic_id = session.tile_semantic_source_id(0)
@@ -844,6 +846,7 @@ def test_exact_page_eviction_before_gui_admission_declines_and_replans():
 
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     renderer = _RungPrepareRenderer()
     effects = FramePipelineEffects(renderer, session)
     intent = _pipeline_intent_for(session)
@@ -876,6 +879,7 @@ def test_exact_page_eviction_before_gui_admission_declines_and_replans():
 def test_materialized_rung_for_removed_tile_releases_lifecycle_claim():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     renderer = _RungPrepareRenderer()
     effects = FramePipelineEffects(renderer, session)
     intent = _pipeline_intent_for(session)
@@ -910,6 +914,7 @@ def test_materialized_rung_for_removed_tile_releases_lifecycle_claim():
 def test_dropped_rung_for_removed_tile_releases_page_and_lifecycle_claims():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     renderer = _RungPrepareRenderer()
     effects = FramePipelineEffects(renderer, session)
     intent = _pipeline_intent_for(session)
@@ -3432,23 +3437,29 @@ def test_coverage_pass_defers_desired_submission_not_presentation():
     them into pixels, and deferring on them is an ownerless wait."""
 
     from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
+    from arrayscope.render.progressive_scheduling import (
+        SchedulingPhase,
+        SchedulingVerdict,
+    )
     ladder = LodLadder(policy=LadderPolicy(
         mode="resident", floor_level=4, preview_level=4, reduced_input_available=True,
     ))
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
 
+    coverage = SchedulingVerdict(1, SchedulingPhase.COVERAGE, (0, 1))
+    refine = SchedulingVerdict(1, SchedulingPhase.REFINE, (0, 1))
     covered = TileLodState(
         tile_number=0, presented_level=4, presented_quality="preview",
-        coverage_pass_open=True,
     )
     assert not any(
-        step.rung is Rung.DESIRED for step in ladder.plan_tile(covered, demand)
+        step.rung is Rung.DESIRED
+        for step in ladder.plan_tile(covered, demand, coverage)
     ), "refinement submitted during the open coverage pass"
 
     blank_with_preview_path = TileLodState(
-        tile_number=1, allow_preview=True, coverage_pass_open=True,
+        tile_number=1, allow_preview=True,
     )
-    steps = ladder.plan_tile(blank_with_preview_path, demand)
+    steps = ladder.plan_tile(blank_with_preview_path, demand, coverage)
     assert any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
     assert not any(step.rung is Rung.DESIRED for step in steps), (
         "phase-2 DESIRED submitted alongside this tile's phase-1 producer"
@@ -3456,10 +3467,10 @@ def test_coverage_pass_defers_desired_submission_not_presentation():
 
     closed = TileLodState(
         tile_number=2, presented_level=4, presented_quality="preview",
-        coverage_pass_open=False,
     )
     assert any(
-        step.rung is Rung.DESIRED for step in ladder.plan_tile(closed, demand)
+        step.rung is Rung.DESIRED
+        for step in ladder.plan_tile(closed, demand, refine)
     ), "refinement must plan immediately once the pass closes"
 
 
@@ -4775,6 +4786,7 @@ def test_live_phase_vector_ladder_builds_cancellation_preserving_page_payload():
 def test_live_phase_ladder_does_not_accept_resident_mean_family_as_floor():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
+    _settle_first_pixels(session)
     yy, xx = np.mgrid[:TILE, :TILE]
     values = ((1.0 + yy + xx) * np.exp(1j * (xx - yy) / 7.0)).astype(np.complex64)
     phase_rendered = _phase_shader_rendered(session, values)
@@ -5067,6 +5079,7 @@ def test_commuting_desired_reduced_input_uses_preview_claim_not_native():
     """Commuting DESIRED display targets run as reduced-display work."""
 
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     session.lod_preview_level = 6
     renderer = _RungPrepareRenderer()
     effects = FramePipelineEffects(renderer, session)
@@ -5117,6 +5130,7 @@ def test_rejected_current_reduced_completion_replans_after_releasing_claim(monke
     """An obsolete LOD result must leave a producer wakeup for the new demand."""
 
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
     renderer = _RungPrepareRenderer()
@@ -5185,6 +5199,7 @@ def test_admitted_preview_completion_replans_unblocked_target_rung(monkeypatch):
 
 def test_reduced_claim_identity_follows_source_when_scroll_reuses_same_slot_and_frame_key():
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
@@ -5206,6 +5221,7 @@ def test_reduced_claim_identity_follows_source_when_scroll_reuses_same_slot_and_
     session.visible_tiles = tuple(session.plan.tiles)
     session.visible_tile_numbers = frozenset({0})
     session.sync_lifecycle_scope()
+    _settle_first_pixels(session)
     new_intent = _pipeline_intent_for(session)
     new_identity = effects._preview_claim_identity(new_intent, session.plan.tiles[0])
 
@@ -5216,6 +5232,7 @@ def test_reduced_claim_identity_follows_source_when_scroll_reuses_same_slot_and_
 
 def test_non_commuting_desired_with_retained_source_uses_page_claim():
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     stage_key = ("stage", "retained")
     session.stage_fan_in.tile_stage_keys[0] = stage_key
     session.stage_fan_in.values[stage_key] = object()
@@ -5948,7 +5965,7 @@ def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
     session.first_pass_quality = "preview"
     session.first_pass_histogram_published = False
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
-    assert effects.shared_first_pass_barrier_pending(None)
+    assert not effects.scheduling_verdict().admits_lane(Lane.DISPLAY_PREPARATION)
 
     for tile in session.plan.tiles[1:]:
         source_id = session.tile_semantic_source_id(tile.source_index)
@@ -5962,10 +5979,8 @@ def test_shared_target_candidates_do_not_erase_plan_wide_physical_barrier():
         session.tile_presentation_state.payloads[int(tile.montage_index)] = payload
     session.lifecycle.commit_emitted(session.tile_presentation_state.payloads)
     session.lifecycle.backend_ack(session.tile_presentation_state.payloads)
-    assert effects.shared_first_pass_barrier_pending(None)
-
-    session.first_pass_histogram_published = True
-    assert not effects.shared_first_pass_barrier_pending(None)
+    assert effects.scheduling_verdict().admits_lane(Lane.DISPLAY_PREPARATION)
+    assert not session.first_pass_histogram_published
 
 
 def test_fallback_payload_at_target_level_is_still_an_exact_pass_candidate():
@@ -6032,10 +6047,12 @@ def test_fallback_payload_at_target_level_is_still_an_exact_pass_candidate():
     assert 0 not in [int(candidate.montage_index) for candidate in preview_candidates]
 
 
-def test_shared_first_pass_barrier_uses_required_scope_not_retained_active_rows():
+def test_phase_owner_uses_required_scope_not_retained_active_rows():
     session = _session(count=3, pyramid=LodPageCache(max_bytes=1 << 20))
     session.shader_display = False
+    session.visible_tiles = tuple(session.plan.tiles[:2])
     session.visible_tile_numbers = frozenset((0, 1))
+    session.sync_lifecycle_scope()
     for tile in session.plan.tiles[:2]:
         source_id = session.tile_semantic_source_id(tile.source_index)
         payload = DisplayTilePayload(
@@ -6060,8 +6077,7 @@ def test_shared_first_pass_barrier_uses_required_scope_not_retained_active_rows(
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
 
     assert session.required_first_pixels_presented()
-    assert not session.visible_first_pixels_presented()
-    assert not effects.shared_first_pass_barrier_pending(None)
+    assert effects.scheduling_verdict().admits_lane(Lane.DISPLAY_PREPARATION)
 
 
 def test_finer_presented_preview_satisfies_coarser_shared_target_after_zoom_out():
@@ -6655,6 +6671,7 @@ def test_stale_materialized_desired_admission_does_not_invent_native_claim():
     """A resident-level result may complete without any semantic eval claim."""
 
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     renderer = _RungPrepareRenderer()
     effects = FramePipelineEffects(renderer, session)
     intent = _pipeline_intent_for(session)

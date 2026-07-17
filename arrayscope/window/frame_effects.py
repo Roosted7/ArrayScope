@@ -154,6 +154,20 @@ class FramePipelineEffects:
         self.renderer = renderer
         self.session = session
 
+    def scheduling_verdict(self):
+        """Read/advance the sole required-generation phase owner."""
+
+        policy = self.session.scheduling_policy
+        policy.observe(
+            self.session.lifecycle,
+            on_refinement_replan=(
+                (lambda: self.renderer.request_montage_replan(self.session))
+                if self._session_is_current()
+                else None
+            ),
+        )
+        return policy.verdict
+
     def _evaluation_claim(self, intent, step, tile) -> _EvaluationClaim:
         source_index_for_tile = getattr(intent, "source_index_for_tile", None)
         intent_source_index = (
@@ -339,40 +353,11 @@ class FramePipelineEffects:
             return tuple(replace(state, allow_preview=False) for state in states)
         return states
 
-    def shared_first_pass_barrier_pending(self, scope: LodAdmissionScope | None) -> bool:
-        """Hold shared quality work behind acknowledged first-pass pixels.
-
-        Shared transforms sit outside ``FramePipeline`` because one evaluation
-        fans out to every tile.  Their planned/admitted rows therefore cannot
-        prove physical coverage; only the canonical lifecycle can open the
-        target pass.  Shader backends additionally wait for the first-pass
-        levels which give those pixels their intended meaning.
-        """
-
-        if not self._session_is_current():
-            return False
-        session = self.session
-        if not bool(session.required_first_pixels_presented()):
-            return True
-        return bool(
-            getattr(session, "shader_display", False)
-            and getattr(session, "first_pass_quality", None) == "preview"
-            and not bool(getattr(session, "first_pass_histogram_published", False))
-        )
-
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
         if tile is None or not self._session_is_current(intent):
             return False
-        if (
-            bool(getattr(self.session, "shader_display", False))
-            and getattr(self.session, "first_pass_quality", None) == "preview"
-            and not bool(getattr(self.session, "first_pass_histogram_published", False))
-            and step.rung in (Rung.DESIRED, Rung.EXACT)
-        ):
-            # The preview pass is one coherent evidence/display phase.  Do not
-            # let target work race its final physical acknowledgement and
-            # rough histogram publication.
+        if not self.scheduling_verdict().admits_lane(step.lane):
             return False
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
@@ -906,7 +891,9 @@ class FramePipelineEffects:
             if (
                 desired > 0
                 and not preview_tiles
-                and not self.shared_first_pass_barrier_pending(scope)
+                and self.scheduling_verdict().admits_lane(
+                    WorkLane.DISPLAY_PREPARATION
+                )
             ):
                 target_tiles = tuple(
                     render_effects.shared_transform_candidate_tiles(
@@ -1479,13 +1466,18 @@ class FramePipelineEffects:
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
             atomic_successor_pending = _atomic_successor_handoff_pending(session)
+            refinement_admissible = bool(
+                session.scheduling_policy.verdict.refinement_admissible
+            )
             cpu_atomic_successor = bool(
                 cpu_backend
                 and atomic_successor_pending
+                and refinement_admissible
             )
             shader_atomic_successor = bool(
                 capabilities.shader_windowing
                 and atomic_successor_pending
+                and refinement_admissible
             )
             renderer._last_montage_atomic_successor_pending_before = bool(
                 atomic_successor_pending
@@ -2181,12 +2173,9 @@ class FramePipelineEffects:
     ) -> None:
         renderer = self.renderer
         session = self.session
-        preview_pass_open_before = session._first_pixel_pass_open()
-        # Captured with the pass flag so the trace oracle is independent of
-        # the admission gate: an exact upsert for a tile whose first pixels
-        # were ALREADY acknowledged before this delta is a refinement, and
-        # refinements inside an open pass are the violation trace_verify
-        # rejects. Same lifecycle fact as the pass predicate — one notion.
+        coverage_phase_before = bool(
+            session.scheduling_policy.verdict.coverage_open
+        )
         presented_before_commit = frozenset(
             int(tile)
             for tile in session.required_tile_numbers()
@@ -2213,6 +2202,7 @@ class FramePipelineEffects:
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
+        phase_closed = False
         if atomic_successor:
             # A successor is complete only after the lifecycle accepts
             # one coverage-complete backend report.  Backend submission alone
@@ -2312,6 +2302,10 @@ class FramePipelineEffects:
             # preview transition can replan target quality.
             session.flush_pending = True
             session.final_commit_pending = True
+        phase_closed = session.scheduling_policy.observe(
+            session.lifecycle,
+            on_refinement_replan=lambda: renderer.request_montage_replan(session),
+        )
         session.display_committed = bool(session.lifecycle.presented_tiles)
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         semantic_evidence_waiting = bool(
@@ -2321,7 +2315,7 @@ class FramePipelineEffects:
                 or int(semantic_progress.pending_batches) > 0
             )
         )
-        if first_pixel_transition or semantic_evidence_waiting:
+        if first_pixel_transition or phase_closed or semantic_evidence_waiting:
             # Physical first-pixel completion changes DISPLAY_PREPARATION and
             # side-work eligibility without a kernel completion after this
             # acknowledgement. Refined semantic evidence has the same shape.
@@ -2331,11 +2325,6 @@ class FramePipelineEffects:
             reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
             if callable(reconcile_quotas):
                 reconcile_quotas(refresh_telemetry=False)
-        if first_pixel_transition:
-            # Physical first-pass closure is a planning edge.  No worker
-            # completion follows the backend acknowledgement, so the quality
-            # barrier needs an explicit receiver-owned replan wakeup.
-            renderer.request_montage_replan(session)
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
         geometry_start = perf_counter()
@@ -2356,16 +2345,9 @@ class FramePipelineEffects:
             tile_delta,
             commit_start=commit_start,
             preview_transition=preview_transition,
-            preview_pass_open_before=preview_pass_open_before,
+            coverage_phase_before=coverage_phase_before,
             presented_before_commit=presented_before_commit,
         )
-        if first_pass_publication_transition:
-            renderer.request_montage_replan(session)
-        if preview_pass_open_before and not session._first_pixel_pass_open():
-            # Pass-close edge: refinement-class DESIRED steps were withheld
-            # from planning while coverage was incomplete; this replan is the
-            # named owner that re-emits them (no wait without an owner).
-            renderer.request_montage_replan(session)
 
     def _finish_commit(
         self,
@@ -2375,7 +2357,7 @@ class FramePipelineEffects:
         *,
         commit_start: float,
         preview_transition: bool,
-        preview_pass_open_before: bool = False,
+        coverage_phase_before: bool = False,
         presented_before_commit: frozenset[int] = frozenset(),
     ) -> None:
         renderer = self.renderer
@@ -2441,9 +2423,17 @@ class FramePipelineEffects:
             first_display_commit=bool(
                 getattr(renderer, "_last_montage_commit_first_display", False)
             ),
-            preview_pass_open_before=bool(preview_pass_open_before),
+            # Compatibility fields consumed by the journey oracle. Their
+            # value now comes directly from the scheduling-policy verdict;
+            # neither commit tracing nor the oracle reconstructs coverage
+            # from payload or lifecycle counters.
+            preview_pass_open_before=bool(coverage_phase_before),
             coverage_pass_closed=bool(
-                preview_pass_open_before and not session._first_pixel_pass_open()
+                coverage_phase_before
+                and not session.scheduling_policy.verdict.coverage_open
+            ),
+            scheduling_phase_before=(
+                "coverage" if coverage_phase_before else "refine"
             ),
             required_tile_count=len(session.required_tile_numbers()),
             preview_missing_tile_count=sum(
@@ -3860,13 +3850,6 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     if persistent_gpu_tile_residency_backend(window, session):
         return _persistent_tile_upsert_limits(window, session)
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    if not capabilities.shader_windowing and not bool(getattr(session, "display_committed", False)):
-        # PyQtGraph cannot show a partially windowed first frame: unlike the
-        # shader backend, every first-pixel tile must already carry refined
-        # CPU levels. Build and acknowledge that one complete transaction;
-        # capping it creates TARGET_EMITTED subsets that no backend commit may
-        # accept and therefore strands the first frame at zero pixels.
-        return {}
     if not (
         not capabilities.shader_windowing
         and (

@@ -164,7 +164,7 @@ def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
     assert replanned == [first_session, second_session]
 
 
-def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot, monkeypatch):
+def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot):
     clear_arrayscope_settings()
     from arrayscope.core.compute_policy import ComputeLane
     from arrayscope.window import ArrayScopeWindow
@@ -174,7 +174,11 @@ def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot, mo
     try:
         process_events(qtbot)
         session = win.renderer._frame_session
-        monkeypatch.setattr(session, "visible_first_pixels_presented", lambda: False)
+        session.scheduling_policy.retarget(
+            ("test-required-scope",),
+            session.required_tile_numbers(),
+            progressive=True,
+        )
 
         busy = win._scheduler_busy_state()
         decision = win.resource_governor.decide_lane_workers(

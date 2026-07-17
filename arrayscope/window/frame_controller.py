@@ -1605,6 +1605,8 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if not session.is_complete():
             return False
         self._settle_montage_visible_plan_if_complete(session)
+        if not session.scheduling_policy.verdict.refinement_admissible:
+            return True
         # Montage level phasing: rough -> hold -> refined. Refined evidence is
         # queued after visible settlement and admitted through the kernel.
         if bool(getattr(session, "shader_display", False)):

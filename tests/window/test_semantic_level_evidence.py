@@ -104,6 +104,12 @@ def _service(session, *, capabilities=PYQTGRAPH_CAPABILITIES):
     return service, kernel
 
 
+def _close_coverage_phase(session):
+    session.scheduling_policy.observe(
+        SimpleNamespace(first_pixels_presented=lambda _required: True)
+    )
+
+
 def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles():
     data = np.arange(32 * 48 * 20, dtype=np.float32).reshape(32, 48, 20)
     session = _session(data)
@@ -131,7 +137,7 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     assert progress.pending_batches == 0
     assert progress.inflight_generation is None
     assert progress.blocking_reason == "ready"
-    assert all(task["lane"] == Lane.VISIBLE_MATERIALIZATION for task in submitted)
+    assert all(task["lane"] == Lane.DISPLAY_PREVIEW for task in submitted)
     assert all(task["priority"] == Priority.VISIBLE_IMAGE for task in submitted)
     assert all(task["pass_token"] is True for task in submitted)
     assert max(task["max_items"] for task in submitted) <= 16
@@ -186,6 +192,7 @@ def test_vispy_uses_background_batches_but_converges_to_the_same_population():
     data = np.arange(10 * 12 * 20, dtype=np.float32).reshape(10, 12, 20)
     session = _session(data)
     service, kernel = _service(session, capabilities=VISPY_CAPABILITIES)
+    _close_coverage_phase(session)
 
     service._schedule_semantic_level_evidence(session)
     first = kernel.run_next()
@@ -217,6 +224,7 @@ def test_vispy_semantic_background_batches_publish_once_after_full_population():
     session.display_committed = True
     session.first_pass_histogram_published = True
     session.required_target_settled = lambda: True
+    _close_coverage_phase(session)
     session.pipeline.effects.request_presentation = lambda: publications.append(
         len(session.semantic_level_evidence_progress.covered_sources)
     )

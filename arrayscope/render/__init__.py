@@ -11,6 +11,8 @@ well-defined task and its state:
 - `render.pipeline` — FramePipeline: turns ladder plans into kernel tasks,
                       consumes TileLifecycle events, emits bounded commit
                       batches through an injected Effects protocol.
+- `render.progressive_scheduling` — the one per-required-scope-generation
+                      COVERAGE -> REFINE policy owner.
 
 Ownership rules:
 
@@ -28,6 +30,12 @@ Ownership rules:
 
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.pipeline import FramePipeline
+from arrayscope.render.progressive_scheduling import (
+    ProgressiveSchedulingPolicy,
+    SchedulingPhase,
+    SchedulingVerdict,
+    SchedulingWork,
+)
 from arrayscope.render.stages import (
     CommitBatch,
     RenderIntent,
@@ -38,9 +46,13 @@ __all__ = [
     "CommitBatch",
     "FramePipeline",
     "LodLadder",
+    "ProgressiveSchedulingPolicy",
     "RenderIntent",
     "Rung",
     "RungStep",
+    "SchedulingPhase",
+    "SchedulingVerdict",
+    "SchedulingWork",
     "TileLodState",
     "TileWork",
 ]
