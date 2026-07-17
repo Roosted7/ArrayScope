@@ -39,6 +39,24 @@ this file says *what, in what order, and when it counts as done*.
 
 ## Standing lane — test hardening & debt (parallel-safe, any order)
 
+Safe to pick up alongside the numbered queue; each is self-contained.
+
+- **AUTO-camera demand freshness / dead gesture edge.** After montage
+  entry, a programmatic `setRange` zoom invokes NOTHING in the viewport
+  chain within 5 s — zero calls to `retarget_montage_viewport` /
+  `apply_montage_viewport_retarget` / `_montage_viewport_plan`, identical
+  offscreen and on real Wayland — so LOD demand freezes at the fit level.
+  Consistent with the viewport bridge holding a connection to the
+  pre-montage view/camera object across the scene swap. Red pin (strict
+  xfail WITH instrumented probes in its failure path):
+  `tests/ui/test_lod_demand_freshness.py`; journey-matrix zoom cells stay
+  red until this closes. Next probe: enumerate live range-signal receivers
+  post-entry.
+- **Canonical priority order through commit construction.** The journey
+  matrix's rank-correlation oracle shows commit construction can erase the
+  canonical scheduling order (weak/unordered batches). Preserve the
+  priority ordering from admission through delta building to backend
+  upsert order.
 - **Re-rank in-flight coverage waves when the camera re-anchors.** A
   montage entered under a preserved USER camera that is then fitted
   (programmatic pulse or AUTO replay) re-focuses only newly planned waves;
@@ -47,9 +65,7 @@ this file says *what, in what order, and when it counts as done*.
   tile ~92 of 272). Contract: priority re-targets on every view change —
   including work already queued. Owner: kernel re-rank on
   tile-priority-context change, or supersede-and-resubmit of unstarted
-  coverage tasks at retarget.
-Safe to pick up alongside the numbered queue; each is self-contained.
-
+  coverage tasks at retarget. (In flight: `codex/camera-reanchor-rerank`.)
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner

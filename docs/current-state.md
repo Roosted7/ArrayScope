@@ -1,62 +1,70 @@
 # Current state
 
-**Snapshot: G5 landing candidate, 2026-07-16.** The GPU engine branch
-(`codex/gpu-engine`) is fully merged; the sparse-pyramid work is completing
-row 1 of [`queue.md`](queue.md) on its dedicated worktree. Keep this file a
-*short* snapshot — history belongs to the archives, direction to the queue.
-Update by replacement, not by layering dated correction blocks.
+**Snapshot: `main`, 2026-07-18.** One line of development; the G5 sparse
+pyramid, the four 07-17 chip landings (retained-satisfaction trace, key-owner
+consolidation, VisPy+PyQtGraph pixel oracles, ImageViewShell dedup), the
+journey-matrix trajectory gate, and the `ProgressiveSchedulingPolicy`
+phase owner are all merged. Keep this file a *short* snapshot — history
+belongs to the archives, direction to [`queue.md`](queue.md). Update by
+replacement, not by layering dated correction blocks.
 
 ## Architecture (what stands)
 
 - One execution kernel (`arrayscope/kernel/`), one render pipeline
   (`arrayscope/render/`), one tile lifecycle machine (ADR 0051);
-  orchestration on `RenderOrchestrator` over
-  `frame_controller/frame_session/frame_effects/frame_runtime` (ADR 0045).
+  orchestration on `RenderOrchestrator` (ADR 0045).
 - The GPU engine (ADR 0055/0056, G1–G5): Qt-free `arrayscope/gpu/` chunk
-  keys/grid, page table, and chunk store; one source-grid route plans
-  anisotropic reduced pages and exact clipped draw geometry; the shared
-  bounded page cache and both backends consume checked `DataChunkKey`
-  materializations. Requested targets remain distinct from resolved physical
-  pages, with complete coarse fallback and physical presentation truth as
-  standing audited invariants.
-- Visible-truth machinery: schema-v1 trace bus, `trace_verify` invariants
-  (stalls, ack churn, identity-rejected commits), the V3 stall watchdog,
-  import-health and architecture guards.
+  keys/grid, page table, chunk store; one source-grid route for anisotropic
+  reduced pages and exact clipped draw geometry; both backends consume
+  checked `DataChunkKey` materializations; physical presentation truth is a
+  standing audited invariant.
+- **One scheduling-phase owner** (2026-07-18):
+  `arrayscope/render/progressive_scheduling.py` —
+  `ProgressiveSchedulingPolicy` owns the COVERAGE→REFINE verdict, the
+  lifecycle first-pixel close predicate, and the refinement replan edge;
+  ladder, admission, level/histogram work, atomic handoffs, and commit
+  batching read it (progressive presentation contract in
+  [architecture/rendering.md](architecture/rendering.md)).
+- Visible-truth machinery: schema-v1 trace bus; `trace_verify` invariants
+  incl. `no_phase2_submit_during_coverage`, retained-satisfaction closure,
+  identity-rejection, ack-churn and bail-loop limits; the journey-matrix
+  trajectory gate (`arrayscope.tools.journey_matrix`); framebuffer-to-CPU
+  pixel oracles on BOTH backends with fault injection.
 
-## Verified behavior (real-display, 2026-07-15/16)
+## Verified behavior (real display, 2026-07-17/18)
 
-- ±1 window shift uploads boundary strips only; scroll-back and revisit =
-  0 uploads; warm prefetch never disturbs residents; FFT-along-shifted-axis
-  correctly re-uploads (negative gate).
-- The 2026-07 field-defect classes — black tiles, wrong fill order, orange
-  complex tiles (two causes), identity-aliasing starvation, retained-slice
-  staleness, deferred-stage lost wakeups — are each closed with a
-  repro-first gate and a dossier ([redesign/README.md](redesign/README.md)).
+- Cold raw fills settle 60/60 exact targets on both backends with zero
+  trace violations; VisPy submits zero phase-2 jobs before coverage closes;
+  PyQtGraph first fill arrives in bounded ≤12-item batches.
+- Chunked residency: ±1 window shift uploads boundary strips only;
+  revisit/scroll-back = 0 uploads; never-black fine↔coarse transitions with
+  fault-injected proof.
+- complex64 PyQtGraph native convergence restored (stress-matrix row is a
+  hard pass).
 
 ## Known open work
 
-The ordered list with exit gates is [`queue.md`](queue.md). Headlines: G5
-final real-Wayland/stress acceptance (row 1), then the performance bars —
-FFT scroll is ~4 fps vs the ~17 fps scalar target (row 2), followed by
-G6/renderer-protocol/G7. Standing debt: framebuffer-to-CPU oracle,
-ImageViewShell duplication, montage key-owner consolidation
-(`target_satisfied_retained` landed 2026-07-17).
+Direction and exit gates: [`queue.md`](queue.md). Headlines: the red
+journey-matrix cells — AUTO-camera demand freshness (dead gesture edge;
+strict xfail pin `tests/ui/test_lod_demand_freshness.py`), priority order
+through commit construction, in-flight re-rank on camera re-anchor (in
+flight on `codex/camera-reanchor-rerank`) — then G6. The complex VisPy
+phasing oracle has one pre-existing red on main (payload-level identity vs
+shader-uniform mismatch, under investigation). Perf bars stay parked per
+Thomas 2026-07-17 (act only on true stalls).
 
 ## Material risks
 
-1. **Complexity debt.** The renderer successor is ~10,800 lines across six
-   modules on one object; `FrameSession` has ~100+ fields; residency/
-   visibility/priority facts still live in several owners. Every fix should
-   reduce owner count ([ground rules](ground-rules.md) #2).
-2. **Acceptance is machine-bound.** Rings 3–4 (stress, real-GL) run only on
-   this machine by hand; CI is offscreen software-GL. A display-lane
-   regression can merge green ([testing/README.md](testing/README.md)).
-3. **Hardware evidence is Linux-only**; per-OS backend/LOD defaults await
-   X5e. The histogram adapter remains sensitive to private PyQtGraph API.
+1. **Complexity debt**, still: `FrameSession` ~100 fields; the policy owner
+   removed the phase/first-pass duplicates, but residency/visibility facts
+   retain multiple owners. Every fix should reduce owner count.
+2. **Acceptance is machine-bound.** Rings 3–4 and the journey matrix run
+   only on this machine by hand; CI is offscreen software-GL. Whoever
+   changes a display/render/kernel/window lane runs them
+   ([testing/README.md](testing/README.md)).
 
 ## What is working well
 
-- The Qt-free semantic core (`core/`, `operations/`), operation pipeline,
-  slicing, profiles, ROI, linked-window sync.
-- Suite health: ~2081 passed / 24 skipped in ~124 s, parallel by default,
-  with strong doc-to-test traceability (tests cite their ADR/dossier).
+- The Qt-free semantic core, operations pipeline, slicing, profiles, ROI,
+  linked-window sync; suite ~2,300 tests in ~2 min parallel, with
+  doc-to-test traceability and trajectory-level oracles.
