@@ -220,6 +220,23 @@ passes 88/88. The replay at
 exact-convergence gate: 31 L1 tasks were still in flight at the unchanged
 five-second cap, so this evidence does not claim the full scrub green.
 
+The 2026-07-17 10:20 user trace
+`/tmp/arrayscope-stall-57-1.trace.jsonl` exposed the complement of that owner
+fix: an atomic successor stopped at 10/15 payloads while 28 upserts remained
+parked and every kernel/stage/evaluation/LOD owner was idle. The ladder saw
+current native `RenderedTile` results for the five missing tiles and correctly
+scheduled no evaluation; the frame-wide floor-first presentation barrier then
+withheld those native wrappers because other successor tiles still had coarse
+floors. Floor-first is now per tile during an atomic handoff: a tile with live
+resolvable floor ownership keeps that floor, while a tile with no floor owner
+uses its already-owned current native result. The focused regression constructs
+that mixed cohort and requires one complete 4/4 successor delta. In parallel,
+`trace_verify` now fails repeated identical semantic `commit_bail` states via
+`no_identical_commit_bail_loop` / `--max-identical-commit-bails` (default 25),
+mirroring the acknowledgement-churn bound. The supplied field trace triggers
+the new invariant with a 334-event identical signature; its other changing
+bails remain separately visible rather than being folded into that count.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`

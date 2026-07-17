@@ -324,6 +324,70 @@ def test_trace_verify_flags_acknowledgement_churn_livelock(tmp_path):
     assert verify_trace(path, max_identical_acks=50)["ok"]
 
 
+def test_trace_verify_flags_identical_commit_bail_livelock(tmp_path):
+    """Ring 0 gate: a barrier cannot replan forever without a producer."""
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    path = tmp_path / "trace.jsonl"
+    rows = [
+        {
+            "kind": "lifecycle",
+            "edge": "target_required",
+            "tile": 2,
+            "source_index": 7,
+            "target_level": 0,
+            "sequence": 1,
+        },
+        {
+            "kind": "backend_ack",
+            "tile": 2,
+            "source_index": 7,
+            "level": 0,
+            "quality": "exact",
+            "accepted": True,
+            "sequence": 2,
+        },
+    ]
+    rows.extend(
+        {
+            "kind": "commit_bail",
+            "outcome": "shader-atomic-successor-wait",
+            "wakeup": "replan",
+            "session_id": 57,
+            "active_payloads": 10,
+            "active_tiles": 15,
+            "pending_upserts": 28,
+            "dirty_payloads": 33,
+            "sequence": 3 + offset,
+            "ts_ns": 1000 + offset,
+        }
+        for offset in range(30)
+    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    result = verify_trace(path)
+    assert not result["ok"]
+    loops = [
+        violation
+        for violation in result["violations"]
+        if violation["invariant"] == "no_identical_commit_bail_loop"
+    ]
+    assert loops == [
+        {
+            "invariant": "no_identical_commit_bail_loop",
+            "outcome": "shader-atomic-successor-wait",
+            "wakeup": "replan",
+            "session_id": 57,
+            "identical_commit_bails": 30,
+            "limit": 25,
+        }
+    ]
+
+    assert verify_trace(path, max_identical_commit_bails=0)["ok"]
+    assert verify_trace(path, max_identical_commit_bails=50)["ok"]
+
+
 def test_trace_verify_retains_ack_across_compatible_retarget(tmp_path):
     """Idempotent backends do not re-ack a retarget the payload already satisfies."""
 

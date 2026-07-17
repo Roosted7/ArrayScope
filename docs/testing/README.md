@@ -18,7 +18,9 @@ Front page for test policy. Deep dives:
    a `trace_verify` invariant, a stats counter asserted somewhere, or a
    visible diagnostic. Examples that now exist because of this rule:
    `no_identity_rejected_commits`, `no_acknowledgement_churn`
-   (`--max-identical-acks`), `no_stall_events`, the import-health guard.
+   (`--max-identical-acks`), `no_identical_commit_bail_loop`
+   (`--max-identical-commit-bails`), `no_stall_events`, the import-health
+   guard.
 3. **Implementation-detail tests are deletable** when they block a
    user-visible fix (say so in the commit) — but user-visible assertions are
    never weakened to green a suite ([ground rules](../ground-rules.md) #4).

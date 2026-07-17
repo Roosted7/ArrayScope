@@ -89,8 +89,10 @@ never per-pixel events.
   settlement no visible tile lacks an acknowledged payload (black-tile
   class); every visible target reaches ack; stale work never commits;
   placeholders only where no compatible source; quality monotonic per
-  tile; paint order center-out within a rung. These are the GPU-harness
-  assertions generalized to any recorded session.
+  tile; paint order center-out within a rung; repeated identical
+  `commit_bail` state is bounded so a barrier without a complement producer
+  fails mechanically. These are the GPU-harness assertions generalized to
+  any recorded session.
 - **`trace_latency`** — input→first-pixel waterfalls per interaction;
   per-stage spans (submit→start→finish→drain→commit→ack); heartbeat-gap
   attribution (which events occupied the gap). This is what the

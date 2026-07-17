@@ -3398,6 +3398,48 @@ def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     assert set(session.dirty_payloads) == {0, 1, 2, 3}
 
 
+def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
+    """Ring 0 gate for field stall 57: no atomic wait without a floor owner."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    native_range = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
+    session = _session(pyramid=pyramid, count=4, view_range=native_range)
+    session.lod_preview_level = 4
+    session.mark_preview_floor_scope(range(4))
+    session.atomic_successor_pending = True
+
+    # Only one successor tile still has resolvable page coverage.  The other
+    # three already own current native RenderedTiles, so the ladder schedules
+    # no producer for them (the exact result already exists).
+    rendered = session.rendered_tiles[0]
+    demand = session.lod_policy_decision.demand
+    assert demand.desired_level == 0
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=4,
+        semantic_source_id=session.tile_semantic_source_id(0),
+    )
+    _admit_page_set(pyramid, key, np.asarray(rendered.image))
+    _claim_preview_resident(session, 0, key)
+
+    # The fast atomic builder is lookup-only and correctly declines the
+    # incomplete cohort.  General presentation owns the honest fallback: keep
+    # tile 0's coarse floor and wrap current native pixels for tiles 1..3.
+    assert session.build_atomic_successor_presentation() is None
+    _state, delta = session.build_tile_presentation({})
+
+    assert set(delta.active_tiles) == {0, 1, 2, 3}
+    assert set(delta.upserts) == {0, 1, 2, 3}
+    assert delta.upserts[0].quality == "preview"
+    assert delta.upserts[0].lod.level == 4
+    assert {
+        tile: (payload.quality, payload.lod.level)
+        for tile, payload in delta.upserts.items()
+        if tile != 0
+    } == {1: ("exact", 0), 2: ("exact", 0), 3: ("exact", 0)}
+
+
 def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=2)

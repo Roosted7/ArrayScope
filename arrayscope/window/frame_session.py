@@ -2639,7 +2639,30 @@ class FrameSession:
             if build_limit is not None and built >= build_limit:
                 break
             if floor_first_fill_active and int(tile_number) in planned_numbers:
-                continue
+                tile = plan_tiles_by_number.get(int(tile_number))
+                floor_payload = self.display_tile_payloads.get(int(tile_number))
+                floor_owned = bool(
+                    _payload_matches_current_tile(
+                        self,
+                        int(tile_number),
+                        floor_payload,
+                        plan_tiles_by_number,
+                    )
+                    and str(getattr(floor_payload, "quality", "") or "")
+                    in {"preview", "fallback"}
+                ) or self._floor_can_progress(int(tile_number), tile=tile)
+                if floor_owned or not bool(self.atomic_successor_pending):
+                    continue
+                # Ground rule 11: an atomic successor may wait only when the
+                # missing complement has a live owner.  Floor-first is a
+                # frame-wide visual preference, but floor residency is
+                # per-tile.  A rendered tile with no resolvable floor has no
+                # preview producer for the ladder to schedule; withholding
+                # its native wrapper here leaves the atomic builder at
+                # N-k/N forever.  Use the already-owned native result for
+                # that tile while the rest of the successor keeps its coarse
+                # floors.  Later refinement still follows the ordinary rung
+                # path.
             rendered = self.rendered_tiles.get(int(tile_number))
             if rendered is not None:
                 self._ensure_display_tile_payload(int(tile_number), rendered, source_ids, lod_factor=lod_factor)
