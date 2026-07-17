@@ -2539,7 +2539,7 @@ class ImageView2D(ImageViewShell):
 
     def _apply_backend_tiled_presentation(
         self,
-        placeholder: np.ndarray,
+        img: np.ndarray,
         *,
         histogramPlotData,
         geometry,
@@ -2556,43 +2556,10 @@ class ImageView2D(ImageViewShell):
         frame_plan,
     ) -> TileLayerUpdateStats:
         # The CPU-LUT backend bakes shader mapping into pixels through the
-        # LUT and levels; it has no uniform to receive the mapping.
+        # LUT and levels; it has no uniform to receive the mapping.  Tiled
+        # commits carry histogram evidence only via histogramPlotData.
         del shader_mapping
-        return self._apply_tile_layer_presentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=histogramPlotData,
-            geometry=geometry,
-            levels=levels,
-            histogramRange=histogramRange,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-            frame_plan=frame_plan,
-        )
-
-    def _apply_tile_layer_presentation(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None,
-        geometry,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
-        tile_delta=None,
-        tile_residency_budget_bytes: int = 0,
-        frame_plan=None,
-    ) -> None:
+        histogramData = None
         self._start_upload_timing("tile_layer")
         applying = self._applying_presentation
         self._applying_presentation = True

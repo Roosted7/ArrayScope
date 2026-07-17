@@ -40,7 +40,6 @@ from arrayscope.display.shader_mapping import (
     default_phase_lut,
     shader_mapping_with_lut,
 )
-from arrayscope.display.viewport import ViewportPolicy
 # The levels-convergence no-op test (P9) and the tile layer must normalize
 # levels identically; the single definition lives with the layer.
 from arrayscope.display.backends.vispy.tiles import _normalize_levels
@@ -398,25 +397,30 @@ class VisPyImageView2D(ImageViewShell):
             lut_identity=self.displayColorMapKey(),
         )
 
-    def _apply_vispy_tile_layer_presentation(
+    def _apply_backend_tiled_presentation(
         self,
         img: np.ndarray,
         *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None,
+        histogramPlotData,
         geometry,
         levels: tuple[float, float],
         histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
-        shader_mapping=None,
-        tile_delta: "TilePresentationDelta | None" = None,
-        tile_residency_budget_bytes: int = 0,
-        frame_plan=None,
-    ) -> None:
+        viewport_policy,
+        rgb_already_windowed: bool,
+        montage_dirty_tiles: tuple[int, ...] | None,
+        montage_tile_source_ids: dict[int, object] | None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None,
+        shader_mapping,
+        tile_delta: "TilePresentationDelta",
+        tile_residency_budget_bytes: int,
+        frame_plan,
+    ):
+        # ADR 0055 G4c: the prefetch warm hook mirrors the residency knobs of
+        # the most recent visible commit instead of inventing its own.  Tiled
+        # commits carry histogram evidence only via histogramPlotData.
+        self._vispy_last_tile_residency_budget_bytes = int(tile_residency_budget_bytes or 0)
+        self._vispy_last_tiled_rgb_already_windowed = bool(rgb_already_windowed)
+        histogramData = None
         self._start_upload_timing("vispy_tile_layer")
         applying = self._applying_presentation
         self._applying_presentation = True
@@ -647,46 +651,6 @@ class VisPyImageView2D(ImageViewShell):
         finally:
             self._applying_presentation = applying
             self._finish_upload_timing()
-
-    def _apply_backend_tiled_presentation(
-        self,
-        placeholder: np.ndarray,
-        *,
-        histogramPlotData,
-        geometry,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy,
-        rgb_already_windowed: bool,
-        montage_dirty_tiles: tuple[int, ...] | None,
-        montage_tile_source_ids: dict[int, object] | None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None,
-        shader_mapping,
-        tile_delta: "TilePresentationDelta",
-        tile_residency_budget_bytes: int,
-        frame_plan,
-    ):
-        # ADR 0055 G4c: the prefetch warm hook mirrors the residency knobs of
-        # the most recent visible commit instead of inventing its own.
-        self._vispy_last_tile_residency_budget_bytes = int(tile_residency_budget_bytes or 0)
-        self._vispy_last_tiled_rgb_already_windowed = bool(rgb_already_windowed)
-        return self._apply_vispy_tile_layer_presentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=histogramPlotData,
-            geometry=geometry,
-            levels=levels,
-            histogramRange=histogramRange,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
-            shader_mapping=shader_mapping,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-            frame_plan=frame_plan,
-        )
 
     def _after_tiled_commit(
         self,
