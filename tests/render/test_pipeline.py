@@ -387,6 +387,7 @@ def test_trace_phase_follows_first_pixel_role_not_desired_rung_name():
         resident_levels=(3,),
         presented_quality="preview",
     )
+    covered_effects.phase = SchedulingPhase.REFINE
     covered_pipeline = FramePipeline(covered_kernel, covered_effects, LodLadder())
 
     assert covered_pipeline.retarget(intent(), demand(3), scope(0)) == 1
