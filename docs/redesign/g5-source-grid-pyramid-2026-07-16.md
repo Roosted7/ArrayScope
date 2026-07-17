@@ -264,6 +264,26 @@ preparation accepts either exact hidden payload residency or an onscreen slot
 owned by that final commit; a tile with neither remains unresolved and rearms
 the visible owner. The focused coordinator gate distinguishes all three cases.
 
+The next canonical screenshot isolated a broader misuse of that atomic owner:
+the transition planner armed an all-slot handoff when the physical montage
+topology changed from the retained 60-slot setup frame to the 272-slot raw
+frame. The predecessor can honestly remain visible during that transition,
+but it cannot own the 212 new slots; requiring hidden residency for the whole
+successor delayed both geometry and pixels behind an impossible continuity
+claim. Both session rebirth and in-place index-window retargeting now compare
+layout topology independently of semantic source indices. Same-layout source
+swaps remain atomic; expansion, shrink, or relocation retains the predecessor
+only as a visual bridge and publishes the successor through ordinary bounded
+deltas. Focused expansion/shrink and same-layout gates pass 5/5. The real
+Wayland PyQtGraph rerun at
+`tests/artifacts/g5-topology-transition-pyqtgraph-2026-07-17/` reaches honest
+272/272 physical presentation with zero dirty/upsert debt, where the prior run
+never left the 60-tile predecessor. It is intentionally still red: the visual
+timeline takes about 11.3 s and shows preview/exact qualities interleaving
+tile-by-tile rather than two coherent passes; physical L1 also remains below
+the current L2 target. Those are the next convergence slices, not evidence for
+relaxing the five-second gate.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`

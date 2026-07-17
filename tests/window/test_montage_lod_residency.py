@@ -4085,7 +4085,36 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert session.display_tile_payloads[0].source_index == 2
     assert session.display_tile_payloads[1].source_index == 3
     assert set(session.pending_payload_upserts) == {0, 1}
-    assert session.atomic_successor_pending is True
+    # The successor shrinks the physical slot topology. The retained values
+    # remain useful inputs, but they cannot own an atomic wait for a different
+    # layout; bounded ordinary deltas must publish that geometry honestly.
+    assert session.atomic_successor_pending is False
+
+
+def test_expanded_index_window_does_not_arm_ownerless_atomic_successor():
+    """A complete small predecessor cannot own the new slots of a larger plan."""
+
+    session = _session(count=4)
+    old_source_ids = {index: ("src", index) for index in range(4)}
+    _state, delta = session.build_tile_presentation(old_source_ids)
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    session.tile_source_ids = dict(old_source_ids)
+    session.rendered_tiles.clear()
+    assert session.required_first_pixels_presented()
+
+    expanded = _shifted_plan(count=8, offset=0)
+    _retarget(
+        session,
+        expanded,
+        new_source_ids={index: ("src", index) for index in range(8)},
+        cached_tiles={},
+    )
+
+    assert not session.atomic_successor_pending
+    assert session.build_atomic_successor_presentation() is None
+    assert session.flush_pending
+    assert session.final_commit_pending
 
 
 def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
@@ -4135,6 +4164,41 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     )
     assert decision.retain_pixels
     assert decision.atomic_successor
+
+
+def test_expanded_montage_rebirth_retains_pixels_without_atomic_wait():
+    """A small predecessor cannot own the additional slots of a larger layout."""
+
+    previous = _session(count=4)
+    successor = _session(count=8)
+    document = ArrayDocument(np.zeros((8, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    previous.view_state = ViewState.from_shape((8, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    successor.view_state = previous.view_state.with_montage_axis(
+        0,
+        # Layout columns are auto-derived outside ViewState in the live path;
+        # keep semantic intent stable while the physical plan expands.
+        columns=4,
+        indices=tuple(range(8)),
+        text="0:8",
+    )
+    _state, previous_delta = previous.build_tile_presentation({})
+    _acknowledge(previous, previous_delta)
+    previous.mark_presented(tuple(previous_delta.upserts))
+    assert previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "montage-topology-change"
 
 
 def test_transposed_axes_cannot_retain_predecessor_mappings():

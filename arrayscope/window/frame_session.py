@@ -237,6 +237,30 @@ def _free_retarget_tiles(
     return frozenset(int(tile) for tile in logical_resident_tiles)
 
 
+def _montage_plan_topology(plan: MontagePlan) -> tuple:
+    """Return layout identity without folding semantic source indices into it."""
+
+    return (
+        tuple(int(value) for value in plan.tile_shape),
+        tuple(int(value) for value in plan.grid_shape),
+        int(plan.columns),
+        int(plan.rows),
+        int(plan.gap),
+        tuple(
+            (
+                int(tile.montage_index),
+                int(tile.row),
+                int(tile.col),
+                int(tile.x0),
+                int(tile.y0),
+                int(tile.width),
+                int(tile.height),
+            )
+            for tile in plan.tiles
+        ),
+    )
+
+
 def _physical_rebind_transaction(
     payloads: dict[int, DisplayTilePayload],
     *,
@@ -1076,6 +1100,7 @@ class FrameSession:
         """
 
         old_source_ids = dict(self.tile_source_ids)
+        old_plan_topology = _montage_plan_topology(self.plan)
         old_rendered_tiles = dict(self.rendered_tiles)
         old_display_payloads = dict(self.display_tile_payloads)
         old_state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
@@ -1242,7 +1267,18 @@ class FrameSession:
             # index scrolling changes semantic sources without changing layout
             # geometry, so the former geometry-only arming missed the exact
             # full -> subset -> full transition seen on screen.
-            self.atomic_successor_pending = bool(had_complete_predecessor)
+            # Atomic retention is meaningful only while the predecessor and
+            # successor share one physical slot topology.  When a montage
+            # expands, shrinks, or changes layout, the old frame cannot own
+            # the new slots.  Arming an atomic handoff in that case parked the
+            # new geometry behind hidden residency for every successor tile
+            # (field failure: 60 visible predecessors, 272 successor slots),
+            # so neither backend could publish the honest progressive frame.
+            # Same-topology source-window swaps retain the atomic guarantee.
+            self.atomic_successor_pending = bool(
+                had_complete_predecessor
+                and old_plan_topology == _montage_plan_topology(plan)
+            )
             retained_state = {
                 int(tile): payload
                 for tile, payload in old_state_payloads.items()
@@ -3903,6 +3939,9 @@ def plan_presentation_transition(
         return reject("montage-state")
     if aligned != previous_state:
         return reject("view-state")
+    same_topology = _montage_plan_topology(previous_session.plan) == _montage_plan_topology(
+        session.plan
+    )
     first_pixels = getattr(previous_session, "required_first_pixels_presented", None)
     complete_predecessor = bool(
         bool(callable(first_pixels) and first_pixels())
@@ -3910,6 +3949,16 @@ def plan_presentation_transition(
     )
     if not complete_predecessor:
         return reject("predecessor-incomplete")
+    if not same_topology:
+        # Retaining the predecessor is still an honest visual bridge, but it
+        # cannot own slots that do not exist in its layout.  The successor
+        # must therefore publish normal bounded deltas instead of waiting for
+        # an all-slot hidden warm that the predecessor cannot complement.
+        return PresentationTransitionDecision(
+            True,
+            False,
+            "montage-topology-change",
+        )
     # A montage rebirth has a cold lifecycle even though the physical surface
     # still owns a compatible predecessor. Arm the existing all-slot handoff
     # so no partial successor can replace that complete coverage.
