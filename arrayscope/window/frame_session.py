@@ -2034,6 +2034,28 @@ class FrameSession:
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         return render_lod.floor_can_progress(self, tile_number, tile=tile)
 
+    def _preview_floor_owner_exists(self, tile_number: int, tile=None) -> bool:
+        """Whether a declared preview slot has a concrete complement owner."""
+
+        if self._tile_preview_floor_pending(int(tile_number)):
+            return True
+        if tile is None:
+            tile = next(
+                (
+                    candidate
+                    for candidate in tuple(self.visible_tiles)
+                    if int(candidate.montage_index) == int(tile_number)
+                ),
+                None,
+            )
+        return bool(
+            tile is not None
+            and self._best_floor_key(
+                int(tile.source_index), tile_number=int(tile_number)
+            )
+            is not None
+        )
+
     def _ensure_floor_payloads(self, tile_numbers, *, max_count: int | None = None) -> None:
         return render_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
 
@@ -2095,8 +2117,21 @@ class FrameSession:
         self.lifecycle.level_resident(int(tile_number), key)
         return True
 
-    def mark_preview_floor_scope(self, tile_numbers) -> None:
-        self.lod_preview_floor_scope.update(int(tile) for tile in tuple(tile_numbers or ()))
+    def declare_preview_floor_scope(self, tile_numbers) -> tuple[int, ...]:
+        """Replace the preview-pass scope owned by the current ladder plan.
+
+        This is plan state, not an accumulating observation. A later plan
+        which no longer needs first-pixel previews must close the pass so
+        target-quality presentation can proceed; retaining tiles from an old
+        plan would turn the visual barrier into an ownerless wait.
+        """
+
+        required = set(self.required_tile_numbers())
+        declared = {
+            int(tile) for tile in tuple(tile_numbers or ()) if int(tile) in required
+        }
+        self.lod_preview_floor_scope = declared
+        return tuple(sorted(declared))
 
     def release_preview_claim(self, tile_number: int, key) -> None:
         self.lifecycle.level_declined(int(tile_number), key)
@@ -2176,6 +2211,36 @@ class FrameSession:
         source_shape = tuple(int(value) for value in source.shape[:2])
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
         return source, histogram, lod, texture_kind, None
+
+    def _quality_pass_admissible_upserts(
+        self,
+        payloads: dict[int, DisplayTilePayload],
+        *,
+        plan_tiles_by_number: dict[int, object],
+    ) -> dict[int, DisplayTilePayload]:
+        """Apply the current physical quality-pass contract to one delta.
+
+        Every transaction constructor, including the already-built follow-up
+        fast path, must cross this gate. Ladder task deferral cannot govern
+        retained or reusable exact payloads which require no new task.
+        """
+
+        if not self._lod_preview_floor_first_fill_active(
+            self.required_tile_numbers()
+        ):
+            return dict(payloads)
+        return {
+            int(tile): payload
+            for tile, payload in payloads.items()
+            if int(tile) not in self.lod_preview_floor_scope
+            or str(getattr(payload, "quality", "exact") or "exact") != "exact"
+            or (
+                bool(self.atomic_successor_pending)
+                and not self._preview_floor_owner_exists(
+                    int(tile), tile=plan_tiles_by_number.get(int(tile))
+                )
+            )
+        }
 
     def _paced_pending_presentation_followup(
         self,
@@ -2261,6 +2326,15 @@ class FrameSession:
             return None
         ordered = self._prioritized_tile_numbers(candidate_numbers)
         payloads = {int(tile): self.display_tile_payloads[int(tile)] for tile in ordered}
+        payloads = self._quality_pass_admissible_upserts(
+            payloads,
+            plan_tiles_by_number=plan_tiles_by_number,
+        )
+        if not payloads:
+            # Full reconciliation can construct resident preview wrappers.
+            # Returning an empty fast transaction here would strand the pass
+            # behind the forbidden exact rows already parked in this queue.
+            return None
         resident_retargets = {
             int(tile)
             for tile, payload in payloads.items()
@@ -2886,6 +2960,16 @@ class FrameSession:
             for tile, payload in upserts.items()
             if int(tile) in active_set
         }
+        # The preview pass is a physical transaction class. Exact pixels can
+        # reach this point without a new ladder task (retained payload,
+        # reusable completion, or a wrapper admitted before this plan), so
+        # task deferral alone cannot enforce it. Already-presented exact pixels
+        # remain visible because they are absent from ``upserts``. Ground rule
+        # 11's atomic no-floor degradation is owned inside the shared gate.
+        all_candidate_upserts = self._quality_pass_admissible_upserts(
+            all_candidate_upserts,
+            plan_tiles_by_number=plan_tiles_by_number,
+        )
         required = set(self.required_tile_numbers())
         required_unsettled = set(self.lifecycle.target_unsettled_tiles(required))
         if self.display_committed and required_unsettled:

@@ -284,6 +284,34 @@ tile-by-tile rather than two coherent passes; physical L1 also remains below
 the current L2 target. Those are the next convergence slices, not evidence for
 relaxing the five-second gate.
 
+The interleaving was not a priority-tuning defect. The ladder already deferred
+new desired/exact tasks behind its first-pixel steps, but its `allow_preview`
+decision had no production owner for `FrameSession.lod_preview_floor_scope`.
+Retained/reusable exact payloads therefore needed no task and bypassed that
+barrier; the bounded already-built follow-up path also returned before full
+presentation reconciliation. The structured trace now records planned versus
+declared preview counts, per-delta quality/LOD rows, whether the physical pass
+was open, and any exact upsert admitted inside it. `trace_verify` rejects the
+latter via `preview_pass_precedes_exact_upserts`. The plan effects now replace
+the current declared scope (never accumulate old tiles), and both full and
+fast-path delta constructors cross one canonical quality-pass gate. Exact
+reduced pages used for provisional coverage are exposed conservatively as
+preview until physical coverage closes; already-presented compatible exact
+pixels remain visible, and an atomic tile with no floor producer still degrades
+honestly under ground rule 11. The focused model/trace ring passes 201/201
+(one real-VisPy test deliberately isolated from the mixed-binding process).
+
+The real-Wayland PyQtGraph evidence at
+`tests/artifacts/g5-preview-owner-fix2-pyqtgraph-2026-07-17/` is semantically
+green for this slice: planned and declared scopes agree, every open-pass delta
+contains preview only, and the exact-during-preview trace violation count is
+zero. Its contact sheet confirms that target-quality islands no longer expand
+through holes. It remains an explicit performance red, not a row exit: the
+CPU item backend admits 12 rows per commit, reaches only 227/272 successor
+slots by the hard deadline, and takes roughly 13 s in the sampled timeline.
+Closing that bounded-commit throughput bottleneck is the next slice; the
+two-pass contract and five-second cap are unchanged.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`

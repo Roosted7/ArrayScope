@@ -3376,9 +3376,14 @@ def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     pyramid = LodPageCache(max_bytes=1 << 24)
     preview = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=4)
+    # Exact wrappers can be admitted before a later plan declares the preview
+    # pass (retained/reusable work follows this same route). They still must
+    # cross the final physical delta gate rather than flash in as exact islands.
+    _exact_state, exact_delta = session.build_tile_presentation({}, max_upserts=4)
+    assert set(exact_delta.upserts) == {0, 1, 2, 3}
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
     session.lod_page_cache = preview
     session.lod_preview_level = 4
-    session.mark_preview_floor_scope(range(4))
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     rendered = session.rendered_tiles[0]
     key = page_set_key_for_rendered(
@@ -3389,6 +3394,15 @@ def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     )
     _admit_page_set(preview, key, np.asarray(rendered.image))
     _claim_preview_resident(session, 0, key)
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+
+    effects.tile_states(
+        _pipeline_intent_for(session),
+        session.lod_policy_decision.demand,
+        _pipeline_scope_for(session),
+    )
+
+    assert session.lod_preview_floor_scope == {0, 1, 2, 3}
 
     _state, delta = session.build_tile_presentation({}, max_upserts=4)
 
@@ -3398,6 +3412,27 @@ def test_preview_floor_scope_defers_exact_until_scoped_tiles_are_covered():
     assert set(session.dirty_payloads) == {0, 1, 2, 3}
 
 
+def test_ladder_plan_closes_obsolete_preview_floor_scope():
+    session = _session(count=2)
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    intent = _pipeline_intent_for(session)
+
+    effects.tile_states(intent, session.lod_policy_decision.demand, _pipeline_scope_for(session))
+    assert session.lod_preview_floor_scope == {0, 1}
+
+    effects.tile_states(
+        intent,
+        session.lod_policy_decision.demand,
+        LodAdmissionScope(
+            visible_tile_numbers=(0, 1),
+            near_tile_numbers=(0, 1),
+            visible_missing_count=0,
+        ),
+    )
+
+    assert session.lod_preview_floor_scope == set()
+
+
 def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     """Ring 0 gate for field stall 57: no atomic wait without a floor owner."""
 
@@ -3405,7 +3440,7 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     native_range = ((0.0, float(2 * TILE)), (0.0, float(TILE)))
     session = _session(pyramid=pyramid, count=4, view_range=native_range)
     session.lod_preview_level = 4
-    session.mark_preview_floor_scope(range(4))
+    session.declare_preview_floor_scope(range(4))
     session.atomic_successor_pending = True
 
     # Only one successor tile still has resolvable page coverage.  The other

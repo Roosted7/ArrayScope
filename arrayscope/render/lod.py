@@ -1230,6 +1230,13 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         int(tile.montage_index): tile
         for tile in tuple(session.visible_tiles)
     }
+    preview_pass_scope = (
+        set(int(tile) for tile in session.lod_preview_floor_scope)
+        if session._lod_preview_floor_first_fill_active(
+            session.required_tile_numbers()
+        )
+        else set()
+    )
     built = 0
     for tile_number in tuple(dict.fromkeys(int(number) for number in tuple(tile_numbers))):
         if max_count is not None and built >= int(max_count):
@@ -1260,6 +1267,15 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         )
         if resolved is None:
             continue
+        # Quality describes the presentation pass as well as the provenance
+        # of the cached page. During a declared first-pixel pass, even an exact
+        # reduced page is exposed conservatively as preview: its pixels can
+        # cover the slot immediately, but it must not become a target-quality
+        # island before peer slots have first pixels. The same page can be
+        # reclassified/refined after physical preview coverage closes.
+        presentation_quality = (
+            "preview" if tile_number in preview_pass_scope else best_quality
+        )
         if existing is not None:
             presented_actual_level = _conservative_actual_level_for_payload(existing)
             existing_backing = getattr(existing, "page_backing", None)
@@ -1272,12 +1288,16 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             )
             if (
                 presented_actual_level == int(coarsest_actual_level)
-                and str(getattr(existing, "quality", "preview") or "preview") == best_quality
+                and str(getattr(existing, "quality", "preview") or "preview")
+                == presentation_quality
                 and existing_actual_keys == tuple(resolved.actual_keys)
                 and existing_requested_keys == tuple(key.page_keys)
             ):
                 continue
-            if str(getattr(existing, "quality", "exact")) != "preview":
+            if (
+                tile_number not in preview_pass_scope
+                and str(getattr(existing, "quality", "exact")) != "preview"
+            ):
                 desired = int(session.lod_policy_decision.demand.desired_level)
                 if (
                     presented_actual_level <= desired
@@ -1336,7 +1356,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         # planes do not honor.  ``_payload_source_anchor`` itself returns
         # None for montage sessions and unanchorable chains.
         source_anchor = None
-        if best_quality == "exact" and resolved.exact:
+        if presentation_quality == "exact" and resolved.exact:
             anchor_fn = getattr(session, "_payload_source_anchor", None)
             if callable(anchor_fn):
                 source_anchor = anchor_fn(tile_shape)
@@ -1354,7 +1374,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             texture_data=np.asarray(pages[0].values),
             texture_kind=texture_kind,
             lod=requested_lod,
-            quality=best_quality,
+            quality=presentation_quality,
             shader_mapping=shader_mapping,
             source_anchor=source_anchor,
             page_backing=PageBackedPresentation(
@@ -1381,7 +1401,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                 ),
                 shader_mapping=shader_mapping,
                 lod=requested_lod,
-                quality=best_quality,
+                quality=presentation_quality,
             ),
             presentation_identity=session.tile_presentation_identity(shader_mapping),
         )

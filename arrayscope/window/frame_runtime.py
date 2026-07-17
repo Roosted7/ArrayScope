@@ -325,6 +325,13 @@ class FrameRuntimeMixin:
             states=tuple(getattr(pipeline, "last_plan_states", ()) or ()),
             steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
+            required_tile_count=len(session.required_tile_numbers()),
+            preview_planned_tile_count=len(
+                getattr(pipeline.effects, "last_preview_planned_scope", ()) or ()
+            ),
+            preview_declared_tile_count=len(session.lod_preview_floor_scope),
+            first_pass_quality=getattr(session, "first_pass_quality", None),
+            first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
         )
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
