@@ -25,7 +25,6 @@ from arrayscope.display.imageview2d import ImageViewShell
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView
 from arrayscope.display.imageview2d import _point_inside_view_range
 from arrayscope.display.imageview2d import _is_tiled_loading_only_commit
-from arrayscope.display.imageview2d import _tile_commit_report
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.model.tiled_histogram_identity import (
     payload_histogram_source,
@@ -649,36 +648,29 @@ class VisPyImageView2D(ImageViewShell):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def setTiledPresentation(
+    def _apply_backend_tiled_presentation(
         self,
+        placeholder: np.ndarray,
         *,
+        histogramPlotData,
         geometry,
-        tile_state: "TilePresentationState",
-        tile_delta: "TilePresentationDelta",
-        histogramPlotData: np.ndarray | None,
         levels: tuple[float, float],
         histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        shader_mapping=None,
-        tile_residency_budget_bytes: int = 0,
-        frame_plan=None,
-    ) -> None:
+        viewport_policy,
+        rgb_already_windowed: bool,
+        montage_dirty_tiles: tuple[int, ...] | None,
+        montage_tile_source_ids: dict[int, object] | None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None,
+        shader_mapping,
+        tile_delta: "TilePresentationDelta",
+        tile_residency_budget_bytes: int,
+        frame_plan,
+    ):
         # ADR 0055 G4c: the prefetch warm hook mirrors the residency knobs of
         # the most recent visible commit instead of inventing its own.
         self._vispy_last_tile_residency_budget_bytes = int(tile_residency_budget_bytes or 0)
         self._vispy_last_tiled_rgb_already_windowed = bool(rgb_already_windowed)
-        placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
-            geometry,
-            tile_state=tile_state,
-            tile_delta=tile_delta,
-        )
-        warm_payloads = {
-            int(tile): payload
-            for tile, payload in tile_state.near_payloads(tile_delta).items()
-            if int(tile) not in tile_payloads
-        }
-        stats = self._apply_vispy_tile_layer_presentation(
+        return self._apply_vispy_tile_layer_presentation(
             placeholder,
             histogramData=None,
             histogramPlotData=histogramPlotData,
@@ -687,23 +679,39 @@ class VisPyImageView2D(ImageViewShell):
             histogramRange=histogramRange,
             viewport_policy=viewport_policy,
             rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=dirty_tiles,
-            montage_tile_source_ids=tile_source_ids,
-            montage_tile_payloads=tile_payloads,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
             shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
             frame_plan=frame_plan,
         )
-        if not (getattr(tile_delta, "upserts", None) or getattr(tile_delta, "removals", None)):
-            self._schedule_vispy_warm_tile_residency(
-                warm_payloads,
-                geometry=geometry,
-                rgb_already_windowed=rgb_already_windowed,
-                tile_delta=tile_delta,
-                tile_residency_budget_bytes=tile_residency_budget_bytes,
-            )
-        return _tile_commit_report(tile_payloads, tile_delta, stats)
+
+    def _after_tiled_commit(
+        self,
+        *,
+        tile_state: "TilePresentationState",
+        tile_delta: "TilePresentationDelta",
+        tile_payloads: dict[int, "DisplayTilePayload"],
+        geometry,
+        rgb_already_windowed: bool,
+        tile_residency_budget_bytes: int,
+    ) -> None:
+        if getattr(tile_delta, "upserts", None) or getattr(tile_delta, "removals", None):
+            return
+        warm_payloads = {
+            int(tile): payload
+            for tile, payload in tile_state.near_payloads(tile_delta).items()
+            if int(tile) not in tile_payloads
+        }
+        self._schedule_vispy_warm_tile_residency(
+            warm_payloads,
+            geometry=geometry,
+            rgb_already_windowed=rgb_already_windowed,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
 
     def _schedule_vispy_warm_tile_residency(
         self,
@@ -790,12 +798,8 @@ class VisPyImageView2D(ImageViewShell):
         )
         return None
 
-    def tiledPayloadResident(self, payload) -> bool:
-        """Report physical tile/page residency without changing backend state."""
-
-        layer = getattr(self, "_vispy_gpu_montage_layer", None)
-        resident = getattr(layer, "payload_resident", None)
-        return bool(callable(resident) and resident(payload))
+    def _tiled_presentation_layer(self):
+        return getattr(self, "_vispy_gpu_montage_layer", None)
 
     def _submit_vispy_warm_tile_residency_continuation(self) -> None:
         scheduler = getattr(self, "_vispy_warm_tile_scheduler", None)
@@ -1557,12 +1561,6 @@ class VisPyImageView2D(ImageViewShell):
                 )
         self._record_upload_timing("tile_layer_upload_ms", float(stats.upload_ms))
         return stats
-
-    def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
-        layer = getattr(self, "_vispy_gpu_montage_layer", None)
-        if layer is None:
-            return {}
-        return layer.tile_truth_physical_rows()
 
     def _request_vispy_tile_layer_redraw(self) -> None:
         self._vispy_tile_presentation_request_count = int(

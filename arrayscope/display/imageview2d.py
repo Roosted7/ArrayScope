@@ -901,21 +901,22 @@ class ImageViewShell(QtWidgets.QWidget):
     ) -> None:
         """Commit a first-class tiled presentation through this backend.
 
-        A small placeholder remains inside the widget shell because shared
+        One semantic flow for every backend: prepare the typed montage
+        commit, hand the ordered payloads to backend mechanics, and derive
+        the commit report from the returned physical stats.  A small
+        placeholder remains inside the widget shell because shared
         image-view bookkeeping still expects ``self.image.shape``.  Core
         presentation state and renderer upload decisions use the typed tile
         state and delta, not placeholder pixels.
         """
 
-        self._last_tiled_shader_mapping = shader_mapping
         placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
             geometry,
             tile_state=tile_state,
             tile_delta=tile_delta,
         )
-        stats = self._apply_tile_layer_presentation(
+        stats = self._apply_backend_tiled_presentation(
             placeholder,
-            histogramData=None,
             histogramPlotData=histogramPlotData,
             geometry=geometry,
             levels=levels,
@@ -925,11 +926,72 @@ class ImageViewShell(QtWidgets.QWidget):
             montage_dirty_tiles=dirty_tiles,
             montage_tile_source_ids=tile_source_ids,
             montage_tile_payloads=tile_payloads,
+            shader_mapping=shader_mapping,
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
             frame_plan=frame_plan,
         )
+        self._after_tiled_commit(
+            tile_state=tile_state,
+            tile_delta=tile_delta,
+            tile_payloads=tile_payloads,
+            geometry=geometry,
+            rgb_already_windowed=rgb_already_windowed,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
         return _tile_commit_report(tile_payloads, tile_delta, stats)
+
+    def _apply_backend_tiled_presentation(
+        self,
+        placeholder: np.ndarray,
+        *,
+        histogramPlotData,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy,
+        rgb_already_windowed: bool,
+        montage_dirty_tiles: tuple[int, ...] | None,
+        montage_tile_source_ids: dict[int, object] | None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None,
+        shader_mapping,
+        tile_delta: "TilePresentationDelta",
+        tile_residency_budget_bytes: int,
+        frame_plan,
+    ) -> TileLayerUpdateStats:
+        """Backend hook: physically commit one prepared tiled presentation."""
+
+        # The CPU-LUT backend bakes shader mapping into pixels through the
+        # LUT and levels; it has no uniform to receive the mapping.
+        del shader_mapping
+        return self._apply_tile_layer_presentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+            frame_plan=frame_plan,
+        )
+
+    def _after_tiled_commit(
+        self,
+        *,
+        tile_state: "TilePresentationState",
+        tile_delta: "TilePresentationDelta",
+        tile_payloads: dict[int, "DisplayTilePayload"],
+        geometry,
+        rgb_already_windowed: bool,
+        tile_residency_budget_bytes: int,
+    ) -> None:
+        """Backend hook: schedule follow-up work (e.g. residency warming)."""
 
     def _prepare_tiled_montage_commit(self, geometry, *, tile_state: "TilePresentationState", tile_delta: "TilePresentationDelta"):
         tile_payloads = tile_state.active_payloads(tile_delta)
@@ -986,17 +1048,22 @@ class ImageViewShell(QtWidgets.QWidget):
         finally:
             self._finish_upload_timing()
 
-    def tiledPayloadResident(self, payload) -> bool:
-        """Report physical PyQtGraph tile residency without changing state."""
+    def _tiled_presentation_layer(self):
+        """Backend hook: the physical tiled-presentation layer, if any."""
 
-        layer = self._montage_tile_layer
+        return self._montage_tile_layer
+
+    def tiledPayloadResident(self, payload) -> bool:
+        """Report physical tile residency without changing backend state."""
+
+        layer = self._tiled_presentation_layer()
         resident = getattr(layer, "payload_resident", None)
         return bool(callable(resident) and resident(payload))
 
     def tiledPayloadCommitSlotOwned(self, payload) -> bool:
         """Report an onscreen holder that owns the payload's atomic swap."""
 
-        layer = self._montage_tile_layer
+        layer = self._tiled_presentation_layer()
         owned = getattr(layer, "payload_commit_slot_owned", None)
         return bool(callable(owned) and owned(payload))
 
@@ -1128,7 +1195,7 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def presentation_diagnostics(self) -> dict[str, object]:
         timing = self.lastImageUploadTiming()
-        tile_layer = getattr(self, "_montage_tile_layer", None)
+        tile_layer = self._tiled_presentation_layer()
         physically_visible_tile_count = int(
             getattr(tile_layer, "physically_visible_tile_count", 0) or 0
         )
@@ -1733,7 +1800,7 @@ class ImageViewShell(QtWidgets.QWidget):
         layer.set_rows(rows)
 
     def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
-        layer = self._montage_tile_layer
+        layer = self._tiled_presentation_layer()
         if layer is None:
             return {}
         return layer.tile_truth_physical_rows()
