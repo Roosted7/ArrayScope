@@ -525,9 +525,12 @@ session retargeted to B while it evaluated. Its final page-key construction
 re-read the mutable session, disagreed with A, and raised instead of returning
 reusable A work for the pipeline's existing stale-intent drop. Rung closures
 now snapshot their source identity and reduced-target page construction uses
-that captured route. A unit gate moves the session route before completion and
-requires the result to remain labeled A; it does not infer or materialize a
-second route.
+that captured route through the canonical session-aware planner. The latter is
+important for non-montage window shifts: captured semantic identity must not
+discard the session's native source anchor. A unit gate moves the session route
+before completion, applies a shifted native footprint, and requires the result
+to remain labeled A at that anchored footprint; it does not infer or
+materialize a second route.
 
 The required live real-data interaction-convergence ring is green on Wayland
 as one continuous app session: hard-capped initial fill, montage-window

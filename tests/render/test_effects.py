@@ -10,7 +10,7 @@ import pytest
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
 from arrayscope.display.montage import MontageTile, RenderedTile, make_montage_plan
-from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
 from arrayscope.display.pyramid import (
     LodPageCache,
     MaterializedLodPage,
@@ -343,13 +343,17 @@ def test_evaluate_preview_tile_uses_requested_rung_level():
     assert pages[0].values.shape == (1, 2)
 
 
-def test_reusable_preview_finishes_under_its_captured_semantic_route():
+def test_reusable_preview_keeps_captured_route_and_source_anchor():
     """A reused session may retarget while an old reusable rung evaluates."""
 
     session = _session()
     tile = session.plan.tiles[2]
     demand = _demand(0)
     captured_source_id = session.tile_semantic_source_id(tile.source_index)
+    session._payload_source_anchor = lambda _shape: PayloadSourceAnchor(
+        content_key=("anchored-content",),
+        source_rect=(10, 14, 20, 26),
+    )
     session.tile_semantic_source_id = lambda source_index: (
         "new-semantic-route",
         int(source_index),
@@ -368,6 +372,7 @@ def test_reusable_preview_finishes_under_its_captured_semantic_route():
     assert preview is not None
     key, _pages, *_rest = preview
     assert key.source_id == captured_source_id
+    assert key.plans[0].valid_source_rect_yx == (10, 14, 20, 26)
 
 
 def test_evaluate_shared_preview_fans_out_display_only_payloads():

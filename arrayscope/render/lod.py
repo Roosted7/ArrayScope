@@ -256,11 +256,29 @@ def page_set_key_for_rendered(
     )
 
 
-def page_set_key_for(session, rendered: RenderedTile, *, demand, level: int) -> LodPageSetKey:
-    plans = page_plans_for_rendered(session, rendered, demand=demand, level=level)
+def page_set_key_for(
+    session,
+    rendered: RenderedTile,
+    *,
+    demand,
+    level: int,
+    semantic_source_id=None,
+) -> LodPageSetKey:
+    source_id = (
+        session.tile_semantic_source_id(rendered.tile.source_index)
+        if semantic_source_id is None
+        else semantic_source_id
+    )
+    plans = page_plans_for_rendered(
+        session,
+        rendered,
+        demand=demand,
+        level=level,
+        semantic_source_id=source_id,
+    )
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
     return LodPageSetKey(
-        source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+        source_id=source_id,
         tile_id=int(rendered.tile.source_index),
         level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
         reducer=plans[0].reducer,
@@ -325,7 +343,15 @@ def source_origin_yx_for_session(session, source: np.ndarray) -> tuple[int, int]
     return (int(anchor.source_rect[0]), int(anchor.source_rect[2]))
 
 
-def page_plans_for_rendered(session, rendered, *, demand, level: int, native_source=None):
+def page_plans_for_rendered(
+    session,
+    rendered,
+    *,
+    demand,
+    level: int,
+    native_source=None,
+    semantic_source_id=None,
+):
     if native_source is None:
         native_source = canonical_value_source_for_rendered(
             rendered, shader_display=bool(getattr(session, "shader_display", True))
@@ -343,12 +369,17 @@ def page_plans_for_rendered(session, rendered, *, demand, level: int, native_sou
     height, width = (int(value) for value in source.shape[:2])
     anchor_fn = getattr(session, "_payload_source_anchor", None)
     anchor = anchor_fn((height, width)) if callable(anchor_fn) else None
+    source_id = (
+        session.tile_semantic_source_id(rendered.tile.source_index)
+        if semantic_source_id is None
+        else semantic_source_id
+    )
     content_key = (
         anchor.content_key
         if anchor is not None
         else (
             "src-anchored",
-            session.tile_semantic_source_id(rendered.tile.source_index),
+            source_id,
             ("display-plane",),
         )
     )
