@@ -993,6 +993,13 @@ class ImageViewShell(QtWidgets.QWidget):
         resident = getattr(layer, "payload_resident", None)
         return bool(callable(resident) and resident(payload))
 
+    def tiledPayloadCommitSlotOwned(self, payload) -> bool:
+        """Report an onscreen holder that owns the payload's atomic swap."""
+
+        layer = self._montage_tile_layer
+        owned = getattr(layer, "payload_commit_slot_owned", None)
+        return bool(callable(owned) and owned(payload))
+
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
         timing = self._upload_timing
         if timing is None:

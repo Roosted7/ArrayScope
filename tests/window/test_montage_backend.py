@@ -1755,6 +1755,77 @@ def test_hidden_target_warm_zero_progress_rearms_visible_owner(monkeypatch):
     assert replans == [session]
 
 
+def test_hidden_target_warm_accepts_visible_commit_slot_owner(monkeypatch):
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+    from arrayscope.window import frame_effects
+
+    payload = DisplayTilePayload(
+        0,
+        0,
+        np.zeros((2, 2), dtype=np.float32),
+        None,
+        ("slot-owned-target", 0),
+    )
+    warm_calls = []
+    view = SimpleNamespace(
+        warmTiledResidency=lambda **kwargs: warm_calls.append(kwargs),
+        tiledPayloadResident=lambda _payload: False,
+        tiledPayloadCommitSlotOwned=lambda candidate: candidate is payload,
+    )
+    session = SimpleNamespace(
+        session_id=10,
+        key=("slot-owned-session",),
+        viewport_revision=5,
+        _atomic_warm_job=None,
+        final_commit_pending=False,
+        flush_pending=False,
+    )
+    replans = []
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(img_view=view),
+        _frame_session_is_current=lambda candidate: candidate is session,
+        _memory_policy=lambda: SimpleNamespace(
+            visible_render_budget_bytes=1 << 20,
+            display_cache_budget_bytes=1 << 20,
+            user_render_cap_bytes=1 << 20,
+        ),
+        request_montage_replan=lambda candidate: replans.append(candidate),
+    )
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_low_priority_callback",
+        lambda _renderer, callback: callback(),
+    )
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=5,
+        upserts={0: payload},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+    )
+
+    ready = frame_effects._warm_atomic_successor_residency(
+        renderer,
+        session,
+        _geometry(),
+        delta,
+        levels=(-1.0, 1.0),
+        rgb_already_windowed=False,
+        payloads={0: payload},
+    )
+
+    assert ready is False
+    assert len(warm_calls) == 1
+    assert session._atomic_warm_job is None
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+    assert replans == [session]
+
+
 def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():
     from arrayscope.window import frame_effects as montage_commit
 

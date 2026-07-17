@@ -2199,6 +2199,14 @@ def test_pyqtgraph_resident_pixels_without_physical_identity_are_reacknowledged(
             histogramRange=(0.0, 3.0),
         )
         assert first.committed_upserts == frozenset({0})
+        successor = replace(
+            payload,
+            image=np.full((2, 2), 8.0, dtype=np.float32),
+            source_id=("successor", 0),
+            tile_identity=replace(identity, semantic_generation=("tile", 1)),
+        )
+        assert view.tiledPayloadResident(successor) is False
+        assert view.tiledPayloadCommitSlotOwned(successor) is True
 
         state = view._montage_tile_layer.states[0]
         state.acknowledged_identity = None

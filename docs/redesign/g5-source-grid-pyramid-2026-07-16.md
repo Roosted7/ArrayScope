@@ -253,6 +253,17 @@ holders plus a positive physical-residency query for every payload. The
 canonical screenshot/two-quality-pass replay remains an exit gate; these unit
 results alone do not claim it green.
 
+The first honest live rerun then stopped on the predecessor overlap rather
+than fabricating residency: the first warm cohort addressed tile slots whose
+old holders were still onscreen, and `warm_payloads` correctly refused to
+overwrite them before the atomic swap. Those slots already have a bounded
+complement owner: the final synchronous PyQtGraph commit can replace their
+ImageItems without yielding to a paint. PyQtGraph now exposes that visible
+commit-slot ownership separately from physical payload residency. Atomic
+preparation accepts either exact hidden payload residency or an onscreen slot
+owned by that final commit; a tile with neither remains unresolved and rearms
+the visible owner. The focused coordinator gate distinguishes all three cases.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`

@@ -3675,10 +3675,20 @@ def _warm_atomic_successor_residency(
             "tiledPayloadResident",
             None,
         )
+        commit_slot_owned = getattr(
+            getattr(renderer.win, "img_view", None),
+            "tiledPayloadCommitSlotOwned",
+            None,
+        )
         unresolved = tuple(
             int(tile)
             for tile in admitted
-            if callable(resident) and not bool(resident(job["payloads"][int(tile)]))
+            if callable(resident)
+            and not bool(resident(job["payloads"][int(tile)]))
+            and not (
+                callable(commit_slot_owned)
+                and bool(commit_slot_owned(job["payloads"][int(tile)]))
+            )
         )
         for tile in admitted:
             if int(tile) in unresolved:

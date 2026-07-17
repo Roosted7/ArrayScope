@@ -1331,6 +1331,12 @@ class MontageTileLayer:
                 return True
         return False
 
+    def payload_commit_slot_owned(self, payload: DisplayTilePayload) -> bool:
+        """Return whether an onscreen holder owns this tile's atomic swap."""
+
+        state = self._states.get(int(payload.tile_number))
+        return bool(state is not None and _state_is_physically_visible(state))
+
     def _take_resident_direct_state(
         self,
         tile_number: int,
