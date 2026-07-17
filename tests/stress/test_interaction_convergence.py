@@ -47,6 +47,11 @@ from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
 )
 
+# Build-time budget for the cold 272-tile FFT fill — a measured multi-second
+# operation on this hardware. The five-second interaction budget above
+# applies to per-gesture probes only.
+_FILL_TIMEOUT_S = 120
+
 
 
 # PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
@@ -230,7 +235,11 @@ def _build_fft_montage_window(qtbot):
     )
     win._set_view_state(state)
     win.update_image_view()
-    qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+    # The cold 272-tile FFT fill is a measured multi-second operation on this
+    # hardware; the five-second interaction budget applies to the per-gesture
+    # probes below, not to build-time setup. Capping the build here made the
+    # whole net erroring-red without testing anything (2026-07-17).
+    qtbot.waitUntil(lambda: _settled(win), timeout=_FILL_TIMEOUT_S * 1000)
     return win, settings, data, n
 
 

@@ -75,6 +75,12 @@ class TileLodState:
     target_quality_available: bool = False
     exact_requested: bool = False  # inspection or user demanded native
     scheduling_rank: int = 0
+    # Plan-wide first-pixel pass state (progressive presentation contract):
+    # while some required tile still lacks first pixels, refinement of a
+    # covered tile is not scheduled at all — its workers would starve
+    # coverage (2026-07-17 field plateau: 108 refinement evaluations ran
+    # while 164 tiles stayed black for ~3 s).
+    coverage_pass_open: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,6 +224,19 @@ class LodLadder:
             desired in resident and not presented_preview
         ) or (presented == desired and not presented_preview)
         if presented is not None and int(presented) <= desired and not presented_preview:
+            desired_resident = True
+        if (
+            not desired_resident
+            and bool(state.coverage_pass_open)
+            and presented is not None
+        ):
+            # Progressive presentation contract: this tile already shows
+            # pixels, so its DESIRED step is refinement-class work. While the
+            # plan-wide first-pixel pass is open, refinement is neither
+            # presentable (commit gate) nor schedulable — submitting it here
+            # spent every worker on covered tiles while missing tiles
+            # starved. The pass-close acknowledgement edge replans, which
+            # re-emits this step.
             desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
             # DESIRED is usually refinement and belongs to preparation.  But

@@ -580,9 +580,16 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         plan_tiles=plan_tiles,
         context=context_owner(),
     )
+    coverage_pass_open = bool(
+        getattr(session, "_first_pixel_pass_open", lambda: False)()
+    )
     by_number = {int(state.tile_number): state for state in states}
     return tuple(
-        replace(by_number[int(tile_number)], scheduling_rank=rank)
+        replace(
+            by_number[int(tile_number)],
+            scheduling_rank=rank,
+            coverage_pass_open=coverage_pass_open,
+        )
         for rank, tile_number in enumerate(ordered_numbers)
     )
 

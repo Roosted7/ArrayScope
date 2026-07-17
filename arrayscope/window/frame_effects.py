@@ -2336,6 +2336,11 @@ class FramePipelineEffects:
         )
         if first_pass_publication_transition:
             renderer.request_montage_replan(session)
+        if preview_pass_open_before and not session._first_pixel_pass_open():
+            # Pass-close edge: refinement-class DESIRED steps were withheld
+            # from planning while coverage was incomplete; this replan is the
+            # named owner that re-emits them (no wait without an owner).
+            renderer.request_montage_replan(session)
 
     def _finish_commit(
         self,
