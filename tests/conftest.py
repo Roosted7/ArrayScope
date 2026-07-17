@@ -49,21 +49,22 @@ def pytest_xdist_auto_num_workers(config):
 # Keep direct-import test modules from replacing the real package in sys.modules.
 import arrayscope  # noqa: F401
 
-# Modules that tests monkeypatch but production code imports lazily must be
-# in the identity snapshot below from the start; otherwise the teardown
-# deletes the never-snapshotted sys.modules entry while the parent package
-# attribute keeps the old object, and later `from arrayscope.display import
-# colormap_library` resolves a *different* module than the running code uses
-# (patched writes become invisible to the UI under test).
-import arrayscope.display.colormap_library  # noqa: F401
 
-
-def _arrayscope_module_names():
-    return [
-        name
-        for name in sys.modules
+def _arrayscope_modules():
+    return {
+        name: module
+        for name, module in sys.modules.items()
         if name == "arrayscope" or name.startswith("arrayscope.")
-    ]
+    }
+
+
+def _has_replaced_ancestor(name, replaced_names):
+    parent_name = name
+    while "." in parent_name:
+        parent_name = parent_name.rpartition(".")[0]
+        if parent_name in replaced_names:
+            return True
+    return False
 
 
 @pytest.fixture(autouse=True)
@@ -76,16 +77,45 @@ def _restore_arrayscope_module_identity():
     brand-new class objects, so a later ``isinstance`` or ``pytest.raises``
     check in an unrelated test compares against the *old* class identity and
     fails even though the production code is correct (e.g. ``LazySourceArray``,
-    ``SourceReadRefused``). Snapshot the arrayscope module objects before each
-    test and restore them afterward so module identity cannot leak forward.
+    ``SourceReadRefused``). Snapshot the arrayscope module objects and their
+    parent-package bindings before each test. Restore replaced modules while
+    retaining legitimate first imports so module identity cannot leak forward.
     """
 
-    snapshot = {name: sys.modules[name] for name in _arrayscope_module_names()}
+    snapshot = _arrayscope_modules()
+    package_attributes = {
+        name: vars(module).copy()
+        for name, module in snapshot.items()
+        if hasattr(module, "__path__")
+    }
     yield
-    for name in _arrayscope_module_names():
-        if sys.modules.get(name) is not snapshot.get(name):
-            del sys.modules[name]
+
+    current = _arrayscope_modules()
+    replaced_names = {
+        name for name, module in snapshot.items() if current.get(name) is not module
+    }
+    discard_names = replaced_names | {
+        name
+        for name in current.keys() - snapshot.keys()
+        if _has_replaced_ancestor(name, replaced_names)
+    }
+    for name in discard_names:
+        sys.modules.pop(name, None)
     sys.modules.update(snapshot)
+
+    # Import machinery also caches every child module as an attribute of its
+    # parent package. Restore those bindings together with sys.modules; fixing
+    # only one side leaves two module/class identities alive in later tests.
+    for name in discard_names:
+        parent_name, separator, child_name = name.rpartition(".")
+        if not separator or parent_name not in package_attributes:
+            continue
+        parent = snapshot[parent_name]
+        previous_attributes = package_attributes[parent_name]
+        if child_name in previous_attributes:
+            setattr(parent, child_name, previous_attributes[child_name])
+        else:
+            vars(parent).pop(child_name, None)
 
 
 @pytest.fixture(autouse=True)
