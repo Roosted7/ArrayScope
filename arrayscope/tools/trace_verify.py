@@ -32,11 +32,16 @@ def _ack_satisfies_target(ack: dict[str, object], target: dict[str, object]) -> 
         return False
     level = ack.get("level")
     target_level = target.get("target_level")
-    return (
-        level is not None
-        and target_level is not None
-        and int(level) <= int(target_level)
-    )
+    if level is None or target_level is None:
+        return False
+    quality = str(ack.get("quality", "") or "exact")
+    # Mirror lifecycle settlement (`_quality_lod_satisfies_target`): exact
+    # pixels satisfy their level or any coarser demand; retained
+    # fallback/preview pixels satisfy only a *strictly* coarser demand — an
+    # equal-level fallback still owes exact target work.
+    if quality in {"fallback", "preview"}:
+        return int(level) < int(target_level)
+    return int(level) <= int(target_level)
 
 
 def verify_trace(
@@ -144,11 +149,14 @@ def verify_trace(
             elif edge == "target_satisfied_retained":
                 # Production closed this target with an already-acknowledged
                 # compatible payload (idempotent backends do not re-upload or
-                # re-ack).  Contract: the emitter must only publish this edge
-                # for a payload whose source/level satisfy the current target.
+                # re-ack).  The emitter publishes the retained payload's
+                # source/level/quality; re-judge them here so a buggy emitter
+                # cannot vouch for a payload the settlement rule rejects.
                 target = targets.get(tile)
-                if target is not None and int(event.get("sequence", 0) or 0) >= int(
-                    target["sequence"]
+                if (
+                    target is not None
+                    and int(event.get("sequence", 0) or 0) >= int(target["sequence"])
+                    and _ack_satisfies_target(event, target)
                 ):
                     acknowledgements[tile] = event
                     first_ack_sequences.setdefault(

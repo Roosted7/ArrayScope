@@ -87,10 +87,11 @@ only at ring 4.
 
 ## Known gaps (owners in the queue)
 
-- **`target_satisfied_retained` is not emitted yet.** Whole-workflow replay
-  therefore under-reports final-scope acknowledgement; the stress matrix
-  tolerates exactly that one invariant (`TOLERATED_INVARIANTS`) until the
-  emitter lands. Tighten immediately after.
+- ~~**`target_satisfied_retained` is not emitted yet.**~~ Closed 2026-07-17:
+  the lifecycle emits it once per target requirement closed by retained
+  pixels, `verify_trace` re-judges the edge with the production settlement
+  rule, and `TOLERATED_INVARIANTS` is empty — the strongest invariant is
+  enforced in whole-workflow replays.
 - **The stress matrix is unstable** (see its docstring): synthetic-input
   convergence is nondeterministic at dfa53db3, complex64 raw input deadlocks
   deterministically, tiny-montage level settlement is racy. The matrix goes

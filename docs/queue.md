@@ -51,10 +51,6 @@ this file says *what, in what order, and when it counts as done*.
   coverage tasks at retarget.
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **Emit `target_satisfied_retained`** when a retained compatible payload
-  closes a target — until then `trace_verify`'s strongest invariant
-  (`final_required_target_acknowledged`) stays tolerated in the stress
-  matrix, i.e. effectively off.
 - **complex64 PyQtGraph presentation deadlock** (deterministic; strict xfail
   in the stress matrix).
 - **PyQtGraph physical readback oracle** — the framebuffer-to-CPU oracle
@@ -95,6 +91,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   hover/selection owners deleted. Behavior-preserving refactor gated on
   ring 1 (full offscreen suite green); no ring 3–4 run — no rendering
   behavior change intended.
+- 2026-07-17 — **`target_satisfied_retained` emitted in production** (standing
+  lane): the lifecycle emits it once per target requirement closed by a
+  retained compatible payload (retarget/ack/confirm edges + the settled
+  noop-commit re-affirmation in `frame_effects`); `trace_verify` re-judges
+  the edge with the production settlement rule (fallback needs strictly finer
+  level); `TOLERATED_INVARIANTS` is empty — the strongest invariant
+  (`final_required_target_acknowledged`) is enforced in the stress matrix,
+  which passed 5/5 rows serially. Gates: `tests/core/test_trace.py`
+  (`*retained_satisfaction*`, red-first).
+
 - 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
   route, reducer families, page cache, both-backend consumers, legacy
   whole-plane ownership deleted with a resurrection guard; the progressive

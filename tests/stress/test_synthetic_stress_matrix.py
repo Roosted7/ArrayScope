@@ -44,11 +44,11 @@ pytestmark = [
 
 ROOT = Path(__file__).parents[2]
 
-# Until production emits `target_satisfied_retained` for targets closed by
-# retained compatible payloads, whole-workflow replays legitimately end with
-# final targets that have no ack event.  Tolerate exactly that invariant and
-# nothing else; tighten by emptying this set once the emitter lands.
-TOLERATED_INVARIANTS = frozenset({"final_required_target_acknowledged"})
+# Production emits `target_satisfied_retained` when a retained compatible
+# payload closes a target without a fresh backend acknowledgement
+# (2026-07-17), so whole-workflow replays enforce the full invariant set.
+# Tolerate an invariant here only with a queue row that owns its removal.
+TOLERATED_INVARIANTS = frozenset()
 
 
 def _dataset(rng, shape, dtype):

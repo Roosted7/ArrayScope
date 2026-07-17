@@ -515,6 +515,220 @@ def test_trace_verify_drops_ack_across_incompatible_retarget(tmp_path):
     assert result["violations"][0]["tile"] == 3
 
 
+def _drive_lifecycle_trace(tmp_path, drive):
+    """Run one lifecycle scenario with the real trace bus writing to a file."""
+
+    from arrayscope.core.trace import close_trace, configure_trace
+
+    path = tmp_path / "lifecycle-trace.jsonl"
+    configure_trace(path)
+    try:
+        drive()
+    finally:
+        close_trace()
+    return path
+
+
+def _retained_edges(path):
+    return [
+        event
+        for event in (json.loads(line) for line in path.read_text().splitlines())
+        if event.get("kind") == "lifecycle"
+        and event.get("edge") == "target_satisfied_retained"
+    ]
+
+
+def test_lifecycle_emits_retained_satisfaction_for_finer_fallback_ack(tmp_path):
+    """A retained finer fallback settles its target with only fallback acks.
+
+    ``_quality_lod_satisfies_target`` lets already-finer fallback pixels close
+    a coarser demand, but the only backend acks on the bus carry fallback
+    quality, which replay must not count as exact settlement.  Production owns
+    saying `target_satisfied_retained`; without it the strongest invariant
+    reads the run as never satisfied.
+    """
+
+    from arrayscope.presentation.tile_lifecycle import (
+        TileLifecycle,
+        TilePayloadRef,
+        TileTarget,
+    )
+    from arrayscope.tools.trace_verify import verify_trace
+
+    lc = TileLifecycle()
+    fallback = TilePayloadRef(
+        source_id="p0", quality="fallback", lod_level=0, source_index=5
+    )
+
+    def drive():
+        lc.retarget(
+            {0: TileTarget(tile_number=0, source_index=5, semantic_source_id="s5", lod_level=2)}
+        )
+        lc.fallback_ready(0, fallback)
+        lc.commit_emitted({0: fallback})
+        lc.backend_ack({0: fallback})
+
+    path = _drive_lifecycle_trace(tmp_path, drive)
+
+    assert lc.record(0).target_settled
+    edges = _retained_edges(path)
+    assert edges and edges[0]["tile"] == 0
+    result = verify_trace(path, expect_targets=1)
+    assert result["ok"], result["violations"]
+
+
+def test_lifecycle_emits_retained_satisfaction_on_confirmed_resident_commit(tmp_path):
+    """Resident-retarget commits confirm without upserts and without acks."""
+
+    from arrayscope.presentation.tile_lifecycle import (
+        TileLifecycle,
+        TilePayloadRef,
+        TileTarget,
+    )
+    from arrayscope.tools.trace_verify import verify_trace
+
+    lc = TileLifecycle()
+    exact = TilePayloadRef(source_id="p1", quality="exact", lod_level=0, source_index=7)
+
+    def drive():
+        lc.retarget(
+            {1: TileTarget(tile_number=1, source_index=7, semantic_source_id="s7", lod_level=0)}
+        )
+        lc.target_ready(1, exact)
+        lc.commit_emitted({1: exact})
+        lc.backend_presented_snapshot({1: "p1"})
+        lc.presentation_confirmed([1])
+
+    path = _drive_lifecycle_trace(tmp_path, drive)
+
+    assert lc.record(1).target_settled
+    assert _retained_edges(path)
+    result = verify_trace(path, expect_targets=1)
+    assert result["ok"], result["violations"]
+
+
+def test_lifecycle_reaffirms_retained_satisfaction_across_compatible_retarget(tmp_path):
+    """Each new requirement a retained payload closes gets its own edge.
+
+    The backend never re-acks a retarget the resident payload already
+    satisfies; the lifecycle is the only owner that can say the new
+    requirement was closed by retention.
+    """
+
+    from arrayscope.presentation.tile_lifecycle import (
+        TileLifecycle,
+        TilePayloadRef,
+        TileTarget,
+    )
+    from arrayscope.tools.trace_verify import verify_trace
+
+    lc = TileLifecycle()
+    fallback = TilePayloadRef(
+        source_id="p0", quality="fallback", lod_level=0, source_index=5
+    )
+
+    def drive():
+        lc.retarget(
+            {0: TileTarget(tile_number=0, source_index=5, semantic_source_id="s5", lod_level=2)}
+        )
+        lc.fallback_ready(0, fallback)
+        lc.commit_emitted({0: fallback})
+        lc.backend_ack({0: fallback})
+        # Coarse zoom replan: still strictly coarser than the retained level-0
+        # fallback, so no work and no ack follow.
+        lc.retarget(
+            {0: TileTarget(tile_number=0, source_index=5, semantic_source_id="s5", lod_level=1)}
+        )
+
+    path = _drive_lifecycle_trace(tmp_path, drive)
+
+    assert lc.record(0).target_settled
+    assert len(_retained_edges(path)) == 2
+    result = verify_trace(path, expect_targets=1)
+    assert result["ok"], result["violations"]
+
+
+def test_lifecycle_commit_path_reaffirmation_is_idempotent_per_requirement(tmp_path):
+    """`note_retained_satisfaction` re-affirms settled scope without churn."""
+
+    from arrayscope.presentation.tile_lifecycle import (
+        TileLifecycle,
+        TilePayloadRef,
+        TileTarget,
+    )
+
+    lc = TileLifecycle()
+    exact = TilePayloadRef(source_id="p1", quality="exact", lod_level=0, source_index=7)
+
+    def drive():
+        lc.retarget(
+            {1: TileTarget(tile_number=1, source_index=7, semantic_source_id="s7", lod_level=0)}
+        )
+        lc.target_ready(1, exact)
+        lc.commit_emitted({1: exact})
+        lc.backend_presented_snapshot({1: "p1"})
+        lc.presentation_confirmed([1])
+        # The settled noop-commit bail re-affirms the whole required scope;
+        # repeated polls must not spam the bus (unsettled tile 2 stays quiet).
+        lc.note_retained_satisfaction((1, 2))
+        lc.note_retained_satisfaction((1, 2))
+
+    path = _drive_lifecycle_trace(tmp_path, drive)
+
+    edges = _retained_edges(path)
+    assert len(edges) == 1 and edges[0]["tile"] == 1
+
+
+def test_trace_verify_retained_edge_quality_matches_lifecycle_settlement(tmp_path):
+    """Fallback-quality retention closes only strictly coarser later demands.
+
+    Mirrors ``_quality_lod_satisfies_target``: an equal-level fallback still
+    owes exact target work, so a retained fallback edge must not survive a
+    retarget to its own level.
+    """
+
+    from arrayscope.tools.trace_verify import verify_trace
+
+    def rows(final_target_level):
+        return (
+            {
+                "kind": "lifecycle",
+                "edge": "target_required",
+                "tile": 4,
+                "source_index": 9,
+                "target_level": 2,
+                "sequence": 1,
+            },
+            {
+                "kind": "lifecycle",
+                "edge": "target_satisfied_retained",
+                "tile": 4,
+                "source_index": 9,
+                "level": 1,
+                "quality": "fallback",
+                "sequence": 2,
+            },
+            {
+                "kind": "lifecycle",
+                "edge": "target_required",
+                "tile": 4,
+                "source_index": 9,
+                "target_level": final_target_level,
+                "sequence": 3,
+            },
+        )
+
+    coarser = tmp_path / "coarser.jsonl"
+    coarser.write_text("".join(json.dumps(row) + "\n" for row in rows(2)))
+    assert verify_trace(coarser, expect_targets=1)["ok"]
+
+    equal = tmp_path / "equal.jsonl"
+    equal.write_text("".join(json.dumps(row) + "\n" for row in rows(1)))
+    result = verify_trace(equal)
+    assert not result["ok"]
+    assert result["violations"][0]["invariant"] == "final_required_target_acknowledged"
+
+
 def test_trace_verify_accepts_retained_satisfaction_edge(tmp_path):
     """`target_satisfied_retained` closes a target without a fresh backend ack."""
 

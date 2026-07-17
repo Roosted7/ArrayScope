@@ -286,6 +286,11 @@ class TileRecord:
     task_claim: TileTaskClaim | None = None
     stage_producer_key: object = None
     failed_reason: str = ""
+    #: Trace bookkeeping: the current target requirement's closure is already
+    #: on the bus (a fresh satisfying ``backend_ack`` or one
+    #: ``target_satisfied_retained`` edge).  Reset when a new requirement is
+    #: adopted, so every requirement gets exactly one closure statement.
+    satisfaction_traced: bool = False
 
     @property
     def active(self) -> bool:
@@ -529,6 +534,12 @@ class TileLifecycle:
                 rec.presented_level = None
                 rec.presentation = Presentation.UNPRESENTED
                 self._presented.discard(tile_number)
+            # Idempotent backends never re-upload or re-acknowledge a payload
+            # that already satisfies the new requirement, so this is the last
+            # moment production can say the requirement was closed by
+            # retention rather than left unsatisfied.
+            rec.satisfaction_traced = False
+            self._note_retained_satisfaction(rec)
         for tile_number, rec in tuple(self._records.items()):
             if tile_number in wanted or rec.target is None:
                 continue
@@ -926,6 +937,21 @@ class TileLifecycle:
             accepted=True,
         )
         _trace_lifecycle(rec, "presented", identity=payload_identity)
+        if rec.target_settled:
+            if (
+                rec.target is not None
+                and normalized_quality == "exact"
+                and normalized_level is not None
+                and normalized_level <= int(rec.target.lod_level)
+            ):
+                # The ``backend_ack`` just emitted is itself replay-visible
+                # exact settlement; no retained-satisfaction edge is owed.
+                rec.satisfaction_traced = True
+            else:
+                # Settled by retained already-finer fallback pixels: the ack
+                # on the bus carries fallback quality, which replay must not
+                # count as exact settlement.
+                self._note_retained_satisfaction(rec)
         return True
 
     def may_remove_visible(self, tile_number: int, *, memory_pressure: bool = False) -> bool:
@@ -1438,6 +1464,47 @@ class TileLifecycle:
             self._presented.add(rec.tile_number)
             if rec.semantic is Semantic.EVALUATED:
                 self._load_cleared(rec)
+            # This is backend acknowledgement without an upsert, so no
+            # ``backend_ack`` event exists for replay to close the target on.
+            self._note_retained_satisfaction(rec)
+
+    def note_retained_satisfaction(self, tile_numbers: Iterable[int]) -> None:
+        """Commit-path re-affirmation of targets closed by retained payloads.
+
+        A commit cycle that ends with the required scope settled and nothing
+        to upsert owns the fact that no backend acknowledgement will follow.
+        Safety net for presentation state restored outside the ordinary
+        retarget/acknowledge events; idempotent per requirement.
+        """
+
+        for tile_number in tuple(tile_numbers or ()):
+            rec = self._records.get(int(tile_number))
+            if rec is not None:
+                self._note_retained_satisfaction(rec)
+
+    def _note_retained_satisfaction(self, rec: TileRecord) -> None:
+        """Emit ``target_satisfied_retained`` once per target requirement.
+
+        The rule from docs/testing/stress-and-trace-strategy.md: a subsystem
+        that satisfies an obligation without doing work must say so in the
+        trace, or replay cannot tell "satisfied cheaply" from "never
+        satisfied".  ``quality``/``level`` describe the retained payload so
+        ``trace_verify`` can re-judge the closure against later compatible
+        retargets with the same settlement rule production uses.
+        """
+
+        if rec.satisfaction_traced or not trace_enabled() or not rec.target_settled:
+            return
+        fields = rec._presented_payload_fields()
+        if fields is None:
+            return
+        rec.satisfaction_traced = True
+        _trace_lifecycle(
+            rec,
+            "target_satisfied_retained",
+            quality=str(fields[0]),
+            level=int(fields[1]),
+        )
 
     def presentation_discarded(self, tile_number: int) -> None:
         rec = self._records.get(int(tile_number))

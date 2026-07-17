@@ -1786,6 +1786,15 @@ class FramePipelineEffects:
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
                 session.note_committed()
+                # The required scope is settled with nothing to upsert, so no
+                # backend acknowledgement will follow this cycle.  Re-affirm
+                # targets closed by retained payloads (idempotent per
+                # requirement) so whole-workflow replay sees the closure even
+                # for presentation state restored outside the ordinary
+                # retarget/acknowledge events.
+                session.lifecycle.note_retained_satisfaction(
+                    session.required_tile_numbers()
+                )
                 self._note_commit_bail("empty-progressive-settled", wakeup="noop-finish")
                 self._finish_after_noop_commit()
                 return
