@@ -1233,7 +1233,15 @@ class MontageTileLayer:
                 int(width),
                 int(height),
             )
-            self._add_to_direct_reuse_pool(item_state)
+            # Hidden warm residency is owned by the successor transaction,
+            # not by the generic reusable-item pool.  Putting the holder back
+            # in that pool lets the next warm batch pop and retarget it while
+            # the coordinator still records the old payload as resident.  A
+            # 272-tile logical warm can then collapse to one physical holder.
+            # The next presentation either claims this exact state or calls
+            # ``_hide_tile``/``_displace_tile_slot_resident`` to release it
+            # back to ordinary reuse.
+            self._remove_from_direct_reuse_pool(item_state)
             self._touch_resident_state(item_state)
         self._prune_rgb_source_cache()
         storage_evictions += self._prune_resident_items(
@@ -1273,6 +1281,55 @@ class MontageTileLayer:
             warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
             upload_ms=(perf_counter() - start) * 1000.0 if items_updated or items_created else 0.0,
         )
+
+    def payload_resident(self, payload: DisplayTilePayload) -> bool:
+        """Report exact physical ImageItem residency without changing state."""
+
+        source_id = _direct_payload_source_id(payload.source_id, payload)
+        identity = getattr(payload, "tile_identity", None) or payload.source_id
+        backing = getattr(payload, "page_backing", None)
+        for state in self._states.values():
+            if (
+                state.acknowledged_identity != identity
+                and not acknowledged_identity_satisfies_target(
+                    state.acknowledged_identity, identity
+                )
+                or getattr(state.item, "image", None) is None
+                or self._states.get(int(state.tile_number)) is not state
+            ):
+                continue
+            if backing is None:
+                if _direct_physical_payload_source_matches(
+                    state.source_array_id,
+                    source_id,
+                ):
+                    return True
+                continue
+            missing = tuple(
+                target
+                for target, resolution in zip(
+                    backing.requested_keys,
+                    backing.candidate_resolutions,
+                    strict=True,
+                )
+                if resolution is None
+            )
+            if missing:
+                if (
+                    state.page_candidate_missing == missing
+                    and state.page_fallback_reason
+                    == "incomplete-page-coverage-native"
+                ):
+                    return True
+                continue
+            resolved = backing.resolved_page_set
+            if (
+                resolved is not None
+                and state.page_resolutions == resolved.resolutions
+                and not state.page_candidate_missing
+            ):
+                return True
+        return False
 
     def _take_resident_direct_state(
         self,
@@ -1751,6 +1808,20 @@ def _canonical_direct_base_source_id(base_source_id: object) -> object:
 
 def _direct_base_source_matches(left: object, right: object) -> bool:
     return _direct_base_source_id(left) == _direct_base_source_id(right)
+
+
+def _direct_physical_payload_source_matches(left: object, right: object) -> bool:
+    """Compare exact direct payload storage while ignoring route-key spelling."""
+
+    if left == right:
+        return True
+    return bool(
+        isinstance(left, tuple)
+        and isinstance(right, tuple)
+        and len(left) > 1
+        and len(right) > 1
+        and left[1:] == right[1:]
+    )
 
 
 def _direct_payload_semantic_source_token(source_id: tuple[object, ...]) -> object:

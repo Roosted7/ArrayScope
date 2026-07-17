@@ -986,6 +986,13 @@ class ImageViewShell(QtWidgets.QWidget):
         finally:
             self._finish_upload_timing()
 
+    def tiledPayloadResident(self, payload) -> bool:
+        """Report physical PyQtGraph tile residency without changing state."""
+
+        layer = self._montage_tile_layer
+        resident = getattr(layer, "payload_resident", None)
+        return bool(callable(resident) and resident(payload))
+
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
         timing = self._upload_timing
         if timing is None:

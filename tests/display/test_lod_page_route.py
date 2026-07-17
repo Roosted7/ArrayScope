@@ -1370,6 +1370,7 @@ def test_pyqtgraph_anisotropic_resolution_matches_page_table_and_vispy(qt_app):
     assert warm.updated_tiles == (0,)
     assert not warm_layer.states[0].visible
     assert warm_layer.states[0].page_resolutions[0].actual_key == canonical.actual_key
+    assert warm_layer.payload_resident(payload)
     np.testing.assert_array_equal(warm_layer.states[0].item.image, expected)
 
 

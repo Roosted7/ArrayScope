@@ -2069,13 +2069,74 @@ def test_pyqtgraph_warm_residency_prepares_invisible_item_without_committing(qt_
         )
 
         assert 1 in view._montage_tile_layer.states
-        assert len(view._montage_tile_layer._direct_reuse_pool) == 1
-        assert view._montage_tile_layer._direct_reuse_pool[0].item.isVisible() is False
+        assert len(view._montage_tile_layer._direct_reuse_pool) == 0
+        assert view._montage_tile_layer.states[1].item.isVisible() is False
+        assert view.tiledPayloadResident(payload) is True
         assert stats.items_created == 1
         assert stats.items_updated == 1
         assert stats.visible_items == 0
         assert stats.resident_items == 1
         assert stats.warm_resident_items == 1
+    finally:
+        view.close()
+
+
+def test_pyqtgraph_warm_residency_keeps_every_successor_holder_across_batches(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+    from arrayscope.display.montage import MontageTileState
+
+    view = ImageView2D()
+    geometry = DisplayGeometry(
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=3, indices=(0, 1, 2), text=":"
+        ),
+        display_shape=(2, 8),
+        montage=MontageGeometry(
+            indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1
+        ),
+        montage_tile_states=(MontageTileState.LOADED,) * 3,
+    )
+    payloads = {
+        tile: DisplayTilePayload(
+            tile,
+            tile,
+            np.full((2, 2), float(tile + 1), dtype=np.float32),
+            None,
+            ("warm", tile),
+        )
+        for tile in range(3)
+    }
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        upserts={},
+        active_tiles=(),
+        planned_tiles=(0, 1, 2),
+        near_tiles=(0, 1, 2),
+        near_tile_source_ids={tile: ("near-route", tile) for tile in range(3)},
+    )
+    try:
+        for tile in range(3):
+            view.warmTiledResidency(
+                payloads={tile: payloads[tile]},
+                geometry=geometry,
+                levels=(0.0, 4.0),
+                tile_delta=delta,
+            )
+
+        states = view._montage_tile_layer.states
+        assert set(states) == {0, 1, 2}
+        assert len({id(state.item) for state in states.values()}) == 3
+        assert len(view._montage_tile_layer._direct_reuse_pool) == 0
+        assert all(view.tiledPayloadResident(payload) for payload in payloads.values())
+        assert all(state.item.isVisible() is False for state in states.values())
     finally:
         view.close()
 

@@ -237,6 +237,22 @@ mirroring the acknowledgement-churn bound. The supplied field trace triggers
 the new invariant with a 334-event identical signature; its other changing
 bails remain separately visible rather than being folded into that count.
 
+The canonical raw-full workflow then exposed a false physical-residency proof
+on PyQtGraph. Its counters claimed all 272 successor payloads were resident,
+but the required screenshot showed only the retained 60-tile predecessor
+footprint. `warm_payloads` placed each newly prepared hidden `ImageItem` back
+in the generic reuse pool, so the next bounded warm cohort could retarget that
+same holder while the coordinator continued to count its former payload as
+warm. PyQtGraph also had no `tiledPayloadResident` implementation, causing the
+coordinator to accept every warm call without a receiver-side proof. Hidden
+successor holders are now transaction-owned until presentation claims them or
+ordinary hide/displacement releases them, and PyQtGraph reports exact physical
+payload residency from its live item states. The focused gate warms three
+successor payloads in separate cohorts and requires three distinct invisible
+holders plus a positive physical-residency query for every payload. The
+canonical screenshot/two-quality-pass replay remains an exit gate; these unit
+results alone do not claim it green.
+
 The semantic-compatibility boundary is now explicit in that same transition
 owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
 visible after transposing the image axes. `plan_presentation_transition`
