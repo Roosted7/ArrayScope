@@ -91,7 +91,6 @@ def verify_trace(
     identical_commit_bail_counts: dict[tuple[tuple[str, object], ...], int] = {}
     stalls: list[dict[str, object]] = []
     identity_rejected_commits: list[dict[str, object]] = []
-    preview_pass_exact_commits: list[dict[str, object]] = []
     lifecycle_events = 0
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -120,12 +119,6 @@ def verify_trace(
                 and tuple(event.get("identity_rejected", ()) or ())
             ):
                 identity_rejected_commits.append(event)
-            if (
-                str(event.get("phase", "")) == "backend_complete"
-                and bool(event.get("preview_pass_open_before", False))
-                and tuple(event.get("exact_upserts_during_preview_pass", ()) or ())
-            ):
-                preview_pass_exact_commits.append(event)
             continue
         if kind == "lifecycle":
             lifecycle_events += 1
@@ -221,17 +214,6 @@ def verify_trace(
         }
         for event in identity_rejected_commits
     )
-    violations.extend(
-        {
-            "invariant": "preview_pass_precedes_exact_upserts",
-            "session_id": event.get("session_id"),
-            "revision": event.get("revision"),
-            "exact_upserts": tuple(
-                event.get("exact_upserts_during_preview_pass") or ()
-            ),
-        }
-        for event in preview_pass_exact_commits
-    )
     if event_count == 0:
         violations.append({"invariant": "trace_not_empty"})
     elif lifecycle_events == 0:
@@ -280,7 +262,6 @@ def verify_trace(
         "event_count": event_count,
         "lifecycle_events": lifecycle_events,
         "identity_rejected_commits": len(identity_rejected_commits),
-        "preview_pass_exact_commits": len(preview_pass_exact_commits),
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(

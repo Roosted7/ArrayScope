@@ -225,19 +225,25 @@ class LodLadder:
         ) or (presented == desired and not presented_preview)
         if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
-        if (
-            not desired_resident
-            and bool(state.coverage_pass_open)
-            and presented is not None
-        ):
-            # Progressive presentation contract: this tile already shows
-            # pixels, so its DESIRED step is refinement-class work. While the
-            # plan-wide first-pixel pass is open, refinement is neither
-            # presentable (commit gate) nor schedulable — submitting it here
-            # spent every worker on covered tiles while missing tiles
-            # starved. The pass-close acknowledgement edge replans, which
-            # re-emits this step.
-            desired_resident = True
+        if not desired_resident and bool(state.coverage_pass_open):
+            # Progressive presentation contract: DESIRED is phase-2 work,
+            # and phase 2 must not be SUBMITTED while the phase-1 coverage
+            # pass is open — parallel execution steals the workers that make
+            # preview cheap (2026-07-18 field report: scroll shuffles became
+            # a slideshow while exact work ran during coverage). The only
+            # exception is a blank tile with no phase-1 producer at all: its
+            # DESIRED is its first pixels, not refinement. The pass-close
+            # acknowledgement edge replans and re-emits deferred steps.
+            # Bare resident levels are NOT a producer: the ladder owns no
+            # step that turns them into pixels, so deferring on them would
+            # be an ownerless wait (rule 11).
+            has_phase1_producer = bool(
+                presented is not None
+                or ready is not None
+                or any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+            )
+            if has_phase1_producer:
+                desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
             # DESIRED is usually refinement and belongs to preparation.  But
             # when no floor/preview/current payload exists it is also the

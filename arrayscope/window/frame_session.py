@@ -2191,44 +2191,6 @@ class FrameSession:
         lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
         return source, histogram, lod, texture_kind, None
 
-    def _quality_pass_admissible_upserts(
-        self,
-        payloads: dict[int, DisplayTilePayload],
-        *,
-        plan_tiles_by_number: dict[int, object],
-    ) -> dict[int, DisplayTilePayload]:
-        """Apply the current physical quality-pass contract to one delta.
-
-        Every transaction constructor, including the already-built follow-up
-        fast path, must cross this gate. Ladder task deferral cannot govern
-        retained or reusable exact payloads which require no new task.
-        """
-
-        if not self._first_pixel_pass_open():
-            return dict(payloads)
-        if bool(self.atomic_successor_pending):
-            # An atomic successor swap presents complete coverage in one
-            # transaction — it IS the first-pixel pass for its window.
-            # Filtering any slot here would deadlock its completeness wait
-            # (the field-57 shader-atomic-successor-wait grammar; ground
-            # rule 11).
-            return dict(payloads)
-        return {
-            int(tile): payload
-            for tile, payload in payloads.items()
-            # First pixels are always admissible, whatever their quality —
-            # an exact payload for a blank tile closes that tile's coverage
-            # with strictly stronger evidence. Only *refinement* of a tile
-            # whose first pixels are already acknowledged waits for the pass
-            # to close. Both sides of this gate read the SAME lifecycle
-            # first-pixel fact the pass predicate reads; mixing coverage
-            # notions here would let a tile be simultaneously "covered"
-            # (unrefinable) and "missing" (holding the pass open) — an
-            # ownerless wait (ground rule 11).
-            if str(getattr(payload, "quality", "exact") or "exact") != "exact"
-            or not self.lifecycle.first_pixels_presented((int(tile),))
-        }
-
     def _paced_pending_presentation_followup(
         self,
         *,
@@ -2313,14 +2275,7 @@ class FrameSession:
             return None
         ordered = self._prioritized_tile_numbers(candidate_numbers)
         payloads = {int(tile): self.display_tile_payloads[int(tile)] for tile in ordered}
-        payloads = self._quality_pass_admissible_upserts(
-            payloads,
-            plan_tiles_by_number=plan_tiles_by_number,
-        )
         if not payloads:
-            # Full reconciliation can construct resident preview wrappers.
-            # Returning an empty fast transaction here would strand the pass
-            # behind the forbidden exact rows already parked in this queue.
             return None
         resident_retargets = {
             int(tile)
@@ -2947,16 +2902,10 @@ class FrameSession:
             for tile, payload in upserts.items()
             if int(tile) in active_set
         }
-        # The preview pass is a physical transaction class. Exact pixels can
-        # reach this point without a new ladder task (retained payload,
-        # reusable completion, or a wrapper admitted before this plan), so
-        # task deferral alone cannot enforce it. Already-presented exact pixels
-        # remain visible because they are absent from ``upserts``. Ground rule
-        # 11's atomic no-floor degradation is owned inside the shared gate.
-        all_candidate_upserts = self._quality_pass_admissible_upserts(
-            all_candidate_upserts,
-            plan_tiles_by_number=plan_tiles_by_number,
-        )
+        # Presentation never withholds better ready data (progressive
+        # presentation contract, 2026-07-18): the preview/refinement split is
+        # enforced where COMPUTE is submitted (the ladder's phase barrier),
+        # never here at commit.
         required = set(self.required_tile_numbers())
         required_unsettled = set(self.lifecycle.target_unsettled_tiles(required))
         if self.display_committed and required_unsettled:

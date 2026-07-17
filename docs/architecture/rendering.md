@@ -209,45 +209,49 @@ geometry for montage presentations.
 
 Widget close stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas.
 
-## Progressive presentation contract (Thomas, 2026-07-17 — binding)
+## Progressive presentation contract (Thomas, 2026-07-17/18 — binding)
 
-The purpose of preview/floor work is to reach **overall coverage** of the
-required scope as fast as possible; refinement exists to upgrade an already
-covered frame without ever showing black in between. The rules, in order of
-authority:
+Preview work exists because it is CHEAPER than target-quality work: a
+preview pass over the whole required scope completes sooner than the full
+render — **but only if the expensive work is not running at the same time,
+competing for the same workers**. The barrier is therefore about WHERE
+COMPUTE GOES, never about what may be shown:
 
-1. **Coverage before refinement, plan-wide.** While any required tile lacks
-   first pixels, all admitted presentation work serves coverage. A tile that
-   already shows pixels (any quality) may only be *refined* to target
-   quality after every required tile shows something. The commit gate
-   (`FrameSession._quality_pass_admissible_upserts`, keyed on
-   `_first_pixel_pass_open`) enforces this physically; schedulers must not
-   rely on it as their ordering — they must not submit refinement ahead of
-   missing coverage in the first place.
-2. **Every unit of work obeys the priority system — preview and target
-   alike.** Within the coverage class and within the refinement class,
-   ordering is the canonical tile priority (viewport-distance/center-out
-   from the CURRENT camera). Coverage-class work for missing tiles always
-   outranks refinement-class work for covered tiles.
-3. **Priority re-targets on every view change** — user pan/zoom AND
-   programmatic/auto-fit transitions alike. A montage entered via auto-fit
-   orders its fill from the fitted viewport's center, not from the previous
-   view's corner and not in grid order. Tiles retained from the previous
-   view already show pixels and therefore sort behind every missing tile.
-4. **Quality upgrades never blank.** Refinement replaces pixels
-   atomically per tile; eviction/fallback returns to the coarse pixels,
-   never to black (ADR 0056 never-black rule).
-
-Levels/histogram interaction with the passes:
-
-5. **Refined level statistics are sampled only after the full
-   lower-quality pass has completed** (coverage settled) — never
-   concurrently with coverage work.
-6. **A CPU-LUT backend (PyQtGraph) running a single quality pass skips the
-   rough levels/histogram publication entirely**: it bakes levels into
-   pixels at commit, so the final levels must be decided before its first
-   tile renders. Rough-then-refined level phasing is a shader-windowing
-   (VisPy) behavior, where levels are a cheap uniform update.
+1. **Two strictly ordered compute phases.**
+   *Phase 1 (coverage):* preview/floor evaluation for every required tile,
+   rough level statistics, and the single rough histogram publication.
+   *Phase 2 (refinement):* target-quality evaluation, refined level
+   sampling, refined histogram updates, and every refinement-adjacent job.
+   **Nothing from phase 2 is submitted, scheduled, or evaluated until
+   phase 1 has completed for the whole required scope.** Running the two
+   in parallel silently destroys preview's entire reason to exist
+   (2026-07-18 field report: parallel exact work made scroll shuffles a
+   slideshow).
+2. **Presentation never withholds better data.** If a better payload is
+   ready, show it immediately — even if that upgrades tiles "out of
+   order", even if the whole frame jumps to final quality at once. An
+   instant all-at-once upgrade from ready resident data is the ideal
+   outcome, not a defect. There is NO quality-ordering gate at commit;
+   pacing comes only from the ordinary bounded-batch commit caps.
+   (A commit-side refinement-withholding gate was built 2026-07-17 and
+   rejected 2026-07-18 — see the graveyard.)
+3. **Every unit of work obeys the priority system** — inside phase 1 and
+   inside phase 2 alike, ordering is the canonical tile priority
+   (viewport distance from the CURRENT camera), re-targeted on every view
+   change (user gesture or auto-fit). Inside phase 1, already-covered
+   tiles never outrank missing tiles.
+4. **Quality upgrades never blank.** Refinement replaces pixels atomically
+   per tile; eviction returns to coarse pixels, never black (ADR 0056).
+5. **Phase-1 completion is a robust, owned fact** — lifecycle first-pixel
+   coverage of the required scope — with the phase-2 replan armed on its
+   closing edge. A stuck-open phase silently starves refinement forever
+   (PyQtGraph zoom regression, 2026-07-18: LOD never upgraded until a
+   reindex).
+6. **CPU-LUT single-pass mode (PyQtGraph):** when the backend runs one
+   quality pass there is no phase 1: final levels are decided before the
+   first tile renders, and rough levels/histogram publication is skipped
+   entirely. Rough→refined level phasing is shader-windowing (VisPy)
+   behavior only.
 
 ## Presentation performance contract
 

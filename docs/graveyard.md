@@ -28,6 +28,7 @@ dossier, review, or artifact path). Never delete rows.
 
 | Date | Tried | Why rejected | Retry only if | Evidence |
 |---|---|---|---|---|
+| 2026-07-18 | **Commit-side refinement withholding** (quality gate in `_quality_pass_admissible_upserts` holding exact upserts for covered tiles until plan-wide coverage) | Presentation must NEVER withhold better ready data — the "boom" upgrade is the ideal; the real barrier is phase-2 COMPUTE not starting during phase 1 (Thomas). The gate also stuck open on PyQtGraph and froze LOD upgrades after zoom | Never — enforce phase separation at work submission, not at commit | rendering.md progressive contract |
 | 2026-07-14 | **Deleting CPU atomic successors wholesale** (V2) | PyQtGraph discarded 59 compatible slots and visibly rebuilt 12→60 | Never — atomicity is semantic: it preserves *compatible pixels*, nothing more | [V-record](redesign/archive/v-program-execution-record-2026-07.md) |
 | 2026-07-14 | **Harness-side second completion model** (reconstructing "done" from six queues + plan length) | Diverged from the live owner; the harness never settled on a converged frame | Never — read `visible_plan_complete()` / lifecycle truth | [V-record](redesign/archive/v-program-execution-record-2026-07.md) |
 | 2026-07-14 | **Watchdog that silently repairs** (`release_idle_evaluation_claims()` when idle) | Changed live state, erased the owner chain it was investigating, retried the same architecture | Never — watchdogs are evidence-only | [V-record](redesign/archive/v-program-execution-record-2026-07.md) |

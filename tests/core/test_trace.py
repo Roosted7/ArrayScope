@@ -217,53 +217,6 @@ def test_trace_verify_rejects_identity_rejected_commits(tmp_path):
     assert clean["identity_rejected_commits"] == 0
 
 
-def test_trace_verify_rejects_exact_upsert_during_open_preview_pass(tmp_path):
-    """A declared first-pixel pass cannot publish a new exact island."""
-
-    from arrayscope.tools.trace_verify import verify_trace
-
-    rows = (
-        {
-            "kind": "lifecycle",
-            "edge": "target_required",
-            "tile": 0,
-            "source_index": 0,
-            "target_level": 0,
-            "sequence": 1,
-        },
-        {
-            "kind": "commit_batch",
-            "phase": "backend_complete",
-            "session_id": 2,
-            "revision": 4,
-            "preview_pass_open_before": True,
-            "exact_upserts_during_preview_pass": [0],
-            "sequence": 2,
-        },
-        {
-            "kind": "backend_ack",
-            "tile": 0,
-            "accepted": True,
-            "source_index": 0,
-            "level": 0,
-            "quality": "exact",
-            "sequence": 3,
-        },
-    )
-    path = tmp_path / "trace.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-    result = verify_trace(path)
-
-    assert not result["ok"]
-    assert result["preview_pass_exact_commits"] == 1
-    assert {
-        "invariant": "preview_pass_precedes_exact_upserts",
-        "session_id": 2,
-        "revision": 4,
-        "exact_upserts": (0,),
-    } in result["violations"]
-
 
 def test_trace_verify_rejects_empty_and_lifecycle_free_traces(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace

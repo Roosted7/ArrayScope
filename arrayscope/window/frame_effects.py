@@ -2394,14 +2394,6 @@ class FramePipelineEffects:
                 for tile, payload in tile_delta.upserts.items()
             ),
             preview_pass_open_before=bool(preview_pass_open_before),
-            exact_upserts_during_preview_pass=tuple(
-                int(tile)
-                for tile, payload in tile_delta.upserts.items()
-                if preview_pass_open_before
-                and not bool(session.atomic_successor_pending)
-                and int(tile) in presented_before_commit
-                and str(getattr(payload, "quality", "exact") or "exact") == "exact"
-            ),
             required_tile_count=len(session.required_tile_numbers()),
             preview_missing_tile_count=sum(
                 1

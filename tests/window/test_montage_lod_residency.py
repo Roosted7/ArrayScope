@@ -292,6 +292,43 @@ def _desired_materialization_step(tile_number=0, *, level=2):
     )
 
 
+def _settle_first_pixels(session) -> None:
+    """Close the phase-1 coverage pass for phase-2 machinery tests.
+
+    Progressive presentation contract (2026-07-18): materialization,
+    pressure, and refinement planning are phase-2 work and only run after
+    phase-1 coverage completes. These fixtures exercise that machinery, so
+    they start from a covered scope.
+    """
+
+    from arrayscope.presentation.tile_lifecycle import TileTarget
+
+    tiles = tuple(session.plan.tiles)
+    session.lifecycle.retarget(
+        {
+            int(tile.montage_index): TileTarget(
+                tile_number=int(tile.montage_index),
+                source_index=int(tile.source_index),
+                semantic_source_id=session.tile_semantic_source_id(
+                    int(tile.source_index)
+                ),
+            )
+            for tile in tiles
+        }
+    )
+    session.lifecycle.backend_presented_snapshot(
+        {
+            int(tile.montage_index): session.tile_semantic_source_id(
+                int(tile.source_index)
+            )
+            for tile in tiles
+        }
+    )
+    session.lifecycle.presentation_confirmed(
+        tuple(int(tile.montage_index) for tile in tiles)
+    )
+
+
 def _plan_rung_materializations(session) -> tuple:
     demand = session.lod_policy_decision.demand
     policy = LadderPolicy(
@@ -386,6 +423,7 @@ def test_preview_level_tracks_coarser_viewport_demand():
 
 def test_resident_mode_falls_back_to_native_and_records_missing_levels():
     session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     state, delta = session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
 
@@ -411,6 +449,7 @@ def test_resident_mode_falls_back_to_native_and_records_missing_levels():
 
 def test_duplicate_materialization_requests_coalesce():
     session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     first = list(_plan_rung_materializations(session))
 
@@ -426,6 +465,7 @@ def test_materialization_request_owns_one_rung_and_only_its_missing_pages():
 
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
@@ -444,6 +484,7 @@ def test_coarser_materialization_is_direct_source_despite_resident_finer_pages()
 
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, view_range=((0.0, 3.0 * 2 * TILE), (0.0, 3.0 * TILE)))
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
@@ -895,6 +936,7 @@ def test_dropped_rung_for_removed_tile_releases_page_and_lifecycle_claims():
 def test_memory_pressure_admits_reduced_level_with_distinct_identity_and_shape():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     state, delta = session.build_tile_presentation({})
     native_ids = {tile: payload.source_id for tile, payload in delta.upserts.items()}
     session.tile_residency_budget_bytes = sum(
@@ -931,6 +973,7 @@ def test_memory_pressure_admits_reduced_level_with_distinct_identity_and_shape()
 def test_pressure_uses_available_coarse_per_tile_and_reports_common_level():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     _state, native_delta = session.build_tile_presentation({})
     session.tile_residency_budget_bytes = sum(
         int(np.asarray(payload.texture_data).nbytes)
@@ -962,6 +1005,7 @@ def test_pressure_uses_available_coarse_per_tile_and_reports_common_level():
 def test_threshold_recrossing_hits_the_pyramid_cache_without_new_requests():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
@@ -1070,6 +1114,7 @@ def test_native_only_and_native_scale_sessions_have_no_ingest_demand():
 def test_demand_flip_materialization_cannot_demote_finer_native_without_pressure():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _cold_session(pyramid=pyramid)
+    _settle_first_pixels(session)
     demand = session.ingest_lod_demand()
     assert demand.desired_level == 2
 
@@ -1119,6 +1164,7 @@ def _acknowledge(session, delta):
 def test_presented_lod_summary_reports_plurality_of_presented_payloads():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=3)
+    _settle_first_pixels(session)
 
     # Nothing committed yet: fall back to the session-wide decision (native).
     assert session.presented_lod_summary() == (0, 1, (1, 1))
@@ -1557,6 +1603,7 @@ def test_level_swap_keeps_semantic_histogram_identity():
 def test_coarser_level_stays_direct_source_with_finer_pages_resident():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=LEVEL1_RANGE)
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     level1_requests = list(_plan_rung_materializations(session))
     session.pending_rung_materializations.clear()
@@ -1586,6 +1633,7 @@ def test_uneven_tiles_fall_back_to_native_reduction_source():
     tile = 63
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, view_range=LEVEL1_RANGE)
+    _settle_first_pixels(session)
     for index, rendered in dict(session.rendered_tiles).items():
         from dataclasses import replace as dc_replace
 
@@ -3372,101 +3420,48 @@ def test_cold_preview_floor_uploads_obey_item_cap():
     assert set(session.pending_payload_upserts) == {0, 1, 2, 3}
 
 
-def test_quality_pass_admits_first_pixels_and_withholds_refinement():
-    """Field defect 2026-07-17 (PyQtGraph raw fill): the preview pass was
-    derived from declared planning WAVES, so a required tile whose preview
-    was simply not yet planned kept no pass open — exact refinement marched
-    across a black field (192 preview acks after the first exact ack). The
-    pass has one owner now: lifecycle first-pixel coverage of the required
-    set. While it is open, first pixels of ANY quality are admissible
-    (exact-as-first-pixels is stronger coverage), but a tile that already
-    shows pixels may not refine."""
+def test_coverage_pass_defers_desired_submission_not_presentation():
+    """Progressive presentation contract (corrected 2026-07-18): the
+    preview/refinement barrier lives at COMPUTE SUBMISSION — while the
+    phase-1 coverage pass is open the ladder plans no DESIRED step for any
+    tile with an OWNED phase-1 producer (presented pixels, an in-flight
+    ready payload, or a planned FLOOR/PREVIEW step) — and NEVER at
+    presentation, which always shows the best ready data immediately (the
+    commit-side withholding gate is buried in docs/graveyard.md). Bare
+    resident levels are NOT a producer: nothing in the ladder owns turning
+    them into pixels, and deferring on them is an ownerless wait."""
 
-    from arrayscope.presentation.tile_lifecycle import TileTarget
+    from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
+    ladder = LodLadder(policy=LadderPolicy(
+        mode="resident", floor_level=4, preview_level=4, reduced_input_available=True,
+    ))
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
 
-    session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 24))
-    plan_tiles_by_number = {
-        int(tile.montage_index): tile for tile in session.plan.tiles
-    }
-    session.lifecycle.retarget(
-        {
-            number: TileTarget(
-                tile_number=number,
-                source_index=int(tile.source_index),
-                semantic_source_id=session.tile_semantic_source_id(
-                    int(tile.source_index)
-                ),
-            )
-            for number, tile in plan_tiles_by_number.items()
-        }
+    covered = TileLodState(
+        tile_number=0, presented_level=4, presented_quality="preview",
+        coverage_pass_open=True,
     )
-    # Tiles 0 and 1 have acknowledged first pixels; 2 and 3 are still blank.
-    presented_sources = {
-        number: session.tile_semantic_source_id(
-            plan_tiles_by_number[number].source_index
-        )
-        for number in (0, 1)
-    }
-    session.lifecycle.backend_presented_snapshot(presented_sources)
-    session.lifecycle.presentation_confirmed((0, 1))
-    assert session.lifecycle.first_pixels_presented((0,))
-    assert not session.lifecycle.first_pixels_presented((2,))
-    assert session._first_pixel_pass_open(), (
-        "pass must stay open while any required tile lacks first pixels"
+    assert not any(
+        step.rung is Rung.DESIRED for step in ladder.plan_tile(covered, demand)
+    ), "refinement submitted during the open coverage pass"
+
+    blank_with_preview_path = TileLodState(
+        tile_number=1, allow_preview=True, coverage_pass_open=True,
+    )
+    steps = ladder.plan_tile(blank_with_preview_path, demand)
+    assert any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+    assert not any(step.rung is Rung.DESIRED for step in steps), (
+        "phase-2 DESIRED submitted alongside this tile's phase-1 producer"
     )
 
-    def payload_for(number, quality):
-        rendered = session.rendered_tiles[number]
-        return DisplayTilePayload(
-            number,
-            int(rendered.tile.source_index),
-            np.asarray(rendered.image),
-            None,
-            session.tile_semantic_source_id(int(rendered.tile.source_index)),
-            quality=quality,
-        )
-
-    candidates = {
-        0: payload_for(0, "exact"),  # refinement of a presented tile
-        1: payload_for(1, "preview"),  # preview rows always flow
-        2: payload_for(2, "exact"),  # exact-as-first-pixels for a blank tile
-        3: payload_for(3, "preview"),  # preview first pixels
-    }
-    admitted = session._quality_pass_admissible_upserts(
-        dict(candidates), plan_tiles_by_number=plan_tiles_by_number
+    closed = TileLodState(
+        tile_number=2, presented_level=4, presented_quality="preview",
+        coverage_pass_open=False,
     )
-    assert set(admitted) == {1, 2, 3}, (
-        "refinement of a presented tile must wait for plan-wide first-pixel "
-        "coverage; first pixels (any quality) must flow"
-    )
+    assert any(
+        step.rung is Rung.DESIRED for step in ladder.plan_tile(closed, demand)
+    ), "refinement must plan immediately once the pass closes"
 
-    # Atomic successor transactions present complete coverage in one swap —
-    # filtering any slot would deadlock their completeness wait (field
-    # stall 57 grammar; ground rule 11).
-    session.atomic_successor_pending = True
-    assert set(
-        session._quality_pass_admissible_upserts(
-            dict(candidates), plan_tiles_by_number=plan_tiles_by_number
-        )
-    ) == {0, 1, 2, 3}
-    session.atomic_successor_pending = False
-
-    # Pass closes on full physical coverage — refinements flow again.
-    session.lifecycle.backend_presented_snapshot(
-        {
-            number: session.tile_semantic_source_id(
-                plan_tiles_by_number[number].source_index
-            )
-            for number in (0, 1, 2, 3)
-        }
-    )
-    session.lifecycle.presentation_confirmed((0, 1, 2, 3))
-    assert not session._first_pixel_pass_open()
-    assert set(
-        session._quality_pass_admissible_upserts(
-            dict(candidates), plan_tiles_by_number=plan_tiles_by_number
-        )
-    ) == {0, 1, 2, 3}
 
 
 def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
@@ -3903,6 +3898,7 @@ def test_replaced_session_releases_undrained_request_claims():
 
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
     assert len(requests) == 2
@@ -3915,6 +3911,7 @@ def test_replaced_session_releases_undrained_request_claims():
     assert pyramid.pending_count == 0
     # The same slice revisited (equal session key) can claim its levels again.
     replacement = _session(pyramid=pyramid)
+    _settle_first_pixels(replacement)
     replacement.build_tile_presentation({})
     replacement_requests = list(_plan_rung_materializations(replacement))
     assert len(replacement_requests) == 2
@@ -3923,6 +3920,7 @@ def test_replaced_session_releases_undrained_request_claims():
 def test_pending_lod_request_view_clear_releases_pyramid_claims():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid)
+    _settle_first_pixels(session)
     session.build_tile_presentation({})
     requests = list(_plan_rung_materializations(session))
     assert len(requests) == 2
