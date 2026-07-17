@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
     assert_size_close as _assert_size_close,
@@ -32,8 +33,14 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
     warnings = []
     try:
         _process_events(qtbot, count=20)
-        qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        qtbot.waitUntil(
+            lambda: getattr(win, "_committed_display_frame", None) is not None,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
+        qtbot.waitUntil(
+            lambda: not win.montage_tile_evaluation_controller.is_busy(),
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         previous_image = win.img_view.image.copy()
         previous_frame = win._committed_display_frame
         win.operation_evaluator.clear_cache()
@@ -166,7 +173,10 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        qtbot.waitUntil(
+            lambda: not win.montage_tile_evaluation_controller.is_busy(),
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         win.operation_evaluator.clear_cache()
         win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
         win.renderer._frame_session = None

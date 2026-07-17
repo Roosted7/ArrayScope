@@ -2,6 +2,11 @@
 
 import time
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 
 def _make_controller(qt_app):
     from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
@@ -9,11 +14,17 @@ def _make_controller(qt_app):
     return EvaluationController(name="capacity-test", max_workers=1)
 
 
-def _drain_until(predicate, *, timeout_s=5.0):
+def _drain_until(
+    predicate,
+    *,
+    timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+):
     from pyqtgraph.Qt import QtCore, QtWidgets
 
     app = QtWidgets.QApplication.instance()
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + bounded_interaction_settle_timeout_s(
+        timeout_s
+    )
     while time.monotonic() < deadline:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         if predicate():

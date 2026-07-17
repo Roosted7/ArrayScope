@@ -19,7 +19,7 @@ def test_interaction_settlement_budget_is_two_second_target_five_second_hard_lim
     assert interaction_settle_timeout_ms(120.0) == 5000
 
 
-@pytest.mark.parametrize("timeout_s", (0.0, -1.0))
+@pytest.mark.parametrize("timeout_s", (0.0, -1.0, float("nan"), float("inf")))
 def test_interaction_settlement_budget_rejects_nonpositive_timeouts(timeout_s):
-    with pytest.raises(ValueError, match="must be positive"):
+    with pytest.raises(ValueError, match="must be positive and finite"):
         bounded_interaction_settle_timeout_s(timeout_s)

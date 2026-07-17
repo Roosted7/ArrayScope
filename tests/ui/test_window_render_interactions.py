@@ -457,7 +457,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
             == (0.0, 19.0),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
@@ -492,7 +492,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         _process_events(qtbot, count=20)
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=3000)
+        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         # Drop warm tile state (evaluator cache and resident payloads from the
         # startup render of the middle slice) so slice 1 starts uncached.
         win.operation_evaluator.clear_cache()

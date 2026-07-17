@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
     assert_size_close as _assert_size_close,
@@ -71,7 +72,10 @@ def test_montage_roi_waits_for_canonical_visible_plan_completion():
 
 def _render_committed_tiled_frame(win, qtbot, *, reason: str) -> None:
     win.render(reason=reason)
-    qtbot.waitUntil(lambda: getattr(getattr(win, "_committed_display_frame", None), "is_tiled", False), timeout=3000)
+    qtbot.waitUntil(
+        lambda: getattr(getattr(win, "_committed_display_frame", None), "is_tiled", False),
+        timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+    )
 
 
 def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
@@ -161,7 +165,7 @@ def test_hidden_single_image_timed_roi_refresh_updates_overlay(qtbot, monkeypatc
         calls.clear()
         win._refresh_inspection_dock_now()
 
-        qtbot.waitUntil(lambda: win.img_view._roi_info_panel is not None, timeout=3000)
+        qtbot.waitUntil(lambda: win.img_view._roi_info_panel is not None, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         assert len(calls) == 1
         assert win._roi_inspection_priority.name == "HIDDEN_ROI"
         assert getattr(win, "_inspection_stale", False)
@@ -246,7 +250,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
-        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)
+        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         _process_events(qtbot, count=10)
 
         model = win.inspection_dock.roi_model
@@ -295,7 +299,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
 
         win._set_view_state(first_state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: getattr(win.renderer._frame_session, "display_committed", False), timeout=1000)
+        qtbot.waitUntil(lambda: getattr(win.renderer._frame_session, "display_committed", False), timeout=min(1000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
         win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
         _process_events(qtbot, count=20)
@@ -356,7 +360,7 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
         assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
-        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=3000)
+        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
     finally:
         win.close()
         settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
@@ -388,7 +392,7 @@ def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot,
 
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
-        qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         _process_events(qtbot, count=10)
 
         model = win.inspection_dock.roi_model
@@ -459,12 +463,12 @@ def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(q
         _process_events(qtbot, count=40)
         win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
         win.img_view.createRoi("rectangle", rect=(1, 1, 2, 2))
-        qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         _process_events(qtbot, count=10)
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
         win.update_image_view()
-        qtbot.waitUntil(lambda: len(calls) >= 2, timeout=3000)
+        qtbot.waitUntil(lambda: len(calls) >= 2, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
         _process_events(qtbot, count=40)
         calls_after_layout = len(calls)
         win.update_image_view()

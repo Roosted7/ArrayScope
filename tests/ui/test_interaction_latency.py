@@ -285,7 +285,10 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
+        qtbot.waitUntil(
+            lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer",
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         monkeypatch.setattr(
             win.renderer,
             "retarget_montage_viewport",

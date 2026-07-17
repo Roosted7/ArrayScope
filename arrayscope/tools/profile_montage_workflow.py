@@ -306,7 +306,7 @@ def run_profile_montage_workflow(
                 win,
                 app,
                 QtCore,
-                budget_s=timeout_s,
+                budget_s=bounded_interaction_settle_timeout_s(timeout_s),
                 stall_grace_s=4.0,
             )
             if not fixture_startup_settled:
@@ -3461,7 +3461,7 @@ def _run_phase(
             app,
             QtCore,
             win,
-            timeout_s=timeout_s,
+            timeout_s=bounded_interaction_settle_timeout_s(timeout_s),
             start=start,
             draw_start=draw_start,
             preview_floor_session_id=preview_floor_session_id,
@@ -4376,7 +4376,13 @@ def _preview_floor_physical_rows(win) -> list[dict[str, object]]:
     ]
 
 
-def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> None:
+def _wait_for_vispy_tile_draw(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> None:
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -4385,9 +4391,21 @@ def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> No
             return
         _process_events(app, QtCore, count=2)
         time.sleep(0.005)
+    requested = _vispy_tile_presentation_request_count(win)
+    drawn = _vispy_tile_presentation_draw_count(win)
+    raise TimeoutError(
+        "VisPy tile draw did not settle within "
+        f"{timeout_s:.3f}s: requested={requested} drawn={drawn}"
+    )
 
 
-def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float = 3.0) -> None:
+def _wait_for_physical_presentation_quiet(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> None:
     """Drain restore-time paints before measured workflow phases start."""
 
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
@@ -4405,6 +4423,12 @@ def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float 
             continue
         if perf_counter() - quiet_since >= 0.1:
             return
+    pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
+    raise TimeoutError(
+        "physical presentation did not become quiet within "
+        f"{timeout_s:.3f}s: draw_count={_vispy_draw_count(win)} "
+        f"draw_pending={bool(callable(pending_fn) and pending_fn())}"
+    )
 
 
 def _elapsed_between_ms(start_ms, end_ms) -> float | None:
@@ -6514,7 +6538,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     data_path=args.data,
                     backend=backend,
                     jsonl=jsonl,
-                    timeout_s=args.timeout_s,
+                    timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
                     max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
                     scroll_max_tiles=args.scroll_max_tiles,
                     columns=None if args.columns <= 0 else args.columns,

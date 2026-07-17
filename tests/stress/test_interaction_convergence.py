@@ -42,7 +42,10 @@ pytestmark = pytest.mark.skipif(
     reason="needs ARRAYSCOPE_STRESS=1, a real display, and the local NIfTI dataset",
 )
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_MS,
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+)
 
 
 
@@ -184,7 +187,7 @@ def _build_fft_montage_window(qtbot):
     )
     win._set_view_state(state)
     win.update_image_view()
-    qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_S * 1000)
+    qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     return win, settings, data, n
 
 
@@ -302,7 +305,7 @@ def test_interaction_churn_converges_on_real_data(qtbot):
             )
 
         try:
-            qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_S * 1000)
+            qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         except Exception:
             _dump_convergence_state(win, "post-churn-timeout")
             raise

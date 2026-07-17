@@ -9,6 +9,50 @@ from types import SimpleNamespace
 
 import pytest
 
+from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
+
+
+def test_vispy_draw_wait_fails_loudly_when_request_is_not_drawn(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            vispyPresentationDiagnostics=lambda: {
+                "tile_presentation_request_count": 2,
+                "tile_presentation_draw_count": 1,
+            },
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"requested=2 drawn=1"):
+        workflow._wait_for_vispy_tile_draw(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
+
+def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            presentationDrawPending=lambda: True,
+            vispyPresentationDiagnostics=lambda: {"draw_count": 7},
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"draw_count=7 draw_pending=True"):
+        workflow._wait_for_physical_presentation_quiet(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
 
 def test_preview_floor_physical_rows_preserve_page_shader_evidence():
     from arrayscope.tools.profile_montage_workflow import _preview_floor_physical_rows
@@ -1170,7 +1214,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         app,
         FakeQtCore,
         win,
-        timeout_s=0.5,
+        timeout_s=bounded_interaction_settle_timeout_s(0.5),
         start=0.0,
         draw_start=0,
         require_presentation_settled=True,
@@ -1317,7 +1361,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         app,
         FakeQtCore,
         win,
-        timeout_s=0.5,
+        timeout_s=bounded_interaction_settle_timeout_s(0.5),
         start=0.0,
         draw_start=0,
     )
@@ -1493,7 +1537,9 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
     if "vispy" in backends:
         pytest.importorskip("vispy")
 
-    timeout_s = float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "5"))
+    timeout_s = bounded_interaction_settle_timeout_s(
+        float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "5"))
+    )
     max_tiles_raw = int(os.environ.get("ARRAYSCOPE_PROFILE_MAX_TILES", "0"))
     max_tiles = None if max_tiles_raw <= 0 else max_tiles_raw
     jsonl = tmp_path / "profile-workflow.jsonl"
@@ -1504,7 +1550,7 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
             data_path=data_path,
             backend=backend,
             jsonl=jsonl,
-            timeout_s=timeout_s,
+            timeout_s=bounded_interaction_settle_timeout_s(timeout_s),
             max_tiles=max_tiles,
         )
         all_records.extend(records)

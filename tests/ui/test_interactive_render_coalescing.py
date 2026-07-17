@@ -415,7 +415,10 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
+        qtbot.waitUntil(
+            lambda: getattr(win, "_committed_display_frame", None) is not None,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         refreshes = []
         monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
 

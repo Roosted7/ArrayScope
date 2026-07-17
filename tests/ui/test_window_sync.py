@@ -50,8 +50,15 @@ def _enable_all_facets(win):
     win.inspection_dock.sync_button.setChecked(True)
 
 
-def _settled(qtbot, predicate, timeout=4000):
-    qtbot.waitUntil(lambda: bool(predicate()), timeout=timeout)
+def _settled(
+    qtbot,
+    predicate,
+    timeout_ms=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+):
+    qtbot.waitUntil(
+        lambda: bool(predicate()),
+        timeout=min(int(timeout_ms), INTERACTION_SETTLE_HARD_LIMIT_MS),
+    )
 
 
 def test_sync_buttons_toggle_controller_facets(qtbot, make_window):

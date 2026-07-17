@@ -14,11 +14,20 @@ from pyqtgraph.Qt import QtCore
 
 from arrayscope.kernel import Kernel, Supersession, TaskSpec, ThreadWorkerBackend
 from arrayscope.kernel.qt_bridge import QtKernelBridge
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
 
 
-def _process_until(qt_app, predicate, timeout_s: float = 10.0) -> bool:
+def _process_until(
+    qt_app,
+    predicate,
+    timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
+) -> bool:
     """Pump the event loop until ``predicate()`` — no fixed sleeps."""
 
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():

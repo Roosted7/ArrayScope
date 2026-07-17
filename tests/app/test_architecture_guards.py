@@ -3,6 +3,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_MS,
@@ -26,22 +27,354 @@ def _constant_number(node):
     return None
 
 
-def _is_global_capped_interaction_budget(node):
-    if not (
+_INTERACTION_BUDGET_UNITS = {
+    "INTERACTION_SETTLE_HARD_LIMIT_MS": "ms",
+    "INTERACTION_SETTLE_HARD_LIMIT_S": "s",
+}
+_INTERACTION_BUDGET_HELPER_UNITS = {
+    "bounded_interaction_settle_timeout_s": "s",
+    "interaction_settle_timeout_ms": "ms",
+}
+
+
+def _call_name(node):
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
+
+
+def _contains_number(node):
+    return any(_constant_number(child) is not None for child in ast.walk(node))
+
+
+def _literal_number_expression(node):
+    if _constant_number(node) is not None:
+        return True
+    return bool(
         isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "min"
-        and len(node.args) == 2
+        and _call_name(node) in {"float", "int"}
+        and len(node.args) == 1
         and not node.keywords
-    ):
-        return False
-    has_local_limit = any(_constant_number(argument) is not None for argument in node.args)
-    has_global_limit = any(
-        isinstance(argument, ast.Name)
-        and argument.id == "INTERACTION_SETTLE_HARD_LIMIT_S"
-        for argument in node.args
+        and _constant_number(node.args[0]) is not None
     )
-    return has_local_limit and has_global_limit
+
+
+def _has_direct_deadline_literal(node):
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Add)
+        and (
+            _literal_number_expression(node.left)
+            or _literal_number_expression(node.right)
+        )
+    )
+
+
+def _canonical_interaction_budget_bindings(tree):
+    """Return unshadowed names imported from the one budget owner."""
+
+    imported_budgets = {}
+    imported_helpers = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "arrayscope.tools.interaction_budget":
+            continue
+        for alias in node.names:
+            bound = alias.asname or alias.name
+            if alias.name in _INTERACTION_BUDGET_UNITS:
+                imported_budgets[bound] = _INTERACTION_BUDGET_UNITS[alias.name]
+            if alias.name in _INTERACTION_BUDGET_HELPER_UNITS:
+                imported_helpers[bound] = _INTERACTION_BUDGET_HELPER_UNITS[alias.name]
+
+    shadowed = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            shadowed.update(
+                label
+                for target in targets
+                for label in _assigned_labels(target)
+            )
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadowed.add(node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                shadowed.update(argument.arg for argument in arguments)
+                if node.args.vararg is not None:
+                    shadowed.add(node.args.vararg.arg)
+                if node.args.kwarg is not None:
+                    shadowed.add(node.args.kwarg.arg)
+    return (
+        {name: unit for name, unit in imported_budgets.items() if name not in shadowed},
+        {name: unit for name, unit in imported_helpers.items() if name not in shadowed},
+    )
+
+
+def _interaction_budget_unit(node, *, budgets, helpers):
+    """Return the unit of a safe outer cap, or ``None`` when it is unsafe."""
+
+    if isinstance(node, ast.Name):
+        return budgets.get(node.id)
+    if not isinstance(node, ast.Call):
+        return None
+    name = _call_name(node)
+    if name in helpers:
+        return helpers[name]
+    if name == "min" and not node.keywords:
+        units = {
+            unit
+            for argument in node.args
+            if (unit := _interaction_budget_unit(
+                argument,
+                budgets=budgets,
+                helpers=helpers,
+            )) is not None
+        }
+        return next(iter(units)) if len(units) == 1 else None
+    return None
+
+
+def _is_global_capped_interaction_budget(
+    node,
+    *,
+    budgets,
+    helpers,
+    expected_unit=None,
+):
+    """Accept only safe outer caps expressed in the call site's unit."""
+
+    unit = _interaction_budget_unit(node, budgets=budgets, helpers=helpers)
+    return unit is not None and (expected_unit is None or unit == expected_unit)
+
+
+def _module_capped_budget_names(tree, *, budgets, helpers):
+    """Resolve only immutable-looking module assignments from capped forms."""
+
+    capped = dict(budgets)
+    assignments = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+        names = {
+            label
+            for target in targets
+            for label in _assigned_labels(target)
+            if label.isupper()
+        }
+        for name in names:
+            assignments.setdefault(name, []).append(node.value)
+    changed = True
+    while changed:
+        changed = False
+        for name, values in assignments.items():
+            if name in capped or len(values) != 1:
+                continue
+            unit = _interaction_budget_unit(
+                values[0],
+                budgets=capped,
+                helpers=helpers,
+            )
+            if unit is not None:
+                capped[name] = unit
+                changed = True
+    return capped
+
+
+def _assigned_labels(node):
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    ):
+        return {node.slice.value}
+    return set()
+
+
+def _interaction_wait_name(function_name):
+    if function_name in {
+        "waitUntil",
+        "waitExposed",
+        "settle",
+        "wait_settled",
+        "_wait_until",
+        "_process_until",
+        "_drain_until",
+        "_wait_idle",
+    }:
+        return True
+    lowered = function_name.lower()
+    if "settle" in lowered:
+        return True
+    return any(
+        token in lowered
+        for token in (
+            "target_lod",
+            "montage_complete",
+            "profile_montage_workflow",
+            "presentation_quiet",
+            "vispy_tile_draw",
+        )
+    )
+
+
+def _interaction_timeout_call(function_name, keyword_name):
+    if function_name in {"waitUntil", "waitExposed", "settle", "wait_settled"}:
+        return keyword_name == "timeout"
+    if keyword_name not in {"budget_s", "timeout_s"}:
+        return False
+    return _interaction_wait_name(function_name)
+
+
+def _timeout_unit(*, function_name="", argument_name=""):
+    lowered = str(argument_name).lower()
+    if lowered.endswith("_ms"):
+        return "ms"
+    if lowered.endswith("_s") or lowered == "budget_s":
+        return "s"
+    if function_name in {"waitUntil", "waitExposed"}:
+        return "ms"
+    # Project-owned settle wrappers consistently accept seconds. Generic
+    # ``timeout`` must not make the seconds/milliseconds owners interchangeable.
+    return "s"
+
+
+def _interaction_timeout_offenders(tree, rel):
+    offenders = []
+    budgets, helpers = _canonical_interaction_budget_bindings(tree)
+    budgets = _module_capped_budget_names(
+        tree,
+        budgets=budgets,
+        helpers=helpers,
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            value = node.value
+            labels = set().union(*(_assigned_labels(target) for target in targets))
+            for name in labels:
+                upper = name.upper()
+                timeout_label = "timeout" in name.lower()
+                interaction_budget_label = (
+                    ("INTERACTION" in upper or "SETTLE" in upper)
+                    and ("BUDGET" in upper or "LIMIT" in upper)
+                )
+                if (
+                    (timeout_label or interaction_budget_label)
+                    and _contains_number(value)
+                    and rel != Path("arrayscope/tools/interaction_budget.py")
+                    and not _is_global_capped_interaction_budget(
+                        value,
+                        budgets=budgets,
+                        helpers=helpers,
+                        expected_unit=_timeout_unit(argument_name=name),
+                    )
+                ):
+                    offenders.append(f"{rel}:{node.lineno}:uncapped {name}")
+                if (
+                    "deadline" in name.lower()
+                    and _has_direct_deadline_literal(value)
+                    and any(
+                        isinstance(child, ast.Call)
+                        and _call_name(child) in {"monotonic", "perf_counter"}
+                        for child in ast.walk(value)
+                    )
+                    and not _is_global_capped_interaction_budget(
+                        value,
+                        budgets=budgets,
+                        helpers=helpers,
+                        expected_unit="s",
+                    )
+                ):
+                    offenders.append(f"{rel}:{node.lineno}:uncapped {name}")
+        if isinstance(node, ast.FunctionDef) and _interaction_wait_name(node.name):
+            positional = (*node.args.posonlyargs, *node.args.args)
+            defaults = (None,) * (len(positional) - len(node.args.defaults)) + tuple(node.args.defaults)
+            for argument, default in zip(positional, defaults, strict=True):
+                if (
+                    default is not None
+                    and argument.arg in {"timeout", "timeout_ms", "timeout_s", "budget_s"}
+                    and _contains_number(default)
+                    and not _is_global_capped_interaction_budget(
+                        default,
+                        budgets=budgets,
+                        helpers=helpers,
+                        expected_unit=_timeout_unit(
+                            function_name=node.name,
+                            argument_name=argument.arg,
+                        ),
+                    )
+                ):
+                    offenders.append(
+                        f"{rel}:{node.lineno}:uncapped {node.name} default {argument.arg}"
+                    )
+            for argument, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True):
+                if (
+                    default is not None
+                    and argument.arg in {"timeout", "timeout_ms", "timeout_s", "budget_s"}
+                    and _contains_number(default)
+                    and not _is_global_capped_interaction_budget(
+                        default,
+                        budgets=budgets,
+                        helpers=helpers,
+                        expected_unit=_timeout_unit(
+                            function_name=node.name,
+                            argument_name=argument.arg,
+                        ),
+                    )
+                ):
+                    offenders.append(
+                        f"{rel}:{node.lineno}:uncapped {node.name} default {argument.arg}"
+                    )
+        if not isinstance(node, ast.Call):
+            continue
+        function_name = _call_name(node)
+        if function_name == "singleShot" and node.args:
+            delay = _constant_number(node.args[0])
+            callback_name = _call_name(node.args[-1])
+            if (
+                delay is not None
+                and delay > INTERACTION_SETTLE_HARD_LIMIT_MS
+                and "process_guard" not in callback_name.lower()
+            ):
+                offenders.append(f"{rel}:{node.lineno}:singleShot delay={delay:g}")
+        for keyword in node.keywords:
+            if not _interaction_timeout_call(function_name, keyword.arg):
+                continue
+            if not _is_global_capped_interaction_budget(
+                keyword.value,
+                budgets=budgets,
+                helpers=helpers,
+                expected_unit=_timeout_unit(
+                    function_name=function_name,
+                    argument_name=keyword.arg,
+                ),
+            ):
+                offenders.append(
+                    f"{rel}:{node.lineno}:{function_name} {keyword.arg} is not globally capped"
+                )
+        if function_name in {"waitUntil", "waitExposed"} and len(node.args) >= 2:
+            if not _is_global_capped_interaction_budget(
+                node.args[1],
+                budgets=budgets,
+                helpers=helpers,
+                expected_unit="ms",
+            ):
+                offenders.append(
+                    f"{rel}:{node.lineno}:{function_name} positional timeout is not globally capped"
+                )
+    return offenders
 
 
 def test_interaction_gates_have_one_bounded_timeout_owner():
@@ -49,67 +382,164 @@ def test_interaction_gates_have_one_bounded_timeout_owner():
 
     roots = (
         ROOT / "arrayscope" / "tools",
-        ROOT / "tests" / "gpu_interaction",
-        ROOT / "tests" / "stress",
-        ROOT / "tests" / "ui",
+        ROOT / "tools",
+        ROOT / "tests",
     )
     offenders = []
     for root in roots:
         for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text())
             rel = path.relative_to(ROOT)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    targets = (
-                        node.targets
-                        if isinstance(node, ast.Assign)
-                        else (node.target,)
-                    )
-                    value = node.value
-                    for target in targets:
-                        if not isinstance(target, ast.Name):
-                            continue
-                        name = target.id
-                        if (
-                            name.isupper()
-                            and "TIMEOUT" in name
-                            and rel != Path("arrayscope/tools/interaction_budget.py")
-                        ):
-                            offenders.append(f"{rel}:{node.lineno}:local {name}")
-                        if (
-                            name.isupper()
-                            and ("SETTLE" in name or "BUDGET" in name)
-                            and rel != Path("arrayscope/tools/interaction_budget.py")
-                            and not _is_global_capped_interaction_budget(value)
-                        ):
-                            offenders.append(
-                                f"{rel}:{node.lineno}:uncapped {name}"
-                            )
-                if not isinstance(node, ast.Call):
-                    continue
-                function_name = (
-                    node.func.attr
-                    if isinstance(node.func, ast.Attribute)
-                    else node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else ""
-                )
-                for keyword in node.keywords:
-                    numeric = _constant_number(keyword.value)
-                    if numeric is None:
-                        continue
-                    limit = None
-                    if function_name == "waitUntil" and keyword.arg == "timeout":
-                        limit = float(INTERACTION_SETTLE_HARD_LIMIT_MS)
-                    elif function_name == "wait_settled" and keyword.arg == "timeout":
-                        limit = INTERACTION_SETTLE_HARD_LIMIT_S
-                    elif keyword.arg in {"timeout_s", "budget_s"}:
-                        limit = INTERACTION_SETTLE_HARD_LIMIT_S
-                    if limit is not None and numeric > limit:
-                        offenders.append(
-                            f"{rel}:{node.lineno}:{function_name} {keyword.arg}={numeric:g}"
-                        )
-    assert offenders == []
+            if rel == Path("tests/app/test_architecture_guards.py"):
+                continue
+            tree = ast.parse(path.read_text())
+            offenders.extend(_interaction_timeout_offenders(tree, rel))
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_interaction_timeout_guard_rejects_ui_literals_but_not_thread_guards():
+    tree = ast.parse(
+        """
+def probe(qtbot, finished, thread):
+    qtbot.waitUntil(lambda: True, timeout=3000)
+    finished.wait(timeout=30)
+    thread.join(timeout=30)
+"""
+    )
+
+    assert _interaction_timeout_offenders(tree, Path("tools/probe.py")) == [
+        "tools/probe.py:3:waitUntil timeout is not globally capped"
+    ]
+
+
+def test_interaction_timeout_guard_accepts_shorter_global_cap():
+    tree = ast.parse(
+        """
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
+def probe(qtbot):
+    qtbot.waitUntil(
+        lambda: True,
+        timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+    )
+"""
+    )
+
+    assert _interaction_timeout_offenders(tree, Path("tests/ui/test_probe.py")) == []
+
+
+def test_interaction_timeout_guard_covers_root_tool_phase_machines():
+    tree = ast.parse(
+        """
+PHASES = [("load", lambda: None, 60.0)]
+deadline = monotonic() + 20.0
+settle_checks = 0
+if settle_checks > 120:
+    raise RuntimeError
+QtCore.QTimer.singleShot(22000, win, start_work)
+QtCore.QTimer.singleShot(180000, win, process_guard_expired)
+
+def settle(timeout=25.0):
+    return timeout
+"""
+    )
+
+    offenders = _interaction_timeout_offenders(tree, Path("tools/probe.py"))
+    assert len(offenders) == 3
+    assert any("uncapped deadline" in offender for offender in offenders)
+    assert any("singleShot delay=22000" in offender for offender in offenders)
+    assert any("uncapped settle default timeout" in offender for offender in offenders)
+    assert all("180000" not in offender for offender in offenders)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "INTERACTION_SETTLE_HARD_LIMIT_MS * 100",
+        "max(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)",
+        "interaction_settle_timeout_ms(3.0) + 100000",
+    ),
+)
+def test_interaction_timeout_guard_rejects_caps_wrapped_by_widening_operations(
+    expression,
+):
+    tree = ast.parse(
+        f"""
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_MS,
+    interaction_settle_timeout_ms,
+)
+
+def probe(qtbot):
+    qtbot.waitUntil(lambda: True, timeout={expression})
+"""
+    )
+
+    offenders = _interaction_timeout_offenders(tree, Path("tests/ui/test_probe.py"))
+    assert len(offenders) == 1
+    assert "is not globally capped" in offenders[0]
+
+
+def test_interaction_timeout_guard_rejects_unit_mismatch():
+    tree = ast.parse(
+        """
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
+def _wait_until(*, timeout_s):
+    return timeout_s
+
+_wait_until(timeout_s=INTERACTION_SETTLE_HARD_LIMIT_MS)
+"""
+    )
+
+    offenders = _interaction_timeout_offenders(tree, Path("tools/probe.py"))
+    assert offenders == [
+        "tools/probe.py:7:_wait_until timeout_s is not globally capped"
+    ]
+
+
+def test_interaction_timeout_guard_covers_settled_wrappers_and_ui_watchdogs():
+    tree = ast.parse(
+        """
+def _settled(predicate, timeout=60000):
+    return predicate()
+
+QtCore.QTimer.singleShot(180000, win, interaction_watchdog)
+QtCore.QTimer.singleShot(180000, win, process_guard_expired)
+"""
+    )
+
+    offenders = _interaction_timeout_offenders(tree, Path("tests/ui/test_probe.py"))
+    assert len(offenders) == 2
+    assert any("uncapped _settled default timeout" in item for item in offenders)
+    assert any("singleShot delay=180000" in item for item in offenders)
+    assert all("process_guard_expired" not in item for item in offenders)
+
+
+def test_interaction_timeout_guard_rejects_shadowed_owner_and_indirect_literals():
+    tree = ast.parse(
+        """
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
+INTERACTION_SETTLE_HARD_LIMIT_MS = 60000
+LOCAL_TIMEOUT = 60000
+REASSIGNED_TIMEOUT = min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+REASSIGNED_TIMEOUT = 60000
+
+def probe(qtbot):
+    timeout_s = 60
+    deadline = monotonic() + timeout_s
+    other_deadline = monotonic() + float(60)
+    qtbot.waitUntil(lambda: True, timeout=LOCAL_TIMEOUT)
+    qtbot.waitUntil(lambda: True, timeout=REASSIGNED_TIMEOUT)
+"""
+    )
+
+    offenders = _interaction_timeout_offenders(tree, Path("tests/ui/test_probe.py"))
+    assert any("uncapped INTERACTION_SETTLE_HARD_LIMIT_MS" in item for item in offenders)
+    assert any("uncapped LOCAL_TIMEOUT" in item for item in offenders)
+    assert any("uncapped timeout_s" in item for item in offenders)
+    assert any("uncapped other_deadline" in item for item in offenders)
+    assert sum("waitUntil timeout is not globally capped" in item for item in offenders) == 2
 
 
 def test_managed_docks_do_not_use_qt_toggle_view_action():

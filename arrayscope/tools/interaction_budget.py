@@ -7,6 +7,8 @@ but it may not make a slow interaction pass by requesting a longer one.
 
 from __future__ import annotations
 
+import math
+
 
 INTERACTION_SETTLE_TARGET_S = 2.0
 INTERACTION_SETTLE_HARD_LIMIT_S = 5.0
@@ -19,8 +21,8 @@ def bounded_interaction_settle_timeout_s(requested_s: float | None = None) -> fl
     if requested_s is None:
         return INTERACTION_SETTLE_HARD_LIMIT_S
     requested = float(requested_s)
-    if requested <= 0.0:
-        raise ValueError("interaction settlement timeout must be positive")
+    if not math.isfinite(requested) or requested <= 0.0:
+        raise ValueError("interaction settlement timeout must be positive and finite")
     return min(requested, INTERACTION_SETTLE_HARD_LIMIT_S)
 
 

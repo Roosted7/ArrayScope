@@ -222,7 +222,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         assert getattr(win.img_view, "_vispy_overlay_visuals", [])
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
         while time.monotonic() < deadline and not win.widgets["labels"]["pixelValue"].text():
             _process_events(qt_app, count=2)
 
