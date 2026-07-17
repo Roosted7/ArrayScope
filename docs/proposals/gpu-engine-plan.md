@@ -319,6 +319,36 @@ The first numeric oracle uses 64 local bins and requires aggregate normalized
 histogram L1 error at or below 5% against the direct CPU histogram on its
 deterministic multi-chunk fixture; levels preserve exact finite min/max.
 
+
+**Endpoint scope (Thomas, 2026-07-18 — binding for G6 completion):** the
+point of G6 is that level/histogram SAMPLING itself runs on the GPU over
+resident pages, not only that CPU summaries ride along with
+materialization. Three explicit ambitions beyond the first landing:
+
+1. **GPU-side sampling/reduction shaders** over resident chunk pages
+   (sharing the shader's complex-mapping function). Runtime honesty:
+   VisPy/gloo is GL-3.3-era — no compute shaders. A fragment-pass
+   reduction ladder over resident textures is the legitimate interim; true
+   workgroup reduction arrives with the wgpu runtime (queue row
+   "Renderer protocol + wgpu Experiment A") and G6's shader work should be
+   written against the backend-neutral command protocol so it ports
+   rather than being rebuilt. Coordinate the two rows; pulling Experiment
+   A forward is on the table if the GL interim proves awkward.
+2. **Evidence-gated design question — collapse rough→refined:** if GPU
+   sampling of the full resident population is fast enough, the two-stage
+   level phasing may become a single exact pass on shader backends.
+   This is a MEASUREMENT decision, not a theory decision (ADR 0046;
+   graveyard discipline): keep the ADR 0054 phases until a harness shows
+   full-population GPU stats inside the phase-1 budget. The CPU-LUT
+   single-pass rule for PyQtGraph (rendering.md contract rule 6) is
+   unaffected either way.
+3. **VisPy histogram widget:** replace/replicate the PyQtGraph histogram
+   UI with a VisPy-rendered equivalent fed straight from chunk/GPU
+   summaries — parity first, then improvements. This also retires the
+   standing risk that the histogram adapter depends on private PyQtGraph
+   API (current-state.md). PyQtGraph backend keeps a working histogram
+   throughout (both-backends rule).
+
 *Gate:* histogram-from-chunks matches CPU histogram within documented
 tolerance on both real-hardware backends; levels convergence behavior
 unchanged from the ADR 0054 contract.
