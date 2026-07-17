@@ -173,21 +173,55 @@ class Harness:
             )
 
     def assert_vispy_visual_mapping_matches_pool(self) -> None:
-        """The atlas registry must match the texcoords actually drawn."""
+        """Canonical page bindings must match every submitted draw quad."""
 
         layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return
+        from arrayscope.display.backends.vispy.tiles import _tile_quad_rects
+
+        for tile, resolutions in layer._pool.tile_page_target_resolutions.items():
+            bound_pages = {
+                int(resolution.slot.page_index) for resolution in resolutions
+            }
+            drawn_pages = {
+                int(part.page_index)
+                for part in layer._pool.tile_draw_parts.get(int(tile), ())
+                if part.page_index is not None
+            }
+            assert drawn_pages and drawn_pages.issubset(bound_pages), (
+                f"tile {tile} draw pages {sorted(drawn_pages)} do not match "
+                f"bound pages {sorted(bound_pages)}"
+            )
         for page_index, payloads in enumerate(layer._page_payloads_by_index):
+            if not payloads:
+                continue
             visual = layer._visuals_by_page[page_index]
-            ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
-            for offset, tile in enumerate(ordered_tiles):
-                expected = np.asarray(layer._pool.tile_uvs[tile][:2], dtype=np.float32)
-                actual = np.asarray(visual.texcoord_data[offset * 6], dtype=np.float32)
-                assert np.allclose(actual, expected), (
-                    f"tile {tile} pool UV {expected.tolist()} != drawn UV "
-                    f"{actual.tolist()} (slot={layer._pool.tile_slots.get(tile)})"
-                )
+            expected_texcoords = []
+            for tile in sorted(int(tile) for tile in payloads):
+                for _world, (u0, v0, u1, v1) in _tile_quad_rects(
+                    tile,
+                    layer._last_layout,
+                    layer._pool.tile_uvs,
+                    layer._pool.tile_draw_parts,
+                    page_index=page_index,
+                ):
+                    expected_texcoords.extend(
+                        (
+                            (u0, v0),
+                            (u1, v0),
+                            (u1, v1),
+                            (u0, v0),
+                            (u1, v1),
+                            (u0, v1),
+                        )
+                    )
+            expected = np.asarray(expected_texcoords, dtype=np.float32).reshape((-1, 2))
+            actual = np.asarray(visual.texcoord_data, dtype=np.float32).reshape((-1, 2))
+            assert actual.shape == expected.shape and np.allclose(actual, expected), (
+                f"page {page_index} submitted texcoords diverge from canonical "
+                f"draw parts: actual={actual.shape}, expected={expected.shape}"
+            )
 
     def prepare_image_layer_pixel_sampling(self) -> None:
         """Hide independent composition overlays before sampling image pixels.

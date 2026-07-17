@@ -387,10 +387,11 @@ class TextureAtlasPage:
         self.tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
         self.capacity = max(1, int(capacity))
         self.storage_mode = _normalize_storage_mode(storage_mode)
+        self.max_texture_size = max(1, int(max_texture_size))
         self.columns, self.rows = _atlas_grid(
             tile_shape=self.tile_shape,
             capacity=self.capacity,
-            max_texture_size=max_texture_size,
+            max_texture_size=self.max_texture_size,
         )
         tile_h, tile_w = self.tile_shape
         self.atlas_shape = (int(self.rows * tile_h), int(self.columns * tile_w))
@@ -458,9 +459,12 @@ class TextureAtlasPage:
 
     @property
     def estimated_gpu_bytes(self) -> int:
-        pixels = int(self.atlas_shape[0]) * int(self.atlas_shape[1])
-        scalar_bytes = 8 if self.complex_is_atlas else 4
-        return pixels * (scalar_bytes if self.scalar_is_atlas else 0) + pixels * (3 if self.color_is_atlas else 0)
+        return _atlas_allocation_bytes(
+            tile_shape=self.tile_shape,
+            capacity=self.capacity,
+            storage_mode=self.storage_mode,
+            max_texture_size=self.max_texture_size,
+        )
 
     def uv_for_slot(self, slot: int) -> tuple[float, float, float, float]:
         tile_h, tile_w = self.tile_shape
@@ -633,6 +637,7 @@ class TextureAtlasPool:
                 page_index,
                 slot,
                 page.uv_for_slot(slot),
+                page_backed=True,
             )
             self.page_target_resolutions[tile] = resolution
         self._page_target_pin_tiles = set(requested)
@@ -882,15 +887,19 @@ class TextureAtlasPool:
                 f"tile shape {(tile_h, tile_w)} exceeds atlas texture limit {self.max_texture_size}"
             )
         max_slots_per_page = int(max_columns * max_rows)
-        bytes_per_slot = _storage_mode_bytes_per_pixel(storage_mode) * tile_h * tile_w
-        budget_slots = requested if self.budget_bytes <= 0 else self.budget_bytes // max(1, bytes_per_slot)
-        if requested > budget_slots:
+        storage_mode = _normalize_storage_mode(storage_mode)
+        required_bytes = _atlas_class_allocation_bytes(
+            tile_shape=(tile_h, tile_w),
+            count=requested,
+            storage_mode=storage_mode,
+            max_texture_size=self.max_texture_size,
+        )
+        if self.budget_bytes > 0 and required_bytes > self.budget_bytes:
             raise AtlasCapacityError(
                 f"{requested} active tiles of shape {(tile_h, tile_w)} exceed tile residency budget "
-                f"{self.budget_bytes} bytes (capacity {budget_slots})"
+                f"{self.budget_bytes} bytes (physical allocation {required_bytes} bytes)"
             )
 
-        storage_mode = _normalize_storage_mode(storage_mode)
         shape_changed = self.tile_shape != (tile_h, tile_w)
         if (
             not shape_changed
@@ -1016,6 +1025,24 @@ class TextureAtlasPool:
             if self.budget_bytes > 0:
                 budget_left = self.budget_bytes - self.estimated_gpu_bytes
                 page_capacity = min(page_capacity, budget_left // bytes_per_slot)
+                # Atlas textures allocate the complete rectangular grid, not
+                # merely ``capacity`` logical slots.  Fit against that rounded
+                # physical allocation so a nominally in-budget page cannot
+                # push the pool over its byte limit.
+                low, high = 0, max(0, int(page_capacity))
+                while low < high:
+                    candidate = (low + high + 1) // 2
+                    candidate_bytes = _atlas_allocation_bytes(
+                        tile_shape=shape,
+                        capacity=candidate,
+                        storage_mode=mode,
+                        max_texture_size=self.max_texture_size,
+                    )
+                    if candidate_bytes <= budget_left:
+                        low = candidate
+                    else:
+                        high = candidate - 1
+                page_capacity = int(low)
                 if page_capacity < 1:
                     # Before budget-limiting the class, reclaim slots whose
                     # tiles now present a different class and drop pages that
@@ -1178,6 +1205,14 @@ class TextureAtlasPool:
 
     def _drop_pages(self, page_indices) -> None:
         dropped = {int(index) for index in page_indices}
+        if not dropped:
+            return
+        invalid = tuple(
+            sorted(index for index in dropped if index < 0 or index >= len(self.pages))
+        )
+        if invalid:
+            raise IndexError(f"cannot drop atlas page indices {invalid!r}")
+
         remap: dict[int, int] = {}
         kept: list[TextureAtlasPage] = []
         for old_index, page in enumerate(self.pages):
@@ -1185,14 +1220,100 @@ class TextureAtlasPool:
                 continue
             remap[old_index] = len(kept)
             kept.append(page)
-        self.pages = kept
+
+        def remapped_page_index(old_index: int, *, owner: object) -> int:
+            old_index = int(old_index)
+            if old_index not in remap:
+                raise RuntimeError(
+                    f"cannot compact atlas: {owner!r} still references "
+                    f"dropped page {old_index}"
+                )
+            return int(remap[old_index])
+
+        # Build every presentation-side remap before changing the canonical
+        # page table.  A page is droppable only after all of its bindings and
+        # draw owners have been released; finding one here is an invariant
+        # violation, not a reason to publish a partially compacted atlas.
+        for key, slot_ref in self._page_table.slot_items():
+            remapped_page_index(slot_ref.page_index, owner=key)
+        remapped_tile_slots = {
+            int(tile): (
+                remapped_page_index(page_index, owner=("tile-slot", int(tile))),
+                int(slot),
+            )
+            for tile, (page_index, slot) in self.tile_slots.items()
+        }
+        remapped_draw_parts = {
+            int(tile): tuple(
+                part
+                if part.page_index is None
+                else replace(
+                    part,
+                    page_index=remapped_page_index(
+                        part.page_index,
+                        owner=("tile-draw-part", int(tile)),
+                    ),
+                )
+                for part in parts
+            )
+            for tile, parts in self.tile_draw_parts.items()
+        }
+
+        cached_resolutions = tuple(self.page_target_resolutions.values()) + tuple(
+            resolution
+            for resolutions in self.tile_page_target_resolutions.values()
+            for resolution in resolutions
+        )
+        for resolution in cached_resolutions:
+            # Preserve the physically presented actual page until the normal
+            # resolver deliberately replaces it.  A newly warmed finer page
+            # may now win a fresh target lookup, but compaction alone must not
+            # silently change presentation quality or geometry.
+            binding = self._page_table.resolve(resolution.actual_key)
+            if (
+                binding is None
+                or binding.actual_key != resolution.actual_key
+                or binding.slot != resolution.slot
+            ):
+                raise RuntimeError(
+                    "cannot compact atlas with a stale cached page resolution: "
+                    f"target={resolution.target_key!r}, "
+                    f"actual={resolution.actual_key!r}"
+                )
+
         self._page_table.remap_slots(
             lambda slot: PageSlot(slot.pool_id, remap[slot.page_index], slot.slot_index)
         )
-        self.tile_slots = {
-            tile: (remap[int(page_index)], int(slot))
-            for tile, (page_index, slot) in self.tile_slots.items()
+
+        def refreshed_resolution(resolution: PageResolution) -> PageResolution:
+            binding = self._page_table.resolve(resolution.actual_key)
+            if binding is None or binding.actual_key != resolution.actual_key:
+                raise RuntimeError(
+                    "atlas compaction lost a resident page binding: "
+                    f"{resolution.actual_key!r}"
+                )
+            return replace(
+                resolution,
+                slot=binding.slot,
+                binding_generation=int(binding.binding_generation),
+            )
+
+        remapped_page_target_resolutions = {
+            int(tile): refreshed_resolution(resolution)
+            for tile, resolution in self.page_target_resolutions.items()
         }
+        remapped_tile_page_target_resolutions = {
+            int(tile): tuple(refreshed_resolution(resolution) for resolution in resolutions)
+            for tile, resolutions in self.tile_page_target_resolutions.items()
+        }
+
+        # Publish the compacted physical pages and every derived presentation
+        # map together, before the serial tells the layer to rebuild visuals.
+        self.pages = kept
+        self.tile_slots = remapped_tile_slots
+        self.tile_draw_parts = remapped_draw_parts
+        self.page_target_resolutions = remapped_page_target_resolutions
+        self.tile_page_target_resolutions = remapped_tile_page_target_resolutions
         self.pages_dropped_count += len(dropped)
         self.serial += 1
 
@@ -1232,7 +1353,13 @@ class TextureAtlasPool:
         requested = max(active_count, min(reserve_count, chunked))
         effective_budget = self.budget_bytes if budget_bytes is None else max(0, int(budget_bytes))
         if effective_budget > 0:
-            budget_slots = max(0, effective_budget // max(1, bytes_per_slot))
+            budget_slots = _max_atlas_class_capacity_within_bytes(
+                tile_shape=(tile_h, tile_w),
+                max_capacity=requested,
+                storage_mode=storage_mode,
+                max_texture_size=self.max_texture_size,
+                budget_bytes=effective_budget,
+            )
             # The active set is mandatory.  Returning active_count lets
             # ensure_layout raise a precise capacity error when even it does
             # not fit, while speculative reserve headroom is simply clamped.
@@ -1723,6 +1850,7 @@ class TextureAtlasPool:
                 active_tile_slots[int(tile)][1],
                 active_tile_uvs[int(tile)],
                 chunked=int(tile) in chunk_plans or int(tile) in page_backed_tiles,
+                page_backed=int(tile) in page_backed_tiles,
             )
         # Reclaim identity records of chunked keys that no tile presents
         # anymore, now that every mapping of this commit has settled (the
@@ -2563,16 +2691,27 @@ class TextureAtlasPool:
         prepare_ms = 0.0
         submit_ms = 0.0
         uploaded_keys: list[DataChunkKey] = []
-        missing_count = sum(
-            self._page_table.lookup(page.key) is None
+        missing_keys = {
+            page.key
             for page in backing.materialized_pages
-        )
-        if missing_count:
+            if self._page_table.lookup(page.key) is None
+        }
+        if missing_keys:
+            free_slots = sum(
+                owner is None
+                for page in self.pages
+                if page.tile_shape == slot_shape and page.storage_mode == storage_mode
+                for owner in page.slot_owners
+            )
+            shortage = max(0, len(missing_keys) - int(free_slots))
+        else:
+            shortage = 0
+        if shortage:
             try:
                 self._ensure_class_capacity(
                     slot_shape,
                     self._class_capacity(slot_shape, storage_mode=storage_mode)
-                    + int(missing_count),
+                    + int(shortage),
                     storage_mode=storage_mode,
                 )
             except AtlasCapacityError:
@@ -3087,11 +3226,7 @@ class TextureAtlasPool:
 
     def _clear_tile_mapping(self, tile_number: int) -> None:
         tile_number = int(tile_number)
-        page_owner = self._tile_page_pin_owners.pop(tile_number, None)
-        if page_owner is not None:
-            self._page_table.replace_pin_set(page_owner, ())
-        self.tile_page_target_resolutions.pop(tile_number, None)
-        self.tile_page_candidate_missing.pop(tile_number, None)
+        self._clear_tile_page_target_binding(tile_number)
         old_key = self.tile_resident_keys.pop(tile_number, None)
         if old_key is not None:
             tiles = self.resident_tiles.get(old_key)
@@ -3104,6 +3239,23 @@ class TextureAtlasPool:
         self.tile_draw_parts.pop(tile_number, None)
         self.tile_uvs.pop(tile_number, None)
         self._release_tile_chunks(tile_number)
+
+    def _clear_tile_page_target_binding(self, tile_number: int) -> None:
+        """Release every canonical page-resolution cache/pin for one tile."""
+
+        tile_number = int(tile_number)
+        if tile_number in self._page_target_pin_tiles:
+            self._page_table.replace_pin_set(
+                _page_target_pin_owner(tile_number),
+                (),
+            )
+            self._page_target_pin_tiles.discard(tile_number)
+        self.page_target_resolutions.pop(tile_number, None)
+        page_owner = self._tile_page_pin_owners.pop(tile_number, None)
+        if page_owner is not None:
+            self._page_table.replace_pin_set(page_owner, ())
+        self.tile_page_target_resolutions.pop(tile_number, None)
+        self.tile_page_candidate_missing.pop(tile_number, None)
 
     def clear_presentation(self) -> None:
         """Drop every visible mapping and owner pin, preserving resident bytes.
@@ -3137,8 +3289,11 @@ class TextureAtlasPool:
         uv: tuple[float, float, float, float],
         *,
         chunked: bool = False,
+        page_backed: bool = False,
     ) -> None:
         tile_number = int(tile_number)
+        if not page_backed:
+            self._clear_tile_page_target_binding(tile_number)
         old_key = self.tile_resident_keys.get(tile_number)
         if old_key is not None and old_key != resident_key:
             tiles = self.resident_tiles.get(old_key)
@@ -5098,6 +5253,82 @@ def _atlas_grid(*, tile_shape: tuple[int, int], capacity: int, max_texture_size:
             f"atlas grid {columns}x{rows} exceeds texture limit {max_texture_size} for tile shape {tile_shape}"
         )
     return columns, rows
+
+
+def _atlas_allocation_bytes(
+    *,
+    tile_shape: tuple[int, int],
+    capacity: int,
+    storage_mode: str,
+    max_texture_size: int,
+) -> int:
+    """Physical bytes of the rectangular texture grid for one atlas page."""
+
+    columns, rows = _atlas_grid(
+        tile_shape=tile_shape,
+        capacity=capacity,
+        max_texture_size=max_texture_size,
+    )
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    pixels = int(columns) * tile_w * int(rows) * tile_h
+    return pixels * _storage_mode_bytes_per_pixel(storage_mode)
+
+
+def _atlas_class_allocation_bytes(
+    *,
+    tile_shape: tuple[int, int],
+    count: int,
+    storage_mode: str,
+    max_texture_size: int,
+) -> int:
+    """Physical bytes for a class split across bounded texture pages."""
+
+    remaining = max(0, int(count))
+    if remaining == 0:
+        return 0
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    max_slots_per_page = max(1, int(max_texture_size // tile_w)) * max(
+        1,
+        int(max_texture_size // tile_h),
+    )
+    total = 0
+    while remaining:
+        page_capacity = min(remaining, max_slots_per_page)
+        total += _atlas_allocation_bytes(
+            tile_shape=(tile_h, tile_w),
+            capacity=page_capacity,
+            storage_mode=storage_mode,
+            max_texture_size=max_texture_size,
+        )
+        remaining -= page_capacity
+    return int(total)
+
+
+def _max_atlas_class_capacity_within_bytes(
+    *,
+    tile_shape: tuple[int, int],
+    max_capacity: int,
+    storage_mode: str,
+    max_texture_size: int,
+    budget_bytes: int,
+) -> int:
+    """Largest logical class capacity whose rounded pages fit the budget."""
+
+    low, high = 0, max(0, int(max_capacity))
+    budget = max(0, int(budget_bytes))
+    while low < high:
+        candidate = (low + high + 1) // 2
+        required = _atlas_class_allocation_bytes(
+            tile_shape=tile_shape,
+            count=candidate,
+            storage_mode=storage_mode,
+            max_texture_size=max_texture_size,
+        )
+        if required <= budget:
+            low = candidate
+        else:
+            high = candidate - 1
+    return int(low)
 
 
 def _atlas_reserve_count(geometry, *, minimum: int, frame_plan=None) -> int:

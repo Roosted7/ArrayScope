@@ -4,11 +4,15 @@ import numpy as np
 
 from arrayscope.display.backends.vispy.tiles import (
     TileDrawPart,
+    TextureAtlasPool,
     _quad_buffers,
     _tile_quad_rects,
 )
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.tile_layout import TileLayoutRegion
+from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot
+
+from tests.display.vispy_test_utils import FakeGloo
 
 
 def payload(tile_number: int, value: float = 1.0) -> DisplayTilePayload:
@@ -94,3 +98,101 @@ def test_tile_quad_rects_reports_parts_or_default():
     )
     # No layout/UV -> nothing to draw.
     assert _tile_quad_rects(9, layout, uvs, None) == ()
+
+
+def test_page_compaction_atomically_remaps_bindings_and_draw_parts():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=2)
+    pool.ensure_layout(tile_shape=(2, 2), count=2, storage_mode="scalar")
+    assert len(pool.pages) == 2
+
+    target = DataChunkKey(
+        document_generation=("doc", 1),
+        operation_key=("op", "identity"),
+        lod=ChunkLod(reduction=(0, 0), reducer="mean"),
+        chunk_origin=(2, 2),
+        chunk_shape=(2, 2),
+        dtype="float32",
+    )
+    coarse = DataChunkKey(
+        document_generation=target.document_generation,
+        operation_key=target.operation_key,
+        lod=ChunkLod(reduction=(2, 2), reducer="mean"),
+        chunk_origin=(0, 0),
+        chunk_shape=(8, 8),
+        dtype="float32",
+    )
+    survivor = pool.pages[1]
+    slot = survivor.take_free_slot(coarse)
+    assert slot == 0
+    pool._bind_resident_slot(coarse, 1, slot, survivor)
+    pool.source_ids[coarse] = coarse
+    pool.acknowledged_identities[coarse] = coarse
+
+    single = pool.resolve_page_targets({7: target})[7]
+    multi = pool.resolve_tile_page_targets(
+        {7: (target,)},
+        owner_scope=("session", 1),
+    )[7]
+    assert single is not None and multi is not None
+    assert single.actual_key == coarse
+    assert single.slot == PageSlot("vispy-atlas", 1, 0)
+    pool.tile_draw_parts[7] = (
+        TileDrawPart(
+            world_rect=(3.0, 5.0, 5.0, 7.0),
+            uv_rect=(0.0, 0.0, 1.0, 1.0),
+            page_index=1,
+        ),
+    )
+
+    layout = {7: region(7, x=3, y=5)}
+    payloads = {7: payload(7)}
+    before_geometry = _quad_buffers(
+        layout,
+        payloads,
+        pool.tile_uvs,
+        rgb_already_windowed=False,
+        draw_parts=pool.tile_draw_parts,
+    )
+    generation_before = single.binding_generation
+
+    # Page zero is empty.  Dropping it moves the surviving physical page from
+    # index one to zero without changing its slot, pixels, or draw geometry.
+    pool._drop_pages((0,))
+
+    authoritative = pool._page_table.resolve(target)
+    assert authoritative is not None
+    assert pool.pages == [survivor]
+    assert authoritative.actual_key == coarse
+    assert authoritative.slot == PageSlot("vispy-atlas", 0, 0)
+    assert authoritative.binding_generation > generation_before
+    assert pool.page_target_resolutions[7] == authoritative
+    assert pool.tile_page_target_resolutions[7] == (authoritative,)
+    assert pool.tile_slots[7] == (0, 0)
+    assert pool.tile_draw_parts[7][0].page_index == 0
+
+    after_geometry = _quad_buffers(
+        layout,
+        payloads,
+        pool.tile_uvs,
+        rgb_already_windowed=False,
+        draw_parts=pool.tile_draw_parts,
+    )
+    for before, after in zip(before_geometry, after_geometry, strict=True):
+        np.testing.assert_array_equal(after, before)
+
+    # Returning this tile to a non-page-backed/native mapping must release the
+    # canonical resolution cache and its owner pin. Otherwise physical truth
+    # continues to claim a coarse binding that no draw part consumes.
+    assert pool._page_table.is_pinned(coarse)
+    pool._set_tile_mapping(
+        7,
+        coarse,
+        0,
+        0,
+        survivor.uv_for_slot(0),
+        chunked=True,
+    )
+    assert 7 not in pool.page_target_resolutions
+    assert 7 not in pool.tile_page_target_resolutions
+    assert 7 not in pool._tile_page_pin_owners
+    assert not pool._page_table.is_pinned(coarse)

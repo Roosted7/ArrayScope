@@ -18,6 +18,7 @@ from arrayscope.display.backends.vispy.tiles import (
     ANCHORED_CHUNK_SHAPE,
     AtlasCapacityError,
     TextureAtlasPool,
+    _atlas_allocation_bytes,
     _payload_chunk_plan,
     _payload_chunked_eligible,
 )
@@ -79,6 +80,45 @@ def page_backed_payload(start, *, tile_number=0):
         image=pages[0].values,
         histogram_data=None,
         source_id=("page-backed-window", start),
+        lod=lod,
+        page_backing=PageBackedPresentation(plans, pages, rect, lod),
+    )
+
+
+def single_physical_page_payload(tile_number):
+    """One tiny clipped value footprint in a 256x256 physical page class."""
+
+    source_x0 = int(tile_number) * 512
+    rect = (0, 4, source_x0, source_x0 + 4)
+    source = np.full((4, 4), float(tile_number + 1), dtype=np.float32)
+    plans = plan_source_grid_pages(
+        content_key=("page-capacity-reuse",),
+        valid_source_rect_yx=rect,
+        reduction_yx=(1, 1),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    assert len(plans) == 1
+    pages = materialize_source_grid_pages(
+        source,
+        source_origin_yx=(rect[0], rect[2]),
+        plans=plans,
+    )
+    lod = LodInfo(
+        level=1,
+        factor=2,
+        source_shape=(4, 4),
+        texture_shape=(2, 2),
+        gutter=0,
+    )
+    return DisplayTilePayload(
+        tile_number=int(tile_number),
+        source_index=int(tile_number),
+        image=pages[0].values,
+        histogram_data=None,
+        source_id=("page-capacity-reuse", int(tile_number)),
         lod=lod,
         page_backing=PageBackedPresentation(plans, pages, rect, lod),
     )
@@ -497,9 +537,19 @@ def test_warm_payloads_chunks_are_pure_residency_and_make_commit_upload_free():
 def test_warm_payloads_denied_by_budget_skips_without_evicting():
     """G4c hard invariant: warm work never evicts to make room for itself."""
 
-    base_bytes = HEIGHT * EXTENT * 4
-    chunk_bytes = CHUNK * CHUNK * 4
-    budget = base_bytes + 10 * chunk_bytes  # exactly plane A's residency
+    base_bytes = _atlas_allocation_bytes(
+        tile_shape=(HEIGHT, EXTENT),
+        capacity=1,
+        storage_mode="scalar",
+        max_texture_size=4096,
+    )
+    chunk_bytes = _atlas_allocation_bytes(
+        tile_shape=ANCHORED_CHUNK_SHAPE,
+        capacity=10,
+        storage_mode="scalar",
+        max_texture_size=4096,
+    )
+    budget = base_bytes + chunk_bytes  # exactly plane A's physical residency
     data = _data()
     other = np.random.default_rng(13).standard_normal((HEIGHT, DATA_WIDTH)).astype(np.float32)
     pool = TextureAtlasPool(FakeGloo(), budget_bytes=budget)
@@ -1006,6 +1056,72 @@ def test_page_backed_shift_uploads_only_changed_boundary_and_revisit_is_zero():
     revisit_stats = commit_page_backed(pool, first)
     assert revisit_stats.texture_uploads == 0
     assert set(pool.tile_chunk_residency[0]) == first_keys
+
+
+def test_sequential_page_backed_uploads_reuse_free_class_slots_within_budget():
+    """A new key consumes a free slot, not a new atlas page per payload."""
+
+    budget = 128 * 1024 * 1024
+    pool = TextureAtlasPool(
+        FakeGloo(),
+        max_texture_size=4096,
+        budget_bytes=budget,
+    )
+    payloads = {}
+    regions = {}
+    for tile_number in range(4):
+        payload = single_physical_page_payload(tile_number)
+        payloads[tile_number] = payload
+        source_x0 = int(tile_number) * 512
+        regions[tile_number] = (source_x0, 0, 4, 4)
+        _uvs, stats = pool.update_payloads(
+            dict(payloads),
+            tile_shape=(256, 256),
+            dirty_tiles=None,
+            rgb_already_windowed=False,
+            reserve_count=len(payloads),
+            tile_world_regions=dict(regions),
+        )
+        assert set(stats.presented_tiles) == set(payloads)
+
+    scalar_pages = tuple(
+        page
+        for page in pool.pages
+        if page.tile_shape == (256, 256) and page.storage_mode == "scalar"
+    )
+    assert len(scalar_pages) == 1
+    assert sum(owner is not None for page in scalar_pages for owner in page.slot_owners) == 4
+    assert scalar_pages[0].capacity >= 4
+
+    # Texture bytes are based on the rounded atlas grid, not merely the
+    # advertised logical slot capacity. Both the reuse decision and budget
+    # gate must use this physical allocation truth.
+    logical_slot_bytes = sum(
+        int(page.capacity) * 256 * 256 * 4 for page in scalar_pages
+    )
+    actual_page_bytes = sum(int(page.estimated_gpu_bytes) for page in scalar_pages)
+    assert actual_page_bytes > logical_slot_bytes
+    assert pool.estimated_gpu_bytes == actual_page_bytes
+    assert actual_page_bytes <= budget
+
+
+def test_base_atlas_budget_rejects_rounded_physical_overcommit():
+    slot_bytes = 256 * 256 * 4
+    logical_five_slot_budget = 5 * slot_bytes
+    pool = TextureAtlasPool(
+        FakeGloo(),
+        max_texture_size=4096,
+        budget_bytes=logical_five_slot_budget,
+    )
+
+    # Five square slots require a 3x2 texture grid: six physical slots.  The
+    # logical five-slot calculation must not admit that over-budget texture.
+    with pytest.raises(AtlasCapacityError, match="physical allocation"):
+        pool.ensure_layout(
+            tile_shape=(256, 256),
+            count=5,
+            storage_mode="scalar",
+        )
 
 
 def test_page_backed_draw_parts_cover_exact_clipped_geometry_and_report_all_bindings():
