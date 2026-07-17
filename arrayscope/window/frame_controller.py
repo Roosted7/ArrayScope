@@ -234,16 +234,27 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         viewport_controller = getattr(self.win.img_view, "viewport_controller", None)
         planning_intent = montage_viewport_intent(viewport_controller, current_range)
+        # AUTO/FIT describes the intended SUCCESSOR camera: when this plan's
+        # layout differs from the committed session's, the fit extent — not
+        # the predecessor camera — is the planning truth, so a CPU backend
+        # cannot commit only the predecessor-sized subset and expose holes
+        # when acknowledgement applies the new fit. But when the camera is
+        # already on THIS layout, the live range IS the truth even under
+        # AUTO intent: a zoom gesture does not change intent, and replacing
+        # it with the fit froze the LOD demand at the fit level forever
+        # (field defect 2026-07-18, both backends; red journey gate
+        # tests/ui/test_lod_demand_freshness.py).
+        camera_on_this_layout = bool(
+            camera_on_montage
+            and getattr(getattr(current_session, "plan", None), "geometry", None)
+            == plan.geometry
+        )
         if (
             view_range is None
             and pending_restore_range is None
             and planning_intent.auto_like
+            and not camera_on_this_layout
         ):
-            # AUTO/FIT describes the intended successor camera, even while the
-            # acknowledged predecessor camera must remain onscreen. Plan the
-            # successor's full visible obligation from that intent so a CPU
-            # backend cannot commit only the predecessor-sized subset and then
-            # expose holes when acknowledgement finally applies the new fit.
             current_range = _initial_montage_planning_view_range(
                 plan,
                 viewport_shape,

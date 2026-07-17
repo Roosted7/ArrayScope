@@ -73,6 +73,21 @@ def test_zoom_in_rederives_lod_demand(qtbot):
 
         # Hard zoom into ~1.5 tiles: true texels-per-pixel drops below 1,
         # so the demanded level must become finer (smaller) than the fit's.
+        calls = {"plan": 0, "retarget_viewport": 0, "viewport_only": 0, "retarget_mv": 0, "apply_mv": 0, "bridge": 0}
+        bridge = getattr(win.img_view, "viewport_bridge", None) or getattr(win.renderer, "viewport_bridge", None)
+        orig_rmv = win.renderer.retarget_montage_viewport
+        win.renderer.retarget_montage_viewport = lambda *a, **k: (calls.__setitem__("retarget_mv", calls["retarget_mv"] + 1), orig_rmv(*a, **k))[1]
+        orig_amv = win.renderer.apply_montage_viewport_retarget
+        win.renderer.apply_montage_viewport_retarget = lambda *a, **k: (calls.__setitem__("apply_mv", calls["apply_mv"] + 1), orig_amv(*a, **k))[1]
+        renderer = win.renderer
+        orig_plan = renderer._montage_viewport_plan
+        renderer._montage_viewport_plan = lambda *a, **k: (calls.__setitem__("plan", calls["plan"] + 1), orig_plan(*a, **k))[1]
+        orig_only = renderer._try_update_montage_viewport_only
+        renderer._try_update_montage_viewport_only = lambda *a, **k: (calls.__setitem__("viewport_only", calls["viewport_only"] + 1), orig_only(*a, **k))[1]
+        session_now = win.renderer._frame_session
+        orig_rv = session_now.retarget_viewport
+        session_now.retarget_viewport = lambda *a, **k: (calls.__setitem__("retarget_viewport", calls["retarget_viewport"] + 1), orig_rv(*a, **k))[1]
+
         view = win.img_view.getView()
         (x0, x1), (y0, y1) = view.viewRange()
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -96,6 +111,7 @@ def test_zoom_in_rederives_lod_demand(qtbot):
             view = win.img_view.getView()
             print("camera:", view.viewRange())
             print("session.view_range:", current.view_range)
+            print("calls:", calls)
             print("session desired:", current.lod_policy_decision.demand.desired_level,
                   "wanted:", _demand_for_current_camera(win).desired_level,
                   "session_id:", current.session_id)
