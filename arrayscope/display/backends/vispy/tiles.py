@@ -762,9 +762,14 @@ class TextureAtlasPool:
         _require_canonical_reduced_payload(payload, action="resolve residency for")
         backing = getattr(payload, "page_backing", None)
         if backing is not None:
+            # Admission asks whether committing this payload performs physical
+            # work.  A requested key may resolve through a coarser ancestor,
+            # but a payload that supplies finer pages will upload those exact
+            # pages when admitted.  Only the supplied materialized page set is
+            # therefore allowed to bypass the item/upload budget.
             return all(
-                self._page_table.resolve(target) is not None
-                for target in backing.requested_keys
+                self._page_table.lookup(page.key) is not None
+                for page in backing.materialized_pages
             )
         if _payload_chunked_eligible(payload):
             # Native source-anchored planes are physically partitioned into

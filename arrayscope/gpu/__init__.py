@@ -13,6 +13,14 @@ points the other way.
 """
 
 from arrayscope.gpu.keys import ChunkLod, DataChunkKey, ViewTileKey
+from arrayscope.gpu.chunk_summary import (
+    ChunkHistogramAggregate,
+    ChunkHistogramSummary,
+    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
+    aggregate_chunk_summaries,
+    chunk_summary_frontier,
+    summarize_chunk,
+)
 from arrayscope.gpu.chunk_grid import ChunkGrid, WindowDelta
 from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable, ResidencyEntry
 from arrayscope.gpu.chunk_store import (
@@ -26,6 +34,9 @@ from arrayscope.gpu.chunk_store import (
 __all__ = [
     "CapacityError",
     "ChunkGrid",
+    "ChunkHistogramAggregate",
+    "ChunkHistogramSummary",
+    "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "ChunkLod",
     "ChunkStore",
     "ChunkStoreDiagnostics",
@@ -38,4 +49,7 @@ __all__ = [
     "SlotPool",
     "ViewTileKey",
     "WindowDelta",
+    "aggregate_chunk_summaries",
+    "chunk_summary_frontier",
+    "summarize_chunk",
 ]

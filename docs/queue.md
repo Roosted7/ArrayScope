@@ -23,7 +23,7 @@ this file says *what, in what order, and when it counts as done*.
 | # | Step | Exit gate |
 |---|---|---|
 | 1 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 2 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
+| 2 | **G6 — GPU histogram/levels** (in progress: first landing stores bounded, source-weighted summaries on canonical pages and derives phase-1 rough evidence through the ADR 0056 frontier; GPU LOD generation remains follow-up). | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
 | 3 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
 | 4 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 

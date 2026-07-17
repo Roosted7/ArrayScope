@@ -8,7 +8,7 @@ looks levels up.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import RLock
 
 import numpy as np
@@ -27,6 +27,7 @@ from arrayscope.gpu.keys import (
     ChunkLod,
     DataChunkKey,
 )
+from arrayscope.gpu.chunk_summary import ChunkHistogramSummary, summarize_chunk
 from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable
 
 
@@ -200,6 +201,7 @@ class MaterializedLodPage:
 
     plan: LodPagePlan
     values: np.ndarray
+    summary: ChunkHistogramSummary = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan, LodPagePlan):
@@ -232,6 +234,20 @@ class MaterializedLodPage:
         if not values.flags.c_contiguous:
             raise ValueError("materialized page values must be C-contiguous")
         object.__setattr__(self, "values", values)
+        source_y_weights = np.asarray(
+            [stop - start for start, stop in self.plan.source_y_bins],
+            dtype=np.float64,
+        )
+        source_x_weights = np.asarray(
+            [stop - start for start, stop in self.plan.source_x_bins],
+            dtype=np.float64,
+        )
+        source_weights = source_y_weights[:, np.newaxis] * source_x_weights[np.newaxis, :]
+        object.__setattr__(
+            self,
+            "summary",
+            summarize_chunk(self.plan.key, values, weights=source_weights),
+        )
 
     @property
     def key(self) -> DataChunkKey:
@@ -239,6 +255,8 @@ class MaterializedLodPage:
 
     @property
     def nbytes(self) -> int:
+        # Value budgets keep their existing meaning. Fixed summary storage is
+        # bounded one-for-one by the resident logical pages.
         return int(self.values.nbytes)
 
 

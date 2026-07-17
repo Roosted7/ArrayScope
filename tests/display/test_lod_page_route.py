@@ -1245,6 +1245,72 @@ def _vispy_resolve_materialized_pages(target, pages):
     return pool.resolve_page_targets({17: target.key})[17]
 
 
+def test_page_backed_residency_requires_exact_supplied_pages_not_fallback_coverage():
+    rect = (0, 8, 0, 8)
+    values = np.arange(64, dtype=np.float32).reshape(8, 8)
+    fine_plan = plan_source_grid_pages(
+        content_key=CONTENT,
+        valid_source_rect_yx=rect,
+        reduction_yx=(1, 1),
+        stored_page_shape=(4, 4),
+        dtype="float32",
+        representation=SCALAR_R32F,
+        reducer="mean",
+    )[0]
+    coarse_plan = plan_source_grid_pages(
+        content_key=CONTENT,
+        valid_source_rect_yx=rect,
+        reduction_yx=(2, 2),
+        stored_page_shape=(2, 2),
+        dtype="float32",
+        representation=SCALAR_R32F,
+        reducer="mean",
+    )[0]
+    fine_page = materialize_lod_page(
+        values,
+        source_origin_yx=(0, 0),
+        plan=fine_plan,
+    )
+    coarse_page = materialize_lod_page(
+        values,
+        source_origin_yx=(0, 0),
+        plan=coarse_plan,
+    )
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
+    pool.update_payloads(
+        {
+            0: DisplayTilePayload(
+                0,
+                0,
+                coarse_page.values,
+                None,
+                coarse_page.key,
+            )
+        },
+        tile_shape=coarse_page.values.shape[:2],
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+    )
+
+    lod = LodInfo(1, 2, values.shape, fine_page.values.shape, 0)
+    fine_payload = DisplayTilePayload(
+        0,
+        0,
+        fine_page.values,
+        None,
+        fine_page.key,
+        texture_data=fine_page.values,
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        lod=lod,
+        page_backing=PageBackedPresentation((fine_plan,), (fine_page,), rect, lod),
+    )
+
+    assert pool._page_table.resolve(fine_page.key) is not None
+    assert pool._page_table.lookup(fine_page.key) is None
+    assert pool.payload_resident(fine_payload) is False
+
+
 def test_pyqtgraph_anisotropic_resolution_matches_page_table_and_vispy(qt_app):
     """The backend must not own an anisotropic tie-break rank.
 

@@ -17,6 +17,8 @@ import numpy as np
 from arrayscope.display.lod import LodInfo, factor_xy_for_level
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.montage_levels import (
+    LevelEvidenceQuality,
+    TileLevelStats,
     provisional_tile_level_stats,
     sample_tile_level_stats,
     tile_level_stats_with_quality,
@@ -28,15 +30,19 @@ from arrayscope.display.model.tile_identity import (
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.pyramid import MaterializedLodPage, plan_source_grid_pages
 from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderScale,
     TexturePlaneKind,
     apply_scale as apply_shader_scale,
     extract_component,
+    mapped_scalar,
 )
 from arrayscope.display.slice_engine import (
     make_image,
     make_image_from_slab,
     make_shader_image_from_slab,
 )
+from arrayscope.gpu.chunk_summary import aggregate_chunk_summaries, summarize_chunk
 from arrayscope.operations.capabilities import (
     pipeline_commutes_for_display_lod,
     pipeline_supports_reduced_display_lod,
@@ -1146,6 +1152,67 @@ def attach_montage_tile_level_stats(display_image, tile, *, refined: bool = Fals
     return display_image
 
 
+def chunk_level_stats_for_pages(pages, *, source_index: int, mapping=None) -> TileLevelStats | None:
+    """Aggregate worker-prepared chunk summaries into rough tile evidence.
+
+    The materialized arrays are read only when a display-specific mapping is
+    needed. Complex mapping crosses through the shared mapped-scalar function
+    used by the shader mirror and CPU backend. Numeric aggregation remains
+    worker-side; GUI admission sees only immutable TileLevelStats.
+    """
+
+    materialized = tuple(pages or ())
+    if not materialized:
+        return None
+    summaries = []
+    for page in materialized:
+        if not isinstance(page, MaterializedLodPage):
+            raise TypeError("chunk level evidence requires MaterializedLodPage values")
+        if mapping is None or _page_summary_matches_mapping(page, mapping):
+            summaries.append(page.summary)
+            continue
+        mapped = mapped_scalar(np.asarray(page.values), mapping)
+        summaries.append(
+            summarize_chunk(
+                page.key,
+                mapped,
+                weights=_page_source_weights(page),
+            )
+        )
+    aggregate = aggregate_chunk_summaries(summaries)
+    if aggregate.bounds is None:
+        return None
+    return TileLevelStats(
+        source_index=int(source_index),
+        bounds=aggregate.bounds,
+        sample=aggregate.representative_sample,
+        refined=False,
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+
+def _page_summary_matches_mapping(page: MaterializedLodPage, mapping) -> bool:
+    if getattr(mapping, "scale", None) != ShaderScale.LINEAR:
+        return False
+    component = getattr(mapping, "component", None)
+    values = np.asarray(page.values)
+    if np.iscomplexobj(values):
+        return component == ShaderComponent.ABS
+    return component == ShaderComponent.REAL
+
+
+def _page_source_weights(page: MaterializedLodPage) -> np.ndarray:
+    y_weights = np.asarray(
+        [stop - start for start, stop in page.plan.source_y_bins],
+        dtype=np.float64,
+    )
+    x_weights = np.asarray(
+        [stop - start for start, stop in page.plan.source_x_bins],
+        dtype=np.float64,
+    )
+    return y_weights[:, np.newaxis] * x_weights[np.newaxis, :]
+
+
 def montage_refined_level_values(rendered) -> np.ndarray:
     semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
     if semantic_histogram is not None:
@@ -1250,19 +1317,10 @@ def _evaluate_tile_native_output_preview(
         else TexturePlaneKind.SCALAR_R32F
     )
     mapping = getattr(value, "shader_mapping", None)
-    reduced_level_values = []
-    for page in pages:
-        page_values = np.asarray(page.values)
-        if mapping is not None:
-            page_values = apply_shader_scale(
-                extract_component(page_values, getattr(mapping, "component", "real")),
-                getattr(mapping, "scale", "linear"),
-                symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
-            )
-        reduced_level_values.append(np.asarray(page_values).reshape(-1))
-    rough_level_stats = provisional_tile_level_stats(
-        np.concatenate(reduced_level_values),
-        int(tile.source_index),
+    rough_level_stats = chunk_level_stats_for_pages(
+        pages,
+        source_index=int(tile.source_index),
+        mapping=mapping,
     )
     _check_render_cancelled(cancellation_token)
     return (

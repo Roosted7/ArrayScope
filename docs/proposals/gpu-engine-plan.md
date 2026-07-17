@@ -300,6 +300,25 @@ correctness path, and a GPU op lands only with harness evidence that it
 beats the CPU+upload route — semantics duplication has to buy real
 performance.
 
+**First landing (branch candidate, 2026-07-17):** canonical materialized
+pages now retain fixed-size min/max/histogram summaries weighted by their
+exact clipped source-bin areas. The Qt-free frontier holds a coarse parent
+until complete child coverage can replace it atomically, and the existing
+phase-1 preview worker derives rough `TileLevelStats` from that frontier via
+the shared shader mapping without replacing stronger semantic evidence already
+attached to a preview. PyQtGraph's CPU-LUT single-pass path continues to skip
+rough publication. Refined semantic sampling, GPU workgroup reduction, and
+GPU-from-resident-page LOD generation remain subsequent G6 slices.
+Presentation construction binds the prepared shader batch to the accepted
+global level generation before draw, and rejects a stale crossing without
+repeating materialization or upload.
+Admission also distinguishes exact supplied-page residency from fallback
+coverage: a coarser resolvable ancestor cannot make finer page uploads free or
+let them bypass the per-frame work cap.
+The first numeric oracle uses 64 local bins and requires aggregate normalized
+histogram L1 error at or below 5% against the direct CPU histogram on its
+deterministic multi-chunk fixture; levels preserve exact finite min/max.
+
 *Gate:* histogram-from-chunks matches CPU histogram within documented
 tolerance on both real-hardware backends; levels convergence behavior
 unchanged from the ADR 0054 contract.

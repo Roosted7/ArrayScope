@@ -17,6 +17,7 @@ from arrayscope.display.pyramid import (
     materialize_lod_page,
     plan_source_grid_pages,
 )
+from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -909,3 +910,72 @@ def test_presentation_commit_replays_extent_camera_retarget_after_guard_release(
     assert renderer._montage_presentation_commit_active is False
     assert renderer._frame_viewport_retarget_after_commit is False
     assert scheduled == [1]
+
+
+def test_chunk_summary_levels_share_complex_shader_mapping():
+    values = np.asarray(
+        [[1.0 + 10.0j, 2.0 + 20.0j], [3.0 + 30.0j, 4.0 + 40.0j]],
+        dtype=np.complex64,
+    )
+    plans = plan_source_grid_pages(
+        content_key="complex-summary",
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(0, 0),
+        stored_page_shape=(2, 2),
+        dtype="complex64",
+        representation="complex_rg32f",
+        reducer="native",
+    )
+    pages = tuple(
+        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+        for plan in plans
+    )
+
+    real = effects.chunk_level_stats_for_pages(
+        pages,
+        source_index=7,
+        mapping=ShaderMapping(component=ShaderComponent.REAL),
+    )
+    magnitude = effects.chunk_level_stats_for_pages(
+        pages,
+        source_index=7,
+        mapping=ShaderMapping(component=ShaderComponent.ABS),
+    )
+
+    assert real.bounds == (1.0, 4.0)
+    assert np.allclose(
+        magnitude.bounds,
+        (float(np.abs(values).min()), float(np.abs(values).max())),
+    )
+    assert real.sample.size <= 512
+    assert magnitude.sample.size <= 512
+
+
+def test_chunk_summary_levels_reuse_identity_mapped_scalar_summary(monkeypatch):
+    values = np.arange(4, dtype=np.float32).reshape(2, 2)
+    plans = plan_source_grid_pages(
+        content_key="scalar-summary",
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(0, 0),
+        stored_page_shape=(2, 2),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="native",
+    )
+    pages = tuple(
+        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+        for plan in plans
+    )
+    monkeypatch.setattr(
+        effects,
+        "summarize_chunk",
+        lambda *_args, **_kwargs: pytest.fail("identity mapping must reuse the resident summary"),
+    )
+
+    stats = effects.chunk_level_stats_for_pages(
+        pages,
+        source_index=3,
+        mapping=ShaderMapping(component=ShaderComponent.REAL),
+    )
+
+    assert stats.bounds == (0.0, 3.0)

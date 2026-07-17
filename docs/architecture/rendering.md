@@ -220,6 +220,14 @@ COMPUTE GOES, never about what may be shown:
 1. **Two strictly ordered compute phases.**
    *Phase 1 (coverage):* preview/floor evaluation for every required tile,
    rough level statistics, and the single rough histogram publication.
+   Canonical materialized pages retain bounded, source-area-weighted
+   summaries; shader-windowing rough evidence aggregates their ADR 0056
+   non-overlapping coverage frontier in the existing worker task, never in
+   GUI admission, when stronger semantic evidence is not already attached.
+   A parent remains the sole contributor until its complete finer cover is
+   available. Presentation construction binds every ordered upsert and
+   retained active payload to the accepted level generation before physical
+   draw; the gateway rejects a stale crossing.
    *Phase 2 (refinement):* target-quality evaluation, refined level
    sampling, refined histogram updates, and every refinement-adjacent job.
    **Nothing from phase 2 is submitted, scheduled, or evaluated until
