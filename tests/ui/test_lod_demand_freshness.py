@@ -107,6 +107,23 @@ def test_zoom_in_rederives_lod_demand(qtbot):
         try:
             qtbot.waitUntil(demand_fresh, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         except Exception:
+            # Decisive probe: is only the SIGNAL dead, or the handler chain?
+            manual = {"worked": None, "error": None}
+            try:
+                win.renderer._on_view_range_changed()
+                qtbot.wait(500)
+                manual["worked"] = demand_fresh()
+            except Exception as exc:
+                manual["error"] = repr(exc)
+            print("manual handler call:", manual)
+            frame = getattr(win, "_committed_display_frame", None)
+            vs = getattr(frame, "value_source", None)
+            print("bridge inputs: frame=", type(frame).__name__ if frame is not None else None,
+                  "value_source=", type(vs).__name__ if vs is not None else None,
+                  "has_payloads=", hasattr(vs, "payloads"),
+                  "commit_active=", getattr(win.renderer, "_montage_presentation_commit_active", None),
+                  "montage_axis=", getattr(win.view_state, "montage_axis", None))
+            print("view object id stable:", id(win.img_view.getView()))
             current = win.renderer._frame_session
             view = win.img_view.getView()
             print("camera:", view.viewRange())

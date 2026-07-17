@@ -76,7 +76,12 @@ def _range_change_has_pointer_gesture() -> bool:
 
 
 def _owner_has_tiled_scene(owner) -> bool:
+    # The tiled-scene fact is the committed frame's tiled VALUE SOURCE.
+    # ``frame.scene`` is a rebuildable cache that the montage geometry-sync
+    # path deliberately nulls (``replace(frame, scene=None)``); requiring it
+    # here made every post-sync range change invisible to the bridge — the
+    # 2026-07-18 dead gesture edge that froze LOD demand at the fit level
+    # on both backends (red pin: tests/ui/test_lod_demand_freshness.py).
     frame = getattr(owner.win, "_committed_display_frame", None)
-    scene = getattr(frame, "scene", None)
     value_source = getattr(frame, "value_source", None)
-    return scene is not None and value_source is not None and hasattr(value_source, "payloads")
+    return value_source is not None and hasattr(value_source, "payloads")
