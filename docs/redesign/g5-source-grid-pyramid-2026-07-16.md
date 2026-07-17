@@ -515,10 +515,28 @@ fixture: forged visible-busy also set the governor's speculative quota to zero
 while the test waited for that parked body before releasing busy. It now uses
 real bounded visible work and its actual drain; production ownership was not
 changed and no timeout was widened. Remaining G5 work is broader suite/stress
-cleanup, the required live real-data interaction-convergence run, full
-real-Wayland `gpu_interaction` baseline comparison, and the onscreen workflow
-on both backends. The queue row does not move to Done until every exit gate
-above is green.
+cleanup, full real-Wayland `gpu_interaction` baseline comparison, and the
+onscreen workflow on both backends. The queue row does not move to Done until
+every exit gate above is green.
+
+The live churn ring also exposed a normal-supersession route exception. A
+reusable reduced-target worker began under semantic source A, then the reused
+session retargeted to B while it evaluated. Its final page-key construction
+re-read the mutable session, disagreed with A, and raised instead of returning
+reusable A work for the pipeline's existing stale-intent drop. Rung closures
+now snapshot their source identity and reduced-target page construction uses
+that captured route. A unit gate moves the session route before completion and
+requires the result to remain labeled A; it does not infer or materialize a
+second route.
+
+The required live real-data interaction-convergence ring is green on Wayland
+as one continuous app session: hard-capped initial fill, montage-window
+shrink/grow, 48 seeded zoom/pan/range/slice gestures, and final exact target
+settlement passed in 38.91 s. Its 27,600-event trace verifies 272/272 required
+targets acknowledged, zero identity-rejected commits, and zero invariant
+violations, including the identical-`commit_bail` loop check. Keeping both
+defect probes in one window removes an unrelated duplicate cold startup while
+making their continuity contract stricter; no per-step deadline changed.
 
 ## Rejected shortcuts
 

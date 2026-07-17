@@ -121,6 +121,17 @@ floor builder uses it whenever the metadata mapping is gone. Probe post-fix:
 content), zero solid tile blocks. Gates:
 ``tests/window/test_floor_payload_mapping.py``.
 
+The later live churn ring exposed why that framebuffer color count cannot be
+the long-running pass/fail oracle. A correct zoomed phase frame contained
+6,286 legitimate pixels within the PAL-relaxed orange tolerance while every
+drawn quad physically held mapping mode 4, component mode 2, and a current
+shader mapping. The stress ring now gates those fields on quads with a sampled
+span in the current GL vertex buffer and retains the framebuffer count only as
+failure context. The synthetic zero-background
+framebuffer test still fault-injects the stale mode and proves its orange-pixel
+consequence; real anatomical phase content is not rejected for sharing a LUT
+color with the defect.
+
 The same field session's stall (``/tmp/arrayscope-stall-1-1.trace.jsonl``:
 36 ``pending_tiles``, 55 required-unsettled, kernel idle ~3 s during an
 interactive fill) belongs to a **deferred-stage-planning lost-wakeup family**,
