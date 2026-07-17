@@ -378,6 +378,113 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
         win.close()
 
 
+def test_vispy_expanded_montage_never_hides_retained_sixty(qtbot):
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        pytest.skip("physical VisPy continuity requires a real OpenGL display")
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.backends import surface_for_view
+    from arrayscope.window import ArrayScopeWindow
+
+    settings = QtCore.QSettings()
+    previous_backend = settings.value("image_rendering_backend", "pyqtgraph")
+    settings.setValue("image_rendering_backend", "vispy")
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+    data = np.arange(6 * 8 * 272, dtype=np.float32).reshape(6, 8, 272)
+    win = ArrayScopeWindow(data)
+    win.resize(1200, 700)
+    win.show()
+    qtbot.addWidget(win)
+    try:
+        retained_indices = tuple(range(106, 166))
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2,
+                columns=8,
+                indices=retained_indices,
+                text="106:166",
+            )
+        )
+        win.update_image_view()
+        surface = surface_for_view(win.img_view)
+
+        def physical_count() -> int:
+            return int(
+                surface.presentation_diagnostics().get(
+                    "physically_visible_tile_count", 0
+                )
+                or 0
+            )
+
+        qtbot.waitUntil(
+            lambda: bool(
+                win.renderer._frame_session is not None
+                and win.renderer._frame_session.visible_plan_complete()
+                and physical_count() == 60
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        retained_sources = set(retained_indices)
+        observations = []
+        fit_applied = {"value": False}
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2,
+                columns=8,
+                indices=tuple(range(272)),
+                text=":",
+            )
+        )
+        win.update_image_view()
+
+        def expanded_and_fitted_without_loss() -> bool:
+            diagnostics = surface.presentation_diagnostics()
+            visible_tiles = tuple(diagnostics.get("presented_tiles", ()) or ())
+            identities = win.img_view._vispy_gpu_montage_layer._pool.presented_identities()
+            visible_sources = {
+                int(identity.source_index)
+                for tile in visible_tiles
+                if (identity := identities.get(int(tile))) is not None
+                and getattr(identity, "source_index", None) is not None
+            }
+            observations.append(
+                (physical_count(), tuple(sorted(retained_sources - visible_sources)))
+            )
+            session = win.renderer._frame_session
+            if session is None or len(session.plan.tiles) != 272:
+                return False
+            if not fit_applied["value"]:
+                fit_applied["value"] = True
+                height, width = tuple(
+                    int(value) for value in session.plan.display_shape[:2]
+                )
+                win.img_view.getView().setRange(
+                    xRange=(0.0, float(width)),
+                    yRange=(0.0, float(height)),
+                    padding=0,
+                )
+                win.update_image_view()
+            return bool(
+                session.required_first_pixels_presented()
+                and physical_count() >= 60
+            )
+
+        qtbot.waitUntil(
+            expanded_and_fitted_without_loss,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        assert observations
+        assert min(count for count, _missing in observations) >= 60, observations
+        assert all(not missing for _count, missing in observations), observations
+    finally:
+        win.close()
+        settings.setValue("image_rendering_backend", previous_backend)
+        settings.sync()
+
+
 @pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
 def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, backend):
     _clear_arrayscope_settings()

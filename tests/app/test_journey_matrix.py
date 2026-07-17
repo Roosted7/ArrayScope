@@ -106,6 +106,11 @@ def _evaluate(trace, timeline, interval):
 
 def test_healthy_trajectory_fixture_exercises_all_oracles(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
+    trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
+    trace[1]["committed_upserts"] = [0, 2]
+    trace[1]["max_upserts"] = 2
+    trace[2]["delta_priority_ranks"] = []
 
     result = _evaluate(trace, timeline, interval)
 
@@ -145,7 +150,7 @@ def test_phase_order_oracle_fault_injection(tmp_path):
 def test_bounded_priority_commit_oracle_fault_injection(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
-    trace[1]["delta_priority_ranks"] = [[0, 2], [2, 3]]
+    trace[1]["delta_priority_ranks"] = [[0, 3], [2, 2]]
     trace[1]["committed_upserts"] = [0, 2]
     trace[2]["delta_priority_ranks"] = [[1, 0]]
 
@@ -154,6 +159,38 @@ def test_bounded_priority_commit_oracle_fault_injection(tmp_path):
     assert not result["ok"]
     assert not result["presentation"]["bounded"]
     assert not result["presentation"]["priority_ordered"]
+
+
+def test_vispy_zero_upload_rebind_is_exempt_from_item_cap(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
+    trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
+    trace[1]["committed_upserts"] = [0, 2]
+    trace[1]["uploads"] = 0
+    trace[1]["upload_bytes"] = 0
+    trace[1]["vertex_uploads"] = 0
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert result["presentation"]["bounded"]
+    assert result["presentation"]["cap_exemptions"] == [
+        {"sequence": 10, "size": 2, "limit": 1, "reason": "vispy_zero_upload_rebind"}
+    ]
+
+
+def test_vispy_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
+    trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
+    trace[1]["committed_upserts"] = [0, 2]
+    trace[1]["uploads"] = 1
+    trace[1]["upload_bytes"] = 4096
+    trace[1]["vertex_uploads"] = 0
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert not result["presentation"]["bounded"]
+    assert result["presentation"]["cap_exemptions"] == []
 
 
 def test_demand_freshness_oracle_fault_injection(tmp_path):

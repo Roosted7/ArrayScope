@@ -75,10 +75,16 @@ every applicable journey/backend cell:
    is open (`trace_verify` independently enforces
    `no_phase2_submit_during_coverage`);
 2. at least the journey/backend's declared `N` payload commits, every commit
-   within its emitted cap (only a shader-backend atomic successor may be
-   unbounded), with rank correlation against the
-   canonical current-camera scheduling ranks when two or more ranked payloads make
-   ordering observable (minimum correlation `0.50`);
+   within its emitted cap. Shader-backend atomic successors are unbounded;
+   VisPy commits that explicitly report zero texture uploads, zero upload
+   bytes, and zero vertex uploads may also exceed the item cap because they
+   only rebind already-resident pixels. Any pixel-upload commit remains
+   capped. Rank correlation compares each commit's local presentation ordinal
+   with the immutable current-camera ranks captured at its final backend
+   boundary when two or more ranked payloads make ordering observable. Each
+   batch is normalized to its first rank so batching offsets and later-ready
+   work do not masquerade as an ordering decision (minimum correlation
+   `0.50`);
 3. session LOD demand matches demand recomputed from the live camera within
    5 s — the strict xfail in `tests/ui/test_lod_demand_freshness.py` remains
    the red pin for the open 2026-07-18 defect and must not be weakened;

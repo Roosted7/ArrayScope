@@ -239,7 +239,10 @@ COMPUTE GOES, never about what may be shown:
    inside phase 2 alike, ordering is the canonical tile priority
    (viewport distance from the CURRENT camera), re-targeted on every view
    change (user gesture or auto-fit). Inside phase 1, already-covered
-   tiles never outrank missing tiles.
+   tiles never outrank missing tiles. The final presentation boundary
+   reasserts this order and carries its immutable rank snapshot with the
+   delta; later camera callbacks cannot rewrite the evidence for an already
+   emitted transaction.
 4. **Quality upgrades never blank.** Refinement replaces pixels atomically
    per tile; eviction returns to coarse pixels, never black (ADR 0056).
 5. **`ProgressiveSchedulingPolicy` is the one phase owner.** Each frame
@@ -278,6 +281,10 @@ queue, or commit-emission counts.
 - Apply backpressure before visible admission; once admitted, visible payloads commit coherently or
   the previous placeholder/retained frame remains in force.
 - Bound cold preparation/upload by items, bytes, and elapsed time.
+- A VisPy transaction that performs zero texture uploads, zero upload bytes,
+  and zero vertex uploads is a resident mapping rebind, not a cold batch. It
+  may bypass the item cap so presentation does not withhold ready pixels;
+  commits that upload any pixels remain capped.
 - Do not count a batch of many tiles as one feedback item.
 - Separate submission time, preparation time, upload bytes/time, queue delay, and first-frame/presented age.
 - Publish work-graph counters by lane so dropped, superseded, reusable, and budget-blocked work are

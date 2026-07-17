@@ -622,6 +622,7 @@ class TilePresentationDelta:
     near_tiles: tuple[int, ...] = ()
     near_tile_source_ids: Mapping[int, object] = field(default_factory=dict)
     target_identities: Mapping[int, TileIdentity] = field(default_factory=dict)
+    priority_ranks: Mapping[int, int] = field(default_factory=dict)
     # A compatible predecessor remains the complete physical frame until
     # every payload in this successor can cross the backend boundary.  This
     # travels with the immutable command so the backend cannot advance shared
@@ -645,6 +646,10 @@ class TilePresentationDelta:
         target_identities = {
             int(key): value for key, value in dict(self.target_identities or {}).items()
         }
+        priority_ranks = {
+            int(key): int(value)
+            for key, value in dict(self.priority_ranks or {}).items()
+        }
         if any(not isinstance(value, TileIdentity) for value in target_identities.values()):
             raise TypeError("tile delta target identities must be TileIdentity instances")
         object.__setattr__(self, "structure_revision", int(self.structure_revision))
@@ -667,6 +672,7 @@ class TilePresentationDelta:
         object.__setattr__(self, "near_tiles", near)
         object.__setattr__(self, "near_tile_source_ids", near_sources)
         object.__setattr__(self, "target_identities", target_identities)
+        object.__setattr__(self, "priority_ranks", priority_ranks)
         object.__setattr__(self, "atomic_handoff", bool(self.atomic_handoff))
         object.__setattr__(self, "force_refresh", bool(self.force_refresh))
         object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))

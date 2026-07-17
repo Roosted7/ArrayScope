@@ -117,15 +117,34 @@ def _presentation_oracle(
     deltas = [event for event in commits if tuple(event.get("delta_qualities", ()) or ())]
     minimum = int(MIN_COMMITS[(backend, journey)])
     bounded_failures = []
+    cap_exemptions = []
     commit_ordinals: list[float] = []
     scheduling_ranks: list[float] = []
-    presentation_ordinal = 0
     for event in deltas:
         delta = tuple(event.get("delta_qualities", ()) or ())
         limit = int(event.get("max_upserts", 0) or 0)
         reason = str(event.get("unbounded_reason", "") or "")
+        zero_upload_rebind = bool(
+            backend == "vispy"
+            and "uploads" in event
+            and "upload_bytes" in event
+            and "vertex_uploads" in event
+            and int(event.get("uploads", 0) or 0) == 0
+            and int(event.get("upload_bytes", 0) or 0) == 0
+            and int(event.get("vertex_uploads", 0) or 0) == 0
+        )
         if limit > 0 and len(delta) > limit:
-            bounded_failures.append({"sequence": event.get("sequence"), "size": len(delta), "limit": limit})
+            record = {
+                "sequence": event.get("sequence"),
+                "size": len(delta),
+                "limit": limit,
+            }
+            if zero_upload_rebind:
+                cap_exemptions.append(
+                    {**record, "reason": "vispy_zero_upload_rebind"}
+                )
+            else:
+                bounded_failures.append(record)
         elif limit <= 0 and reason not in {"atomic_successor", "first_cpu_frame"}:
             bounded_failures.append({"sequence": event.get("sequence"), "size": len(delta), "limit": None})
         ranks = {
@@ -133,12 +152,12 @@ def _presentation_oracle(
             for tile, rank in tuple(event.get("delta_priority_ranks", ()) or ())
             if rank is not None
         }
-        for row in delta:
+        rank_origin = min(ranks.values()) if ranks else 0
+        for presentation_ordinal, row in enumerate(delta):
             tile = int(row[0])
             if tile in ranks:
                 commit_ordinals.append(float(presentation_ordinal))
-                scheduling_ranks.append(float(ranks[tile]))
-            presentation_ordinal += 1
+                scheduling_ranks.append(float(ranks[tile] - rank_origin))
     rho = _pearson(commit_ordinals, scheduling_ranks)
     correlation_applicable = len(set(commit_ordinals)) >= 2 and len(set(scheduling_ranks)) >= 2
     priority_ok = not correlation_applicable or (rho is not None and rho >= MIN_PRIORITY_CORRELATION)
@@ -147,6 +166,7 @@ def _presentation_oracle(
         "commit_count": len(deltas),
         "bounded": not bounded_failures,
         "bounded_failures": bounded_failures,
+        "cap_exemptions": cap_exemptions,
         "priority_correlation": rho,
         "priority_correlation_applicable": correlation_applicable,
         "priority_ordered": priority_ok,

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,6 +21,7 @@ from arrayscope.display.model.frame import (
     TilePresentationState,
     TiledValueSource,
 )
+from arrayscope.display.model.tile_identity import TilePresentationIdentity
 from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.display.model.commit import (
@@ -457,8 +459,12 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
 
     presentation = decision.display_presentation
     assert isinstance(presentation, DisplayTiledPresentation)
-    assert presentation.tile_state.payloads == {0: tile}
-    assert presentation.tile_delta.upserts == {0: tile}
+    assert tuple(presentation.tile_state.payloads) == (0,)
+    assert tuple(presentation.tile_delta.upserts) == (0,)
+    assert presentation.tile_state.payloads[0] is presentation.tile_delta.upserts[0]
+    assert presentation.tile_delta.upserts[0].presentation_identity == (
+        TilePresentationIdentity(levels_generation=1, levels=(0.0, 1.0))
+    )
     assert presentation.tile_delta.active_tiles == (0,)
     assert not hasattr(presentation, "data")
 
@@ -506,6 +512,55 @@ def test_tiled_presentation_owns_one_explicit_shader_mapping():
     presentation = decide_presentation(_input(payload, kind=CommitKind.FULL_FRAME_INITIAL)).display_presentation
 
     assert presentation.shader_mapping is mapping
+
+
+def test_tiled_presentation_binds_ordered_upserts_to_accepted_level_generation():
+    payload = _payload(np.arange(4, dtype=np.float32).reshape(2, 2))
+    sample = next(iter(payload.tile_delta.upserts.values()))
+    stale = {
+        tile: replace(
+            sample,
+            tile_number=tile,
+            source_index=tile,
+            source_id=("tile", tile),
+            presentation_identity=TilePresentationIdentity(
+                levels_generation=1,
+                levels=(2.0, 3.0),
+            ),
+        )
+        for tile in (3, 1, 2)
+    }
+    ordered_stale = {tile: stale[tile] for tile in (3, 1)}
+    tile_delta = replace(
+        payload.tile_delta,
+        level_revision=7,
+        upserts=ordered_stale,
+        active_tiles=(3, 1, 2),
+        planned_tiles=(3, 1, 2),
+        near_tiles=(),
+    )
+    tile_state = TilePresentationState(
+        stale,
+        revision=payload.tile_state.revision,
+    )
+    payload = replace(payload, tile_state=tile_state, tile_delta=tile_delta)
+
+    presentation = decide_presentation(
+        _input(
+            payload,
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
+            user_levels=(10.0, 20.0),
+        )
+    ).display_presentation
+
+    assert tuple(presentation.tile_delta.upserts) == tuple(ordered_stale)
+    for tile, rebound in presentation.tile_state.payloads.items():
+        if tile in ordered_stale:
+            assert rebound is presentation.tile_delta.upserts[tile]
+        assert rebound.presentation_identity == TilePresentationIdentity(
+            levels_generation=7,
+            levels=(10.0, 20.0),
+        )
 
 
 def test_tiled_presentation_rejects_conflicting_payload_shader_mappings():

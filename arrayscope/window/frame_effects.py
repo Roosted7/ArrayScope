@@ -10,7 +10,7 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
-from arrayscope.core.trace import emit_trace, trace_enabled
+from arrayscope.core.trace import emit_trace
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.kernel import Lane as WorkLane, Priority, Supersession, TaskSpec, WorkItem, complete_inline_work
@@ -1681,6 +1681,7 @@ class FramePipelineEffects:
                     )
                     if shader_atomic_successor:
                         tile_delta = replace(tile_delta, atomic_handoff=True)
+            tile_delta = _priority_ordered_tile_delta(session, tile_delta)
             active_payloads = tile_state.active_payloads(tile_delta)
             first_display_commit = not bool(session.display_committed)
             renderer._last_montage_commit_first_display = bool(first_display_commit)
@@ -2384,22 +2385,7 @@ class FramePipelineEffects:
             session.flush_pending = True
         rearmed_parked = tuple(getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ())
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
-        priority_ranks: dict[int, int] = {}
-        if trace_enabled():
-            plan_tiles = {
-                int(tile.montage_index): tile
-                for tile in tuple(
-                    getattr(getattr(session, "plan", None), "tiles", ()) or ()
-                )
-            }
-            priority_order = prioritize_tile_numbers(
-                plan_tiles,
-                plan_tiles=plan_tiles,
-                context=session.tile_priority_context(),
-            )
-            priority_ranks = {
-                int(tile): int(rank) for rank, tile in enumerate(priority_order)
-            }
+        priority_ranks = dict(getattr(tile_delta, "priority_ranks", {}) or {})
         lod_decision = getattr(session, "lod_policy_decision", None)
         lod_demand = getattr(lod_decision, "demand", None)
         emit_trace(
@@ -2882,6 +2868,48 @@ def _prioritize_shared_preview_rows(session, rows) -> tuple:
         context=session.tile_priority_context(),
     )
     return tuple(rows_by_tile[int(tile)] for tile in ordered if int(tile) in rows_by_tile)
+
+
+def _priority_ordered_tile_delta(session, tile_delta):
+    """Freeze current-camera order at the final backend command boundary."""
+
+    if not tile_delta.upserts:
+        return tile_delta
+    plan_tiles = tuple(
+        getattr(getattr(session, "plan", None), "tiles", ()) or ()
+    )
+    context = session.tile_priority_context()
+    cache_key = (id(getattr(session, "plan", None)), id(context))
+    cached = getattr(session, "_presentation_priority_rank_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        priority_ranks = cached[1]
+    else:
+        priority_order = prioritize_tile_numbers(
+            range(len(plan_tiles)),
+            plan_tiles=plan_tiles,
+            context=context,
+        )
+        priority_ranks = {
+            int(tile): int(rank) for rank, tile in enumerate(priority_order)
+        }
+        session._presentation_priority_rank_cache = (cache_key, priority_ranks)
+    ordered_upserts = {
+        int(tile): tile_delta.upserts[int(tile)]
+        for tile in sorted(
+            tile_delta.upserts,
+            key=lambda tile: priority_ranks.get(int(tile), len(priority_ranks)),
+        )
+        if int(tile) in tile_delta.upserts
+    }
+    return replace(
+        tile_delta,
+        upserts=ordered_upserts,
+        priority_ranks={
+            int(tile): priority_ranks[int(tile)]
+            for tile in ordered_upserts
+            if int(tile) in priority_ranks
+        },
+    )
 
 
 def _commit_report_accepts_new_preview(session, report, tile_delta, tile_state) -> bool:

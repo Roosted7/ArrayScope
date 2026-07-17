@@ -46,26 +46,10 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   chain within 5 s — zero calls to `retarget_montage_viewport` /
   `apply_montage_viewport_retarget` / `_montage_viewport_plan`, identical
   offscreen and on real Wayland — so LOD demand freezes at the fit level.
-  Consistent with the viewport bridge holding a connection to the
-  pre-montage view/camera object across the scene swap. Red pin (strict
-  xfail WITH instrumented probes in its failure path):
-  `tests/ui/test_lod_demand_freshness.py`; journey-matrix zoom cells stay
-  red until this closes. Next probe: enumerate live range-signal receivers
-  post-entry.
-- **Canonical priority order through commit construction.** The journey
-  matrix's rank-correlation oracle shows commit construction can erase the
-  canonical scheduling order (weak/unordered batches). Preserve the
-  priority ordering from admission through delta building to backend
-  upsert order.
-- **Re-rank in-flight coverage waves when the camera re-anchors.** A
-  montage entered under a preserved USER camera that is then fitted
-  (programmatic pulse or AUTO replay) re-focuses only newly planned waves;
-  kernel tasks already submitted keep their stale scheduling_rank, so the
-  fill finishes in the old order (2026-07-17 raw-fill sheets: anchor at
-  tile ~92 of 272). Contract: priority re-targets on every view change —
-  including work already queued. Owner: kernel re-rank on
-  tile-priority-context change, or supersede-and-resubmit of unstarted
-  coverage tasks at retarget. (In flight: `codex/camera-reanchor-rerank`.)
+  The post-policy journey matrix measures fresh demand on every live cell,
+  so the unit gate's fixture (window carries no committed display frame) is
+  a prime suspect; field zoom verdict pending. Red pin (strict xfail with
+  instrumented probes): `tests/ui/test_lod_demand_freshness.py`.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -79,6 +63,15 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-18 — **Camera re-anchor order retained end to end:** priority
+  retargets atomically rebuild the kernel ready heap for unstarted session
+  tasks, and the final presentation boundary reorders delta upserts against
+  the same current-camera context before either backend sees them. The
+  journey oracle consumes that immutable rank snapshot per commit; VisPy
+  zero-texture/zero-vertex-upload rebinds are explicitly item-cap exempt,
+  while pixel uploads remain capped. Real-Wayland coverage includes the saved
+  60-source VisPy predecessor through a 272-tile expansion and fit without a
+  physically hidden frame.
 - 2026-07-18 — **One COVERAGE→REFINE scheduling-policy owner:**
   `ProgressiveSchedulingPolicy` now owns the per-required-scope phase,
   lifecycle first-pixel close predicate, and refinement replan edge. Ladder,

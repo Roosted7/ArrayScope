@@ -72,9 +72,23 @@ class DisplayCommitter:
         for tile_number, payload in dict(presentation.tile_state.payloads).items():
             if int(tile_number) != int(payload.tile_number):
                 raise ValueError("tile payload key must match tile_number")
-        for tile_number, payload in dict(presentation.tile_delta.upserts).items():
+        transaction_payloads = presentation.tile_state.active_payloads(
+            presentation.tile_delta
+        )
+        transaction_payloads.update(presentation.tile_delta.upserts)
+        for tile_number, payload in transaction_payloads.items():
             if int(tile_number) != int(payload.tile_number):
-                raise ValueError("tile delta upsert key must match tile_number")
+                raise ValueError("tile transaction payload key must match tile_number")
+            identity = getattr(payload, "presentation_identity", None)
+            if (
+                identity is None
+                or int(identity.levels_generation)
+                != int(presentation.tile_delta.level_revision)
+                or identity.levels != tuple(float(value) for value in presentation.levels)
+            ):
+                raise ValueError(
+                    "tile delta payload must name the transaction's accepted level generation"
+                )
         if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
             raise ValueError("histogram plot data must not be empty")
         self._validate_bounds("levels", presentation.levels)

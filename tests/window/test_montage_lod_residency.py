@@ -18,7 +18,7 @@ from arrayscope.display.lod import (
 )
 from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
 from arrayscope.display.model.tile_identity import tile_ack_identity
-from arrayscope.display.model.tile_priority import prioritize_tile_numbers
+from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tile_numbers
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile, make_montage_plan
 from arrayscope.display.pyramid import (
     LodPageCache,
@@ -35,7 +35,7 @@ from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
 from arrayscope.window import frame_effects as montage_commit
-from arrayscope.window.frame_effects import FramePipelineEffects
+from arrayscope.window.frame_effects import FramePipelineEffects, _priority_ordered_tile_delta
 from arrayscope.render.lod import LodPageSetKey, admit_retained_preview_level
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window.frame_session import (
@@ -373,6 +373,58 @@ def test_uncapped_backend_batch_preserves_canonical_admission_order():
 
     assert expected != tuple(range(12))
     assert tuple(delta.upserts) == expected
+
+
+def test_first_pixel_coverage_preserves_canonical_focus_band_order():
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    session._priority_context = TilePriorityContext.from_tiles(
+        view_range=session.view_range,
+        visible_tiles=range(12),
+        priority_tiles=(0,),
+    )
+    expected = prioritize_tile_numbers(
+        range(12),
+        plan_tiles=session.plan.tiles,
+        context=session.tile_priority_context(),
+    )
+
+    _state, delta = session.build_tile_presentation({})
+
+    assert expected[0] == 0
+    assert tuple(delta.upserts) == expected
+
+
+def test_backend_boundary_reorders_stale_delta_with_current_camera_context():
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    _state, delta = session.build_tile_presentation({})
+    stale = replace(delta, upserts=dict(reversed(tuple(delta.upserts.items()))))
+    session._priority_context = TilePriorityContext.from_tiles(
+        view_range=session.view_range,
+        visible_tiles=range(12),
+        priority_tiles=(0,),
+    )
+    canonical = prioritize_tile_numbers(
+        range(12),
+        plan_tiles=session.plan.tiles,
+        context=session.tile_priority_context(),
+    )
+    expected = tuple(tile for tile in canonical if tile in stale.upserts)
+
+    ordered = _priority_ordered_tile_delta(session, stale)
+
+    assert tuple(ordered.upserts) == expected
+    assert tuple(ordered.priority_ranks) == expected
+    assert list(ordered.priority_ranks.values()) == sorted(
+        ordered.priority_ranks.values()
+    )
 
 
 def test_visible_replacement_retains_presented_payload_until_acknowledged():

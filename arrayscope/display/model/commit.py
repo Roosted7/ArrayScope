@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -18,6 +18,7 @@ from arrayscope.display.model.frame import (
     TilePresentationDelta,
     TilePresentationState,
 )
+from arrayscope.display.model.tile_identity import TilePresentationIdentity
 
 
 class CommitKind(Enum):
@@ -82,6 +83,50 @@ class DisplayTiledPresentation:
     histogram_plot_data: np.ndarray | None = None
     rgb_already_windowed: bool = False
     shader_mapping: ShaderMapping | None = None
+
+    def __post_init__(self) -> None:
+        """Bind emitted wrappers to this transaction's accepted levels."""
+
+        levels = tuple(float(value) for value in self.levels)
+        transaction_payloads = self.tile_state.active_payloads(self.tile_delta)
+        transaction_payloads.update(self.tile_delta.upserts)
+        rebound_payloads = {}
+        for tile_number, payload in transaction_payloads.items():
+            mapping = getattr(payload, "shader_mapping", None)
+            prior = getattr(payload, "presentation_identity", None)
+            identity = TilePresentationIdentity(
+                levels_generation=int(self.tile_delta.level_revision),
+                levels=levels,
+                scale=getattr(mapping, "scale", getattr(prior, "scale", None)),
+                lut_identity=getattr(
+                    mapping,
+                    "lut_identity",
+                    getattr(prior, "lut_identity", None),
+                ),
+            )
+            rebound_payloads[int(tile_number)] = replace(
+                payload,
+                presentation_identity=identity,
+            )
+        if not rebound_payloads:
+            return
+        delta = replace(
+            self.tile_delta,
+            upserts={
+                int(tile_number): rebound_payloads[int(tile_number)]
+                for tile_number in self.tile_delta.upserts
+            },
+        )
+        state_payloads = dict(self.tile_state.payloads)
+        for tile_number, payload in rebound_payloads.items():
+            if int(tile_number) in state_payloads:
+                state_payloads[int(tile_number)] = payload
+        state = TilePresentationState(
+            state_payloads,
+            revision=int(self.tile_state.revision),
+        )
+        object.__setattr__(self, "tile_delta", delta)
+        object.__setattr__(self, "tile_state", state)
 
 
 DisplayPresentation = DisplayTiledPresentation

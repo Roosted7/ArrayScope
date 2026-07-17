@@ -2628,34 +2628,7 @@ class FrameSession:
             )
         )
         self._rearm_required_first_pixel_payloads()
-        correctness_priority_tiles = tuple(
-            dict.fromkeys(
-                (
-                    *missing_payload_tiles,
-                    *(int(tile) for tile in stale_drawn),
-                    *unpresented_tiles,
-                    # Coverage outranks refinement. Once every active slot has
-                    # acknowledged pixels, oldest/coarsest preview upgrades
-                    # become the correctness-priority set; before that they
-                    # remain ordinary visible work and cannot starve edge
-                    # first pixels under a center-focused admission cap.
-                    *(() if unpresented_tiles else preview_upgrade_tiles),
-                )
-            )
-        )
         priority_context = self.tile_priority_context()
-        if correctness_priority_tiles:
-            priority_context = replace(
-                priority_context,
-                priority_tiles=tuple(
-                    dict.fromkeys(
-                        (
-                            *correctness_priority_tiles,
-                            *tuple(getattr(priority_context, "priority_tiles", ()) or ()),
-                        )
-                    )
-                ),
-            )
 
         def prioritize(tiles) -> tuple[int, ...]:
             return prioritize_tile_numbers(
