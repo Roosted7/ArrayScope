@@ -229,3 +229,47 @@ survive VisPy's disappearance?
    virtual tensor; optional hardware-sparse allocator; adaptive compression;
    CPU/GPU cost-based planner with learned statistics; shared multi-window
    and external-GPU residency; optional remote renderer.
+
+
+## Renderer ranking revision (2026-07-18 — supersedes the 2026-07-15 WAIT on Datoviz)
+
+The graveyard retry condition on Datoviz resolved: **v0.4-dev renders
+directly into a Qt-created Vulkan surface** (Qt owns the window/event loop,
+Datoviz owns rendering; no framebuffer readback), exposes the canvas
+draw-callback with vklite + runtime shaderc from the wheel, and DRP2 models
+the render/compute vocabulary our software virtual tensor needs. Full scout
+report reviewed 2026-07-18; corrected facts: ArrayScope runs **PySide6**
+(not PyQt5), so the Qt-bridge question is PySide6-vs-PyQt6 adaptation; and
+we composite Qt overlays over the canvas today (tile-truth overlay, ROI
+handles, coach marks), so the native-child-window matrix must include them.
+
+Revised ranking: **(1) Datoviz v0.4-dev** for the real vertical slice,
+**(2) wgpu-py** as the comparison implementation, **(3) direct Vulkan**
+only if Datoviz extension boundaries obstruct. Run (1) and (2) as PARALLEL
+judged slices with identical scenario + measurements (judge-panel pattern),
+not serially. QRhiWidget+native remains recorded but is no longer the
+presumed production candidate.
+
+**The Datoviz experiment (10 steps, one worktree, pinned v0.4-dev commit):**
+PySide6/PyQt6 shell branch → native-window container in the real dock/tab
+layout → Wayland/xcb, floating docks, focus, cursors, multi-window, AND our
+Qt-overlay stack → empty figure + replace canvas callback via
+dvz_view_canvas()/dvz_canvas_set_draw_callback() → one instanced tiled
+surface with a custom shader → RG32F complex upload → magnitude/phase/real/
+imag + levels switching WITHOUT re-upload → one compute histogram →
+measure GUI-thread time, submit time, upload time, offscreen→swapchain blit.
+
+**Known gaps to validate as blocking-vs-nice-to-have** (we would not lose
+these over VisPy either — judge accordingly): supported hosted-canvas /
+frame-producer insertion point (vs overwriting the scene callback);
+submission-completion tokens (page-cache reuse needs them); persistent
+mapped upload arenas (current APIs copy); compute breadth (storage-texture
+writes, barriers, atomics, multi-pass reductions); GUI-thread render_once
+cost; native-child-window compositing limits; Qt-bridge distribution.
+Upstream-proposal order if the slice succeeds: hosted canvas/frame
+producer, submission tokens, upload arenas, compute-to-texture, packaged
+Qt provider, threaded hosted provider. **Application semantics never
+upstream**: tile identity, N-D chunking, LOD families/reducers, complex
+mappings, page policy, coverage frontier, histogram refinement, prefetch,
+compression, operation planning — Datoviz is the execution substrate,
+ArrayScope stays the tensor engine.
