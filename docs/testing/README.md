@@ -65,8 +65,17 @@ not "fixed".
 ## Environment facts (hard-won; trust these)
 
 - Python: `~/miniconda3/envs/arrayscope/bin/python` (conda env, PySide6,
-  editable install → this checkout: **the user's live app runs `main`**;
-  field reports are `main` reports).
+  editable install). **The editable-install pointer decides which checkout
+  the live app AND every test run import — check it before interpreting any
+  field report or gate result:**
+  `python -c "import arrayscope; print(arrayscope.__file__)"`.
+  Re-pointing it (`pip install -e <checkout>`) is a deliberate, announced
+  act: it silently redirects the *other* party's runs too (a branch agent's
+  live gates would import `main`, or the user's field session imports WIP).
+  Field reports must name the checkout + commit they ran. As of 2026-07-17
+  the pointer is at `.worktrees/g5-sparse-pyramid` (the G5 program's live
+  verification channel) — the user's field sessions currently test that
+  branch, not `main`.
 - Real display works from the harness (`QT_QPA_PLATFORM=wayland`). Real
   rendering/Wayland claims must never use `offscreen`. Hybrid GPU: Intel
   default; NVIDIA offload is *slower* to first frame — don't default to it.
