@@ -1891,7 +1891,7 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def sync_interaction_state(self, state: DisplayInteractionState) -> None:
         self._apply_interaction_cursor(state.cursor_intent)
-        self._sync_pyqtgraph_interaction_visuals(state)
+        self._sync_interaction_visuals(state)
 
     def _apply_interaction_cursor(self, intent: CursorIntent) -> None:
         cursor_shapes = {
@@ -1952,7 +1952,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._roi_hit_index.upsert(selection)
         if item is not None:
             self._layer_owner.add_roi_item(roi_id, item)
-        self._sync_roi_item_style(roi_id)
+        self._backend_roi_visual_upserted(selection)
         self.roiCreated.emit(selection)
         return selection
 
@@ -1991,6 +1991,7 @@ class ImageViewShell(QtWidgets.QWidget):
         item, _selection = item_selection
         if item is not None:
             self._layer_owner.remove_roi_item(roi_id)
+        self._backend_roi_visual_removed(roi_id)
         self.roiDeleted.emit(str(roi_id))
         return True
 
@@ -2013,7 +2014,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._highlighted_roi_id = roi_id
         for current_id in {previous, roi_id}:
             if current_id is not None:
-                self._sync_roi_item_style(current_id)
+                self._backend_roi_emphasis_changed(current_id)
         return True
 
     def _set_roi_geometry(self, roi_id: str, geometry: RoiGeometry, *, emit: bool, sync_item: bool = True) -> bool:
@@ -2032,9 +2033,8 @@ class ImageViewShell(QtWidgets.QWidget):
         )
         self._roi_items[str(roi_id)] = (item, updated)
         self._roi_hit_index.upsert(updated)
-        if sync_item and item is not None:
-            self._sync_roi_item_to_geometry(item, geometry)
-            self._sync_roi_item_style(roi_id)
+        if sync_item:
+            self._backend_roi_visual_upserted(updated)
         if changed and emit:
             self.roiChanged.emit(str(roi_id), geometry)
         return changed
@@ -2042,23 +2042,68 @@ class ImageViewShell(QtWidgets.QWidget):
     def _sync_roi_item_to_geometry(self, item, geometry: RoiGeometry) -> None:
         sync_item_to_roi_geometry(item, geometry)
 
-    def _sync_pyqtgraph_interaction_visuals(self, state: DisplayInteractionState) -> None:
+    def _sync_interaction_visuals(self, state: DisplayInteractionState) -> None:
+        """Single owner for hover/capture emphasis targets.
+
+        The shell decides which ROI or profile part carries interaction
+        emphasis; backends only draw the resulting state through
+        :meth:`_backend_roi_emphasis_changed` and
+        :meth:`_backend_profile_emphasis_changed`.
+        """
+
         target = state.capture if state.capture is not None else state.hover
         roi_id = target.object_id if target is not None and target.kind == "roi" else None
         profile_part = target.part if target is not None and target.kind == "profile" else None
-        if self.draws_qgraphics_roi_items:
-            previous_roi_id = self._interaction_visual_roi_id
-            self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
-            for current_id in {previous_roi_id, self._interaction_visual_roi_id}:
-                if current_id is not None:
-                    self._sync_roi_item_style(current_id)
-        else:
-            self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
-        if self.draws_qgraphics_profile_marker_items and self._interaction_visual_profile_part != profile_part:
+        previous_roi_id = self._interaction_visual_roi_id
+        self._interaction_visual_roi_id = None if roi_id is None else str(roi_id)
+        for current_id in {previous_roi_id, self._interaction_visual_roi_id}:
+            if current_id is not None:
+                self._backend_roi_emphasis_changed(current_id)
+        if self._interaction_visual_profile_part != profile_part:
             self._interaction_visual_profile_part = profile_part
+            self._backend_profile_emphasis_changed()
+
+    def _roi_visual_emphasis(self, roi_id: str) -> tuple[bool, bool]:
+        """(highlighted, interactive) for one ROI — the only emphasis owner."""
+
+        roi_id = str(roi_id)
+        return (
+            roi_id == self._highlighted_roi_id,
+            roi_id == self._interaction_visual_roi_id,
+        )
+
+    def _roi_visual_style(self, roi_id: str, color) -> tuple[float, tuple[int, int, int]]:
+        """Line width and RGB derived from the shared emphasis state."""
+
+        highlighted, interactive = self._roi_visual_emphasis(roi_id)
+        width = 4.0 if highlighted else 3.25 if interactive else 2.0
+        rgb = tuple(int(value) for value in tuple(color or (255, 255, 0))[:3])
+        if interactive:
+            rgb = tuple(min(255, int(value) + 70) for value in rgb)
+        return width, rgb
+
+    # --- Backend visual hooks ------------------------------------------
+    # The shell owns which ROIs exist, their geometry, and their emphasis
+    # state; these hooks own only how a backend draws that state.  The
+    # default implementations are the shared QGraphics item path declared
+    # by ``draws_qgraphics_roi_items``/``draws_qgraphics_profile_marker_items``.
+
+    def _backend_roi_visual_upserted(self, selection: RoiSelection) -> None:
+        item_selection = self._roi_items.get(str(selection.id))
+        item = None if item_selection is None else item_selection[0]
+        if item is not None:
+            self._sync_roi_item_to_geometry(item, selection.geometry)
+        self._sync_roi_item_style(str(selection.id))
+
+    def _backend_roi_visual_removed(self, roi_id: str) -> None:
+        """The ROI's visual left the scene together with its selection."""
+
+    def _backend_roi_emphasis_changed(self, roi_id: str) -> None:
+        self._sync_roi_item_style(roi_id)
+
+    def _backend_profile_emphasis_changed(self) -> None:
+        if self.draws_qgraphics_profile_marker_items:
             self._sync_profile_interaction_visuals()
-        elif not self.draws_qgraphics_profile_marker_items:
-            self._interaction_visual_profile_part = profile_part
 
     def _sync_roi_item_style(self, roi_id: str) -> None:
         if not self.draws_qgraphics_roi_items:
@@ -2067,13 +2112,8 @@ class ImageViewShell(QtWidgets.QWidget):
         if item_selection is None:
             return
         item, selection = item_selection
-        highlighted = str(roi_id) == self._highlighted_roi_id
-        interactive = str(roi_id) == self._interaction_visual_roi_id
-        width = 4.0 if highlighted else 3.25 if interactive else 2.0
-        color = tuple(selection.color)
-        if interactive:
-            color = tuple(min(255, int(value) + 70) for value in color[:3])
-        item.setPen(pg.mkPen(color + (255,), width=width))
+        width, rgb = self._roi_visual_style(roi_id, selection.color)
+        item.setPen(pg.mkPen(tuple(rgb) + (255,), width=width))
 
     def _sync_profile_interaction_visuals(self) -> None:
         marker_pen = (
@@ -2306,9 +2346,7 @@ class ImageViewShell(QtWidgets.QWidget):
         return bool(callable(handler) and getattr(view_state, "montage_axis", None) is not None)
 
     def _sync_backend_camera_to_view(self) -> None:
-        sync_camera = getattr(self, "_sync_vispy_camera_to_view", None)
-        if callable(sync_camera):
-            sync_camera()
+        """Backend hook: mirror the canonical ViewBox range into a backend camera."""
 
     def _apply_viewport_resize(
         self,

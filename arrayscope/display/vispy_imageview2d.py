@@ -33,7 +33,6 @@ from arrayscope.display.model.tiled_histogram_identity import (
     tiled_semantic_histogram_identity,
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
-from arrayscope.display.interaction import DisplayInteractionState
 from arrayscope.display.overlay_hit_test import roi_handle_points
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.display.shader_mapping import (
@@ -106,8 +105,9 @@ class VisPyImageView2D(ImageViewShell):
         )
         self._vispy_roi_visuals: dict[str, object] = {}
         self._vispy_roi_handle_visuals: dict[str, object] = {}
-        self._vispy_selected_roi_id: str | None = None
-        self._vispy_hovered_roi_id: str | None = None
+        # Visual-only cache of the shell-owned interaction emphasis
+        # (ImageViewShell._interaction_visual_profile_part); the marker sync
+        # resets it when the marker leaves the viewport.
         self._vispy_profile_hover_part: str | None = None
         self._vispy_roi_drawing_preview = None
         self._vispy_overlay_visuals: list[object] = []
@@ -893,57 +893,27 @@ class VisPyImageView2D(ImageViewShell):
         if callable(handler):
             handler(levels, final=bool(final))
 
-    def createRoi(self, kind, *, points=None, rect=None, line_width=1.0, label=None, color=None):
-        selection = super().createRoi(kind, points=points, rect=rect, line_width=line_width, label=label, color=color)
+    def _backend_roi_visual_upserted(self, selection) -> None:
         self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
-        return selection
 
-    def removeRoi(self, roi_id):
-        removed = super().removeRoi(roi_id)
-        if removed:
-            if self._vispy_selected_roi_id == str(roi_id):
-                self._vispy_selected_roi_id = None
-            if self._vispy_hovered_roi_id == str(roi_id):
-                self._vispy_hovered_roi_id = None
-            self._remove_vispy_roi(roi_id)
-        return removed
+    def _backend_roi_visual_removed(self, roi_id) -> None:
+        self._remove_vispy_roi(roi_id)
 
-    def clearRois(self):
-        super().clearRois()
-        for roi_id in tuple(getattr(self, "_vispy_roi_visuals", {})):
-            self._remove_vispy_roi(roi_id)
-
-    def setRoiSelections(self, selections, *, selected_id=None) -> None:
-        super().setRoiSelections(selections, selected_id=selected_id)
-        for current_id, (_item, selection) in self._roi_items.items():
-            self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
-
-    def highlightRoi(self, roi_id):
-        result = super().highlightRoi(roi_id)
-        self._vispy_selected_roi_id = str(roi_id) if result else None
-        for current_id, (_item, selection) in self._roi_items.items():
-            self._upsert_vispy_roi(current_id, selection.geometry, selection.color)
-        return result
-
-    def _set_roi_geometry(self, roi_id: str, geometry, *, emit: bool, sync_item: bool = True) -> bool:
-        changed = super()._set_roi_geometry(roi_id, geometry, emit=emit, sync_item=sync_item)
+    def _backend_roi_emphasis_changed(self, roi_id: str) -> None:
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
-            self._remove_vispy_roi(roi_id)
-            return changed
+            return
         _item, selection = item_selection
         self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
-        return changed
 
-    def _upsert_vispy_roi(self, roi_id, geometry, color, *, width: float | None = None) -> None:
+    def _upsert_vispy_roi(self, roi_id, geometry, color) -> None:
         points = _vispy_roi_points(geometry)
         if points is None:
             self._remove_vispy_roi(roi_id)
             return
         roi_id = str(roi_id)
-        if width is None:
-            width = self._vispy_roi_width(roi_id)
-        line_color = self._vispy_roi_color(roi_id, color)
+        width, rgb = self._roi_visual_style(roi_id, color)
+        line_color = _vispy_color(rgb)
         visual = self._vispy_roi_visuals.get(str(roi_id))
         if visual is None:
             visual = self._vispy_visuals.Line(
@@ -1003,32 +973,18 @@ class VisPyImageView2D(ImageViewShell):
             return
         if marker is None or not hasattr(marker, "set_data"):
             marker = self._vispy_visuals.Markers(parent=self._vispy_view.scene)
-        selected = roi_id == self._vispy_selected_roi_id
-        hovered = roi_id == self._vispy_hovered_roi_id
+        highlighted, interactive = self._roi_visual_emphasis(roi_id)
         marker.set_data(
             points,
             symbol="square",
-            size=12.0 if selected or hovered else 10.0,
+            size=12.0 if highlighted or interactive else 10.0,
             face_color=(0.05, 0.05, 0.05, 0.75),
-            edge_color=_vispy_color((255, 255, 255) if hovered else color),
-            edge_width=2.0 if selected or hovered else 1.25,
+            edge_color=_vispy_color((255, 255, 255) if interactive else color),
+            edge_width=2.0 if highlighted or interactive else 1.25,
         )
         marker.order = 10_001
         marker.visible = True
         self._vispy_roi_handle_visuals[roi_id] = [marker]
-
-    def _vispy_roi_width(self, roi_id: str) -> float:
-        if str(roi_id) == self._vispy_selected_roi_id:
-            return 4.0
-        if str(roi_id) == self._vispy_hovered_roi_id:
-            return 3.25
-        return 2.0
-
-    def _vispy_roi_color(self, roi_id: str, color):
-        if str(roi_id) == self._vispy_hovered_roi_id:
-            rgb = tuple(min(255, int(value) + 70) for value in tuple(color or (255, 255, 0))[:3])
-            return _vispy_color(rgb)
-        return _vispy_color(color)
 
     def _vispy_handle_world_size(self) -> float:
         """World-space radius corresponding to an eight-pixel hit target."""
@@ -1042,32 +998,9 @@ class VisPyImageView2D(ImageViewShell):
         except Exception:
             return 2.0
 
-    def sync_interaction_state(self, state: DisplayInteractionState) -> None:
-        super().sync_interaction_state(state)
-        target = state.capture if state.capture is not None else state.hover
-        profile_part = target.part if target is not None and target.kind == "profile" else None
-        roi_id = target.object_id if target is not None and target.kind == "roi" else None
-        self._set_vispy_profile_hover_part(profile_part)
-        self._set_vispy_hovered_roi(roi_id)
-
-    def _set_vispy_hovered_roi(self, roi_id: str | None) -> None:
-        roi_id = None if roi_id is None else str(roi_id)
-        previous = self._vispy_hovered_roi_id
-        if previous == roi_id:
-            return
-        self._vispy_hovered_roi_id = roi_id
-        for current in (previous, roi_id):
-            item_selection = self._roi_items.get(str(current)) if current is not None else None
-            if item_selection is None:
-                continue
-            _item, selection = item_selection
-            self._upsert_vispy_roi(selection.id, selection.geometry, selection.color)
-
-    def _set_vispy_profile_hover_part(self, part: str | None) -> None:
-        part = None if part is None else str(part)
-        if part == self._vispy_profile_hover_part:
-            return
-        self._vispy_profile_hover_part = part
+    def _backend_profile_emphasis_changed(self) -> None:
+        part = self._interaction_visual_profile_part
+        self._vispy_profile_hover_part = None if part is None else str(part)
         self._sync_vispy_profile_marker()
 
     def setViewportContentExtent(self, extent) -> bool:
@@ -1103,6 +1036,9 @@ class VisPyImageView2D(ImageViewShell):
         return getattr(self, "_vispy_display_shape", None) or self.image.shape[:2]
 
     def _after_viewport_camera_change(self) -> None:
+        self._sync_vispy_camera_to_view()
+
+    def _sync_backend_camera_to_view(self) -> None:
         self._sync_vispy_camera_to_view()
 
     def _after_profile_marker_sync(self) -> None:

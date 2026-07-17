@@ -3391,7 +3391,7 @@ def test_vispy_roi_visuals_do_not_register_pyqtgraph_scene_items(qt_app):
             point=(11.0, 10.0),
         )
         view.sync_interaction_state(state)
-        assert view._vispy_hovered_roi_id == selection.id
+        assert view._interaction_visual_roi_id == selection.id
 
         assert view.removeRoi(selection.id)
         assert selection.id not in view._vispy_roi_visuals
@@ -3473,7 +3473,7 @@ def test_vispy_line_roi_has_reused_endpoint_handles_and_hover_cursor(qt_app):
             point=(3.0, 4.0),
         )
         view.sync_interaction_state(state)
-        assert view._vispy_hovered_roi_id == selection.id
+        assert view._interaction_visual_roi_id == selection.id
 
         view._begin_pointer_capture(
             InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="line"),
