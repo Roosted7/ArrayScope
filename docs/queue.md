@@ -23,7 +23,7 @@ this file says *what, in what order, and when it counts as done*.
 | # | Step | Exit gate |
 |---|---|---|
 | 1 | **G5 remainder — sparse multiresolution pyramid.** Migrate the live ladder from whole-plane keys to logical chunks feeding the resolution seam; finish source-grid materialization and reducer families. Implementation contract: [`redesign/g5-source-grid-pyramid-2026-07-16.md`](redesign/g5-source-grid-pyramid-2026-07-16.md). | MERGED 2026-07-17 — see Done log |
-| 2 | **Performance-bars program on the engine.** The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
+| 2 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
 | 3 | **G6 — GPU histogram/levels.** Per-chunk summaries over the chunk store with the ADR 0056 coverage frontier; GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; no GUI-thread aggregation; real-GL gate |
 | 4 | **Renderer protocol + wgpu Experiment A.** Formalize the backend-neutral semantic command table ([tensor-engine-endpoint](proposals/tensor-engine-endpoint.md)); wgpu-py vertical slice (real QRenderWidget; test `present_method` screen vs bitmap on Wayland). QRhiWidget+native runtime is the recorded production candidate. | Command table maps 1:1 onto existing seams; Experiment A renders the montage scenario on real Wayland |
 | 5 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
@@ -40,6 +40,15 @@ this file says *what, in what order, and when it counts as done*.
 
 ## Standing lane — test hardening & debt (parallel-safe, any order)
 
+- **Re-rank in-flight coverage waves when the camera re-anchors.** A
+  montage entered under a preserved USER camera that is then fitted
+  (programmatic pulse or AUTO replay) re-focuses only newly planned waves;
+  kernel tasks already submitted keep their stale scheduling_rank, so the
+  fill finishes in the old order (2026-07-17 raw-fill sheets: anchor at
+  tile ~92 of 272). Contract: priority re-targets on every view change —
+  including work already queued. Owner: kernel re-rank on
+  tile-priority-context change, or supersede-and-resubmit of unstarted
+  coverage tasks at retarget.
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **Emit `target_satisfied_retained`** when a retained compatible payload
