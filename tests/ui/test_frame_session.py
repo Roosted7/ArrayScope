@@ -1149,11 +1149,14 @@ def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     assert session.ensure_tile_states()[0].value == "loaded"
 
 
-def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
+def test_retarget_viewport_rechecks_dormant_pending_tile_against_cache():
     session = _session()
     session.visible_tiles = session.plan.tiles[:2]
-    session.loading_tiles = {2}
     session.pending_tiles = deque((session.plan.tiles[2],))
+
+    # A pending queue row has no production scheduler owner after the frame
+    # pipeline cutover.  It must not suppress viewport cache/residency lookup
+    # when that tile enters the required scope.
 
     additions, _changed = session.retarget_viewport(
         view_range=((3.0, 4.0), (0.0, 1.0)),
@@ -1161,7 +1164,7 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
         coverage_margin_tiles=1,
     )
 
-    assert 2 not in {tile.montage_index for tile in additions}
+    assert 2 in {tile.montage_index for tile in additions}
 
 
 def test_retarget_viewport_adopts_replacement_plan_with_same_geometry():

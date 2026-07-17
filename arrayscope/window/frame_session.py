@@ -239,6 +239,36 @@ def _free_retarget_tiles(
     return frozenset(int(tile) for tile in logical_resident_tiles)
 
 
+def _physical_rebind_transaction(
+    payloads: dict[int, DisplayTilePayload],
+    *,
+    free_retarget_tiles,
+    physical_resident_fn,
+) -> dict[int, DisplayTilePayload]:
+    """Keep a mixed persistent-GPU delta from delaying resident rebinds.
+
+    The persistent backend defers physically cold replacements during an
+    active gesture.  One cold member in a mixed delta would therefore delay
+    every already-resident page mapping in that delta.  Emit the complete
+    physically free cohort first; cold members remain in the session's
+    pending-upsert store for the next bounded transaction.  Semantic successor
+    handoffs bypass ordinary admission limits and never enter this split.
+    """
+
+    free = frozenset(int(tile) for tile in tuple(free_retarget_tiles or ()))
+    if (
+        not callable(physical_resident_fn)
+        or not free
+        or all(int(tile) in free for tile in payloads)
+    ):
+        return payloads
+    return {
+        int(tile): payload
+        for tile, payload in payloads.items()
+        if int(tile) in free
+    }
+
+
 class LifecycleRenderedTiles(dict):
     """``rendered_tiles`` with the machine's semantic axis kept authoritative.
 
@@ -989,7 +1019,6 @@ class FrameSession:
         known.update(int(index) for index in self.loading_tiles)
         known.update(int(index) for index in self.skipped_tiles)
         known.update(int(index) for index in self.active_tile_requests)
-        known.update(int(tile.montage_index) for tile in self.pending_tiles)
         additions = tuple(tile for tile in coverage if int(tile.montage_index) not in known)
         active_numbers = tuple(int(tile.montage_index) for tile in active)
         near_numbers = tuple(int(tile.montage_index) for tile in near)
@@ -2212,6 +2241,17 @@ class FrameSession:
             for tile, payload in payloads.items()
             if payload.source_id in self.acknowledged_source_ids
         }
+        free_retarget_tiles = _free_retarget_tiles(
+            payloads,
+            logical_resident_tiles=resident_retargets,
+            physical_resident_fn=physical_resident_fn,
+            pace_resident_retargets=pace_resident_retargets,
+        )
+        payloads = _physical_rebind_transaction(
+            payloads,
+            free_retarget_tiles=free_retarget_tiles,
+            physical_resident_fn=physical_resident_fn,
+        )
         plan_tiles_by_number = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(self.plan, "tiles", ()) or ())
@@ -2219,12 +2259,6 @@ class FrameSession:
         admission_candidates = tuple(
             plan_tiles_by_number.get(int(tile), int(tile))
             for tile in payloads
-        )
-        free_retarget_tiles = _free_retarget_tiles(
-            payloads,
-            logical_resident_tiles=resident_retargets,
-            physical_resident_fn=physical_resident_fn,
-            pace_resident_retargets=pace_resident_retargets,
         )
         admission = TileAdmissionQueue(self.tile_priority_context()).admit(
             admission_candidates,
@@ -2845,6 +2879,11 @@ class FrameSession:
             logical_resident_tiles=resident_retarget_tiles,
             physical_resident_fn=physical_resident_fn,
             pace_resident_retargets=pace_resident_retargets,
+        )
+        all_candidate_upserts = _physical_rebind_transaction(
+            all_candidate_upserts,
+            free_retarget_tiles=free_retarget_tiles,
+            physical_resident_fn=physical_resident_fn,
         )
         zero_byte_retarget_tiles = (
             free_retarget_tiles

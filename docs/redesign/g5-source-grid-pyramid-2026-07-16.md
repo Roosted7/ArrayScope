@@ -334,6 +334,23 @@ compatible L0/L1/L2 residency existed. Prefetch page claims/admission are GUI-ow
 workers return checked pages only, and success, stale, cancellation, partial
 fanout, and teardown all release claims and wake the standing replan path.
 
+The follow-up saved-session pan/zoom reproduced two remaining ways that warm
+coverage could still stream in. First, a mixed presentation transaction could
+contain a complete set of physically free coarse rebinds plus one cold upload;
+the interaction guard correctly deferred the cold member but necessarily
+deferred the whole transaction with it. The admission owner now emits the
+complete physically free cohort as its own transaction and leaves cold exact
+work queued. Second, the obsolete `pending_tiles` queue still admitted
+coverage-margin misses even though the frame pipeline, not that queue, owns
+production scheduling. A dormant shell entry was then treated as already
+known when it entered the required viewport, suppressing the immediate
+cache/residency lookup. Viewport admission is now lifecycle-required only,
+coverage warming remains prefetch-owned, and fossil queue membership has no
+authority over retarget additions. Focused gates require all resident members
+to cross before any cold member and require a dormant coverage hint to be
+rechecked when it becomes visible. Full removal of the remaining legacy
+`pending_tiles` state is still a one-owner cleanup before final acceptance.
+
 The broader memory-stress gate initially appeared to show a roughly 216 MiB
 G5 residency increase, but reproduced with a roughly 178 MiB increase on
 `main`. Its baseline was taken before the one-time Qt/PyQtGraph window/backend

@@ -2363,7 +2363,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     assert controller.groups == []
 
 
-def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_batches(qt_app, monkeypatch):
+def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
@@ -2411,16 +2411,27 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         def retarget_frame_pipeline(self, session):
             self.pipeline_retargets += 1
 
-    document = ArrayDocument(np.zeros((2, 2, 10), dtype=np.float32))
-    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=10, indices=tuple(range(10)), text=":")
-    plan = make_montage_plan(state, axis=2, indices=tuple(range(10)), tile_shape=(2, 2), columns=10)
+    document = ArrayDocument(np.zeros((20, 20, 16), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2,
+        columns=4,
+        indices=tuple(range(16)),
+        text=":",
+    )
+    plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=tuple(range(16)),
+        tile_shape=(20, 20),
+        columns=4,
+    )
     viewport_plan = MontageViewportPlan(
         axis=2,
-        all_indices=tuple(range(10)),
-        viewport_shape=(4, 40),
-        tile_shape=(2, 2),
+        all_indices=tuple(range(16)),
+        viewport_shape=(200, 200),
+        tile_shape=(20, 20),
         plan=plan,
-        view_range=((-1.0, 40.0), (-1.0, 4.0)),
+        view_range=((21.0, 39.0), (21.0, 39.0)),
         shader_display=True,
         persistent_tile_residency=True,
     )
@@ -2429,13 +2440,13 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
         key=frame_session_key(_document_key(document), state, viewport_plan, None),
         render_generation=1,
         level_key=("levels",),
-        level_expected_indices=tuple(range(10)),
+        level_expected_indices=tuple(range(16)),
         plan=plan,
         view_state=state,
         document=document,
         montage_axis=2,
         colormap_lut=None,
-        viewport_shape=(4, 40),
+        viewport_shape=(200, 200),
         view_range=None,
         output_dtype=np.dtype(np.float32),
         rgb=False,
@@ -2462,12 +2473,14 @@ def test_interactive_viewport_expansion_resolves_cached_tiles_without_scheduler_
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert len(win.resolved_batches) == 10
+    required = set(session.required_tile_numbers())
+    assert required
+    assert len(required) < len(plan.tiles), "the fixture needs a non-required coverage shell"
+    assert len(win.resolved_batches) == len(required)
     resolved = [tile for batch in win.resolved_batches for tile in batch]
-    assert len(resolved) == 10
+    assert set(resolved) == required
     pending = [int(tile.montage_index) for tile in session.pending_tiles]
     assert pending == resolved
-    assert pending[0] == 6
     assert session.loading_tiles == set()
     assert win.pipeline_retargets == 2
     assert submitted_stage_plans == [tuple(session.pending_tiles)]

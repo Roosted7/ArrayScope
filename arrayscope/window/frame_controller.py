@@ -1316,7 +1316,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # quality demotion. Demand math only; reduction stays on worker lanes.
         lod_swap_ready = session.mark_ladder_swaps_for_viewport()
         self.retarget_frame_pipeline(session)
-        additions = viewport_plan.prioritize_tiles(additions)
+        required_tile_numbers = frozenset(session.required_tile_numbers())
+        # ``pending_tiles`` no longer drives production scheduling: the frame
+        # pipeline derives visible work from the lifecycle's required scope.
+        # Keep the viewport-only cache/evaluation path on that same scope.
+        # Coverage-margin misses are speculative and are owned by
+        # ``schedule_near_viewport_montage_prefetch`` once visible work is
+        # quiet; admitting them here leaves a dormant queue entry with no
+        # pipeline consumer and later suppresses the cache lookup when the
+        # tile actually becomes visible.
+        additions = tuple(
+            tile
+            for tile in viewport_plan.prioritize_tiles(additions)
+            if int(tile.montage_index) in required_tile_numbers
+        )
         self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed or lod_swap_ready:

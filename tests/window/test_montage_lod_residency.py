@@ -6264,6 +6264,71 @@ def test_only_physically_resident_payloads_bypass_all_cold_caps_in_one_delta(
         assert set(delta.active_tiles) == set(range(16))
 
 
+def test_physically_resident_rebinds_do_not_share_a_delta_with_cold_uploads():
+    """A mixed pan/zoom cohort must expose its resident floor immediately.
+
+    VisPy defers physically cold replacement work while a gesture is active.
+    If one cold upload shares the resident rebind delta, that backend guard
+    necessarily defers the resident members too and already-loaded tiles pop
+    in only after the interaction-stop edge.  The admission owner therefore
+    emits the complete free cohort first and leaves every cold member queued
+    for the following transaction.
+    """
+
+    session = _session(
+        mode=LOD_POLICY_RESIDENT,
+        count=16,
+        pyramid=LodPageCache(max_bytes=1 << 20),
+    )
+    _admit_zoomed_out_levels(session)
+    session.rendered_tiles.clear()
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    session.display_tile_payloads.clear()
+    session._ensure_floor_payloads(tuple(range(16)))
+    assert len(session.display_tile_payloads) == 16
+    assert all(
+        payload.page_backing is not None
+        for payload in session.display_tile_payloads.values()
+    )
+
+    resident_tiles = frozenset(range(12))
+    _state, delta = session.build_tile_presentation(
+        {},
+        max_upserts=1,
+        max_upsert_bytes=1 << 20,
+        upsert_cost_fn=lambda payload: payload.nbytes,
+        physical_resident_fn=lambda payload: int(payload.tile_number) in resident_tiles,
+        pace_resident_retargets=False,
+    )
+
+    assert set(delta.upserts) == resident_tiles
+    assert set(session.pending_payload_upserts).issuperset(set(range(12, 16)))
+    _state, paced_delta = session.build_tile_presentation(
+        {},
+        max_upserts=1,
+        max_upsert_bytes=1 << 20,
+        upsert_cost_fn=lambda payload: payload.nbytes,
+        physical_resident_fn=lambda payload: int(payload.tile_number) in resident_tiles,
+        pace_resident_retargets=False,
+    )
+    assert set(paced_delta.upserts) == resident_tiles
+    delta = paced_delta
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+
+    _state, cold_delta = session.build_tile_presentation(
+        {},
+        max_upserts=1,
+        max_upsert_bytes=1 << 20,
+        upsert_cost_fn=lambda payload: payload.nbytes,
+        physical_resident_fn=lambda payload: int(payload.tile_number) in resident_tiles,
+        pace_resident_retargets=False,
+    )
+    assert len(cold_delta.upserts) == 1
+    assert set(cold_delta.upserts).isdisjoint(resident_tiles)
+
+
 def test_visible_parked_payload_rearms_instead_of_settling_missing():
     session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 20))
     session.build_tile_presentation({})
