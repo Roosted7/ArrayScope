@@ -49,7 +49,6 @@ class PresentationSettlementSnapshot:
     physical_tiles: tuple[int, ...]
     physical_truth_errors: tuple[str, ...]
     session_work_inflight: int
-    session_pending_tiles: int
     page_cache_pending: int
     rung_materializations_pending: int
     scheduler_pending: int
@@ -72,7 +71,6 @@ class PresentationSettlementSnapshot:
             return logical_and_physical
         return bool(
             self.session_work_inflight == 0
-            and self.session_pending_tiles == 0
             and self.page_cache_pending == 0
             and self.rung_materializations_pending == 0
             and self.scheduler_pending == 0
@@ -140,7 +138,6 @@ def presentation_settlement_snapshot(
             physical_tiles=(),
             physical_truth_errors=("session_missing",),
             session_work_inflight=0,
-            session_pending_tiles=0,
             page_cache_pending=0,
             rung_materializations_pending=0,
             scheduler_pending=0,
@@ -210,7 +207,6 @@ def presentation_settlement_snapshot(
         physical_tiles=physical_tiles,
         physical_truth_errors=physical_errors,
         session_work_inflight=int(session_work_inflight),
-        session_pending_tiles=len(tuple(getattr(session, "pending_tiles", ()) or ())),
         page_cache_pending=page_cache_pending,
         rung_materializations_pending=rung_pending,
         scheduler_pending=int(getattr(display_diagnostics, "scheduler_pending", 0) or 0),
@@ -250,7 +246,6 @@ def presentation_settlement_diagnostic(
         f"physical_tiles={snapshot.physical_tiles!r} "
         f"physical_errors={snapshot.physical_truth_errors!r} "
         f"session_inflight={snapshot.session_work_inflight} "
-        f"session_pending={snapshot.session_pending_tiles} "
         f"page_cache_pending={snapshot.page_cache_pending} "
         f"rungs_pending={snapshot.rung_materializations_pending} "
         f"scheduler=({snapshot.scheduler_pending},{snapshot.scheduler_running}) "

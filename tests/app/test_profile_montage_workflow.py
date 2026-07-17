@@ -1180,7 +1180,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         skipped_tiles=set(),
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0})),
         display_committed=True,
-        pending_tiles=(),
+        required_target_unsettled_tiles=lambda: (),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1340,7 +1340,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         skipped_tiles=set(),
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
         display_committed=True,
-        pending_tiles=(),
+        required_target_unsettled_tiles=lambda: (),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1374,7 +1374,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     assert result["required_target_settled"] is True
 
 
-def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
+def test_profile_montage_visibility_ignores_offscreen_unsettled_targets():
     from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.tools.profile_montage_workflow import _montage_visibility_state
 
@@ -1384,7 +1384,7 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
         display_committed=True,
         level_expected_indices=(10, 11),
-        pending_tiles=(SimpleNamespace(montage_index=5),),
+        required_target_unsettled_tiles=lambda: (5,),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1407,8 +1407,14 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
     state = _montage_visibility_state(win, mode="vispy_tile_layer")
 
     assert state["fully_visible"] is True
-    assert state["visible_pending_tiles"] == 0
+    assert state["visible_target_unsettled_tiles"] == 0
     assert state["active_presented_tile_count"] == 2
+
+    session.required_target_unsettled_tiles = lambda: (1,)
+    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+
+    assert state["fully_visible"] is False
+    assert state["visible_target_unsettled_tiles"] == 1
 
 
 def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger():
@@ -1421,7 +1427,7 @@ def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger(
         lifecycle=SimpleNamespace(presented_tiles=frozenset(range(44))),
         display_committed=True,
         level_expected_indices=tuple(range(60)),
-        pending_tiles=(SimpleNamespace(montage_index=58),),
+        required_target_unsettled_tiles=lambda: (58,),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1447,7 +1453,7 @@ def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger(
     assert state["active_presented_tile_count"] == 44
     assert state["active_planned_tile_count"] == 44
     assert state["requested_tile_count"] == 60
-    assert state["visible_pending_tiles"] == 0
+    assert state["visible_target_unsettled_tiles"] == 0
 
 
 @pytest.mark.skipif(

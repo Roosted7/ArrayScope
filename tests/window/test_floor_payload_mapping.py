@@ -84,7 +84,6 @@ def _session(*, dtype, view_state, shader_display: bool, count=2):
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         lod_policy_mode=LOD_POLICY_RESIDENT,
         lod_page_cache=LodPageCache(max_bytes=1 << 24),
     )

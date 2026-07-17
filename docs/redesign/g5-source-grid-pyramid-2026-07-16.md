@@ -348,8 +348,27 @@ cache/residency lookup. Viewport admission is now lifecycle-required only,
 coverage warming remains prefetch-owned, and fossil queue membership has no
 authority over retarget additions. Focused gates require all resident members
 to cross before any cold member and require a dormant coverage hint to be
-rechecked when it becomes visible. Full removal of the remaining legacy
-`pending_tiles` state is still a one-owner cleanup before final acceptance.
+rechecked when it becomes visible.
+
+The remaining `FrameSession.pending_tiles` state is now deleted, not renamed.
+History showed that its only production drain disappeared when scheduling
+moved to `FramePipeline`; the persisted queue survived as a second, write-only
+idea of target debt. It could suppress a visible cache/residency recheck even
+though no scheduler consumed it. Required target debt now comes only from
+`TileLifecycle`; task/evaluation claims own running work, `stage_fan_in` owns
+stage waiters, `deferred_missing_tiles` owns an immutable deferred plan, and
+the presentation delta owns commit debt. Stage completion unbinds its
+dependents and requests the existing coalesced pipeline replan instead of
+manufacturing queue membership. `TilePriorityContext` remains the one ordering
+input; the local prefetch priority queue is deliberately ephemeral and does
+not claim lifecycle state. Runtime diagnostics expose
+`target_unsettled_tiles`; only the historical JSONL reader accepts the old
+field name. A structural resurrection guard rejects a live pending-queue
+field, access, repair helper, classifier, or release shim. The translated
+page/lifecycle rings pass **271/271**, and the session/diagnostics/structural
+ring passes **144** with **2** intentional skips. This closes the duplicate
+scheduler-state seam; real-Wayland visual acceptance remains required before
+the queue row moves.
 
 The same onscreen replay exposed a distinct idle-draw loop after coverage had
 already reached 100/100 exact pages. Semantic level evidence advances in small

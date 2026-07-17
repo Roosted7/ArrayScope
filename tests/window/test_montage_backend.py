@@ -105,7 +105,6 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         lod_policy_decision=SimpleNamespace(demand=object()),
         pending_level_tiles=(),
         level_scan_remaining_tiles=0,
-        pending_tiles=(),
         active_tile_requests=(),
         loading_tiles=(),
         dirty_payloads={7: None},
@@ -114,6 +113,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         flush_pending=False,
         final_commit_pending=False,
         visible_first_pixels_presented=lambda: True,
+        is_complete=lambda: False,
         stage_fan_in=SimpleNamespace(
             active_requests=(),
             attached_requests=(),
@@ -122,7 +122,6 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     )
     effects = SimpleNamespace(
         submit_shared_transform_floor=lambda _scope: 0,
-        release_display_owned_pending=lambda _scope: None,
     )
     pipeline = SimpleNamespace(
         effects=effects,
@@ -1030,7 +1029,6 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
     window = SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")))
     window.win = window
     session = SimpleNamespace(
-        pending_tiles=[],
         loading_tiles=set(),
         active_tile_requests=set(),
         pending_level_tiles=deque([object()]),
@@ -1355,22 +1353,19 @@ def test_auto_successor_plan_uses_successor_fit_while_predecessor_camera_is_reta
     assert len(viewport_plan.candidate_tiles()) == 272
 
 
-def test_visible_tile_classifier_respects_native_queue_policy():
+def test_lod_policy_selects_producer_without_owning_target_debt():
     from arrayscope.core.view_state import ViewState
-    from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_POLICY_RESIDENT, native_lod_policy, resident_lod_policy
+    from arrayscope.display.lod import (
+        LOD_POLICY_NATIVE_ONLY,
+        LOD_POLICY_RESIDENT,
+        native_lod_policy,
+        resident_lod_policy,
+    )
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.frame_runtime import FrameRuntimeMixin
-
-    class Window(FrameRuntimeMixin):
-        def __init__(self):
-            self.replans = 0
-
-        def request_montage_replan(self, _session):
-            self.replans += 1
+    from arrayscope.render.lod import missing_tiles_require_native_target
+    from arrayscope.window.frame_session import FrameSession
 
     def session_for(policy, decision):
-        from arrayscope.display.model.tile_priority import TilePriorityContext
-
         state = ViewState.from_shape((64, 64, 4)).with_montage_axis(
             2,
             columns=4,
@@ -1378,35 +1373,30 @@ def test_visible_tile_classifier_respects_native_queue_policy():
             text=":",
         )
         plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(16, 16), columns=4)
-        pending = []
-
-        def pending_tile_numbers():
-            return tuple(int(tile.montage_index) for tile in pending)
-
-        def enqueue_pending_tile(tile):
-            if int(tile.montage_index) not in set(pending_tile_numbers()):
-                pending.append(tile)
-
-        session = SimpleNamespace(
+        return FrameSession(
+            session_id=1,
+            key=("target-debt", policy),
+            render_generation=1,
+            level_key=("levels",),
+            level_expected_indices=(0, 1, 2, 3),
             plan=plan,
-            view_range=((0.0, float(plan.display_shape[1])), (0.0, float(plan.display_shape[0]))),
+            view_state=state,
+            document=None,
+            montage_axis=2,
+            colormap_lut=None,
+            view_range=((0.0, 1024.0), (0.0, 1024.0)),
             viewport_shape=(128, 128),
-            pending_tiles=pending,
-            pending_tile_numbers=pending_tile_numbers,
-            enqueue_pending_tile=enqueue_pending_tile,
+            output_dtype=np.dtype(np.float32),
+            rgb=False,
+            window_mode="relative",
+            force_auto=False,
+            visible_tiles=plan.tiles,
             rendered_tiles={},
             loading_tiles=set(),
             skipped_tiles=set(),
             lod_policy_mode=policy,
             lod_policy_decision=decision,
         )
-        session.tile_priority_context = lambda: TilePriorityContext.from_tiles(
-            view_range=session.view_range,
-            visible_tiles=tuple(
-                int(tile.montage_index) for tile in session.plan.tiles
-            ),
-        )
-        return session
 
     coarse_resident = session_for(
         LOD_POLICY_RESIDENT,
@@ -1417,14 +1407,17 @@ def test_visible_tile_classifier_respects_native_queue_policy():
         native_lod_policy(((0.0, 16.0), (0.0, 16.0)), (128, 128), (16, 16)),
     )
 
-    win = Window()
-    FrameRuntimeMixin._classify_visible_montage_tiles(win, coarse_resident)
-    assert coarse_resident.pending_tiles == []
-    assert win.replans == 0
-
-    FrameRuntimeMixin._classify_visible_montage_tiles(win, native)
-    assert sorted(int(tile.montage_index) for tile in native.pending_tiles) == [0, 1, 2, 3]
-    assert win.replans == 1
+    # Target debt has one owner regardless of which producer can satisfy it.
+    assert coarse_resident.required_target_unsettled_tiles() == (0, 1, 2, 3)
+    assert native.required_target_unsettled_tiles() == (0, 1, 2, 3)
+    assert not missing_tiles_require_native_target(
+        coarse_resident.lod_policy_mode,
+        coarse_resident.lod_policy_decision.demand,
+    )
+    assert missing_tiles_require_native_target(
+        native.lod_policy_mode,
+        native.lod_policy_decision.demand,
+    )
 
 
 def test_montage_commit_reschedules_restored_roi_stats():
@@ -1450,7 +1443,10 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace()
-    resident = lambda _payload: True
+
+    def resident(_payload):
+        return True
+
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
@@ -2115,7 +2111,6 @@ def test_tile_presentation_admission_uses_backend_cost_function():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     for index in range(2):
         image = np.zeros((2, 2), dtype=np.float32)
@@ -2182,7 +2177,6 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     for index, tile in enumerate(tiles):
         image = np.full((2, 2), index, dtype=np.float32)
@@ -2261,7 +2255,6 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     for index, tile in enumerate(tiles):
         image = np.full((2, 2), index, dtype=np.float32)
@@ -2343,7 +2336,6 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
         rendered_tiles={},
         loading_tiles={7},
         skipped_tiles=set(),
-        pending_tiles=[plan.tiles[1], plan.tiles[7]],
     )
     session.active_tile_requests.add(7)
     session.tile_states = [MontageTileState.UNLOADED for _tile in plan.tiles]
@@ -2356,7 +2348,7 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
 
     win._prune_stale_montage_tile_work(session)
 
-    assert [int(tile.montage_index) for tile in session.pending_tiles] == [1]
+    assert session.required_target_unsettled_tiles() == (0,)
     assert 7 in session.loading_tiles
     assert 7 in session.active_tile_requests
     assert session.tile_states[7] == MontageTileState.LOADING
@@ -2456,7 +2448,6 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     win = Window(document, state, viewport_plan)
     win._frame_session = session
@@ -2479,11 +2470,13 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
     assert len(win.resolved_batches) == len(required)
     resolved = [tile for batch in win.resolved_batches for tile in batch]
     assert set(resolved) == required
-    pending = [int(tile.montage_index) for tile in session.pending_tiles]
-    assert pending == resolved
+    assert set(session.required_target_unsettled_tiles()) == required
     assert session.loading_tiles == set()
     assert win.pipeline_retargets == 2
-    assert submitted_stage_plans == [tuple(session.pending_tiles)]
+    assert submitted_stage_plans == [session.deferred_missing_tiles]
+    assert {
+        int(tile.montage_index) for tile in session.deferred_missing_tiles
+    } == required
     assert session.stage_planning_deferred is True
     assert not getattr(win, "_montage_viewport_update_pending", False)
     assert not hasattr(win, "_montage_viewport_continue_immediately")
@@ -2562,7 +2555,8 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
         rendered_tiles={},
         loading_tiles={0, 1, 2, 3},
         skipped_tiles=set(),
-        pending_tiles=list(plan.tiles),
+        stage_planning_deferred=True,
+        deferred_missing_tiles=tuple(plan.tiles),
     )
     win = Window(document, state, viewport_plan)
     win._frame_session = session
@@ -2571,7 +2565,9 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
 
     assert win._try_update_montage_viewport_only() is True
 
-    assert win.pipeline_retargets == 2
+    assert win.pipeline_retargets == 1
+    assert session.stage_planning_deferred is True
+    assert session.deferred_missing_tiles == tuple(plan.tiles)
 
 
 def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(qt_app, monkeypatch):
@@ -2724,7 +2720,6 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         display_committed=True,
     )
     session.shader_display = True
@@ -2830,7 +2825,6 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         display_committed=True,
     )
     session.shader_display = True
@@ -3023,7 +3017,6 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         rendered_tiles={int(tile.montage_index): SimpleNamespace(tile=tile) for tile in plan.tiles},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     session.level_generation.target_levels = (2.0, 4.0)
     session.set_level_update_pending(True)
@@ -3037,10 +3030,11 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
     assert session.level_generation.target_levels == (2.0, 4.0)
 
 
-def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
+def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
     from pyqtgraph.Qt import QtCore
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
+    from arrayscope.display.model.tile_priority import prioritize_tiles
     from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.frame_session import FrameSession
 
@@ -3060,9 +3054,11 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
             return True
 
         def retarget_frame_pipeline(self, session):
-            tile = session.next_tile()
-            if tile is not None:
-                self.scheduled.append(int(tile.montage_index))
+            ordered = prioritize_tiles(
+                session.plan.tiles,
+                context=session.tile_priority_context(),
+            )
+            self.scheduled.append(int(ordered[0].montage_index))
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
@@ -3088,7 +3084,6 @@ def test_hover_priority_retarget_timer_changes_next_pending_tile(qt_app):
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=list(plan.tiles),
     )
     win = Window(state, viewport_plan)
     win._frame_session = session
@@ -3492,7 +3487,6 @@ def test_tiled_payload_source_id_follows_semantic_materialization_identity():
         rendered_tiles={0: rendered(1.0)},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
 
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
@@ -3521,9 +3515,6 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
 
         def _frame_session_is_current(self, _session):
             return True
-
-        def _classify_visible_montage_tiles(self, _session):
-            return None
 
         def _montage_tile_source_ids(self, _session):
             return {}

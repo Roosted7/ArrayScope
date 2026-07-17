@@ -194,9 +194,6 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
     }
     assert presentation_is_settled(win)
     assert presentation_is_settled(win, require_quiescent=True)
-    session.pending_tiles = (object(),)
-    assert not presentation_is_settled(win, require_quiescent=True)
-    session.pending_tiles = ()
     session.lod_page_cache.pending_count = 1
     assert not presentation_is_settled(win, require_quiescent=True)
     session.lod_page_cache.pending_count = 0

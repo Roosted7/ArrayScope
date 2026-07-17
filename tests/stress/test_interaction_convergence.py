@@ -91,7 +91,6 @@ def _dump_convergence_state(win, label: str) -> None:
     unsettled = session.required_target_unsettled_tiles()
     print(
         f"[{label}] session={session.session_id} unsettled={len(unsettled)} "
-        f"pending={len(session.pending_tiles)} "
         f"active={len(session.active_tile_requests)} "
         f"evaluating={len(session.lifecycle.evaluating_tiles)} "
         f"dirty={len(session.dirty_payloads)} "
@@ -146,9 +145,12 @@ def _dump_convergence_state(win, label: str) -> None:
     print(f"[{label}] presentationDrawPending={draw_pending() if callable(draw_pending) else None}")
     # Discriminator: does one manual retarget unstick the session?
     win.renderer.retarget_frame_pipeline(session)
-    print(f"[{label}] after manual retarget: pending={len(session.pending_tiles)} "
+    print(
+        f"[{label}] after manual retarget: "
+        f"target_unsettled={len(session.required_target_unsettled_tiles())} "
           f"active={len(session.active_tile_requests)} "
-          f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}")
+        f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}"
+    )
 
 
 def _build_fft_montage_window(qtbot):

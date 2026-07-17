@@ -519,25 +519,6 @@ class FramePipelineEffects:
             return False
         return int(tile_number) in set(getattr(self.session.lifecycle, "presented_tiles", ()) or ())
 
-    def _display_payload_owns_pending_tile(self, tile_number: int, tile) -> bool:
-        payload = self.session.display_tile_payloads.get(int(tile_number))
-        if not self._display_payload_is_current(tile_number, tile, payload=payload):
-            return False
-        if self._shared_transform_owns_tile_display_target(tile):
-            return True
-        lod = getattr(payload, "lod", None)
-        if lod is None or int(getattr(lod, "level", 0) or 0) <= 0:
-            return False
-        if not bool(getattr(self.session, "shader_display", False)):
-            return False
-        if str(getattr(payload, "quality", "exact") or "exact") != "preview":
-            return False
-        return bool(
-            getattr(payload, "level_stats", None) is not None
-            or getattr(payload, "level_data", None) is not None
-            or getattr(payload, "histogram_data", None) is not None
-        )
-
     def _shared_transform_owns_display_target(self, tile, step) -> bool:
         if not self._shared_transform_owns_tile_display_target(tile):
             return False
@@ -721,28 +702,6 @@ class FramePipelineEffects:
         stage_cache = self.renderer.win.operation_evaluator.stage_cache
         getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
         return getter(stage_key) is not None
-
-    def release_display_owned_pending(self, scope: LodAdmissionScope | None = None) -> int:
-        if not self._session_is_current():
-            return 0
-        pending_numbers = set(self.session.pending_tile_numbers())
-        if not pending_numbers:
-            return 0
-        visible = None
-        if scope is not None:
-            visible = {int(tile) for tile in tuple(getattr(scope, "visible_tile_numbers", ()) or ())}
-        released = 0
-        for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ()):
-            tile_number = int(tile.montage_index)
-            if tile_number not in pending_numbers:
-                continue
-            if visible is not None and tile_number not in visible:
-                continue
-            if not self._display_payload_owns_pending_tile(tile_number, tile):
-                continue
-            if self.session.discard_pending_tile(tile_number):
-                released += 1
-        return released
 
     def _release_evaluation_claim(self, tile_number: int, *, marker=None, request_replan: bool = True) -> bool:
         tile_number = int(tile_number)
@@ -1132,7 +1091,6 @@ class FramePipelineEffects:
             return
         self.renderer._montage_commit_drain_active = True
         try:
-            self.renderer._classify_visible_montage_tiles(self.session)
             direct_presentation = self.direct_tile_layer_presentation()
             if direct_presentation is None:
                 raise RuntimeError("montage presentation could not be built")
@@ -2296,12 +2254,6 @@ class FramePipelineEffects:
             session.acknowledge_uniform_level_presentation(committed_levels)
         if not session.has_stale_level_presentations():
             session.set_level_update_pending(False)
-        released_display_pending = self.release_display_owned_pending()
-        if released_display_pending:
-            renderer._montage_display_owned_pending_released = (
-                int(getattr(renderer, "_montage_display_owned_pending_released", 0) or 0)
-                + int(released_display_pending)
-            )
         if accepted_payloads:
             # Evidence quality can advance only after the backend accepts the
             # payload. Scan the current active population at that transition
@@ -3206,16 +3158,6 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
             candidate_plan=candidate_plan,
         )
         merge_stage_fan_in_plan(current, stage_plan)
-        if render_lod.native_missing_tile_queue_required(
-            str(getattr(current, "lod_policy_mode", "")),
-            getattr(getattr(current, "lod_policy_decision", None), "demand", None),
-        ):
-            queued = set(current.pending_tile_numbers())
-            for tile in missing_tiles:
-                index = int(tile.montage_index)
-                if index not in queued and index not in current.rendered_tiles and index not in current.skipped_tiles:
-                    current.enqueue_pending_tile(tile)
-                    queued.add(index)
         submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
         renderer.retarget_frame_pipeline(current)
 
@@ -3324,7 +3266,7 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
         emit_trace(
             "stage_plan_async_defer",
             session_id=int(getattr(session, "session_id", 0) or 0),
-            pending=len(tuple(getattr(session, "pending_tiles", ()) or ())),
+            target_unsettled=len(tuple(session.required_target_unsettled_tiles())),
             deferred_missing=len(tuple(getattr(session, "deferred_missing_tiles", ()) or ())),
         )
         return False
@@ -3339,12 +3281,6 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
     stage_plan = build_stage_fan_in_plan(renderer, session.document, missing_tiles)
     renderer._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
     attach_stage_fan_in_plan(session, stage_plan)
-    if render_lod.native_missing_tile_queue_required(
-        str(getattr(session, "lod_policy_mode", "")),
-        getattr(getattr(session, "lod_policy_decision", None), "demand", None),
-    ):
-        for tile in missing_tiles:
-            session.enqueue_pending_tile(tile)
     submit_stage_tasks(renderer, session, stage_plan["stage_requests"])
     renderer.retarget_frame_pipeline(session)
     return True
@@ -3383,8 +3319,7 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
             # (see submit_deferred_stage_fan_in_plan.done) silently skipped
             # both activation and the replan wakeup after any unrelated
             # repaint, parking the waiting tiles until the next replan.
-            batch = current.stage_fan_in.activate_value(key, value)
-            enqueue_stage_dependent_tiles(current, batch.tiles)
+            current.stage_fan_in.activate_value(key, value)
             # Per-completion: coalesced replan, never a direct O(tiles) one.
             renderer.request_montage_replan(current)
 
@@ -3464,28 +3399,6 @@ def _stage_consumer_scheduling_rank(session, stage_key) -> int:
     )
 
 
-def enqueue_stage_dependent_tiles(session, tile_numbers) -> int:
-    """Requeue stage-backed tiles whose retained source is now usable."""
-
-    queued = set(session.pending_tile_numbers())
-    busy = (
-        set(int(tile) for tile in getattr(session, "loading_tiles", ()) or ())
-        | set(int(tile) for tile in getattr(session, "active_tile_requests", ()) or ())
-    )
-    added = 0
-    for tile_number in tuple(tile_numbers or ()):
-        tile_number = int(tile_number)
-        if tile_number in queued or tile_number in busy:
-            continue
-        if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
-            continue
-        if 0 <= tile_number < len(session.plan.tiles):
-            if session.enqueue_pending_tile(session.plan.tiles[tile_number]):
-                queued.add(tile_number)
-                added += 1
-    return int(added)
-
-
 def rearm_ready_stage_dependents(session) -> int:
     """Keep stage-backed retained pixels from idling after their source is ready."""
 
@@ -3506,27 +3419,12 @@ def rearm_ready_stage_dependents(session) -> int:
 
 
 def release_stage_dependents_to_direct(session, key) -> int:
-    queued = set(session.pending_tile_numbers())
-    unbound = 0
-    queued_count = 0
-    for tile_number, stage_key in tuple(session.stage_fan_in.tile_stage_keys.items()):
-        tile_number = int(tile_number)
-        if stage_key != key:
-            continue
-        session.stage_fan_in.tile_stage_keys.pop(tile_number, None)
-        unbound += 1
-        if tile_number in session.rendered_tiles or tile_number in session.skipped_tiles:
-            continue
-        if 0 <= tile_number < len(session.plan.tiles) and tile_number not in queued:
-            tile = session.plan.tiles[tile_number]
-            session.enqueue_pending_tile(tile)
-            queued.add(tile_number)
-            queued_count += 1
-    session.stage_fan_in.detach_unbound_requests()
+    released = session.stage_fan_in.release_missing(key)
+    unbound = len(tuple(released.tiles or ()))
     if unbound:
         session.tile_compute_waiting_for_stage = max(0, int(session.tile_compute_waiting_for_stage) - unbound)
         session.stage_backed_tiles_pending = max(0, int(session.stage_backed_tiles_pending) - unbound)
-    return int(queued_count)
+    return int(unbound)
 
 
 def montage_tile_layer_placeholder(session) -> np.ndarray:

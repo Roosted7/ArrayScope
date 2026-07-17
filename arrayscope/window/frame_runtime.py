@@ -19,7 +19,6 @@ from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work a
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import MontageTileState, montage_rect_for_viewport
-from arrayscope.display.model.tile_priority import prioritize_tiles
 from arrayscope.display.viewport import ViewportMode, view_ranges_near
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.pyramid import LodPageCache
@@ -117,7 +116,7 @@ class FrameRuntimeMixin:
             return
         if session.visible_plan_complete():
             return
-        if not session.pending_tiles and not session.loading_tiles and not session.stage_fan_in.attached_requests:
+        if session.is_complete():
             return
         self._show_frame_session_loading_overlay(session)
 
@@ -316,7 +315,6 @@ class FrameRuntimeMixin:
         pipeline = self._frame_pipeline_for_session(session)
         submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
-            pipeline.effects.release_display_owned_pending(scope)
             return submitted
         montage_commit.rearm_ready_stage_dependents(session)
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
@@ -328,7 +326,6 @@ class FrameRuntimeMixin:
             steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
         )
-        pipeline.effects.release_display_owned_pending(scope)
         if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
             self._schedule_montage_cached_level_stats(session)
         if (
@@ -347,18 +344,7 @@ class FrameRuntimeMixin:
             self.apply_ready_montage_display(session)
         if not submitted:
             self._finish_frame_session_if_complete(session)
-        unsettled = bool(
-            getattr(session, "pending_tiles", None)
-            or getattr(session, "active_tile_requests", None)
-            or getattr(session, "loading_tiles", None)
-            or getattr(session.stage_fan_in, "active_requests", None)
-            or getattr(session.stage_fan_in, "attached_requests", None)
-            or getattr(session.stage_fan_in, "tile_stage_keys", None)
-            or getattr(session, "dirty_payloads", None)
-            or getattr(session, "pending_payload_upserts", None)
-            or bool(getattr(session, "histogram_aggregate_inflight", False))
-        )
-        if unsettled:
+        if not session.is_complete():
             self._ensure_montage_watchdog()
         return int(submitted)
 
@@ -374,10 +360,11 @@ class FrameRuntimeMixin:
         residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
         # Interactive montage retargets also park their MISSING-tile producer:
         # stage planning is deferred (``stage_planning_deferred``) and the
-        # tiles queue in ``pending_tiles``.  That deferral does not touch the
+        # immutable missing-tile set remains in ``deferred_missing_tiles``.
+        # That deferral does not touch the
         # interactive-native counter, so gating this edge on the counter alone
         # left the deferred stage plan unowned after the gesture ended — 146
-        # pending tiles with an idle kernel until the watchdog asserted
+        # unsettled targets with an idle kernel until the watchdog asserted
         # (field stall 2026-07-16 09:14, /tmp/arrayscope-stall-1-1).  The
         # completion path (``complete_deferred_stage_fan_in``) is idempotent
         # and runs first thing inside ``retarget_frame_pipeline``.
@@ -441,7 +428,8 @@ class FrameRuntimeMixin:
         if session is None or not self._frame_session_is_current(session):
             self._montage_watchdog_stop()
             return
-        pending = len(session.pending_tiles)
+        required_unsettled = tuple(session.required_target_unsettled_tiles())
+        target_unsettled = len(required_unsettled)
         evaluating = len(session.lifecycle.evaluating_tiles)
         active = len(session.active_tile_requests)
         dirty = len(session.dirty_payloads)
@@ -464,7 +452,6 @@ class FrameRuntimeMixin:
             if session.has_pending_level_update()
             else 0
         )
-        required_unsettled = tuple(session.required_target_unsettled_tiles())
         if not required_unsettled:
             self._montage_watchdog_stop()
             return
@@ -481,7 +468,7 @@ class FrameRuntimeMixin:
             return
         signature = (
             int(session.session_id),
-            pending,
+            target_unsettled,
             evaluating,
             active,
             dirty,
@@ -532,7 +519,7 @@ class FrameRuntimeMixin:
         self._montage_watchdog_last_stall = signature
         owner_chain = {
             "required_unsettled": required_unsettled,
-            "pending": pending,
+            "target_unsettled": target_unsettled,
             "evaluating": evaluating,
             "active_requests": active,
             "dirty": dirty,
@@ -742,25 +729,26 @@ class FrameRuntimeMixin:
         session = getattr(self, "_frame_session", None)
         if not self._frame_session_is_current(session):
             return
-        if not session.pending_tiles:
+        if not session.required_target_unsettled_tiles():
             return
         self._montage_priority_retarget_token = _montage_work_token(session, "priority_retarget")
         self._montage_priority_retarget_pending = True
         self.apply_montage_priority_retarget()
 
     def refresh_montage_priority_targets(self, session) -> int:
-        """Rebuild tile-queue priorities from the live viewport.
+        """Rebuild pipeline scheduling priorities from the live viewport.
 
         The session's priority context is captured before the first montage
         commit rescales the viewport, so the distance-from-focus ordering can
         point at the stale pre-montage view range — one corner of the montage
-        — for the entire fill. Retarget every queued tile against the live
+        — for the entire fill. Retarget every unsettled tile against the live
         range at the moments that decide fill order: the first display commit
         and a shared-stage activation. The range is passed as a priority-only
         override; ``session.view_range`` is viewport bookkeeping shared with
         level/commit scoping and stays untouched.
         """
-        if not session.pending_tiles:
+        unsettled = tuple(session.required_target_unsettled_tiles())
+        if not unsettled:
             return 0
         # While a viewport-continuity restore (reload, layout change) is in
         # flight, the live camera range is transitional; prioritizing against
@@ -779,10 +767,8 @@ class FrameRuntimeMixin:
                 return 0
             view_range = viewport_plan.view_range
             focus = viewport_plan.priority_focus
-        total = len(session.pending_tiles)
         return session.retarget_tile_priority(
             focus=focus,
-            max_items=max(1, int(total)),
             view_range=view_range,
         )
 
@@ -796,19 +782,19 @@ class FrameRuntimeMixin:
         token = getattr(self, "_montage_priority_retarget_token", None)
         if not _montage_work_token_is_current(session, token, "priority_retarget"):
             return
-        if not session.pending_tiles:
+        unsettled = tuple(session.required_target_unsettled_tiles())
+        if not unsettled:
             return
+        viewport_plan = self._montage_viewport_plan(self.win.view_state)
         budget = self._montage_callback_budget(
             "montage_priority_retarget",
             interactive=True,
-            work_class="queue_metadata",
-            item_cap=max(1, len(session.pending_tiles)),
+            work_class="priority_metadata",
+            item_cap=max(1, len(tuple(session.plan.tiles))),
         )
-        viewport_plan = self._montage_viewport_plan(self.win.view_state)
         session.priority_focus = viewport_plan.priority_focus
         processed = session.retarget_tile_priority(
             focus=viewport_plan.priority_focus,
-            max_items=budget.item_cap,
         )
         if processed:
             budget.record_item(item_count=processed)
@@ -828,9 +814,10 @@ class FrameRuntimeMixin:
                 ),
             )
         self._last_montage_priority_retarget_count = int(processed)
-        self._last_montage_priority_retarget_pending = len(session.pending_tiles)
+        remaining = len(session.required_target_unsettled_tiles())
+        self._last_montage_priority_retarget_unsettled = remaining
         self._record_gui_budget(budget)
-        if session.pending_tiles:
+        if remaining:
             self.retarget_frame_pipeline(session)
 
     def apply_montage_viewport_retarget(self) -> None:
@@ -1095,35 +1082,6 @@ class FrameRuntimeMixin:
                     )
         session._tile_source_ids_plan = plan
         return source_ids
-    def _classify_visible_montage_tiles(self, session) -> None:
-        if not render_lod.native_missing_tile_queue_required(
-            str(getattr(session, "lod_policy_mode", "")),
-            getattr(getattr(session, "lod_policy_decision", None), "demand", None),
-        ):
-            return
-        rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
-        pending = set(session.pending_tile_numbers())
-        newly_pending = []
-        for tile in session.plan.tiles:
-            index = int(tile.montage_index)
-            intersects = tile.x0 < rect[2] and tile.x0 + tile.width > rect[0] and tile.y0 < rect[3] and tile.y0 + tile.height > rect[1]
-            if not intersects:
-                continue
-            if index in session.rendered_tiles or index in session.loading_tiles or index in session.skipped_tiles:
-                continue
-            if index not in pending:
-                newly_pending.append(tile)
-                pending.add(index)
-        for tile in prioritize_tiles(
-            newly_pending,
-            context=session.tile_priority_context(),
-        ):
-            _enqueue_session_pending_tile(session, tile)
-        if newly_pending:
-            self.request_montage_replan(session)
-
-
-
 def _copy_view_range(view_range):
     return (
         (float(view_range[0][0]), float(view_range[0][1])),
@@ -1227,14 +1185,6 @@ def _montage_autofit_scope_grew(previous, current) -> bool:
         or int(current_height) > int(previous_height)
         or int(current_gap) > int(previous_gap)
     )
-
-
-def _enqueue_session_pending_tile(session, tile) -> None:
-    enqueue = getattr(session, "enqueue_pending_tile", None)
-    if callable(enqueue):
-        enqueue(tile)
-        return
-    session.pending_tiles.append(tile)
 
 
 def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:

@@ -101,7 +101,6 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         lod_policy_mode=mode,
         lod_page_cache=pyramid,
     )
@@ -2659,25 +2658,28 @@ def test_floor_payloads_never_stall_level_convergence():
     assert 1 not in active, "preview payloads must stay outside the level scope"
 
 
-def test_orphaned_loading_tiles_are_requeued_for_evaluation():
-    """Regression: declined admission left tiles loading forever with no
-    pending work, so the visible plan never completed and finalization
-    retried commits in a timer loop at idle."""
+def test_orphaned_loading_state_does_not_suppress_pipeline_target():
+    """A stale loading marker cannot become a second scheduling owner."""
 
     session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
-    # Simulate a lost evaluation: dequeued, marked loading, work vanished.
+    # Simulate a lost evaluation: lifecycle still says loading, but no task
+    # claim exists. The ladder must derive the missing producer from target
+    # state instead of relying on a repair queue.
     del session.rendered_tiles[1]
     session.dirty_payloads.pop(1, None)
     session.loading_tiles.add(1)
-    assert not session.pending_tiles
+    demand = session.lod_policy_decision.demand
+    states = render_effects.tile_lod_states(session, demand)
+    policy = LadderPolicy(
+        mode=session.lod_policy_mode,
+        floor_level=4,
+        preview_level=2,
+        reduced_input_available=True,
+    )
+    steps = LodLadder(policy).plan(states, demand)
 
-    requeued = session.requeue_orphaned_loading_tiles()
-    assert requeued == 1
-    assert 1 not in session.loading_tiles
-    assert [int(t.montage_index) for t in session.pending_tiles] == [1]
-
-    # Idempotent: a second repair finds nothing.
-    assert session.requeue_orphaned_loading_tiles() == 0
+    assert 1 in session.required_target_unsettled_tiles()
+    assert any(int(step.tile_number) == 1 for step in steps)
 
 
 def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
@@ -5364,7 +5366,6 @@ def test_shared_transform_pipeline_blocks_direct_display_target(monkeypatch):
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     monkeypatch.setattr(render_effects, "preview_pipeline_commutes_for_display_lod", lambda _session, _tile: False)
     monkeypatch.setattr(
         render_effects,
@@ -5417,7 +5418,7 @@ def test_shared_transform_owner_suppresses_duplicate_per_tile_preview_rungs(monk
     assert all(not state.allow_preview for state in states)
 
 
-def test_shared_transform_fallback_releases_per_tile_pending(monkeypatch):
+def test_shared_transform_fallback_does_not_falsely_settle_exact_target(monkeypatch):
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     session.document = ArrayDocument(
         np.ones((TILE, TILE, 8), dtype=np.float32),
@@ -5426,7 +5427,6 @@ def test_shared_transform_fallback_releases_per_tile_pending(monkeypatch):
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     session.display_tile_payloads[0] = DisplayTilePayload(
         0,
         int(tile.source_index),
@@ -5450,20 +5450,24 @@ def test_shared_transform_fallback_releases_per_tile_pending(monkeypatch):
     )
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
 
-    effects.release_display_owned_pending()
+    states = effects.tile_states(
+        _pipeline_intent_for(session),
+        session.lod_policy_decision.demand,
+        _pipeline_scope_for(session),
+    )
 
-    assert not session.pending_tiles
+    assert states
+    assert session.required_target_unsettled_tiles() == (0,)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
 
-def test_shader_preview_evidence_releases_per_tile_pending(monkeypatch):
+def test_shader_preview_evidence_does_not_falsely_settle_exact_target(monkeypatch):
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     session.shader_display = True
     tile = session.plan.tiles[0]
     session.rendered_tiles.clear()
     session.dirty_payloads.clear()
-    session.enqueue_pending_tile(tile)
     source_id = (*session.tile_semantic_source_id(tile.source_index), "floor", "complex_rg32f", (4, 4))
     session.display_tile_payloads[0] = DisplayTilePayload(
         0,
@@ -5485,9 +5489,14 @@ def test_shader_preview_evidence_releases_per_tile_pending(monkeypatch):
     monkeypatch.setattr(render_effects, "preview_pipeline_commutes_for_display_lod", lambda _session, _tile: True)
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
 
-    effects.release_display_owned_pending()
+    states = effects.tile_states(
+        _pipeline_intent_for(session),
+        session.lod_policy_decision.demand,
+        _pipeline_scope_for(session),
+    )
 
-    assert not session.pending_tiles
+    assert states
+    assert session.required_target_unsettled_tiles() == (0,)
     assert 0 not in session.active_tile_requests
     assert 0 not in session.loading_tiles
 
@@ -5510,10 +5519,10 @@ def test_ready_stage_dependent_rearms_pending_tile_until_materialized():
 
     assert montage_commit.rearm_ready_stage_dependents(session) == 1
 
-    assert session.pending_tile_numbers() == (0,)
     assert session.stage_fan_in.tile_stage_keys == {}
     assert session.tile_compute_waiting_for_stage == 0
     assert session.stage_backed_tiles_pending == 0
+    assert session.required_target_unsettled_tiles() == (0,)
     assert not session.is_complete()
 
 
@@ -5533,8 +5542,7 @@ def test_stage_activation_batch_rearms_tiles_after_wait_binding_clears():
 
     assert batch.tiles == (0,)
     assert session.stage_fan_in.tile_stage_keys == {}
-    assert montage_commit.enqueue_stage_dependent_tiles(session, batch.tiles) == 1
-    assert session.pending_tile_numbers() == (0,)
+    assert session.required_target_unsettled_tiles() == (0,)
     assert not session.is_complete()
 
 
@@ -5550,7 +5558,7 @@ def test_orphaned_stage_dependent_releases_to_direct_tile_work():
     assert montage_commit.rearm_ready_stage_dependents(session) == 1
 
     assert session.stage_fan_in.tile_stage_keys == {}
-    assert session.pending_tile_numbers() == (0,)
+    assert session.required_target_unsettled_tiles() == (0,)
     assert not session.is_complete()
 
 
@@ -6205,7 +6213,6 @@ def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod
     session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 20))
     assert session.lod_policy_mode == LOD_POLICY_RESIDENT
     assert session.lod_policy_decision.demand.desired_level > 0
-    session.pending_tiles.clear()
     session.stage_planning_deferred = True
     session.stage_planning_async = False
     session.deferred_missing_tiles = tuple(session.plan.tiles)
@@ -6230,7 +6237,8 @@ def test_deferred_stage_completion_does_not_enqueue_native_tiles_for_reduced_lod
     )
 
     assert montage_commit.complete_deferred_stage_fan_in(renderer, session)
-    assert session.pending_tile_numbers() == ()
+    assert session.deferred_missing_tiles == ()
+    assert session.required_target_unsettled_tiles() == (0, 1, 2, 3)
     assert getattr(session, "_test_retargeted", False) is True
 
 
@@ -6249,7 +6257,6 @@ def test_deferred_stage_plan_applies_after_unrelated_render_generation_advance(m
     from types import SimpleNamespace
 
     session = _session(count=4, pyramid=LodPageCache(max_bytes=1 << 20))
-    session.pending_tiles.clear()
     session.stage_planning_deferred = True
     session.stage_planning_async = False
     session.deferred_missing_tiles = tuple(session.plan.tiles)

@@ -319,7 +319,8 @@ def run_profile_montage_workflow(
                 )
                 raise RuntimeError(
                     "profile session fixture did not reach a settled frame before measurement: "
-                    f"pending={0 if session is None else len(session.pending_tile_numbers())} "
+                    "target_unsettled="
+                    f"{0 if session is None else len(session.required_target_unsettled_tiles())} "
                     f"loading={0 if session is None else len(getattr(session, 'loading_tiles', ()) or ())} "
                     f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
                     f"dirty={0 if session is None else len(getattr(session, 'dirty_payloads', ()) or ())} "
@@ -2199,7 +2200,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     if session is None:
         return {
             "visible_has_backlog": False,
-            "visible_pending_tiles": 0,
+            "visible_target_unsettled_tiles": 0,
             "visible_loading_tiles": 0,
             "visible_active_requests": 0,
             "visible_dirty_tiles": 0,
@@ -2208,14 +2209,14 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
             "visible_stage_waiters": 0,
         }
     fan = getattr(session, "stage_fan_in", None)
-    pending = _tile_number_set(getattr(session, "pending_tiles", ()))
+    target_unsettled = _tile_number_set(session.required_target_unsettled_tiles())
     loading = _tile_number_set(getattr(session, "loading_tiles", ()))
     active = _tile_number_set(getattr(session, "active_tile_requests", ()))
     dirty = _tile_number_set(getattr(session, "dirty_payloads", ()))
     upserts = _tile_number_set(getattr(session, "pending_payload_upserts", ()))
     removals = _tile_number_set(getattr(session, "pending_removals", ()))
     stage_waiters = _tile_number_set(getattr(fan, "tile_stage_keys", {}) if fan is not None else {})
-    visible_pending = pending & expected
+    visible_target_unsettled = target_unsettled & expected
     visible_loading = loading & expected
     visible_active = active & expected
     visible_dirty = dirty & expected
@@ -2224,7 +2225,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     visible_stage_waiters = stage_waiters & expected
     visible_changed = bool(visible_dirty or visible_upserts or visible_removals)
     visible_has_backlog = bool(
-        visible_pending
+        visible_target_unsettled
         or visible_loading
         or visible_active
         or visible_stage_waiters
@@ -2234,7 +2235,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     )
     return {
         "visible_has_backlog": visible_has_backlog,
-        "visible_pending_tiles": len(visible_pending),
+        "visible_target_unsettled_tiles": len(visible_target_unsettled),
         "visible_loading_tiles": len(visible_loading),
         "visible_active_requests": len(visible_active),
         "visible_dirty_tiles": len(visible_dirty),
@@ -2293,7 +2294,7 @@ def _montage_stall_signature(session):
     return (
         int(getattr(session, "session_id", -1)),
         len(getattr(session, "loading_tiles", ()) or ()),
-        len(session.pending_tile_numbers()) if hasattr(session, "pending_tile_numbers") else 0,
+        len(session.required_target_unsettled_tiles()),
         len(getattr(session, "active_tile_requests", ()) or ()),
         len(getattr(session, "dirty_payloads", {}) or {}),
         0 if fan is None else len(getattr(fan, "tile_stage_keys", {}) or {}),
@@ -4007,7 +4008,8 @@ def _wait_for_montage_complete(
         _stall_prefix = "timed out waiting for montage completion: "
     raise TimeoutError(
         _stall_prefix
-        + f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
+        + f"loaded={snapshot.montage.loaded_tiles} "
+        f"target_unsettled={snapshot.montage.target_unsettled_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"stage_active={0 if fan_in is None else len(getattr(fan_in, 'active_requests', ()) or ())} "
@@ -4018,7 +4020,8 @@ def _wait_for_montage_complete(
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"fully_visible={final_visibility_state.get('fully_visible', False)} "
         f"requested={final_visibility_state.get('requested_tile_count', 0)} "
-        f"visible_pending={final_visibility_state.get('visible_pending_tiles', 0)} "
+        "visible_target_unsettled="
+        f"{final_visibility_state.get('visible_target_unsettled_tiles', 0)} "
         f"visible_loading={final_visibility_state.get('visible_loading_tiles', 0)} "
         f"visible_active={final_visibility_state.get('visible_active_requests', 0)} "
         f"visible_dirty={final_visibility_state.get('visible_dirty_tiles', 0)} "
@@ -4204,7 +4207,7 @@ def _phase_record(
         "montage_histogram_cross_level_reuses": int(getattr(montage, "tile_histogram_cross_level_reuses", 0) or 0),
         "montage_loaded_tiles": int(montage.loaded_tiles),
         "montage_loading_tiles": int(montage.loading_tiles),
-        "montage_pending_tiles": int(montage.pending_tiles),
+        "montage_target_unsettled_tiles": int(montage.target_unsettled_tiles),
         "montage_tile_compute_cache_hits": int(montage.tile_compute_cache_hits),
         "montage_tile_compute_stage_backed": int(montage.tile_compute_stage_backed),
         "montage_tile_compute_direct": int(montage.tile_compute_direct),

@@ -51,10 +51,8 @@ from arrayscope.presentation import (
     payload_ref_from_display_payload,
 )
 from arrayscope.display.model.tile_priority import (
-    MontageTilePriorityQueue,
     TilePriorityContext,
     prioritize_tile_numbers,
-    tile_numbers,
 )
 from arrayscope.render import lod as render_lod
 from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
@@ -600,7 +598,6 @@ class FrameSession:
     rendered_tiles: dict[int, RenderedTile]
     loading_tiles: set[int]
     skipped_tiles: set[int]
-    pending_tiles: MontageTilePriorityQueue | deque[MontageTile] | list[MontageTile]
     shader_display: bool = False
     # ADR 0055 G3: window-invariant anchoring for non-montage sessions on
     # atlas backends (display.source_anchoring.SourceAnchoring); stamps
@@ -771,7 +768,12 @@ class FrameSession:
     def required_tile_numbers(self) -> tuple[int, ...]:
         """The one set that admission, evidence, and completion must render."""
 
-        return tuple(sorted(int(tile) for tile in self.visible_tile_numbers))
+        return tuple(
+            sorted(
+                set(int(tile) for tile in self.visible_tile_numbers)
+                - set(int(tile) for tile in self.skipped_tiles)
+            )
+        )
 
     def required_target_unsettled_tiles(self) -> tuple[int, ...]:
         return self.lifecycle.target_unsettled_tiles(self.required_tile_numbers())
@@ -846,14 +848,6 @@ class FrameSession:
         self.level_generation.revision = int(value)
 
     def __post_init__(self) -> None:
-        # These queues are drained throughout progressive rendering.  The
-        # visible tile queue is indexed so viewport/hover retargeting updates
-        # metadata instead of sorting inside high-frequency callbacks.
-        pending = tuple(self.pending_tiles or ())
-        self.pending_tiles = MontageTilePriorityQueue(
-            pending,
-            context_provider=self.tile_priority_context,
-        )
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
             int(source) for source in (self.pending_level_sources or ())
@@ -975,7 +969,6 @@ class FrameSession:
         coverage_margin_tiles: int = 1,
         near_margin_tiles: int = 2,
         priority_focus: tuple[float, float] | None = None,
-        priority_retarget_limit: int = 64,
     ) -> tuple[tuple[MontageTile, ...], bool]:
         """Retarget draw and compute coverage without replacing the session.
 
@@ -994,7 +987,6 @@ class FrameSession:
             self.plan = plan
             if layout_changed:
                 self._layout_geometry_changed_pending = True
-                self._remap_queued_tiles_to_plan()
         self.priority_focus = priority_focus
         self._selected_lod_factor()
         active = _viewport_tiles(
@@ -1038,7 +1030,6 @@ class FrameSession:
             self.update_level_presentation_scope()
         self.priority_retargeted_tiles = self.retarget_tile_priority(
             focus=priority_focus,
-            max_items=max(1, int(priority_retarget_limit)),
             active_tiles=active_numbers,
             near_tiles=near_numbers,
         )
@@ -1145,7 +1136,6 @@ class FrameSession:
         # renderer re-marks the scan whenever a commit parks on evidence).
         self.level_scan_cursor = 0
         self.level_scan_remaining_tiles = 0
-        self.pending_tiles.prune(frozenset())
         hits = misses = unchanged = remapped = 0
         changed_slots: set[int] = set()
         plan_tiles_by_number = {
@@ -1444,7 +1434,6 @@ class FrameSession:
         self.stage_fan_in.detach_unbound_requests()
         self.active_tile_requests.discard(index)
         self.skipped_tiles.discard(index)
-        self.discard_pending_tile(index)
         self.loading_tiles.add(index)
         self.lifecycle.evaluation_completed(index)
         self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
@@ -3331,7 +3320,7 @@ class FrameSession:
         }
         presented = set(int(tile) for tile in self.lifecycle.presented_tiles)
         visible = set(int(tile) for tile in self.visible_tile_numbers)
-        pending = set(int(tile) for tile in self.pending_tile_numbers())
+        target_unsettled = set(int(tile) for tile in self.required_target_unsettled_tiles())
         loading = set(int(tile) for tile in self.loading_tiles)
         active = set(int(tile) for tile in self.active_tile_requests)
         dirty = set(int(tile) for tile in self.dirty_payloads)
@@ -3340,7 +3329,7 @@ class FrameSession:
         desired_payloads = dict(self.display_tile_payloads)
         state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
         suspect = set(visible - presented)
-        suspect.update(pending | loading | active | dirty | upserts)
+        suspect.update(target_unsettled | loading | active | dirty | upserts)
         for tile_number, payload in desired_payloads.items():
             tile = plan_tiles.get(int(tile_number))
             if tile is not None and int(getattr(payload, "source_index", -1)) != int(tile.source_index):
@@ -3450,7 +3439,7 @@ class FrameSession:
                     "visible_first_pixel_complete": bool(visible_first_pixel_complete),
                     "rendered": tile_number in self.rendered_tiles,
                     "presented": tile_number in presented,
-                    "pending": tile_number in pending,
+                    "target_unsettled": tile_number in target_unsettled,
                     "loading": tile_number in loading,
                     "active": tile_number in active,
                     "dirty": tile_number in dirty,
@@ -3459,49 +3448,6 @@ class FrameSession:
                 }
             )
         return tuple(rows)
-
-    def requeue_orphaned_loading_tiles(self) -> int:
-        """Re-enqueue planned tiles stuck in loading with no work attached.
-
-        A tile can be dequeued, marked loading, and then lose its evaluation
-        (declined admission, crashed worker path).  Loading with no pending,
-        active, or completed-pending work is unservable state: the visible
-        plan can never complete and finalization retries forever.  Repair by
-        returning such tiles to the pending queue; scheduling stays bounded
-        by the ordinary drain.  Idempotent and cheap — set arithmetic plus
-        one enqueue per orphan.
-        """
-
-        if bool(getattr(self, "stage_planning_deferred", False)):
-            # Interaction-burst session: missing tiles intentionally have no
-            # work attached until the deferred stage planning runs.  Requeuing
-            # them here would start direct per-tile evaluations without the
-            # stage fan-in (each tile computing the expensive stage alone).
-            return 0
-        orphaned = (
-            set(int(t) for t in self.loading_tiles)
-            - set(int(t) for t in self.active_tile_requests)
-            - set(int(t) for t in self.rendered_tiles)
-            - {int(t.montage_index) for t in self.pending_tiles}
-        )
-        if not orphaned:
-            return 0
-        by_number = {int(t.montage_index): t for t in tuple(self.plan.tiles)}
-        requeued = 0
-        for index in sorted(orphaned):
-            tile = by_number.get(int(index))
-            # Orphan requeue is an evaluation repair only.  rung residency
-            # claims release through the materialization/session-replacement
-            # paths; never silently drop an unexpected effect here.
-            if self.lifecycle.evaluation_declined(int(index)):
-                raise AssertionError("unexecuted ReleaseClaim effects in requeue repair")
-            if tile is None or int(index) in self.skipped_tiles:
-                self.loading_tiles.discard(int(index))
-                continue
-            self.loading_tiles.discard(int(index))
-            if self.enqueue_pending_tile(tile):
-                requeued += 1
-        return requeued
 
     def mark_loading(self, tile: MontageTile) -> None:
         index = int(tile.montage_index)
@@ -3521,20 +3467,8 @@ class FrameSession:
             self.display_tile_payloads.pop(index, None)
             self.level_generation.forget_tile(index)
             self.tile_source_ids.pop(index, None)
-            self.discard_pending_tile(index)
             self.lifecycle.tile_skipped(index)
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
-
-    def next_tile(self) -> MontageTile | None:
-        self._ensure_pending_priority_queue()
-        while self.pending_tiles:
-            tile = self.pending_tiles.pop()
-            index = int(tile.montage_index)
-            if index not in self.rendered_tiles and index not in self.skipped_tiles:
-                self.mark_loading(tile)
-                self.active_tile_requests.add(index)
-                return tile
-        return None
 
     def rendered_tuple(self) -> tuple[RenderedTile, ...]:
         return tuple(sorted(self.rendered_tiles.values(), key=lambda rendered: rendered.tile.montage_index))
@@ -3573,7 +3507,9 @@ class FrameSession:
 
     def is_complete(self) -> bool:
         return not (
-            self.pending_tiles
+            not self.required_target_settled()
+            or self.stage_planning_deferred
+            or self.deferred_missing_tiles
             or self.loading_tiles
             or self.active_tile_requests
             or self.stage_fan_in.active_requests
@@ -3705,101 +3641,10 @@ class FrameSession:
         self.final_commit_pending = commit_owed
         self.flush_pending = commit_owed
 
-    def enqueue_pending_tile(self, tile: MontageTile) -> bool:
-        self._ensure_pending_priority_queue()
-        index = int(tile.montage_index)
-        if index in self.rendered_tiles or index in self.skipped_tiles or index in self.loading_tiles:
-            self.pending_tiles.discard(index)
-            return False
-        before = len(self.pending_tiles)
-        self.pending_tiles.append(tile)
-        return len(self.pending_tiles) > before
-
-    def enqueue_pending_tiles(self, tiles) -> int:
-        added = 0
-        for tile in tuple(tiles or ()):
-            if self.enqueue_pending_tile(tile):
-                added += 1
-        return int(added)
-
-    def discard_pending_tile(self, tile_or_index) -> bool:
-        self._ensure_pending_priority_queue()
-        return bool(self.pending_tiles.discard(tile_or_index))
-
-    def prune_pending_tiles(self, keep: set[int] | frozenset[int]) -> int:
-        self._ensure_pending_priority_queue()
-        return int(self.pending_tiles.prune(keep))
-
-    def pending_tile_numbers(self) -> tuple[int, ...]:
-        self._ensure_pending_priority_queue()
-        self._prune_stale_pending_tiles()
-        return tile_numbers(self.pending_tiles)
-
-    def _prune_stale_pending_tiles(self) -> int:
-        stale = (
-            set(int(tile) for tile in self.rendered_tiles)
-            | set(int(tile) for tile in self.skipped_tiles)
-            | set(int(tile) for tile in self.loading_tiles)
-        )
-        presented = set(int(tile) for tile in self.lifecycle.presented_tiles)
-        for index in tuple(self.pending_tiles):
-            tile_number = int(getattr(index, "montage_index", index))
-            if tile_number not in presented:
-                continue
-            if not (0 <= tile_number < len(getattr(self.plan, "tiles", ()) or ())):
-                continue
-            payload = self.display_tile_payloads.get(tile_number)
-            if payload is None:
-                continue
-            tile = self.plan.tiles[tile_number]
-            if int(getattr(payload, "source_index", -1)) != int(tile.source_index):
-                continue
-            semantic_id = self.tile_semantic_source_id(tile.source_index)
-            payload_source_id = getattr(payload, "source_id", None)
-            if payload_source_id != semantic_id and _base_source_id(payload_source_id) != semantic_id:
-                continue
-            lod = getattr(payload, "lod", None)
-            if lod is not None and int(getattr(lod, "level", 0) or 0) <= 0:
-                continue
-            if _payload_has_level_presentation_evidence(
-                payload,
-                shader_display=bool(getattr(self, "shader_display", False)),
-            ):
-                stale.add(tile_number)
-        removed = 0
-        for index in tuple(stale):
-            removed += int(bool(self.pending_tiles.discard(int(index))))
-        return int(removed)
-
-    def _remap_queued_tiles_to_plan(self) -> None:
-        """Rebind queued tile objects to the current plan's geometry.
-
-        Session invariant: every queued tile belongs to ``self.plan``. A
-        layout reflow (column-count change during window-shape settling)
-        moves each montage index to a new position; tile objects captured
-        under the previous geometry would be *scheduled* by their stale
-        coordinates but *drawn* at the new ones, so the fill visibly ignores
-        the priority order no matter how correct the scheduling context is.
-        """
-        tiles = tuple(getattr(self.plan, "tiles", ()) or ())
-
-        def remap(tile):
-            index = int(getattr(tile, "montage_index", -1))
-            return tiles[index] if 0 <= index < len(tiles) else tile
-
-        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
-            pending = tuple(self.pending_tiles.insertion_tiles())
-        else:
-            pending = tuple(self.pending_tiles or ())
-        self.pending_tiles = MontageTilePriorityQueue(
-            tuple(remap(tile) for tile in pending),
-            context_provider=self.tile_priority_context,
-        )
     def retarget_tile_priority(
         self,
         *,
         focus=None,
-        max_items: int = 64,
         active_tiles=None,
         near_tiles=None,
         view_range=None,
@@ -3828,15 +3673,16 @@ class FrameSession:
             priority_tiles=self._priority_focus_tile_numbers(),
             view_range=range_for_priority,
         )
-        # Every ordering consumer (pending queue, per-commit upsert admission,
-        # prefetch candidates) reads this one
-        # context through tile_priority_context; retargets are the only
-        # writer, and queues resolve it live via their context provider.
+        # Every ordering consumer (per-commit upsert admission and prefetch
+        # candidates) reads this one context through tile_priority_context;
+        # retargets are the only writer.
         # Rebuilding the context ad hoc per consumer let different stages of
         # the pipeline order the same fill around different anchors.
         self._priority_context = context
-        self._ensure_pending_priority_queue()
-        self.priority_retargeted_tiles = len(self.pending_tiles)
+        self.priority_retargeted_tiles = len(
+            set(int(tile) for tile in tuple(active_tiles or ()))
+            | set(int(tile) for tile in tuple(near_tiles or ()))
+        )
         return int(self.priority_retargeted_tiles)
 
     def tile_priority_context(self) -> TilePriorityContext:
@@ -3923,16 +3769,6 @@ class FrameSession:
             plan_tiles=tuple(getattr(self.plan, "tiles", ()) or ()),
             context=self.tile_priority_context(),
         )
-
-    def _ensure_pending_priority_queue(self, *, context: TilePriorityContext | None = None) -> None:
-        del context
-        if isinstance(self.pending_tiles, MontageTilePriorityQueue):
-            return
-        self.pending_tiles = MontageTilePriorityQueue(
-            tuple(self.pending_tiles or ()),
-            context_provider=self.tile_priority_context,
-        )
-
 
 @dataclass(frozen=True)
 class PresentationTransitionDecision:

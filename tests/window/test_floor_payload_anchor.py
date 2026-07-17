@@ -79,7 +79,6 @@ def _session(*, montage_axis, source_anchoring=None, count=2):
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         lod_policy_mode=LOD_POLICY_RESIDENT,
         lod_page_cache=LodPageCache(max_bytes=1 << 24),
         source_anchoring=source_anchoring,

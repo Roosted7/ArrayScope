@@ -200,7 +200,6 @@ class Harness:
         return {
             "visible_complete": session.visible_plan_complete(),
             "required_unsettled": session.required_target_unsettled_tiles(),
-            "pending": tuple(session.pending_tiles),
             "active_requests": tuple(session.active_tile_requests),
             "dirty": tuple(session.dirty_payloads),
             "upserts": tuple(session.pending_payload_upserts),

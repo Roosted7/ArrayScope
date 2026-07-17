@@ -683,14 +683,14 @@ def ingest_lod_demand(session) -> object | None:
     return demand
 
 
-def native_missing_tile_queue_required(lod_policy_mode: str, demand) -> bool:
-    """Return whether a missing tile belongs in the native evaluation queue.
+def missing_tiles_require_native_target(lod_policy_mode: str, demand) -> bool:
+    """Return whether missing tiles owe an immediate native target.
 
     Resident LOD separates first correct pixels from exact/native refinement:
     if the viewport demands a reduced display level, cold tiles should be
-    filled by ladder/pipeline rungs instead of entering the native target-tile
-    queue as the first response. Native-only policy, invalid demand, and
-    native-scale resident demand still require native evaluation.
+    filled by ladder/pipeline page rungs first. Native-only policy, invalid
+    demand, and native-scale resident demand still require native evaluation.
+    This is a target-policy query; it owns no queue or scheduling state.
     """
 
     if str(lod_policy_mode) != LOD_POLICY_RESIDENT:

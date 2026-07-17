@@ -82,6 +82,14 @@ sort geometry keys, page indices, or unordered membership snapshots for stable
 mechanics; it may not sort or setify the ordered command collection. Backend
 hover state and cache iteration order never choose semantic priority.
 
+`FrameSession` does not persist a second tile-work queue. Required target debt
+is read from `TileLifecycle` whenever `FramePipeline` plans; running work is a
+task/evaluation claim; stage waiting is a stage-fan-in binding; deferred stage
+planning retains only its immutable missing-tile input. Completion and
+diagnostics derive from those owners. A priority queue may exist as a local,
+ephemeral ordering utility for prefetch, but its membership is never semantic
+or lifecycle state.
+
 VisPy atlas residency is a data-keyed cache, not a mirror of the current viewport. `active_tiles`
 controls which retained tile mappings are visible; source identity, texture kind, LOD, tile shape,
 storage mode, budget eviction, reset/context loss, or teardown are the only valid reasons for texture

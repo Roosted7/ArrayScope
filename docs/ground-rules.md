@@ -84,4 +84,7 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
    certification bar; PyQtGraph targets GPU-headless/remote use and gets 2×
    the performance allowance (Thomas, 2026-07-14).
 11. **One scheduler.** No new scheduling systems beside the kernel, no new
-    pacing timers, no parallel tile-state collections (ADR 0053).
+    pacing timers, no parallel tile-state collections (ADR 0053). Required
+    tile debt belongs to `TileLifecycle`; stage waiters belong to the stage
+    fan-in; deferred planning owns an immutable missing set. A session-level
+    pending/repair queue must not duplicate any of those facts.

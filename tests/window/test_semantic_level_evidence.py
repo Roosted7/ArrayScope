@@ -70,7 +70,6 @@ def _session(data, *, session_id=1, selected=tuple(range(20)), level_key=None):
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=(plan.tiles[0],),
     )
     session.frame_plan = SimpleNamespace(active_region_ids=(0,))
     session.pipeline = SimpleNamespace(effects=SimpleNamespace(request_presentation=lambda: None))

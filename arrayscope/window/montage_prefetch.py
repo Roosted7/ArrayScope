@@ -362,7 +362,7 @@ def _interaction_active(window) -> bool:
 
 def _busy(window, session=None) -> bool:
     if session is not None and (
-        getattr(session, "pending_tiles", None)
+        not session.required_target_settled()
         or getattr(session, "loading_tiles", None)
         or getattr(session, "active_tile_requests", None)
         or getattr(session, "dirty_payloads", None)

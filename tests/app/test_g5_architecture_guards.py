@@ -28,3 +28,46 @@ def test_vispy_cannot_infer_reduced_page_keys():
         node.id for node in ast.walk(key_builder) if isinstance(node, ast.Name)
     }
     assert vispy_text.count("DataChunkKey(") == 1
+
+
+def test_live_render_path_cannot_resurrect_frame_session_pending_queue():
+    """Target lifecycle is the sole live scheduling-debt authority."""
+
+    live_paths = (
+        ROOT / "arrayscope" / "window" / "frame_session.py",
+        ROOT / "arrayscope" / "window" / "frame_controller.py",
+        ROOT / "arrayscope" / "window" / "frame_effects.py",
+        ROOT / "arrayscope" / "window" / "frame_runtime.py",
+        ROOT / "arrayscope" / "window" / "main.py",
+        ROOT / "arrayscope" / "window" / "montage_prefetch.py",
+        ROOT / "arrayscope" / "window" / "render_resources.py",
+        ROOT / "arrayscope" / "render" / "lod.py",
+    )
+    forbidden_helpers = {
+        "next_tile",
+        "pending_tile_numbers",
+        "enqueue_pending_tile",
+        "discard_pending_tile",
+        "prune_pending_tiles",
+        "requeue_orphaned_loading_tiles",
+        "release_display_owned_pending",
+        "enqueue_stage_dependent_tiles",
+        "_classify_visible_montage_tiles",
+        "_enqueue_session_pending_tile",
+    }
+    violations: list[str] = []
+    for path in live_paths:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "pending_tiles":
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: .pending_tiles")
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden_helpers:
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.name}")
+            if (
+                path.name == "frame_session.py"
+                and isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "pending_tiles"
+            ):
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: pending_tiles field")
+    assert not violations, "live duplicate scheduling owner resurrected:\n" + "\n".join(violations)

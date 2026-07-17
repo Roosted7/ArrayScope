@@ -41,7 +41,7 @@ class TraceStall:
     recorded_at: str
     session_id: int | None
     loaded_tiles: int
-    pending_tiles: int
+    target_unsettled_tiles: int
     changed_timings_ms: tuple[tuple[str, float], ...]
 
 
@@ -134,7 +134,15 @@ def summarize_diagnostics_trace(
                         recorded_at=str(record.get("recorded_at", "")),
                         session_id=_optional_int(montage.get("session_id")),
                         loaded_tiles=int(montage.get("loaded_tiles", 0) or 0),
-                        pending_tiles=int(montage.get("pending_tiles", 0) or 0),
+                        target_unsettled_tiles=int(
+                            montage.get(
+                                "target_unsettled_tiles",
+                                # Historical JSONL traces predate the
+                                # canonical target-settlement metric.
+                                montage.get("pending_tiles", 0),
+                            )
+                            or 0
+                        ),
                         changed_timings_ms=changed,
                     )
                 )
@@ -181,7 +189,8 @@ def format_trace_summary_markdown(summary: DiagnosticsTraceSummary, *, timing_li
     for stall in sorted(summary.stalls, key=lambda item: item.gap_ms, reverse=True):
         context = (
             f"sequence {stall.sequence}, gap {stall.gap_ms:.1f} ms, "
-            f"session {stall.session_id}, loaded/pending {stall.loaded_tiles}/{stall.pending_tiles}"
+            f"session {stall.session_id}, loaded/target-unsettled "
+            f"{stall.loaded_tiles}/{stall.target_unsettled_tiles}"
         )
         lines.append(f"- {context}")
         for name, value in stall.changed_timings_ms[:5]:

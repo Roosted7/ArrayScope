@@ -648,7 +648,7 @@ def _montage_overview(snapshot) -> str:
         return "inactive"
     return (
         f"{snapshot.montage.loaded_tiles}/{snapshot.montage.visible_tiles} loaded, "
-        f"pending {snapshot.montage.pending_tiles}, "
+        f"target unsettled {snapshot.montage.target_unsettled_tiles}, "
         f"resident {snapshot.montage_timing.tile_layer_resident_items}/"
         f"{snapshot.montage_timing.tile_layer_storage_capacity}, "
         f"updated {snapshot.montage_timing.tile_layer_items_updated}, "

@@ -59,5 +59,5 @@ class RenderResourceMixin:
 
     def _montage_render_active(self) -> bool:
         session = getattr(self, "_frame_session", None)
-        return bool(session is not None and (session.pending_tiles or session.loading_tiles))
+        return bool(session is not None and not session.is_complete())
     

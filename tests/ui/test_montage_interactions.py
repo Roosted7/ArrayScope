@@ -1162,7 +1162,6 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
                         "visible_complete": stalled.visible_plan_complete(),
                         "required": sorted(stalled.required_tile_numbers()),
                         "unsettled": sorted(stalled.required_target_unsettled_tiles()),
-                        "pending": sorted(stalled.pending_tiles),
                         "active_requests": sorted(stalled.active_tile_requests),
                         "dirty": sorted(stalled.dirty_payloads),
                         "acks": sorted(_visible_backend_acknowledgements(win, backend)),

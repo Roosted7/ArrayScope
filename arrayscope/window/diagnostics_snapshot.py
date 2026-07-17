@@ -98,7 +98,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
         active_tile_requests=0 if session is None else len(getattr(session, "active_tile_requests", ())),
-        pending_tiles=0 if session is None else len(session.pending_tiles),
+        target_unsettled_tiles=(
+            0
+            if session is None
+            else len(session.required_target_unsettled_tiles())
+        ),
         pending_payload_upserts=0 if session is None else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
