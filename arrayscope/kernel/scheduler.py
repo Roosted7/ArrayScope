@@ -24,7 +24,7 @@ import heapq
 import itertools
 import threading
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic, perf_counter_ns
 from typing import Any, Callable
 
@@ -287,6 +287,75 @@ class Kernel:
                     record.token.cancel()
             self._cond.notify_all()
 
+    def rerank_unstarted_tile_tasks(
+        self,
+        *,
+        session_id: int,
+        scheduling_ranks: dict[int, int],
+    ) -> int:
+        """Apply current-camera tile ranks to every unstarted task in a session.
+
+        Camera changes do not invalidate materialization, so retargeting must
+        not cancel and resubmit unchanged work. The kernel instead updates the
+        immutable task descriptions for queued/dependency/quota-parked records
+        and atomically rebuilds its ready heap. Running work is deliberately
+        left alone; only work which has not started can still be reordered.
+        """
+
+        session_id = int(session_id)
+        if session_id <= 0:
+            return 0
+        normalized_ranks = {
+            int(tile_number): int(scheduling_rank)
+            for tile_number, scheduling_rank in scheduling_ranks.items()
+        }
+        if any(scheduling_rank < 0 for scheduling_rank in normalized_ranks.values()):
+            raise ValueError("scheduling ranks must be non-negative")
+        if not normalized_ranks:
+            return 0
+
+        updated = 0
+        ready_updated = 0
+        parked_updated = 0
+        updated_tiles: set[int] = set()
+        with self._lock:
+            for record in self._records.values():
+                if record.state not in (_QUEUED, _PARKED_DEPS, _PARKED_QUOTA):
+                    continue
+                spec = record.spec
+                if int(spec.session_id) != session_id:
+                    continue
+                scheduling_rank = normalized_ranks.get(int(spec.tile_number))
+                if scheduling_rank is None or scheduling_rank == int(spec.scheduling_rank):
+                    continue
+                record.spec = replace(spec, scheduling_rank=scheduling_rank)
+                updated += 1
+                updated_tiles.add(int(spec.tile_number))
+                if record.state == _QUEUED:
+                    ready_updated += 1
+                else:
+                    parked_updated += 1
+            if updated:
+                self._ready = [
+                    self._ready_entry_locked(record)
+                    for record in self._records.values()
+                    if record.state == _QUEUED
+                ]
+                heapq.heapify(self._ready)
+                self._cond.notify_all()
+
+        if updated:
+            emit_trace(
+                "kernel_rerank",
+                session_id=session_id,
+                updated_tasks=int(updated),
+                updated_tiles=int(len(updated_tiles)),
+                ready_updated=int(ready_updated),
+                parked_updated=int(parked_updated),
+            )
+            self._backend.wake()
+        return int(updated)
+
     def set_lane_quota(self, lane: Lane, quota: int | None) -> None:
         """Set or clear the maximum concurrent tasks for one lane.
 
@@ -540,12 +609,18 @@ class Kernel:
 
     def _enqueue_ready_locked(self, record: _Record) -> None:
         record.state = _QUEUED
+        heapq.heappush(self._ready, self._ready_entry_locked(record))
+
+    def _ready_entry_locked(self, record: _Record) -> tuple[int, int, int, float, int]:
         spec = record.spec
         deadline = float("inf") if spec.deadline_ns <= 0 else float(spec.deadline_ns)
         rank = 0 if spec.visible else 1
-        heapq.heappush(
-            self._ready,
-            (rank, int(spec.priority), int(spec.scheduling_rank), deadline, record.seq),
+        return (
+            rank,
+            int(spec.priority),
+            int(spec.scheduling_rank),
+            deadline,
+            record.seq,
         )
 
     def _pop_ready_locked(self) -> _Record | None:

@@ -191,6 +191,30 @@ def test_unranked_visible_work_does_not_preempt_ranked_tiles():
     assert ran == ["edge-tile", "unranked-stage"]
 
 
+def test_rerank_unstarted_tile_tasks_rebuilds_ready_order_for_current_camera():
+    kernel, backend = make_manual()
+    ran = []
+    for tile_number, scheduling_rank in ((0, 0), (1, 1), (2, 2)):
+        kernel.submit(
+            TaskSpec(
+                key=("coverage", tile_number),
+                fn=lambda tile_number=tile_number: ran.append(tile_number),
+                scheduling_rank=scheduling_rank,
+                session_id=7,
+                tile_number=tile_number,
+            )
+        )
+
+    updated = kernel.rerank_unstarted_tile_tasks(
+        session_id=7,
+        scheduling_ranks={0: 2, 1: 1, 2: 0},
+    )
+    backend.run_all()
+
+    assert updated == 2
+    assert ran == [2, 1, 0]
+
+
 def test_negative_scheduling_rank_is_rejected():
     with pytest.raises(ValueError, match="scheduling_rank must be non-negative"):
         TaskSpec(key="bad-rank", fn=lambda: None, scheduling_rank=-1)

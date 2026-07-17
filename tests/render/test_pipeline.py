@@ -8,6 +8,8 @@ pipeline/kernel contract from the concrete montage backend bridge.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from arrayscope.display.lod import LodDemand
 from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane, TaskSpec
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
@@ -259,6 +261,31 @@ def test_camera_only_retarget_never_invalidates_rung_work():
     pipeline.retarget(intent(viewport="vp-2"), demand(2), scope(0))
     drain(kernel)
     assert len(effects.evaluated) == evaluated_before
+
+
+def test_camera_only_retarget_reranks_already_queued_coverage_work():
+    kernel, backend, effects, pipeline = make_manual_pipeline(tiles=2)
+    effects.session = SimpleNamespace(session_id=7)
+    effects.states = {
+        0: TileLodState(tile_number=0, scheduling_rank=0),
+        1: TileLodState(tile_number=1, scheduling_rank=1),
+    }
+    pipeline.retarget(intent(viewport="before-fit"), demand(1), scope(0, 1, missing=2))
+
+    effects.states = {
+        0: TileLodState(tile_number=0, scheduling_rank=1),
+        1: TileLodState(tile_number=1, scheduling_rank=0),
+    }
+    submitted = pipeline.retarget(
+        intent(viewport="after-fit"),
+        demand(1),
+        scope(0, 1, missing=2),
+    )
+    while backend.run_next():
+        pass
+
+    assert submitted == 0
+    assert effects.evaluated[0][0] == 1
     lanes = kernel.diagnostics().lanes
     superseded = sum(counters.get("superseded", 0) for counters in lanes.values())
     assert superseded == 0

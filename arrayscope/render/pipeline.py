@@ -178,6 +178,16 @@ class FramePipeline:
 
         verdict = self.effects.scheduling_verdict()
         states = self.effects.tile_states(intent, demand, scope)
+        session = getattr(self.effects, "session", None)
+        session_id = int(getattr(session, "session_id", 0) or 0)
+        if session_id > 0:
+            self.kernel.rerank_unstarted_tile_tasks(
+                session_id=session_id,
+                scheduling_ranks={
+                    int(state.tile_number): int(state.scheduling_rank)
+                    for state in states
+                },
+            )
         steps = self.ladder.plan(states, demand, verdict)
         self.last_plan_states = tuple(
             (
