@@ -207,8 +207,6 @@ class ImageViewShell(QtWidgets.QWidget):
         self._background_task_submitter = None
         self._level_presentation_change_handler = None
         self._montage_display_mode = "none"
-        self._montage_tile_layer = None
-        self._montage_tile_layer_histogram_key = None
         self._profile_vline = None
         self._profile_hline = None
         self._profile_handle = None
@@ -263,13 +261,7 @@ class ImageViewShell(QtWidgets.QWidget):
         else:
             self.imageItem = imageItem
         self._layer_owner.add_image_item(self.imageItem)
-        self._montage_tile_layer = MontageTileLayer(
-            self._layer_owner,
-            set_image_item_data=self._set_image_item_data,
-            record_upload_timing=self._record_upload_timing,
-            histogram_levels_for_display=self._histogram_levels_for_display,
-            is_rgb_image=self._is_rgb_image,
-        )
+        self._init_tiled_presentation_backend()
         
         # Setup histogram
         self.histogramImageItem = ImageItem(axisOrder="row-major")
@@ -758,131 +750,32 @@ class ImageViewShell(QtWidgets.QWidget):
         return str(self._montage_display_mode)
 
     def clearMontageTileLayer(self) -> None:
-        self.reset_tiled_residency("surface-reset")
+        """Backend contract: drop the tiled presentation for a surface reset."""
+
+        raise NotImplementedError
 
     def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
         """Hide semantically superseded pixels without discarding residency.
 
-        With ``hide_pixels=False`` the tile-layer items keep drawing the
-        previous plane (stale-but-honest preview across a slice-index-only
-        session transition).  The retained items are presentation only: the
-        successor session's lifecycle starts cold, and its first tile-layer
+        With ``hide_pixels=False`` the backend keeps drawing the previous
+        plane (stale-but-honest preview across a slice-index-only session
+        transition).  The retained pixels are presentation only: the
+        successor session's lifecycle starts cold, and its first tiled
         commit replaces the drawn payloads through the ordinary
         identity-checked upsert path.
         """
 
-        if not hide_pixels:
-            return
-        if self._montage_tile_layer is not None:
-            self._montage_tile_layer.hide_all()
-        self._montage_tile_layer_histogram_key = None
-        self._montage_display_mode = "none"
-        self.imageItem.setVisible(False)
+        raise NotImplementedError
 
     def hide_tiled_presentation(self, reason: str) -> None:
-        if self._montage_tile_layer is not None:
-            self._montage_tile_layer.clear()
-        self._montage_tile_layer_histogram_key = None
-        self._montage_display_mode = "none"
-        self.imageItem.setVisible(True)
+        """Backend contract: deactivate the tiled presentation entirely."""
+
+        raise NotImplementedError
 
     def reset_tiled_residency(self, reason: str) -> None:
-        self.hide_tiled_presentation(reason)
+        """Backend contract: destroy retained tile residency (reset boundary)."""
 
-    def _apply_tile_layer_presentation(
-        self,
-        img: np.ndarray,
-        *,
-        histogramData: np.ndarray | None,
-        histogramPlotData: np.ndarray | None,
-        geometry,
-        levels: tuple[float, float],
-        histogramRange: tuple[float, float],
-        viewport_policy=ViewportPolicy.PRESERVE,
-        rgb_already_windowed: bool = False,
-        montage_dirty_tiles: tuple[int, ...] | None = None,
-        montage_tile_source_ids: dict[int, object] | None = None,
-        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
-        tile_delta=None,
-        tile_residency_budget_bytes: int = 0,
-        frame_plan=None,
-    ) -> None:
-        self._start_upload_timing("tile_layer")
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            self.image = img
-            loading_only = _is_tiled_loading_only_commit(
-                montage_tile_payloads,
-                histogramData=histogramData,
-                histogramPlotData=histogramPlotData,
-            )
-            if not loading_only:
-                self.histogramSource = histogramData
-                self.histogramPlotSource = histogramPlotData
-                self.setHistogramDataBounds(histogramRange)
-            self._montage_display_mode = "tile_layer"
-            self.imageItem.setVisible(False)
-            stats = self._update_montage_tile_layer_items(
-                img,
-                histogramData=histogramData,
-                geometry=geometry,
-                levels=levels,
-                rgb_already_windowed=rgb_already_windowed,
-                montage_dirty_tiles=montage_dirty_tiles,
-                montage_tile_source_ids=montage_tile_source_ids,
-                montage_tile_payloads=montage_tile_payloads,
-                tile_delta=tile_delta,
-                tile_residency_budget_bytes=tile_residency_budget_bytes,
-                frame_plan=frame_plan,
-            )
-            self._record_tile_layer_stats(stats)
-            histogram_key = self._tile_layer_histogram_key(
-                histogramData,
-                histogramPlotData,
-                levels=levels,
-                histogramRange=histogramRange,
-            )
-            skip_histogram_upload = (
-                loading_only
-                or montage_dirty_tiles == ()
-                and self._montage_tile_layer_histogram_key == histogram_key
-                and getattr(self.histogramImageItem, "image", None) is not None
-            )
-            if not skip_histogram_upload:
-                plot_data = self._histogram_plot_data(histogramData)
-            else:
-                plot_data = None
-            if plot_data is not None:
-                self._bind_histogram_item(self.histogramImageItem)
-                self._set_image_item_data(
-                    self.histogramImageItem,
-                    plot_data,
-                    self._histogram_levels_for_display(levels),
-                    role="histogram",
-                )
-            if not loading_only:
-                self._montage_tile_layer_histogram_key = histogram_key
-                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
-                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
-            profile_start = perf_counter()
-            self._update_profile_line_bounds()
-            self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
-            self._updateAspectRatio()
-            self._apply_viewport_policy(
-                tuple(img.shape[:2]),
-                viewport_policy,
-                image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
-                content_rect=_viewport_rect_for_geometry(
-                    geometry,
-                    img.shape[:2],
-                    (geometry.montage_origin_x, geometry.montage_origin_y),
-                ),
-            )
-            return stats
-        finally:
-            self._applying_presentation = applying
-            self._finish_upload_timing()
+        raise NotImplementedError
 
     def setTiledPresentation(
         self,
@@ -961,25 +854,7 @@ class ImageViewShell(QtWidgets.QWidget):
     ) -> TileLayerUpdateStats:
         """Backend hook: physically commit one prepared tiled presentation."""
 
-        # The CPU-LUT backend bakes shader mapping into pixels through the
-        # LUT and levels; it has no uniform to receive the mapping.
-        del shader_mapping
-        return self._apply_tile_layer_presentation(
-            placeholder,
-            histogramData=None,
-            histogramPlotData=histogramPlotData,
-            geometry=geometry,
-            levels=levels,
-            histogramRange=histogramRange,
-            viewport_policy=viewport_policy,
-            rgb_already_windowed=rgb_already_windowed,
-            montage_dirty_tiles=montage_dirty_tiles,
-            montage_tile_source_ids=montage_tile_source_ids,
-            montage_tile_payloads=montage_tile_payloads,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-            frame_plan=frame_plan,
-        )
+        raise NotImplementedError
 
     def _after_tiled_commit(
         self,
@@ -1000,25 +875,6 @@ class ImageViewShell(QtWidgets.QWidget):
         tile_source_ids = {key: payload.source_id for key, payload in tile_payloads.items()}
         return placeholder, tile_payloads, dirty_tiles, tile_source_ids
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, tile_residency_budget_bytes: int = 0, frame_plan=None) -> TileLayerUpdateStats:
-        if self._montage_tile_layer is None:
-            return TileLayerUpdateStats()
-        if montage_tile_payloads is None or tile_delta is None:
-            raise ValueError("typed tile payloads and a TilePresentationDelta are required for tiled presentation commits")
-        return self._montage_tile_layer.update_presentation(
-            img,
-            histogram_data=histogramData,
-            geometry=geometry,
-            levels=levels,
-            rgb_already_windowed=rgb_already_windowed,
-            dirty_tiles=montage_dirty_tiles,
-            tile_source_ids=montage_tile_source_ids,
-            tile_payloads=montage_tile_payloads,
-            tile_delta=tile_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes,
-            frame_plan=frame_plan,
-        )
-
     def warmTiledResidency(
         self,
         *,
@@ -1029,29 +885,22 @@ class ImageViewShell(QtWidgets.QWidget):
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
-    ) -> TileLayerUpdateStats:
-        if self._montage_tile_layer is None:
-            return TileLayerUpdateStats()
-        self._start_upload_timing("tile_warm_residency")
-        try:
-            stats = self._montage_tile_layer.warm_payloads(
-                {int(key): value for key, value in dict(payloads or {}).items()},
-                geometry=geometry,
-                levels=levels,
-                rgb_already_windowed=rgb_already_windowed,
-                tile_residency_budget_bytes=tile_residency_budget_bytes,
-                tile_delta=tile_delta,
-                frame_plan=frame_plan,
-            )
-            self._record_tile_layer_stats(stats)
-            return stats
-        finally:
-            self._finish_upload_timing()
+    ):
+        """Backend contract: warm non-presenting payloads into residency.
+
+        Warming changes only content-keyed residency; it never acknowledges
+        a presentation or changes an active slot mapping.
+        """
+
+        raise NotImplementedError
+
+    def _init_tiled_presentation_backend(self) -> None:
+        """Backend hook: build the persistent tiled-presentation layer(s)."""
 
     def _tiled_presentation_layer(self):
         """Backend hook: the physical tiled-presentation layer, if any."""
 
-        return self._montage_tile_layer
+        return None
 
     def tiledPayloadResident(self, payload) -> bool:
         """Report physical tile residency without changing backend state."""
@@ -1133,19 +982,6 @@ class ImageViewShell(QtWidgets.QWidget):
                 ),
             )
 
-    def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
-        source = histogramPlotData if histogramPlotData is not None else histogramData
-        return (
-            id(source),
-            tuple(np.shape(source)) if source is not None else None,
-            None if source is None else str(np.asarray(source).dtype),
-            (float(levels[0]), float(levels[1])),
-            (float(histogramRange[0]), float(histogramRange[1])),
-        )
-
-    def _update_montage_tile_levels(self, levels) -> TileLayerUpdateStats:
-        raise RuntimeError("PyQtGraph tiled level changes must use governed tiled presentation commits")
-        
     @property
     def widget(self):
         return self
@@ -1322,11 +1158,7 @@ class ImageViewShell(QtWidgets.QWidget):
     def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
         """Backend mechanics for one preview-level application."""
 
-        if self._montage_display_mode != "tile_layer":
-            return
-        handler = getattr(self, "_level_presentation_change_handler", None)
-        if callable(handler):
-            handler(levels, final=bool(final))
+        raise NotImplementedError
 
     def _finish_histogram_preview_levels(self, levels) -> None:
         """Finalize an already-applied preview without repeating pixel work.
@@ -1632,8 +1464,10 @@ class ImageViewShell(QtWidgets.QWidget):
         image = getattr(self.imageItem, "image", None)
         if image is not None and np.asarray(image).ndim == 2:
             self.imageItem.setLookupTable(lut)
-        if self._montage_tile_layer is not None:
-            self._montage_tile_layer.set_lookup_table(lut)
+        self._backend_display_lut_changed(lut)
+
+    def _backend_display_lut_changed(self, lut: np.ndarray) -> None:
+        """Backend hook: the frame-level RGB lookup table changed."""
 
     def displayColorMapLookupTable(self) -> np.ndarray:
         """Return the active frame-level RGB lookup table."""
@@ -2658,9 +2492,255 @@ class ImageViewShell(QtWidgets.QWidget):
 
 
 class ImageView2D(ImageViewShell):
-    """PyQtGraph-backed shell used by the default display factory."""
+    """PyQtGraph-backed image surface used by the default display factory.
 
-    pass
+    The shell owns meaning (targets, ROI/interaction state, viewport
+    intent, level semantics); this class owns the PyQtGraph mechanics: the
+    persistent CPU-item montage tile layer, tile-layer histogram uploads,
+    and CPU-LUT application.
+    """
+
+    def _init_tiled_presentation_backend(self) -> None:
+        self._montage_tile_layer_histogram_key = None
+        self._montage_tile_layer = MontageTileLayer(
+            self._layer_owner,
+            set_image_item_data=self._set_image_item_data,
+            record_upload_timing=self._record_upload_timing,
+            histogram_levels_for_display=self._histogram_levels_for_display,
+            is_rgb_image=self._is_rgb_image,
+        )
+
+    def _tiled_presentation_layer(self):
+        return self._montage_tile_layer
+
+    def clearMontageTileLayer(self) -> None:
+        self.reset_tiled_residency("surface-reset")
+
+    def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
+        # The retained ImageItems keep drawing the previous plane when
+        # ``hide_pixels`` is False; see the shell contract docstring.
+        if not hide_pixels:
+            return
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.hide_all()
+        self._montage_tile_layer_histogram_key = None
+        self._montage_display_mode = "none"
+        self.imageItem.setVisible(False)
+
+    def hide_tiled_presentation(self, reason: str) -> None:
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.clear()
+        self._montage_tile_layer_histogram_key = None
+        self._montage_display_mode = "none"
+        self.imageItem.setVisible(True)
+
+    def reset_tiled_residency(self, reason: str) -> None:
+        self.hide_tiled_presentation(reason)
+
+    def _apply_backend_tiled_presentation(
+        self,
+        placeholder: np.ndarray,
+        *,
+        histogramPlotData,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy,
+        rgb_already_windowed: bool,
+        montage_dirty_tiles: tuple[int, ...] | None,
+        montage_tile_source_ids: dict[int, object] | None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None,
+        shader_mapping,
+        tile_delta: "TilePresentationDelta",
+        tile_residency_budget_bytes: int,
+        frame_plan,
+    ) -> TileLayerUpdateStats:
+        # The CPU-LUT backend bakes shader mapping into pixels through the
+        # LUT and levels; it has no uniform to receive the mapping.
+        del shader_mapping
+        return self._apply_tile_layer_presentation(
+            placeholder,
+            histogramData=None,
+            histogramPlotData=histogramPlotData,
+            geometry=geometry,
+            levels=levels,
+            histogramRange=histogramRange,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            montage_dirty_tiles=montage_dirty_tiles,
+            montage_tile_source_ids=montage_tile_source_ids,
+            montage_tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+            frame_plan=frame_plan,
+        )
+
+    def _apply_tile_layer_presentation(
+        self,
+        img: np.ndarray,
+        *,
+        histogramData: np.ndarray | None,
+        histogramPlotData: np.ndarray | None,
+        geometry,
+        levels: tuple[float, float],
+        histogramRange: tuple[float, float],
+        viewport_policy=ViewportPolicy.PRESERVE,
+        rgb_already_windowed: bool = False,
+        montage_dirty_tiles: tuple[int, ...] | None = None,
+        montage_tile_source_ids: dict[int, object] | None = None,
+        montage_tile_payloads: dict[int, "DisplayTilePayload"] | None = None,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
+    ) -> None:
+        self._start_upload_timing("tile_layer")
+        applying = self._applying_presentation
+        self._applying_presentation = True
+        try:
+            self.image = img
+            loading_only = _is_tiled_loading_only_commit(
+                montage_tile_payloads,
+                histogramData=histogramData,
+                histogramPlotData=histogramPlotData,
+            )
+            if not loading_only:
+                self.histogramSource = histogramData
+                self.histogramPlotSource = histogramPlotData
+                self.setHistogramDataBounds(histogramRange)
+            self._montage_display_mode = "tile_layer"
+            self.imageItem.setVisible(False)
+            stats = self._update_montage_tile_layer_items(
+                img,
+                histogramData=histogramData,
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+                montage_dirty_tiles=montage_dirty_tiles,
+                montage_tile_source_ids=montage_tile_source_ids,
+                montage_tile_payloads=montage_tile_payloads,
+                tile_delta=tile_delta,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
+                frame_plan=frame_plan,
+            )
+            self._record_tile_layer_stats(stats)
+            histogram_key = self._tile_layer_histogram_key(
+                histogramData,
+                histogramPlotData,
+                levels=levels,
+                histogramRange=histogramRange,
+            )
+            skip_histogram_upload = (
+                loading_only
+                or montage_dirty_tiles == ()
+                and self._montage_tile_layer_histogram_key == histogram_key
+                and getattr(self.histogramImageItem, "image", None) is not None
+            )
+            if not skip_histogram_upload:
+                plot_data = self._histogram_plot_data(histogramData)
+            else:
+                plot_data = None
+            if plot_data is not None:
+                self._bind_histogram_item(self.histogramImageItem)
+                self._set_image_item_data(
+                    self.histogramImageItem,
+                    plot_data,
+                    self._histogram_levels_for_display(levels),
+                    role="histogram",
+                )
+            if not loading_only:
+                self._montage_tile_layer_histogram_key = histogram_key
+                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+            profile_start = perf_counter()
+            self._update_profile_line_bounds()
+            self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
+            self._updateAspectRatio()
+            self._apply_viewport_policy(
+                tuple(img.shape[:2]),
+                viewport_policy,
+                image_origin=(geometry.montage_origin_x, geometry.montage_origin_y),
+                content_rect=_viewport_rect_for_geometry(
+                    geometry,
+                    img.shape[:2],
+                    (geometry.montage_origin_x, geometry.montage_origin_y),
+                ),
+            )
+            return stats
+        finally:
+            self._applying_presentation = applying
+            self._finish_upload_timing()
+
+    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, tile_residency_budget_bytes: int = 0, frame_plan=None) -> TileLayerUpdateStats:
+        if self._montage_tile_layer is None:
+            return TileLayerUpdateStats()
+        if montage_tile_payloads is None or tile_delta is None:
+            raise ValueError("typed tile payloads and a TilePresentationDelta are required for tiled presentation commits")
+        return self._montage_tile_layer.update_presentation(
+            img,
+            histogram_data=histogramData,
+            geometry=geometry,
+            levels=levels,
+            rgb_already_windowed=rgb_already_windowed,
+            dirty_tiles=montage_dirty_tiles,
+            tile_source_ids=montage_tile_source_ids,
+            tile_payloads=montage_tile_payloads,
+            tile_delta=tile_delta,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+            frame_plan=frame_plan,
+        )
+
+    def warmTiledResidency(
+        self,
+        *,
+        payloads,
+        geometry,
+        levels: tuple[float, float],
+        rgb_already_windowed: bool = False,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
+    ) -> TileLayerUpdateStats:
+        if self._montage_tile_layer is None:
+            return TileLayerUpdateStats()
+        self._start_upload_timing("tile_warm_residency")
+        try:
+            stats = self._montage_tile_layer.warm_payloads(
+                {int(key): value for key, value in dict(payloads or {}).items()},
+                geometry=geometry,
+                levels=levels,
+                rgb_already_windowed=rgb_already_windowed,
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
+                tile_delta=tile_delta,
+                frame_plan=frame_plan,
+            )
+            self._record_tile_layer_stats(stats)
+            return stats
+        finally:
+            self._finish_upload_timing()
+
+    def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
+        source = histogramPlotData if histogramPlotData is not None else histogramData
+        return (
+            id(source),
+            tuple(np.shape(source)) if source is not None else None,
+            None if source is None else str(np.asarray(source).dtype),
+            (float(levels[0]), float(levels[1])),
+            (float(histogramRange[0]), float(histogramRange[1])),
+        )
+
+    def _update_montage_tile_levels(self, levels) -> TileLayerUpdateStats:
+        raise RuntimeError("PyQtGraph tiled level changes must use governed tiled presentation commits")
+
+    def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
+        if self._montage_display_mode != "tile_layer":
+            return
+        handler = getattr(self, "_level_presentation_change_handler", None)
+        if callable(handler):
+            handler(levels, final=bool(final))
+
+    def _backend_display_lut_changed(self, lut: np.ndarray) -> None:
+        if self._montage_tile_layer is not None:
+            self._montage_tile_layer.set_lookup_table(lut)
 
 
 def _image_origin(geometry) -> tuple[float, float]:
