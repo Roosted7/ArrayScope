@@ -28,10 +28,16 @@ class ViewportBridge:
         # The title depends on display mode, image shape, and viewport size,
         # never on camera range. Calling QGroupBox.setTitle here synchronously
         # entered style/layout work for every wheel and pan signal.
-        if not getattr(self.owner, "_montage_presentation_commit_active", False) and _owner_has_tiled_scene(self.owner):
+        if _owner_has_tiled_scene(self.owner):
             scheduler = getattr(self.owner, "_schedule_frame_viewport_update", None)
             montage = getattr(self.owner.win.view_state, "montage_axis", None) is not None
-            if montage and not pointer_gesture:
+            if montage and getattr(self.owner, "_montage_presentation_commit_active", False):
+                # The commit guard prevents re-entry, but it must not erase
+                # camera intent.  Commit teardown already owns the one replay
+                # obligation used by extent-induced range changes; user and
+                # profile gestures crossing the same guard join that owner.
+                self.owner._frame_viewport_retarget_after_commit = True
+            elif montage and not pointer_gesture:
                 # Programmatic range replay is a semantic obligation and the
                 # V1 boundary reveal requires its visibility update before the
                 # caller observes pixels. Only real input bursts are paced.

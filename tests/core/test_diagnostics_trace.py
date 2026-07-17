@@ -19,7 +19,11 @@ def _write_trace(path):
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2.0},
                 "montage_timing": {"last_tile_commit_ms": 1.0},
-                "montage": {"session_id": 1, "loaded_tiles": 1, "pending_tiles": 3},
+                "montage": {
+                    "session_id": 1,
+                    "loaded_tiles": 1,
+                    "target_unsettled_tiles": 3,
+                },
             },
         },
         {
@@ -29,7 +33,11 @@ def _write_trace(path):
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2.0},
                 "montage_timing": {"last_tile_commit_ms": 1.0},
-                "montage": {"session_id": 1, "loaded_tiles": 2, "pending_tiles": 2},
+                "montage": {
+                    "session_id": 1,
+                    "loaded_tiles": 2,
+                    "target_unsettled_tiles": 2,
+                },
             },
         },
         {
@@ -39,7 +47,11 @@ def _write_trace(path):
             "diagnostics": {
                 "render_timing": {"last_render_sync_ms": 2100.0},
                 "montage_timing": {"last_tile_commit_ms": 4.0},
-                "montage": {"session_id": 2, "loaded_tiles": 4, "pending_tiles": 0},
+                "montage": {
+                    "session_id": 2,
+                    "loaded_tiles": 4,
+                    "target_unsettled_tiles": 0,
+                },
             },
         },
     ]
@@ -60,7 +72,24 @@ def test_trace_summary_detects_sampling_stall_and_changed_timing(tmp_path):
     stall = summary.stalls[0]
     assert stall.sequence == 3
     assert stall.session_id == 2
+    assert stall.target_unsettled_tiles == 0
     assert stall.changed_timings_ms[0] == ("render_timing.last_render_sync_ms", 2100.0)
+
+
+def test_trace_summary_reads_historical_pending_tile_field(tmp_path):
+    path = tmp_path / "historical-trace.jsonl"
+    _write_trace(path)
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    for record in records:
+        montage = record.get("diagnostics", {}).get("montage")
+        if montage is not None:
+            montage["pending_tiles"] = montage.pop("target_unsettled_tiles")
+    records[-1]["diagnostics"]["montage"]["pending_tiles"] = 7
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    summary = summarize_diagnostics_trace(path)
+
+    assert summary.stalls[0].target_unsettled_tiles == 7
 
 
 def test_trace_summary_markdown_marks_unattributed_stall(tmp_path):

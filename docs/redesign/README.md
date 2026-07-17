@@ -41,7 +41,7 @@ These are **not archive**: queue steps and tests cite them.
 | [coverage-stall-2026-07-15.md](coverage-stall-2026-07-15.md) | Shared-fanout coverage-refill stall (fixed; exit gate recorded) |
 | [stale-empty-tiles-2026-07-16.md](stale-empty-tiles-2026-07-16.md) | Identity-aliasing starvation livelock (fixed) + open follow-ups feeding queue step 1 |
 | [slice-retention-staleness-2026-07-16.md](slice-retention-staleness-2026-07-16.md) | Retained-transition replacement latency (fixed at the rung-label owner) |
-| [g5-source-grid-pyramid-2026-07-16.md](g5-source-grid-pyramid-2026-07-16.md) | **Authoritative implementation contract** for the remaining ADR 0056 work (queue step 2) |
+| [g5-source-grid-pyramid-2026-07-16.md](g5-source-grid-pyramid-2026-07-16.md) | **Authoritative implementation contract** for the remaining ADR 0056 work (queue row 1) |
 | [retro-2026-07.md](retro-2026-07.md) | Why the circling happened; the rules that stop it |
 
 **Dossier convention:** a dossier is created when a field defect or design

@@ -27,7 +27,13 @@ from arrayscope.display.backends.vispy.tiles import (
 )
 from arrayscope.display.tile_layout import TileLayoutRegion
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
-from arrayscope.display.model.frame import DisplayTilePayload
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    PageBackedPresentation,
+    TilePresentationDelta,
+)
+from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
 
 from tests.display.vispy_test_utils import (
     FakeGloo,
@@ -259,6 +265,60 @@ def test_complex_payload_quad_buffers_use_phase_color_shader_mode():
 
     assert _payload_mode(payload, rgb_already_windowed=False) == 4
     np.testing.assert_array_equal(modes, np.full((6,), 4.0, dtype=np.float32))
+
+
+def test_phase_vector_page_quad_uses_resultant_range_shader_mode():
+    values = np.asarray([[1 + 0j, 1j], [-1 + 0j, -1j]], dtype=np.complex64)
+    plan = plan_source_grid_pages(
+        content_key=("phase",),
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(1, 1),
+        stored_page_shape=(2, 2),
+        dtype="complex64",
+        representation="complex_rg32f",
+        reducer="phase_vector",
+    )[0]
+    page = materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+    lod = LodInfo(level=1, factor=2, source_shape=(2, 2), texture_shape=(1, 1), gutter=0)
+    native = complex_payload(0)
+    payload = replace(
+        native,
+        image=page.values,
+        texture_data=page.values,
+        histogram_data=None,
+        lod=lod,
+        page_backing=PageBackedPresentation((plan,), (page,), (0, 2, 0, 2), lod),
+    )
+
+    assert _payload_mode(payload, rgb_already_windowed=False) == 5
+
+
+def test_mean_complex_page_keeps_level_controlled_phase_color_shader_mode():
+    values = np.asarray([[1 + 0j, 10j], [-100 + 0j, -10j]], dtype=np.complex64)
+    plan = plan_source_grid_pages(
+        content_key=("complex",),
+        valid_source_rect_yx=(0, 2, 0, 2),
+        reduction_yx=(1, 1),
+        stored_page_shape=(2, 2),
+        dtype="complex64",
+        representation="complex_rg32f",
+        reducer="mean",
+    )[0]
+    page = materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+    lod = LodInfo(level=1, factor=2, source_shape=(2, 2), texture_shape=(1, 1), gutter=0)
+    native = complex_payload(0)
+    payload = replace(
+        native,
+        image=page.values,
+        texture_data=page.values,
+        histogram_data=None,
+        lod=lod,
+        page_backing=PageBackedPresentation((plan,), (page,), (0, 2, 0, 2), lod),
+    )
+
+    # Mode 4 applies u_levels to magnitude and phase to hue. Mode 5 is only
+    # valid for explicit phase_vector pages and would make level drags inert.
+    assert _payload_mode(payload, rgb_already_windowed=False) == 4
 
 
 def test_complex_payload_upload_uses_defensive_copy_into_atlas():
@@ -559,6 +619,183 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
         for texture in (page.scalar_texture, page.color_texture)
     ) == texture_updates
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
+
+
+def test_storage_classes_coexist_and_visibility_clear_preserves_page_residency():
+    layer = GpuMontageLayer(
+        scene=FakeScene(),
+        visuals=None,
+        gloo=FakeGloo(),
+        transforms=None,
+        parent=None,
+        limits=GpuDeviceLimits(max_texture_size=8),
+    )
+    montage = SimpleNamespace(
+        indices=(0,),
+        tile_width=4,
+        tile_height=4,
+        columns=1,
+        rows=1,
+        gap=0,
+    )
+    geometry = SimpleNamespace(montage=montage, montage_tile_states=("loaded",))
+    lod = LodInfo(level=1, factor=2, source_shape=(4, 4), texture_shape=(2, 2), gutter=0)
+
+    def page_payload(content_key, *, values, supplied, mapping, representation, dtype):
+        plans = plan_source_grid_pages(
+            content_key=content_key,
+            valid_source_rect_yx=(0, 4, 0, 4),
+            reduction_yx=(1, 1),
+            stored_page_shape=(2, 2),
+            dtype=dtype,
+            representation=representation,
+            reducer="mean",
+        )
+        pages = (
+            tuple(materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans)
+            if supplied
+            else ()
+        )
+        image = pages[0].values if pages else np.zeros((2, 2), dtype=dtype)
+        return DisplayTilePayload(
+            tile_number=0,
+            source_index=0,
+            image=image,
+            histogram_data=None,
+            source_id=("page-frame", content_key),
+            lod=lod,
+            shader_mapping=mapping,
+            page_backing=PageBackedPresentation(plans, pages, (0, 4, 0, 4), lod),
+        )
+
+    complex_mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+    )
+    scalar_mapping = ShaderMapping(component=ShaderComponent.REAL)
+    predecessor = page_payload(
+        ("complex", 1),
+        values=np.arange(16, dtype=np.float32).reshape(4, 4).astype(np.complex64),
+        supplied=True,
+        mapping=complex_mapping,
+        representation="complex_rg32f",
+        dtype="complex64",
+    )
+    first_delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=1,
+        visibility_revision=0,
+        level_revision=0,
+        histogram_revision=0,
+        viewport_revision=0,
+        upserts={0: predecessor},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+    )
+    layer.update(
+        payloads={0: predecessor},
+        geometry=geometry,
+        levels=(-1.0, 1.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=complex_mapping,
+        tile_delta=first_delta,
+    )
+    predecessor_resident_key = layer._pool.tile_resident_keys[0]
+
+    successor = page_payload(
+        ("scalar", 2),
+        values=np.zeros((4, 4), dtype=np.float32),
+        supplied=False,
+        mapping=scalar_mapping,
+        representation="scalar_r32f",
+        dtype="float32",
+    )
+    atomic_delta = TilePresentationDelta(
+        structure_revision=0,
+        payload_revision=2,
+        visibility_revision=0,
+        level_revision=1,
+        histogram_revision=0,
+        viewport_revision=0,
+        base_revision=1,
+        upserts={0: successor},
+        active_tiles=(0,),
+        planned_tiles=(0,),
+        atomic_handoff=True,
+    )
+    rejected = layer.update(
+        payloads={0: successor},
+        geometry=geometry,
+        levels=(0.0, 15.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=scalar_mapping,
+        tile_delta=atomic_delta,
+    )
+
+    assert rejected.committed_upserts == ()
+    assert layer._pool.tile_resident_keys[0] == predecessor_resident_key
+    assert layer._levels == (-1.0, 1.0)
+    assert layer._shader_mapping is complex_mapping
+    assert layer._visuals_by_page[0].mappings[-1][1] is complex_mapping
+    assert layer._pool.tile_page_candidate_missing[0] == successor.page_backing.requested_keys
+
+    supplied_successor = page_payload(
+        ("scalar", 2),
+        values=np.ones((4, 4), dtype=np.float32),
+        supplied=True,
+        mapping=scalar_mapping,
+        representation="scalar_r32f",
+        dtype="float32",
+    )
+    predecessor_draw_parts = layer._pool.tile_draw_parts[0]
+    warmed = layer.warm_residency(
+        payloads={0: supplied_successor},
+        geometry=geometry,
+        rgb_already_windowed=False,
+        tile_delta=atomic_delta,
+    )
+
+    assert warmed.texture_uploads > 0
+    assert layer._pool.tile_resident_keys[0] == predecessor_resident_key
+    assert layer._pool.tile_draw_parts[0] == predecessor_draw_parts
+    assert layer._levels == (-1.0, 1.0)
+    assert layer._shader_mapping is complex_mapping
+    assert all(
+        layer._pool._page_table.resolve(key) is not None
+        for key in supplied_successor.page_backing.requested_keys
+    )
+    assert layer.payload_resident(supplied_successor) is True
+
+    admitted_delta = replace(atomic_delta, upserts={0: supplied_successor})
+    admitted = layer.update(
+        payloads={0: supplied_successor},
+        geometry=geometry,
+        levels=(0.0, 15.0),
+        dirty_tiles=(0,),
+        rgb_already_windowed=False,
+        shader_mapping=scalar_mapping,
+        tile_delta=admitted_delta,
+    )
+
+    assert admitted.committed_upserts == (0,)
+    assert admitted.texture_uploads == 0
+    assert layer._levels == (0.0, 15.0)
+    assert layer._shader_mapping is scalar_mapping
+
+    resident_page_keys = {
+        *predecessor.page_backing.requested_keys,
+        *supplied_successor.page_backing.requested_keys,
+    }
+    assert {page.storage_mode for page in layer._pool.pages} >= {"complex", "scalar"}
+
+    layer.clear()
+
+    assert not layer._pool.tile_resident_keys
+    assert not layer._pool.tile_draw_parts
+    assert not any(visual.visible for visual in layer._visuals_by_page)
+    assert all(key in layer._pool._page_table for key in resident_page_keys)
 
 
 def test_touched_atlas_page_repairs_stale_local_mapping_when_global_key_is_unchanged():
@@ -1406,170 +1643,23 @@ def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
 def _lod_payload(tile_number: int, value: float, *, level: int, source_shape=(4, 4)) -> DisplayTilePayload:
     from arrayscope.display.lod import LodInfo
 
-    factor = 2 ** int(level)
-    texture_shape = (
-        max(1, int(source_shape[0]) // factor),
-        max(1, int(source_shape[1]) // factor),
-    )
+    if int(level) != 0:
+        raise ValueError("reduced renderer fixtures require canonical page_backing")
     image = np.full(tuple(source_shape), value, dtype=np.float32)
-    texture = image if level == 0 else np.full(texture_shape, value, dtype=np.float32)
     return DisplayTilePayload(
         tile_number=tile_number,
         source_index=tile_number,
         image=image,
         histogram_data=None,
         source_id=("tile", tile_number, value, "lod", int(level)),
-        texture_data=texture,
+        texture_data=image,
         lod=LodInfo(
-            level=int(level),
-            factor=factor,
+            level=0,
+            factor=1,
             source_shape=tuple(source_shape),
-            texture_shape=texture.shape[:2],
+            texture_shape=image.shape[:2],
         ),
     )
-
-
-def test_atlas_classes_pages_by_texture_shape_for_mixed_levels():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-
-    payloads = {
-        0: _lod_payload(0, 1.0, level=0),
-        1: _lod_payload(1, 2.0, level=0),
-        2: _lod_payload(2, 3.0, level=1),
-        3: _lod_payload(3, 4.0, level=1),
-    }
-    uvs, stats = pool.update_payloads(
-        payloads,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=4,
-    )
-
-    assert stats.items_updated == 4
-    assert set(stats.presented_tiles) == {0, 1, 2, 3}
-    page_shapes = {page.tile_shape for page in pool.pages}
-    assert (4, 4) in page_shapes and (2, 2) in page_shapes
-    for tile_number, payload in payloads.items():
-        page_index, _slot = pool.tile_slots[int(tile_number)]
-        texture = np.asarray(payload.texture_data)
-        assert pool.pages[page_index].tile_shape == tuple(texture.shape[:2]), (
-            "a payload must only occupy a slot of its own texture shape class"
-        )
-
-
-def test_reduced_payload_never_lands_in_native_shaped_slot():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    native = {0: _lod_payload(0, 1.0, level=0)}
-    pool.update_payloads(
-        native,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=8,
-    )
-    assert all(page.tile_shape == (4, 4) for page in pool.pages)
-
-    reduced = {0: _lod_payload(0, 1.0, level=1)}
-    _uvs, stats = pool.update_payloads(
-        reduced,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=8,
-    )
-
-    assert stats.presented_tiles == (0,)
-    page_index, _slot = pool.tile_slots[0]
-    assert pool.pages[page_index].tile_shape == (2, 2)
-    # The native level for the same tile remains resident in its own class.
-    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
-    assert ("tile", 0, 1.0, "lod", 1) in pool.source_ids.values()
-
-
-def test_level_flip_back_to_native_does_not_reupload_source_pixels():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    native = {0: _lod_payload(0, 1.0, level=0)}
-    reduced = {0: _lod_payload(0, 1.0, level=1)}
-
-    _uvs, first = pool.update_payloads(
-        native, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
-    )
-    _uvs, second = pool.update_payloads(
-        reduced, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
-    )
-    _uvs, third = pool.update_payloads(
-        native, tile_shape=(4, 4), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
-    )
-
-    assert first.texture_uploads == 1
-    assert second.texture_uploads == 1
-    assert third.texture_uploads == 0, "an already-resident native level must not re-upload"
-    assert third.items_skipped >= 1
-
-
-def test_mixed_level_commit_keeps_base_class_when_actives_are_all_reduced():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    pool.update_payloads(
-        {0: _lod_payload(0, 1.0, level=0)},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=4,
-    )
-    base_pages = sum(1 for page in pool.pages if page.tile_shape == (4, 4))
-    assert base_pages >= 1
-
-    # The layer derives the base shape from lod.source_shape, so an
-    # all-reduced active set must not rebuild/clear the native class.
-    from arrayscope.display.backends.vispy.tiles import _atlas_base_tile_shape_for_payloads
-
-    reduced_only = {0: _lod_payload(0, 1.0, level=1)}
-    base_shape = _atlas_base_tile_shape_for_payloads(reduced_only, fallback=(2, 2))
-    assert base_shape == (4, 4)
-
-    _uvs, stats = pool.update_payloads(
-        reduced_only,
-        tile_shape=base_shape,
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=4,
-    )
-
-    assert stats.storage_rebuilds == 0
-    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
-
-
-def test_reduced_class_budget_exhaustion_retains_previous_mapping():
-    tile_bytes = 4 * 4 * 4  # scalar float32 slots
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8, budget_bytes=tile_bytes)
-    native = {0: _lod_payload(0, 1.0, level=0)}
-    pool.update_payloads(
-        native,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        budget_bytes=tile_bytes,
-    )
-    native_mapping = dict(pool.tile_slots)
-    assert native_mapping
-
-    reduced = {0: _lod_payload(0, 1.0, level=1)}
-    _uvs, stats = pool.update_payloads(
-        reduced,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        budget_bytes=tile_bytes,
-    )
-
-    # No budget headroom for a second shape class: the reduced payload is
-    # skipped and the native mapping stays presented rather than clearing.
-    assert stats.presented_tiles == (0,)
-    assert dict(pool.tile_slots) == native_mapping
-    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
 
 
 def test_unsupported_replacement_retains_previous_mapping():
@@ -1599,123 +1689,6 @@ def test_unsupported_replacement_retains_previous_mapping():
     assert pool.presented_identities()[0] == original[0].source_id
 
 
-def test_cold_fill_at_reduced_level_performs_zero_native_uploads():
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    reduced = {index: _lod_payload(index, float(index + 1), level=1) for index in range(3)}
-
-    _uvs, stats = pool.update_payloads(
-        reduced,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=8,
-    )
-
-    assert set(stats.presented_tiles) == {0, 1, 2}
-    assert stats.texture_uploads == 3
-    assert stats.texture_upload_bytes == 3 * (2 * 2 * 4)
-    # The native class is never uploaded to, and it is not pre-allocated for
-    # the whole montage when the active set needs no native slots.
-    native_pages = [page for page in pool.pages if page.tile_shape == (4, 4)]
-    assert all(owner is None for page in native_pages for owner in page.slot_owners)
-    assert all(not page.scalar_texture.updates for page in native_pages)
-    assert sum(page.capacity for page in native_pages) <= 1
-
-
-def test_superseded_native_slots_are_reclaimed_under_reduced_class_pressure():
-    native_slot = 4 * 4 * 4
-    reduced_slot = 2 * 2 * 4
-    budget = native_slot + reduced_slot
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16, budget_bytes=budget)
-
-    pool.update_payloads(
-        {0: _lod_payload(0, 1.0, level=0)},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        budget_bytes=budget,
-    )
-    _uvs, flipped = pool.update_payloads(
-        {0: _lod_payload(0, 1.0, level=1)},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        budget_bytes=budget,
-    )
-    assert flipped.presented_tiles == (0,)
-    # The reduced payload is acknowledged and presented: the native slot for
-    # the same tile is now superseded but still allocated.
-    assert ("tile", 0, 1.0, "lod", 0) in pool.source_ids.values()
-    assert pool.superseded_keys
-
-    _uvs, stats = pool.update_payloads(
-        {0: _lod_payload(0, 1.0, level=1), 1: _lod_payload(1, 2.0, level=1)},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=2,
-        budget_bytes=budget,
-    )
-
-    # Instead of budget-limiting the reduced class, the superseded native
-    # slot was freed and its emptied page dropped to recover the bytes.
-    assert set(stats.presented_tiles) == {0, 1}
-    assert pool.superseded_reclaimed_count == 1
-    assert pool.pages_dropped_count == 1
-    assert ("tile", 0, 1.0, "lod", 0) not in pool.source_ids.values()
-    assert pool.tile_slots[0] != pool.tile_slots[1]
-
-
-def test_presented_native_slot_is_never_reclaimed_for_reduced_capacity():
-    native_slot = 4 * 4 * 4
-    reduced_slot = 2 * 2 * 4
-    budget = 2 * native_slot + reduced_slot
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16, budget_bytes=budget)
-
-    shared_native = _lod_payload(0, 1.0, level=0)
-    other_native = DisplayTilePayload(
-        tile_number=1,
-        source_index=1,
-        image=np.asarray(shared_native.image),
-        histogram_data=None,
-        source_id=shared_native.source_id,
-        texture_data=shared_native.texture_data,
-        lod=shared_native.lod,
-    )
-    pool.update_payloads(
-        {0: shared_native, 1: other_native},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=2,
-        budget_bytes=budget,
-    )
-
-    # Tile 0 flips to its reduced level while tile 1 keeps presenting the
-    # shared native slot.
-    _uvs, stats = pool.update_payloads(
-        {0: _lod_payload(0, 1.0, level=1), 1: other_native},
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=2,
-        budget_bytes=budget,
-    )
-    assert set(stats.presented_tiles) == {0, 1}
-    native_key = pool.tile_resident_keys[1]
-    assert pool.resident_tiles[native_key] == {1}
-
-    # Reduced-class pressure must not free the slot tile 1 still presents
-    # (ADR 0041 gate 5: presented stays usable until its replacement lands).
-    assert pool._ensure_class_capacity((2, 2), 5) == 1
-    assert pool.superseded_reclaimed_count == 0
-    assert native_key in pool.resident_slots
-    assert pool.tile_resident_keys[1] == native_key
-    assert pool.source_ids[native_key] == other_native.source_id
-
-
 def test_eviction_prefers_superseded_slots_over_lru_and_near_keys():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
     pool.ensure_layout(tile_shape=(4, 4), count=2, storage_mode="scalar")
@@ -1739,53 +1712,6 @@ def test_eviction_prefers_superseded_slots_over_lru_and_near_keys():
     assert "plain-old" in pool.resident_slots
     assert "superseded" not in pool.superseded_keys
     assert pool.eviction_count == 1
-
-
-def _cycle_update(pool, payloads, budget=None):
-    return pool.update_payloads(
-        payloads,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=2,
-        budget_bytes=budget,
-    )
-
-
-def test_zoom_cycle_over_resident_classes_is_zero_upload_after_first_materialization():
-    """ADR 0050 gate 6: level flips between resident classes are identity swaps."""
-
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    native = {0: _lod_payload(0, 1.0, level=0), 1: _lod_payload(1, 2.0, level=0)}
-    reduced = {0: _lod_payload(0, 1.0, level=1), 1: _lod_payload(1, 2.0, level=1)}
-
-    _uvs, first = _cycle_update(pool, native)
-    assert first.texture_uploads == 2
-
-    # Zoom out: reduced class materializes once, counted as swaps-with-upload.
-    _uvs, out = _cycle_update(pool, reduced)
-    assert out.texture_uploads == 2
-    assert out.lod_level_swaps_with_upload == 2
-    assert out.lod_level_swaps_zero_upload == 0
-
-    # Zoom back in and back out: both classes resident, zero uploads, pure
-    # identity swaps, and no superseded slot was reclaimed merely because a
-    # swap happened.
-    _uvs, back_in = _cycle_update(pool, native)
-    assert back_in.texture_uploads == 0
-    assert back_in.lod_level_swaps_zero_upload == 2
-    assert back_in.lod_level_swaps_with_upload == 0
-    assert back_in.superseded_reclaimed_under_pressure == 0
-
-    _uvs, back_out = _cycle_update(pool, reduced)
-    assert back_out.texture_uploads == 0
-    assert back_out.lod_level_swaps_zero_upload == 2
-    assert back_out.lod_level_swaps_with_upload == 0
-    assert back_out.superseded_reclaimed_under_pressure == 0
-
-    assert pool.lod_level_swaps_zero_upload == 4
-    assert pool.lod_level_swaps_with_upload == 2
-    assert pool.superseded_reclaimed_count == 0
 
 
 def test_eviction_reclaims_active_tiles_adjacent_level_only_as_last_resort():
@@ -1836,6 +1762,7 @@ def test_active_tiles_only_resident_presented_class_is_never_evicted():
     with pytest.raises(AtlasCapacityError):
         pool._slot_for("incoming", active_keys={key, "incoming"}, near_keys=set())
     assert pool.tile_resident_keys[0] == key
+
 
 def test_atlas_mipmaps_default_off_after_stale_mip_field_regression():
     # 2026-07-04: whole-atlas regen showed stale mip content (previous atlas

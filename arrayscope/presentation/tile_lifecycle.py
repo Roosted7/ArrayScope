@@ -87,6 +87,33 @@ class TilePhase(str, Enum):
     FAILED = "failed"
 
 
+def _quality_lod_satisfies_target(
+    quality: str,
+    payload_level: int,
+    target_level: int,
+) -> bool:
+    """Whether presented pixels already meet one display LOD demand.
+
+    Exact pixels satisfy their level or any coarser demand.  Pixels retained
+    as fallback against an earlier demand satisfy a *strictly* coarser later
+    demand when they are already finer; an equal-level fallback still owes
+    exact target work.  This prevents quality demotion without letting a
+    genuinely coarse preview claim exact settlement.
+    """
+
+    payload_level = max(0, int(payload_level))
+    target_level = max(0, int(target_level))
+    quality = (
+        "fallback"
+        if str(quality or "exact") == "preview"
+        else str(quality or "exact")
+    )
+    return bool(
+        payload_level <= target_level
+        and (quality == "exact" or payload_level < target_level)
+    )
+
+
 @dataclass(frozen=True)
 class TilePayloadRef:
     """Backend-independent identity metadata for a presentable payload."""
@@ -123,12 +150,20 @@ class TilePayloadRef:
             return bool(
                 self.identity is not None
                 and target.identity is not None
-                and self.identity.satisfies_target(target.identity)
+                and self.identity.semantic_key == target.identity.semantic_key
+                and _quality_lod_satisfies_target(
+                    self.quality,
+                    self.lod_level,
+                    target.lod_level,
+                )
             )
         return bool(
-            self.is_target_quality
-            and int(self.source_index) == int(target.source_index)
-            and int(self.lod_level) <= int(target.lod_level)
+            int(self.source_index) == int(target.source_index)
+            and _quality_lod_satisfies_target(
+                self.quality,
+                self.lod_level,
+                target.lod_level,
+            )
         )
 
 
@@ -304,24 +339,58 @@ class TileRecord:
 
     @property
     def target_settled(self) -> bool:
-        payload = self.acknowledged_payload
+        fields = self._presented_payload_fields()
         return bool(
             self.target is not None
-            and payload is not None
-            and payload.satisfies_target(self.target)
-            and _payload_refs_match(payload, self.backend_payload)
+            and fields is not None
+            and fields[2] == int(self.target.source_index)
+            and _quality_lod_satisfies_target(
+                fields[0],
+                fields[1],
+                self.target.lod_level,
+            )
+            and self.backend_source_id == self.presented_source_id
         )
 
     @property
     def first_pixel_presented(self) -> bool:
-        payload = self.acknowledged_payload
+        fields = self._presented_payload_fields()
         return bool(
             self.active
             and self.target is not None
-            and payload is not None
-            and payload.source_index == self.target.source_index
+            and fields is not None
+            and fields[2] == int(self.target.source_index)
             and self.backend_source_id == self.presented_source_id
         )
+
+    def _presented_payload_fields(self) -> tuple[str, int, int] | None:
+        """Read acknowledged payload facts without normalizing a new ref."""
+
+        if self.presented_source_id is None:
+            return None
+        payload = self.presentable_payloads.get(self.presented_source_id)
+        if payload is None:
+            if self.target is None:
+                return None
+            return (
+                str(self.presented_quality or "exact"),
+                0 if self.presented_level is None else int(self.presented_level),
+                int(self.target.source_index),
+            )
+        quality = str(
+            self.presented_quality
+            or getattr(payload, "quality", "exact")
+            or "exact"
+        )
+        if quality == "preview":
+            quality = "fallback"
+        lod = getattr(payload, "lod", None)
+        level = (
+            int(getattr(lod, "level", 0) or 0)
+            if self.presented_level is None
+            else int(self.presented_level)
+        )
+        return quality, level, int(getattr(payload, "source_index", -1))
 
     @property
     def phase(self) -> TilePhase:
@@ -606,7 +675,7 @@ class TileLifecycle:
 
     def visible_first_pixels_presented(self) -> bool:
         rows = tuple(rec for rec in self._records.values() if rec.active)
-        return bool(not rows or all(_record_first_pixel_presented(rec) for rec in rows))
+        return bool(not rows or all(rec.first_pixel_presented for rec in rows))
 
     def first_pixels_presented(self, tile_numbers) -> bool:
         """Return whether every tile in one required scope has a first pixel.
@@ -622,13 +691,13 @@ class TileLifecycle:
             return True
         return all(
             (record := self._records.get(tile_number)) is not None
-            and _record_first_pixel_presented(record)
+            and record.first_pixel_presented
             for tile_number in required
         )
 
     def visible_target_settled(self) -> bool:
         rows = tuple(rec for rec in self._records.values() if rec.active)
-        return bool(not rows or all(_record_target_settled(rec) for rec in rows))
+        return bool(not rows or all(rec.target_settled for rec in rows))
 
     def target_unsettled_tiles(self, tile_numbers) -> tuple[int, ...]:
         """Return scoped target obligations without redefining visibility."""
@@ -636,7 +705,7 @@ class TileLifecycle:
         unsettled = []
         for tile_number in tuple(tile_numbers or ()):
             rec = self._records.get(int(tile_number))
-            if rec is None or not _record_target_settled(rec):
+            if rec is None or not rec.target_settled:
                 unsettled.append(int(tile_number))
         return tuple(dict.fromkeys(unsettled))
 
@@ -1544,64 +1613,22 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
     texture_kind = getattr(payload, "texture_kind", None)
     shader_mapping = getattr(payload, "shader_mapping", None)
     quality = str(getattr(payload, "quality", "exact") or "exact")
+    policy_lod_level = int(
+        getattr(
+            payload,
+            "conservative_actual_lod_level",
+            int(getattr(lod, "level", 0) or 0),
+        )
+    )
     return TilePayloadRef(
         source_id=getattr(payload, "source_id", None),
         quality="fallback" if quality == "preview" else quality,
-        lod_level=int(getattr(lod, "level", 0) or 0),
+        lod_level=policy_lod_level,
         source_index=int(getattr(payload, "source_index", -1)),
         texture_kind=None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
         shader_mapping_key=None if shader_mapping is None else getattr(shader_mapping, "identity_key", shader_mapping),
         identity=getattr(payload, "tile_identity", None),
         payload=payload,
-    )
-
-
-def _record_presented_payload_fields(rec: TileRecord) -> tuple[str, int, int] | None:
-    """Read acknowledged payload facts without allocating a normalized ref.
-
-    Settlement is queried far more often than payloads change.  Constructing a
-    fresh ``TilePayloadRef`` (and shader identity tuple) for every tile/query
-    made the lifecycle query itself a dominant render cost.
-    """
-
-    if rec.presented_source_id is None:
-        return None
-    payload = rec.presentable_payloads.get(rec.presented_source_id)
-    if payload is None:
-        if rec.target is None:
-            return None
-        return (
-            str(rec.presented_quality or "exact"),
-            0 if rec.presented_level is None else int(rec.presented_level),
-            int(rec.target.source_index),
-        )
-    quality = str(rec.presented_quality or getattr(payload, "quality", "exact") or "exact")
-    if quality == "preview":
-        quality = "fallback"
-    lod = getattr(payload, "lod", None)
-    level = int(getattr(lod, "level", 0) or 0) if rec.presented_level is None else int(rec.presented_level)
-    return quality, level, int(getattr(payload, "source_index", -1))
-
-
-def _record_first_pixel_presented(rec: TileRecord) -> bool:
-    fields = _record_presented_payload_fields(rec)
-    return bool(
-        fields is not None
-        and rec.target is not None
-        and fields[2] == int(rec.target.source_index)
-        and rec.backend_source_id == rec.presented_source_id
-    )
-
-
-def _record_target_settled(rec: TileRecord) -> bool:
-    fields = _record_presented_payload_fields(rec)
-    return bool(
-        fields is not None
-        and rec.target is not None
-        and fields[0] == "exact"
-        and fields[2] == int(rec.target.source_index)
-        and fields[1] <= int(rec.target.lod_level)
-        and rec.backend_source_id == rec.presented_source_id
     )
 
 

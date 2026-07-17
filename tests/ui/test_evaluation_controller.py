@@ -2,15 +2,16 @@ import os
 import threading
 import time
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-_WAIT_TIMEOUT_MS = 5000
 
 
-def _wait_until(qtbot, predicate, *, timeout_ms=_WAIT_TIMEOUT_MS):
-    qtbot.waitUntil(predicate, timeout=timeout_ms)
+def _wait_until(qtbot, predicate, *, timeout_ms=INTERACTION_SETTLE_HARD_LIMIT_MS):
+    qtbot.waitUntil(predicate, timeout=min(int(timeout_ms), INTERACTION_SETTLE_HARD_LIMIT_MS))
 
 
 def test_evaluation_controller_ignores_stale_results(qtbot):
@@ -173,6 +174,40 @@ def test_start_prefetch_local_gates_then_submits_to_kernel(qtbot):
         assert not limited.scheduled and limited.reason == "limited"
         assert not idle.scheduled and idle.reason == "idle"
         assert not cost.scheduled and cost.reason == "cost"
+    finally:
+        controller.shutdown_for_close()
+
+
+def test_start_prefetch_forwards_error_and_stale_terminals(qtbot):
+    import threading
+    import time
+
+    from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
+
+    controller = EvaluationController(max_workers=1)
+    errors = []
+    stale = []
+    entered = threading.Event()
+    try:
+        controller.start_prefetch(
+            lambda: (_ for _ in ()).throw(RuntimeError("prefetch failed")),
+            key=("prefetch", "error"),
+            on_error=errors.append,
+            on_stale=lambda: stale.append("error-stale"),
+        )
+        _wait_until(qtbot, lambda: len(errors) == 1)
+        assert str(errors[0]) == "prefetch failed"
+        assert stale == []
+
+        controller.start_prefetch(
+            lambda: entered.set() or (time.sleep(0.05), "late")[1],
+            key=("prefetch", "stale"),
+            on_stale=lambda: stale.append("cancelled"),
+        )
+        _wait_until(qtbot, entered.is_set)
+        controller.cancel_prefetch()
+        _wait_until(qtbot, lambda: stale == ["cancelled"])
+        assert not controller.is_busy()
     finally:
         controller.shutdown_for_close()
 

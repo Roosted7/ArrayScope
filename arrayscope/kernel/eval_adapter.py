@@ -280,6 +280,8 @@ class KernelEvaluationController(Qt.QtCore.QObject):
         fn,
         on_done=None,
         *,
+        on_error=None,
+        on_stale=None,
         key=None,
         memory_budget_bytes=None,
         idle_elapsed=None,
@@ -332,8 +334,19 @@ class KernelEvaluationController(Qt.QtCore.QObject):
         def stale(*, key=key):
             self._prefetch_keys.discard(key)
             self._pending_prefetch.discard(key)
+            if on_stale is not None:
+                on_stale()
 
-        self.kernel.submit(spec, on_done=done, on_error=lambda _exc: stale(), on_stale=stale)
+        def error(exc, *, key=key):
+            self._prefetch_keys.discard(key)
+            self._pending_prefetch.discard(key)
+            if on_error is not None:
+                on_error(exc)
+
+        handle = self.kernel.submit(spec, on_done=done, on_error=error, on_stale=stale)
+        if handle is None:
+            stale()
+            return WorkStart(False, "declined")
         return WorkStart(True)
 
     def cancel_prefetch(self) -> None:

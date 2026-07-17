@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
     assert_size_close as _assert_size_close,
@@ -79,7 +80,7 @@ def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
         assert "Fit mode is enabled" in label.text()
         qtbot.waitUntil(
             lambda: win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusMessageLabel") is None,
-            timeout=2000,
+            timeout=min(2000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
     finally:
         win.close()

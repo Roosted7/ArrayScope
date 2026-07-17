@@ -28,7 +28,7 @@ from arrayscope.display.montage import (
     make_montage_plan,
 )
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.backends.base import surface_for_view
+from arrayscope.display.backends.base import surface_for_view, tiled_presentation_visible
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render.stages import RenderIntent
@@ -38,7 +38,6 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
-from arrayscope.presentation import ClaimOwner
 from arrayscope.display.pyramid import preview_level_for_tile_shape
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches as _payload_lod_matches,
@@ -71,7 +70,7 @@ from arrayscope.window.montage_viewport import (
     square_montage_fit_view_range,
 )
 from arrayscope.render import lod as render_lod
-from arrayscope.window.frame_session import FrameSession, slice_only_session_transition
+from arrayscope.window.frame_session import FrameSession, plan_presentation_transition
 from arrayscope.window.render_contract import (
     session_token_is_current as _session_token_is_current,
 )
@@ -400,7 +399,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             coverage_margin_tiles=0,
             near_margin_tiles=0,
             priority_focus=viewport_plan.priority_focus,
-            priority_retarget_limit=1,
         )
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
@@ -599,15 +597,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             and bool(getattr(previous_session, "display_committed", False))
             and getattr(previous_session, "montage_axis", None) == axis
         )
-        queue_native_missing_tiles = bool(
+        native_target_required = bool(
             not defer_stage_planning
-            and render_lod.native_missing_tile_queue_required(
+            and render_lod.missing_tiles_require_native_target(
                 lod_policy_mode,
                 initial_demand,
             )
         )
         stage_plan_start = perf_counter()
-        if missing_tiles and not queue_native_missing_tiles and not defer_stage_planning:
+        if missing_tiles and not native_target_required and not defer_stage_planning:
             stage_plan = montage_commit.deferred_stage_fan_in_plan()
         elif defer_stage_planning:
             stage_plan = montage_commit.hot_cached_stage_fan_in_plan(
@@ -624,7 +622,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             stage_plan = montage_commit.build_stage_fan_in_plan(self, document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
-        pending_tiles = list(missing_tiles) if queue_native_missing_tiles else []
         session_key = frame_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan = self._montage_frame_planner().plan(
@@ -675,7 +672,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
             loading_tiles=set(),
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
-            pending_tiles=list(pending_tiles),
             shader_display=bool(shader_display),
             stage_fan_in=montage_commit.stage_fan_in_state(stage_plan),
             defer_side_panels=bool(defer_side_panels),
@@ -702,13 +698,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             lod_preview_level=lod_preview_level,
             lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
-            pyramid_cache=(
-                self._montage_pyramid_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+            lod_page_cache=(
+                self._lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
         )
         stage_planning_deferred = bool(
             defer_stage_planning
-            or (missing_tiles and not queue_native_missing_tiles)
+            or (missing_tiles and not native_target_required)
         )
         session.stage_planning_deferred = stage_planning_deferred
         session.stage_planning_async = False
@@ -742,11 +738,32 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # still starts cold: no acknowledgement inheritance, no seeded
         # evidence (payload seeding requires exact source identities), and
         # the successor's first commit swaps the drawn pixels atomically.
-        # Any other difference (document revision/steps, geometry, colormap,
-        # window/levels mode, backend, dtype) keeps today's full blank,
-        # because stale pixels from a different target are lies, not
-        # previews.
-        retain_stale_pixels = slice_only_session_transition(dying_session, session)
+        # The transition planner keeps the predecessor as independently named
+        # physical truth while compatible successor semantics are prepared.
+        # It rejects a different staged document or surface/backend contract;
+        # derived representation, view state, and auto layout belong to the
+        # complete successor transaction and cannot justify a black flash.
+        surface = surface_for_view(self.win.img_view)
+        transition = plan_presentation_transition(
+            dying_session,
+            session,
+            predecessor_visible=tiled_presentation_visible(surface),
+        )
+        retain_stale_pixels = bool(transition.retain_pixels)
+        session.atomic_successor_pending = bool(transition.atomic_successor)
+        emit_trace(
+            "presentation_transition_retention",
+            session_id=int(session.session_id),
+            predecessor_session_id=int(
+                getattr(dying_session, "session_id", 0) or 0
+            ),
+            retained=bool(retain_stale_pixels),
+            reason=str(transition.reason),
+            detail=str(transition.detail),
+            force_auto=bool(session.force_auto),
+            montage_axis=getattr(session, "montage_axis", None),
+            atomic_successor_pending=bool(session.atomic_successor_pending),
+        )
         self._frame_session_transition_retained_pixels = bool(retain_stale_pixels)
         if retain_stale_pixels:
             self._frame_session_transitions_retained = (
@@ -763,7 +780,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         else:
             self._slice_retention_started_at = None
             self._slice_retention_session_id = None
-        surface_for_view(self.win.img_view).invalidate_tiled_presentation(
+        surface.invalidate_tiled_presentation(
             "frame-session-transition",
             hide_pixels=not retain_stale_pixels,
         )
@@ -1270,7 +1287,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             coverage_margin_tiles=retarget_policy.coverage_margin_tiles,
             near_margin_tiles=retarget_policy.near_margin_tiles,
             priority_focus=viewport_plan.priority_focus,
-            priority_retarget_limit=max(1, len(tuple(getattr(session, "pending_tiles", ()) or ())) + len(tuple(viewport_plan.plan.tiles))),
         )
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
@@ -1296,19 +1312,26 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # quality demotion. Demand math only; reduction stays on worker lanes.
         lod_swap_ready = session.mark_ladder_swaps_for_viewport()
         self.retarget_frame_pipeline(session)
-        additions = viewport_plan.prioritize_tiles(additions)
+        required_tile_numbers = frozenset(session.required_tile_numbers())
+        # The frame pipeline derives visible work from the lifecycle's
+        # required scope. Keep the viewport-only cache/evaluation path on that
+        # same scope.
+        # Coverage-margin misses are speculative and are owned by
+        # ``schedule_near_viewport_montage_prefetch`` once visible work is
+        # quiet; admitting them here leaves dormant speculative debt with no
+        # pipeline consumer and later suppresses the cache lookup when the
+        # tile actually becomes visible.
+        additions = tuple(
+            tile
+            for tile in viewport_plan.prioritize_tiles(additions)
+            if int(tile.montage_index) in required_tile_numbers
+        )
         self._prune_stale_montage_tile_work(session)
         if not additions:
             if presentation_changed or lod_swap_ready:
                 self.apply_montage_presentation(session)
-            if session.pending_tiles and not _viewport_interaction_active(self):
-                self.retarget_frame_pipeline(session)
-                return True
-            if session.pending_tiles:
-                return True
-            else:
-                self._finish_frame_session_if_complete(session)
-                schedule_near_viewport_montage_prefetch(self, session)
+            self._finish_frame_session_if_complete(session)
+            schedule_near_viewport_montage_prefetch(self, session)
             return True
         additions_to_process = tuple(additions)
         budget = self._montage_callback_budget(
@@ -1338,11 +1361,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._record_gui_budget(budget)
         remaining_additions = max(0, len(additions_to_process) - int(processed_additions))
         self._last_montage_viewport_deferred_additions = int(remaining_additions)
-        queue_native_additions = render_lod.native_missing_tile_queue_required(
+        native_target_additions = render_lod.missing_tiles_require_native_target(
             str(getattr(session, "lod_policy_mode", "")),
             getattr(getattr(session, "lod_policy_decision", None), "demand", None),
         )
-        if remaining_additions and queue_native_additions:
+        if remaining_additions and native_target_additions:
             self.win._montage_viewport_update_pending = True
             self._montage_viewport_continue_immediately = True
         session.tile_compute_cache_hits += len(cached_tiles)
@@ -1361,7 +1384,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             schedule_near_viewport_montage_prefetch(self, session)
             return True
         missing_tiles = viewport_plan.prioritize_tiles(missing_tiles)
-        if not queue_native_additions:
+        if not native_target_additions:
             self.win._montage_viewport_update_pending = False
             self._montage_viewport_continue_immediately = False
             session.stage_planning_deferred = bool(missing_tiles)
@@ -1375,12 +1398,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             stage_plan = montage_commit.hot_cached_stage_fan_in_plan(self, session.document, missing_tiles)
             if montage_commit.stage_fan_in_plan_has_existing_sources(stage_plan):
                 montage_commit.merge_stage_fan_in_plan(session, stage_plan)
-            queued = set(session.pending_tile_numbers())
-            for tile in missing_tiles:
-                index = int(tile.montage_index)
-                if index not in queued:
-                    _enqueue_session_pending_tile(session, tile)
-                    queued.add(index)
             session.stage_planning_deferred = True
             session.stage_planning_async = False
             session.deferred_missing_tiles = tuple(missing_tiles)
@@ -1390,12 +1407,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
 
         stage_plan = montage_commit.build_stage_fan_in_plan(self, session.document, missing_tiles)
         montage_commit.merge_stage_fan_in_plan(session, stage_plan)
-        queued = set(session.pending_tile_numbers())
-        for tile in missing_tiles:
-            index = int(tile.montage_index)
-            if index not in queued:
-                _enqueue_session_pending_tile(session, tile)
-                queued.add(index)
 
         self.win.prefetch_evaluation_controller.cancel_prefetch()
         self.win.operation_evaluator.last_status = CacheStatusSnapshot(
@@ -1416,7 +1427,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         }
         if not keep:
             return
-        pruned_pending = session.prune_pending_tiles(keep)
         stale = (set(session.loading_tiles) - set(session.active_tile_requests)) - keep
         if stale:
             for index in sorted(stale):
@@ -1424,7 +1434,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 if 0 <= int(index) < len(session.tile_states):
                     session.tile_states[int(index)] = MontageTileState.UNLOADED
                     session.invalidate_tile_states()
-        pruned = pruned_pending + len(stale)
+        pruned = len(stale)
         if pruned > 0:
             self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
 
@@ -1540,7 +1550,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
-            and (session.pending_tiles or session.loading_tiles or session.active_tile_requests or session.stage_fan_in.attached_requests)
+            and not session.is_complete()
         ):
             self.win.img_view.setImageStale(True)
             self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
@@ -1770,14 +1780,6 @@ def _montage_tile_layer_placeholder(session) -> np.ndarray:
     return np.broadcast_to(base, (height, width))
 
 
-def _enqueue_session_pending_tile(session, tile) -> None:
-    enqueue = getattr(session, "enqueue_pending_tile", None)
-    if callable(enqueue):
-        enqueue(tile)
-        return
-    session.pending_tiles.append(tile)
-
-
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     semantic = None if payload.semantic_data is None else np.asarray(payload.semantic_data)
     image = semantic if semantic is not None else np.asarray(payload.image)
@@ -1801,6 +1803,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
         semantic_histogram_data=semantic_histogram,
+        lod_source_data=getattr(payload, "lod_source_data", None),
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
@@ -1826,6 +1829,7 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
         texture_kind=getattr(cached, "texture_kind", None),
         semantic_data=getattr(cached, "semantic_data", None),
         semantic_histogram_data=getattr(cached, "semantic_histogram_data", None),
+        lod_source_data=getattr(cached, "lod_source_data", None),
         lod=getattr(cached, "lod", None),
         level_data=getattr(cached, "level_data", None),
         level_stats=getattr(cached, "level_stats", None),
@@ -1846,6 +1850,7 @@ def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=getattr(value, "semantic_data", None),
         semantic_histogram_data=getattr(value, "semantic_histogram_data", None),
+        lod_source_data=getattr(value, "lod_source_data", None),
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
@@ -1896,34 +1901,6 @@ def _preview_tile_shape(session, demand) -> tuple[int, int]:
     factor_x, factor_y = factor_xy_for_level(demand, render_effects.preview_evaluation_level(session, demand))
     tile_h, tile_w = (max(1, int(value)) for value in tuple(session.plan.tile_shape)[:2])
     return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
-
-
-def _preview_floor_blocks_exact_submission(session, tile) -> bool:
-    if tile is None:
-        return False
-    scope = set(int(value) for value in getattr(session, "lod_preview_floor_scope", set()) or set())
-    tile_number = int(tile.montage_index)
-    if tile_number not in scope:
-        return False
-    payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
-    payload = payloads.get(tile_number)
-    return str(getattr(payload, "quality", "")) not in {"preview", "exact"}
-
-
-def _claim_preview_floor(session, tile_number: int, key) -> bool:
-    cache = getattr(session, "pyramid_cache", None)
-    if cache is None:
-        return False
-    tile_number = int(tile_number)
-    if cache.peek(key) is not None:
-        session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
-        session.lifecycle.level_resident(tile_number, key)
-        return True
-    if not cache.begin_pending(key):
-        return False
-    session.lifecycle.level_claimed(tile_number, key, ClaimOwner.PREVIEW, request=("preview-floor", key))
-    session.lifecycle.level_materializing(tile_number, key)
-    return True
 
 
 def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:

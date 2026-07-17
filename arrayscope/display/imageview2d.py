@@ -986,6 +986,20 @@ class ImageViewShell(QtWidgets.QWidget):
         finally:
             self._finish_upload_timing()
 
+    def tiledPayloadResident(self, payload) -> bool:
+        """Report physical PyQtGraph tile residency without changing state."""
+
+        layer = self._montage_tile_layer
+        resident = getattr(layer, "payload_resident", None)
+        return bool(callable(resident) and resident(payload))
+
+    def tiledPayloadCommitSlotOwned(self, payload) -> bool:
+        """Report an onscreen holder that owns the payload's atomic swap."""
+
+        layer = self._montage_tile_layer
+        owned = getattr(layer, "payload_commit_slot_owned", None)
+        return bool(callable(owned) and owned(payload))
+
     def _record_tile_layer_stats(self, stats: TileLayerUpdateStats) -> None:
         timing = self._upload_timing
         if timing is None:
@@ -1114,12 +1128,17 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def presentation_diagnostics(self) -> dict[str, object]:
         timing = self.lastImageUploadTiming()
+        tile_layer = getattr(self, "_montage_tile_layer", None)
+        physically_visible_tile_count = int(
+            getattr(tile_layer, "physically_visible_tile_count", 0) or 0
+        )
         return {
             "backend": self.capabilities.name,
             "mode": str(getattr(timing, "mode", "")),
             "interaction_event_owner": self.interaction_event_owner(),
             "native_pointer_interaction": bool(self.capabilities.native_pointer_interaction),
             "montage_display_mode": self.montageDisplayMode(),
+            "physically_visible_tile_count": physically_visible_tile_count,
             "last_reset_reason": str(getattr(self, "_last_surface_reset_reason", "")),
         }
 

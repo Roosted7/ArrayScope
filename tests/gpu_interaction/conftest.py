@@ -22,6 +22,11 @@ from time import monotonic, perf_counter, sleep
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 
 def _display_available() -> bool:
     if os.environ.get("QT_QPA_PLATFORM", "") == "offscreen":
@@ -32,6 +37,25 @@ def _display_available() -> bool:
 ENABLED = os.environ.get("ARRAYSCOPE_GPU_TESTS", "") == "1" and _display_available()
 
 pytestmark = pytest.mark.gpu_interaction
+
+
+def wait_for_qt_condition(
+    app,
+    predicate,
+    *,
+    timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
+) -> bool:
+    """Pump Qt until one condition holds, bounded by the global hard limit."""
+
+    timeout = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        sleep(0.001)
+    app.processEvents()
+    return bool(predicate())
 
 
 def pytest_collection_modifyitems(config, items):
@@ -76,7 +100,7 @@ def montage_window():
         vs = win.view_state
         win._set_view_state(vs.with_montage_axis(2, text=":"))
         win.render(reason="gpu-harness-montage")
-        assert harness.wait_settled(timeout=20.0), "montage never settled after open"
+        assert harness.wait_settled(), "montage never settled after open"
         yield harness
     finally:
         win.close()
@@ -149,21 +173,78 @@ class Harness:
             )
 
     def assert_vispy_visual_mapping_matches_pool(self) -> None:
-        """The atlas registry must match the texcoords actually drawn."""
+        """Canonical page bindings must match every submitted draw quad."""
 
         layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
         if layer is None:
             return
+        from arrayscope.display.backends.vispy.tiles import _tile_quad_rects
+
+        for tile, resolutions in layer._pool.tile_page_target_resolutions.items():
+            bound_pages = {
+                int(resolution.slot.page_index) for resolution in resolutions
+            }
+            drawn_pages = {
+                int(part.page_index)
+                for part in layer._pool.tile_draw_parts.get(int(tile), ())
+                if part.page_index is not None
+            }
+            assert drawn_pages and drawn_pages.issubset(bound_pages), (
+                f"tile {tile} draw pages {sorted(drawn_pages)} do not match "
+                f"bound pages {sorted(bound_pages)}"
+            )
         for page_index, payloads in enumerate(layer._page_payloads_by_index):
+            if not payloads:
+                continue
             visual = layer._visuals_by_page[page_index]
-            ordered_tiles = tuple(sorted(int(tile) for tile in payloads))
-            for offset, tile in enumerate(ordered_tiles):
-                expected = np.asarray(layer._pool.tile_uvs[tile][:2], dtype=np.float32)
-                actual = np.asarray(visual.texcoord_data[offset * 6], dtype=np.float32)
-                assert np.allclose(actual, expected), (
-                    f"tile {tile} pool UV {expected.tolist()} != drawn UV "
-                    f"{actual.tolist()} (slot={layer._pool.tile_slots.get(tile)})"
-                )
+            expected_texcoords = []
+            for tile in sorted(int(tile) for tile in payloads):
+                for _world, (u0, v0, u1, v1) in _tile_quad_rects(
+                    tile,
+                    layer._last_layout,
+                    layer._pool.tile_uvs,
+                    layer._pool.tile_draw_parts,
+                    page_index=page_index,
+                ):
+                    expected_texcoords.extend(
+                        (
+                            (u0, v0),
+                            (u1, v0),
+                            (u1, v1),
+                            (u0, v0),
+                            (u1, v1),
+                            (u0, v1),
+                        )
+                    )
+            expected = np.asarray(expected_texcoords, dtype=np.float32).reshape((-1, 2))
+            actual = np.asarray(visual.texcoord_data, dtype=np.float32).reshape((-1, 2))
+            assert actual.shape == expected.shape and np.allclose(actual, expected), (
+                f"page {page_index} submitted texcoords diverge from canonical "
+                f"draw parts: actual={actual.shape}, expected={expected.shape}"
+            )
+
+    def prepare_image_layer_pixel_sampling(self) -> None:
+        """Hide independent composition overlays before sampling image pixels.
+
+        The default restored ROIs/profile line cross tiles 6 and 7 in the GPU
+        harness.  They are valid composition pixels, but they must not turn a
+        tile-texture identity assertion into an ROI-colour assertion.
+        """
+
+        self.win._clear_rois()
+        self.win.img_view.setRoiInfoRows(())
+        self.win.img_view.clearMontageTileOverlays()
+        self.win.img_view.hideProfileMarker()
+        self.win._clear_image_hover_state()
+        from pyqtgraph.Qt import QtWidgets
+
+        for hints in self.win.img_view.findChildren(
+            QtWidgets.QWidget,
+            "FirstRunHints",
+        ):
+            hints.hide()
+        self.app.processEvents()
+        self.app.processEvents()
 
     # -- event loop ----------------------------------------------------------
 
@@ -172,19 +253,14 @@ class Harness:
         while monotonic() < deadline:
             self.app.processEvents()
 
-    def wait_settled(self, timeout: float = 15.0) -> bool:
-        deadline = monotonic() + timeout
-        while monotonic() < deadline:
-            self.app.processEvents()
-            if self.settled():
-                return True
-            # A tight Python/Qt poll can monopolize the client process long
-            # enough for Wayland/GL paint delivery to miss the very draw ack
-            # this condition is observing. This is still a condition wait,
-            # not a fixed timing assertion; yield one millisecond to the
-            # compositor between polls.
-            sleep(0.001)
-        return self.settled()
+    def wait_settled(
+        self, timeout: float = INTERACTION_SETTLE_HARD_LIMIT_S
+    ) -> bool:
+        return wait_for_qt_condition(
+            self.app,
+            self.settled,
+            timeout_s=timeout,
+        )
 
     def settlement_diagnostics(self) -> dict[str, object]:
         session = self.session
@@ -192,7 +268,6 @@ class Harness:
         return {
             "visible_complete": session.visible_plan_complete(),
             "required_unsettled": session.required_target_unsettled_tiles(),
-            "pending": tuple(session.pending_tiles),
             "active_requests": tuple(session.active_tile_requests),
             "dirty": tuple(session.dirty_payloads),
             "upserts": tuple(session.pending_payload_upserts),
@@ -364,12 +439,16 @@ class Harness:
         return modes
 
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:
-        """Every tile must show ITS OWN constant value: the measured gray
-        means must be strictly increasing with the tile number and close to
-        the analytic ramp.  Wrong-content tiles (previous atlas occupant,
-        stale mip/LOD of another window, wrong source index) violate this."""
+        """Every tile must show ITS OWN constant value.
 
-        means = self.tile_means()
+        Use the modal interior pixel rather than the mean: antialiased ROI or
+        profile composition can touch an image interior for one frame without
+        changing the dominant texture value.  A stale atlas slot changes the
+        dominant value and still fails this assertion.
+        """
+
+        self.prepare_image_layer_pixel_sampling()
+        means = self.tile_pixel_modes()
         expected = [255.0 * k / (COUNT - 1) for k in range(COUNT)]
         for k in range(1, COUNT):
             assert means[k] > means[k - 1] + 1.0, (

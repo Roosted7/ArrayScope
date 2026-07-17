@@ -1,9 +1,10 @@
 import numpy as np
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
 
 
-_WAIT_TIMEOUT_MS = 5000
 
 
 def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeypatch):
@@ -23,7 +24,7 @@ def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeyp
         assert win.widgets["spins"]["slice_indices"][2].value() == 3
         assert calls == []
 
-        qtbot.waitUntil(lambda: len(calls) == 1, timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         assert len(calls) == 1
         assert calls[0][0]["reason"] == "slice"
         assert calls[0][0]["defer_side_panels"] is True
@@ -150,7 +151,7 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
         qtbot.waitUntil(
             lambda: win._deferred_side_panel_refresh_pending
             and not win.render_coordinator.has_pending_render,
-            timeout=_WAIT_TIMEOUT_MS,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         assert calls == {"operation": 0, "inspection": 0, "profile": 0}
@@ -261,7 +262,7 @@ def test_cached_interactive_render_uses_cadence_and_cancels_side_work(qtbot, mon
 
         assert renders == []
         assert cancellations == []
-        qtbot.waitUntil(lambda: bool(renders), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: bool(renders), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         assert renders[-1]["reason"] == "cached-slice"
         assert cancellations == [True]
         assert win.render_coordinator.immediate_cache_flushes == before_flushes
@@ -312,7 +313,7 @@ def test_cached_interactive_render_skips_intermediate_requests_until_draw_comple
 
     win.img_view.pending = False
     win.img_view.presentationDrawn.emit()
-    qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-3"]
     assert win.cancelled == 1
@@ -356,7 +357,7 @@ def test_uncached_interactive_render_supersedes_pending_draw(qtbot):
     win = DummyWindow()
     win.render_coordinator.request(reason="slice-1", interactive=True)
     win.render_coordinator.request(reason="slice-2", interactive=True)
-    qtbot.waitUntil(lambda: len(win.rendered) == 1, timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: len(win.rendered) == 1, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
     assert win.cancelled == 1
     assert win.render_coordinator.presentation_backpressure_skips == 2
@@ -401,7 +402,7 @@ def test_quiet_timer_flushes_pending_render_if_draw_signal_was_missed(qtbot):
 
     assert win.rendered == []
     win.img_view.pending = False
-    qtbot.waitUntil(lambda: bool(win.rendered), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: bool(win.rendered), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
     assert [call["reason"] for call in win.rendered] == ["slice-latest"]
     assert win.cancelled == 1
@@ -414,7 +415,10 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        qtbot.waitUntil(lambda: getattr(win, "_committed_display_frame", None) is not None, timeout=3000)
+        qtbot.waitUntil(
+            lambda: getattr(win, "_committed_display_frame", None) is not None,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         refreshes = []
         monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
 

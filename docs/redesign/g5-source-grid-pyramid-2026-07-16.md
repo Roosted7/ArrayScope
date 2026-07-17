@@ -1,10 +1,10 @@
 # G5 source-grid sparse pyramid contract — 2026-07-16
 
-**Status:** authoritative implementation contract for the remaining ADR 0056
-work; pure page resolution/pins, source-grid mean geometry, and the VisPy
-CPU-resolution/physical-truth seam implemented.
-This closes the dangling “route-canonicalization” reference in the GPU handoff
-before production code chooses an accidental second reduction route.
+**Status:** authoritative implementation contract and landing dossier for ADR
+0056 G5. The canonical live page route, reducer families, renderer-shared
+cache, producer migration, and both backend consumers are implemented on the
+landing candidate; the remaining broad/stress and real-Wayland acceptance
+matrix still gates queue row 1.
 
 ## One canonical reduction route
 
@@ -52,10 +52,11 @@ A target virtual page resolves once on the CPU to either:
   target, including actual key/LOD, physical slot, target-to-resident sample
   scale and offset, and that binding's generation.
 
-Document/operation generation, representation, dtype, spatial coverage, and
-reducer family must all match. Anisotropic reductions use componentwise
-ancestry; reducer mismatch never aliases. The shader consumes the resolved
-binding and does not walk an ancestor ladder per fragment.
+Document/operation generation, representation, dtype, spatial coverage,
+reducer family, and gutter must all match. Anisotropic reductions use
+componentwise ancestry; a semantic-family mismatch never aliases. The shader
+consumes the resolved binding and does not walk an ancestor ladder per
+fragment.
 
 Pins are owner-scoped sets, replaced atomically. Several active target pages
 may share one coarse ancestor; one target leaving must not unpin coverage still
@@ -85,7 +86,35 @@ display is allowed only when no compatible resident ancestor exists.
 5. Reducer families and phase-cancellation correctness, followed by real
    Wayland GL certification.
 
+G5 is row **1** of [`docs/queue.md`](../queue.md); older plan text referring
+to queue step 2 is stale after the churn-convergence net landed. Each stage's
+commit message records the ring, exact pass/skip counts, and artifact paths;
+documentation evidence is not a substitute for commit-local evidence.
+
+Before row 1 can move to Done, the real-Wayland ring includes both the
+dedicated never-black `tests/gpu_interaction` coarse/fine arrival/eviction
+scenario and a live, real-data run of
+`tests/stress/test_interaction_convergence.py`. Performance evidence is valid
+only on real data and is stored under `tests/artifacts/<gate>-<date>/`; the
+synthetic registration charts diagnose placement, phase, and continuity but
+do not establish a performance number.
+
+All G5 gates also obey the repository-wide per-step interaction budget: 2 s
+target and 5 s hard failure. A multi-step zoom/pan/scroll scenario receives a
+fresh budget per step, but no stage may turn a 5+ s settlement into a pass by
+widening its timeout. Each stage's commit message records the ring, exact
+pass/skip counts, and artifact paths.
+
 ## Implementation progress
+
+Release capture and interaction probes now share one read-only settlement
+snapshot in `arrayscope.tools.presentation_settlement`. It combines the
+current frame/viewport target token, `TileLifecycle` target completion, commit
+debt, backend acknowledgement identity, exact required physical coverage,
+backend-qualified geometry truth, and draw completion without scheduling or
+mutating the live pipeline. Release diagnostics require a distinct target for
+the initial image, changed slice, and montage captures; geometry-only or stale
+physical rows fail loudly at the repository five-second cap.
 
 The pure model and first VisPy consumption slice now stand without scheduler
 coupling:
@@ -111,8 +140,412 @@ coupling:
 - physical presentation rows report target key, actual key/LOD, exact versus
   fallback quality, and binding generation; presented identity is the actual
   resident page, never the requested fine page;
-- 111 focused GPU/pyramid/VisPy tests pass. The next slice is the live
-  ladder/cache migration that emits logical page targets into this seam.
+- The initial seam landed with 111 focused GPU/pyramid/VisPy tests; the live
+  ladder/cache migration and later evidence are recorded below.
+
+The live page-backed VisPy cutover now also has a restored-session geometry
+guard. A field reproduction using the saved 100-tile complex session found
+that each per-tile resolver call treated its one-tile input as a complete
+frame and cleared all earlier tiles' page mappings. Ninety-nine L2 tiles then
+sampled a padded 336-by-336 slot instead of their valid 84-by-84 UV crop; only
+the last committed tile kept the correct size. Multi-page resolution input is
+now explicitly partial across tiles, while frame-boundary removal remains the
+only owner that clears omitted tiles. The regression commits two page-backed
+tiles in one frame and requires both complete binding sets and draw parts.
+The real-Wayland saved-session artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/repro-fixed/` records 100/100
+bound tiles with one consistent UV span and uniform framebuffer geometry by
+1.23 s. The accompanying zoom/pan artifact remains a red convergence gate:
+it preserved page bindings but correctly hard-failed when an L6 target had
+only complete L2/L4 fallback and no materialization work in flight. That
+lost-wakeup is follow-on work, not a timeout exception or a reason to weaken
+the never-black fallback.
+
+The follow-on trace showed that no L6 work was actually missing: retained L2
+and L4 pixels already exceeded the later L6 demand. `TileRecord.target_settled`
+and the scoped `TileLifecycle` queries had drifted into two implementations;
+the latter required the historical quality label `exact` and therefore called
+finer retained fallback unsettled. `TileRecord` now owns first-pixel and target
+settlement truth, all scoped queries delegate to it, and one shared quality/LOD
+rule prevents demotion: an exact level satisfies its own or a coarser demand,
+while a retained fallback satisfies only a *strictly* coarser later demand.
+Equal-level and genuinely coarser fallback remain unsettled. The real-Wayland
+artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-settlement-fixed/`
+reaches `required_target_settled=True` without producing L6 replacement work.
+The later real-data scrub gate exposed the complementary producer-side drift:
+`FramePipelineEffects` asked the backend identity rule whether an equal-level
+fallback was safe to draw, then treated that answer as proof that exact work
+was already covered. The fallback correctly prevented black while tiles 0--7
+were left with no exact claim or task. Producer suppression now delegates to
+the same `TilePayloadRef.satisfies_target` lifecycle rule as settlement;
+backend fallback drawability remains unchanged. A parsed 64-slice, 60-step
+real-Wayland scrub changes from 56/64 exact acknowledgements plus a stall to
+64/64, zero stalls, and zero identity rejections within the unchanged five-
+second step cap. Before/after traces and verifier output are preserved under
+`tests/artifacts/g5-probe-scrub-lost-wakeup-2026-07-17/`.
+
+The saved-session zoom/pan/FFT trace then exposed a second correctness defect:
+the complete predecessor surface collapsed to 16 or 69 drawn tiles when the
+first bounded successor batch was acknowledged. Retention and atomic handoff
+had drifted across a source-window flag, an independent completion generation,
+derived dtype/RGB/geometry/ViewState vetoes, and a backend atomic query that no
+backend implemented. One immutable presentation-transition decision now owns
+retention, atomic obligation, reason, and trace detail. Its initial rule was too
+broad: it allowed a common staged base to retain pixels across an operation
+change. The corrected contract separates residency from visibility. Old pages
+may remain resident for a later revert, but a document/operation source change
+hides their mappings and shows black/placeholder until successor pixels present.
+Never-black retention and coarse fallback are allowed only under the same full
+semantic source identity; shader-only levels/LUT/mapping state crosses with the
+compatible pixels atomically. The redundant
+completion generation, lifecycle-based clear, and dead backend query are gone.
+The real-Wayland artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-atomic-view-fixed/`
+has no post-start sample with drawn coverage below the visible set and the
+`presentation_continuity` gate is green. Its remaining failures are LOD
+checkpoint coverage and GUI/event-loop latency, not tolerated continuity gaps.
+
+A later 60-step real-Wayland scrub found the atomic obligation itself had
+acquired a second owner: commit code re-decided the already-armed
+`FrameSession.atomic_successor_pending` flag from the lagging committed semantic
+frame. When that derived check disagreed, commits ran without the atomic guard
+while the canonical flag could never be acknowledged, producing an idle
+`pipeline_plan steps=[]` loop. The transition owner now arms the flag and the
+backend acknowledgement alone clears it. The focused atomic ring passes 4/4,
+the montage LOD residency ring passes 181/181, and the montage backend ring
+passes 88/88. The replay at
+`tests/artifacts/g5-atomic-successor-owner-2026-07-17/stdout.log` retains complete
+64/64 physical coverage and clears all atomic commit debt. It remains a red
+exact-convergence gate: 31 L1 tasks were still in flight at the unchanged
+five-second cap, so this evidence does not claim the full scrub green.
+
+The 2026-07-17 10:20 user trace
+`/tmp/arrayscope-stall-57-1.trace.jsonl` exposed the complement of that owner
+fix: an atomic successor stopped at 10/15 payloads while 28 upserts remained
+parked and every kernel/stage/evaluation/LOD owner was idle. The ladder saw
+current native `RenderedTile` results for the five missing tiles and correctly
+scheduled no evaluation; the frame-wide floor-first presentation barrier then
+withheld those native wrappers because other successor tiles still had coarse
+floors. Floor-first is now per tile during an atomic handoff: a tile with live
+resolvable floor ownership keeps that floor, while a tile with no floor owner
+uses its already-owned current native result. The focused regression constructs
+that mixed cohort and requires one complete 4/4 successor delta. In parallel,
+`trace_verify` now fails repeated identical semantic `commit_bail` states via
+`no_identical_commit_bail_loop` / `--max-identical-commit-bails` (default 25),
+mirroring the acknowledgement-churn bound. The supplied field trace triggers
+the new invariant with a 334-event identical signature; its other changing
+bails remain separately visible rather than being folded into that count.
+
+The canonical raw-full workflow then exposed a false physical-residency proof
+on PyQtGraph. Its counters claimed all 272 successor payloads were resident,
+but the required screenshot showed only the retained 60-tile predecessor
+footprint. `warm_payloads` placed each newly prepared hidden `ImageItem` back
+in the generic reuse pool, so the next bounded warm cohort could retarget that
+same holder while the coordinator continued to count its former payload as
+warm. PyQtGraph also had no `tiledPayloadResident` implementation, causing the
+coordinator to accept every warm call without a receiver-side proof. Hidden
+successor holders are now transaction-owned until presentation claims them or
+ordinary hide/displacement releases them, and PyQtGraph reports exact physical
+payload residency from its live item states. The focused gate warms three
+successor payloads in separate cohorts and requires three distinct invisible
+holders plus a positive physical-residency query for every payload. The
+canonical screenshot/two-quality-pass replay remains an exit gate; these unit
+results alone do not claim it green.
+
+The first honest live rerun then stopped on the predecessor overlap rather
+than fabricating residency: the first warm cohort addressed tile slots whose
+old holders were still onscreen, and `warm_payloads` correctly refused to
+overwrite them before the atomic swap. Those slots already have a bounded
+complement owner: the final synchronous PyQtGraph commit can replace their
+ImageItems without yielding to a paint. PyQtGraph now exposes that visible
+commit-slot ownership separately from physical payload residency. Atomic
+preparation accepts either exact hidden payload residency or an onscreen slot
+owned by that final commit; a tile with neither remains unresolved and rearms
+the visible owner. The focused coordinator gate distinguishes all three cases.
+
+The next canonical screenshot isolated a broader misuse of that atomic owner:
+the transition planner armed an all-slot handoff when the physical montage
+topology changed from the retained 60-slot setup frame to the 272-slot raw
+frame. The predecessor can honestly remain visible during that transition,
+but it cannot own the 212 new slots; requiring hidden residency for the whole
+successor delayed both geometry and pixels behind an impossible continuity
+claim. Both session rebirth and in-place index-window retargeting now compare
+layout topology independently of semantic source indices. Same-layout source
+swaps remain atomic; expansion, shrink, or relocation retains the predecessor
+only as a visual bridge and publishes the successor through ordinary bounded
+deltas. Focused expansion/shrink and same-layout gates pass 5/5. The real
+Wayland PyQtGraph rerun at
+`tests/artifacts/g5-topology-transition-pyqtgraph-2026-07-17/` reaches honest
+272/272 physical presentation with zero dirty/upsert debt, where the prior run
+never left the 60-tile predecessor. It is intentionally still red: the visual
+timeline takes about 11.3 s and shows preview/exact qualities interleaving
+tile-by-tile rather than two coherent passes; physical L1 also remains below
+the current L2 target. Those are the next convergence slices, not evidence for
+relaxing the five-second gate.
+
+The interleaving was not a priority-tuning defect. The ladder already deferred
+new desired/exact tasks behind its first-pixel steps, but its `allow_preview`
+decision had no production owner for `FrameSession.lod_preview_floor_scope`.
+Retained/reusable exact payloads therefore needed no task and bypassed that
+barrier; the bounded already-built follow-up path also returned before full
+presentation reconciliation. The structured trace now records planned versus
+declared preview counts, per-delta quality/LOD rows, whether the physical pass
+was open, and any exact upsert admitted inside it. `trace_verify` rejects the
+latter via `preview_pass_precedes_exact_upserts`. The plan effects now replace
+the current declared scope (never accumulate old tiles), and both full and
+fast-path delta constructors cross one canonical quality-pass gate. Exact
+reduced pages used for provisional coverage are exposed conservatively as
+preview until physical coverage closes; already-presented compatible exact
+pixels remain visible, and an atomic tile with no floor producer still degrades
+honestly under ground rule 11. The focused model/trace ring passes 201/201
+(one real-VisPy test deliberately isolated from the mixed-binding process).
+
+The real-Wayland PyQtGraph evidence at
+`tests/artifacts/g5-preview-owner-fix2-pyqtgraph-2026-07-17/` is semantically
+green for this slice: planned and declared scopes agree, every open-pass delta
+contains preview only, and the exact-during-preview trace violation count is
+zero. Its contact sheet confirms that target-quality islands no longer expand
+through holes. It remains an explicit performance red, not a row exit: the
+CPU item backend admits 12 rows per commit, reaches only 227/272 successor
+slots by the hard deadline, and takes roughly 13 s in the sampled timeline.
+Closing that bounded-commit throughput bottleneck is the next slice; the
+two-pass contract and five-second cap are unchanged.
+
+The semantic-compatibility boundary is now explicit in that same transition
+owner. A later axes/PyQtGraph gate caught the predecessor mappings remaining
+visible after transposing the image axes. `plan_presentation_transition`
+therefore normalizes only the source-selection field that retention is allowed
+to bridge: `slice_indices` for a single image, or
+`montage_indices`/`montage_text` for a montage. Axes, flips, channel/view mode,
+and every other `ViewState` difference reject predecessor retention. Rejection
+hides the old mapping through the existing surface invalidation while leaving
+its CPU/GPU residency reusable for a later revert; it does not clear caches or
+add a second freshness set. The full real-Wayland semantic transition matrix
+(operation, real channel, complex mode, and axes on both backends) passes 8/8,
+and the full montage LOD residency file passes 181/181.
+
+A later 500 ms framebuffer sequence caught a stricter atomicity violation that
+the tile-count gates missed: during raw-to-FFT replacement, canonical successor
+pages could be uploaded and rebound while the layer still held predecessor
+levels/mapping (or vice versa), briefly producing white-background grayscale or
+psychedelic complex tiles. The real-Wayland artifact
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/zoompan-atomic-handoff-fixed/`
+is retained as a **red** diagnostic: its scalar frames proved that
+cross-operation predecessor retention could present stale complex values under
+scalar target state. Page-backed warming remains residency-only, but operation
+changes now hide the incompatible presentation; only same-source LOD and
+shader-presentation handoffs may retain visible predecessor bindings. The
+replacement real-Wayland saved-session sequence is retained at
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/scalar-freshness-storage-pressure-fixed/`.
+Its periodic framebuffer/physical-truth record keeps one storage/mapping family
+per sample across FFT-to-scalar replacement, ends with 60/60 exact scalar L0
+bindings and settled target coverage, and was visually confirmed onscreen. Its
+three red gates are explicitly performance-only (GUI callback, heartbeat, and
+warm-input latency); they do not weaken this semantic correctness result.
+
+The periodic screenshot/JSONL probe now separates lifecycle acknowledgement,
+resident physical rows, scene-presented primitives, and primitives that
+actually intersect the camera. It records the scripted action, live/session/
+VisPy camera ranges, content intersection, projected tile sizes, exact/fallback
+bindings, missing candidates, page-table occupancy, and atlas storage classes;
+the generated contact sheet labels scene and onscreen counts. The earlier
+stress path also derived an off-centre zoom from the maximum-out range, putting
+the entire camera tens of thousands of samples outside the montage and making
+correct black frames look like renderer failures. Non-limit gestures now start
+from the content range. The real-Wayland evidence at
+`tests/artifacts/g5-wrong-tile-size-2026-07-16/visual-truth-camera-fixed/`
+contains 23 periodic frames: every sample has one 336×336 world-size class, no
+layout-bound mismatch, no mixed scalar/complex storage/mapping/levels among
+scene primitives, and a VisPy camera key matching the live range. The semantic
+operation switch is explicitly hidden before scalar pixels arrive; the final
+frame has 60/60 scalar scene bindings. Its three remaining reds are the same
+performance-only gates and remain work, not widened timeouts.
+
+The resident-LOD matrix now separates candidate construction from physical
+truth. An unacknowledged native wrapper may be replaced by the first legitimate
+reduced commit, while an acknowledged finer compatible presentation satisfies
+later coarser demand and cannot be demoted by a logical payload/cache byte
+estimate. Only the backend's physical-capacity owner may reclaim it, after
+less-important residency and with complete same-source fallback retained.
+Translated level-swap coverage still proves distinct page identity, per-tile
+mixed availability, bounded deferral without removals, native semantic-stat
+reuse, and stable histogram identity without manufacturing logical pressure.
+
+Producer success is also exact now: ingest/worker materialization, retained
+preview admission, prefetch, lifecycle residency, and terminal claim handling
+require the precise planned `DataChunkKey` set. A coarse ancestor can keep a
+target drawable but cannot suppress a finer claim or mark it resident. Floor
+candidates are ranked by the actual physical page set returned by the same
+resolver, so an L2 fallback can no longer win by masquerading as a hypothetical
+L1 request. PyQtGraph's independent ancestry scan was deleted; both PyQtGraph
+and VisPy use `PageTable.resolve` and report requested-to-actual identity,
+anisotropic scale/offset, and exact/fallback quality. The focused serial ring
+covering keys, chunk store, page-table resolution, source-grid geometry,
+materialization, both backend routes, target planning, and the resident matrix
+passes **283 tests** in 1.16 s on the current slice.
+
+The page cache now attaches an owner to the whole requested set, not just its
+new boundary claims. Before each admission it touches resident members of that
+set, so a two-page-budget shift in either direction retains the shared interior
+and evicts the outgoing boundary. Cache-ineligible exact sets are rejected
+before worker scheduling and remembered until resize; the former completion →
+eviction → GUI-admission race declines normally and balances every claim rather
+than throwing or immediately recomputing an impossible set. Requested and
+actual `LodInfo` source/stored shapes are checked against immutable plans and
+resolved values, structurally rejecting the malformed payload class that made
+tiles draw at mixed sizes. Native two-dimensional `uint8` is likewise a scalar
+page family; only actual three/four-component `uint8` values may claim `RGB8`.
+
+History identifies two earlier false-truth seams. Commit `6ffce57a` let
+`build_tile_presentation` copy an unacknowledged lifecycle fallback directly
+into `TilePresentationState`; that duplicate acknowledgement path is deleted.
+The initial G5 cutover `56d1cc0a` then preserved a requested L2 identity over
+physically sampled L4 values; floor payloads now keep requested geometry and
+actual sampled LOD as separate typed facts.
+
+Those two correctness gates are now closed at their existing owners. One
+`tiledPayloadResident` seam reports page-backed ancestor resolution,
+source-anchored native chunks, and classic residency; the session treats only
+that physical proof as exempt from cold admission caps. A complete already-
+resident coarse set therefore rebinds in one presentation transaction instead
+of streaming tile by tile after pan/zoom. Hidden warming uses the same seam,
+and first-display rough level evidence remains visible correctness work until
+the first frame commits instead of parking on the optional histogram lane.
+The five-node live window-shift ring passes in 4.54 s. An integrated
+`FrameSession → FramePipelineEffects → DisplayCommitter → VisPy` gate
+keeps interaction active, defeats a one-item/one-byte cold cap, and commits all
+three L2 targets through resident L4 ancestors with no removals and zero
+uploads before the stop edge. Its physically cold same-source control still
+defers. This deleted a duplicate unconditional interaction-time LOD gate; the
+backend-residency predicate now owns the decision once. The field failure is
+preserved at
+`tests/artifacts/g5-resident-fallback-field-2026-07-16/`: several transitions
+reported 100 visible tiles but only 78, 92, 85, 97, or 80 presented while
+compatible L0/L1/L2 residency existed. Prefetch page claims/admission are GUI-owned;
+workers return checked pages only, and success, stale, cancellation, partial
+fanout, and teardown all release claims and wake the standing replan path.
+
+The follow-up saved-session pan/zoom reproduced two remaining ways that warm
+coverage could still stream in. First, a mixed presentation transaction could
+contain a complete set of physically free coarse rebinds plus one cold upload;
+the interaction guard correctly deferred the cold member but necessarily
+deferred the whole transaction with it. The admission owner now emits the
+complete physically free cohort as its own transaction and leaves cold exact
+work queued. Second, the obsolete `pending_tiles` queue still admitted
+coverage-margin misses even though the frame pipeline, not that queue, owns
+production scheduling. A dormant shell entry was then treated as already
+known when it entered the required viewport, suppressing the immediate
+cache/residency lookup. Viewport admission is now lifecycle-required only,
+coverage warming remains prefetch-owned, and fossil queue membership has no
+authority over retarget additions. Focused gates require all resident members
+to cross before any cold member and require a dormant coverage hint to be
+rechecked when it becomes visible.
+
+The remaining `FrameSession.pending_tiles` state is now deleted, not renamed.
+History showed that its only production drain disappeared when scheduling
+moved to `FramePipeline`; the persisted queue survived as a second, write-only
+idea of target debt. It could suppress a visible cache/residency recheck even
+though no scheduler consumed it. Required target debt now comes only from
+`TileLifecycle`; task/evaluation claims own running work, `stage_fan_in` owns
+stage waiters, `deferred_missing_tiles` owns an immutable deferred plan, and
+the presentation delta owns commit debt. Stage completion unbinds its
+dependents and requests the existing coalesced pipeline replan instead of
+manufacturing queue membership. `TilePriorityContext` remains the one ordering
+input; the local prefetch priority queue is deliberately ephemeral and does
+not claim lifecycle state. Runtime diagnostics expose
+`target_unsettled_tiles`; only the historical JSONL reader accepts the old
+field name. A structural resurrection guard rejects a live pending-queue
+field, access, repair helper, classifier, or release shim. The translated
+page/lifecycle rings pass **271/271**, and the session/diagnostics/structural
+ring passes **144** with **2** intentional skips. This closes the duplicate
+scheduler-state seam; real-Wayland visual acceptance remains required before
+the queue row moves.
+
+The same onscreen replay exposed a distinct idle-draw loop after coverage had
+already reached 100/100 exact pages. Semantic level evidence advances in small
+background batches; the level-statistics owner computed that the evidence
+frontier was incomplete but ignored that fact in its settled-session
+publication branch, so every batch requested a full VisPy tile-layer commit.
+Those commits carried zero upserts and zero uploads yet kept physical draw
+truth changing indefinitely. Metadata publication now waits for the complete
+semantic evidence frontier and has one final-publication owner. A regression
+requires zero intermediate presentation requests and exactly one request when
+the full population closes; timeout and quiescence guards remain unchanged.
+
+The next real-Wayland replay found exact L1 pages resident for all 60 visible
+tiles while every tile still reported a native semantic evaluation in flight.
+The result contract and numeric route had been conflated: a cold DESIRED rung
+with `reduce_from_native=True` still returns canonical display pages, but the
+pipeline labeled it as a native `RenderedTile` producer. That invented claim
+had no legal terminal event and also made floor selection preserve the existing
+same-level fallback instead of preparing the exact wrapper. Page-payload
+ownership now depends only on rung/output type; `reduce_from_native` selects
+where the page values are computed, never what lifecycle they own. The
+regression drives the complete `FramePipelineEffects` admission edge and
+requires the page claim released, no semantic evaluation/loading claim, the
+acknowledged fallback retained until replacement acknowledgement, and an exact
+upsert armed. The full LOD-residency file passes **183/183** and the supporting
+ladder/pipeline/render-effects/montage-backend ring passes **150/150**. The
+onscreen artifact
+`tests/artifacts/g5-resident-fallback-popin-2026-07-17/after-claim-terminal/`
+ends with 60/60 exact L1 payloads, zero preview payloads, zero loading tiles,
+zero pending materializations, and the required target settled. That workflow
+still reports its independent LOD-checkpoint and GUI/heartbeat gates red; this
+evidence closes the false-claim/exact-promotion defect only and does not relabel
+the whole workflow green.
+
+The broader memory-stress gate initially appeared to show a roughly 216 MiB
+G5 residency increase, but reproduced with a roughly 178 MiB increase on
+`main`. Its baseline was taken before the one-time Qt/PyQtGraph window/backend
+allocation. The corrected gate takes its RSS baseline after backend
+initialization and separately asserts the deterministic owners: in the failing
+scenario the logical page cache plateaued at 129 pages / 1,115,136 bytes with
+zero pending claims and the display cache plateaued at 16 entries / 4,194,304
+bytes; repeated viewport walks did not grow either owner. This correction does
+not widen a cache budget or excuse unbounded RSS growth.
+
+That live ring also caught one last route split rather than being weakened for
+the new semantic-read contract. Cold reduced-target evaluation planned and
+materialized at local `(0, 0)` while its payload advertised a shifted native
+source anchor. The stored values could therefore be offset from their page
+keys and draw geometry by the window origin. Cold-target evaluation now asks
+the same session source-origin owner used by ladder materialization; the live
+factor-two gate asserts shifted native coverage and samples recognizable bins
+through the exact page plan.
+
+Presentation sampling and scientific reads are now separate typed APIs.
+`PageBackedPresentation.sample_presented_*` maps native coordinates through
+clipped/nonuniform target bins and actual ancestor pages exactly, but those
+reduced values do not thereby become native semantic data. `TiledValueSource`
+admits only explicit native `semantic_data` (and optional native histogram
+data); exact ROI/measurement/export region demand falls through display pages
+to the evaluator/cache. Preview, fallback, or reduced display pages can no
+longer silently satisfy an exact scientific read.
+
+Runtime JSONL now reports resident page counts by anisotropic reduction vector
+and reducer family. Together with requested-to-actual physical binding rows,
+this distinguishes “already resident but not rebound” from “not resident”
+without inferring state from logical acknowledgement.
+
+`PageResolution.scale/offset` remains the nominal aligned-grid transform used
+for ancestry diagnostics. One affine transform cannot represent a clipped
+leading/trailing bin: the real factor-two target through a factor-eight
+ancestor maps its first three-native-sample coarse bin to one third of a stored
+sample, not the nominal one quarter. Both backends therefore consume the
+canonical target and actual `SourceGridDrawBlock`s for exact boundary mapping;
+the clipped VisPy gate proves the intentional divergence from the nominal
+transform so a future simplification cannot reintroduce uniform stretching.
+
+The dedicated real-Wayland gate
+`tests/gpu_interaction/test_g5_page_fallback.py` drives missing fine → pinned
+coarse → fine arrival → fine eviction → pinned coarse on a real VisPy
+surface and samples the framebuffer at every state. Fine resolution and
+eviction fallback take 35.5 ms and 23.3 ms with zero uploads; binding
+generations are coarse 1, fine 2, fallback 1. Its fault injection hides the
+actual GL visual and produces a genuinely black framebuffer, proving the
+never-black oracle can fail. The green run and PNG/JSON evidence are under
+`tests/artifacts/g5-never-black-real-gl-2026-07-17/`.
 
 The ladder-side target planner is also now explicit:
 
@@ -122,11 +555,10 @@ The ladder-side target planner is also now explicit:
 - factor-2 windows starting at 101 and 102 share the aligned interior page
   and keep both clipped boundaries distinct; desired mean-family identity
   stays separate from a coarser physical resolution;
-- the planner is not yet attached to `DisplayTilePayload`. Current reduced
-  ladder values are still binned from window-local zero, and attaching global
-  target names to those texels would be false identity. The next slice must
-  migrate materialization and boundary draw geometry together before feeding
-  these targets into the VisPy resolver.
+- the planner is attached to `DisplayTilePayload`, ladder materialization,
+  retained/floor queries, and backend resolution. Requested target geometry
+  stays distinct from actual sampled residency, so a coarse fallback cannot be
+  relabeled as its fine target.
 
 The pure boundary-geometry half of that atomic slice is now implemented:
 
@@ -142,8 +574,70 @@ The pure boundary-geometry half of that atomic slice is now implemented:
   `SourceGridDrawBlock`s; aligned interior pages are one block, while stored
   and native-source coverage both remain exactly once.
 
-The remaining live step is to carry these page values and spans through the
-ladder cache/payload contract and have VisPy build grouped quads from the spans.
+These values and spans now travel through the page-backed ladder/cache and
+payload contract. The stale live name `RungMaterializationRequest` is removed;
+`LodPageMaterializationRequest` carries the source coverage, canonical plans,
+and only the claims newly owned by one request. Named asymmetric gates now
+compare `(1, 2)` with `(2, 1)` across conversion, bin footprints, page shapes,
+and componentwise ancestry. PyQtGraph and VisPy share direct-oracle parity for
+clipped pages, anisotropy, `mean_abs` magnitude, and phase cancellation; a
+complex-mean page cannot resolve a magnitude target. Current focused evidence
+includes 70 pure geometry/key/page-table tests, 93 route/reducer/model tests,
+236 backend/offscreen page/physical/window/floor tests, and 129
+producer/model/semantic tests, the 18-node prefetch file, and the dedicated
+real-GL node above. The former order-dependent prefetch red was a circular test
+fixture: forged visible-busy also set the governor's speculative quota to zero
+while the test waited for that parked body before releasing busy. It now uses
+real bounded visible work and its actual drain; production ownership was not
+changed and no timeout was widened. Remaining G5 work is broader suite/stress
+cleanup, full real-Wayland `gpu_interaction` baseline comparison, and the
+onscreen workflow on both backends. The queue row does not move to Done until
+every exit gate above is green.
+
+The live churn ring also exposed a normal-supersession route exception. A
+reusable reduced-target worker began under semantic source A, then the reused
+session retargeted to B while it evaluated. Its final page-key construction
+re-read the mutable session, disagreed with A, and raised instead of returning
+reusable A work for the pipeline's existing stale-intent drop. Rung closures
+now snapshot their source identity and reduced-target page construction uses
+that captured route through the canonical session-aware planner. The latter is
+important for non-montage window shifts: captured semantic identity must not
+discard the session's native source anchor. A unit gate moves the session route
+before completion, applies a shifted native footprint, and requires the result
+to remain labeled A at that anchored footprint; it does not infer or
+materialize a second route.
+
+The required live real-data interaction-convergence ring is green on Wayland
+as one continuous app session: hard-capped initial fill, montage-window
+shrink/grow, 48 seeded zoom/pan/range/slice gestures, and final exact target
+settlement passed in 38.91 s. Its 27,600-event trace verifies 272/272 required
+targets acknowledged, zero identity-rejected commits, and zero invariant
+violations, including the identical-`commit_bail` loop check. Keeping both
+defect probes in one window removes an unrelated duplicate cold startup while
+making their continuity contract stricter; no per-step deadline changed.
+
+The canonical real-data workflow then exposed a separate PyQtGraph first-frame
+evidence ownership error. A visible 108-tile plan used sparse/global montage
+indices, but the deferred evidence cursor looked them up as dense ordinals;
+108 ready payloads consequently waited in the upsert queue for evidence whose
+scan was reading holes. The cursor now resolves through `plan.tiles` to each
+canonical montage index. The CPU first-frame complement producer is armed
+immediately on the visible materialization lane, while a refined subset may
+degrade honestly only when its source indices cover every required tile; the
+full semantic producer remains owned for later improvement. Focused gates also
+require the profile stall detector to count only a genuinely in-flight
+semantic generation.
+
+The profile's Fit pulse had one more ownership bug: turning Fit off preserves
+the fitted range and emits no second range-change signal, so the async render
+could retain the predecessor's 108-tile viewport plan while the camera showed
+all 272. The driver now delivers the final programmatic retarget explicitly,
+through the same immediate path as the viewport bridge. The next real-Wayland
+run proves the raw phase at 272/272 presented with full requested-grid
+coverage. It remains red and therefore is not merge evidence: the following
+FFT phase reaches 233/272 before the unchanged cap, with the remaining exact
+L2 payloads owned by an armed PyQtGraph presentation gate. That is the next
+bounded convergence slice; no timeout or queue exit gate has been relaxed.
 
 ## Rejected shortcuts
 

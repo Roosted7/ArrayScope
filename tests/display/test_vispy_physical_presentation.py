@@ -183,6 +183,17 @@ def test_clean_represent_is_noop_when_physical_state_matches():
     assert layer.changed_page_indices() == ()
 
 
+def test_physical_truth_reports_exact_draw_world_geometry():
+    layer, _geometry, _payloads, _clean_delta = _committed_phase_layer()
+
+    rows = layer.tile_truth_physical_rows()
+
+    assert rows[0]["physical_draw_world_rects"] == ((0.0, 0.0, 2.0, 2.0),)
+    assert rows[3]["physical_draw_world_bounds"] == (6.0, 0.0, 8.0, 2.0)
+    assert rows[3]["physical_expected_world_rect"] == (6.0, 0.0, 8.0, 2.0)
+    assert rows[3]["physical_draw_bounds_match_layout"] is True
+
+
 def test_clean_represent_repairs_stale_component_uniform_behind_fresh_key():
     # The field-defect class: the visual's mapping KEY still looks fresh but
     # the derived uniform diverged (u_component_mode stale -> LUT(0) orange

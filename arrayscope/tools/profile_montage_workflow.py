@@ -22,6 +22,10 @@ from time import perf_counter
 from uuid import uuid4
 
 import numpy as np
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
 from arrayscope.core.trace import emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
 
@@ -39,15 +43,14 @@ PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
 # slow scroll paces by target-LOD completion, and a single short settle runs
 # after the whole zoom/pan storm.
 SCROLL_FAST_DURATION_S = 5.0
-SCROLL_SLOW_LOD_BUDGET_S = 3.0
-ZOOMPAN_FINAL_SETTLE_S = 3.0
-MONTAGE_PREP_SOFT_BUDGET_S = 8.0
+SCROLL_SLOW_LOD_BUDGET_S = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S)
+ZOOMPAN_FINAL_SETTLE_S = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S)
 ZOOMPAN_INPUT_FPS = 120.0
 ZOOMPAN_MAX_OUT_REQUEST_SCALE = 1_000_000.0
 ZOOMPAN_CENTRAL_SPAN_SCALE = 0.16
 ZOOMPAN_PAN_FRACTION = 0.32
 ZOOMPAN_DEEP_SPAN_SCALE = 0.06
-ZOOMPAN_CHECKPOINT_SETTLE_S = 3.0
+ZOOMPAN_CHECKPOINT_SETTLE_S = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S)
 ZOOMPAN_NEAR_OBSERVE_S = 0.20
 R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
@@ -101,7 +104,7 @@ def run_profile_montage_workflow(
     data_path: str | Path = DEFAULT_DATA_PATH,
     backend: str = "pyqtgraph",
     jsonl: str | Path | None = None,
-    timeout_s: float = 180.0,
+    timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
     max_tiles: int | None = None,
     scroll_max_tiles: int = 60,
     columns: int | None = None,
@@ -110,8 +113,11 @@ def run_profile_montage_workflow(
     profiler_artifact_paths: tuple[str | Path, ...] = (),
     stages: tuple[str, ...] | None = None,
     screenshot_dir: str | Path | None = None,
+    screenshot_interval_s: float = 0.0,
     session_fixture: str | Path | None = DEFAULT_SESSION_FIXTURE,
     verbose_tile_trace: bool = False,
+    synthetic_scene: str | None = None,
+    synthetic_shape: tuple[int, int, int] = (192, 256, 40),
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -120,11 +126,13 @@ def run_profile_montage_workflow(
     enough app diagnostics to correlate profiler stacks with UI-visible phases.
     """
 
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
     import pyqtgraph as pg
-    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtCore, QtGui
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.core.view_session import (
@@ -158,11 +166,22 @@ def run_profile_montage_workflow(
 
     win = None
     probe = None
+    visual_probe = None
     try:
         stage_order = _resolve_profile_stages(stages)
         stage_enabled = set(stage_order)
         load_start = perf_counter()
-        data = _load_dataset(data_path, mode=load_mode)
+        synthetic_scene = str(synthetic_scene or "").strip().lower()
+        if synthetic_scene:
+            data = _synthetic_profile_data(synthetic_scene, synthetic_shape)
+            artifact_root = screenshot_dir or Path(os.environ.get("TMPDIR", "/tmp"))
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            data_path = artifact_root / f"synthetic-{synthetic_scene}-{'x'.join(str(v) for v in data.shape)}.npy"
+            np.save(data_path, data)
+            load_mode = "synthetic"
+            session_fixture = None
+        else:
+            data = _load_dataset(data_path, mode=load_mode)
         load_elapsed_ms = (perf_counter() - load_start) * 1000.0
         if np.ndim(data) < 3:
             raise ValueError(f"profile workflow requires at least 3 dimensions, got shape {np.shape(data)}")
@@ -235,6 +254,8 @@ def run_profile_montage_workflow(
             grid_kind="scroll",
             source_index_count=len(scroll_source_indices),
         )
+        base_large["synthetic_scene"] = synthetic_scene or None
+        base_scroll["synthetic_scene"] = synthetic_scene or None
         if "load_data" in stage_enabled:
             _append_record(
                 records,
@@ -267,6 +288,17 @@ def run_profile_montage_workflow(
         )
         win.show()
         _process_events(app, QtCore, count=20)
+        if screenshot_dir is not None and float(screenshot_interval_s) > 0.0:
+            visual_probe = _VisualTimelineProbe(
+                QtCore,
+                QtGui,
+                win,
+                backend=backend,
+                directory=screenshot_dir,
+                interval_s=float(screenshot_interval_s),
+            )
+            win._arrayscope_visual_timeline_probe = visual_probe
+            visual_probe.start()
         fixture_startup_settled = True
         fixture_startup_ms = 0.0
         if restored_fixture is not None:
@@ -274,7 +306,7 @@ def run_profile_montage_workflow(
                 win,
                 app,
                 QtCore,
-                budget_s=min(30.0, float(timeout_s)),
+                budget_s=bounded_interaction_settle_timeout_s(timeout_s),
                 stall_grace_s=4.0,
             )
             if not fixture_startup_settled:
@@ -287,7 +319,8 @@ def run_profile_montage_workflow(
                 )
                 raise RuntimeError(
                     "profile session fixture did not reach a settled frame before measurement: "
-                    f"pending={0 if session is None else len(session.pending_tile_numbers())} "
+                    "target_unsettled="
+                    f"{0 if session is None else len(session.required_target_unsettled_tiles())} "
                     f"loading={0 if session is None else len(getattr(session, 'loading_tiles', ()) or ())} "
                     f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
                     f"dirty={0 if session is None else len(getattr(session, 'dirty_payloads', ()) or ())} "
@@ -305,7 +338,7 @@ def run_profile_montage_workflow(
                     f"kernel={getattr(getattr(win, 'kernel', None), 'diagnostics', lambda: None)()!r} "
                     f"lifecycle={None if lifecycle is None else dict(lifecycle.counts)}"
                 )
-            geometry_deadline = perf_counter() + min(10.0, float(timeout_s))
+            geometry_deadline = perf_counter() + timeout_s
             while not (
                 _window_geometry_state(win)["session_viewport_shape_matches"]
                 and _window_geometry_state(win)["session_axis_orientation_matches"]
@@ -465,7 +498,7 @@ def run_profile_montage_workflow(
                 def _fft_scroll_action() -> dict[str, object]:
                     _set_operations(win, fft_operations)
                     _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                     return _apply_montage_scroll_pattern(
                         win,
                         montage_axis=montage_axis,
@@ -505,7 +538,7 @@ def run_profile_montage_workflow(
                 def _scalar_scroll_action() -> dict[str, object]:
                     _set_operations(win, ())
                     _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                    _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                     return _apply_montage_scroll_pattern(
                         win,
                         montage_axis=montage_axis,
@@ -540,7 +573,7 @@ def run_profile_montage_workflow(
             def _fft_zoompan_action() -> dict[str, object]:
                 _set_operations(win, ())
                 _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                 return _apply_montage_zoom_pan_stress(
                     win,
                     probe=probe,
@@ -579,7 +612,7 @@ def run_profile_montage_workflow(
             def _scalar_zoompan_action() -> dict[str, object]:
                 _set_operations(win, fft_operations)
                 _set_montage_indices(win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices)
-                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=MONTAGE_PREP_SOFT_BUDGET_S)
+                _wait_for_montage_complete_soft(win=win, app=app, QtCore=QtCore, budget_s=INTERACTION_SETTLE_HARD_LIMIT_S)
                 return _apply_montage_zoom_pan_stress(
                     win,
                     probe=probe,
@@ -612,6 +645,8 @@ def run_profile_montage_workflow(
     finally:
         if probe is not None:
             probe.stop()
+        if visual_probe is not None:
+            visual_probe.stop()
         if win is not None:
             win.close()
             _process_events(app, QtCore, count=10)
@@ -815,6 +850,10 @@ def _wait_for_target_lod(win, app, QtCore, *, budget_s: float, stall_grace_s: fl
     staring at a dead session for the whole budget.
     """
 
+    budget_s = bounded_interaction_settle_timeout_s(budget_s)
+    stall_grace_s = min(
+        bounded_interaction_settle_timeout_s(stall_grace_s), budget_s
+    )
     t0 = perf_counter()
     if _montage_at_target_lod(win):
         return True, 0.0
@@ -1342,7 +1381,7 @@ class _VerboseTileTrace:
                 "requested_start": None if requested_start is None else int(requested_start),
                 "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
                 "presentation_revision": revision,
-                "source_window_changed_pending": bool(session is not None and getattr(session, "source_window_changed_pending", False)),
+                "atomic_successor_pending": bool(session is not None and getattr(session, "atomic_successor_pending", False)),
                 "camera_view_range": _montage_view_range(self.win),
                 "composite_cache_reason": str(getattr(composite, "composite_cache_reason", "") or ""),
                 "composite_has_pixmap": bool(
@@ -1651,8 +1690,8 @@ def _slow_scroll_lod_paced(
                 "atomic_fast_reject_reason": str(
                     getattr(getattr(win, "renderer", None), "_last_montage_atomic_fast_reject_reason", "") or ""
                 ),
-                "source_window_changed_pending": bool(
-                    getattr(session, "source_window_changed_pending", False)
+                "atomic_successor_pending": bool(
+                    getattr(session, "atomic_successor_pending", False)
                 ),
                 "flush_pending": bool(getattr(session, "flush_pending", False)),
                 "final_commit_pending": bool(getattr(session, "final_commit_pending", False)),
@@ -1727,7 +1766,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         prep_reached, prep_settle_ms = False, 0.0
@@ -1739,7 +1778,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         auto_reached, auto_settle_ms = False, 0.0
@@ -1755,7 +1794,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         fit_reached, fit_settle_ms = False, 0.0
@@ -1784,7 +1823,7 @@ def _apply_montage_scroll_pattern(
             win,
             app,
             QtCore,
-            budget_s=MONTAGE_PREP_SOFT_BUDGET_S,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
     else:
         fast_recovery_reached, fast_recovery_settle_ms = False, 0.0
@@ -1867,6 +1906,7 @@ def _apply_montage_zoom_pan_stress(
     record.update(fit_metrics)
 
     def _glide(label: str, target_range, frames: int, *, frame_action=None) -> None:
+        win._arrayscope_profile_action = str(label)
         stats = _glide_view_range(
             win,
             app,
@@ -1886,6 +1926,7 @@ def _apply_montage_zoom_pan_stress(
     record["zoompan_available"] = True
 
     # 1) Hit the real enforced zoom-out limit, not a guessed span multiplier.
+    win._arrayscope_profile_action = "maximum-zoomout-probe"
     maximum_out = _maximum_zoomout_view_range(win, app, QtCore, base)
     record["zoompan_input_fps"] = float(ZOOMPAN_INPUT_FPS)
     record["zoompan_max_out_request_scale"] = float(ZOOMPAN_MAX_OUT_REQUEST_SCALE)
@@ -1896,9 +1937,8 @@ def _apply_montage_zoom_pan_stress(
     # 2) Toggle the op pipeline at the tiny-tile vantage point (no settle; the
     #    following glides pump the document swap through as they run).
     if callable(mid_toggle):
+        win._arrayscope_profile_action = "operation-toggle"
         mid_toggle()
-
-    limit_range = _montage_view_range(win) or base
 
     # 3) From the deliberately distant limit, make roughly the whole grid fill
     #    the viewport. This is the broadest useful LOD transition: many tiles
@@ -1907,9 +1947,16 @@ def _apply_montage_zoom_pan_stress(
     record["lod_full_grid_checkpoint_available"] = full_grid_range is not None
     if full_grid_range is not None:
         _glide("full_grid_zoomin", full_grid_range, frames=4)
+        win._arrayscope_profile_action = "full-grid-target-settle"
         full_grid_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_full_grid_checkpoint"] = full_grid_checkpoint
         record["lod_full_grid_active_count"] = len(tuple(full_grid_checkpoint.get("active_tiles", ()) or ()))
+
+    # The correctness storm must keep some content in view.  Basing the next
+    # off-centre zoom on ``maximum_out`` can put its entire target tens of
+    # thousands of source pixels outside the montage, where a black framebuffer
+    # is correct and therefore proves nothing about retained coverage.
+    interaction_range = full_grid_range or base
 
     # 4) Rapid, deterministic impulses repeatedly supersede unfinished LOD
     #    requests. Alternating off-centre zooms and opposing pans deliberately
@@ -1917,34 +1964,34 @@ def _apply_montage_zoom_pan_stress(
     record["zoompan_zoomin_span_scale"] = float(ZOOMPAN_CENTRAL_SPAN_SCALE)
     _glide(
         "zoomin",
-        _scaled_view_range(limit_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+        _scaled_view_range(interaction_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
         frames=4,
     )
     # 5) Churn the visible set in opposing directions.
     record["zoompan_pan_right_dx_frac"] = float(ZOOMPAN_PAN_FRACTION)
     record["zoompan_pan_right_dy_frac"] = 0.0
-    _glide("pan_right", _panned_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_PAN_FRACTION, -0.21), frames=3)
+    _glide("pan_right", _panned_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_PAN_FRACTION, -0.21), frames=3)
     record["zoompan_pan_down_dx_frac"] = 0.0
     record["zoompan_pan_down_dy_frac"] = float(ZOOMPAN_PAN_FRACTION)
-    _glide("pan_down", _panned_view_range(_montage_view_range(win) or limit_range, -0.41, ZOOMPAN_PAN_FRACTION), frames=3)
+    _glide("pan_down", _panned_view_range(_montage_view_range(win) or interaction_range, -0.41, ZOOMPAN_PAN_FRACTION), frames=3)
     _glide(
         "erratic_zoomout",
-        _scaled_view_range(_montage_view_range(win) or limit_range, 5.0, center_frac=(0.81, 0.18)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, 5.0, center_frac=(0.81, 0.18)),
         frames=3,
     )
     _glide(
         "erratic_zoomin",
-        _scaled_view_range(_montage_view_range(win) or limit_range, 0.11, center_frac=(0.74, 0.31)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, 0.11, center_frac=(0.74, 0.31)),
         frames=3,
     )
     # 6) Deep zoom into roughly one tile, then jump to the opposite side.
     record["zoompan_deep_zoom_span_scale"] = float(ZOOMPAN_DEEP_SPAN_SCALE)
     _glide(
         "deep_zoom",
-        _scaled_view_range(_montage_view_range(win) or limit_range, ZOOMPAN_DEEP_SPAN_SCALE, center_frac=(0.18, 0.82)),
+        _scaled_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_DEEP_SPAN_SCALE, center_frac=(0.18, 0.82)),
         frames=3,
     )
-    _glide("opposite_pan", _panned_view_range(_montage_view_range(win) or limit_range, 0.72, -0.64), frames=2)
+    _glide("opposite_pan", _panned_view_range(_montage_view_range(win) or interaction_range, 0.72, -0.64), frames=2)
     # 7) End at the same real maximum-out constraint for comparable recovery.
     _glide("zoomout_return", maximum_out, frames=4)
 
@@ -2014,50 +2061,50 @@ def _apply_montage_zoom_pan_stress(
             )
         _glide(
             "combined_zoomin",
-            _scaled_view_range(maximum_out, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
+            _scaled_view_range(interaction_range, ZOOMPAN_CENTRAL_SPAN_SCALE, center_frac=(0.22, 0.78)),
             frames=4,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_zoom_scroll_pause",
-            _montage_view_range(win) or maximum_out,
+            _montage_view_range(win) or interaction_range,
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_right",
-            _panned_view_range(_montage_view_range(win) or maximum_out, ZOOMPAN_PAN_FRACTION, -0.21),
+            _panned_view_range(_montage_view_range(win) or interaction_range, ZOOMPAN_PAN_FRACTION, -0.21),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_scroll_pause",
-            _montage_view_range(win) or maximum_out,
+            _montage_view_range(win) or interaction_range,
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_pan_down",
-            _panned_view_range(_montage_view_range(win) or maximum_out, -0.41, ZOOMPAN_PAN_FRACTION),
+            _panned_view_range(_montage_view_range(win) or interaction_range, -0.41, ZOOMPAN_PAN_FRACTION),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_erratic_zoomout",
-            _scaled_view_range(_montage_view_range(win) or maximum_out, 5.0, center_frac=(0.81, 0.18)),
+            _scaled_view_range(_montage_view_range(win) or interaction_range, 5.0, center_frac=(0.81, 0.18)),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_erratic_zoomin",
-            _scaled_view_range(_montage_view_range(win) or maximum_out, 0.11, center_frac=(0.74, 0.31)),
+            _scaled_view_range(_montage_view_range(win) or interaction_range, 0.11, center_frac=(0.74, 0.31)),
             frames=3,
             frame_action=advance_center_window,
         )
         _glide(
             "combined_deep_zoom",
             _scaled_view_range(
-                _montage_view_range(win) or maximum_out,
+                _montage_view_range(win) or interaction_range,
                 ZOOMPAN_DEEP_SPAN_SCALE,
                 center_frac=(0.18, 0.82),
             ),
@@ -2066,7 +2113,7 @@ def _apply_montage_zoom_pan_stress(
         )
         _glide(
             "combined_opposite_pan",
-            _panned_view_range(_montage_view_range(win) or maximum_out, 0.72, -0.64),
+            _panned_view_range(_montage_view_range(win) or interaction_range, 0.72, -0.64),
             frames=2,
             frame_action=advance_center_window,
         )
@@ -2075,6 +2122,7 @@ def _apply_montage_zoom_pan_stress(
         for name, values in combined_scroll_costs.items():
             record[f"combined_scroll_{name}_max_ms"] = float(max(values) if values else 0.0)
             record[f"combined_scroll_{name}_p95_ms"] = float(_percentile(tuple(values), 95.0))
+        win._arrayscope_profile_action = "combined-target-settle"
         combined_reached, combined_settle_ms = _wait_for_target_lod(
             win,
             app,
@@ -2094,6 +2142,7 @@ def _apply_montage_zoom_pan_stress(
     record["lod_checkpoint_available"] = checkpoint_range is not None
     if checkpoint_range is not None:
         _glide("lod_checkpoint_zoomin", checkpoint_range, frames=3)
+        win._arrayscope_profile_action = "lod-checkpoint-zoom-settle"
         first_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_checkpoint_zoom"] = first_checkpoint
         first_active = set(int(tile) for tile in first_checkpoint["active_tiles"])
@@ -2101,6 +2150,7 @@ def _apply_montage_zoom_pan_stress(
 
         pan_target = _panned_view_range(_montage_view_range(win) or checkpoint_range, 0.78, 0.34)
         _glide("lod_checkpoint_pan", pan_target, frames=3)
+        win._arrayscope_profile_action = "lod-checkpoint-pan-settle"
         second_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
         record["lod_checkpoint_pan_result"] = second_checkpoint
         second_active = set(int(tile) for tile in second_checkpoint["active_tiles"])
@@ -2112,6 +2162,7 @@ def _apply_montage_zoom_pan_stress(
         _glide("lod_checkpoint_zoomout_return", maximum_out, frames=3)
 
     # Single final settle after restoring the full montage.
+    win._arrayscope_profile_action = "final-target-settle"
     reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=ZOOMPAN_FINAL_SETTLE_S)
     record["final_settle_ms"] = float(settle_ms)
     record["final_reached_target_lod"] = bool(reached)
@@ -2149,7 +2200,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     if session is None:
         return {
             "visible_has_backlog": False,
-            "visible_pending_tiles": 0,
+            "visible_target_unsettled_tiles": 0,
             "visible_loading_tiles": 0,
             "visible_active_requests": 0,
             "visible_dirty_tiles": 0,
@@ -2158,14 +2209,14 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
             "visible_stage_waiters": 0,
         }
     fan = getattr(session, "stage_fan_in", None)
-    pending = _tile_number_set(getattr(session, "pending_tiles", ()))
+    target_unsettled = _tile_number_set(session.required_target_unsettled_tiles())
     loading = _tile_number_set(getattr(session, "loading_tiles", ()))
     active = _tile_number_set(getattr(session, "active_tile_requests", ()))
     dirty = _tile_number_set(getattr(session, "dirty_payloads", ()))
     upserts = _tile_number_set(getattr(session, "pending_payload_upserts", ()))
     removals = _tile_number_set(getattr(session, "pending_removals", ()))
     stage_waiters = _tile_number_set(getattr(fan, "tile_stage_keys", {}) if fan is not None else {})
-    visible_pending = pending & expected
+    visible_target_unsettled = target_unsettled & expected
     visible_loading = loading & expected
     visible_active = active & expected
     visible_dirty = dirty & expected
@@ -2174,7 +2225,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     visible_stage_waiters = stage_waiters & expected
     visible_changed = bool(visible_dirty or visible_upserts or visible_removals)
     visible_has_backlog = bool(
-        visible_pending
+        visible_target_unsettled
         or visible_loading
         or visible_active
         or visible_stage_waiters
@@ -2184,7 +2235,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     )
     return {
         "visible_has_backlog": visible_has_backlog,
-        "visible_pending_tiles": len(visible_pending),
+        "visible_target_unsettled_tiles": len(visible_target_unsettled),
         "visible_loading_tiles": len(visible_loading),
         "visible_active_requests": len(visible_active),
         "visible_dirty_tiles": len(visible_dirty),
@@ -2223,6 +2274,7 @@ def _montage_work_in_flight(session) -> bool:
     if session is None:
         return False
     fan = getattr(session, "stage_fan_in", None)
+    semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
     # Only kernel-submitted work counts as in flight.  ``attached_requests`` are
     # stage keys bound to the fan-in but not necessarily running; an attached
     # stage that never activates while nothing else progresses is precisely the
@@ -2231,6 +2283,10 @@ def _montage_work_in_flight(session) -> bool:
         getattr(session, "active_tile_requests", None)
         or getattr(session, "pending_rung_materializations", None)
         or bool(getattr(session, "level_evidence_inflight", False))
+        or bool(
+            semantic_progress is not None
+            and getattr(semantic_progress, "inflight_generation", None) is not None
+        )
         or bool(getattr(session, "histogram_aggregate_inflight", False))
         or (fan is not None and getattr(fan, "active_requests", None))
     )
@@ -2243,7 +2299,7 @@ def _montage_stall_signature(session):
     return (
         int(getattr(session, "session_id", -1)),
         len(getattr(session, "loading_tiles", ()) or ()),
-        len(session.pending_tile_numbers()) if hasattr(session, "pending_tile_numbers") else 0,
+        len(session.required_target_unsettled_tiles()),
         len(getattr(session, "active_tile_requests", ()) or ()),
         len(getattr(session, "dirty_payloads", {}) or {}),
         0 if fan is None else len(getattr(fan, "tile_stage_keys", {}) or {}),
@@ -2263,7 +2319,11 @@ def _wait_for_montage_complete_soft(*, win, app, QtCore, budget_s: float, stall_
     session).  A montage still computing keeps the full budget.
     """
 
-    deadline = perf_counter() + float(budget_s)
+    budget_s = bounded_interaction_settle_timeout_s(budget_s)
+    stall_grace_s = min(
+        bounded_interaction_settle_timeout_s(stall_grace_s), budget_s
+    )
+    deadline = perf_counter() + budget_s
     stall_since = None
     last_sig = None
     while perf_counter() < deadline:
@@ -2334,6 +2394,21 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None, metrics: dict[str, float] 
             except Exception:
                 disable_ranges.append(None)
     disable_delivery_ms = (perf_counter() - disable_delivery_start) * 1000.0
+    # Turning Fit off preserves the fitted camera range, so it does not emit a
+    # second range-change signal.  The async render started immediately before
+    # this pulse can therefore still own the predecessor's smaller visibility
+    # plan even though the camera already shows the full montage.  Deliver the
+    # final programmatic-camera obligation explicitly, matching the synchronous
+    # path owned by ViewportBridge.on_view_range_changed().
+    retarget = getattr(win, "retarget_montage_viewport", None)
+    retarget_call_start = perf_counter()
+    if callable(retarget):
+        retarget()
+    retarget_call_ms = (perf_counter() - retarget_call_start) * 1000.0
+    retarget_delivery_start = perf_counter()
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=2)
+    retarget_delivery_ms = (perf_counter() - retarget_delivery_start) * 1000.0
     if metrics is not None:
         image_view = getattr(win, "img_view", None)
         controller = getattr(image_view, "viewport_controller", None)
@@ -2352,6 +2427,8 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None, metrics: dict[str, float] 
                 "fit_stretch_enable_delivery_ms": float(enable_delivery_ms),
                 "fit_stretch_disable_call_ms": float(disable_call_ms),
                 "fit_stretch_disable_delivery_ms": float(disable_delivery_ms),
+                "fit_stretch_retarget_call_ms": float(retarget_call_ms),
+                "fit_stretch_retarget_delivery_ms": float(retarget_delivery_ms),
                 "fit_disable_delivery_modes": disable_modes,
                 "fit_disable_delivery_ranges": disable_ranges,
                 "fit_stretch_total_ms": float((perf_counter() - total_start) * 1000.0),
@@ -2444,6 +2521,549 @@ class _EventLoopProbe:
         if not self.gaps_ms:
             return None
         return _percentile(tuple(self.gaps_ms), percentile)
+
+
+class _VisualTimelineProbe:
+    """Periodic framebuffer + physical tile truth for interaction diagnosis."""
+
+    def __init__(self, QtCore, QtGui, win, *, backend: str, directory: Path, interval_s: float):
+        self._QtCore = QtCore
+        self._QtGui = QtGui
+        self._win = win
+        self._backend = str(backend)
+        self._directory = Path(directory)
+        self._interval_ms = max(100, int(round(float(interval_s) * 1000.0)))
+        self._timer = QtCore.QTimer(win)
+        self._timer.setInterval(self._interval_ms)
+        self._timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(lambda: self.capture("interval"))
+        self._started_ns = time.monotonic_ns()
+        self._last_sample_ns = self._started_ns
+        self._last_drawn: frozenset[int] = frozenset()
+        self._last_identities: dict[int, str] = {}
+        self._images: list[tuple[Path, dict[str, object]]] = []
+        self._index = 0
+        self.timeline_path = self._directory / f"{self._backend}-visual-timeline.jsonl"
+        self.contact_sheet_path = self._directory / f"{self._backend}-visual-contact-sheet.png"
+
+    def start(self) -> None:
+        self._directory.mkdir(parents=True, exist_ok=True)
+        if self.timeline_path.exists():
+            self.timeline_path.unlink()
+        self.capture("start")
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.capture("stop")
+        self._write_contact_sheet()
+
+    def capture(self, reason: str) -> None:
+        now_ns = time.monotonic_ns()
+        self._index += 1
+        path = self._directory / f"{self._backend}-visual-{self._index:04d}.png"
+        saved = _save_view_screenshot(self._win, path)
+        session = getattr(self._win, "_frame_session", None)
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        requested = frozenset(int(tile.montage_index) for tile in plan_tiles)
+        visible = frozenset(int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ()))
+        payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+        lifecycle = getattr(session, "lifecycle", None)
+        required_tiles = tuple(
+            getattr(session, "required_tile_numbers", lambda: ())()
+            if session is not None
+            else ()
+        )
+        unsettled_tiles = tuple(
+            getattr(session, "required_target_unsettled_tiles", lambda: ())()
+            if session is not None
+            else ()
+        )
+        lifecycle_snapshot = (
+            getattr(session, "lifecycle_snapshot", lambda: None)()
+            if session is not None
+            else None
+        )
+        backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
+        physical_rows_fn = getattr(getattr(self._win, "img_view", None), "tileTruthPhysicalRows", None)
+        physical_rows = dict(physical_rows_fn() or {}) if callable(physical_rows_fn) else {}
+        presentation_diagnostics = dict(
+            getattr(getattr(self._win, "img_view", None), "presentation_diagnostics", lambda: {})()
+            or {}
+        )
+        physical_acknowledged = frozenset(
+            int(tile)
+            for tile, row in physical_rows.items()
+            if dict(row or {}).get("physical_acknowledged_identity") is not None
+        )
+        acknowledged = (
+            frozenset(int(tile) for tile in backend_identities) | physical_acknowledged
+        ) & requested
+        scene_presented = _visual_scene_presented_tiles(
+            self._backend,
+            presentation_diagnostics=presentation_diagnostics,
+            physical_rows=physical_rows,
+        )
+        drawn = scene_presented & requested
+        identity_text: dict[int, str] = {}
+        for tile in drawn:
+            identity = backend_identities.get(int(tile))
+            if identity is None:
+                identity = dict(physical_rows.get(int(tile), {}) or {}).get(
+                    "physical_acknowledged_identity"
+                )
+            identity_text[int(tile)] = _trace_identity(identity, limit=500) or ""
+        changed = frozenset(
+            tile
+            for tile, identity in identity_text.items()
+            if self._last_identities.get(tile) not in (None, identity)
+        )
+        appeared = drawn - self._last_drawn
+        disappeared = self._last_drawn - drawn
+        fallback_bindings = 0
+        exact_bindings = 0
+        binding_rows = 0
+        for tile, row in physical_rows.items():
+            if int(tile) not in drawn:
+                continue
+            for binding in tuple(dict(row or {}).get("physical_page_bindings", ()) or ()):
+                binding_rows += 1
+                if str(dict(binding or {}).get("quality", "")) == "exact":
+                    exact_bindings += 1
+                else:
+                    fallback_bindings += 1
+        physical_draw_rows = _visual_physical_draw_rows(physical_rows, drawn)
+        geometry_state = _window_geometry_state(self._win)
+        view_range = _montage_view_range(self._win)
+        content_range = _full_montage_view_range(self._win)
+        onscreen = frozenset(
+            int(tile)
+            for tile in drawn
+            if _view_range_intersects_world_bounds(
+                view_range,
+                dict(physical_rows.get(int(tile), {}) or {}).get(
+                    "physical_draw_world_bounds"
+                ),
+            )
+        )
+        physical_visible_pages = int(
+            presentation_diagnostics.get("physical_visible_page_count", 0)
+            or presentation_diagnostics.get("tile_visual_visible_pages", 0)
+            or 0
+        )
+        backend_presented_count = int(
+            presentation_diagnostics.get("presented_tile_count", 0) or 0
+        )
+        physically_visible_tile_count = int(
+            presentation_diagnostics.get("physically_visible_tile_count", 0) or 0
+        )
+        physical_visible = physically_visible_tile_count > 0
+        camera_state = _visual_camera_state(
+            self._win,
+            session=session,
+            live_view_range=view_range,
+        )
+        elapsed_ms = (now_ns - self._started_ns) / 1_000_000.0
+        gap_ms = (now_ns - self._last_sample_ns) / 1_000_000.0
+        record = {
+            "record_type": "visual_sample",
+            "backend": self._backend,
+            "sample": int(self._index),
+            "reason": str(reason),
+            "phase": str(getattr(self._win, "_arrayscope_profile_phase", "setup") or "setup"),
+            "action": str(getattr(self._win, "_arrayscope_profile_action", "idle") or "idle"),
+            "monotonic_ns": int(now_ns),
+            "elapsed_ms": float(elapsed_ms),
+            "sample_gap_ms": float(gap_ms),
+            "event_loop_freeze": bool(gap_ms > max(1500.0, self._interval_ms * 1.5)),
+            "screenshot_path": str(path),
+            "screenshot_saved": bool(saved),
+            "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
+            "requested_tiles": sorted(requested),
+            "visible_tiles": sorted(visible),
+            "required_tiles": sorted(int(tile) for tile in required_tiles),
+            "required_target_unsettled_tiles": sorted(
+                int(tile) for tile in unsettled_tiles
+            ),
+            "lifecycle_phase_counts": dict(
+                getattr(lifecycle_snapshot, "counts", {}) or {}
+            ),
+            "payload_tiles": sorted(int(tile) for tile in payloads if int(tile) in requested),
+            "acknowledged_tiles": sorted(acknowledged),
+            "resident_physical_row_tiles": sorted(
+                set(int(tile) for tile in physical_rows).intersection(requested)
+            ),
+            "scene_presented_tiles": sorted(drawn),
+            "onscreen_tiles": sorted(onscreen),
+            "drawn_tiles": sorted(drawn),
+            "appeared_tiles": sorted(appeared),
+            "disappeared_tiles": sorted(disappeared),
+            "changed_tiles": sorted(changed),
+            "missing_draw_tiles": sorted(requested - drawn),
+            "missing_visible_draw_tiles": sorted(visible - drawn),
+            "requested_count": len(requested),
+            "visible_count": len(visible),
+            "payload_count": len(set(payloads).intersection(requested)),
+            "drawn_count": len(drawn),
+            "onscreen_count": len(onscreen),
+            "acknowledged_count": len(acknowledged),
+            "resident_physical_row_count": len(
+                set(int(tile) for tile in physical_rows).intersection(requested)
+            ),
+            "exact_page_binding_count": int(exact_bindings),
+            "fallback_page_binding_count": int(fallback_bindings),
+            "page_binding_count": int(binding_rows),
+            "physical_draw_rows": physical_draw_rows,
+            "view_range": view_range,
+            "content_range": content_range,
+            "camera_intersects_content": _view_ranges_intersect(
+                view_range, content_range
+            ),
+            "camera_state": camera_state,
+            "window_geometry": geometry_state,
+            "montage_display_mode": str(
+                presentation_diagnostics.get("montage_display_mode", "none")
+            ),
+            "physical_visible": physical_visible,
+            "physically_visible_tile_count": physically_visible_tile_count,
+            "backend_presented_tile_count": backend_presented_count,
+            "physical_visible_page_count": physical_visible_pages,
+            "physical_geometry": _visual_geometry_summary(
+                physical_draw_rows,
+                view_range=view_range,
+                viewport_shape=geometry_state.get("viewport_shape"),
+            ),
+            "page_candidate_missing_tile_count": int(
+                presentation_diagnostics.get("page_candidate_missing_tile_count", 0)
+                or 0
+            ),
+            "page_candidate_missing_key_count": int(
+                presentation_diagnostics.get("page_candidate_missing_key_count", 0)
+                or 0
+            ),
+            "page_table_resident_count": int(
+                presentation_diagnostics.get("page_table_resident_count", 0) or 0
+            ),
+            "atlas_page_classes": tuple(
+                presentation_diagnostics.get("atlas_page_classes", ()) or ()
+            ),
+            "atlas_estimated_gpu_bytes": int(
+                presentation_diagnostics.get("atlas_estimated_gpu_bytes", 0) or 0
+            ),
+            "atlas_budget_bytes": int(
+                presentation_diagnostics.get("atlas_budget_bytes", 0) or 0
+            ),
+            "presentation_revision": int(
+                getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0
+            ),
+            "lod_level_counts": _visual_lod_level_counts(payloads, requested),
+        }
+        with self.timeline_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        emit_trace(
+            "visual_sample",
+            backend=self._backend,
+            phase=record["phase"],
+            sample=int(self._index),
+            screenshot_path=str(path),
+            drawn_tiles=tuple(sorted(drawn)),
+            appeared_tiles=tuple(sorted(appeared)),
+            disappeared_tiles=tuple(sorted(disappeared)),
+            changed_tiles=tuple(sorted(changed)),
+            missing_draw_tiles=tuple(sorted(requested - drawn)),
+            onscreen_tiles=tuple(sorted(onscreen)),
+            acknowledged_tiles=tuple(sorted(acknowledged)),
+            event_loop_freeze=bool(record["event_loop_freeze"]),
+            sample_gap_ms=float(gap_ms),
+            action=record["action"],
+            physical_visible=bool(record["physical_visible"]),
+            physical_visible_page_count=int(record["physical_visible_page_count"]),
+            page_candidate_missing_tile_count=int(
+                record["page_candidate_missing_tile_count"]
+            ),
+        )
+        self._images.append((path, record))
+        self._last_sample_ns = now_ns
+        self._last_drawn = drawn
+        self._last_identities = identity_text
+
+    def _write_contact_sheet(self) -> None:
+        images = [(path, record) for path, record in self._images if path.exists()]
+        if not images:
+            return
+        columns = min(4, len(images))
+        thumb_w, thumb_h, label_h = 320, 200, 58
+        rows = int(math.ceil(len(images) / columns))
+        sheet = self._QtGui.QPixmap(columns * thumb_w, rows * (thumb_h + label_h))
+        sheet.fill(self._QtCore.Qt.GlobalColor.black)
+        painter = self._QtGui.QPainter(sheet)
+        painter.setPen(self._QtCore.Qt.GlobalColor.white)
+        for index, (path, record) in enumerate(images):
+            row, column = divmod(index, columns)
+            x, y = column * thumb_w, row * (thumb_h + label_h)
+            pixmap = self._QtGui.QPixmap(str(path)).scaled(
+                thumb_w,
+                thumb_h,
+                self._QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                self._QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(x + (thumb_w - pixmap.width()) // 2, y, pixmap)
+            label = (
+                f"{record['sample']:04d} {record['elapsed_ms'] / 1000.0:.1f}s "
+                f"{record['phase']}\n"
+                f"{record['action']}\n"
+                f"scene {record['drawn_count']}/{record['requested_count']} "
+                f"onscreen {record['onscreen_count']} "
+                f"+{len(record['appeared_tiles'])} -{len(record['disappeared_tiles'])} "
+                f"gap {record['sample_gap_ms']:.0f}ms"
+            )
+            painter.drawText(x + 4, y + thumb_h + 2, thumb_w - 8, label_h - 4, 0, label)
+        painter.end()
+        sheet.save(str(self.contact_sheet_path))
+
+
+def _visual_scene_presented_tiles(
+    backend: str,
+    *,
+    presentation_diagnostics,
+    physical_rows,
+) -> frozenset[int]:
+    """Return named scene primitives, never residency/acknowledgement rows."""
+
+    if str(backend) == "vispy":
+        return frozenset(
+            int(tile)
+            for tile in tuple(
+                dict(presentation_diagnostics or {}).get("presented_tiles", ())
+                or ()
+            )
+        )
+    # PyQtGraph's physical rows already exclude hidden/empty ImageItems.
+    return frozenset(int(tile) for tile in dict(physical_rows or {}))
+
+
+def _visual_lod_level_counts(payloads, requested) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for tile, payload in dict(payloads or {}).items():
+        if int(tile) not in requested:
+            continue
+        lod = getattr(payload, "lod", None)
+        level = int(getattr(lod, "level", 0) or 0)
+        quality = str(getattr(payload, "quality", "exact") or "exact")
+        key = f"{quality}:L{level}"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _visual_physical_draw_rows(physical_rows, requested) -> dict[str, dict[str, object]]:
+    return {
+        str(int(tile)): {
+            "texture_kind": dict(row or {}).get("physical_texture_kind"),
+            "storage_mode": dict(row or {}).get("physical_storage_mode"),
+            "texture_dtype": dict(row or {}).get("physical_texture_dtype"),
+            "texture_shape": dict(row or {}).get("physical_texture_shape"),
+            "mapping_mode": dict(row or {}).get("physical_mapping_mode"),
+            "component_mode": dict(row or {}).get("physical_component_mode"),
+            "levels": dict(row or {}).get("physical_levels"),
+            "shader_mapping_key": dict(row or {}).get(
+                "physical_shader_mapping_key"
+            ),
+            "draw_world_rects": tuple(
+                dict(row or {}).get("physical_draw_world_rects", ()) or ()
+            ),
+            "draw_world_bounds": dict(row or {}).get("physical_draw_world_bounds"),
+            "draw_uv_rects": tuple(
+                dict(row or {}).get("physical_draw_uv_rects", ()) or ()
+            ),
+            "expected_world_rect": dict(row or {}).get(
+                "physical_expected_world_rect"
+            ),
+            "bounds_match_layout": dict(row or {}).get(
+                "physical_draw_bounds_match_layout"
+            ),
+            "page_bindings": tuple(
+                _visual_page_binding_row(binding)
+                for binding in tuple(
+                    dict(row or {}).get("physical_page_bindings", ()) or ()
+                )
+            ),
+        }
+        for tile, row in dict(physical_rows or {}).items()
+        if int(tile) in requested
+    }
+
+
+def _visual_geometry_summary(
+    physical_draw_rows,
+    *,
+    view_range,
+    viewport_shape,
+) -> dict[str, object]:
+    """Compact world/screen geometry oracle for periodic visual evidence.
+
+    The source of truth remains the physical draw rows.  Projecting their
+    bounds through the live PyQtGraph camera range makes a mixed-size defect
+    searchable in JSONL without trying to infer geometry from a screenshot.
+    It also records enough context to distinguish a deliberate maximum-out or
+    deep-zoom gesture from stale VisPy vertices/camera state.
+    """
+
+    world_sizes: list[tuple[float, float]] = []
+    projected_sizes: list[tuple[float, float]] = []
+    mismatched_tiles: list[int] = []
+    x_span = y_span = 0.0
+    viewport_height = viewport_width = 0
+    try:
+        (x0, x1), (y0, y1) = view_range
+        x_span = abs(float(x1) - float(x0))
+        y_span = abs(float(y1) - float(y0))
+    except Exception:
+        pass
+    try:
+        viewport_height = max(0, int(viewport_shape[0]))
+        viewport_width = max(0, int(viewport_shape[1]))
+    except Exception:
+        pass
+    for tile_text, row in dict(physical_draw_rows or {}).items():
+        row = dict(row or {})
+        if row.get("bounds_match_layout") is False:
+            mismatched_tiles.append(int(tile_text))
+        bounds = tuple(row.get("draw_world_bounds", ()) or ())
+        if len(bounds) != 4:
+            continue
+        width = abs(float(bounds[2]) - float(bounds[0]))
+        height = abs(float(bounds[3]) - float(bounds[1]))
+        world_sizes.append((width, height))
+        if x_span > 0.0 and y_span > 0.0 and viewport_width > 0 and viewport_height > 0:
+            projected_sizes.append(
+                (
+                    width * float(viewport_width) / x_span,
+                    height * float(viewport_height) / y_span,
+                )
+            )
+
+    def unique(values) -> tuple[tuple[float, float], ...]:
+        return tuple(
+            sorted(
+                {
+                    (round(float(width), 6), round(float(height), 6))
+                    for width, height in values
+                }
+            )
+        )
+
+    unique_world = unique(world_sizes)
+    unique_projected = unique(projected_sizes)
+    return {
+        "world_size_classes": unique_world,
+        "projected_pixel_size_classes": unique_projected,
+        "mixed_world_sizes": len(unique_world) > 1,
+        "mixed_projected_pixel_sizes": len(unique_projected) > 1,
+        "bounds_mismatch_tiles": tuple(sorted(mismatched_tiles)),
+    }
+
+
+def _visual_camera_state(win, *, session, live_view_range) -> dict[str, object]:
+    """Record every camera representation without making one a new owner."""
+
+    session_range = _normalized_view_range(getattr(session, "view_range", None))
+    live_range = _normalized_view_range(live_view_range)
+    image_view = getattr(win, "img_view", None)
+    raw_key = getattr(image_view, "_vispy_camera_key", None)
+    vispy_key_range = _normalized_view_range(
+        None if raw_key is None else tuple(raw_key[:2])
+    )
+    camera_rect = None
+    try:
+        rect = image_view._vispy_view.camera.rect
+        camera_rect = (
+            float(rect.left),
+            float(rect.bottom),
+            float(rect.right),
+            float(rect.top),
+        )
+    except Exception:
+        pass
+    return {
+        "session_view_range": session_range,
+        "live_view_range": live_range,
+        "vispy_camera_key": _trace_identity(raw_key, limit=500),
+        "vispy_camera_key_range": vispy_key_range,
+        "vispy_camera_rect": camera_rect,
+        "session_matches_live": _view_ranges_close(session_range, live_range),
+        "vispy_key_matches_live": _view_ranges_close(vispy_key_range, live_range),
+    }
+
+
+def _normalized_view_range(value):
+    try:
+        return (
+            (float(value[0][0]), float(value[0][1])),
+            (float(value[1][0]), float(value[1][1])),
+        )
+    except Exception:
+        return None
+
+
+def _view_ranges_close(left, right, *, tolerance: float = 1e-6) -> bool | None:
+    left = _normalized_view_range(left)
+    right = _normalized_view_range(right)
+    if left is None or right is None:
+        return None
+    return all(
+        abs(float(a) - float(b)) <= float(tolerance) * max(1.0, abs(float(a)), abs(float(b)))
+        for left_axis, right_axis in zip(left, right)
+        for a, b in zip(left_axis, right_axis)
+    )
+
+
+def _view_ranges_intersect(left, right) -> bool:
+    left = _normalized_view_range(left)
+    right = _normalized_view_range(right)
+    if left is None or right is None:
+        return False
+    return all(
+        max(min(a0, a1), min(b0, b1)) < min(max(a0, a1), max(b0, b1))
+        for (a0, a1), (b0, b1) in zip(left, right)
+    )
+
+
+def _view_range_intersects_world_bounds(view_range, bounds) -> bool:
+    try:
+        world_range = (
+            (float(bounds[0]), float(bounds[2])),
+            (float(bounds[1]), float(bounds[3])),
+        )
+    except Exception:
+        return False
+    return _view_ranges_intersect(view_range, world_range)
+
+
+def _visual_page_binding_row(binding) -> dict[str, object]:
+    binding = dict(binding or {})
+    target = binding.get("target_key")
+    actual = binding.get("actual_key")
+    slot = binding.get("slot")
+    return {
+        "target_key": _trace_identity(target, limit=500),
+        "actual_key": _trace_identity(actual, limit=500),
+        "target_origin_yx": tuple(getattr(target, "chunk_origin", ()) or ()),
+        "target_shape_yx": tuple(getattr(target, "chunk_shape", ()) or ()),
+        "target_reduction_yx": tuple(
+            getattr(getattr(target, "lod", None), "reduction", ()) or ()
+        ),
+        "actual_origin_yx": tuple(getattr(actual, "chunk_origin", ()) or ()),
+        "actual_shape_yx": tuple(getattr(actual, "chunk_shape", ()) or ()),
+        "actual_reduction_yx": tuple(
+            getattr(getattr(actual, "lod", None), "reduction", ()) or ()
+        ),
+        "scale_yx": tuple(float(value) for value in tuple(binding.get("scale", ()) or ())),
+        "offset_yx": tuple(float(value) for value in tuple(binding.get("offset", ()) or ())),
+        "quality": str(binding.get("quality", "")),
+        "page_index": None if slot is None else int(getattr(slot, "page_index", -1)),
+        "slot_index": None if slot is None else int(getattr(slot, "slot_index", -1)),
+        "binding_generation": int(binding.get("binding_generation", 0) or 0),
+    }
 
 
 class _PresentationContinuityProbe:
@@ -2688,7 +3308,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
                     app,
                     QtCore,
                     win,
-                    timeout_s=5.0,
+                    timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
                     start=preview_start,
                     draw_start=draw_start,
                     require_presentation_settled=True,
@@ -2830,6 +3450,11 @@ def _run_phase(
     backend: str = "",
     screenshot_dir: Path | None = None,
 ) -> dict[str, object]:
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    win._arrayscope_profile_phase = str(phase)
+    visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+    if visual_probe is not None:
+        visual_probe.capture("phase-start")
     emit_trace("input", action="phase_start", phase=str(phase), backend=str(backend))
     probe.reset()
     phase_start_geometry = _window_geometry_state(win)
@@ -2859,7 +3484,7 @@ def _run_phase(
             app,
             QtCore,
             win,
-            timeout_s=timeout_s,
+            timeout_s=bounded_interaction_settle_timeout_s(timeout_s),
             start=start,
             draw_start=draw_start,
             preview_floor_session_id=preview_floor_session_id,
@@ -2875,6 +3500,8 @@ def _run_phase(
         )
     finally:
         continuity_probe.stop()
+        if visual_probe is not None:
+            visual_probe.capture("phase-end")
     elapsed_ms = (perf_counter() - start) * 1000.0
     _process_events(app, QtCore, count=5)
     record = _phase_record(
@@ -3020,7 +3647,8 @@ def _wait_for_montage_complete(
     predecessor_presentation_identity=None,
     predecessor_semantic_key=None,
 ) -> dict[str, float | int | bool | None]:
-    deadline = time.monotonic() + float(timeout_s)
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     first_materialized_tile_ms = None
     first_presented_tile_ms = None
     first_display_committed_ms = None
@@ -3402,7 +4030,8 @@ def _wait_for_montage_complete(
         _stall_prefix = "timed out waiting for montage completion: "
     raise TimeoutError(
         _stall_prefix
-        + f"loaded={snapshot.montage.loaded_tiles} pending={snapshot.montage.pending_tiles} "
+        + f"loaded={snapshot.montage.loaded_tiles} "
+        f"target_unsettled={snapshot.montage.target_unsettled_tiles} "
         f"loading={snapshot.montage.loading_tiles} "
         f"active={0 if session is None else len(getattr(session, 'active_tile_requests', ()) or ())} "
         f"stage_active={0 if fan_in is None else len(getattr(fan_in, 'active_requests', ()) or ())} "
@@ -3413,7 +4042,8 @@ def _wait_for_montage_complete(
         f"{final_visibility_state.get('active_planned_tile_count', 0)} "
         f"fully_visible={final_visibility_state.get('fully_visible', False)} "
         f"requested={final_visibility_state.get('requested_tile_count', 0)} "
-        f"visible_pending={final_visibility_state.get('visible_pending_tiles', 0)} "
+        "visible_target_unsettled="
+        f"{final_visibility_state.get('visible_target_unsettled_tiles', 0)} "
         f"visible_loading={final_visibility_state.get('visible_loading_tiles', 0)} "
         f"visible_active={final_visibility_state.get('visible_active_requests', 0)} "
         f"visible_dirty={final_visibility_state.get('visible_dirty_tiles', 0)} "
@@ -3599,7 +4229,7 @@ def _phase_record(
         "montage_histogram_cross_level_reuses": int(getattr(montage, "tile_histogram_cross_level_reuses", 0) or 0),
         "montage_loaded_tiles": int(montage.loaded_tiles),
         "montage_loading_tiles": int(montage.loading_tiles),
-        "montage_pending_tiles": int(montage.pending_tiles),
+        "montage_target_unsettled_tiles": int(montage.target_unsettled_tiles),
         "montage_tile_compute_cache_hits": int(montage.tile_compute_cache_hits),
         "montage_tile_compute_stage_backed": int(montage.tile_compute_stage_backed),
         "montage_tile_compute_direct": int(montage.tile_compute_direct),
@@ -3771,20 +4401,56 @@ def _preview_floor_physical_rows(win) -> list[dict[str, object]]:
     ]
 
 
-def _wait_for_vispy_tile_draw(win, app, QtCore, *, timeout_s: float = 0.5) -> None:
-    deadline = time.monotonic() + float(timeout_s)
+def _wait_for_vispy_tile_draw(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = 10.0,
+    target_s: float = min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> None:
+    """Wait for the draw count to catch its request count.
+
+    Correctness is EVENTUAL settlement — a run that reaches it late is slow,
+    not wrong. The strict ``target_s`` bound is recorded as a perf
+    observation instead of aborting the whole workflow: a 0.5 s hard abort
+    at 35/36 draws killed runs whose pipeline was demonstrably alive (202
+    tiles acknowledged after the aborted step, 2026-07-17).
+    """
+
+    start = time.monotonic()
+    deadline = start + max(float(timeout_s), float(target_s))
     while time.monotonic() < deadline:
         if _vispy_tile_presentation_draw_count(win) >= _vispy_tile_presentation_request_count(win):
             _process_events(app, QtCore, count=2)
+            elapsed = time.monotonic() - start
+            if elapsed > float(target_s):
+                print(
+                    f"[perf] vispy tile draw settled in {elapsed:.3f}s "
+                    f"(target {float(target_s):.3f}s)"
+                )
             return
         _process_events(app, QtCore, count=2)
         time.sleep(0.005)
+    requested = _vispy_tile_presentation_request_count(win)
+    drawn = _vispy_tile_presentation_draw_count(win)
+    raise TimeoutError(
+        "VisPy tile draw did not settle within "
+        f"{max(float(timeout_s), float(target_s)):.3f}s: requested={requested} drawn={drawn}"
+    )
 
 
-def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float = 3.0) -> None:
+def _wait_for_physical_presentation_quiet(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> None:
     """Drain restore-time paints before measured workflow phases start."""
 
-    deadline = perf_counter() + max(0.1, float(timeout_s))
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = perf_counter() + max(0.1, timeout_s)
     quiet_since = perf_counter()
     previous_draw_count = _vispy_draw_count(win)
     while perf_counter() < deadline:
@@ -3798,6 +4464,12 @@ def _wait_for_physical_presentation_quiet(win, app, QtCore, *, timeout_s: float 
             continue
         if perf_counter() - quiet_since >= 0.1:
             return
+    pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
+    raise TimeoutError(
+        "physical presentation did not become quiet within "
+        f"{timeout_s:.3f}s: draw_count={_vispy_draw_count(win)} "
+        f"draw_pending={bool(callable(pending_fn) and pending_fn())}"
+    )
 
 
 def _elapsed_between_ms(start_ms, end_ms) -> float | None:
@@ -4082,6 +4754,13 @@ def _window_geometry_state(win) -> dict[str, object]:
         viewport_shape = [int(viewport.height()), int(viewport.width())]
     except Exception:
         viewport_shape = None
+    try:
+        canvas = win.img_view._vispy_canvas_native
+        vispy_canvas_shape = [int(canvas.height()), int(canvas.width())]
+        vispy_canvas_device_pixel_ratio = float(canvas.devicePixelRatioF())
+    except Exception:
+        vispy_canvas_shape = None
+        vispy_canvas_device_pixel_ratio = None
     raw_target = getattr(win, "_profile_session_fixture_viewport_shape", None)
     target = None if raw_target is None else [int(raw_target[0]), int(raw_target[1])]
     shape_matches = bool(
@@ -4101,6 +4780,8 @@ def _window_geometry_state(win) -> dict[str, object]:
         "window_size": window_size,
         "window_minimum_size": minimum_size,
         "viewport_shape": viewport_shape,
+        "vispy_canvas_shape": vispy_canvas_shape,
+        "vispy_canvas_device_pixel_ratio": vispy_canvas_device_pixel_ratio,
         "session_viewport_shape_target": target,
         "session_viewport_shape_matches": shape_matches,
         "image_axes": current_image_axes,
@@ -4115,6 +4796,69 @@ def _window_geometry_state(win) -> dict[str, object]:
             )
         ),
     }
+
+
+def _synthetic_profile_data(kind: str, shape: tuple[int, int, int]) -> np.ndarray:
+    """Deterministic visual registration charts for live backend diagnosis."""
+
+    height, width, depth = (int(value) for value in shape)
+    if min(height, width, depth) < 4:
+        raise ValueError(f"synthetic profile shape must be at least 4 on every axis, got {shape}")
+    yy = np.linspace(-1.0, 1.0, height, dtype=np.float32)[:, None, None]
+    xx = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :, None]
+    zz = np.linspace(0.0, 1.0, depth, dtype=np.float32)[None, None, :]
+    z_index = np.arange(depth, dtype=np.int32)[None, None, :]
+
+    if kind == "geometry":
+        values = 0.12 + 0.30 * (xx + 1.0) / 2.0 + 0.18 * (yy + 1.0) / 2.0
+        center_x = -0.65 + 1.30 * zz
+        center_y = 0.32 * np.sin(zz * np.float32(2.0 * np.pi))
+        radius = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
+        values = values + np.where(radius < 0.24, 0.42, 0.0)
+        values = values + np.where((radius > 0.31) & (radius < 0.34), 0.28, 0.0)
+        diagonal = np.abs(yy - (0.72 * xx - 0.38 + 0.76 * zz)) < (3.0 / height)
+        values = values + np.where(diagonal, 0.38, 0.0)
+        border = (np.abs(xx) > 0.965) | (np.abs(yy) > 0.955)
+        values = np.where(border, 0.90 - 0.35 * (z_index % 2), values)
+        # Index-coded vertical and binary horizontal fiducials make a tile's
+        # source position recoverable from one screenshot.
+        bar_x = -0.86 + 0.22 * (z_index % 8)
+        values = values + np.where((np.abs(xx - bar_x) < 0.018) & (yy > 0.46), 0.38, 0.0)
+        for bit in range(6):
+            bit_on = ((z_index >> bit) & 1) != 0
+            band_y = -0.86 + bit * 0.11
+            values = values + np.where(bit_on & (np.abs(yy - band_y) < 0.022) & (xx < -0.45), 0.32, 0.0)
+        return np.ascontiguousarray(np.clip(values, 0.0, 1.0), dtype=np.float32)
+
+    if kind == "complex-phase":
+        center_x = -0.42 + 0.84 * zz
+        center_y = 0.28 * np.cos(zz * np.float32(2.0 * np.pi))
+        dx, dy = xx - center_x, yy - center_y
+        radius = np.sqrt(dx * dx + dy * dy)
+        amplitude = 0.12 + 0.38 * (xx + 1.0) / 2.0
+        amplitude = amplitude + 0.55 * np.exp(-((radius - 0.38) / 0.09) ** 2)
+        amplitude = amplitude + 0.28 * ((np.abs(xx) < 0.18) & (np.abs(yy) < 0.56))
+        phase = np.arctan2(dy, dx) + 5.0 * np.pi * xx + 2.0 * np.pi * zz
+        y_index = np.arange(height, dtype=np.int32)[:, None, None]
+        x_index = np.arange(width, dtype=np.int32)[None, :, None]
+        opposed_patch = (xx < -0.48) & (yy < -0.42)
+        opposed_phase = np.pi * ((x_index + y_index + z_index) & 1)
+        phase = np.where(opposed_patch, opposed_phase, phase)
+        zero_region = ((np.abs(xx) < 0.035) | (np.abs(yy) < 0.035)) & (radius > 0.18)
+        amplitude = np.where(zero_region, 0.0, amplitude)
+        values = amplitude * np.exp(1j * phase)
+        return np.ascontiguousarray(values, dtype=np.complex64)
+
+    raise ValueError("synthetic scene must be 'geometry' or 'complex-phase'")
+
+
+def _parse_synthetic_shape(value: str) -> tuple[int, int, int]:
+    parts = tuple(int(part.strip()) for part in str(value).lower().replace("x", ",").split(",") if part.strip())
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("synthetic shape must be HEIGHTxWIDTHxDEPTH")
+    if min(parts) < 4:
+        raise argparse.ArgumentTypeError("synthetic shape axes must each be at least 4")
+    return parts
 
 
 def _load_dataset(path: Path, *, mode: str):
@@ -5714,10 +6458,28 @@ def _py_spy_filtered_args(argv: tuple[str, ...]) -> tuple[str, ...]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the realistic tiled montage + FFT/shift/iFFT profiling workflow")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="Dataset path; defaults to the bundled realistic NIfTI")
+    parser.add_argument(
+        "--synthetic-scene",
+        choices=("geometry", "complex-phase"),
+        default=None,
+        help="Use a deterministic visual registration chart instead of --data",
+    )
+    parser.add_argument(
+        "--synthetic-shape",
+        type=_parse_synthetic_shape,
+        default=(192, 256, 40),
+        metavar="HEIGHTxWIDTHxDEPTH",
+    )
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")
+    parser.add_argument(
+        "--screenshot-interval-s",
+        type=float,
+        default=0.0,
+        help="Periodic framebuffer/physical-truth sampling interval; requires --screenshot-dir",
+    )
     parser.add_argument(
         "--verbose-tile-trace",
         action="store_true",
@@ -5726,7 +6488,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "revision, and age snapshots in scroll_tile_trace (diagnostic; large JSONL)"
         ),
     )
-    parser.add_argument("--timeout-s", type=float, default=180.0)
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=INTERACTION_SETTLE_HARD_LIMIT_S,
+        help=(
+            "Per-interaction settlement deadline in seconds; values above the "
+            f"repository hard limit ({INTERACTION_SETTLE_HARD_LIMIT_S:g} s) are capped"
+        ),
+    )
     parser.add_argument("--max-tiles", type=int, default=0, help="Optional tile cap for local smoke runs; 0 means full dim 2")
     parser.add_argument(
         "--scroll-max-tiles",
@@ -5809,7 +6579,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     data_path=args.data,
                     backend=backend,
                     jsonl=jsonl,
-                    timeout_s=args.timeout_s,
+                    timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
                     max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
                     scroll_max_tiles=args.scroll_max_tiles,
                     columns=None if args.columns <= 0 else args.columns,
@@ -5818,8 +6588,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     profiler_artifact_paths=tuple(args.profiler_artifact or ()),
                     stages=stages,
                     screenshot_dir=args.screenshot_dir,
+                    screenshot_interval_s=float(args.screenshot_interval_s),
                     session_fixture=None if not str(args.session_fixture).strip() else args.session_fixture,
                     verbose_tile_trace=bool(args.verbose_tile_trace),
+                    synthetic_scene=args.synthetic_scene,
+                    synthetic_shape=tuple(args.synthetic_shape),
                 )
             )
     finally:

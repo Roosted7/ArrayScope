@@ -226,8 +226,23 @@ class VisPyImageView2D(ImageViewShell):
 
     def vispyPresentationDiagnostics(self) -> dict[str, object]:
         layer = getattr(self, "_vispy_gpu_montage_layer", None)
-        layer_stats = getattr(layer, "last_stats", None)
-        presented_tiles = tuple(int(tile) for tile in tuple(getattr(layer_stats, "presented_tiles", ()) or ()))
+        snapshot = (
+            dict(layer.diagnostics_snapshot())
+            if layer is not None and callable(getattr(layer, "diagnostics_snapshot", None))
+            else {
+                "presented_tiles": (),
+                "presented_tile_count": 0,
+                "physically_visible_tile_count": 0,
+                "tile_visual_visible_pages": 0,
+                "physical_visible_page_count": 0,
+                "page_candidate_missing_tile_count": 0,
+                "page_candidate_missing_key_count": 0,
+                "page_table_resident_count": 0,
+                "atlas_page_classes": (),
+                "atlas_estimated_gpu_bytes": 0,
+                "atlas_budget_bytes": 0,
+            }
+        )
         tile_visuals = tuple(getattr(layer, "_visuals_by_page", ()) or ())
         visible_tile_visuals = tuple(visual for visual in tile_visuals if bool(getattr(visual, "visible", False)))
         tile_orders = tuple(int(getattr(visual, "order", 0)) for visual in visible_tile_visuals)
@@ -244,9 +259,7 @@ class VisPyImageView2D(ImageViewShell):
             < int(getattr(self, "_vispy_tile_presentation_request_count", 0) or 0),
             "canvas_update_request_count": int(getattr(self, "_vispy_canvas_update_request_count", 0) or 0),
             "canvas_update_pending": bool(getattr(self, "_vispy_canvas_update_pending", False)),
-            "presented_tiles": presented_tiles,
-            "presented_tile_count": len(presented_tiles),
-            "tile_visual_visible_pages": len(visible_tile_visuals),
+            **snapshot,
             "tile_visual_min_order": tile_min,
             "overlay_count": int(getattr(self, "_vispy_overlay_count", 0) or 0),
             "overlay_visual_visible_items": len(visible_overlays),
@@ -732,7 +745,7 @@ class VisPyImageView2D(ImageViewShell):
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
-    ) -> None:
+    ):
         """Queue non-presenting montage payloads for bounded atlas warming.
 
         This is the persistent-residency seam shared with the CPU-item
@@ -749,6 +762,25 @@ class VisPyImageView2D(ImageViewShell):
             or getattr(self, "_vispy_last_tile_residency_budget_bytes", 0)
             or 0
         )
+        if bool(getattr(tile_delta, "atomic_handoff", False)):
+            # The frame coordinator already invokes atomic warming in small,
+            # receiver-bound low-priority batches. Queueing those batches a
+            # second time lets the coordinator mark them complete before GL
+            # residency exists, so the final zero-upload handoff can stall or
+            # expose a partially rewritten frame. Perform only the residency
+            # mutation here; the layer contract forbids presentation changes.
+            layer = getattr(self, "_vispy_gpu_montage_layer", None)
+            if layer is None or not hasattr(layer, "warm_residency"):
+                return None
+            stats = layer.warm_residency(
+                payloads=dict(payloads or {}),
+                geometry=geometry,
+                rgb_already_windowed=bool(rgb_already_windowed),
+                tile_delta=tile_delta,
+                tile_residency_budget_bytes=budget_bytes,
+            )
+            self._last_vispy_warm_tile_stats = stats
+            return stats
         self._schedule_vispy_warm_tile_residency(
             payloads,
             geometry=geometry,
@@ -756,6 +788,14 @@ class VisPyImageView2D(ImageViewShell):
             tile_delta=tile_delta,
             tile_residency_budget_bytes=budget_bytes,
         )
+        return None
+
+    def tiledPayloadResident(self, payload) -> bool:
+        """Report physical tile/page residency without changing backend state."""
+
+        layer = getattr(self, "_vispy_gpu_montage_layer", None)
+        resident = getattr(layer, "payload_resident", None)
+        return bool(callable(resident) and resident(payload))
 
     def _submit_vispy_warm_tile_residency_continuation(self) -> None:
         scheduler = getattr(self, "_vispy_warm_tile_scheduler", None)

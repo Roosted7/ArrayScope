@@ -5,10 +5,10 @@ from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings, process_events
 
 
-_WAIT_TIMEOUT_MS = 5000
 
 
 def _tile_result(tile, value):
@@ -45,7 +45,7 @@ def _settle_initial_tile_state(win, qtbot):
             and win.renderer._frame_session.visible_plan_complete()
             and not win.montage_tile_evaluation_controller.is_busy()
         ),
-        timeout=_WAIT_TIMEOUT_MS,
+        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
     )
 
 
@@ -56,7 +56,7 @@ def _wait_for_backend_residency(win, qtbot, backend):
                 win.renderer._frame_session.required_target_settled()
                 and len(_backend_residency_snapshot(win, backend)) == 2
             ),
-            timeout=10_000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     except QtBotTimeoutError:
         session = win.renderer._frame_session
@@ -101,7 +101,7 @@ def test_rapid_slice_burst_is_coalesced_and_latest(qtbot, monkeypatch):
         win._on_slice_index_changed(2, 3)
 
         assert calls == []
-        qtbot.waitUntil(lambda: bool(calls), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: bool(calls), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         assert len(calls) < 3
         assert calls[-1][1] == 3
@@ -129,7 +129,7 @@ def test_slice_control_updates_before_render_completion(qtbot, monkeypatch):
         assert win.widgets["spins"]["slice_indices"][2].value() == 4
         assert win.dimension_strip.chip(2).slice_edit.text() == "4"
 
-        qtbot.waitUntil(lambda: bool(render_calls), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         assert render_calls[-1][1] == 4
     finally:
         win.close()
@@ -155,7 +155,7 @@ def test_rapid_scroll_latest_control_state_not_blocked_by_slow_commit(qtbot, mon
             assert win.dimension_strip.chip(2).slice_edit.text() == str(index)
 
         assert render_calls == []
-        qtbot.waitUntil(lambda: bool(render_calls), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: bool(render_calls), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         assert render_calls[-1] == ("slice", 6)
         assert len(render_calls) < 4
     finally:
@@ -285,7 +285,10 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         process_events(qtbot)
         win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
         win.update_image_view()
-        qtbot.waitUntil(lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer", timeout=3000)
+        qtbot.waitUntil(
+            lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer",
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         monkeypatch.setattr(
             win.renderer,
             "retarget_montage_viewport",
@@ -330,7 +333,7 @@ def test_montage_viewport_continuation_never_retargets_inline(qtbot, monkeypatch
         win.renderer._schedule_frame_viewport_update(delay_ms=1)
 
         assert calls == []
-        qtbot.waitUntil(lambda: calls == ["retarget"], timeout=5_000)
+        qtbot.waitUntil(lambda: calls == ["retarget"], timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     finally:
         win.close()
         clear_arrayscope_settings()

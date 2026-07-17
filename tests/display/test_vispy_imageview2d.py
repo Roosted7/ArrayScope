@@ -214,6 +214,7 @@ def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
 
 def test_vispy_surface_exposes_lifecycle_contract(qt_app):
     from arrayscope.display.backends import surface_for_view
+    from arrayscope.display.backends.base import tiled_presentation_visible
     from arrayscope.display.backends.vispy.surface import VisPySurface
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
     from arrayscope.display.viewport import ViewportPolicy
@@ -232,6 +233,10 @@ def test_vispy_surface_exposes_lifecycle_contract(qt_app):
         assert diagnostics["backend"] == "vispy"
         assert diagnostics["interaction_event_owner"] == "shared-controller"
         assert diagnostics["native_pointer_interaction"] is False
+        assert diagnostics["physically_visible_tile_count"] == 0
+
+        view._montage_display_mode = "vispy_tile_layer"
+        assert tiled_presentation_visible(surface) is False
 
         view._vispy_pending_warm_tile_payloads = {1: object()}
         payload = DisplayTilePayload(
@@ -260,9 +265,16 @@ def test_vispy_surface_exposes_lifecycle_contract(qt_app):
             histogramRange=(0.0, 1.0),
         )
         assert view._vispy_gpu_montage_layer._pool.resident_count == 1
+        diagnostics = surface.presentation_diagnostics()
+        assert diagnostics["physically_visible_tile_count"] == 1
+        assert diagnostics["physical_visible_page_count"] == 1
+        assert diagnostics["page_table_resident_count"] == 1
+        assert diagnostics["atlas_page_classes"]
+        assert tiled_presentation_visible(surface) is True
         surface.reset_surface("test-context-loss")
         assert view._vispy_pending_warm_tile_payloads == {}
         assert view._vispy_gpu_montage_layer._pool.resident_count == 0
+        assert surface.presentation_diagnostics()["physically_visible_tile_count"] == 0
         assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
         surface.teardown_surface()
         surface.teardown_surface()
@@ -2785,6 +2797,50 @@ def test_vispy_warm_tiled_residency_enqueues_bounded_nonpresenting_work(qt_app):
         assert pool.presented_identities() == presented_before
         assert pool.active_resident_keys == active_before
         assert pool.tile_slots == slots_before
+    finally:
+        view.close()
+
+
+def test_vispy_atomic_warm_completes_residency_before_returning(qt_app, monkeypatch):
+    """The atomic coordinator may acknowledge only completed GL residency."""
+
+    from arrayscope.display.model.frame import TilePresentationDelta
+    from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    callbacks = []
+    calls = []
+    try:
+        layer = view._vispy_gpu_montage_layer
+
+        def warm_residency(**kwargs):
+            calls.append(kwargs)
+            return TileLayerUpdateStats(texture_uploads=1, items_updated=1)
+
+        monkeypatch.setattr(layer, "warm_residency", warm_residency)
+        view._vispy_warm_tile_scheduler = callbacks.append
+        delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            atomic_handoff=True,
+        )
+
+        stats = view.warmTiledResidency(
+            payloads={0: object()},
+            geometry=_montage_geometry(),
+            levels=(-1.0, 1.0),
+            tile_delta=delta,
+        )
+
+        assert stats.texture_uploads == 1
+        assert len(calls) == 1
+        assert callbacks == []
+        assert not getattr(view, "_vispy_pending_warm_tile_payloads", None)
     finally:
         view.close()
 

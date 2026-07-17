@@ -9,6 +9,50 @@ from types import SimpleNamespace
 
 import pytest
 
+from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
+
+
+def test_vispy_draw_wait_fails_loudly_when_request_is_not_drawn(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            vispyPresentationDiagnostics=lambda: {
+                "tile_presentation_request_count": 2,
+                "tile_presentation_draw_count": 1,
+            },
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"requested=2 drawn=1"):
+        workflow._wait_for_vispy_tile_draw(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
+
+def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            presentationDrawPending=lambda: True,
+            vispyPresentationDiagnostics=lambda: {"draw_count": 7},
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"draw_count=7 draw_pending=True"):
+        workflow._wait_for_physical_presentation_quiet(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
 
 def test_preview_floor_physical_rows_preserve_page_shader_evidence():
     from arrayscope.tools.profile_montage_workflow import _preview_floor_physical_rows
@@ -90,6 +134,178 @@ def test_profile_montage_workflow_py_spy_command_mentions_external_sampler():
     assert "--rate 25" in command
     assert "--gil" in command
     assert "--nonblocking" in command
+
+
+def test_visual_timeline_groups_payload_lod_and_quality():
+    from types import SimpleNamespace
+
+    from arrayscope.tools.profile_montage_workflow import _visual_lod_level_counts
+
+    payloads = {
+        0: SimpleNamespace(lod=SimpleNamespace(level=0), quality="exact"),
+        1: SimpleNamespace(lod=SimpleNamespace(level=2), quality="preview"),
+        2: SimpleNamespace(lod=SimpleNamespace(level=2), quality="preview"),
+        3: SimpleNamespace(lod=SimpleNamespace(level=1), quality="exact"),
+    }
+
+    assert _visual_lod_level_counts(payloads, {0, 1, 2}) == {
+        "exact:L0": 1,
+        "preview:L2": 2,
+    }
+
+
+def test_visual_timeline_preserves_physical_draw_geometry():
+    from arrayscope.tools.profile_montage_workflow import _visual_physical_draw_rows
+
+    rows = _visual_physical_draw_rows(
+        {
+            3: {
+                "physical_draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
+                "physical_draw_uv_rects": ((0.1, 0.2, 0.5, 0.6),),
+                "physical_draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
+                "physical_expected_world_rect": (1.0, 2.0, 5.0, 6.0),
+                "physical_draw_bounds_match_layout": True,
+                "physical_texture_kind": "scalar_r32f",
+                "physical_storage_mode": "scalar",
+                "physical_texture_dtype": "float32",
+                "physical_texture_shape": (4, 4),
+                "physical_mapping_mode": 0.0,
+                "physical_component_mode": 0.0,
+                "physical_levels": (2.0, 6.0),
+                "physical_shader_mapping_key": "linear-real",
+            },
+            9: {"physical_draw_bounds_match_layout": False},
+        },
+        {3},
+    )
+
+    assert rows == {
+        "3": {
+            "texture_kind": "scalar_r32f",
+            "storage_mode": "scalar",
+            "texture_dtype": "float32",
+            "texture_shape": (4, 4),
+            "mapping_mode": 0.0,
+            "component_mode": 0.0,
+            "levels": (2.0, 6.0),
+            "shader_mapping_key": "linear-real",
+            "draw_world_rects": ((1.0, 2.0, 5.0, 6.0),),
+            "draw_world_bounds": (1.0, 2.0, 5.0, 6.0),
+            "draw_uv_rects": ((0.1, 0.2, 0.5, 0.6),),
+            "expected_world_rect": (1.0, 2.0, 5.0, 6.0),
+            "bounds_match_layout": True,
+            "page_bindings": (),
+        }
+    }
+
+
+def test_visual_geometry_summary_projects_physical_bounds_through_live_camera():
+    from arrayscope.tools.profile_montage_workflow import _visual_geometry_summary
+
+    summary = _visual_geometry_summary(
+        {
+            "3": {
+                "draw_world_bounds": (0.0, 0.0, 336.0, 336.0),
+                "bounds_match_layout": True,
+            },
+            "4": {
+                "draw_world_bounds": (336.0, 0.0, 672.0, 336.0),
+                "bounds_match_layout": False,
+            },
+        },
+        view_range=((0.0, 672.0), (0.0, 336.0)),
+        viewport_shape=(500, 1000),
+    )
+
+    assert summary == {
+        "world_size_classes": ((336.0, 336.0),),
+        "projected_pixel_size_classes": ((500.0, 500.0),),
+        "mixed_world_sizes": False,
+        "mixed_projected_pixel_sizes": False,
+        "bounds_mismatch_tiles": (4,),
+    }
+
+
+def test_visual_scene_presented_tiles_does_not_treat_residency_as_drawn():
+    from arrayscope.tools.profile_montage_workflow import _visual_scene_presented_tiles
+
+    resident_rows = {tile: {} for tile in range(60)}
+
+    assert _visual_scene_presented_tiles(
+        "vispy",
+        presentation_diagnostics={"presented_tiles": (40, 41, 50, 51)},
+        physical_rows=resident_rows,
+    ) == frozenset({40, 41, 50, 51})
+    assert _visual_scene_presented_tiles(
+        "pyqtgraph",
+        presentation_diagnostics={},
+        physical_rows={4: {}, 8: {}},
+    ) == frozenset({4, 8})
+
+
+def test_visual_camera_state_reports_session_live_and_vispy_key_drift():
+    from types import SimpleNamespace
+
+    from arrayscope.tools.profile_montage_workflow import _visual_camera_state
+
+    rect = SimpleNamespace(left=1.0, bottom=2.0, right=11.0, top=22.0)
+    image_view = SimpleNamespace(
+        _vispy_camera_key=((1.0, 11.0), (2.0, 22.0), False, True),
+        _vispy_view=SimpleNamespace(camera=SimpleNamespace(rect=rect)),
+    )
+    state = _visual_camera_state(
+        SimpleNamespace(img_view=image_view),
+        session=SimpleNamespace(view_range=((0.0, 10.0), (0.0, 20.0))),
+        live_view_range=((1.0, 11.0), (2.0, 22.0)),
+    )
+
+    assert state["session_matches_live"] is False
+    assert state["vispy_key_matches_live"] is True
+    assert state["vispy_camera_rect"] == (1.0, 2.0, 11.0, 22.0)
+
+
+def test_view_intersection_distinguishes_off_content_camera_and_visible_tile():
+    from arrayscope.tools.profile_montage_workflow import (
+        _view_range_intersects_world_bounds,
+        _view_ranges_intersect,
+    )
+
+    content = ((0.0, 100.0), (0.0, 80.0))
+    assert _view_ranges_intersect(((20.0, 40.0), (10.0, 30.0)), content)
+    assert not _view_ranges_intersect(((-90.0, -10.0), (100.0, 180.0)), content)
+    assert _view_range_intersects_world_bounds(
+        ((20.0, 40.0), (10.0, 30.0)),
+        (0.0, 0.0, 30.0, 20.0),
+    )
+
+
+def test_synthetic_geometry_scene_is_indexed_and_spatially_recognizable():
+    import numpy as np
+
+    from arrayscope.tools.profile_montage_workflow import _synthetic_profile_data
+
+    data = _synthetic_profile_data("geometry", (48, 64, 8))
+
+    assert data.shape == (48, 64, 8)
+    assert data.dtype == np.float32
+    assert data.flags.c_contiguous
+    assert float(data.min()) >= 0.0 and float(data.max()) <= 1.0
+    assert not np.array_equal(data[..., 0], data[..., 1])
+    assert not np.array_equal(data[0, :, :], data[-1, :, :])
+
+
+def test_synthetic_complex_scene_has_amplitude_phase_and_zero_fiducials():
+    import numpy as np
+
+    from arrayscope.tools.profile_montage_workflow import _synthetic_profile_data
+
+    data = _synthetic_profile_data("complex-phase", (48, 64, 8))
+
+    assert data.dtype == np.complex64
+    assert data.flags.c_contiguous
+    assert np.count_nonzero(data == 0) > 0
+    assert np.ptp(np.abs(data)) > 0.5
+    assert np.unique(np.round(np.angle(data[data != 0]), 2)).size > 20
 
 
 def test_profile_suite_commands_cover_required_profilers(tmp_path):
@@ -299,15 +515,22 @@ def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
     from arrayscope.tools.profile_montage_workflow import _pulse_fit_stretch
 
     calls = []
+    retarget_calls = []
     metrics = {}
-    win = SimpleNamespace(fit_image_to_view=lambda enabled: calls.append(bool(enabled)))
+    win = SimpleNamespace(
+        fit_image_to_view=lambda enabled: calls.append(bool(enabled)),
+        retarget_montage_viewport=lambda: retarget_calls.append(True),
+    )
 
     assert _pulse_fit_stretch(win, metrics=metrics) is True
 
     assert calls == [True, False]
+    assert retarget_calls == [True]
     assert metrics["fit_stretch_total_ms"] >= 0.0
     assert metrics["fit_stretch_enable_call_ms"] >= 0.0
     assert metrics["fit_stretch_disable_call_ms"] >= 0.0
+    assert metrics["fit_stretch_retarget_call_ms"] >= 0.0
+    assert metrics["fit_stretch_retarget_delivery_ms"] >= 0.0
 
 
 def _passing_r8_phase_record(*, backend="vispy"):
@@ -964,7 +1187,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         skipped_tiles=set(),
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0})),
         display_committed=True,
-        pending_tiles=(),
+        required_target_unsettled_tiles=lambda: (),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -998,7 +1221,7 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         app,
         FakeQtCore,
         win,
-        timeout_s=0.5,
+        timeout_s=bounded_interaction_settle_timeout_s(0.5),
         start=0.0,
         draw_start=0,
         require_presentation_settled=True,
@@ -1124,7 +1347,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         skipped_tiles=set(),
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
         display_committed=True,
-        pending_tiles=(),
+        required_target_unsettled_tiles=lambda: (),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1145,7 +1368,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
         app,
         FakeQtCore,
         win,
-        timeout_s=0.5,
+        timeout_s=bounded_interaction_settle_timeout_s(0.5),
         start=0.0,
         draw_start=0,
     )
@@ -1158,7 +1381,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     assert result["required_target_settled"] is True
 
 
-def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
+def test_profile_montage_visibility_ignores_offscreen_unsettled_targets():
     from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.tools.profile_montage_workflow import _montage_visibility_state
 
@@ -1168,7 +1391,7 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
         lifecycle=SimpleNamespace(presented_tiles=frozenset({0, 1})),
         display_committed=True,
         level_expected_indices=(10, 11),
-        pending_tiles=(SimpleNamespace(montage_index=5),),
+        required_target_unsettled_tiles=lambda: (5,),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1191,8 +1414,14 @@ def test_profile_montage_visibility_ignores_offscreen_pending_tiles():
     state = _montage_visibility_state(win, mode="vispy_tile_layer")
 
     assert state["fully_visible"] is True
-    assert state["visible_pending_tiles"] == 0
+    assert state["visible_target_unsettled_tiles"] == 0
     assert state["active_presented_tile_count"] == 2
+
+    session.required_target_unsettled_tiles = lambda: (1,)
+    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+
+    assert state["fully_visible"] is False
+    assert state["visible_target_unsettled_tiles"] == 1
 
 
 def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger():
@@ -1205,7 +1434,7 @@ def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger(
         lifecycle=SimpleNamespace(presented_tiles=frozenset(range(44))),
         display_committed=True,
         level_expected_indices=tuple(range(60)),
-        pending_tiles=(SimpleNamespace(montage_index=58),),
+        required_target_unsettled_tiles=lambda: (58,),
         loading_tiles=set(),
         active_tile_requests=set(),
         stage_fan_in=StageFanInState(),
@@ -1231,7 +1460,7 @@ def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger(
     assert state["active_presented_tile_count"] == 44
     assert state["active_planned_tile_count"] == 44
     assert state["requested_tile_count"] == 60
-    assert state["visible_pending_tiles"] == 0
+    assert state["visible_target_unsettled_tiles"] == 0
 
 
 @pytest.mark.skipif(
@@ -1272,7 +1501,7 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
             "--backend",
             "pyqtgraph",
             "--timeout-s",
-            "180",
+            "5",
             "--jsonl",
             str(jsonl),
             "--profiler-type",
@@ -1283,6 +1512,8 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
         check=False,
         text=True,
         capture_output=True,
+        # Whole profiler-child deadlock guard.  The workflow itself hard-fails
+        # each user-visible step after the shared five-second limit.
         timeout=45,
     )
 
@@ -1319,7 +1550,9 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
     if "vispy" in backends:
         pytest.importorskip("vispy")
 
-    timeout_s = float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "180"))
+    timeout_s = bounded_interaction_settle_timeout_s(
+        float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "5"))
+    )
     max_tiles_raw = int(os.environ.get("ARRAYSCOPE_PROFILE_MAX_TILES", "0"))
     max_tiles = None if max_tiles_raw <= 0 else max_tiles_raw
     jsonl = tmp_path / "profile-workflow.jsonl"
@@ -1330,7 +1563,7 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
             data_path=data_path,
             backend=backend,
             jsonl=jsonl,
-            timeout_s=timeout_s,
+            timeout_s=bounded_interaction_settle_timeout_s(timeout_s),
             max_tiles=max_tiles,
         )
         all_records.extend(records)
@@ -1382,6 +1615,24 @@ def test_session_fixture_shape_mismatch_raises_actionable_error(tmp_path):
     message = str(excinfo.value)
     assert "does not fit dataset shape" in message
     assert "--session-fixture ''" in message
+
+
+def test_montage_work_in_flight_counts_semantic_evidence_owner():
+    from arrayscope.tools.profile_montage_workflow import _montage_work_in_flight
+
+    progress = SimpleNamespace(inflight_generation=("levels", 7))
+    session = SimpleNamespace(
+        stage_fan_in=None,
+        active_tile_requests=set(),
+        pending_rung_materializations=(),
+        level_evidence_inflight=False,
+        semantic_level_evidence_progress=progress,
+        histogram_aggregate_inflight=False,
+    )
+
+    assert _montage_work_in_flight(session) is True
+    progress.inflight_generation = None
+    assert _montage_work_in_flight(session) is False
 
 
 def test_post_visible_gate_blockers_names_stuck_completion_gates():

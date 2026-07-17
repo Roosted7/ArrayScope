@@ -5,6 +5,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,10 +25,13 @@ def _process_events(app, count=8):
         app.processEvents()
 
 
-def _wait_until(app, predicate, timeout_s=5.0):
+def _wait_until(
+    app, predicate, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S
+):
     import time
 
-    deadline = time.monotonic() + float(timeout_s)
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         app.processEvents()
         if predicate():
@@ -214,7 +222,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         assert getattr(win.img_view, "_vispy_overlay_visuals", [])
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
         while time.monotonic() < deadline and not win.widgets["labels"]["pixelValue"].text():
             _process_events(qt_app, count=2)
 
@@ -386,7 +394,7 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
                 .name()
                 .endswith("d2=1")
             ),
-            timeout_s=10.0,
+            timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )
         assert win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
 

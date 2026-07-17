@@ -40,6 +40,13 @@ harness.
    V1/V2-style Wayland scenarios and the canonical-fixture workflow with the
    full R8 gate set. Pixels + trace, both backends.
 
+Every driver uses the repository interaction budget: 2 s target and 5 s hard
+failure for each user-visible step. A scenario may contain many steps and take
+longer overall, but no individual open, render, zoom, pan, scroll, scrub,
+level, or refinement step may settle late and still pass. Shorter custom
+budgets remain capped by `arrayscope.tools.interaction_budget`; timeout
+widening is never a convergence fix.
+
 A change is *suspected* good at ring 2, *confident* at ring 3, *accepted*
 only at ring 4.
 

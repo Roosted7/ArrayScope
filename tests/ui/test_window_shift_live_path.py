@@ -29,6 +29,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from arrayscope.gpu import DataChunkKey
 
 from tests.ui.helpers import (
@@ -41,7 +43,6 @@ from tests.ui.helpers import (
     use_vispy_backend,
 )
 
-_WAIT_TIMEOUT_MS = 15_000
 
 CHUNK = 256  # == display.frame_planner.ANCHORED_CHUNK_SHAPE[1]; asserted below
 # Four chunks wide so the shifted window keeps interior chunks strictly
@@ -89,7 +90,7 @@ def _window_settled(win, start: int) -> bool:
 
 
 def _wait_for_window(win, qtbot, start: int) -> None:
-    qtbot.waitUntil(lambda: _window_settled(win, start), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: _window_settled(win, start), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
 def _pool(win):
@@ -140,12 +141,12 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
         for view_x, view_y in probes:
             qtbot.waitUntil(
                 lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
-                timeout=_WAIT_TIMEOUT_MS,
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
             value = committed_value(win, view_x, view_y)
             expected = data[view_y, START_B + view_x]
             assert value == pytest.approx(float(expected)), (
-                f"committed value at view ({view_x}, {view_y}) is {value!r}, "
+                f"presented value at view ({view_x}, {view_y}) is {value!r}, "
                 f"expected source pixel data[{view_y}, {START_B + view_x}] = {expected!r}"
             )
     finally:
@@ -217,7 +218,12 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
             f"shift uploaded {len(native_uploads)} native strips "
             f"(expected <= {expected_boundary + 2}); all uploads: {uploads}"
         )
-        assert len(native_uploads) < total / 2, (
+        # One canonical factor-2 page can be admitted concurrently with the
+        # four native boundary strips and is also 256x256 physically.  The
+        # chunk-key overlap above proves native reuse; allow that one bounded
+        # logical-page upload without misclassifying the fast path as a full
+        # native re-upload.
+        assert len(native_uploads) <= total / 2, (
             f"shift re-uploaded {len(native_uploads)} of {total} chunks — "
             "fast path did not engage"
         )
@@ -277,7 +283,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         pool = _pool(win)
         assert _resident_chunks(pool), "plane 0 did not engage chunked residency"
@@ -296,7 +302,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         def plane_1_warm() -> bool:
             return len(_resident_chunk_keys_for_content(pool, plane_1_key)) >= expected_chunks
 
-        qtbot.waitUntil(plane_1_warm, timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(plane_1_warm, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         # The warm plane is residency only: tile 0 still presents plane 0.
         presented = _resident_chunks(pool)
         assert not (presented & _resident_chunk_keys_for_content(pool, plane_1_key)), (
@@ -306,7 +312,7 @@ def test_fixed_index_scroll_forward_hits_warm_residency(qtbot, upload_log):
         chunk_uploads_before = pool.chunk_upload_count
         uploads.clear()
         apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         # The scroll commit presented plane 1 through the chunked path...
         presented_now = _resident_chunks(pool)
@@ -353,14 +359,14 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
         state = win.view_state.with_image_axes(1, 2)
         win._set_view_state(state.with_slice(0, 0))
         win.render(reason="test-plane-initial")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         pool = _pool(win)
         chunks_plane_0 = _resident_chunks(pool)
         assert chunks_plane_0, "plane 0 did not engage chunked residency"
 
         apply_plane(win, 1, reason="test-plane-forward")
-        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         # Different plane, different content: plane 0's chunks are unlinked
         # from the tile but must SURVIVE as warm page-table residency
         # (grow-before-evict) while plane 1's arrive.
@@ -373,7 +379,7 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
 
         uploads.clear()
         apply_plane(win, 0, reason="test-plane-back")
-        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
         assert not native_uploads, (
@@ -400,14 +406,13 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
     change: shifting the data window while zoomed out materializes the
     demanded level-1 plane, and the exact reduced payload presents through
     ``tile_chunk_residency`` with factor-2 keys in uniform 256^2 plane-pixel
-    slots (the same shape class native chunks use) instead of the classic
-    one-giant-slot-per-plane-size path.  Committed hover truth follows the
-    reduced plane exactly (the established floor-presentation contract).
+        slots (the same shape class native chunks use) instead of the classic
+        one-giant-slot-per-plane-size path. Presentation-qualified lookup
+        follows the canonical bins while exact semantic probes reject the
+        display-only reduced values.
     """
 
     pytest.importorskip("vispy")
-    from arrayscope.display.pyramid import reduce_box_mean
-
     settings = use_vispy_backend()
     rng = np.random.default_rng(23)
     data = rng.standard_normal((2 * CHUNK, 8 * CHUNK)).astype(np.float32)
@@ -442,20 +447,37 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
                 if int(key.lod.factor) > 1
             }
 
-        qtbot.waitUntil(lambda: bool(reduced_chunks()), timeout=_WAIT_TIMEOUT_MS)
-        chunks = reduced_chunks()
-        # Factor-2 keys: LOD triple (factor, level, gutter) == (2, 1, 0);
-        # native key rects span factor * chunk-shape source samples and
-        # anchor at the shifted window start.
+        def factor_two_converged() -> bool:
+            current = win.renderer._frame_session
+            payload = current.display_tile_payloads.get(0)
+            return bool(
+                payload is not None
+                and str(payload.quality) == "exact"
+                and int(payload.lod.factor) == 2
+                and any(int(key.lod.factor) == 2 for key in reduced_chunks())
+            )
+
+        # A retained factor-16 floor may resolve first. It is honest fallback,
+        # not the requested target; wait for the ladder's exact factor-2 rung.
+        qtbot.waitUntil(factor_two_converged, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        chunks = {key for key in reduced_chunks() if int(key.lod.factor) == 2}
+        # Factor-2 keys are the exact canonical page-plan keys. Boundary
+        # pages may be clipped while interior pages stay globally aligned.
         assert {
             (key.lod.factor, key.lod.level, key.lod.gutter) for key in chunks
         } == {(2, 1, 0)}
-        assert len(chunks) == 2
-        rects = sorted(_chunk_rect(key) for key in chunks)
-        assert rects == [
-            (0, 2 * CHUNK, shifted_start, shifted_start + 2 * CHUNK),
-            (0, 2 * CHUNK, shifted_start + 2 * CHUNK, shifted_start + 4 * CHUNK),
-        ]
+        payload = win.renderer._frame_session.display_tile_payloads[0]
+        assert payload.page_backing is not None
+        assert payload.page_backing.source_coverage_yx == (
+            0,
+            2 * CHUNK,
+            shifted_start,
+            shifted_start + EXTENT,
+        )
+        expected_keys = {
+            plan.key for plan in payload.page_backing.requested_plans
+        }
+        assert chunks == expected_keys
         # Uniform plane-pixel pages: the reduced chunks live in the same
         # 256^2 shape class as native chunks.
         slots = pool.resident_slots
@@ -469,25 +491,27 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         assert str(payload.quality) == "exact"
         assert int(payload.lod.factor) == 2
 
-        # Committed value truth: floor-presented planes map view points 1:1
-        # to reduced-plane pixels; hover must report exactly the reduced
-        # plane the session admitted for the SHIFTED window (stale values
-        # from the previous window would betray a wrong chunk mapping).
-        reduced = np.asarray(
-            reduce_box_mean(data[:, shifted_start : shifted_start + EXTENT], (2, 2))
-        )
+        # Presentation-qualified sampling maps native coordinates through the
+        # exact globally aligned source-grid bin. It must not use the old
+        # window-local reduced-plane pixel convention. The committed semantic
+        # probe stays unavailable: a reduced display page without an explicit
+        # native semantic plane cannot answer hover/measurement/export truth.
         probes = ((CHUNK // 2, CHUNK // 2), (CHUNK + 11, CHUNK // 2 + 7))
         for view_x, view_y in probes:
-            qtbot.waitUntil(
-                lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
-                timeout=_WAIT_TIMEOUT_MS,
+            source_x = shifted_start + view_x
+            source_y = view_y
+            value = payload.page_backing.sample_presented_value_at_native(
+                source_y,
+                source_x,
             )
-            value = committed_value(win, view_x, view_y)
-            expected = reduced[view_y, view_x]
+            bin_x = (source_x // 2) * 2
+            bin_y = (source_y // 2) * 2
+            expected = np.mean(data[bin_y : bin_y + 2, bin_x : bin_x + 2])
             assert value == pytest.approx(float(expected)), (
-                f"committed value at view ({view_x}, {view_y}) is {value!r}, "
-                f"expected reduced plane pixel {expected!r}"
+                f"presented value at view ({view_x}, {view_y}) is {value!r}, "
+                f"expected canonical source-grid bin {expected!r}"
             )
+            assert committed_value(win, view_x, view_y) is None
     finally:
         win.close()
         restore_default_backend(settings)

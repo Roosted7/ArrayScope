@@ -84,6 +84,7 @@ def _snapshot():
             tile_lod_source_texels_per_pixel_xy=(8.0, 3.0),
             tile_lod_policy="native-only",
             tile_lod_reason="desired LOD is deferred until asynchronous multi-resolution residency exists",
+            tile_lod_page_families=(((1, 2), "mean", 3), ((3, 3), "phase_vector", 1)),
             tile_compute_cache_hits=3,
             tile_compute_stage_backed=4,
             tile_compute_direct=1,
@@ -179,6 +180,10 @@ def test_diagnostics_jsonl_serializes_nested_snapshot_and_records():
     assert decoded["diagnostics"]["schedulers"][0]["stale_reused"] == 1
     assert decoded["diagnostics"]["schedulers"][0]["presented_target"]["quality"] == "exact-visible"
     assert decoded["diagnostics"]["canvas_preserve"]["events"] == ["start gen=1"]
+    assert decoded["diagnostics"]["montage"]["tile_lod_page_families"] == [
+        [[1, 2], "mean", 3],
+        [[3, 3], "phase_vector", 1],
+    ]
 
 
 def test_diagnostics_jsonable_unknown_objects_are_stable_strings():

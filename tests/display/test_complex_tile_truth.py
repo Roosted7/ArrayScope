@@ -283,7 +283,6 @@ def _session_for_dtype(dtype, *, channel: ChannelMode, shader_display: bool) -> 
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
         shader_display=bool(shader_display),
     )
     return session

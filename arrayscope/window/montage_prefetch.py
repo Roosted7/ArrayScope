@@ -7,9 +7,16 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
+from arrayscope.display.pyramid import (
+    LodPageCache,
+    LodPagePlan,
+    MaterializedLodPage,
+    materialize_source_grid_pages,
+)
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
@@ -17,7 +24,13 @@ from arrayscope.display.slice_engine import make_image_from_slab, make_shader_im
 from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
 from arrayscope.render.effects import rendered_tile_from_evaluation_result
-from arrayscope.render.lod import admit_retained_preview_level
+from arrayscope.render.lod import (
+    LodPageSetKey,
+    _page_set_exact,
+    canonical_value_source_for_rendered,
+    page_set_key_for_rendered,
+    page_set_key_for_tile,
+)
 from arrayscope.window.frame_effects import interactive_active
 
 
@@ -29,6 +42,26 @@ class MontagePrefetchDecision:
     reason: str = ""
     stage_key: object | None = None
     tile_key: object | None = None
+
+
+@dataclass(frozen=True)
+class _RetainedPreviewClaim:
+    """GUI-owned singleflight claim carried across one prefetch worker."""
+
+    key: LodPageSetKey
+    claimed_plans: tuple[LodPagePlan, ...]
+    owner: object
+    cache: LodPageCache
+    demand: object
+    level: int
+
+
+@dataclass(frozen=True)
+class _MontagePrefetchWorkerResult:
+    """Immutable worker output; cache/lifecycle admission stays GUI-owned."""
+
+    evaluation: EvaluationResult
+    preview_pages: tuple[MaterializedLodPage, ...] = ()
 
 
 def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
@@ -100,8 +133,9 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         if stage is None and session.document.enabled_operations:
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "skipped_stage_missing", "would recompute expensive stage per tile", tile_key=tile_key))
             continue
+        preview_claim = _claim_walk_preview(session, tile)
 
-        def evaluate(tile=tile, stage=stage):
+        def evaluate(tile=tile, stage=stage, preview_claim=preview_claim):
             context = window.win._evaluation_context(ComputeLane.PREFETCH, None)
             start = perf_counter()
             if stage is not None:
@@ -142,40 +176,59 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                     shader_display=shader_display,
                     provisional_histogram=bool(shader_display),
                 )
-            # Worker-side, like the visible-path ingest admissions (ADR 0041
-            # gate 1 forbids commit-callback reduction): every walked index
-            # leaves its pinned preview plane behind, so it re-presents
-            # instantly through the floor forever — even if the native
-            # result below is discarded or evicted.
-            _admit_walk_preview(session, tile, result)
-            return result
+            pages = _materialize_walk_preview(
+                session,
+                tile,
+                result,
+                preview_claim,
+                shader_display=shader_display,
+            )
+            return _MontagePrefetchWorkerResult(result, pages)
 
-        def done(result, tile=tile, session_id=session.session_id, session_key=session.key, preview_walk_only=preview_walk_only):
+        def done(worker_result, tile=tile, session_id=session.session_id, session_key=session.key, preview_walk_only=preview_walk_only, preview_claim=preview_claim):
             if not window._is_current_frame_session(session_id, session_key):
+                _release_walk_preview_claim(session, preview_claim)
                 window.win.operation_evaluator.note_prefetch_stale()
+                if preview_claim is not None:
+                    _wake_current_after_walk_preview_terminal(window)
                 return
-            if not preview_walk_only:
-                rendered = window.win.operation_evaluator.store_montage_tile_result(
+            try:
+                _admit_walk_preview_result(
+                    session,
                     tile,
-                    montage_axis=session.montage_axis,
-                    colormap_lut=session.colormap_lut,
-                    result=result,
-                    shader_display=shader_display,
+                    preview_claim,
+                    worker_result.preview_pages,
                 )
-                # In preview-only mode the admission already happened
-                # worker-side; storing the native result would churn the
-                # display cache this mode exists to protect.
-                window.win.operation_evaluator.prefetch_stored += 1
-                _warm_prefetched_tiled_residency(window, session, tile, rendered)
-            # Walk continuation (ADR 0050 background preview walk): flush
-            # paths only invite prefetch while something is happening, so at
-            # true idle the walk stalled after one batch.  Each completion
-            # invites the next batch — deferred and coalesced, because the
-            # scheduling pass (candidate scan + stage probes) is synchronous
-            # GUI work that must never ride on the completion callback while
-            # the user interacts.  Ends itself on no-candidates / governor /
-            # busy; any natural flush invitation re-breaks those states.
-            _invite_walk_continuation(window)
+                if not preview_walk_only:
+                    rendered = window.win.operation_evaluator.store_montage_tile_result(
+                        tile,
+                        montage_axis=session.montage_axis,
+                        colormap_lut=session.colormap_lut,
+                        result=worker_result.evaluation,
+                        shader_display=shader_display,
+                    )
+                    # Preview-only mode deliberately avoids display-cache churn;
+                    # its checked pages were admitted above on the GUI thread.
+                    window.win.operation_evaluator.prefetch_stored += 1
+                    _warm_prefetched_tiled_residency(window, session, tile, rendered)
+            finally:
+                _release_walk_preview_claim(session, preview_claim)
+                if preview_claim is not None:
+                    _wake_walk_preview_admission(window, session)
+                # Walk continuation (ADR 0050 background preview walk): flush
+                # paths only invite prefetch while something is happening, so at
+                # true idle the walk stalled after one batch.  Each completion
+                # invites the next batch — deferred and coalesced.
+                _invite_walk_continuation(window)
+
+        def dropped(preview_claim=preview_claim):
+            _release_walk_preview_claim(session, preview_claim)
+            if preview_claim is not None:
+                _wake_current_after_walk_preview_terminal(window)
+
+        def failed(exc, preview_claim=preview_claim):
+            dropped(preview_claim)
+            handle_ui_exception("montage prefetch", exc)
 
         budget_bytes = int(window._memory_policy().display_cache_budget_bytes)
         # Admission control needs the tile's actual footprint.  The display
@@ -188,6 +241,8 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         started = window.win.prefetch_evaluation_controller.start_prefetch(
             evaluate,
             on_done=done,
+            on_error=failed,
+            on_stale=dropped,
             key=("montage_tile_prefetch", tile_key),
             memory_budget_bytes=budget_bytes,
             work_item=WorkItem(
@@ -221,6 +276,7 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             window.win.operation_evaluator.note_prefetch_deduped()
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "deduped", tile_key=tile_key))
         else:
+            _release_walk_preview_claim(session, preview_claim)
             decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), started.reason, tile_key=tile_key))
 
     if not decisions:
@@ -306,7 +362,7 @@ def _interaction_active(window) -> bool:
 
 def _busy(window, session=None) -> bool:
     if session is not None and (
-        getattr(session, "pending_tiles", None)
+        not session.required_target_settled()
         or getattr(session, "loading_tiles", None)
         or getattr(session, "active_tile_requests", None)
         or getattr(session, "dirty_payloads", None)
@@ -448,7 +504,7 @@ def _invite_walk_continuation(window) -> None:
 
 def _preview_cache_active(session) -> bool:
     return (
-        getattr(session, "pyramid_cache", None) is not None
+        getattr(session, "lod_page_cache", None) is not None
         and int(getattr(session, "lod_preview_level", 0) or 0) > 0
     )
 
@@ -456,48 +512,151 @@ def _preview_cache_active(session) -> bool:
 def _preview_resident(session, tile) -> bool:
     """True when the pinned preview cache already holds this tile's plane."""
 
-    preview = getattr(session, "pyramid_cache", None)
+    preview = getattr(session, "lod_page_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
     if preview is None or level <= 0:
         return False
-    from arrayscope.display.pyramid import PyramidLevelKey
-    from arrayscope.render.lod import floor_component_tags
-
     semantic_id = session.tile_semantic_source_id(int(tile.source_index))
-    for component in floor_component_tags(session):
-        key = PyramidLevelKey(
-            source_id=semantic_id,
-            tile_id=int(tile.source_index),
-            component=component,
-            level_xy=(level, level),
-        )
-        if preview.peek(key) is not None:
+    rec = session.lifecycle.peek(int(tile.montage_index))
+    if rec is None:
+        return False
+    for key, entry in rec.levels.items():
+        if (
+            getattr(key, "source_id", None) == semantic_id
+            and int(getattr(key, "tile_id", -1)) == int(tile.source_index)
+            and max(tuple(getattr(key, "level_xy", (0, 0)))) == level
+            and entry.phase.value == "resident"
+            and _page_set_exact(preview, key)
+        ):
             return True
     return False
 
 
-def _admit_walk_preview(session, tile, result) -> bool:
-    """Pin the retained preview level for a prefetched tile, worker-side.
+def _claim_walk_preview(session, tile) -> _RetainedPreviewClaim | None:
+    """Claim missing retained-preview pages on the GUI scheduling boundary."""
 
-    ADR 0050 background preview walk: prefetch used to warm only the display
-    cache, which evicts; the pinned preview cache does not.  Admission is
-    singleflight-guarded, so a concurrent visible evaluation of the same
-    index never duplicates the reduction.
-    """
-
-    preview = getattr(session, "pyramid_cache", None)
+    preview = getattr(session, "lod_page_cache", None)
     level = int(getattr(session, "lod_preview_level", 0) or 0)
-    if preview is None or level <= 0:
-        return False
+    demand = getattr(getattr(session, "lod_policy_decision", None), "demand", None)
+    if preview is None or level <= 0 or demand is None:
+        return None
+    key = page_set_key_for_tile(session, tile, demand=demand, level=level)
+    if _page_set_exact(preview, key):
+        return None
+    owner = (
+        "montage-prefetch-preview",
+        id(session),
+        int(getattr(session, "session_id", 0) or 0),
+        int(tile.montage_index),
+        key,
+    )
+    claimed = tuple(preview.claim_plans(key.plans, owner))
+    if not claimed:
+        return None
+    return _RetainedPreviewClaim(
+        key=key,
+        claimed_plans=claimed,
+        owner=owner,
+        cache=preview,
+        demand=demand,
+        level=level,
+    )
+
+
+def _materialize_walk_preview(
+    session,
+    tile,
+    result,
+    claim: _RetainedPreviewClaim | None,
+    *,
+    shader_display: bool,
+) -> tuple[MaterializedLodPage, ...]:
+    """Pure worker step: return checked pages without mutating live owners."""
+
+    if claim is None:
+        return ()
     rendered = rendered_tile_from_evaluation_result(tile, result)
+    actual_key = page_set_key_for_rendered(
+        rendered,
+        demand=claim.demand,
+        level=claim.level,
+        semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
+        shader_display=bool(shader_display),
+    )
+    if actual_key != claim.key:
+        raise ValueError("prefetch result disagrees with its precomputed canonical page route")
+    source = canonical_value_source_for_rendered(
+        rendered,
+        shader_display=bool(shader_display),
+    )
+    return materialize_source_grid_pages(
+        source,
+        source_origin_yx=(0, 0),
+        plans=claim.claimed_plans,
+    )
+
+
+def _admit_walk_preview_result(
+    session,
+    tile,
+    claim: _RetainedPreviewClaim | None,
+    pages: tuple[MaterializedLodPage, ...],
+) -> bool:
+    """Admit checked worker pages and lifecycle state on the GUI thread."""
+
+    if claim is None:
+        if pages:
+            raise ValueError("prefetch returned preview pages without a page claim")
+        return False
+    supplied = tuple(pages)
+    if tuple(page.key for page in supplied) != tuple(
+        plan.key for plan in claim.claimed_plans
+    ):
+        raise ValueError("prefetch returned pages outside its claimed canonical plans")
+    preview = claim.cache
+    if getattr(session, "lod_page_cache", None) is not preview:
+        return False
+    for page in supplied:
+        preview.admit_as(page.key, page, owner=claim.owner)
+    exact_pages = preview.exact_pages(claim.key.plans)
+    if exact_pages is None:
+        return False
     return bool(
-        admit_retained_preview_level(
-            preview,
-            rendered,
-            semantic_source_id=session.tile_semantic_source_id(int(tile.source_index)),
-            preview_level=level,
+        session.admit_preview_plane(
+            int(tile.montage_index),
+            claim.key,
+            exact_pages,
+            quality="preview",
         )
     )
+
+
+def _release_walk_preview_claim(
+    session,
+    claim: _RetainedPreviewClaim | None,
+) -> tuple:
+    if claim is None:
+        return ()
+    return tuple(claim.cache.release_owner_claims(claim.owner))
+
+
+def _wake_walk_preview_admission(window, session) -> None:
+    """Wake the existing semantic and physical presentation owners once."""
+
+    window.request_montage_replan(session)
+    effects = getattr(getattr(session, "pipeline", None), "effects", None)
+    request_presentation = getattr(effects, "request_presentation", None)
+    if callable(request_presentation):
+        request_presentation()
+
+
+def _wake_current_after_walk_preview_terminal(window) -> None:
+    """Replan the live session after stale work releases shared page claims."""
+
+    current = getattr(window, "_frame_session", None)
+    if current is None or not window._frame_session_is_current(current):
+        return
+    _wake_walk_preview_admission(window, current)
 
 
 def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:

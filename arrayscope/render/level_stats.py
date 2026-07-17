@@ -704,15 +704,6 @@ class LevelStatsService:
                 progress.blocking_reason = "waiting-semantic-sources"
             self._maybe_publish_after_level_evidence(current, processed=int(merged))
             self._schedule_semantic_level_evidence(current)
-            if (
-                len(progress.covered_sources) >= target.target_population
-                and _montage_side_work_visible_settled(self, current)
-            ):
-                # Completion is the atomic refined levels+histogram edge.
-                # Request it directly from the guarded worker completion;
-                # there is no later payload transition guaranteed to wake the
-                # presentation gate.
-                self._request_level_metadata_presentation(current)
 
         def stale():
             if release(session):
@@ -726,25 +717,60 @@ class LevelStatsService:
         # An all-cached cursor slice still advances only one bounded GUI pass;
         # the no-op worker completion is the continuation for the next slice.
         max_items = max(1, len(sources))
-        handle = self.win.kernel.submit_speculative_batch(
-            kind="semantic-level-evidence",
-            scope="montage:semantic-level-evidence",
-            generation=generation,
-            key=("semantic-level-evidence", generation, int(progress.cursor)),
-            fn=evaluate,
-            on_done=done,
-            on_stale=stale,
-            on_error=failed,
-            priority=Priority.HISTOGRAM,
-            lane=WorkLane.HISTOGRAM_REFINEMENT,
-            max_items=max_items,
-            pass_token=True,
-        )
+        task_key = ("semantic-level-evidence", generation, int(progress.cursor))
+        if visible_dependency:
+            # PyQtGraph cannot acknowledge first pixels until the full
+            # semantic window source exists. This is the complement producer
+            # for that wait, so it must be owned by the visible lane rather
+            # than admitted as optional histogram work after materialization.
+            handle = self.win.kernel.submit(
+                TaskSpec(
+                    key=task_key,
+                    fn=evaluate,
+                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    priority=Priority.VISIBLE_IMAGE,
+                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    scope="montage:semantic-level-evidence",
+                    supersession=Supersession(
+                        ("semantic-level-evidence", session.key),
+                        generation,
+                    ),
+                    reusable=True,
+                    pass_token=True,
+                ),
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+            )
+        else:
+            handle = self.win.kernel.submit_speculative_batch(
+                kind="semantic-level-evidence",
+                scope="montage:semantic-level-evidence",
+                generation=generation,
+                key=task_key,
+                fn=evaluate,
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+                priority=Priority.HISTOGRAM,
+                lane=WorkLane.HISTOGRAM_REFINEMENT,
+                max_items=max_items,
+                pass_token=True,
+            )
         if handle is None:
             release(session)
             progress.blocking_reason = "kernel-admission"
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
+        if (
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        ):
+            # Arm the full-population owner as soon as a CPU first-frame
+            # commit asks for evidence. Payload-derived evidence can reduce
+            # its remaining work, but must not be a serial prerequisite: the
+            # pending upserts are themselves parked behind this producer.
+            self._schedule_semantic_level_evidence(session)
         if self._first_pass_rough_evidence_closed(session):
             getattr(session, "pending_level_tiles", deque()).clear()
             getattr(session, "pending_level_sources", set()).clear()
@@ -959,7 +985,10 @@ class LevelStatsService:
                 continue
             batch.append(rendered)
 
-        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        plan_tiles = tuple(
+            getattr(getattr(session, "plan", None), "tiles", ()) or ()
+        )
+        tile_count = len(plan_tiles)
         remaining = int(getattr(session, "level_scan_remaining_tiles", 0) or 0)
         if tile_count <= 0 or remaining <= 0:
             session.level_scan_remaining_tiles = 0
@@ -976,11 +1005,26 @@ class LevelStatsService:
                 < MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS
             )
         ):
-            rendered = getattr(session, "rendered_tiles", {}).get(cursor)
+            # ``level_scan_cursor`` is an ordinal into the current plan, not a
+            # montage tile number. Visible montage windows retain their
+            # canonical/global ``montage_index`` values, so a 108-tile window
+            # can legitimately contain indices spanning 0..187. Looking up
+            # ``rendered_tiles[cursor]`` scans holes in that case and leaves
+            # the pending presentation delta as an ownerless complement to
+            # PyQtGraph's first-pixel level-evidence wait.
+            plan_tile = plan_tiles[cursor]
+            tile_number = int(getattr(plan_tile, "montage_index", cursor))
+            rendered = getattr(session, "rendered_tiles", {}).get(tile_number)
             if rendered is None:
-                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(cursor)
+                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(
+                    tile_number
+                )
                 if payload is not None:
-                    rendered = self._rendered_tile_for_current_payload(session, cursor, payload)
+                    rendered = self._rendered_tile_for_current_payload(
+                        session,
+                        tile_number,
+                        payload,
+                    )
             cursor = (cursor + 1) % tile_count
             remaining -= 1
             inspected += 1
@@ -1030,7 +1074,7 @@ class LevelStatsService:
         stats_start = perf_counter()
         expected = self._montage_level_expected_indices(session)
         require_refined = _montage_level_evidence_requires_refined(self, session)
-        visible_level_dependency = bool(require_refined and not getattr(session, "display_committed", False))
+        visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         batch = self._take_montage_level_evidence_batch(
             session,
             expected=expected,
@@ -1290,15 +1334,12 @@ class LevelStatsService:
             handle_ui_exception("montage level evidence continuation", exc)
 
         task_key = ("montage_level_evidence_continuation", session.key, int(session.session_id), generation)
-        visible_level_dependency = bool(
-            _montage_level_evidence_requires_refined(self, session)
-            and not getattr(session, "display_committed", False)
-        )
+        visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         if visible_level_dependency:
-            # This continuation advances the scan that gates PyQtGraph's very
-            # first pixels. It is correctness work, not speculative histogram
-            # refinement; parking it behind the optional-lane quota leaves the
-            # app with histogram/ROI metadata but zero tiles forever.
+            # This continuation advances the backend-required evidence scan
+            # that gates the first pixels. It is correctness work, not
+            # speculative histogram refinement; parking it behind the
+            # optional-lane quota leaves the app with metadata but zero tiles.
             handle = self.win.kernel.submit(
                 TaskSpec(
                     key=task_key,
@@ -1345,8 +1386,11 @@ class LevelStatsService:
         # explicit-auto flush waits on level evidence, committing after EVERY
         # budget slice re-runs the full payload build per handful of tiles
         # (~68 no-op commits for a 272-tile scene).  Commit when the evidence
-        # queue actually drained — the parked flush re-checks the rank then —
-        # or when nothing is parked (metadata refresh for a settled session).
+        # queue actually drained — the parked flush re-checks the rank then.
+        # A settled tile set does not make an incomplete semantic evidence
+        # frontier publishable: replaying the full tiled presentation for
+        # every background batch keeps the physical draw stream permanently
+        # busy without changing pixels.
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         semantic_remaining = bool(
             semantic_progress is not None
@@ -1390,7 +1434,9 @@ class LevelStatsService:
             flush_parked = True
         can_resume_parked_flush = bool(flush_parked and not evidence_remaining)
         can_refresh_settled_metadata = bool(
-            not flush_parked and _montage_side_work_visible_settled(self, session)
+            not flush_parked
+            and not evidence_remaining
+            and _montage_side_work_visible_settled(self, session)
         )
         payload_backlog_clear = bool(
             not getattr(session, "dirty_payloads", ())
@@ -1644,6 +1690,7 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         texture_kind=getattr(payload, "texture_kind", None),
         semantic_data=semantic,
         semantic_histogram_data=semantic_histogram,
+        lod_source_data=getattr(payload, "lod_source_data", None),
         lod=getattr(payload, "lod", None),
         level_data=getattr(payload, "level_data", None),
         level_stats=getattr(payload, "level_stats", None),
@@ -1747,6 +1794,18 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
             or (requested_levels is None and getattr(session, "force_auto", False))
         )
     )
+
+
+def _montage_payload_level_evidence_is_visible_dependency(session) -> bool:
+    """Return whether payload evidence still gates the session's first pixels.
+
+    CPU presentation needs refined evidence and shader presentation needs only
+    rough evidence, but both are visible correctness dependencies until the
+    first display commits.  Evidence quality and scheduling criticality are
+    intentionally separate decisions.
+    """
+
+    return not bool(getattr(session, "display_committed", False))
 
 
 def _viewport_interaction_active(window) -> bool:

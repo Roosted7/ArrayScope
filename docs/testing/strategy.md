@@ -39,6 +39,13 @@ Use `pytest-qt` to exercise dimension controls, viewport, montage, ROI/profile, 
 
 High-frequency tests should process events in bounded loops with explicit conditions/timeouts. A passing interaction test does not establish good feel or frame pacing.
 
+Every user-visible step has one repository-wide acceptance budget: 2 s target,
+5 s hard failure, owned by `arrayscope.tools.interaction_budget`. The limit is
+per open/render/zoom/pan/scroll/scrub/level/refinement step, not per multi-step
+scenario. Local budgets may be shorter only through the shared cap. Never
+widen a timeout to make slow settlement pass; a longer process-deadlock guard
+may terminate a whole child but is not evidence of successful settlement.
+
 ## Stress and benchmark tests
 
 Locations: `tests/app/test_memory_stress.py`, `tests/app/test_operation_benchmarks.py`, `tests/display/test_rendering_benchmarks.py`, diagnostics/trace tools.
@@ -158,7 +165,10 @@ the canonical `tests/artifacts/` run those commands with `-n 0`.
 **No fixed-time assertions.** Parallel load makes wall-clock timing nondeterministic. A test that
 launches background work and then asserts state after a *fixed* window — `QTest.qWait(220)`, or a
 short `qtbot.waitUntil(..., timeout=250)` — passes only on an idle CPU and flakes under load. Wait on
-the actual signal or condition with a generous timeout instead. This is the counterpart to the
+the actual signal or condition, using the shared 5 s hard limit for a
+user-visible step. Parallel load is not permission to raise that acceptance
+limit: if the condition misses it, the path is too slow or the test must be
+made smaller while preserving the behavior. This is the counterpart to the
 "deterministic work counters, not elapsed time" rule elsewhere in this doc.
 
 **Debugging serially.** Append `-n 0` to any command to disable parallelism and get clean tracebacks

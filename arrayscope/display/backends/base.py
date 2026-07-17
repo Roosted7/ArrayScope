@@ -87,6 +87,28 @@ def surface_for_view(view) -> ImageSurface:
     raise TypeError(f"{view_type} does not expose an ImageSurface ({detail})")
 
 
+def tiled_presentation_visible(surface: ImageSurface) -> bool:
+    """Return the surface-owned truth for whether tiled pixels are drawn.
+
+    Session/lifecycle state cannot answer this question across rebirths: an
+    unfinished successor may have a cold lifecycle while the surface still
+    draws its predecessor, or an incompatible transition may have hidden the
+    surface while resident pages remain reusable.  ``montage_display_mode``
+    is only the selected render path: it can be set before a candidate commits
+    and therefore cannot prove that any tile primitive is drawable.  Both
+    backends publish the same derived physical count through the diagnostics
+    seam; missing evidence is conservatively treated as hidden.
+    """
+
+    count = surface.presentation_diagnostics().get("physically_visible_tile_count")
+    if isinstance(count, bool):
+        return count
+    try:
+        return int(count) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _qualified_type_name(value) -> str:
     cls = type(value)
     module = getattr(cls, "__module__", "")

@@ -366,7 +366,7 @@ class ArrayScopeWindow(
             return False
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         return bool(
-            getattr(session, "pending_tiles", None)
+            not session.required_target_settled()
             or getattr(session, "loading_tiles", None)
             or getattr(session, "active_tile_requests", None)
             or getattr(session, "pending_level_tiles", None)

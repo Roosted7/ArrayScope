@@ -8,6 +8,23 @@ from pathlib import Path
 
 
 MAX_IDENTICAL_ACKS = 25
+MAX_IDENTICAL_COMMIT_BAILS = 25
+
+
+def _commit_bail_signature(event: dict[str, object]) -> tuple[tuple[str, object], ...]:
+    """Stable semantic signature for one commit deferral.
+
+    Sequence and timestamp identify occurrences, not progress.  Every other
+    field is part of the reason/state contract emitted by ``commit_bail``;
+    canonical JSON keeps nested details hashable without weakening that
+    contract to a hand-maintained subset.
+    """
+
+    return tuple(
+        (key, json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr))
+        for key, value in sorted(event.items())
+        if key not in {"sequence", "ts_ns"}
+    )
 
 
 def _ack_satisfies_target(ack: dict[str, object], target: dict[str, object]) -> bool:
@@ -27,6 +44,7 @@ def verify_trace(
     *,
     expect_targets: int | None = None,
     max_identical_acks: int = MAX_IDENTICAL_ACKS,
+    max_identical_commit_bails: int = MAX_IDENTICAL_COMMIT_BAILS,
 ) -> dict[str, object]:
     """Replay lifecycle scope and prove every final target reached exact ack.
 
@@ -43,19 +61,32 @@ def verify_trace(
     presentation layer is spinning (observed: ~5,500 identical acks per tile
     per minute at idle).
 
+    ``max_identical_commit_bails`` catches the complementary no-progress
+    loop: a commit barrier repeatedly defers the same transaction state while
+    its named wakeup produces no change.  Healthy pacing changes at least one
+    signature field as work drains; dozens of byte-identical semantic bails
+    mean the waited-for complement has no live owner.
+
     Every ``commit_batch``/``backend_complete`` event must report an empty
     ``identity_rejected``: a rejected upsert is a payload the session queued
     against a target its typed identity can never satisfy (the silent
     re-emit loop behind the 2026-07-16 stale/empty-tile stall), which is a
     defect even when the run otherwise converges.
+
+    A backend commit must also report no exact upsert inside an open preview
+    pass. Retaining already-presented exact pixels is valid stronger coverage;
+    introducing new exact pixels while another slot still awaits its preview
+    is the mixed-quality race the plan-wide first-pixel pass forbids.
     """
 
     targets: dict[int, dict[str, object]] = {}
     acknowledgements: dict[int, dict[str, object]] = {}
     first_ack_sequences: dict[int, int] = {}
     identical_ack_counts: dict[tuple[object, ...], int] = {}
+    identical_commit_bail_counts: dict[tuple[tuple[str, object], ...], int] = {}
     stalls: list[dict[str, object]] = []
     identity_rejected_commits: list[dict[str, object]] = []
+    preview_pass_exact_commits: list[dict[str, object]] = []
     lifecycle_events = 0
     event_count = 0
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -64,6 +95,12 @@ def verify_trace(
         event_count += 1
         event = json.loads(line)
         kind = str(event.get("kind", ""))
+        if kind == "commit_bail":
+            signature = _commit_bail_signature(event)
+            identical_commit_bail_counts[signature] = (
+                identical_commit_bail_counts.get(signature, 0) + 1
+            )
+            continue
         if kind == "stall":
             stalls.append(event)
             continue
@@ -78,6 +115,12 @@ def verify_trace(
                 and tuple(event.get("identity_rejected", ()) or ())
             ):
                 identity_rejected_commits.append(event)
+            if (
+                str(event.get("phase", "")) == "backend_complete"
+                and bool(event.get("preview_pass_open_before", False))
+                and tuple(event.get("exact_upserts_during_preview_pass", ()) or ())
+            ):
+                preview_pass_exact_commits.append(event)
             continue
         if kind == "lifecycle":
             lifecycle_events += 1
@@ -170,6 +213,17 @@ def verify_trace(
         }
         for event in identity_rejected_commits
     )
+    violations.extend(
+        {
+            "invariant": "preview_pass_precedes_exact_upserts",
+            "session_id": event.get("session_id"),
+            "revision": event.get("revision"),
+            "exact_upserts": tuple(
+                event.get("exact_upserts_during_preview_pass") or ()
+            ),
+        }
+        for event in preview_pass_exact_commits
+    )
     if event_count == 0:
         violations.append({"invariant": "trace_not_empty"})
     elif lifecycle_events == 0:
@@ -198,11 +252,27 @@ def verify_trace(
             )
             if count > int(max_identical_acks)
         )
+    if max_identical_commit_bails > 0:
+        violations.extend(
+            {
+                "invariant": "no_identical_commit_bail_loop",
+                "outcome": json.loads(dict(signature).get("outcome", '""')),
+                "wakeup": json.loads(dict(signature).get("wakeup", '""')),
+                "session_id": json.loads(dict(signature).get("session_id", "null")),
+                "identical_commit_bails": count,
+                "limit": int(max_identical_commit_bails),
+            }
+            for signature, count in sorted(
+                identical_commit_bail_counts.items(), key=lambda item: -item[1]
+            )
+            if count > int(max_identical_commit_bails)
+        )
     return {
         "ok": not violations,
         "event_count": event_count,
         "lifecycle_events": lifecycle_events,
         "identity_rejected_commits": len(identity_rejected_commits),
+        "preview_pass_exact_commits": len(preview_pass_exact_commits),
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(
@@ -229,11 +299,18 @@ def main(argv=None) -> int:
         default=MAX_IDENTICAL_ACKS,
         help="Identical accepted acks per identity before flagging livelock churn; 0 disables",
     )
+    parser.add_argument(
+        "--max-identical-commit-bails",
+        type=int,
+        default=MAX_IDENTICAL_COMMIT_BAILS,
+        help="Identical semantic commit bails before flagging a no-owner loop; 0 disables",
+    )
     args = parser.parse_args(argv)
     result = verify_trace(
         args.trace,
         expect_targets=args.expect_targets,
         max_identical_acks=args.max_identical_acks,
+        max_identical_commit_bails=args.max_identical_commit_bails,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if bool(result["ok"]) else 1

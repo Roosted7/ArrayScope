@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 
@@ -828,7 +829,7 @@ def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
     qtbot.addWidget(window)
     try:
         window.show()
-        qtbot.waitUntil(window.isVisible, timeout=10_000)
+        qtbot.waitUntil(window.isVisible, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         viewport = window.img_view.graphicsView.viewport()
         view_range = window.img_view.getView().viewRange()
         tx = ViewportContinuityTransaction(
@@ -844,7 +845,7 @@ def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
 
         window.resize(max(window.minimumWidth(), window.width() - 40), window.height())
 
-        qtbot.waitUntil(lambda: tx.released, timeout=10_000)
+        qtbot.waitUntil(lambda: tx.released, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     finally:
         window.close()
         settings.setValue(
@@ -983,6 +984,39 @@ def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatc
 
     assert scheduled == [16]
     assert not image_view._viewport_wheel_range_pending
+
+
+def test_montage_range_change_during_commit_joins_post_commit_retarget(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    retargeted = []
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False),
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _committed_display_frame=SimpleNamespace(
+            scene=object(),
+            value_source=SimpleNamespace(payloads={}),
+        ),
+        _montage_presentation_commit_active=True,
+        _frame_viewport_retarget_after_commit=False,
+        retarget_montage_viewport=lambda: retargeted.append(True),
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    owner.win = owner
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert owner._frame_viewport_retarget_after_commit is True
+    assert retargeted == []
 
 
 def test_restored_viewport_waits_until_frame_committed(qt_app, monkeypatch):

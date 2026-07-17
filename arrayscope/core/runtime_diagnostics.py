@@ -90,7 +90,7 @@ class MontageRuntimeDiagnostics:
     loaded_tiles: int = 0
     loading_tiles: int = 0
     active_tile_requests: int = 0
-    pending_tiles: int = 0
+    target_unsettled_tiles: int = 0
     pending_payload_upserts: int = 0
     pending_removals: int = 0
     pending_level_tiles: int = 0
@@ -138,6 +138,8 @@ class MontageRuntimeDiagnostics:
     tile_lod_pyramid_hits: int = 0
     tile_lod_pyramid_misses: int = 0
     tile_lod_pyramid_evictions: int = 0
+    # ((anisotropic reduction vector, reducer family, resident page count), ...)
+    tile_lod_page_families: tuple[tuple[tuple[int, ...], str, int], ...] = ()
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
     tile_lod_ingest_reductions: int = 0
@@ -467,7 +469,7 @@ def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"  active={snapshot.montage.active} mode={snapshot.montage.display_mode}\n"
             f"  tiles visible={snapshot.montage.visible_tiles} loaded={snapshot.montage.loaded_tiles} "
             f"presented={snapshot.montage.presented_tiles} "
-            f"pending={snapshot.montage.pending_tiles} "
+            f"target_unsettled={snapshot.montage.target_unsettled_tiles} "
             f"overlays={snapshot.montage.overlay_count}"
         ),
         (
@@ -646,7 +648,7 @@ def runtime_bottleneck_text(snapshot: WindowRuntimeDiagnostics) -> str:
         return "stage compute"
     if active_work and snapshot.montage_timing.tile_layer_rgb_window_tiles:
         return "RGB window/upload"
-    if active_work and snapshot.montage.pending_tiles:
+    if active_work and snapshot.montage.target_unsettled_tiles:
         return "tile compute"
     return "idle"
 
@@ -672,7 +674,7 @@ def runtime_has_live_work(snapshot: WindowRuntimeDiagnostics) -> bool:
         return True
     montage = snapshot.montage
     return bool(
-        int(getattr(montage, "pending_tiles", 0) or 0)
+        int(getattr(montage, "target_unsettled_tiles", 0) or 0)
         or int(getattr(montage, "pending_payload_upserts", 0) or 0)
         or int(getattr(montage, "pending_removals", 0) or 0)
         or int(getattr(montage, "loading_tiles", 0) or 0)
@@ -887,7 +889,7 @@ _MONTAGE_COVERED = frozenset(
         "loaded_tiles",
         "presented_tiles",
         "loading_tiles",
-        "pending_tiles",
+        "target_unsettled_tiles",
         "pending_level_tiles",
         "skipped_tiles",
         "lifecycle_parked",
@@ -924,6 +926,7 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_pyramid_hits",
         "tile_lod_pyramid_misses",
         "tile_lod_pyramid_evictions",
+        "tile_lod_page_families",
         "tile_lod_pending_materializations",
         "tile_lod_materializations_completed",
         "tile_lod_ingest_reductions",
@@ -1066,7 +1069,8 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             "Tiles: "
             f"visible={montage.visible_tiles} loaded={montage.loaded_tiles} "
             f"presented={montage.presented_tiles} loading={montage.loading_tiles} "
-            f"pending={montage.pending_tiles} pending_lvls={montage.pending_level_tiles} "
+            f"target_unsettled={montage.target_unsettled_tiles} "
+            f"pending_lvls={montage.pending_level_tiles} "
             f"skipped={montage.skipped_tiles}"
         ),
         (
@@ -1093,6 +1097,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"pyramid={format_bytes(montage.tile_lod_pyramid_bytes)}/{montage.tile_lod_pyramid_entries}e "
             f"hit/miss/evict={montage.tile_lod_pyramid_hits}/{montage.tile_lod_pyramid_misses}/"
             f"{montage.tile_lod_pyramid_evictions} "
+            f"page_families={montage.tile_lod_page_families} "
             f"pending={montage.tile_lod_pending_materializations} "
             f"completed={montage.tile_lod_materializations_completed} "
             f"ingest={montage.tile_lod_ingest_reductions} "

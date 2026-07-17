@@ -588,6 +588,7 @@ class OperationEvaluator:
             shader_mapping=getattr(result.value, "shader_mapping", None),
             texture_kind=getattr(result.value, "texture_kind", None),
             semantic_data=getattr(result.value, "semantic_data", None),
+            lod_source_data=getattr(result.value, "lod_source_data", None),
             lod=getattr(result.value, "lod", None),
             level_data=level_data,
             level_stats=level_stats,

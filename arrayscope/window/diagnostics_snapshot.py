@@ -50,11 +50,26 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     presentation = _presentation_diagnostics(window)
     lod_decision = None if session is None else getattr(session, "lod_policy_decision", None)
     lod_demand = None if lod_decision is None else getattr(lod_decision, "demand", None)
-    pyramid_cache = None if session is None else getattr(session, "pyramid_cache", None)
+    lod_page_cache = None if session is None else getattr(session, "lod_page_cache", None)
+    lod_page_families = (
+        ()
+        if lod_page_cache is None
+        else tuple(
+            sorted(
+                (
+                    tuple(int(step) for step in reduction),
+                    str(reducer),
+                    int(count),
+                )
+                for (reduction, reducer), count in lod_page_cache.resident_lod_reducer_counts().items()
+            )
+        )
+    )
     lod_tile_levels = _montage_payload_level_counts(session)
     presented_lod = _montage_presented_lod(session, lod_decision)
     lifecycle_snapshot = None if session is None else session.lifecycle_snapshot()
     lifecycle_phase_counts = {} if lifecycle_snapshot is None else dict(lifecycle_snapshot.counts)
+    tile_identity_probe = _tile_identity_probe(window, session)
     retention_started_at = getattr(window.renderer, "_slice_retention_started_at", None)
     stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
     stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
@@ -83,7 +98,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
         active_tile_requests=0 if session is None else len(getattr(session, "active_tile_requests", ())),
-        pending_tiles=0 if session is None else len(session.pending_tiles),
+        target_unsettled_tiles=(
+            0
+            if session is None
+            else len(session.required_target_unsettled_tiles())
+        ),
         pending_payload_upserts=0 if session is None else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
         pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
@@ -133,16 +152,17 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_reason=_presented_lod_reason(lod_decision, presented_lod),
         tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
-        tile_lod_pyramid_bytes=0 if pyramid_cache is None else int(getattr(pyramid_cache, "bytes_used", 0) or 0),
-        tile_lod_pyramid_entries=0 if pyramid_cache is None else len(pyramid_cache),
-        tile_lod_pyramid_hits=0 if pyramid_cache is None else int(getattr(pyramid_cache, "hits", 0) or 0),
-        tile_lod_pyramid_misses=0 if pyramid_cache is None else int(getattr(pyramid_cache, "misses", 0) or 0),
-        tile_lod_pyramid_evictions=0 if pyramid_cache is None else int(getattr(pyramid_cache, "evictions", 0) or 0),
+        tile_lod_pyramid_bytes=0 if lod_page_cache is None else int(getattr(lod_page_cache, "bytes_used", 0) or 0),
+        tile_lod_pyramid_entries=0 if lod_page_cache is None else len(lod_page_cache),
+        tile_lod_pyramid_hits=0 if lod_page_cache is None else int(getattr(lod_page_cache, "hits", 0) or 0),
+        tile_lod_pyramid_misses=0 if lod_page_cache is None else int(getattr(lod_page_cache, "misses", 0) or 0),
+        tile_lod_pyramid_evictions=0 if lod_page_cache is None else int(getattr(lod_page_cache, "evictions", 0) or 0),
+        tile_lod_page_families=lod_page_families,
         tile_lod_pending_materializations=(
             0
             if session is None
             else len(getattr(session, "pending_rung_materializations", ()) or ())
-            + (0 if pyramid_cache is None else int(getattr(pyramid_cache, "pending_count", 0) or 0))
+            + (0 if lod_page_cache is None else int(getattr(lod_page_cache, "pending_count", 0) or 0))
         ),
         tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
         tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0),
@@ -214,9 +234,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         last_stall_signature=tuple(
             int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
         ),
-        tile_identity_probe=()
-        if session is None
-        else tuple(getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()),
+        tile_identity_probe=tile_identity_probe,
         presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
     )
 
@@ -453,6 +471,34 @@ def _presentation_diagnostics(window) -> dict[str, object]:
         except Exception:
             return {}
     return {}
+
+
+def _tile_identity_probe(window, session) -> tuple[dict[str, object], ...]:
+    """Merge semantic/lifecycle rows with what the backend physically draws."""
+
+    if session is None:
+        return ()
+    semantic_rows = tuple(
+        dict(row)
+        for row in getattr(
+            session,
+            "diagnostic_tile_identity_rows",
+            lambda **_kwargs: (),
+        )()
+    )
+    getter = getattr(getattr(window, "img_view", None), "tileTruthPhysicalRows", None)
+    physical_rows = (
+        {}
+        if not callable(getter)
+        else {int(tile): dict(row) for tile, row in dict(getter() or {}).items()}
+    )
+    return tuple(
+        {
+            **row,
+            **physical_rows.get(int(row.get("tile", -1)), {}),
+        }
+        for row in semantic_rows
+    )
 
 
 def _lifecycle_semantic_mismatches(session) -> int:

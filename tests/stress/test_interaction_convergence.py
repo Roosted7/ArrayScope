@@ -42,22 +42,72 @@ pytestmark = pytest.mark.skipif(
     reason="needs ARRAYSCOPE_STRESS=1, a real display, and the local NIfTI dataset",
 )
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_MS,
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+)
+
+# Build-time budget for the cold 272-tile FFT fill — a measured multi-second
+# operation on this hardware. The five-second interaction budget above
+# applies to per-gesture probes only.
 _FILL_TIMEOUT_S = 120
-_CONVERGE_TIMEOUT_S = 120
+
+
 
 # PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
-# without their phase mapping (a_mode 3 instead of 4).  Real phase-color
-# content contains a few hundred legitimately near-orange pixels; the
-# 2026-07-16 floor-mapping defect produced 6,000-19,000 per frame.
+# without their phase mapping (a_mode 3 instead of 4).  The count is retained
+# as failure context; real phase-color content can legitimately contain this
+# color, so physical mapping truth is the pass/fail oracle.
 _PAL_RELAXED_ORANGE = (249, 127, 16)
 _ORANGE_TOLERANCE = 16
-_ORANGE_DEFECT_THRESHOLD = 3000
 
 
 def _orange_pixel_count(win) -> int:
     frame = np.asarray(win.img_view._vispy_canvas.render())[..., :3].astype(np.int16)
     reference = np.array(_PAL_RELAXED_ORANGE, dtype=np.int16)
     return int(np.count_nonzero(np.all(np.abs(frame - reference) <= _ORANGE_TOLERANCE, axis=-1)))
+
+
+def _assert_phase_mapping_physical_truth(win, *, context: str) -> None:
+    """Reject the exact physical state that makes zero magnitude orange.
+
+    Real phase data can legitimately cover thousands of framebuffer pixels
+    near PAL-relaxed red at some zooms, so an RGB count is not a semantic
+    oracle.  The field defect is unambiguous in physical truth: phase-color
+    quads use mode 4, the visual component uniform is ABS (2), and every
+    visible page carries a shader key.  During an atomic transition the
+    layer's desired key may advance before retained visuals cross, so equality
+    with that future key is not a physical-correctness condition.  Fault
+    injection for these fields lives in test_vispy_physical_presentation.py;
+    the framebuffer consequence is pinned by test_vispy_phase_framebuffer.py.
+    """
+
+    layer = win.img_view._vispy_gpu_montage_layer
+    rows = layer.tile_truth_physical_rows()
+    drawn_rows = {
+        int(tile): row
+        for tile, row in rows.items()
+        # The pool may retain draw parts while a tile has no span in the
+        # current GL vertex buffer.  Only a sampled a_mode proves pixels are
+        # physically drawable from this row.
+        if row.get("physical_mapping_mode") is not None
+    }
+    violations = {
+        int(tile): {
+            "mode": row.get("physical_mapping_mode"),
+            "component": row.get("physical_component_mode"),
+            "mapping": row.get("physical_shader_mapping_key"),
+        }
+        for tile, row in drawn_rows.items()
+        if row.get("physical_mapping_mode") != 4.0
+        or row.get("physical_component_mode") != 2.0
+        or row.get("physical_shader_mapping_key") in {None, "None"}
+    }
+    orange = _orange_pixel_count(win)
+    assert not violations, (
+        f"{context} has {len(violations)} physically mis-mapped drawn complex tiles "
+        f"and {orange} PAL-relaxed orange pixels: {dict(list(violations.items())[:8])}"
+    )
 
 
 def _settled(win) -> bool:
@@ -87,7 +137,6 @@ def _dump_convergence_state(win, label: str) -> None:
     unsettled = session.required_target_unsettled_tiles()
     print(
         f"[{label}] session={session.session_id} unsettled={len(unsettled)} "
-        f"pending={len(session.pending_tiles)} "
         f"active={len(session.active_tile_requests)} "
         f"evaluating={len(session.lifecycle.evaluating_tiles)} "
         f"dirty={len(session.dirty_payloads)} "
@@ -133,8 +182,7 @@ def _dump_convergence_state(win, label: str) -> None:
         f"fast_reject={getattr(renderer, '_last_montage_atomic_fast_reject_reason', None)!r}"
     )
     print(
-        f"[{label}] source_window_pending={getattr(session, 'source_window_changed_pending', None)} "
-        f"atomic_committed={session.atomic_source_successor_committed() if hasattr(session, 'atomic_source_successor_committed') else None} "
+        f"[{label}] atomic_successor_pending={getattr(session, 'atomic_successor_pending', None)} "
         f"residency_deferred={getattr(session, '_interactive_residency_deferred', None)} "
         f"prepared_atomic={getattr(session, '_atomic_prepared_transaction', None) is not None}"
     )
@@ -143,9 +191,12 @@ def _dump_convergence_state(win, label: str) -> None:
     print(f"[{label}] presentationDrawPending={draw_pending() if callable(draw_pending) else None}")
     # Discriminator: does one manual retarget unstick the session?
     win.renderer.retarget_frame_pipeline(session)
-    print(f"[{label}] after manual retarget: pending={len(session.pending_tiles)} "
+    print(
+        f"[{label}] after manual retarget: "
+        f"target_unsettled={len(session.required_target_unsettled_tiles())} "
           f"active={len(session.active_tile_requests)} "
-          f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}")
+        f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}"
+    )
 
 
 def _build_fft_montage_window(qtbot):
@@ -184,49 +235,21 @@ def _build_fft_montage_window(qtbot):
     )
     win._set_view_state(state)
     win.update_image_view()
+    # The cold 272-tile FFT fill is a measured multi-second operation on this
+    # hardware; the five-second interaction budget applies to the per-gesture
+    # probes below, not to build-time setup. Capping the build here made the
+    # whole net erroring-red without testing anything (2026-07-17).
     qtbot.waitUntil(lambda: _settled(win), timeout=_FILL_TIMEOUT_S * 1000)
     return win, settings, data, n
 
 
-def test_montage_window_change_presents_mapped_complex_tiles(qtbot):
-    """Field defect 2026-07-16 09:14: entering tiles of a montage window
-    change presented resident complex floors WITHOUT their phase mapping and
-    flashed PAL-relaxed LUT[0] orange until exact payloads replaced them
-    (pre-fix probe: 54 orange frames, up to 19,300 orange pixels)."""
-
-    from tests.ui.helpers import restore_default_backend
-
-    win, settings, _data, n = _build_fft_montage_window(qtbot)
-    try:
-        for indices in (tuple(range(n // 3, n // 3 + 60)), tuple(range(n))):
-            win._apply_slice_state(
-                2,
-                win.view_state.with_montage_axis(
-                    2, columns=None, indices=indices,
-                    text=f"{indices[0]}:{indices[-1] + 1}",
-                ),
-                reason="slice-range",
-                interactive=True,
-                immediate_axis_only=False,
-            )
-            deadline = time.monotonic() + _CONVERGE_TIMEOUT_S
-            while time.monotonic() < deadline and not _settled(win):
-                _pump(qtbot, 0.08)
-                orange = _orange_pixel_count(win)
-                assert orange < _ORANGE_DEFECT_THRESHOLD, (
-                    f"montage window change shows {orange} PAL-relaxed LUT[0] "
-                    "orange pixels while filling (2026-07-16 floor-mapping "
-                    "defect class)"
-                )
-            assert _settled(win)
-    finally:
-        win.close()
-        restore_default_backend(settings)
-
-
 def test_interaction_churn_converges_on_real_data(qtbot):
-    """Closed 2026-07-16 (was an xfail net). Members 4 and 5 of the
-    deferred-stage lost-wakeup family: the stage-plan/stage-value completions
+    """Continuous live-session net for the 2026-07-16 field defects.
+
+    The initial shrink/grow catches resident complex floors presented without
+    phase mapping (pre-fix: 54 orange frames, up to 19,300 pixels). Members 4
+    and 5 of the deferred-stage lost-wakeup family had stage-plan/stage-value
+    completions that
     discarded session-current results on a stale render-generation stamp
     (discard/resubmit livelock, 5,200 plan computations per churn run), and
     the shared exact pass filtered out tiles holding non-exact payloads at
@@ -237,6 +260,27 @@ def test_interaction_churn_converges_on_real_data(qtbot):
 
     win, settings, data, n = _build_fft_montage_window(qtbot)
     try:
+        for indices in (tuple(range(n // 3, n // 3 + 60)), tuple(range(n))):
+            win._apply_slice_state(
+                2,
+                win.view_state.with_montage_axis(
+                    2,
+                    columns=None,
+                    indices=indices,
+                    text=f"{indices[0]}:{indices[-1] + 1}",
+                ),
+                reason="slice-range",
+                interactive=True,
+                immediate_axis_only=False,
+            )
+            deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
+            while time.monotonic() < deadline and not _settled(win):
+                _pump(qtbot, 0.08)
+                _assert_phase_mapping_physical_truth(
+                    win,
+                    context="montage window change while filling",
+                )
+            assert _settled(win)
 
         view = win.img_view.getView()
         (x0, x1), (y0, y1) = view.viewRange()[0], view.viewRange()[1]
@@ -294,15 +338,13 @@ def test_interaction_churn_converges_on_real_data(qtbot):
                     immediate_axis_only=True,
                 )
             _pump(qtbot, 0.09)
-            orange = _orange_pixel_count(win)
-            assert orange < _ORANGE_DEFECT_THRESHOLD, (
-                f"frame during churn step {step} shows {orange} PAL-relaxed "
-                "LUT[0] orange pixels: complex texels are being drawn without "
-                "their phase mapping (2026-07-16 floor-mapping defect class)"
+            _assert_phase_mapping_physical_truth(
+                win,
+                context=f"frame during churn step {step}",
             )
 
         try:
-            qtbot.waitUntil(lambda: _settled(win), timeout=_CONVERGE_TIMEOUT_S * 1000)
+            qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         except Exception:
             _dump_convergence_state(win, "post-churn-timeout")
             raise

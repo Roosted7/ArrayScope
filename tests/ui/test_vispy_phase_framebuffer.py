@@ -22,6 +22,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -29,7 +31,6 @@ from tests.ui.helpers import (
     use_vispy_backend,
 )
 
-_WAIT_TIMEOUT_MS = 15_000
 
 # PAL-relaxed LUT[0] (== LUT[-1]; the map is cyclic): the stale-draw color
 # for zero-magnitude complex texels.  Verified against
@@ -45,7 +46,7 @@ def _settled(win) -> bool:
 
 
 def _wait_settled(win, qtbot) -> None:
-    qtbot.waitUntil(lambda: _settled(win), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
 def _render_rgb(win) -> np.ndarray:
@@ -124,7 +125,7 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
         def _recovered() -> bool:
             return float(visual._component_mode) == 2.0 and _orange_pixel_count(_render_rgb(win)) == 0
 
-        qtbot.waitUntil(_recovered, timeout=_WAIT_TIMEOUT_MS)
+        qtbot.waitUntil(_recovered, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         recovered = _render_rgb(win)
         assert _orange_pixel_count(recovered) == 0
         # Background is black again: brightness back to the healthy order of

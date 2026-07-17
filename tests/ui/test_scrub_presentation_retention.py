@@ -17,6 +17,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import (
     apply_plane,
     clear_arrayscope_settings,
@@ -27,7 +29,6 @@ from tests.ui.helpers import (
     use_vispy_backend,
 )
 
-_WAIT_TIMEOUT_MS = 15_000
 
 HEIGHT = 96
 WIDTH = 128
@@ -55,7 +56,7 @@ def _surface_blank(win) -> bool:
 def _assert_scrub_step_never_blanks(qtbot, win, data):
     win._set_view_state(win.view_state.with_image_axes(1, 2))
     apply_plane(win, 0, reason="test-retention-initial")
-    qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert not _surface_blank(win)
 
     # Display-cache MISS for plane 1 (prefetch is off by default).
@@ -90,7 +91,7 @@ def _assert_scrub_step_never_blanks(qtbot, win, data):
             seen_blank.append(True)
         return plane_settled(win, 1)
 
-    qtbot.waitUntil(_settled_without_blank, timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(_settled_without_blank, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert not seen_blank, "surface blanked between the scrub step and the replacement commit"
     assert not _surface_blank(win)
     value = committed_value(win, WIDTH // 2, HEIGHT // 2)
@@ -100,7 +101,7 @@ def _assert_scrub_step_never_blanks(qtbot, win, data):
 def _assert_document_change_blanks(qtbot, win):
     from arrayscope.display.backends.base import surface_for_view
 
-    qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     # A document revision/steps change is new semantic content: stale pixels
     # from the old document are lies, so the transition must hide them.
     surface = surface_for_view(win.img_view)
@@ -117,7 +118,7 @@ def _assert_document_change_blanks(qtbot, win):
         win.request_operation("reverse", 0)
         qtbot.waitUntil(
             lambda: win.renderer._frame_session is not session_before,
-            timeout=_WAIT_TIMEOUT_MS,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
         delattr(surface, "invalidate_tiled_presentation")
@@ -145,7 +146,7 @@ def _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(qtbot, 
     # stage-backed successor rather than cold native work.
     win.request_operation("centered_fft", 0)
     apply_plane(win, 0, reason="test-retention-interactive-initial")
-    qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert win.operation_evaluator.stage_cache.diagnostics().entries >= 1
 
     state_1 = win.view_state.with_slice(0, 1)
@@ -169,7 +170,7 @@ def _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(qtbot, 
     assert during.slice_retention_active
     assert during.slice_retention_inflight_age_ms >= 0.0
 
-    qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=_WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: plane_settled(win, 1), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
     session = win.renderer._frame_session
     assert session is not None

@@ -11,6 +11,8 @@ import uuid
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 pytest.importorskip("pytestqt")
@@ -48,8 +50,15 @@ def _enable_all_facets(win):
     win.inspection_dock.sync_button.setChecked(True)
 
 
-def _settled(qtbot, predicate, timeout=4000):
-    qtbot.waitUntil(lambda: bool(predicate()), timeout=timeout)
+def _settled(
+    qtbot,
+    predicate,
+    timeout_ms=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+):
+    qtbot.waitUntil(
+        lambda: bool(predicate()),
+        timeout=min(int(timeout_ms), INTERACTION_SETTLE_HARD_LIMIT_MS),
+    )
 
 
 def test_sync_buttons_toggle_controller_facets(qtbot, make_window):
@@ -159,7 +168,7 @@ def test_sustained_changes_publish_periodically_and_trail_final_value(qtbot, mak
     timer = controller._publish_timers.get("dims")
     assert timer is not None and timer.isActive()
 
-    qtbot.waitUntil(lambda: len(_state_values()) == 3, timeout=5000)
+    qtbot.waitUntil(lambda: len(_state_values()) == 3, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert _state_values() == [1, 3, 4]
 
 

@@ -39,7 +39,6 @@ def _session():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=list(plan.tiles[:3]),
     )
 
 
@@ -71,13 +70,11 @@ def _present_exact_tiles(session, *tile_numbers):
     session.lifecycle.presentation_confirmed(tile_numbers)
 
 
-def test_montage_render_session_returns_pending_tiles_in_order():
+def test_montage_render_session_starts_with_required_targets_unsettled():
     session = _session()
 
     assert isinstance(session.pending_level_tiles, deque)
-    assert [tile.source_index for tile in session.pending_tiles] == [0, 1, 2]
-    assert session.next_tile().source_index == 0
-    assert session.next_tile().source_index == 1
+    assert session.required_target_unsettled_tiles() == (0, 1, 2, 3)
 
 
 def test_stage_materialization_inherits_best_consumer_tile_rank():
@@ -142,18 +139,18 @@ def test_preview_first_pass_accepts_compatible_exact_overlap():
     assert session.first_pass_pixels_presented()
 
 
-def test_montage_render_session_retarget_changes_next_pending_tile():
+def test_montage_render_session_retarget_changes_canonical_priority():
     session = _session()
     session.view_range = ((0.0, 12.0), (0.0, 4.0))
 
     session.retarget_tile_priority(
         focus=(8.0, 1.0),
-        max_items=4,
         active_tiles=(0, 1, 2, 3),
         near_tiles=(),
     )
 
-    assert session.next_tile().source_index == 2
+    assert session._prioritized_tile_numbers((0, 1, 2))[:1] == (2,)
+    assert session.priority_retargeted_tiles == 4
 
 
 def test_montage_priority_retarget_preserves_payload_identity():
@@ -166,7 +163,6 @@ def test_montage_priority_retarget_preserves_payload_identity():
 
     session.retarget_tile_priority(
         focus=(8.0, 1.0),
-        max_items=4,
         active_tiles=(0, 1, 2, 3),
         near_tiles=(),
     )
@@ -178,14 +174,15 @@ def test_montage_priority_retarget_preserves_payload_identity():
 
 def test_montage_render_session_materialized_tile_stays_loading_until_presented():
     session = _session()
-    tile = session.next_tile()
+    tile = session.plan.tiles[0]
+    session.mark_loading(tile)
+    session.active_tile_requests.add(int(tile.montage_index))
     rendered = RenderedTile(tile, np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16)
 
     session.mark_materialized(rendered)
 
     assert session.is_tile_loaded(tile)
     assert int(tile.montage_index) in session.loading_tiles
-    assert tile not in session.pending_tiles
 
     session.mark_presented((tile.montage_index,))
 
@@ -214,7 +211,8 @@ def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_back
 
     row = next(row for row in session.diagnostic_tile_identity_rows() if row["tile"] == 0)
 
-    assert row["pending"] is True
+    assert row["target_unsettled"] is True
+    assert "pending" not in row
     assert row["rendered"] is False
     assert row["presented"] is True
     assert row["visible_first_pixel_complete"] is True
@@ -287,7 +285,6 @@ def test_stale_committed_state_payload_is_not_complete_after_retarget():
 
 def test_unrendered_tile_without_payload_cannot_keep_pending_upsert_marker():
     session = _session()
-    session.pending_tiles.clear()
     session.rendered_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
@@ -303,7 +300,6 @@ def test_unrendered_tile_without_payload_cannot_keep_pending_upsert_marker():
 
 def test_backend_confirmed_current_payload_rehydrates_active_state():
     session = _session()
-    session.pending_tiles.clear()
     tile = session.plan.tiles[0]
     image = np.full((2, 2), 7.0, dtype=np.float32)
     session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
@@ -338,7 +334,6 @@ def test_tile_presentation_delta_carries_lifecycle_owned_typed_targets():
 
 def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles[:3]:
         index = int(tile.montage_index)
@@ -368,14 +363,13 @@ def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     assert set(session.lifecycle.presented_tiles) >= {0, 1, 2}
 
 
-def test_montage_render_session_keeps_skipped_separate_from_pending():
+def test_montage_render_session_skipped_tile_leaves_required_scope():
     session = _session()
     session.mark_skipped(session.plan.tiles[1])
 
     assert 1 in session.skipped_tiles
-    assert session.plan.tiles[1] not in session.pending_tiles
-    assert session.next_tile().source_index == 0
-    assert session.next_tile().source_index == 2
+    assert 1 not in session.required_target_unsettled_tiles()
+    assert set(session.required_target_unsettled_tiles()) == {0, 2, 3}
 
 
 def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes():
@@ -407,7 +401,6 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
 
 def test_montage_render_session_retries_capped_payload_until_backend_acknowledges():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -436,7 +429,6 @@ def test_montage_render_session_retries_capped_payload_until_backend_acknowledge
 
 def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -464,7 +456,6 @@ def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
 
 def test_level_snapshot_keeps_deferred_visible_upsert_pending_until_acknowledged():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -543,7 +534,6 @@ def test_montage_render_session_caps_upserts_without_clipping_active_scope():
 
 def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for index in (2, 0, 1):
         tile = session.plan.tiles[index]
@@ -567,8 +557,10 @@ def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
 def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_acknowledged():
     session = _session()
     tile = session.plan.tiles[0]
+    session.visible_tiles = (tile,)
+    session.visible_tile_numbers = frozenset({0})
+    session.sync_lifecycle_scope()
     image = np.ones((2, 2), dtype=np.float32)
-    session.pending_tiles.clear()
     session.loading_tiles.clear()
 
     session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
@@ -583,14 +575,32 @@ def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_ack
     assert session.is_complete()
 
 
+def test_montage_render_session_completion_tracks_explicit_deferred_stage_debt():
+    session = _session()
+    session.visible_tiles = ()
+    session.visible_tile_numbers = frozenset()
+    session.sync_lifecycle_scope()
+    session.loading_tiles.clear()
+
+    assert session.is_complete()
+
+    session.stage_planning_deferred = True
+    session.deferred_missing_tiles = (session.plan.tiles[0],)
+    assert not session.is_complete()
+
+    session.stage_planning_deferred = False
+    assert not session.is_complete()
+
+    session.deferred_missing_tiles = ()
+    assert session.is_complete()
+
+
 def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
     session = _session()
-    session.pending_tiles.clear()
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
     _present_exact_tiles(session, 0)
-    session.pending_tiles.append(session.plan.tiles[2])
     session.loading_tiles.add(3)
 
     assert session.visible_first_pixels_presented()
@@ -600,7 +610,6 @@ def test_montage_render_session_visible_plan_ignores_deferred_offscreen_work():
 
 def test_montage_render_session_visible_plan_tracks_visible_work_only():
     session = _session()
-    session.pending_tiles.clear()
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
     session.visible_tile_numbers = frozenset({0, 1})
@@ -608,9 +617,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
 
     assert not session.visible_plan_complete()
 
-    session.pending_tiles.append(session.plan.tiles[1])
     assert not session.visible_plan_complete()
-    session.pending_tiles.discard(1)
     session.loading_tiles.add(1)
     assert not session.visible_plan_complete()
     session.loading_tiles.clear()
@@ -622,7 +629,6 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
 
 def test_montage_render_session_uses_one_required_set_despite_frame_plan_drift():
     session = _session()
-    session.pending_tiles.clear()
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
     session.visible_tile_numbers = frozenset({0, 1})
@@ -655,7 +661,6 @@ def test_montage_render_session_uses_one_required_set_despite_frame_plan_drift()
 
 def test_montage_render_session_replacement_materialization_reopens_visible_plan():
     session = _session()
-    session.pending_tiles.clear()
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0],)
     session.visible_tile_numbers = frozenset({0})
@@ -722,7 +727,6 @@ def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     rgb = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
     histogram = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
@@ -773,7 +777,6 @@ def _zoomed_out_session(*, dtype=np.float32, rgb=False):
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
 
 
@@ -917,7 +920,6 @@ def test_retargeted_seed_rebuilds_typed_identity_for_current_source():
         },
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
 
     current.seed_display_tile_payloads(
@@ -1034,7 +1036,6 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     for tile in plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -1081,7 +1082,6 @@ def test_retarget_viewport_range_change_with_same_tiles_is_camera_only():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     source_ids = {}
     for tile in plan.tiles:
@@ -1149,11 +1149,9 @@ def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     assert session.ensure_tile_states()[0].value == "loaded"
 
 
-def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
+def test_retarget_viewport_requests_newly_required_unowned_tile():
     session = _session()
     session.visible_tiles = session.plan.tiles[:2]
-    session.loading_tiles = {2}
-    session.pending_tiles = deque((session.plan.tiles[2],))
 
     additions, _changed = session.retarget_viewport(
         view_range=((3.0, 4.0), (0.0, 1.0)),
@@ -1161,7 +1159,7 @@ def test_retarget_viewport_does_not_requeue_known_guard_band_tiles():
         coverage_margin_tiles=1,
     )
 
-    assert 2 not in {tile.montage_index for tile in additions}
+    assert 2 in {tile.montage_index for tile in additions}
 
 
 def test_retarget_viewport_adopts_replacement_plan_with_same_geometry():
@@ -1214,7 +1212,6 @@ def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     source_ids = {}
     for tile in first_plan.tiles:
@@ -1291,7 +1288,6 @@ def test_loaded_active_set_change_without_payload_delta_is_not_geometry_change()
 
 def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -1316,7 +1312,6 @@ def test_montage_render_session_passes_cold_deadline_without_slicing_upserts():
 
 def test_montage_render_session_tile_states_keep_materialized_tiles_loading_until_presented():
     session = _session()
-    session.pending_tiles.clear()
     session.visible_tiles = (session.plan.tiles[3], session.plan.tiles[1])
     source_ids = {}
     for tile in session.plan.tiles:
@@ -1568,7 +1563,6 @@ def test_shader_level_acknowledgement_cannot_replace_the_target():
 
 def test_shader_preview_payload_with_level_evidence_enters_level_scope():
     session = _session()
-    session.pending_tiles.clear()
     session.shader_display = True
     tile = session.plan.tiles[0]
     payload = DisplayTilePayload(
@@ -1583,13 +1577,11 @@ def test_shader_preview_payload_with_level_evidence_enters_level_scope():
         texture_kind=TexturePlaneKind.COMPLEX_RG32F,
     )
     session.display_tile_payloads[0] = payload
-    session.enqueue_pending_tile(tile)
     session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, 2)
 
     session.update_level_presentation_scope()
 
     assert session.level_generation.active_tiles == frozenset({0})
-    assert session.pending_tile_numbers() == ()
     assert session.begin_level_presentation_update((2.0, 8.0)) is True
     session.acknowledge_uniform_level_presentation((2.0, 8.0))
     assert session.level_generation.value_counts() == {(2.0, 8.0): 1}
@@ -1597,7 +1589,6 @@ def test_shader_preview_payload_with_level_evidence_enters_level_scope():
 
 def test_cpu_preview_payload_stays_out_of_level_scope():
     session = _session()
-    session.pending_tiles.clear()
     session.shader_display = False
     tile = session.plan.tiles[0]
     payload = DisplayTilePayload(
@@ -1620,7 +1611,6 @@ def test_cpu_preview_payload_stays_out_of_level_scope():
 
 def test_stale_level_delta_cannot_acknowledge_newer_target():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles[:2]:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -1722,7 +1712,6 @@ def test_level_snapshot_tracks_tile_entering_active_set_during_convergence():
 
 def test_montage_render_session_commits_ready_payloads_atomically():
     session = _session()
-    session.pending_tiles.clear()
     source_ids = {}
     for tile in session.plan.tiles:
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
@@ -1806,7 +1795,6 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
         rendered_tiles={0: shifted_rendered},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
 
     shifted.seed_display_tile_payloads(state.payloads, {0: ("tile-source", 2)})
@@ -1862,7 +1850,6 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
         },
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     monkeypatch.setattr(shifted, "_resident_lod_active", lambda: True)
     monkeypatch.setattr(
@@ -1921,7 +1908,6 @@ def test_seeded_payloads_only_confirm_when_backend_identity_matches():
         },
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     payload = state.payloads[2]
     shifted.lifecycle.backend_presented_snapshot({0: payload.tile_identity})
@@ -1986,7 +1972,6 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=[],
     )
     shifted_sources = {tile: ("tile-source", tile + 3) for tile in range(4)}
     for tile_number, source_index in enumerate((3, 4, 5, 6)):
@@ -2013,7 +1998,7 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     assert tuple(next_delta.upserts) == (0,)
 
 
-def _session_with_pending_tiles():
+def _priority_session():
     from arrayscope.operations.stage_fanin import StageFanInState
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
@@ -2039,7 +2024,6 @@ def _session_with_pending_tiles():
         rendered_tiles={},
         loading_tiles=set(),
         skipped_tiles=set(),
-        pending_tiles=list(plan.tiles),
         stage_fan_in=StageFanInState(),
         priority_focus=(8.0, 1.0),
     )
@@ -2048,7 +2032,7 @@ def _session_with_pending_tiles():
 def test_montage_prefetch_candidates_prefer_focus_proximity():
     from arrayscope.window.montage_prefetch import _candidate_tiles
 
-    session = _session_with_pending_tiles()
+    session = _priority_session()
     session.visible_tiles = ()
     session.visible_tile_numbers = frozenset()
 
@@ -2056,12 +2040,8 @@ def test_montage_prefetch_candidates_prefer_focus_proximity():
     assert ordered == [2, 3, 1, 0]
 
 
-def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
-    # Session invariant: every queued tile belongs to session.plan. A column
-    # reflow during window-shape settling used to leave pending tiles bound
-    # to the superseded geometry — scheduled by stale
-    # coordinates, drawn at new ones, so the fill ignored the priority order.
-    session = _session_with_pending_tiles()
+def test_layout_reflow_retargets_priority_context_to_new_plan():
+    session = _priority_session()
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
     reflowed = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2)
@@ -2073,9 +2053,10 @@ def test_layout_reflow_rebinds_queued_tiles_to_new_plan_geometry():
         plan=reflowed,
     )
 
-    for tile in tuple(session.pending_tiles):
-        expected = reflowed.tiles[int(tile.montage_index)]
-        assert (tile.x0, tile.y0) == (expected.x0, expected.y0)
+    assert session.plan is reflowed
+    context = session.tile_priority_context()
+    assert context.visible_tiles == session.visible_tile_numbers
+    assert session.priority_retargeted_tiles == len(context.near_tiles)
 
 
 def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
@@ -2111,7 +2092,6 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
     session_id = abs(hash(str(tmp_path))) % 1_000_000 + 10_000
     session = SimpleNamespace(
         session_id=session_id,
-        pending_tiles=(),
         lifecycle=SimpleNamespace(evaluating_tiles=frozenset(), presented_tiles=frozenset()),
         active_tile_requests=frozenset(),
         dirty_payloads={},
@@ -2146,7 +2126,7 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
             self._frame_session = session
             self._montage_watchdog_state = (
                 session_id,
-                0,
+                1,
                 0,
                 0,
                 0,
@@ -2191,7 +2171,7 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
 
 
 def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot):
-    """A slow-but-live drain keeps every queue length constant across ticks
+    """A slow-but-live drain keeps every debt count constant across ticks
     (one upsert enters as one leaves) while commit batches keep landing; the
     monotonic commit-progress terms must keep the watchdog from firing
     (field session 2026-07-15: 22 Hz one-upsert batches read as a stall)."""
@@ -2213,7 +2193,6 @@ def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot)
     session_id = 424_242
     session = SimpleNamespace(
         session_id=session_id,
-        pending_tiles=(),
         lifecycle=SimpleNamespace(evaluating_tiles=frozenset(), presented_tiles=frozenset()),
         active_tile_requests=frozenset(),
         dirty_payloads={},
@@ -2244,11 +2223,11 @@ def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot)
         def __init__(self):
             self.win = window
             self._frame_session = session
-            # Previous tick observed the same queue lengths but OLDER commit
+            # Previous tick observed the same debt counts but OLDER commit
             # progress (commit_batches=6): commits are still landing.
             self._montage_watchdog_state = (
                 session_id,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 6,
                 3,
             )

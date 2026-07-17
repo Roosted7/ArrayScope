@@ -8,31 +8,19 @@ import pytest
 from arrayscope.display.lod import (
     LOD_POLICY_RESIDENT,
     LOD_REASON_INVALID_VIEW,
-    LOD_REASON_RESIDENT_COARSER,
     LOD_REASON_RESIDENT_FINER,
     LOD_REASON_RESIDENT_MATCH,
     LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     choose_resident_level,
     factor_xy_for_level,
+    resident_presentation_rank,
     resident_lod_policy,
     select_lod_demand,
 )
 from arrayscope.display.pyramid import (
-    ALGO_VERSION,
-    PyramidCache,
-    PyramidLevelKey,
     reduce_box_mean,
     reduce_source_grid_mean,
 )
-
-
-def _key(level_xy=(1, 1), tile=0, component="scalar_r32f", source="src"):
-    return PyramidLevelKey(
-        source_id=source,
-        tile_id=tile,
-        component=component,
-        level_xy=level_xy,
-    )
 
 
 class TestReduceBoxMean:
@@ -314,112 +302,6 @@ class TestSourceGridMeanReduction:
         np.testing.assert_array_equal(coverage, np.ones_like(coverage))
 
 
-class TestPyramidLevelKey:
-    def test_key_identity_includes_algorithm_version(self):
-        key = _key()
-
-        assert key.algo_version == ALGO_VERSION
-        assert key != PyramidLevelKey(
-            source_id="src",
-            tile_id=0,
-            component="scalar_r32f",
-            level_xy=(1, 1),
-            algo_version=ALGO_VERSION + 1,
-        )
-
-    def test_key_reports_factors_and_scalar_level(self):
-        key = _key(level_xy=(2, 1))
-
-        assert key.factor_xy == (4, 2)
-        assert key.level == 2
-
-    def test_key_rejects_negative_levels(self):
-        with pytest.raises(ValueError):
-            _key(level_xy=(-1, 0))
-
-
-class TestPyramidCache:
-    def test_lookup_counts_misses_and_hits(self):
-        cache = PyramidCache(max_bytes=1 << 20)
-        key = _key()
-
-        assert cache.lookup(key) is None
-        admitted = cache.admit(key, np.ones((4, 4), dtype=np.float32))
-        assert cache.lookup(key) is admitted
-        assert cache.misses == 1
-        assert cache.hits == 1
-
-    def test_peek_many_returns_resident_levels_without_counting(self):
-        cache = PyramidCache(max_bytes=1 << 20)
-        first = _key(tile=0)
-        second = _key(tile=1)
-        first_value = cache.admit(first, np.ones((4, 4), dtype=np.float32))
-        second_value = cache.admit(second, np.full((4, 4), 2.0, dtype=np.float32))
-
-        observed = cache.peek_many((second, _key(tile=9), first))
-
-        assert observed.keys() == {second, first}
-        assert observed[first] is first_value
-        assert observed[second] is second_value
-        assert cache.hits == 0 and cache.misses == 0
-
-    def test_bytes_accounting_and_bounded_eviction(self):
-        item = np.ones((8, 8), dtype=np.float32)
-        cache = PyramidCache(max_bytes=int(item.nbytes * 2))
-
-        cache.admit(_key(tile=0), item)
-        cache.admit(_key(tile=1), item)
-        assert cache.bytes_used == item.nbytes * 2
-
-        cache.admit(_key(tile=2), item)
-        assert cache.bytes_used == item.nbytes * 2
-        assert cache.evictions == 1
-        assert cache.peek(_key(tile=0)) is None  # LRU evicted
-        assert cache.peek(_key(tile=2)) is not None
-
-    def test_oversized_entries_are_not_admitted_but_release_pending(self):
-        cache = PyramidCache(max_bytes=8)
-        key = _key()
-        assert cache.begin_pending(key)
-
-        cache.admit(key, np.ones((64, 64), dtype=np.float32))
-
-        assert cache.peek(key) is None
-        assert not cache.pending(key)
-
-    def test_singleflight_claims_coalesce_duplicates(self):
-        cache = PyramidCache(max_bytes=1 << 20)
-        key = _key()
-
-        assert cache.begin_pending(key) is True
-        assert cache.begin_pending(key) is False
-        assert cache.pending(key)
-        assert cache.pending_count == 1
-
-        cache.admit(key, np.ones((2, 2), dtype=np.float32))
-        assert not cache.pending(key)
-        # Already cached: no new claim needed.
-        assert cache.begin_pending(key) is False
-
-    def test_end_pending_releases_claim_without_admitting(self):
-        cache = PyramidCache(max_bytes=1 << 20)
-        key = _key()
-
-        assert cache.begin_pending(key)
-        cache.end_pending(key)
-
-        assert not cache.pending(key)
-        assert cache.begin_pending(key) is True
-
-    def test_resident_level_counts_for_diagnostics(self):
-        cache = PyramidCache(max_bytes=1 << 20)
-        cache.admit(_key(tile=0, level_xy=(1, 1)), np.ones((2, 2), dtype=np.float32))
-        cache.admit(_key(tile=1, level_xy=(1, 1)), np.ones((2, 2), dtype=np.float32))
-        cache.admit(_key(tile=0, level_xy=(2, 2)), np.ones((1, 1), dtype=np.float32))
-
-        assert cache.resident_level_counts() == {1: 2, 2: 1}
-
-
 ZOOMED_OUT_4X = ((0.0, 1024.0), (0.0, 1024.0))
 VIEWPORT = (256, 256)
 TILE = (64, 64)
@@ -530,6 +412,11 @@ class TestResidentSelectionHelpers:
         assert choose_resident_level(demand, ()) == 0
         assert choose_resident_level(demand, (2,)) == 2
         assert choose_resident_level(demand, (1, 3)) == 1
+
+    def test_resident_rank_keeps_finest_compatible_level_and_nearest_fallback(self):
+        assert resident_presentation_rank(2, 6) < resident_presentation_rank(4, 6)
+        assert resident_presentation_rank(6, 6) < resident_presentation_rank(7, 6)
+        assert resident_presentation_rank(7, 6) < resident_presentation_rank(8, 6)
 
     def test_factor_xy_for_level_shifts_anisotropy_with_the_level(self):
         demand = select_lod_demand(((0.0, 2048.0), (0.0, 512.0)), (256, 256), TILE)

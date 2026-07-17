@@ -13,6 +13,11 @@ from time import perf_counter
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
 
@@ -96,10 +101,10 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         )
         win._set_view_state(state)
         win.render(reason="scroll-profile-initial")
-        _wait_idle(app, QtCore, win, timeout_s=20.0)
+        _wait_idle(app, QtCore, win, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S)
 
         warm_stats = _warm_cache(app, QtCore, win, axis=axis, indices=indices)
-        _wait_idle(app, QtCore, win, timeout_s=20.0)
+        _wait_idle(app, QtCore, win, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S)
 
         render_records: list[dict[str, object]] = []
         original_render = win.render
@@ -250,13 +255,14 @@ def _warm_cache(app, QtCore, win, *, axis: int, indices: tuple[int, ...]) -> dic
     for index in indices:
         win._set_view_state(win.view_state.with_slice(axis, int(index)))
         win.render(reason="scroll-profile-warm")
-        _wait_idle(app, QtCore, win, timeout_s=20.0)
+        _wait_idle(app, QtCore, win, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S)
     return {"count": len(indices), "elapsed_ms": (perf_counter() - start) * 1000.0}
 
 
 def _wait_idle(app, QtCore, win, *, timeout_s: float) -> None:
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     start = perf_counter()
-    while perf_counter() - start < float(timeout_s):
+    while perf_counter() - start < timeout_s:
         _process_events(app, QtCore, count=3)
         if not _presentation_pending(win) and not _controller_busy(win):
             return
