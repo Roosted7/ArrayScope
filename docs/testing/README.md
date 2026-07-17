@@ -108,7 +108,6 @@ journey artifacts are complete: the matrix verdict comes exclusively from
 the output oracles above. A 180 s whole-process watchdog remains a blocking
 failure, but it cannot turn a step that exceeded 5 s into a pass.
 
-## Known suite state (2026-07-16)
 ## Known suite state (2026-07-17)
 
 - 2026-07-17 branch run: 2277 passed / 34 skipped / 1 xfailed (~116 s
@@ -116,9 +115,10 @@ failure, but it cannot turn a step that exceeded 5 s into a pass.
   on untouched `main` (`test_lod_demand_freshness.py` owns two uncapped
   `waitUntil` timeouts). The skips are the opt-in rings.
 - Open xfails that are *tracked work, not noise*: churn-convergence
-  (queue step 1, strict=False), complex64 PyQtGraph deadlock (standing
-  lane, strict=True), tiny-3-slices raciness (strict=False), and live-camera
-  LOD-demand freshness after zoom (strict=True).
+  (queue step 1, strict=False), tiny-3-slices raciness (strict=False), and
+  live-camera LOD-demand freshness after zoom (strict=True). The native
+  complex64 PyQtGraph stress row has been a hard pass since `14f0fbc5` and
+  was re-verified serially on 2026-07-17.
 - `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
   lane, strict=True), tiny-3-slices raciness (strict=False).
 - `tests/gpu_interaction`: 20/20 green on real Wayland (2026-07-17 full

@@ -50,8 +50,6 @@ this file says *what, in what order, and when it counts as done*.
   coverage tasks at retarget.
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **complex64 PyQtGraph presentation deadlock** (deterministic; strict xfail
-  in the stress matrix).
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -144,6 +142,11 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   stage-plan callbacks now emit loud bail/decision trace events; the live
   churn scenario converges 3/3 in ~23 s and its xfail is removed. Dossier:
   [stale-empty-tiles-2026-07-16](redesign/stale-empty-tiles-2026-07-16.md).
+- 2026-07-16 — **Native complex64 PyQtGraph convergence restored**
+  (`14f0fbc5`): the canonical native level-zero page route preserves complete
+  handoffs, and the stress-matrix complex64 row is a hard pass. Re-verified
+  serially on 2026-07-17 with 10/10 required targets acknowledged, zero
+  identity-rejected commits, and no `trace_verify` violations.
 - 2026-07-16 — PyQtGraph identity-rejected upserts made loud (`6f95ce70`).
 - 2026-07-16 — Session-148 identity-aliasing follow-ups: canonical full
   ranges, per-tile ack-vs-target coverage, re-commit backoff, trace_verify

@@ -92,10 +92,12 @@ only at ring 4.
   pixels, `verify_trace` re-judges the edge with the production settlement
   rule, and `TOLERATED_INVARIANTS` is empty — the strongest invariant is
   enforced in whole-workflow replays.
-- **The stress matrix is unstable** (see its docstring): synthetic-input
-  convergence is nondeterministic at dfa53db3, complex64 raw input deadlocks
-  deterministically, tiny-montage level settlement is racy. The matrix goes
-  green by fixing those, never by loosening it.
+- **The native complex64 row is a hard pass** since `14f0fbc5`; its original
+  deterministic PyQtGraph deadlock was fixed at the canonical page-handoff
+  route. A 2026-07-17 serial replay acknowledged 10/10 required targets with
+  zero identity-rejected commits and no trace violations. Tiny-montage level
+  settlement remains racy. The matrix goes green by fixing convergence,
+  never by loosening it.
 - **Real-display evidence is manual and Linux-only.** The rings above cannot
   claim pixels; keep ring 4 mandatory for acceptance.
 

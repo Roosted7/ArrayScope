@@ -39,8 +39,8 @@ The ordered list with exit gates is [`queue.md`](queue.md). Headlines: G5
 final real-Wayland/stress acceptance (row 1), then the performance bars —
 FFT scroll is ~4 fps vs the ~17 fps scalar target (row 2), followed by
 G6/renderer-protocol/G7. Standing debt: framebuffer-to-CPU oracle,
-complex64 PyQtGraph deadlock, ImageViewShell duplication, montage
-key-owner consolidation (`target_satisfied_retained` landed 2026-07-17).
+ImageViewShell duplication, montage key-owner consolidation
+(`target_satisfied_retained` landed 2026-07-17).
 
 ## Material risks
 
