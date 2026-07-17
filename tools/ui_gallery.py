@@ -29,6 +29,20 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# ``python tools/ui_gallery.py`` puts tools/ at sys.path[0]. Ensure this
+# working tree wins before importing any ArrayScope helper.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from arrayscope.tools.interaction_budget import (
+    INTERACTION_SETTLE_HARD_LIMIT_S,
+    bounded_interaction_settle_timeout_s,
+)
+from arrayscope.tools.presentation_settlement import (
+    presentation_is_settled,
+    presentation_settlement_diagnostic,
+)
+
 DEFAULT_OUT = REPO_ROOT / "tests" / "artifacts" / "ui_gallery"
 THEMES = ("dark", "light")
 
@@ -112,6 +126,11 @@ class Ctx:
 
     @staticmethod
     def _window_busy(win) -> bool:
+        # A lost wakeup can have no workers and no overlay while the current
+        # frame is still physically incomplete. Use the same strict query as
+        # release capture and the live probes.
+        if not presentation_is_settled(win):
+            return True
         try:
             if win._resource_governor_work_active():
                 return True
@@ -122,10 +141,21 @@ class Ctx:
             return True
         return False
 
-    def settle(self, timeout=15.0, quiet_checks=6):
+    @staticmethod
+    def _window_settle_diagnostics(win) -> dict[str, object]:
+        return {"settlement": presentation_settlement_diagnostic(win)}
+
+    def settle(self, timeout=INTERACTION_SETTLE_HARD_LIMIT_S, quiet_checks=6):
+        timeout = bounded_interaction_settle_timeout_s(timeout)
         deadline = time.monotonic() + timeout
         quiet = 0
         while time.monotonic() < deadline:
+            self.app.processEvents()
+            # QWidget::grab drives the offscreen backing store through the
+            # exact paint path used to create the artifact. Without this, an
+            # offscreen resize can retain draw-pending until the later shot.
+            for win in self.windows:
+                win.img_view.grab()
             self.app.processEvents()
             busy = any(self._window_busy(win) for win in self.windows)
             if busy:
@@ -135,17 +165,13 @@ class Ctx:
                 if quiet >= quiet_checks:
                     return True
             time.sleep(0.02)
-        return False
+        diagnostics = tuple(self._window_settle_diagnostics(win) for win in self.windows)
+        raise TimeoutError(
+            f"UI gallery interaction did not settle within {timeout:.3f}s: "
+            f"{diagnostics!r}"
+        )
 
     def shot(self, widget, label):
-        # KNOWN ISSUE on the temp redesign branch: the first frame's native
-        # tile materialization can be lost, so the "Updating image frame..."
-        # overlay never hides and pixels stay at the preview floor. Hide the
-        # stale overlay so chrome screenshots stay reviewable.
-        for win in self.windows:
-            overlay = getattr(getattr(win, "img_view", None), "_evaluation_overlay", None)
-            if overlay is not None and overlay.isVisible():
-                overlay.hide()
         self.pump(2)
         path = self.out_dir / f"{self.theme}__{label}.png"
         pixmap = widget.grab()
@@ -251,7 +277,7 @@ def s_montage(ctx: Ctx):
     chip.slice_edit.setText(":")
     win._on_slice_text_changed(0, ":")
     ctx.pump(12)
-    ctx.settle(timeout=25.0)
+    ctx.settle()
     ctx.shot(win, "montage_axis0")
 
 
@@ -261,7 +287,7 @@ def s_operations(ctx: Ctx):
     win._append_operation("centered_fft", dim=0)
     ctx.settle()
     win._append_operation("mean", dim=2)
-    ctx.settle(timeout=25.0)
+    ctx.settle()
     ctx.shot(win, "two_ops")
     ctx.shot(win.operation_dock.widget(), "dock_only")
     win.set_operation_enabled(0, False)
@@ -291,11 +317,11 @@ def s_roi(ctx: Ctx):
     win.img_view.createRoi(RoiKind.POLYLINE, points=((10, 10), (90, 25), (150, 140)))
     win.img_view.createRoi(RoiKind.FREEHAND_POLYGON, points=((100, 100), (170, 100), (170, 170), (100, 170)))
     ctx.pump(12)
-    ctx.settle(timeout=25.0)
+    ctx.settle()
     ctx.shot(win, "rois_overlay")
     win._show_inspection_dock()
     ctx.pump(8)
-    ctx.settle(timeout=25.0)
+    ctx.settle()
     ctx.shot(win, "with_inspection_dock")
     ctx.shot(win.inspection_dock.widget(), "inspection_dock_only")
 
@@ -417,11 +443,6 @@ def s_palette(ctx: Ctx):
 def run_child(name: str, theme: str, out_root: Path) -> None:
     os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    # Running as `python tools/ui_gallery.py` puts tools/ at sys.path[0]; make
-    # sure the working-tree package wins over any installed arrayscope.
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-
     import pyqtgraph as pg
     from pyqtgraph.Qt import QtCore
 
@@ -470,7 +491,19 @@ def _spawn(name: str, theme: str, out_root: Path, extra_env: dict) -> tuple[str,
     env.update(extra_env)
     tag = f"{name}:{theme}"
     cmd = [sys.executable, str(Path(__file__).resolve()), "--child", name, theme, "--out", str(out_root)]
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300, cwd=str(REPO_ROOT))
+    try:
+        # Whole-child deadlock guard. Each interaction inside the child still
+        # hard-fails independently through the shared five-second owner.
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(REPO_ROOT),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return tag, False, f"gallery child process watchdog expired: {exc}"
     ok = proc.returncode == 0
     log = (proc.stdout + proc.stderr).strip()
     return tag, ok, log

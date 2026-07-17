@@ -30,10 +30,10 @@ def test_vispy_cannot_infer_reduced_page_keys():
     assert vispy_text.count("DataChunkKey(") == 1
 
 
-def test_live_render_path_cannot_resurrect_frame_session_pending_queue():
+def test_render_and_gate_paths_cannot_resurrect_frame_session_pending_queue():
     """Target lifecycle is the sole live scheduling-debt authority."""
 
-    live_paths = (
+    render_and_gate_paths = (
         ROOT / "arrayscope" / "window" / "frame_session.py",
         ROOT / "arrayscope" / "window" / "frame_controller.py",
         ROOT / "arrayscope" / "window" / "frame_effects.py",
@@ -42,6 +42,11 @@ def test_live_render_path_cannot_resurrect_frame_session_pending_queue():
         ROOT / "arrayscope" / "window" / "montage_prefetch.py",
         ROOT / "arrayscope" / "window" / "render_resources.py",
         ROOT / "arrayscope" / "render" / "lod.py",
+        ROOT / "arrayscope" / "tools" / "profile_montage_workflow.py",
+        ROOT / "tools" / "probes" / "profile_cached_rebuild.py",
+        ROOT / "tools" / "probes" / "verify_scrub_fastpath.py",
+        ROOT / "tools" / "probes" / "verify_stale.py",
+        ROOT / "tools" / "ui_gallery.py",
     )
     forbidden_helpers = {
         "next_tile",
@@ -56,7 +61,7 @@ def test_live_render_path_cannot_resurrect_frame_session_pending_queue():
         "_enqueue_session_pending_tile",
     }
     violations: list[str] = []
-    for path in live_paths:
+    for path in render_and_gate_paths:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "pending_tiles":
