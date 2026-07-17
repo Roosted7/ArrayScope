@@ -515,15 +515,22 @@ def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
     from arrayscope.tools.profile_montage_workflow import _pulse_fit_stretch
 
     calls = []
+    retarget_calls = []
     metrics = {}
-    win = SimpleNamespace(fit_image_to_view=lambda enabled: calls.append(bool(enabled)))
+    win = SimpleNamespace(
+        fit_image_to_view=lambda enabled: calls.append(bool(enabled)),
+        retarget_montage_viewport=lambda: retarget_calls.append(True),
+    )
 
     assert _pulse_fit_stretch(win, metrics=metrics) is True
 
     assert calls == [True, False]
+    assert retarget_calls == [True]
     assert metrics["fit_stretch_total_ms"] >= 0.0
     assert metrics["fit_stretch_enable_call_ms"] >= 0.0
     assert metrics["fit_stretch_disable_call_ms"] >= 0.0
+    assert metrics["fit_stretch_retarget_call_ms"] >= 0.0
+    assert metrics["fit_stretch_retarget_delivery_ms"] >= 0.0
 
 
 def _passing_r8_phase_record(*, backend="vispy"):
@@ -1608,6 +1615,24 @@ def test_session_fixture_shape_mismatch_raises_actionable_error(tmp_path):
     message = str(excinfo.value)
     assert "does not fit dataset shape" in message
     assert "--session-fixture ''" in message
+
+
+def test_montage_work_in_flight_counts_semantic_evidence_owner():
+    from arrayscope.tools.profile_montage_workflow import _montage_work_in_flight
+
+    progress = SimpleNamespace(inflight_generation=("levels", 7))
+    session = SimpleNamespace(
+        stage_fan_in=None,
+        active_tile_requests=set(),
+        pending_rung_materializations=(),
+        level_evidence_inflight=False,
+        semantic_level_evidence_progress=progress,
+        histogram_aggregate_inflight=False,
+    )
+
+    assert _montage_work_in_flight(session) is True
+    progress.inflight_generation = None
+    assert _montage_work_in_flight(session) is False
 
 
 def test_post_visible_gate_blockers_names_stuck_completion_gates():

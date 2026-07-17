@@ -541,6 +541,29 @@ violations, including the identical-`commit_bail` loop check. Keeping both
 defect probes in one window removes an unrelated duplicate cold startup while
 making their continuity contract stricter; no per-step deadline changed.
 
+The canonical real-data workflow then exposed a separate PyQtGraph first-frame
+evidence ownership error. A visible 108-tile plan used sparse/global montage
+indices, but the deferred evidence cursor looked them up as dense ordinals;
+108 ready payloads consequently waited in the upsert queue for evidence whose
+scan was reading holes. The cursor now resolves through `plan.tiles` to each
+canonical montage index. The CPU first-frame complement producer is armed
+immediately on the visible materialization lane, while a refined subset may
+degrade honestly only when its source indices cover every required tile; the
+full semantic producer remains owned for later improvement. Focused gates also
+require the profile stall detector to count only a genuinely in-flight
+semantic generation.
+
+The profile's Fit pulse had one more ownership bug: turning Fit off preserves
+the fitted range and emits no second range-change signal, so the async render
+could retain the predecessor's 108-tile viewport plan while the camera showed
+all 272. The driver now delivers the final programmatic retarget explicitly,
+through the same immediate path as the viewport bridge. The next real-Wayland
+run proves the raw phase at 272/272 presented with full requested-grid
+coverage. It remains red and therefore is not merge evidence: the following
+FFT phase reaches 233/272 before the unchanged cap, with the remaining exact
+L2 payloads owned by an armed PyQtGraph presentation gate. That is the next
+bounded convergence slice; no timeout or queue exit gate has been relaxed.
+
 ## Rejected shortcuts
 
 - backend-private tuple keys as the permanent pyramid identity;

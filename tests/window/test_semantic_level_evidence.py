@@ -26,10 +26,24 @@ class _CapturingKernel:
         self.tasks.append(kwargs)
         return object()
 
+    def submit(self, spec, **callbacks):
+        task = {
+            "fn": spec.fn,
+            "lane": spec.lane,
+            "priority": spec.priority,
+            "pass_token": spec.pass_token,
+            "scope": spec.scope,
+            "generation": spec.supersession.value,
+            **callbacks,
+        }
+        self.tasks.append(task)
+        return object()
+
     def run_next(self):
         task = self.tasks.pop(0)
         fn = task["fn"]
         value = fn(_Token()) if task.get("pass_token") else fn()
+        task.setdefault("max_items", len(getattr(value, "sources", ())))
         task["on_done"](value)
         return task
 
@@ -117,8 +131,8 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     assert progress.pending_batches == 0
     assert progress.inflight_generation is None
     assert progress.blocking_reason == "ready"
-    assert all(task["lane"] == Lane.HISTOGRAM_REFINEMENT for task in submitted)
-    assert all(task["priority"] == Priority.HISTOGRAM for task in submitted)
+    assert all(task["lane"] == Lane.VISIBLE_MATERIALIZATION for task in submitted)
+    assert all(task["priority"] == Priority.VISIBLE_IMAGE for task in submitted)
     assert all(task["pass_token"] is True for task in submitted)
     assert max(task["max_items"] for task in submitted) <= 16
     assert service.win.operation_evaluator.image_evaluations == 0

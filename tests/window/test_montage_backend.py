@@ -403,6 +403,55 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     assert win.scheduled == 1
 
 
+def test_deferred_level_scan_owns_sparse_montage_indices():
+    """The plan cursor must resolve canonical tile numbers, not dense ordinals."""
+
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.render.level_stats import LevelStatsService
+
+    tile_numbers = tuple(100 + 2 * offset for offset in range(32))
+    plan_tiles = tuple(
+        SimpleNamespace(montage_index=tile_number, source_index=offset)
+        for offset, tile_number in enumerate(tile_numbers)
+    )
+    rendered_tiles = {
+        tile_number: SimpleNamespace(
+            tile=plan_tile,
+            quality="exact",
+            level_stats=None,
+        )
+        for tile_number, plan_tile in zip(tile_numbers, plan_tiles, strict=True)
+    }
+    session = SimpleNamespace(
+        level_key=("levels", "sparse-plan"),
+        level_expected_indices=tuple(range(32)),
+        plan=SimpleNamespace(tiles=plan_tiles),
+        rendered_tiles=rendered_tiles,
+        display_tile_payloads={},
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=len(plan_tiles),
+    )
+    tracker = MontageLevelTracker()
+    tracker.ensure_expected(session.level_key, session.level_expected_indices)
+    service = LevelStatsService()
+    service._montage_level_tracker = lambda: tracker
+    service._cached_montage_source_level_stats = lambda *_args: None
+    service._update_montage_level_bounds_from_prepared = lambda *_args, **_kwargs: False
+
+    batch = service._take_montage_level_evidence_batch(
+        session,
+        expected=session.level_expected_indices,
+        require_refined=True,
+        batch_limit=8,
+    )
+
+    assert tuple(int(item.tile.source_index) for item in batch) == tuple(range(8))
+    assert session.level_scan_cursor == 8
+    assert session.level_scan_remaining_tiles == 24
+
+
 def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats
@@ -1033,6 +1082,13 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
         active_tile_requests=set(),
         pending_level_tiles=deque([object()]),
         level_scan_remaining_tiles=0,
+        plan=SimpleNamespace(
+            tiles=(
+                SimpleNamespace(montage_index=0, source_index=0),
+                SimpleNamespace(montage_index=1, source_index=1),
+            )
+        ),
+        required_tile_numbers=lambda: (0, 1),
     )
     partial = MontageLevelStats(
         bounds=(0.0, 1.0),
@@ -1058,6 +1114,55 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, partial) is True
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, complete) is True
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, sampled_full) is False
+
+
+def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        MontageLevelStats,
+    )
+    from arrayscope.window.frame_effects import (
+        tile_layer_first_pixels_wait_for_level_source,
+    )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+        )
+    )
+    window.win = window
+    tiles = tuple(
+        SimpleNamespace(montage_index=tile_number, source_index=source_index)
+        for tile_number, source_index in ((10, 100), (20, 200), (30, 300))
+    )
+    session = SimpleNamespace(
+        plan=SimpleNamespace(tiles=tiles),
+        required_tile_numbers=lambda: (10, 30),
+    )
+    missing_required = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({100, 200}),
+        expected_indices=frozenset({100, 200, 300}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        refined=True,
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    required_subset = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset({100, 300}),
+        expected_indices=frozenset({100, 200, 300}),
+        rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        refined=True,
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, missing_required
+    )
+    assert not tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, required_subset
+    )
 
 
 def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():

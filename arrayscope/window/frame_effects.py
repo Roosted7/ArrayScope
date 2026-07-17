@@ -3842,8 +3842,9 @@ def tile_layer_first_pixels_wait_for_level_source(
 
     Explicit user levels change the window choice, not the semantic histogram
     source. Every first tiled frame still needs rough evidence for a shader
-    backend and refined/full evidence for the CPU-windowed backend before its
-    pixels can be acknowledged.
+    backend. A CPU-windowed backend may use either the full refined semantic
+    population or an honestly ranked refined subset covering every required
+    first-pixel tile; the owned full-population producer then improves it.
     """
 
     if not bool(first_display_commit):
@@ -3863,6 +3864,27 @@ def tile_layer_first_pixels_wait_for_level_source(
         and getattr(level_stats, "rank", None) == LevelSourceRank.MONTAGE_SAMPLED_FULL
     ):
         return False
+    if has_rough_source and bool(getattr(level_stats, "refined", False)):
+        plan_tiles = {
+            int(getattr(tile, "montage_index", offset)): tile
+            for offset, tile in enumerate(
+                tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            )
+        }
+        required = getattr(session, "required_tile_numbers", None)
+        if not callable(required):
+            raise RuntimeError("live frame session has no required-tile owner")
+        required_sources = {
+            int(plan_tiles[int(tile_number)].source_index)
+            for tile_number in tuple(required())
+            if int(tile_number) in plan_tiles
+        }
+        covered_sources = {
+            int(source)
+            for source in tuple(getattr(level_stats, "source_indices", ()) or ())
+        }
+        if required_sources and required_sources <= covered_sources:
+            return False
     return True
 
 

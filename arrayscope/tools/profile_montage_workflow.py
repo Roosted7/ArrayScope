@@ -2274,6 +2274,7 @@ def _montage_work_in_flight(session) -> bool:
     if session is None:
         return False
     fan = getattr(session, "stage_fan_in", None)
+    semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
     # Only kernel-submitted work counts as in flight.  ``attached_requests`` are
     # stage keys bound to the fan-in but not necessarily running; an attached
     # stage that never activates while nothing else progresses is precisely the
@@ -2282,6 +2283,10 @@ def _montage_work_in_flight(session) -> bool:
         getattr(session, "active_tile_requests", None)
         or getattr(session, "pending_rung_materializations", None)
         or bool(getattr(session, "level_evidence_inflight", False))
+        or bool(
+            semantic_progress is not None
+            and getattr(semantic_progress, "inflight_generation", None) is not None
+        )
         or bool(getattr(session, "histogram_aggregate_inflight", False))
         or (fan is not None and getattr(fan, "active_requests", None))
     )
@@ -2389,6 +2394,21 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None, metrics: dict[str, float] 
             except Exception:
                 disable_ranges.append(None)
     disable_delivery_ms = (perf_counter() - disable_delivery_start) * 1000.0
+    # Turning Fit off preserves the fitted camera range, so it does not emit a
+    # second range-change signal.  The async render started immediately before
+    # this pulse can therefore still own the predecessor's smaller visibility
+    # plan even though the camera already shows the full montage.  Deliver the
+    # final programmatic-camera obligation explicitly, matching the synchronous
+    # path owned by ViewportBridge.on_view_range_changed().
+    retarget = getattr(win, "retarget_montage_viewport", None)
+    retarget_call_start = perf_counter()
+    if callable(retarget):
+        retarget()
+    retarget_call_ms = (perf_counter() - retarget_call_start) * 1000.0
+    retarget_delivery_start = perf_counter()
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=2)
+    retarget_delivery_ms = (perf_counter() - retarget_delivery_start) * 1000.0
     if metrics is not None:
         image_view = getattr(win, "img_view", None)
         controller = getattr(image_view, "viewport_controller", None)
@@ -2407,6 +2427,8 @@ def _pulse_fit_stretch(win, *, app=None, QtCore=None, metrics: dict[str, float] 
                 "fit_stretch_enable_delivery_ms": float(enable_delivery_ms),
                 "fit_stretch_disable_call_ms": float(disable_call_ms),
                 "fit_stretch_disable_delivery_ms": float(disable_delivery_ms),
+                "fit_stretch_retarget_call_ms": float(retarget_call_ms),
+                "fit_stretch_retarget_delivery_ms": float(retarget_delivery_ms),
                 "fit_disable_delivery_modes": disable_modes,
                 "fit_disable_delivery_ranges": disable_ranges,
                 "fit_stretch_total_ms": float((perf_counter() - total_start) * 1000.0),

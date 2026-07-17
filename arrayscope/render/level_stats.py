@@ -717,25 +717,60 @@ class LevelStatsService:
         # An all-cached cursor slice still advances only one bounded GUI pass;
         # the no-op worker completion is the continuation for the next slice.
         max_items = max(1, len(sources))
-        handle = self.win.kernel.submit_speculative_batch(
-            kind="semantic-level-evidence",
-            scope="montage:semantic-level-evidence",
-            generation=generation,
-            key=("semantic-level-evidence", generation, int(progress.cursor)),
-            fn=evaluate,
-            on_done=done,
-            on_stale=stale,
-            on_error=failed,
-            priority=Priority.HISTOGRAM,
-            lane=WorkLane.HISTOGRAM_REFINEMENT,
-            max_items=max_items,
-            pass_token=True,
-        )
+        task_key = ("semantic-level-evidence", generation, int(progress.cursor))
+        if visible_dependency:
+            # PyQtGraph cannot acknowledge first pixels until the full
+            # semantic window source exists. This is the complement producer
+            # for that wait, so it must be owned by the visible lane rather
+            # than admitted as optional histogram work after materialization.
+            handle = self.win.kernel.submit(
+                TaskSpec(
+                    key=task_key,
+                    fn=evaluate,
+                    lane=WorkLane.VISIBLE_MATERIALIZATION,
+                    priority=Priority.VISIBLE_IMAGE,
+                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    scope="montage:semantic-level-evidence",
+                    supersession=Supersession(
+                        ("semantic-level-evidence", session.key),
+                        generation,
+                    ),
+                    reusable=True,
+                    pass_token=True,
+                ),
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+            )
+        else:
+            handle = self.win.kernel.submit_speculative_batch(
+                kind="semantic-level-evidence",
+                scope="montage:semantic-level-evidence",
+                generation=generation,
+                key=task_key,
+                fn=evaluate,
+                on_done=done,
+                on_stale=stale,
+                on_error=failed,
+                priority=Priority.HISTOGRAM,
+                lane=WorkLane.HISTOGRAM_REFINEMENT,
+                max_items=max_items,
+                pass_token=True,
+            )
         if handle is None:
             release(session)
             progress.blocking_reason = "kernel-admission"
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
+        if (
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        ):
+            # Arm the full-population owner as soon as a CPU first-frame
+            # commit asks for evidence. Payload-derived evidence can reduce
+            # its remaining work, but must not be a serial prerequisite: the
+            # pending upserts are themselves parked behind this producer.
+            self._schedule_semantic_level_evidence(session)
         if self._first_pass_rough_evidence_closed(session):
             getattr(session, "pending_level_tiles", deque()).clear()
             getattr(session, "pending_level_sources", set()).clear()
@@ -950,7 +985,10 @@ class LevelStatsService:
                 continue
             batch.append(rendered)
 
-        tile_count = len(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+        plan_tiles = tuple(
+            getattr(getattr(session, "plan", None), "tiles", ()) or ()
+        )
+        tile_count = len(plan_tiles)
         remaining = int(getattr(session, "level_scan_remaining_tiles", 0) or 0)
         if tile_count <= 0 or remaining <= 0:
             session.level_scan_remaining_tiles = 0
@@ -967,11 +1005,26 @@ class LevelStatsService:
                 < MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS
             )
         ):
-            rendered = getattr(session, "rendered_tiles", {}).get(cursor)
+            # ``level_scan_cursor`` is an ordinal into the current plan, not a
+            # montage tile number. Visible montage windows retain their
+            # canonical/global ``montage_index`` values, so a 108-tile window
+            # can legitimately contain indices spanning 0..187. Looking up
+            # ``rendered_tiles[cursor]`` scans holes in that case and leaves
+            # the pending presentation delta as an ownerless complement to
+            # PyQtGraph's first-pixel level-evidence wait.
+            plan_tile = plan_tiles[cursor]
+            tile_number = int(getattr(plan_tile, "montage_index", cursor))
+            rendered = getattr(session, "rendered_tiles", {}).get(tile_number)
             if rendered is None:
-                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(cursor)
+                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(
+                    tile_number
+                )
                 if payload is not None:
-                    rendered = self._rendered_tile_for_current_payload(session, cursor, payload)
+                    rendered = self._rendered_tile_for_current_payload(
+                        session,
+                        tile_number,
+                        payload,
+                    )
             cursor = (cursor + 1) % tile_count
             remaining -= 1
             inspected += 1
