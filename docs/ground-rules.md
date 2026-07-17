@@ -88,3 +88,13 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
     tile debt belongs to `TileLifecycle`; stage waiters belong to the stage
     fan-in; deferred planning owns an immutable missing set. A session-level
     pending/repair queue must not duplicate any of those facts.
+11. **No wait without an owner.** Every deferral, bail, or barrier names the
+    event that resumes it, and that event must have a live owner — "a later
+    replan will pick it up" is not an owner. Six stall defects in 2026-07
+    shared one grammar: a consumer waits for completeness (first pixels, an
+    atomic successor, a stage plan) while the producer of the missing piece
+    was dropped, superseded, or never scheduled. The mechanical check: a
+    commit/scheduler bail repeating with an identical signature and no
+    in-flight work is a defect, never pacing — `commit_bail` /
+    `commit_gate_no_progress` trace events exist to make this visible on
+    the first read of a stall dump.
