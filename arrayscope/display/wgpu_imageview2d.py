@@ -853,7 +853,7 @@ class WgpuImageView2D(ImageViewShell):
         source_mapping = common_shader_mapping(
             getattr(payload, "shader_mapping", None) for payload in payloads.values()
         )
-        representation, _mode = self._wgpu_commit_plan(
+        representation, _mode, _scale, _symlog_constant = self._wgpu_commit_plan(
             payloads, source_mapping, rgb_already_windowed
         )
         textures = {

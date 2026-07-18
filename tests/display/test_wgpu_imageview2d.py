@@ -632,3 +632,35 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
         assert view.montageDisplayMode() == "none"
     finally:
         view.close()
+
+
+def test_warm_tiled_residency_accepts_the_commit_plan_contract(qt_app):
+    """Regression: the live warm path must consume _wgpu_commit_plan's full
+    return contract.  The 3c-prep branch unpacked two values while the
+    rejection-lift branch grew the plan to four — no offscreen test drove
+    warmTiledResidency, so only the real-Wayland journey matrix caught the
+    ValueError.  This pins the seam offscreen."""
+
+    import numpy as np
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
+        images = {
+            tile: np.linspace(0.0, 1.0, 16 * 24, dtype=np.float32).reshape(16, 24) + tile
+            for tile in (0, 1)
+        }
+        payloads = {
+            tile: _payload(tile, image, source_id=f"warm-src-{tile}")
+            for tile, image in images.items()
+        }
+        _commit(view, geometry, {0: payloads[0]}, levels=(0.0, 2.0))
+        resident_before = len(view._wgpu_executor.page_table.resident_keys())
+        view.warmTiledResidency(
+            payloads={1: payloads[1]},
+            geometry=geometry,
+            levels=(0.0, 2.0),
+        )
+        assert len(view._wgpu_executor.page_table.resident_keys()) >= resident_before
+    finally:
+        view.close()
