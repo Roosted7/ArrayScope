@@ -77,6 +77,59 @@ def _payload(tile_number, image, *, source_id, shader_mapping=None, texture_kind
     )
 
 
+def _lod_payload(
+    tile_number,
+    image,
+    *,
+    base_source_id,
+    level,
+    source_shape,
+    payload_source_shape=None,
+):
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    factor = 1 << int(level)
+    lod = LodInfo(
+        level=level,
+        factor=factor,
+        source_shape=source_shape,
+        texture_shape=image.shape[:2],
+    )
+    identity = TileIdentity(
+        document_generation="lod-doc",
+        operation_key="lod-op",
+        source_index=tile_number,
+        image_axes=(0, 1),
+        axis_flips=(False, False),
+        channel="real",
+        complex_mapping=None,
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        semantic_generation="lod-semantic",
+        lod=TileLodIdentity(level=level, factor=factor),
+    )
+    return DisplayTilePayload(
+        tile_number,
+        tile_number,
+        image,
+        None,
+        (
+            base_source_id,
+            "texture_kind",
+            TexturePlaneKind.SCALAR_R32F.value,
+            "lod",
+            factor,
+            level,
+            0,
+        ),
+        source_shape=payload_source_shape or source_shape,
+        lod=lod,
+        tile_identity=identity,
+    )
+
+
 def _shown_view(qt_app):
     view = _view_class("wgpu")()
     view.resize(320, 260)
@@ -151,6 +204,54 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
         report = _commit(view, geometry, payloads, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.texture_uploads == 0
+    finally:
+        view.close()
+
+
+def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        source_shape = (512, 512)
+        geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
+        coarse = _lod_payload(
+            0,
+            np.full((256, 256), 0.25, np.float32),
+            base_source_id="lod-plane",
+            level=1,
+            source_shape=source_shape,
+            payload_source_shape=(256, 256),
+        )
+        fine = _lod_payload(
+            0,
+            np.full(source_shape, 0.8, np.float32),
+            base_source_id="lod-plane",
+            level=0,
+            source_shape=source_shape,
+        )
+
+        report = _commit(view, geometry, {0: coarse}, levels=(0.0, 1.0))
+        assert report.texture_uploads == 1
+        assert report.presented_identities == {0: coarse.tile_identity}
+        assert view._wgpu_executor._bound_planes[0].max_lod == 1
+        assert view._wgpu_camera_tiles()[0].lod_level == 0
+        assert view._wgpu_camera_tiles()[0].src_size == (512.0, 512.0)
+        view.getView().setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 64, atol=2)
+
+        coarse_keys = set(view._wgpu_executor.page_table.resident_keys())
+        report = _commit(view, geometry, {0: fine}, levels=(0.0, 1.0))
+        assert report.texture_uploads == 4
+        assert report.presented_identities == {0: fine.tile_identity}
+        assert view._wgpu_executor._bound_planes[0].max_lod == 1
+        assert coarse_keys <= set(view._wgpu_executor.page_table.resident_keys())
+        assert all(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
+        assert {
+            key.document_generation
+            for key in view._wgpu_executor.page_table.resident_keys()
+        } == {view._wgpu_executor._bound_planes[0].document_generation}
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
     finally:
         view.close()
 

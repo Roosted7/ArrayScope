@@ -443,16 +443,26 @@ class WgpuImageView2D(ImageViewShell):
                 tile: self._wgpu_payload_texture(payloads[tile], representation)
                 for tile in payloads
             }
+            lod_geometry = {
+                tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile])
+                for tile in payloads
+            }
+            # Size the pool for each declared ladder, not merely the payload
+            # arriving in this commit.  Otherwise a coarse-first plane can
+            # force an executor rebuild when L0 arrives, discarding the very
+            # ancestor pages that make refinement never-black.
             pages_needed = sum(
-                (-(-texture.shape[0] // PAGE)) * (-(-texture.shape[1] // PAGE))
-                for texture in textures.values()
+                _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
+                for lod_level, source_shape in lod_geometry.values()
             )
             executor = self._ensure_wgpu_executor({representation: pages_needed})
 
-            # One bound content plane per tile: document_generation is the
-            # payload's ack identity, so residency is content-keyed and a
-            # re-commit of previously seen content (scroll-back across
-            # planes) is a physical zero-upload rebind.
+            # One bound content plane per tile.  The plane key deliberately
+            # excludes payload LOD: a coarse and fine acknowledgement are
+            # distinct presentation identities but pages of the SAME source
+            # plane.  The current payload's level selects the page-table span;
+            # tiles continue to request L0 so the shader resolves resident
+            # ancestors while refinement is incomplete.
             planes = []
             committed_tiles: dict[int, dict[str, object]] = {}
             commands = []
@@ -460,16 +470,27 @@ class WgpuImageView2D(ImageViewShell):
             for tile in sorted(payloads):
                 payload = payloads[tile]
                 identity = tile_ack_identity(payload)
+                plane_identity = _wgpu_payload_plane_identity(payload)
                 texture = textures[tile]
+                lod_level, source_shape = lod_geometry[tile]
                 height, width = (int(texture.shape[0]), int(texture.shape[1]))
+                source_height, source_width = source_shape
                 grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
+                resident_lods = (
+                    int(key.lod.level)
+                    for key in executor.page_table.resident_keys()
+                    if key.document_generation == plane_identity
+                    and key.operation_key == "live"
+                    and key.representation == representation
+                )
+                max_lod = max((lod_level, *resident_lods))
                 plane_index = len(planes)
                 planes.append(
                     ContentPlane(
-                        identity,
+                        plane_identity,
                         "live",
-                        (grid_h * PAGE, grid_w * PAGE),
-                        max_lod=0,
+                        (source_height, source_width),
+                        max_lod=max_lod,
                         representation=representation,
                     )
                 )
@@ -478,9 +499,9 @@ class WgpuImageView2D(ImageViewShell):
                 for chunk_y in range(grid_h):
                     for chunk_x in range(grid_w):
                         key = plane_chunk_key(
-                            identity,
+                            plane_identity,
                             "live",
-                            0,
+                            lod_level,
                             chunk_x,
                             chunk_y,
                             dtype=_WGPU_REP_DTYPES[representation],
@@ -508,9 +529,10 @@ class WgpuImageView2D(ImageViewShell):
                         float(region.width),
                         float(region.height),
                     ),
-                    "src_size": (float(width), float(height)),
+                    "src_size": (float(source_width), float(source_height)),
                     "plane_index": plane_index,
                     "page_keys": tuple(page_keys),
+                    "lod_level": lod_level,
                 }
 
             lut = self._wgpu_resolve_lut_bytes(source_mapping)
@@ -807,13 +829,104 @@ class WgpuImageView2D(ImageViewShell):
         super().clear()
         self.reset_tiled_residency("view-clear")
 
-    def warmTiledResidency(self, **_kwargs):
-        """No persistent-residency contract: warming is declared unavailable."""
+    def warmTiledResidency(
+        self,
+        *,
+        payloads,
+        rgb_already_windowed: bool = False,
+        **_kwargs,
+    ):
+        """Ensure payload pages without changing the bound presentation."""
 
-        return None
+        from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+        payloads = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
+        if not payloads:
+            return None
+        source_mapping = common_shader_mapping(
+            getattr(payload, "shader_mapping", None) for payload in payloads.values()
+        )
+        representation, _mode = self._wgpu_commit_plan(
+            payloads, source_mapping, rgb_already_windowed
+        )
+        textures = {
+            tile: self._wgpu_payload_texture(payload, representation)
+            for tile, payload in payloads.items()
+        }
+        lod_geometry = {
+            tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile])
+            for tile in payloads
+        }
+        pages_needed = sum(
+            _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
+            for lod_level, source_shape in lod_geometry.values()
+        )
+        executor = self._ensure_wgpu_executor({representation: pages_needed})
+        commands = []
+        for tile in sorted(payloads):
+            texture = textures[tile]
+            lod_level, _source_shape = lod_geometry[tile]
+            grid_h = -(-int(texture.shape[0]) // PAGE)
+            grid_w = -(-int(texture.shape[1]) // PAGE)
+            plane_identity = _wgpu_payload_plane_identity(payloads[tile])
+            for chunk_y in range(grid_h):
+                for chunk_x in range(grid_w):
+                    commands.append(
+                        EnsureChunkResident(
+                            plane_chunk_key(
+                                plane_identity,
+                                "live",
+                                lod_level,
+                                chunk_x,
+                                chunk_y,
+                                dtype=_WGPU_REP_DTYPES[representation],
+                                representation=representation,
+                            ),
+                            self._wgpu_page_block(
+                                texture, chunk_y, chunk_x, representation
+                            ),
+                        )
+                    )
+        report = self._submit_wgpu(tuple(commands))
+        return report
 
     def warmPlaneResidency(self, payload) -> bool:
-        return False
+        kind = _wgpu_payload_kind(payload)
+        rgb = kind == TexturePlaneKind.RGB8
+        self.warmTiledResidency(
+            payloads={int(getattr(payload, "tile_number", 0)): payload},
+            rgb_already_windowed=rgb,
+        )
+        return self.tiledPayloadResident(payload)
+
+    def tiledPayloadResident(self, payload) -> bool:
+        from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+        executor = self._wgpu_executor
+        if executor is None:
+            return False
+        representation = _WGPU_REP_BY_KIND[_wgpu_payload_kind(payload)]
+        texture = self._wgpu_payload_texture(payload, representation)
+        lod_level, _source_shape = _wgpu_payload_lod_geometry(payload, texture)
+        plane_identity = _wgpu_payload_plane_identity(payload)
+        grid_h = -(-int(texture.shape[0]) // PAGE)
+        grid_w = -(-int(texture.shape[1]) // PAGE)
+        return all(
+            executor.page_table.lookup(
+                plane_chunk_key(
+                    plane_identity,
+                    "live",
+                    lod_level,
+                    chunk_x,
+                    chunk_y,
+                    dtype=_WGPU_REP_DTYPES[representation],
+                    representation=representation,
+                )
+            )
+            is not None
+            for chunk_y in range(grid_h)
+            for chunk_x in range(grid_w)
+        )
 
     def _tiled_presentation_layer(self):
         return None
@@ -938,6 +1051,7 @@ class WgpuImageView2D(ImageViewShell):
     def wgpuPresentationDiagnostics(self) -> dict[str, object]:
         executor = self._wgpu_executor
         drawn_tiles = tuple(getattr(executor, "_tiles", ()) or ()) if executor is not None else ()
+        committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
         return {
             "draw_count": int(getattr(self, "_wgpu_draw_count", 0) or 0),
@@ -953,6 +1067,8 @@ class WgpuImageView2D(ImageViewShell):
             ),
             "canvas_update_pending": bool(getattr(self, "_wgpu_canvas_update_pending", False)),
             "physically_visible_tile_count": len(drawn_tiles),
+            "presented_tile_count": len(committed_tiles),
+            "presented_tiles": committed_tiles,
             "page_table_resident_count": resident,
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
@@ -979,6 +1095,76 @@ class WgpuImageView2D(ImageViewShell):
             except Exception:
                 pass
         super().teardown_surface()
+
+
+def _wgpu_payload_plane_identity(payload) -> object:
+    """LOD-invariant physical plane identity for executor residency.
+
+    Live payload source ids append a tagged ``lod`` suffix.  Removing only
+    that suffix keeps document/operation/source/representation ownership
+    intact while allowing every level to populate one executor plane.  Test
+    and legacy payloads without the tag remain opaque identities.
+    """
+
+    source_id = getattr(payload, "source_id", None)
+    if isinstance(source_id, tuple) and len(source_id) >= 4 and source_id[-4] == "lod":
+        source_id = source_id[:-4]
+    if source_id is None:
+        identity = tile_ack_identity(payload)
+        source_id = getattr(identity, "semantic_key", identity)
+    return ("wgpu-content-plane", source_id)
+
+
+def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
+    """Validate the executor's isotropic LOD contract for one payload."""
+
+    texture_shape = tuple(int(value) for value in np.shape(texture)[:2])
+    lod = getattr(payload, "lod", None)
+    if lod is None:
+        level = 0
+        factor = 1
+        source_shape = tuple(
+            int(value)
+            for value in (getattr(payload, "source_shape", None) or texture_shape)[:2]
+        )
+        declared_texture_shape = texture_shape
+    else:
+        level = int(getattr(lod, "level", 0) or 0)
+        factor = int(getattr(lod, "factor", 1) or 1)
+        gutter = int(getattr(lod, "gutter", 0) or 0)
+        # Live ingest-reduced payloads may carry the reduced evaluated plane
+        # in DisplayTilePayload.source_shape. LodInfo.source_shape is the
+        # canonical native geometry the executor's page ladder addresses.
+        source_shape = tuple(int(value) for value in lod.source_shape)
+        declared_texture_shape = tuple(int(value) for value in lod.texture_shape)
+        if gutter:
+            raise NotImplementedError(
+                f"wgpu backend does not yet support LOD gutters; got {gutter}"
+            )
+    expected_factor = 1 << level
+    if factor != expected_factor:
+        raise NotImplementedError(
+            "wgpu executor supports isotropic power-of-two LODs only; "
+            f"level {level} requires factor {expected_factor}, got {factor}"
+        )
+    expected_texture_shape = tuple(-(-extent // factor) for extent in source_shape)
+    if declared_texture_shape != texture_shape or texture_shape != expected_texture_shape:
+        raise ValueError(
+            "wgpu payload texture geometry does not match its native LOD ladder: "
+            f"source={source_shape}, level={level}, declared={declared_texture_shape}, "
+            f"actual={texture_shape}, expected={expected_texture_shape}"
+        )
+    return level, source_shape
+
+
+def _wgpu_ladder_page_count(source_shape, *, max_lod: int) -> int:
+    height, width = (int(value) for value in source_shape)
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    return sum(
+        (-(-height // (PAGE << level))) * (-(-width // (PAGE << level)))
+        for level in range(int(max_lod) + 1)
+    )
 
 
 def _wgpu_payload_kind(payload) -> TexturePlaneKind:

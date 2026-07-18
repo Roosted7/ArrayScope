@@ -15,7 +15,7 @@ from PIL import Image
 
 
 JOURNEYS = ("cold_fill", "zoom_in", "zoom_out", "scroll_shuffle", "index_scroll")
-BACKENDS = ("vispy", "pyqtgraph")
+BACKENDS = ("vispy", "pyqtgraph", "wgpu")
 DRIVER_RUNS = {
     "cold": ("raw_full_tiled_montage", ("cold_fill",)),
     "scroll": ("montage_scroll_scalar", ("scroll_shuffle", "index_scroll")),
@@ -37,7 +37,28 @@ MIN_COMMITS = {
     ("pyqtgraph", "scroll_shuffle"): 2,
     ("vispy", "index_scroll"): 1,
     ("pyqtgraph", "index_scroll"): 1,
+    ("wgpu", "cold_fill"): 2,
+    ("wgpu", "zoom_in"): 1,
+    ("wgpu", "zoom_out"): 0,
+    ("wgpu", "scroll_shuffle"): 2,
+    ("wgpu", "index_scroll"): 1,
 }
+
+_WGPU_UNSUPPORTED_SIGNATURES = (
+    ("renders complex payloads as a single tile", "complex_montage"),
+    ("supports linear shader scale only", "nonlinear_scale"),
+    ("payload does not fit rgb8 cleanly", "float_rgb"),
+)
+
+
+def _wgpu_unsupported_reason(stderr: str) -> str | None:
+    """Classify only the loud scope rejections recorded in queue row 3."""
+
+    text = str(stderr)
+    return next(
+        (reason for signature, reason in _WGPU_UNSUPPORTED_SIGNATURES if signature in text),
+        None,
+    )
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, object]]:
@@ -333,8 +354,18 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
     rows = []
     for backend in BACKENDS:
         instances_by_journey = {journey: [] for journey in JOURNEYS}
+        unsupported_by_journey: dict[str, set[str]] = {
+            journey: set() for journey in JOURNEYS
+        }
         for run_name, (_stages, owned_journeys) in DRIVER_RUNS.items():
             output = artifact_dir / backend / run_name
+            unsupported_path = output / "unsupported.json"
+            if unsupported_path.exists():
+                unsupported = json.loads(unsupported_path.read_text(encoding="utf-8"))
+                reason = str(unsupported.get("reason", "unsupported") or "unsupported")
+                for journey in owned_journeys:
+                    unsupported_by_journey[journey].add(reason)
+                continue
             trace_path = output / "trace.jsonl"
             timeline_path = output / f"{backend}-visual-timeline.jsonl"
             if not trace_path.exists() or not timeline_path.exists():
@@ -344,17 +375,33 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
                 journey = str(row["journey"])
                 if journey in owned_journeys:
                     instances_by_journey[journey].extend(row["results"])
-        rows.extend(
-            {
-                "backend": backend,
-                "journey": journey,
-                "instances": len(instances_by_journey[journey]),
-                "ok": bool(instances_by_journey[journey])
-                and all(bool(item["ok"]) for item in instances_by_journey[journey]),
-                "results": instances_by_journey[journey],
-            }
-            for journey in JOURNEYS
-        )
+        for journey in JOURNEYS:
+            unsupported_reasons = sorted(unsupported_by_journey[journey])
+            results = instances_by_journey[journey]
+            if unsupported_reasons:
+                rows.append(
+                    {
+                        "backend": backend,
+                        "journey": journey,
+                        "status": "unsupported",
+                        "unsupported_reasons": unsupported_reasons,
+                        "instances": len(results),
+                        "ok": True,
+                        "results": results,
+                    }
+                )
+                continue
+            ok = bool(results) and all(bool(item["ok"]) for item in results)
+            rows.append(
+                {
+                    "backend": backend,
+                    "journey": journey,
+                    "status": "passed" if ok else "failed",
+                    "instances": len(results),
+                    "ok": ok,
+                    "results": results,
+                }
+            )
     return {"ok": all(bool(row["ok"]) for row in rows), "rows": rows}
 
 
@@ -362,10 +409,13 @@ def run_matrix(args) -> int:
     artifact_dir = Path(args.artifact_dir).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     failures = []
+    unsupported_runs = []
     for backend in BACKENDS:
         for run_name, (stages, _owned_journeys) in DRIVER_RUNS.items():
             output = artifact_dir / backend / run_name
             output.mkdir(parents=True, exist_ok=True)
+            unsupported_path = output / "unsupported.json"
+            unsupported_path.unlink(missing_ok=True)
             command = [
                 sys.executable,
                 "-m",
@@ -415,15 +465,32 @@ def run_matrix(args) -> int:
                     returncode = None
                     timed_out = True
             if returncode not in (0, None):
-                failures.append(
-                    {
+                stderr_text = stderr_path.read_text(encoding="utf-8")
+                unsupported_reason = (
+                    _wgpu_unsupported_reason(stderr_text) if backend == "wgpu" else None
+                )
+                if unsupported_reason is not None:
+                    record = {
                         "backend": backend,
                         "run": run_name,
-                        "returncode": returncode,
+                        "reason": unsupported_reason,
                         "stderr": str(stderr_path),
-                        "gate_effect": "diagnostic_only",
                     }
-                )
+                    unsupported_runs.append(record)
+                    unsupported_path.write_text(
+                        json.dumps(record, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    failures.append(
+                        {
+                            "backend": backend,
+                            "run": run_name,
+                            "returncode": returncode,
+                            "stderr": str(stderr_path),
+                            "gate_effect": "diagnostic_only",
+                        }
+                    )
             elif timed_out:
                 failures.append(
                     {
@@ -437,6 +504,7 @@ def run_matrix(args) -> int:
                 )
     report = evaluate_artifact_dir(artifact_dir)
     report["driver_failures"] = failures
+    report["driver_unsupported"] = unsupported_runs
     report["ring"] = "offscreen-smoke" if args.offscreen_smoke else "real-wayland"
     report["ok"] = bool(
         report["ok"]

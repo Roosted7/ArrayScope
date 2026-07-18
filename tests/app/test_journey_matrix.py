@@ -119,13 +119,58 @@ def test_healthy_trajectory_fixture_exercises_all_oracles(tmp_path):
     assert result["coverage_pass_observed"]
 
 
-def test_matrix_declares_all_ten_backend_journey_cells():
+def test_matrix_declares_every_backend_journey_cell():
     from arrayscope.tools.journey_matrix import BACKENDS, JOURNEYS, MIN_COMMITS
 
     assert set(MIN_COMMITS) == {
         (backend, journey) for backend in BACKENDS for journey in JOURNEYS
     }
     assert MIN_COMMITS[("pyqtgraph", "cold_fill")] >= 2
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    (
+        (
+            "NotImplementedError: wgpu backend renders complex payloads as a single tile only",
+            "complex_montage",
+        ),
+        (
+            "NotImplementedError: wgpu backend supports linear shader scale only; got 'log'",
+            "nonlinear_scale",
+        ),
+        (
+            "NotImplementedError: wgpu backend supports linear shader scale only; got 'symlog'",
+            "nonlinear_scale",
+        ),
+        (
+            "NotImplementedError: wgpu RGB tile 0 payload does not fit rgb8 cleanly",
+            "float_rgb",
+        ),
+    ),
+)
+def test_wgpu_recorded_loud_rejections_classify_as_unsupported(stderr, reason):
+    from arrayscope.tools.journey_matrix import _wgpu_unsupported_reason
+
+    assert _wgpu_unsupported_reason(stderr) == reason
+
+
+def test_artifact_evaluation_reports_persisted_wgpu_rows_unsupported(tmp_path):
+    from arrayscope.tools.journey_matrix import DRIVER_RUNS, evaluate_artifact_dir
+
+    for run_name in DRIVER_RUNS:
+        output = tmp_path / "wgpu" / run_name
+        output.mkdir(parents=True)
+        (output / "unsupported.json").write_text(
+            '{"reason": "complex_montage"}\n', encoding="utf-8"
+        )
+
+    report = evaluate_artifact_dir(tmp_path)
+    wgpu_rows = [row for row in report["rows"] if row["backend"] == "wgpu"]
+
+    assert len(wgpu_rows) == 5
+    assert all(row["status"] == "unsupported" for row in wgpu_rows)
+    assert all(row["ok"] for row in wgpu_rows)
 
 
 def test_phase_order_oracle_fault_injection(tmp_path):

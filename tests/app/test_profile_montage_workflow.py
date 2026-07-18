@@ -395,11 +395,13 @@ def test_profile_parser_default_scroll_window_and_custom_value():
     custom_args = parser.parse_args(
         ["--backend", "vispy", "--scroll-max-tiles", "84", "--verbose-tile-trace"]
     )
+    wgpu_args = parser.parse_args(["--backend", "wgpu"])
 
     assert default_args.scroll_max_tiles == 60
     assert custom_args.scroll_max_tiles == 84
     assert default_args.verbose_tile_trace is False
     assert custom_args.verbose_tile_trace is True
+    assert wgpu_args.backend == "wgpu"
     assert Path(default_args.session_fixture) == DEFAULT_SESSION_FIXTURE
 
 
@@ -485,11 +487,19 @@ def test_profile_workflow_preserves_theme_while_forcing_backend_and_resident_pol
         backend="vispy",
         image_choice=ImageRenderingBackendChoice,
     )
+    wgpu = _replace_settings(
+        AppSettingsState(),
+        backend="wgpu",
+        image_choice=ImageRenderingBackendChoice,
+    )
 
     assert pyqtgraph.theme == ThemeChoice.SYSTEM
     assert pyqtgraph.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
     assert vispy.theme == ThemeChoice.SYSTEM
     assert vispy.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
+    assert wgpu.theme == ThemeChoice.SYSTEM
+    assert wgpu.image_rendering_backend == ImageRenderingBackendChoice.WGPU
+    assert wgpu.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
 
 
 def test_profile_transform_pipeline_uses_fft_shift_ifft_sequence():
@@ -534,7 +544,7 @@ def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
 
 
 def _passing_r8_phase_record(*, backend="vispy"):
-    evidence_quality = 1 if backend == "vispy" else 3
+    evidence_quality = 1 if backend in {"vispy", "wgpu"} else 3
     return {
         "phase": "raw_full_tiled_montage",
         "backend": backend,
@@ -590,12 +600,13 @@ def _passing_r8_phase_record(*, backend="vispy"):
 def test_r8_certification_passes_complete_semantic_and_responsive_phase():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
-    result = _r8_certification(_passing_r8_phase_record())
+    for backend in ("vispy", "wgpu"):
+        result = _r8_certification(_passing_r8_phase_record(backend=backend))
 
-    assert result["r8_gate_applicable"] is True
-    assert result["r8_performance_evidence"] is True
-    assert result["r8_gate_passed"] is True
-    assert result["r8_gate_failures"] == []
+        assert result["r8_gate_applicable"] is True
+        assert result["r8_performance_evidence"] is True
+        assert result["r8_gate_passed"] is True
+        assert result["r8_gate_failures"] == []
 
 
 def test_r8_certification_names_first_pixel_and_latency_failures():

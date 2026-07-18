@@ -157,9 +157,14 @@ def run_profile_montage_workflow(
     app.setApplicationName("ArrayScopeProfileMontage")
     settings = QtCore.QSettings()
     settings.clear()
+    backend_choice = {
+        "pyqtgraph": ImageRenderingBackendChoice.PYQTGRAPH,
+        "vispy": ImageRenderingBackendChoice.VISPY,
+        "wgpu": ImageRenderingBackendChoice.WGPU,
+    }[backend]
     settings.setValue(
         "image_rendering_backend",
-        ImageRenderingBackendChoice.VISPY.value if backend == "vispy" else ImageRenderingBackendChoice.PYQTGRAPH.value,
+        backend_choice.value,
     )
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
@@ -3323,6 +3328,13 @@ def _backend_visible_tile_count(win) -> int:
     mode = str(getattr(image_view, "montageDisplayMode", lambda: "")())
     if mode == "vispy_tile_layer":
         return int(_vispy_presentation_diagnostics(win).get("presented_tile_count", 0) or 0)
+    if mode == "wgpu_tile_layer":
+        return int(
+            _vispy_presentation_diagnostics(win).get(
+                "physically_visible_tile_count", 0
+            )
+            or 0
+        )
     layer = getattr(image_view, "_montage_tile_layer", None)
     states = getattr(layer, "states", {}) or {}
     return sum(1 for state in states.values() if bool(getattr(state, "visible", False)))
@@ -3360,6 +3372,13 @@ def _backend_presentation_identity(win) -> tuple[tuple[int, object], ...]:
             )
         tiles = tuple(getattr(stats, "presented_tiles", ()) or ())
         return tuple((int(tile), "") for tile in sorted(int(tile) for tile in tiles))
+    if mode == "wgpu_tile_layer":
+        committed = dict(getattr(image_view, "_wgpu_committed", None) or {})
+        tiles = dict(committed.get("tiles", {}) or {})
+        return tuple(
+            (int(tile), _presentation_identity_token(info.get("identity")))
+            for tile, info in sorted(tiles.items())
+        )
     layer = getattr(image_view, "_montage_tile_layer", None)
     states = getattr(layer, "states", {}) or {}
     return tuple(
@@ -3858,6 +3877,7 @@ def _wait_for_montage_complete(
         else:
             stall_since = None
         vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
+        wgpu_tiled = str(mode) == "wgpu_tile_layer"
         pyqtgraph_tiled = str(mode) == "tile_layer"
         if session is not None:
             if first_materialized_tile_ms is None and bool(getattr(session, "rendered_tiles", None)):
@@ -3874,7 +3894,7 @@ def _wait_for_montage_complete(
             session is not None
             and bool(getattr(session, "display_committed", False))
             and session.is_complete()
-            and mode in {"tile_layer", "vispy_tile_layer"}
+            and mode in {"tile_layer", "vispy_tile_layer", "wgpu_tile_layer"}
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
@@ -3966,7 +3986,7 @@ def _wait_for_montage_complete(
         draw_pending_fn = getattr(win.img_view, "presentationDrawPending", None)
         pyqtgraph_final_drawn = not bool(callable(draw_pending_fn) and draw_pending_fn())
         physical_drawn = bool(
-            (not vispy_tiled or final_drawn)
+            (not (vispy_tiled or wgpu_tiled) or final_drawn)
             and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
         )
         if (
@@ -3992,7 +4012,7 @@ def _wait_for_montage_complete(
                 first_visible_reused_compatible_predecessor = True
             if vispy_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
-            if vispy_tiled or pyqtgraph_tiled:
+            if vispy_tiled or wgpu_tiled or pyqtgraph_tiled:
                 physical_draw_after_complete_ms = (perf_counter() - start) * 1000.0
             display_payload_fill_after_first_payload_ms = _elapsed_between_ms(
                 first_display_payload_ms,
@@ -4101,6 +4121,7 @@ def _wait_for_montage_complete(
                 "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(win),
                 "vispy_tile_presentation_draw_count": _vispy_tile_presentation_draw_count(win),
                 "waited_for_vispy_draw_after_complete": bool(vispy_tiled),
+                "waited_for_wgpu_draw_after_complete": bool(wgpu_tiled),
             }
         blockers = _post_visible_gate_blockers(
             fully_visible=fully_visible,
@@ -4638,12 +4659,14 @@ def _ui_work_observation_delta(current: tuple[object, ...], start: tuple[object,
 
 
 def _vispy_presentation_diagnostics(win) -> dict[str, object]:
-    getter = getattr(getattr(win, "img_view", None), "vispyPresentationDiagnostics", None)
-    if callable(getter):
-        try:
-            return dict(getter())
-        except Exception:
-            return {}
+    image_view = getattr(win, "img_view", None)
+    for name in ("vispyPresentationDiagnostics", "wgpuPresentationDiagnostics"):
+        getter = getattr(image_view, name, None)
+        if callable(getter):
+            try:
+                return dict(getter())
+            except Exception:
+                return {}
     return {}
 
 
@@ -4684,7 +4707,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     overlay_nonblocking = (
         overlay_count == 0
         or (
-            str(mode) == "vispy_tile_layer"
+            str(mode) in {"vispy_tile_layer", "wgpu_tile_layer"}
             and not overlays_above_tiles
             and active
             and active.issubset(presented)
@@ -4693,7 +4716,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     backlog = _visible_backlog_state(session, active)
     active_presented = active.intersection(presented)
     fully_visible = bool(
-        str(mode) in {"tile_layer", "vispy_tile_layer"}
+        str(mode) in {"tile_layer", "vispy_tile_layer", "wgpu_tile_layer"}
         and getattr(session, "display_committed", False)
         and not bool(backlog["visible_has_backlog"])
         and active
@@ -5037,9 +5060,14 @@ def _replace_settings(settings, *, backend: str, image_choice):
     from dataclasses import replace
 
     from arrayscope.app.settings_state import MontageQualityPolicyChoice
+    backend_choice = {
+        "pyqtgraph": image_choice.PYQTGRAPH,
+        "vispy": image_choice.VISPY,
+        "wgpu": image_choice.WGPU,
+    }[_normalize_backend(backend)]
     return replace(
         settings,
-        image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
+        image_rendering_backend=backend_choice,
         montage_quality_policy=MontageQualityPolicyChoice.RESIDENT,
     )
 
@@ -5132,7 +5160,8 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         evidence=record.get("histogram_data_bounds"),
         target="finite non-empty histogram data bounds",
     )
-    required_evidence_quality = 1 if str(record.get("backend", "")) == "vispy" else 3
+    shader_backend = str(record.get("backend", "")) in {"vispy", "wgpu"}
+    required_evidence_quality = 1 if shader_backend else 3
     require(
         "first_visible_levels_semantic",
         not bool(record.get("first_visible_levels_default", True)),
@@ -5152,7 +5181,7 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         first_quality >= required_evidence_quality or compatible_predecessor,
         evidence={"quality": first_quality, "compatible_predecessor": compatible_predecessor},
         target=(
-            "rough-or-better evidence before first VisPy pixels"
+            "rough-or-better evidence before first shader-renderer pixels"
             if required_evidence_quality == 1
             else "refined evidence before first PyQtGraph pixels"
         ),
@@ -5482,8 +5511,10 @@ def _default_columns(tile_count: int) -> int:
 
 def _normalize_backend(backend: str) -> str:
     backend = str(backend).strip().lower()
-    if backend not in {"pyqtgraph", "vispy"}:
-        raise ValueError(f"unsupported backend {backend!r}; expected 'pyqtgraph' or 'vispy'")
+    if backend not in {"pyqtgraph", "vispy", "wgpu"}:
+        raise ValueError(
+            f"unsupported backend {backend!r}; expected 'pyqtgraph', 'vispy', or 'wgpu'"
+        )
     return backend
 
 
@@ -6610,7 +6641,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(192, 256, 40),
         metavar="HEIGHTxWIDTHxDEPTH",
     )
-    parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "all"), default="pyqtgraph")
+    parser.add_argument(
+        "--backend", choices=("pyqtgraph", "vispy", "wgpu", "all"), default="pyqtgraph"
+    )
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")

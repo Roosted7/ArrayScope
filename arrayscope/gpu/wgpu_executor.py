@@ -76,6 +76,7 @@ _POOL_FORMATS = {
 _POOL_TEXEL_BYTES = {SCALAR_R32F: 4, COMPLEX_RG32F: 8, RGB8: 4}
 _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
+_BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
 
 
 def plane_chunk_key(
@@ -507,6 +508,15 @@ class WgpuPlaneExecutor:
             plane_rows.append(
                 (_REP_INDEX[plane.representation], plane.max_lod, lod_base, 0)
             )
+
+        # Bound physical coverage is the active never-black fallback set.
+        # Protect every currently resident page that feeds these plane spans
+        # before later commands in the same submission ensure refinements;
+        # rebinding atomically releases pages of planes that left the view.
+        bound_keys = tuple(
+            key for key in self.page_table.resident_keys() if self._flat_indices(key)
+        )
+        self.page_table.replace_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
 
         self._flat_table = np.full(max(base, 1), -1, dtype=np.int32)
         for key in self.page_table.resident_keys():
