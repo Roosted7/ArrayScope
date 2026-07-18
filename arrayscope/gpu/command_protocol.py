@@ -55,6 +55,8 @@ class DisplayMapping:
     knowledge of ArrayScope's colormap library. ``None`` means the backend's
     neutral grayscale ramp. Levels-normalized values index the table by
     nearest entry (``round(g * 255)``), matching the CPU display mirror.
+    ``phase_color`` makes the LUT coordinate cyclic phase; for a non-phase
+    component the normalized component modulates that color's intensity.
     """
 
     mode: str = "magnitude"
@@ -63,6 +65,7 @@ class DisplayMapping:
     lut: bytes | None = None
     scale: str = "linear"
     symlog_constant: float = 0.0
+    phase_color: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
@@ -76,6 +79,7 @@ class DisplayMapping:
         object.__setattr__(self, "level_lo", float(self.level_lo))
         object.__setattr__(self, "level_hi", float(self.level_hi))
         object.__setattr__(self, "symlog_constant", float(self.symlog_constant))
+        object.__setattr__(self, "phase_color", bool(self.phase_color))
         if not self.level_hi > self.level_lo:
             raise ValueError(
                 f"levels window must be non-empty, got [{self.level_lo}, {self.level_hi}]"

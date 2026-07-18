@@ -63,14 +63,22 @@ def _montage_geometry(tile_shape, columns, rows, *, loaded, gap=0):
     )
 
 
-def _payload(tile_number, image, *, source_id, shader_mapping=None, texture_kind=None):
+def _payload(
+    tile_number,
+    image,
+    *,
+    source_id,
+    shader_mapping=None,
+    texture_kind=None,
+    histogram_data=None,
+):
     from arrayscope.display.model.frame import DisplayTilePayload
 
     return DisplayTilePayload(
         tile_number,
         tile_number,
         image,
-        None,
+        histogram_data,
         source_id,
         shader_mapping=shader_mapping,
         texture_kind=texture_kind,
@@ -487,6 +495,124 @@ def test_complex_phase_color_uses_phase_lut(qt_app):
         view.close()
 
 
+def test_magnitude_modulated_phase_color_matches_cpu_oracle_and_switches_zero_upload(qt_app):
+    from dataclasses import replace
+
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+        cpu_display_rgba,
+        default_phase_lut,
+    )
+
+    view = _shown_view(qt_app)
+    try:
+        phase = np.pi / 3.0
+        image = np.full(
+            (16, 24), 0.5 * np.exp(1j * phase), dtype=np.complex64
+        )
+        geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
+        scalar_mapping = ShaderMapping(
+            component=ShaderComponent.ABS,
+            display_mode=ShaderDisplayMode.COMPLEX,
+        )
+        phase_mapping = replace(
+            scalar_mapping,
+            display_mode=ShaderDisplayMode.PHASE_COLOR,
+        )
+        source_id = ("wgpu-phase-modulated", 1)
+
+        report = _commit(
+            view,
+            geometry,
+            {
+                0: _payload(
+                    0,
+                    image,
+                    source_id=source_id,
+                    shader_mapping=scalar_mapping,
+                )
+            },
+            levels=(0.0, 1.0),
+        )
+        assert set(report.presented_tiles) == {0}
+        assert report.texture_uploads == 1
+
+        report = _commit(
+            view,
+            geometry,
+            {
+                0: _payload(
+                    0,
+                    image,
+                    source_id=source_id,
+                    shader_mapping=phase_mapping,
+                )
+            },
+            levels=(0.0, 1.0),
+        )
+        assert report.texture_uploads == 0
+        view.getView().setRange(xRange=(0, 24), yRange=(0, 16), padding=0)
+        _rerender_internal(view)
+        expected_mapping = replace(
+            phase_mapping,
+            levels=(0.0, 1.0),
+            lut_data=default_phase_lut(),
+        )
+        expected = cpu_display_rgba(image, expected_mapping)[0, 0]
+        assert np.allclose(_center_pixel(view), expected, atol=3)
+    finally:
+        view.close()
+
+
+def test_float_rgb_acknowledges_only_physically_resident_packed_pages(qt_app):
+    from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderMapping
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.keys import RGB_WINDOWED_RGBA32F
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        small = WgpuPlaneExecutor(
+            pool_layers={RGB_WINDOWED_RGBA32F: 1},
+            device=_shared_wgpu_device(),
+        )
+        view._wgpu_executor = small
+        view._ensure_wgpu_executor = lambda required: small
+        geometry = _montage_geometry((20, 30), 2, 1, loaded=2)
+        mapping = ShaderMapping(display_mode=ShaderDisplayMode.RGB_WINDOWED)
+        payloads = {
+            tile: _payload(
+                tile,
+                np.full((20, 30, 3), 0.25 + 0.25 * tile, np.float32),
+                source_id=("wgpu-float-rgb-partial", tile),
+                shader_mapping=mapping,
+                histogram_data=np.full((20, 30), 0.5, np.float32),
+            )
+            for tile in (0, 1)
+        }
+
+        report = _commit(
+            view,
+            geometry,
+            payloads,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+        )
+
+        assert report.texture_uploads == 2
+        assert set(report.presented_tiles) == {1}
+        assert report.presented_identities == {
+            1: ("wgpu-float-rgb-partial", 1)
+        }
+        assert {
+            key.representation for key in small.page_table.resident_keys()
+        } == {RGB_WINDOWED_RGBA32F}
+    finally:
+        view.close()
+
+
 def test_log_and_symlog_scale_switch_is_zero_upload(qt_app):
     from arrayscope.display.shader_mapping import ShaderMapping, ShaderScale
 
@@ -560,6 +686,58 @@ def test_rgb_display_ready_tile_renders_raw_bytes(qt_app):
         view.close()
 
 
+def test_float_rgb_windowing_matches_cpu_reference_and_levels_switch_is_zero_upload(qt_app):
+    from arrayscope.display.image_upload import rgb_display_for_levels
+    from arrayscope.display.shader_mapping import (
+        ShaderDisplayMode,
+        ShaderMapping,
+        TexturePlaneKind,
+        pack_texture_data,
+    )
+
+    view = _shown_view(qt_app)
+    try:
+        color = np.array([0.25, 0.5, 1.0], np.float32)
+        image = np.broadcast_to(color, (20, 30, 3)).copy()
+        histogram = np.full((20, 30), 0.5, np.float32)
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {
+            0: _payload(
+                0,
+                image,
+                source_id=("wgpu-float-rgb", 1),
+                shader_mapping=ShaderMapping(
+                    display_mode=ShaderDisplayMode.RGB_WINDOWED
+                ),
+                histogram_data=histogram,
+            )
+        }
+
+        report = _commit(
+            view,
+            geometry,
+            payloads,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+        )
+        assert set(report.presented_tiles) == {0}
+        assert report.texture_uploads == 1
+        view.getView().setRange(xRange=(0, 30), yRange=(0, 20), padding=0)
+        _rerender_internal(view)
+        base = pack_texture_data(image, TexturePlaneKind.RGB8)
+        expected = rgb_display_for_levels(base, histogram, (0.0, 1.0))[0, 0]
+        assert np.allclose(_center_pixel(view), (*expected, 255), atol=2)
+
+        before = view._wgpu_executor.uploads_total
+        view._apply_preview_levels_to_display((0.0, 0.5), final=True)
+        assert view._wgpu_executor.uploads_total == before
+        _rerender_internal(view)
+        expected = rgb_display_for_levels(base, histogram, (0.0, 0.5))[0, 0]
+        assert np.allclose(_center_pixel(view), (*expected, 255), atol=2)
+    finally:
+        view.close()
+
+
 def test_out_of_scope_commits_reject_loudly(qt_app):
     from arrayscope.display.shader_mapping import (
         ShaderComponent,
@@ -571,7 +749,6 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
     try:
         scalar = np.zeros((20, 30), np.float32)
         cplx = np.zeros((20, 30), np.complex64)
-        rgb = np.zeros((20, 30, 3), np.uint8)
         geometry2 = _montage_geometry((20, 30), 2, 1, loaded=2)
         geometry1 = _montage_geometry((20, 30), 1, 1, loaded=1)
 
@@ -586,17 +763,10 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
                 },
                 levels=(0.0, 1.0),
             )
-        # RGB without display-ready semantics would need shader windowing.
+        # Display-ready promises are still strict: float RGB is not silently
+        # quantized into the bypass pool. The supported float path is the
+        # separately tested windowable-RGB representation.
         with pytest.raises(NotImplementedError, match="display-ready"):
-            _commit(
-                view,
-                geometry1,
-                {0: _payload(0, rgb, source_id=("rej", 4))},
-                levels=(0.0, 1.0),
-                rgb_already_windowed=False,
-            )
-        # Float RGB does not fit rgb8 cleanly — do not guess.
-        with pytest.raises(NotImplementedError, match="rgb8"):
             _commit(
                 view,
                 geometry1,
@@ -610,8 +780,9 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
                 levels=(0.0, 1.0),
                 rgb_already_windowed=True,
             )
-        # Phase hue modulated by magnitude needs a distinct honest shader.
-        with pytest.raises(NotImplementedError, match="magnitude-modulated"):
+        # Phase-color has honest phase and magnitude variants only. A real
+        # component plus cyclic hue has no established backend semantics.
+        with pytest.raises(NotImplementedError, match="phase or magnitude"):
             _commit(
                 view,
                 geometry1,
@@ -621,7 +792,7 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
                         cplx,
                         source_id=("rej", 6),
                         shader_mapping=ShaderMapping(
-                            component=ShaderComponent.ABS,
+                            component=ShaderComponent.REAL,
                             display_mode=ShaderDisplayMode.PHASE_COLOR,
                         ),
                     )

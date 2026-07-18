@@ -212,14 +212,28 @@ class Scene:
             }[mode]()
             x = _scale_reference(x, mapping)
             g = np.clip((x.astype(np.float64) - lo) / (hi - lo), 0, 1)
-            idx = np.clip(np.round(g * 255).astype(np.int32), 0, 255)
+            if bool(getattr(mapping, "phase_color", False)) and mode != 1:
+                phase = np.arctan2(im, re)
+                phase_g = np.clip(
+                    (phase.astype(np.float64) + np.pi) / (2.0 * np.pi), 0, 1
+                )
+            else:
+                phase_g = g
+            phase_idx = np.clip(np.round(phase_g * 255).astype(np.int32), 0, 255)
             if mapping.lut is not None:
                 table = np.frombuffer(mapping.lut, np.uint8).reshape(256, 4)
             else:  # executor's neutral grayscale ramp
                 table = np.empty((256, 4), np.uint8)
                 table[:, 0] = table[:, 1] = table[:, 2] = np.arange(256)
                 table[:, 3] = 255
-            out[y0 : y0 + th, x0 : x0 + tw] = table[idx]
+            rgba = table[phase_idx].copy()
+            if bool(getattr(mapping, "phase_color", False)) and mode != 1:
+                rgba[..., :3] = np.clip(
+                    rgba[..., :3].astype(np.float64) * g[..., np.newaxis],
+                    0.0,
+                    255.0,
+                ).astype(np.uint8)
+            out[y0 : y0 + th, x0 : x0 + tw] = rgba
         return out
 
     def assert_matches(self, got, ref, tol=2, allow_px=0):
@@ -366,6 +380,37 @@ def test_custom_lut_is_applied_exactly_with_zero_uploads(scene):
     report = scene.render(FULL, MAG, generation=36)
     assert report.uploads == 0
     scene.assert_matches(scene.executor.read_target(), scene.reference(FULL, MAG))
+
+
+def test_magnitude_modulated_phase_color_matches_cpu_mirror_with_zero_upload_switch(scene):
+    from arrayscope.display.shader_mapping import default_phase_lut
+
+    table = np.empty((256, 4), np.uint8)
+    table[:, :3] = default_phase_lut()
+    table[:, 3] = 255
+    mapping = DisplayMapping(
+        "magnitude",
+        0.0,
+        6.0,
+        lut=table.tobytes(),
+        phase_color=True,
+    )
+
+    # The pages were already resident under ordinary magnitude rendering.
+    # Phase-color is mapping state only: hue follows phase while brightness
+    # follows the same normalized magnitude CPU formula.
+    report = scene.render(FULL, mapping, generation=37)
+    assert report.uploads == 0
+    scene.assert_matches(
+        scene.executor.read_target(),
+        scene.reference(FULL, mapping),
+        allow_px=64,
+    )
+
+    report = scene.render(FULL, MAG, generation=38)
+    assert report.uploads == 0
+    report = scene.render(FULL, mapping, generation=39)
+    assert report.uploads == 0
 
 
 def test_completion_token_is_callable_and_returns(scene):

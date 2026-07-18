@@ -9,11 +9,13 @@ present mode owns the pixels — but every pixel decision is expressed as
 :class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
 
 Committed scope (everything else raises ``NotImplementedError`` loudly
-instead of guessing): montages of N scalar or complex 2-D tiles and montages
-of display-ready uint8 RGB tiles (``rgb_already_windowed``: levels/LUT
-bypassed by the executor's rgb8 pool). Complex tiles use shader-on-read
-component modes (magnitude/phase/real/imag) including the phase LUT; scalar
-and complex mappings support linear/log/symlog display scales. Each tile is
+instead of guessing): montages of N scalar, complex, display-ready RGB, or
+windowable RGB tiles. Windowable RGB preserves VisPy's two-signal semantics:
+the color plane is multiplied by one levels-normalized histogram/luminance
+plane, packed together in one physical RGBA32F page. Complex tiles use
+shader-on-read component modes (magnitude/phase/real/imag), including cyclic
+phase hue modulated by normalized magnitude; scalar and complex mappings
+support linear/log/symlog display scales. Each tile is
 one bound :class:`ContentPlane` whose
 ``document_generation`` is the payload's ack identity, so residency is
 content-keyed: re-committing identical content, switching complex modes,
@@ -65,7 +67,12 @@ from arrayscope.gpu.command_protocol import (
     TileInstance,
     UpdateTileInstances,
 )
-from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
+from arrayscope.gpu.keys import (
+    COMPLEX_RG32F,
+    RGB8,
+    RGB_WINDOWED_RGBA32F,
+    SCALAR_R32F,
+)
 
 #: Complex shader components → protocol mapping modes.
 _WGPU_COMPONENT_MODES = {
@@ -82,8 +89,18 @@ _WGPU_REP_BY_KIND = {
     TexturePlaneKind.RGB8: RGB8,
 }
 
-_WGPU_REP_DTYPES = {SCALAR_R32F: "float32", COMPLEX_RG32F: "complex64", RGB8: "uint8"}
-_WGPU_REP_TEXEL_BYTES = {SCALAR_R32F: 4, COMPLEX_RG32F: 8, RGB8: 4}
+_WGPU_REP_DTYPES = {
+    SCALAR_R32F: "float32",
+    COMPLEX_RG32F: "complex64",
+    RGB8: "uint8",
+    RGB_WINDOWED_RGBA32F: "float32",
+}
+_WGPU_REP_TEXEL_BYTES = {
+    SCALAR_R32F: 4,
+    COMPLEX_RG32F: 8,
+    RGB8: 4,
+    RGB_WINDOWED_RGBA32F: 16,
+}
 
 # One process-wide wgpu device: views (and executor rebuilds on plane growth)
 # share it so the canvas context never needs reconfiguration and tests do not
@@ -236,7 +253,12 @@ class WgpuImageView2D(ImageViewShell):
         ):
             return executor
         budgets: dict[str, int] = {}
-        for representation in (SCALAR_R32F, COMPLEX_RG32F, RGB8):
+        for representation in (
+            SCALAR_R32F,
+            COMPLEX_RG32F,
+            RGB8,
+            RGB_WINDOWED_RGBA32F,
+        ):
             previous = 0 if executor is None else executor.pool_budget(representation)
             needed = int(required_pages.get(representation, 0))
             # 2x headroom keeps recently unbound planes warm (scroll-back).
@@ -426,7 +448,13 @@ class WgpuImageView2D(ImageViewShell):
                 source_mapping = common_shader_mapping(
                     getattr(payload, "shader_mapping", None) for payload in payloads.values()
                 )
-            representation, mode, scale, symlog_constant = self._wgpu_commit_plan(
+            (
+                representation,
+                mode,
+                scale,
+                symlog_constant,
+                phase_color,
+            ) = self._wgpu_commit_plan(
                 payloads, source_mapping, rgb_already_windowed
             )
             layout = tile_layout_map(geometry, frame_plan=frame_plan)
@@ -544,6 +572,7 @@ class WgpuImageView2D(ImageViewShell):
                 lut=lut,
                 scale=scale,
                 symlog_constant=symlog_constant,
+                phase_color=phase_color,
             )
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
@@ -656,6 +685,8 @@ class WgpuImageView2D(ImageViewShell):
             )
         kind = next(iter(kinds.values()))
         representation = _WGPU_REP_BY_KIND[kind]
+        if kind == TexturePlaneKind.RGB8 and not rgb_already_windowed:
+            representation = RGB_WINDOWED_RGBA32F
         display_mode = getattr(
             getattr(source_mapping, "display_mode", None), "value", None
         )
@@ -671,7 +702,7 @@ class WgpuImageView2D(ImageViewShell):
                     "wgpu backend renders scalar payloads with scalar display "
                     f"mode only; got {display_mode!r}"
                 )
-            return representation, "real", scale, symlog_constant
+            return representation, "real", scale, symlog_constant, False
         if representation == COMPLEX_RG32F:
             if display_mode not in (
                 None,
@@ -691,27 +722,27 @@ class WgpuImageView2D(ImageViewShell):
                     f"wgpu backend cannot render shader component {component!r}"
                 )
             if display_mode == ShaderDisplayMode.PHASE_COLOR.value and component not in (
+                ShaderComponent.ABS.value,
                 ShaderComponent.ANGLE.value,
                 ShaderComponent.COMPLEX_PHASE.value,
             ):
                 raise NotImplementedError(
-                    "wgpu backend renders phase-color for phase components only "
-                    f"(magnitude-modulated phase color is unsupported); got {component!r}"
+                    "wgpu backend renders phase-color for phase or magnitude "
+                    f"components only; got {component!r}"
                 )
             return (
                 representation,
                 _WGPU_COMPONENT_MODES[component],
                 scale,
                 symlog_constant,
+                display_mode == ShaderDisplayMode.PHASE_COLOR.value,
             )
-        # RGB8: display-ready bytes only — the executor pool bypasses
-        # levels/LUT, which is honest solely for already-windowed content.
-        if not rgb_already_windowed:
-            raise NotImplementedError(
-                "wgpu backend renders display-ready RGB only "
-                "(rgb_already_windowed=False needs shader windowing)"
-            )
-        if display_mode not in (None, ShaderDisplayMode.RGB_DISPLAY_READY.value):
+        expected_mode = (
+            ShaderDisplayMode.RGB_DISPLAY_READY.value
+            if rgb_already_windowed
+            else ShaderDisplayMode.RGB_WINDOWED.value
+        )
+        if display_mode not in (None, expected_mode):
             raise NotImplementedError(
                 f"wgpu backend cannot render RGB display mode {display_mode!r}"
             )
@@ -719,15 +750,40 @@ class WgpuImageView2D(ImageViewShell):
             texture = np.asarray(
                 payload.texture_data if payload.texture_data is not None else payload.image
             )
-            if texture.dtype != np.uint8 or texture.ndim != 3 or texture.shape[-1] not in (3, 4):
+            if texture.ndim != 3 or texture.shape[-1] not in (3, 4):
                 raise NotImplementedError(
-                    f"wgpu RGB tile {tile} payload does not fit rgb8 cleanly "
-                    f"(need uint8 (h, w, 3|4), got {texture.dtype} {texture.shape})"
+                    f"wgpu RGB tile {tile} payload must have shape (h, w, 3|4); "
+                    f"got {texture.dtype} {texture.shape}"
                 )
-        return representation, "real", scale, symlog_constant
+            if rgb_already_windowed and texture.dtype != np.uint8:
+                raise NotImplementedError(
+                    f"wgpu display-ready RGB tile {tile} must be uint8; "
+                    f"got {texture.dtype}"
+                )
+        return representation, "real", scale, symlog_constant, False
 
     def _wgpu_payload_texture(self, payload, representation) -> np.ndarray:
         texture = payload.texture_data if payload.texture_data is not None else payload.image
+        if representation == RGB_WINDOWED_RGBA32F:
+            base = pack_texture_data(texture, TexturePlaneKind.RGB8)
+            scalar = getattr(payload, "histogram_data", None)
+            if scalar is None:
+                rgb = np.asarray(texture, dtype=np.float32)[..., :3]
+                scalar = (
+                    0.2126 * rgb[..., 0]
+                    + 0.7152 * rgb[..., 1]
+                    + 0.0722 * rgb[..., 2]
+                )
+            scalar = np.asarray(scalar, dtype=np.float32)
+            if scalar.shape != base.shape[:2]:
+                raise ValueError(
+                    "wgpu windowable RGB scalar plane must match the RGB tile; "
+                    f"got {scalar.shape} versus {base.shape[:2]}"
+                )
+            packed = np.empty(base.shape[:2] + (4,), np.float32)
+            packed[..., :3] = base.astype(np.float32) / 255.0
+            packed[..., 3] = scalar
+            return np.ascontiguousarray(packed)
         kind = {
             SCALAR_R32F: TexturePlaneKind.SCALAR_R32F,
             COMPLEX_RG32F: TexturePlaneKind.COMPLEX_RG32F,
@@ -742,8 +798,10 @@ class WgpuImageView2D(ImageViewShell):
             page = np.zeros((PAGE, PAGE), np.float32)
         elif representation == COMPLEX_RG32F:
             page = np.zeros((PAGE, PAGE, 2), np.float32)
-        else:
+        elif representation == RGB8:
             page = np.zeros((PAGE, PAGE, 3), np.uint8)
+        else:
+            page = np.zeros((PAGE, PAGE, 4), np.float32)
         block = texture[
             chunk_y * PAGE : (chunk_y + 1) * PAGE,
             chunk_x * PAGE : (chunk_x + 1) * PAGE,
@@ -853,7 +911,7 @@ class WgpuImageView2D(ImageViewShell):
         source_mapping = common_shader_mapping(
             getattr(payload, "shader_mapping", None) for payload in payloads.values()
         )
-        representation, _mode, _scale, _symlog_constant = self._wgpu_commit_plan(
+        representation, *_mapping = self._wgpu_commit_plan(
             payloads, source_mapping, rgb_already_windowed
         )
         textures = {
@@ -868,7 +926,7 @@ class WgpuImageView2D(ImageViewShell):
             _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
             for lod_level, source_shape in lod_geometry.values()
         )
-        executor = self._ensure_wgpu_executor({representation: pages_needed})
+        self._ensure_wgpu_executor({representation: pages_needed})
         commands = []
         for tile in sorted(payloads):
             texture = textures[tile]
@@ -899,7 +957,14 @@ class WgpuImageView2D(ImageViewShell):
 
     def warmPlaneResidency(self, payload) -> bool:
         kind = _wgpu_payload_kind(payload)
-        rgb = kind == TexturePlaneKind.RGB8
+        texture = np.asarray(
+            payload.texture_data if payload.texture_data is not None else payload.image
+        )
+        rgb = bool(
+            kind == TexturePlaneKind.RGB8
+            and texture.dtype == np.uint8
+            and getattr(payload, "histogram_data", None) is None
+        )
         self.warmTiledResidency(
             payloads={int(getattr(payload, "tile_number", 0)): payload},
             rgb_already_windowed=rgb,
@@ -912,7 +977,16 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._wgpu_executor
         if executor is None:
             return False
-        representation = _WGPU_REP_BY_KIND[_wgpu_payload_kind(payload)]
+        kind = _wgpu_payload_kind(payload)
+        texture_data = np.asarray(
+            payload.texture_data if payload.texture_data is not None else payload.image
+        )
+        representation = _WGPU_REP_BY_KIND[kind]
+        if kind == TexturePlaneKind.RGB8 and (
+            texture_data.dtype != np.uint8
+            or getattr(payload, "histogram_data", None) is not None
+        ):
+            representation = RGB_WINDOWED_RGBA32F
         texture = self._wgpu_payload_texture(payload, representation)
         lod_level, _source_shape = _wgpu_payload_lod_geometry(payload, texture)
         plane_identity = _wgpu_payload_plane_identity(payload)
@@ -954,6 +1028,7 @@ class WgpuImageView2D(ImageViewShell):
             lut=self._wgpu_mapping_state.lut,
             scale=self._wgpu_mapping_state.scale,
             symlog_constant=self._wgpu_mapping_state.symlog_constant,
+            phase_color=self._wgpu_mapping_state.phase_color,
         )
         start = perf_counter()
         report = self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
@@ -985,6 +1060,7 @@ class WgpuImageView2D(ImageViewShell):
             lut=_resample_lut_to_rgba256(lut),
             scale=self._wgpu_mapping_state.scale,
             symlog_constant=self._wgpu_mapping_state.symlog_constant,
+            phase_color=self._wgpu_mapping_state.phase_color,
         )
         if self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))

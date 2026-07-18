@@ -22,7 +22,13 @@ from dataclasses import dataclass
 SCALAR_R32F = "scalar_r32f"
 COMPLEX_RG32F = "complex_rg32f"
 RGB8 = "rgb8"
-REPRESENTATIONS = (SCALAR_R32F, COMPLEX_RG32F, RGB8)
+RGB_WINDOWED_RGBA32F = "rgb_windowed_rgba32f"
+REPRESENTATIONS = (
+    SCALAR_R32F,
+    COMPLEX_RG32F,
+    RGB8,
+    RGB_WINDOWED_RGBA32F,
+)
 
 
 # Reducers that can produce a derived LOD family (ADR 0056). The reducer is

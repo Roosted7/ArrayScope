@@ -13,9 +13,10 @@ oracles A–G) to the live payload shapes (queue row 3a):
 - **Honest pools per representation**: ``scalar_r32f`` chunks live in an
   ``r32float`` pool (no zero-imaginary waste), ``complex_rg32f`` in
   ``rg32float``, ``rgb8`` in ``rgba8unorm`` (display-ready: sampled as-is,
-  levels/LUT bypassed).  Pool budgets are per representation; LRU eviction
-  touches unpinned pages of the same pool only and pinned exhaustion is a
-  loud error.
+  levels/LUT bypassed), and windowable RGB in ``rgba32float`` (VisPy-faithful
+  color RGB + scalar-window signal in alpha). Pool budgets are per
+  representation; LRU eviction touches unpinned pages of the same pool only
+  and pinned exhaustion is a loud error.
 - **Mapping correctness**: scalar planes ignore complex mapping modes (the
   value *is* the scalar); complex planes keep magnitude/phase/real/imag;
   both apply validated linear/log/symlog scales before levels/LUT mapping;
@@ -56,6 +57,7 @@ from arrayscope.gpu.keys import (
     REDUCER_MEAN,
     REPRESENTATIONS,
     RGB8,
+    RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
     ChunkLod,
     DataChunkKey,
@@ -68,14 +70,25 @@ _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 _SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
 
 #: Shader-side representation flags (PlaneInfo.rep / histogram layer entries).
-_REP_INDEX = {SCALAR_R32F: 0, COMPLEX_RG32F: 1, RGB8: 2}
+_REP_INDEX = {
+    SCALAR_R32F: 0,
+    COMPLEX_RG32F: 1,
+    RGB8: 2,
+    RGB_WINDOWED_RGBA32F: 3,
+}
 
 _POOL_FORMATS = {
     SCALAR_R32F: "r32float",
     COMPLEX_RG32F: "rg32float",
     RGB8: "rgba8unorm",
+    RGB_WINDOWED_RGBA32F: "rgba32float",
 }
-_POOL_TEXEL_BYTES = {SCALAR_R32F: 4, COMPLEX_RG32F: 8, RGB8: 4}
+_POOL_TEXEL_BYTES = {
+    SCALAR_R32F: 4,
+    COMPLEX_RG32F: 8,
+    RGB8: 4,
+    RGB_WINDOWED_RGBA32F: 16,
+}
 _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
@@ -124,7 +137,7 @@ struct Mapping {
     level_lo: f32,
     level_hi: f32,
     symlog_constant: f32,
-    _pad1: u32,
+    phase_color: u32,
     _pad2: u32,
     _pad3: u32,
 };
@@ -145,7 +158,8 @@ struct Tile {
 @group(0) @binding(5) var scalar_pool: texture_2d_array<f32>;
 @group(0) @binding(6) var complex_pool: texture_2d_array<f32>;
 @group(0) @binding(7) var rgb_pool: texture_2d_array<f32>;
-@group(0) @binding(8) var lut: texture_2d<f32>;
+@group(0) @binding(8) var rgb_windowed_pool: texture_2d_array<f32>;
+@group(0) @binding(9) var lut: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -210,6 +224,20 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
         return vec4<f32>(c.rgb, 1.0);
     }
+    if (p.rep == 3u) {
+        // VisPy parity: preserve the color plane and modulate it by one
+        // levels-normalized scalar plane (packed in alpha), not by three
+        // independent per-channel windows.
+        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+        let scalar = apply_scale(c.a);
+        let intensity = clamp(
+            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+            0.0,
+            1.0,
+        );
+        return vec4<f32>(c.rgb * intensity, 1.0);
+    }
     var v = vec2<f32>(0.0, 0.0);
     if (r.layer >= 0) {
         if (p.rep == 0u) {
@@ -232,6 +260,17 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
     x = apply_scale(x);
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
+    if (mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u) {
+        let phase = atan2(v.y, v.x);
+        let phase_g = clamp(
+            (phase + 3.141592653589793) / 6.283185307179586,
+            0.0,
+            1.0,
+        );
+        let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
+        let color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        return vec4<f32>(color.rgb * g, color.a);
+    }
     // Nearest-entry LUT indexing, mirroring the CPU display reference.
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
     return textureLoad(lut, vec2<i32>(idx, 0), 0);
@@ -467,7 +506,8 @@ class WgpuPlaneExecutor:
                     {"binding": 5, "resource": self._pools[SCALAR_R32F].view},
                     {"binding": 6, "resource": self._pools[COMPLEX_RG32F].view},
                     {"binding": 7, "resource": self._pools[RGB8].view},
-                    {"binding": 8, "resource": self._lut_tex.create_view()},
+                    {"binding": 8, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
+                    {"binding": 9, "resource": self._lut_tex.create_view()},
                 ],
             )
             self._binds[fmt] = (bind, self._bind_epoch)
@@ -502,7 +542,7 @@ class WgpuPlaneExecutor:
                 self._mapping.level_lo,
                 self._mapping.level_hi,
                 self._mapping.symlog_constant,
-                0,
+                int(self._mapping.phase_color),
                 0,
                 0,
             ),
@@ -631,6 +671,14 @@ class WgpuPlaneExecutor:
                 rgba[..., 3] = 255
                 data = rgba
             return np.ascontiguousarray(data), PAGE * 4
+        if rep == RGB_WINDOWED_RGBA32F:
+            data = np.ascontiguousarray(data, dtype=np.float32)
+            if data.shape != (PAGE, PAGE, 4):
+                raise ValueError(
+                    f"rgb_windowed_rgba32f payload must be "
+                    f"({PAGE},{PAGE},4), got {data.shape}"
+                )
+            return data, PAGE * 16
         raise ValueError(f"unknown chunk representation {rep!r}")  # pragma: no cover
 
     def _ensure(self, cmd: EnsureChunkResident) -> int:
@@ -715,8 +763,8 @@ class WgpuPlaneExecutor:
             raise ValueError("seed executor supports up to 64 bins (workgroup array)")
         entries = []
         for key in cmd.keys:
-            if key.representation == RGB8:
-                raise ValueError(f"histogram over display-ready rgb8 chunk {key}")
+            if key.representation in (RGB8, RGB_WINDOWED_RGBA32F):
+                raise ValueError(f"histogram over RGB presentation chunk {key}")
             slot = self.page_table.lookup(key)
             if slot is None:
                 raise KeyError(f"histogram over non-resident chunk {key}")
