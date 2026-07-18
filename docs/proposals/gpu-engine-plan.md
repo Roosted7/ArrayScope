@@ -319,13 +319,27 @@ The first numeric oracle uses 64 local bins and requires aggregate normalized
 histogram L1 error at or below 5% against the direct CPU histogram on its
 deterministic multi-chunk fixture; levels preserve exact finite min/max.
 
+**Live wgpu consumer (2026-07-18; real-Wayland acceptance pending):** phase-1
+rough evidence now issues `DispatchHistogram` over each committed plane's
+best resident ADR 0056 frontier. Dynamic finite bounds and bin counts are
+computed on the GPU; the coverage worker fences the submission token before a
+small deferred readback and installs the reconstructed bounded sample through
+the existing level tracker and first-pass publication path. Scalar, complex,
+and the scalar signal packed with windowable RGB stay GPU-resident throughout;
+display-ready RGB has no level obligation. Incumbent backends retain the CPU
+chunk-summary path. The scheduling-policy owner's evidence barrier keeps the
+session in coverage until the matching GPU evidence is installed and published,
+so the existing `no_phase2_submit_during_coverage` trace invariant remains
+authoritative.
+
 
 **Endpoint scope (Thomas, 2026-07-18 — binding for G6 completion):** the
 point of G6 is that level/histogram SAMPLING itself runs on the GPU over
 resident pages, not only that CPU summaries ride along with
 materialization. Three explicit ambitions beyond the first landing:
 
-1. **GPU-side sampling/reduction shaders** over resident chunk pages
+1. **GPU-side sampling/reduction shaders — implemented, acceptance pending**
+   over resident chunk pages
    (sharing the shader's complex-mapping function). Runtime honesty:
    VisPy/gloo is GL-3.3-era — no compute shaders. A fragment-pass
    reduction ladder over resident textures is the legitimate interim; true
