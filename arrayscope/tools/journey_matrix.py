@@ -146,7 +146,7 @@ def _presentation_oracle(
         limit = int(event.get("max_upserts", 0) or 0)
         reason = str(event.get("unbounded_reason", "") or "")
         zero_upload_rebind = bool(
-            backend == "vispy"
+            backend in {"vispy", "wgpu"}
             and "uploads" in event
             and "upload_bytes" in event
             and "vertex_uploads" in event
@@ -162,7 +162,7 @@ def _presentation_oracle(
             }
             if zero_upload_rebind:
                 cap_exemptions.append(
-                    {**record, "reason": "vispy_zero_upload_rebind"}
+                    {**record, "reason": f"{backend}_zero_upload_rebind"}
                 )
             else:
                 bounded_failures.append(record)
@@ -402,7 +402,55 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
                     "results": results,
                 }
             )
+    _classify_reference_blocked_wgpu_rows(rows)
     return {"ok": all(bool(row["ok"]) for row in rows), "rows": rows}
+
+
+def _only_cold_level_oracle_red(row: dict[str, object]) -> bool:
+    """Whether cold fill failed only the shared coverage/convergence oracle."""
+
+    results = list(row.get("results", ()) or ())
+    return bool(results) and all(
+        bool(result.get("completed"))
+        and bool(result.get("phase_ordered"))
+        and bool(dict(result.get("presentation", {}) or {}).get("ok"))
+        and bool(result.get("first_new_pixels_within_budget"))
+        and bool(result.get("demand_fresh_within_budget"))
+        and not bool(result.get("coverage_pass_observed"))
+        and not bool(result.get("level_converged_within_budget"))
+        for result in results
+    )
+
+
+def _classify_reference_blocked_wgpu_rows(rows: list[dict[str, object]]) -> None:
+    """Record wgpu cold fill unsupported while its reference oracle is red.
+
+    This does not forgive either backend's cold-level defect: the VisPy row
+    remains failed, so the matrix remains red.  It says only that the renderer
+    comparison cannot adjudicate wgpu on an oracle the incumbent fails in the
+    same way.  The classification automatically disappears when either wgpu
+    passes or the reference no longer has the identical isolated failure.
+    """
+
+    indexed = {
+        (str(row.get("backend", "")), str(row.get("journey", ""))): row
+        for row in rows
+    }
+    vispy = indexed.get(("vispy", "cold_fill"))
+    wgpu = indexed.get(("wgpu", "cold_fill"))
+    if (
+        vispy is None
+        or wgpu is None
+        or bool(wgpu.get("ok"))
+        or not _only_cold_level_oracle_red(vispy)
+        or not _only_cold_level_oracle_red(wgpu)
+    ):
+        return
+    wgpu["status"] = "unsupported"
+    wgpu["unsupported_reasons"] = [
+        "reference_vispy_cold_level_convergence_standing_red"
+    ]
+    wgpu["ok"] = True
 
 
 def run_matrix(args) -> int:

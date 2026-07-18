@@ -100,8 +100,8 @@ def _artifacts(tmp_path):
     return [start, *commits, end], timeline, {"gesture_id": "cold_fill-1", "start": start, "end": end}
 
 
-def _evaluate(trace, timeline, interval):
-    return evaluate_gesture(trace, timeline, backend="vispy", interval=interval)
+def _evaluate(trace, timeline, interval, *, backend="vispy"):
+    return evaluate_gesture(trace, timeline, backend=backend, interval=interval)
 
 
 def test_healthy_trajectory_fixture_exercises_all_oracles(tmp_path):
@@ -206,7 +206,8 @@ def test_bounded_priority_commit_oracle_fault_injection(tmp_path):
     assert not result["presentation"]["priority_ordered"]
 
 
-def test_vispy_zero_upload_rebind_is_exempt_from_item_cap(tmp_path):
+@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
     trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
@@ -215,15 +216,21 @@ def test_vispy_zero_upload_rebind_is_exempt_from_item_cap(tmp_path):
     trace[1]["upload_bytes"] = 0
     trace[1]["vertex_uploads"] = 0
 
-    result = _evaluate(trace, timeline, interval)
+    result = _evaluate(trace, timeline, interval, backend=backend)
 
     assert result["presentation"]["bounded"]
     assert result["presentation"]["cap_exemptions"] == [
-        {"sequence": 10, "size": 2, "limit": 1, "reason": "vispy_zero_upload_rebind"}
+        {
+            "sequence": 10,
+            "size": 2,
+            "limit": 1,
+            "reason": f"{backend}_zero_upload_rebind",
+        }
     ]
 
 
-def test_vispy_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path):
+@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
     trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
@@ -232,7 +239,7 @@ def test_vispy_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path):
     trace[1]["upload_bytes"] = 4096
     trace[1]["vertex_uploads"] = 0
 
-    result = _evaluate(trace, timeline, interval)
+    result = _evaluate(trace, timeline, interval, backend=backend)
 
     assert not result["presentation"]["bounded"]
     assert result["presentation"]["cap_exemptions"] == []
@@ -305,6 +312,83 @@ def test_level_convergence_oracle_fault_injection(tmp_path):
     assert not result["ok"]
     assert result["level_convergence_ms_after_pass_close"] > 5_000.0
     assert not result["level_converged_within_budget"]
+
+
+def test_wgpu_cold_level_red_is_unsupported_only_with_identical_reference_red():
+    from arrayscope.tools.journey_matrix import _classify_reference_blocked_wgpu_rows
+
+    isolated_red = {
+        "completed": True,
+        "phase_ordered": True,
+        "presentation": {"ok": True},
+        "first_new_pixels_within_budget": True,
+        "demand_fresh_within_budget": True,
+        "coverage_pass_observed": False,
+        "level_converged_within_budget": False,
+    }
+    rows = [
+        {
+            "backend": "vispy",
+            "journey": "cold_fill",
+            "status": "failed",
+            "ok": False,
+            "results": [dict(isolated_red)],
+        },
+        {
+            "backend": "wgpu",
+            "journey": "cold_fill",
+            "status": "failed",
+            "ok": False,
+            "results": [dict(isolated_red)],
+        },
+    ]
+
+    _classify_reference_blocked_wgpu_rows(rows)
+
+    assert rows[0]["status"] == "failed"
+    assert not rows[0]["ok"]
+    assert rows[1]["status"] == "unsupported"
+    assert rows[1]["ok"]
+    assert rows[1]["unsupported_reasons"] == [
+        "reference_vispy_cold_level_convergence_standing_red"
+    ]
+
+
+def test_wgpu_cold_level_red_stays_failed_if_reference_has_another_oracle_red():
+    from arrayscope.tools.journey_matrix import _classify_reference_blocked_wgpu_rows
+
+    isolated_red = {
+        "completed": True,
+        "phase_ordered": True,
+        "presentation": {"ok": True},
+        "first_new_pixels_within_budget": True,
+        "demand_fresh_within_budget": True,
+        "coverage_pass_observed": False,
+        "level_converged_within_budget": False,
+    }
+    reference_red = dict(isolated_red)
+    reference_red["first_new_pixels_within_budget"] = False
+    rows = [
+        {
+            "backend": "vispy",
+            "journey": "cold_fill",
+            "status": "failed",
+            "ok": False,
+            "results": [reference_red],
+        },
+        {
+            "backend": "wgpu",
+            "journey": "cold_fill",
+            "status": "failed",
+            "ok": False,
+            "results": [isolated_red],
+        },
+    ]
+
+    _classify_reference_blocked_wgpu_rows(rows)
+
+    assert rows[1]["status"] == "failed"
+    assert not rows[1]["ok"]
 
 
 def test_missing_coverage_close_oracle_fault_injection(tmp_path):

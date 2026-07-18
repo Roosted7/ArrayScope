@@ -12,7 +12,7 @@ import pytest
 from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
 
 
-def test_vispy_draw_wait_fails_loudly_when_request_is_not_drawn(monkeypatch):
+def test_tile_presentation_draw_wait_fails_loudly_when_request_is_not_drawn(monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 
     monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
@@ -26,7 +26,7 @@ def test_vispy_draw_wait_fails_loudly_when_request_is_not_drawn(monkeypatch):
     )
 
     with pytest.raises(TimeoutError, match=r"requested=2 drawn=1"):
-        workflow._wait_for_vispy_tile_draw(
+        workflow._wait_for_tile_presentation_draw(
             win,
             object(),
             object(),

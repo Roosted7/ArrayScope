@@ -193,11 +193,11 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
             1: ("wgpu-montage", "p1"),
         }
         assert report.texture_uploads == 2  # one 256^2 page per tile
-
         # Identical re-commit: content-keyed residency makes it physical no-op.
         report = _commit(view, geometry, payloads, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.texture_uploads == 0
+        initial_pixels = view._wgpu_executor.read_target()
 
         # Montage scroll: p1 moves to tile 0, new content p2 enters tile 1.
         # Only the genuinely new plane uploads; p1 stays warm across rebind.
@@ -208,11 +208,14 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
         report = _commit(view, geometry, scrolled, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.texture_uploads == 1
+        scrolled_pixels = view._wgpu_executor.read_target()
+        assert not np.array_equal(scrolled_pixels, initial_pixels)
 
         # Scroll back: every plane was seen before — zero upload.
         report = _commit(view, geometry, payloads, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.texture_uploads == 0
+        assert np.array_equal(view._wgpu_executor.read_target(), initial_pixels)
     finally:
         view.close()
 

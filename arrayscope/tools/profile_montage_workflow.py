@@ -1747,6 +1747,11 @@ def _slow_scroll_lod_paced(
         if tile_trace is not None:
             tile_trace.capture("slow-after-input", requested_start=current)
         reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=SCROLL_SLOW_LOD_BUDGET_S)
+        # Target-LOD settlement is semantic session truth.  The journey's
+        # pixel oracle samples the physical surface, so do not close the
+        # gesture (and capture its endpoint screenshot) until the matching
+        # backend presentation request has actually drawn.
+        _wait_for_tile_presentation_draw(win, app, QtCore)
         _finish_journey_gesture(win, gesture_id, reached=bool(reached))
         if tile_trace is not None:
             tile_trace.capture("slow-settled", requested_start=current)
@@ -3944,7 +3949,7 @@ def _wait_for_montage_complete(
             ):
                 first_preview_floor_fill_ms = (perf_counter() - start) * 1000.0
                 if preview_floor_screenshot_path is not None and preview_floor_screenshot_saved is None:
-                    _wait_for_vispy_tile_draw(win, app, QtCore)
+                    _wait_for_tile_presentation_draw(win, app, QtCore)
                     try:
                         preview_floor_screenshot_saved = _save_view_screenshot(
                             win,
@@ -3963,7 +3968,7 @@ def _wait_for_montage_complete(
             if first_preview_payload_fill_ms is None and payload_state["preview_payload_fill"]:
                 first_preview_payload_fill_ms = (perf_counter() - start) * 1000.0
                 if preview_floor_screenshot_path is not None and preview_floor_screenshot_saved is None:
-                    _wait_for_vispy_tile_draw(win, app, QtCore)
+                    _wait_for_tile_presentation_draw(win, app, QtCore)
                     try:
                         preview_floor_screenshot_saved = _save_view_screenshot(
                             win,
@@ -4562,7 +4567,7 @@ def _preview_floor_physical_rows(win) -> list[dict[str, object]]:
     ]
 
 
-def _wait_for_vispy_tile_draw(
+def _wait_for_tile_presentation_draw(
     win,
     app,
     QtCore,
@@ -4587,7 +4592,7 @@ def _wait_for_vispy_tile_draw(
             elapsed = time.monotonic() - start
             if elapsed > float(target_s):
                 print(
-                    f"[perf] vispy tile draw settled in {elapsed:.3f}s "
+                    f"[perf] tile presentation draw settled in {elapsed:.3f}s "
                     f"(target {float(target_s):.3f}s)"
                 )
             return
@@ -4596,7 +4601,7 @@ def _wait_for_vispy_tile_draw(
     requested = _vispy_tile_presentation_request_count(win)
     drawn = _vispy_tile_presentation_draw_count(win)
     raise TimeoutError(
-        "VisPy tile draw did not settle within "
+        "tile presentation draw did not settle within "
         f"{max(float(timeout_s), float(target_s)):.3f}s: requested={requested} drawn={drawn}"
     )
 
