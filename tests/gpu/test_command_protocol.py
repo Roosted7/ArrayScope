@@ -8,10 +8,12 @@ from arrayscope.gpu.command_protocol import (
     DispatchHistogram,
     DisplayMapping,
     FrameSubmission,
+    GenerateLodPages,
     PresentGeneration,
     TileInstance,
     UpdateTileInstances,
 )
+from arrayscope.gpu.wgpu_executor import plane_chunk_key
 
 
 def test_display_mapping_rejects_unknown_mode():
@@ -65,6 +67,22 @@ def test_content_plane_validates_shape_and_representation():
         ContentPlane("doc", "op", (0, 8))
     with pytest.raises(ValueError, match="unknown plane representation"):
         ContentPlane("doc", "op", (8, 8), representation="bgr")
+    with pytest.raises(ValueError, match="unknown plane LOD reducer"):
+        ContentPlane("doc", "op", (8, 8), lod_reducer="mystery")
+
+
+def test_lod_generation_command_freezes_and_validates_page_keys():
+    sources = [
+        plane_chunk_key("doc", "op", 0, cx, cy)
+        for cy in range(2)
+        for cx in range(2)
+    ]
+    destination = plane_chunk_key("doc", "op", 1, 0, 0)
+    command = GenerateLodPages(sources, destination)
+    assert command.source_keys == tuple(sources)
+    assert command.destination_key == destination
+    with pytest.raises(ValueError, match="one to four"):
+        GenerateLodPages((), destination)
 
 
 def test_bind_content_planes_requires_content_planes():

@@ -356,6 +356,59 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         view.close()
 
 
+def test_coarser_mean_payload_generates_from_resident_fine_pages_zero_upload(qt_app):
+    from arrayscope.display.pyramid import reduce_box_mean
+    from arrayscope.gpu.keys import REDUCER_MEAN
+
+    view = _shown_view(qt_app)
+    try:
+        source_shape = (512, 512)
+        rng = np.random.default_rng(606)
+        fine_values = rng.standard_normal(source_shape, dtype=np.float32)
+        coarse_values = reduce_box_mean(fine_values, (4, 4))
+        # Deliberately hostile descriptor payload: the live path must ignore
+        # these CPU bytes and derive the requested page from resident L0.
+        coarse_payload_values = np.full(coarse_values.shape, 123.0, np.float32)
+        geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
+        fine = _lod_payload(
+            0,
+            fine_values,
+            base_source_id="gpu-generated-lod-plane",
+            level=0,
+            source_shape=source_shape,
+        )
+        coarse = _lod_payload(
+            0,
+            coarse_payload_values,
+            base_source_id="gpu-generated-lod-plane",
+            level=2,
+            source_shape=source_shape,
+        )
+
+        first = _commit(view, geometry, {0: fine}, levels=(-5.0, 5.0))
+        assert first.texture_uploads == 4
+        second = _commit(view, geometry, {0: coarse}, levels=(-5.0, 5.0))
+
+        assert second.texture_uploads == 0
+        assert second.presented_identities == {0: coarse.tile_identity}
+        (generated_key,) = view._wgpu_committed["tiles"][0]["page_keys"]
+        assert generated_key.lod.reducer == REDUCER_MEAN
+        assert generated_key.lod.level == 2
+        assert view._wgpu_executor.page_table.lookup(generated_key) is not None
+        view._wgpu_executor.device.queue.on_submitted_work_done_sync()
+        gpu_page = view._wgpu_executor.read_resident_page(generated_key)
+        np.testing.assert_allclose(
+            gpu_page[: coarse_values.shape[0], : coarse_values.shape[1]],
+            coarse_values,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        assert not np.any(gpu_page[coarse_values.shape[0] :, :])
+        assert not np.any(gpu_page[:, coarse_values.shape[1] :])
+    finally:
+        view.close()
+
+
 def test_non_power_of_two_payload_factor_is_rejected_loudly(qt_app):
     view = _shown_view(qt_app)
     try:

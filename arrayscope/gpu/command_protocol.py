@@ -21,7 +21,8 @@ Command → engine-seam mapping (from the endpoint doc):
 ``EvictChunk``            ``PageTable.unbind``
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
 ``SetDisplayMapping``     shader-mapping uniforms + physical-truth audit
-``DispatchHistogram``     G6 reduction
+``GenerateLodPages``      G6 resident-page reduction
+``DispatchHistogram``     G6 histogram reduction
 ``PresentGeneration``     ``TileCommitReport`` acknowledgement + physical audit
 ========================  ====================================================
 """
@@ -31,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from arrayscope.gpu.keys import REPRESENTATIONS, DataChunkKey
+from arrayscope.gpu.keys import REDUCERS, REDUCER_MEAN, REPRESENTATIONS, DataChunkKey
 
 #: Display mapping modes for complex-valued chunks. Scalar chunks use
 #: ``"real"`` (imaginary plane is zero by construction).
@@ -103,6 +104,9 @@ class ContentPlane:
     this plane's chunks (ADR 0056 §5).  Binding carries no payloads and no
     residency: chunks are ensured separately, and chunks of planes that are
     currently *unbound* stay warm in the backend's page table.
+    ``lod_reducer`` selects the derived-value family for the plane's flat LOD
+    spans; native pages are shared input, but incompatible reduced families
+    never occupy the same physical lookup entry (ADR 0056 §3).
     """
 
     document_generation: object
@@ -110,6 +114,7 @@ class ContentPlane:
     plane_shape: tuple[int, int]
     max_lod: int = 0
     representation: str = "scalar_r32f"
+    lod_reducer: str = REDUCER_MEAN
 
     def __post_init__(self) -> None:
         shape = tuple(int(value) for value in self.plane_shape)
@@ -124,6 +129,12 @@ class ContentPlane:
                 f"expected one of {REPRESENTATIONS}"
             )
         object.__setattr__(self, "representation", representation)
+        reducer = str(self.lod_reducer)
+        if reducer not in REDUCERS:
+            raise ValueError(
+                f"unknown plane LOD reducer {reducer!r}; expected one of {REDUCERS}"
+            )
+        object.__setattr__(self, "lod_reducer", reducer)
 
 
 @dataclass(frozen=True)
@@ -208,6 +219,31 @@ class EvictChunk:
 
 
 @dataclass(frozen=True)
+class GenerateLodPages:
+    """Reduce resident child pages into one derived parent page.
+
+    ``source_keys`` are the one-to-four valid children at the immediately
+    finer reduction level.  The destination is bound to the executor's page
+    table only after the GPU pass has been submitted; no CPU payload or texel
+    upload is involved.  Reducer-family honesty is validated again by the
+    executor, which currently implements only component-wise ``mean``.
+    """
+
+    source_keys: tuple[DataChunkKey, ...]
+    destination_key: DataChunkKey
+
+    def __post_init__(self) -> None:
+        sources = tuple(self.source_keys)
+        if not 1 <= len(sources) <= 4:
+            raise ValueError("LOD generation requires one to four child pages")
+        if any(not isinstance(key, DataChunkKey) for key in sources):
+            raise TypeError("LOD generation sources must be DataChunkKey instances")
+        if not isinstance(self.destination_key, DataChunkKey):
+            raise TypeError("LOD generation destination must be a DataChunkKey")
+        object.__setattr__(self, "source_keys", sources)
+
+
+@dataclass(frozen=True)
 class UpdateTileInstances:
     tiles: tuple[TileInstance, ...]
 
@@ -268,6 +304,7 @@ Command = (
     BindContentPlanes
     | EnsureChunkResident
     | EvictChunk
+    | GenerateLodPages
     | UpdateTileInstances
     | SetDisplayMapping
     | DispatchHistogram
@@ -295,7 +332,8 @@ class FrameReport:
     """What physically happened; the auditable half of the contract.
 
     ``uploads`` counts texel uploads performed by THIS submission (the
-    zero-upload oracles read it); ``histograms`` maps DispatchHistogram
+    zero-upload oracles read it); ``lod_pages_generated`` names pages created
+    wholly inside the resident pool; ``histograms`` maps DispatchHistogram
     order-index → bins array; ``wait_completed`` blocks until the GPU
     finished the submitted work — the completion token that page/staging
     recycling requires (renderer gate 3).
@@ -305,6 +343,7 @@ class FrameReport:
     presented: bool = False
     uploads: int = 0
     evictions: int = 0
+    lod_pages_generated: tuple[DataChunkKey, ...] = ()
     histograms: dict[int, object] = field(default_factory=dict)
     histogram_bounds: dict[int, tuple[float, float] | None] = field(default_factory=dict)
     wait_completed: object = None  # callable () -> None

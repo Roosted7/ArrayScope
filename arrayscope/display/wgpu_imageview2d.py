@@ -64,6 +64,7 @@ from arrayscope.gpu.command_protocol import (
     EnsureChunkResident,
     EvictChunk,
     FrameSubmission,
+    GenerateLodPages,
     PresentGeneration,
     SetDisplayMapping,
     TileInstance,
@@ -72,6 +73,8 @@ from arrayscope.gpu.command_protocol import (
 from arrayscope.gpu.chunk_summary import chunk_key_frontier
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
+    REDUCER_MEAN,
+    REDUCER_PHASE_VECTOR,
     RGB8,
     RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
@@ -603,6 +606,7 @@ class WgpuImageView2D(ImageViewShell):
             planes = []
             committed_tiles: dict[int, dict[str, object]] = {}
             commands = []
+            planned_resident = set(executor.page_table.resident_keys())
             planned_upload_tiles = []
             histogram_specs = []
             for tile in sorted(payloads):
@@ -614,8 +618,17 @@ class WgpuImageView2D(ImageViewShell):
                 height, width = (int(texture.shape[0]), int(texture.shape[1]))
                 source_height, source_width = source_shape
                 grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
+                lod_reducer = _wgpu_payload_lod_reducer(
+                    payload,
+                    representation=representation,
+                    mapping_mode=mode,
+                )
                 resident_plane_keys = tuple(
-                    resident_by_plane.get((plane_identity, "live", representation), ())
+                    key
+                    for key in resident_by_plane.get(
+                        (plane_identity, "live", representation), ()
+                    )
+                    if key.lod.is_native or key.lod.reducer == lod_reducer
                 )
                 resident_lods = (int(key.lod.level) for key in resident_plane_keys)
                 max_lod = max((lod_level, *resident_lods))
@@ -627,6 +640,7 @@ class WgpuImageView2D(ImageViewShell):
                         (source_height, source_width),
                         max_lod=max_lod,
                         representation=representation,
+                        lod_reducer=lod_reducer,
                     )
                 )
                 page_keys = []
@@ -642,18 +656,32 @@ class WgpuImageView2D(ImageViewShell):
                             dtype=_WGPU_REP_DTYPES[representation],
                             representation=representation,
                             plane_shape=source_shape,
+                            reducer=lod_reducer,
                         )
                         page_keys.append(key)
-                        if executor.page_table.lookup(key) is None:
-                            will_upload = True
-                        # Content-keyed: re-ensuring a resident key is a no-op
-                        # in the executor (0 uploads); the report is the oracle.
-                        commands.append(
-                            EnsureChunkResident(
+                        if key not in planned_resident:
+                            generated = _wgpu_plan_lod_page_generation(
                                 key,
-                                self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
+                                plane_shape=source_shape,
+                                available=planned_resident,
+                                commands=commands,
                             )
-                        )
+                            if not generated:
+                                will_upload = True
+                                # CPU-produced payload remains the fallback for
+                                # cold content and non-mean reducer families.
+                                commands.append(
+                                    EnsureChunkResident(
+                                        key,
+                                        self._wgpu_page_block(
+                                            texture,
+                                            chunk_y,
+                                            chunk_x,
+                                            representation,
+                                        ),
+                                    )
+                                )
+                                planned_resident.add(key)
                 if will_upload:
                     planned_upload_tiles.append(tile)
                 plane_residency_key = (plane_identity, "live", representation)
@@ -674,6 +702,7 @@ class WgpuImageView2D(ImageViewShell):
                     "page_keys": tuple(page_keys),
                     "lod_level": lod_level,
                     "plane_identity": plane_identity,
+                    "lod_reducer": lod_reducer,
                     "source_index": int(getattr(payload, "source_index", tile)),
                 }
 
@@ -682,9 +711,14 @@ class WgpuImageView2D(ImageViewShell):
             for tile, info in committed_tiles.items():
                 frontier_keys = (
                     chunk_key_frontier(
-                        resident_by_plane[
-                            (info["plane_identity"], "live", representation)
-                        ]
+                        tuple(
+                            key
+                            for key in resident_by_plane[
+                                (info["plane_identity"], "live", representation)
+                            ]
+                            if key.lod.is_native
+                            or key.lod.reducer == info["lod_reducer"]
+                        )
                     )
                     if histogram_capable
                     else ()
@@ -1384,6 +1418,95 @@ def _wgpu_payload_plane_identity(payload) -> object:
         identity = tile_ack_identity(payload)
         source_id = getattr(identity, "semantic_key", identity)
     return ("wgpu-content-plane", source_id)
+
+
+def _wgpu_payload_lod_reducer(payload, *, representation: str, mapping_mode: str) -> str:
+    """Canonical derived-value family for one live executor plane."""
+
+    backing = getattr(payload, "page_backing", None)
+    reducers = {
+        str(plan.reducer)
+        for plan in tuple(getattr(backing, "requested_plans", ()) or ())
+    }
+    if len(reducers) > 1:
+        raise ValueError(
+            f"wgpu payload mixes LOD reducer families: {tuple(sorted(reducers))}"
+        )
+    if reducers:
+        reducer = next(iter(reducers))
+        if reducer != "native":
+            return reducer
+    # Native pages are shared input.  The bound plane still names the family
+    # its future parents must belong to so phase-vector and component-mean
+    # pages can never collide in one flat LOD span.
+    if representation == COMPLEX_RG32F and str(mapping_mode) == "phase":
+        return REDUCER_PHASE_VECTOR
+    return REDUCER_MEAN
+
+
+def _wgpu_plan_lod_page_generation(
+    destination,
+    *,
+    plane_shape: tuple[int, int],
+    available: set,
+    commands: list,
+) -> bool:
+    """Append a topological resident-mean chain, or leave the plan unchanged."""
+
+    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+    if destination in available:
+        return True
+    level = int(destination.lod.level)
+    if (
+        level <= 0
+        or destination.lod.reducer != REDUCER_MEAN
+        or destination.representation not in (SCALAR_R32F, COMPLEX_RG32F)
+    ):
+        return False
+
+    command_start = len(commands)
+    available_before = set(available)
+    child_level = level - 1
+    child_extent = PAGE << child_level
+    y0, x0 = (int(value) for value in destination.chunk_origin)
+    h, w = (int(value) for value in destination.chunk_shape)
+    child_keys = []
+    for child_y in range(y0 // child_extent, -(-(y0 + h) // child_extent)):
+        for child_x in range(x0 // child_extent, -(-(x0 + w) // child_extent)):
+            child_keys.append(
+                plane_chunk_key(
+                    destination.document_generation,
+                    destination.operation_key,
+                    child_level,
+                    child_x,
+                    child_y,
+                    dtype=destination.dtype,
+                    representation=destination.representation,
+                    plane_shape=plane_shape,
+                    reducer=REDUCER_MEAN,
+                )
+            )
+    if not 1 <= len(child_keys) <= 4:
+        raise ValueError(
+            "wgpu canonical parent must cover one to four immediate child pages"
+        )
+    for child in child_keys:
+        if child in available:
+            continue
+        if not _wgpu_plan_lod_page_generation(
+            child,
+            plane_shape=plane_shape,
+            available=available,
+            commands=commands,
+        ):
+            del commands[command_start:]
+            available.clear()
+            available.update(available_before)
+            return False
+    commands.append(GenerateLodPages(tuple(child_keys), destination))
+    available.add(destination)
+    return True
 
 
 def _wgpu_pool_layer_budget(

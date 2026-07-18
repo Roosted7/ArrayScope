@@ -3,9 +3,9 @@
 - **Status:** Accepted and implemented through the live backend
   (2026-07-18): the wgpu executor commits every ArrayScope payload shape
   behind the protocol with physical page-table acknowledgements, the LOD
-  ladder and montage sessions run on `BindContentPlanes`, and the first
-  compute consumer (G6a resident-page histograms) is live. Promotion vs
-  VisPy is queue row 3 (evidence-gated).
+  ladder and montage sessions run on `BindContentPlanes`, and both G6 compute
+  consumers (resident-page histograms and reducer-honest resident-page LOD
+  generation) are live. Promotion vs VisPy is queue row 3 (evidence-gated).
 - **Date:** 2026-07-18
 - **Branch note:** authored on `codex/wgpu-renderer-gate-b`; renumber on
   integration if a parallel branch claimed 0057.
@@ -30,9 +30,9 @@ second one.
 
 1. **`arrayscope/gpu/command_protocol.py` is the only seam renderers
    implement.** Frozen command dataclasses — `EnsureChunkResident`,
-   `EvictChunk`, `UpdateTileInstances`, `SetDisplayMapping`,
-   `DispatchHistogram`, `PresentGeneration` — carried by an ordered
-   `FrameSubmission`, answered by an auditable `FrameReport` (uploads,
+   `EvictChunk`, `GenerateLodPages`, `UpdateTileInstances`,
+   `SetDisplayMapping`, `DispatchHistogram`, `PresentGeneration` — carried by
+   an ordered `FrameSubmission`, answered by an auditable `FrameReport` (uploads,
    evictions, histogram results, completion token). Commands speak ADR
    0055/0056 identities (`DataChunkKey`, `ChunkLod`) and normalized
    geometry; nothing in the protocol may name WGSL, GL objects, Qt, Datoviz
@@ -42,10 +42,12 @@ second one.
    The report's `wait_completed` token is how page/staging recycling fences
    GPU work — renderer gate 3's contract, now explicit.
 3. **`arrayscope/gpu/wgpu_executor.py` is the first implementation**
-   (`WgpuPlaneExecutor`): one 2-D plane pyramid, one rg32float page pool,
+   (`WgpuPlaneExecutor`): bound 2-D plane pyramids, format-honest page pools,
    `PageTable` bookkeeping, GPU-side ancestor-fallback lookup, one instanced
-   draw, two-pass G6 histogram. Its scope is deliberately the gate-B
-   harness's; growth is queue-gated. Default-ring tests
+   draw, two-pass G6 histogram, and in-pool component-mean LOD generation.
+   Reducer family is physical binding identity: recursive GPU generation is
+   accepted only for `mean`; mode-specific `mean_abs`/`phase_vector` families
+   remain on their honest CPU route. Default-ring tests
    (`tests/gpu/test_wgpu_command_protocol.py`) hold the gate-B oracles —
    zero-upload mode/levels/shift/scroll, pinned-ancestor fallback
    (never-black), exact histogram, completion token — and skip cleanly

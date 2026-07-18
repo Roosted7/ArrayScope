@@ -48,6 +48,7 @@ from arrayscope.gpu.command_protocol import (
     EvictChunk,
     FrameReport,
     FrameSubmission,
+    GenerateLodPages,
     PresentGeneration,
     SetDisplayMapping,
     UpdateTileInstances,
@@ -92,6 +93,7 @@ _POOL_TEXEL_BYTES = {
 _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
+_LOD_GENERATION_PIN_OWNER = "wgpu-lod-generation-sources"
 
 
 def _ordered_float32(value: float) -> int:
@@ -115,6 +117,7 @@ def plane_chunk_key(
     dtype: str = "complex64",
     representation: str = COMPLEX_RG32F,
     plane_shape: tuple[int, int] | None = None,
+    reducer: str = REDUCER_MEAN,
 ) -> DataChunkKey:
     """Canonical key for one 256² page of a 2-D plane pyramid.
 
@@ -130,7 +133,7 @@ def plane_chunk_key(
             level=lod_level,
             factor=1 << lod_level,
             reduction=(lod_level, lod_level),
-            reducer=REDUCER_MEAN,
+            reducer=str(reducer),
         )
     factor = 1 << int(lod_level)
     origin = (chunk_y * PAGE * factor, chunk_x * PAGE * factor)
@@ -530,6 +533,83 @@ fn merge(@builtin(local_invocation_index) li: u32) {
 """
 
 
+def _reduce_wgsl(*, value_type: str, load_suffix: str, storage_format: str) -> str:
+    """Build the component-mean shader for one honest pool representation."""
+
+    zero = "0.0" if value_type == "f32" else "vec2<f32>(0.0)"
+    stored = (
+        "vec4<f32>(mean, 0.0, 0.0, 0.0)"
+        if value_type == "f32"
+        else "vec4<f32>(mean, 0.0, 0.0)"
+    )
+    return f"""
+struct Args {{
+    valid0: vec4<u32>,
+    valid1: vec4<u32>,
+    valid2: vec4<u32>,
+    valid3: vec4<u32>,
+}};
+@group(0) @binding(0) var<uniform> args: Args;
+@group(0) @binding(1) var src0: texture_2d<f32>;
+@group(0) @binding(2) var src1: texture_2d<f32>;
+@group(0) @binding(3) var src2: texture_2d<f32>;
+@group(0) @binding(4) var src3: texture_2d<f32>;
+@group(0) @binding(5) var dst: texture_storage_2d<{storage_format}, write>;
+
+fn valid_size(page: u32) -> vec2<u32> {{
+    switch page {{
+        case 0u: {{ return args.valid0.xy; }}
+        case 1u: {{ return args.valid1.xy; }}
+        case 2u: {{ return args.valid2.xy; }}
+        default: {{ return args.valid3.xy; }}
+    }}
+}}
+
+fn load_value(page: u32, coord: vec2<i32>) -> {value_type} {{
+    switch page {{
+        case 0u: {{ return textureLoad(src0, coord, 0).{load_suffix}; }}
+        case 1u: {{ return textureLoad(src1, coord, 0).{load_suffix}; }}
+        case 2u: {{ return textureLoad(src2, coord, 0).{load_suffix}; }}
+        default: {{ return textureLoad(src3, coord, 0).{load_suffix}; }}
+    }}
+}}
+
+@compute @workgroup_size(16, 16)
+fn reduce(@builtin(global_invocation_id) gid: vec3<u32>) {{
+    if (gid.x >= 256u || gid.y >= 256u) {{ return; }}
+    let source = gid.xy * 2u;
+    var acc = {zero};
+    var count = 0u;
+    for (var dy = 0u; dy < 2u; dy = dy + 1u) {{
+        for (var dx = 0u; dx < 2u; dx = dx + 1u) {{
+            let coord = source + vec2<u32>(dx, dy);
+            let page_xy = coord / 256u;
+            let page = page_xy.y * 2u + page_xy.x;
+            let local = coord % 256u;
+            let valid = valid_size(page);
+            if (local.x < valid.x && local.y < valid.y) {{
+                acc = acc + load_value(page, vec2<i32>(local));
+                count = count + 1u;
+            }}
+        }}
+    }}
+    var mean = {zero};
+    if (count != 0u) {{ mean = acc / f32(count); }}
+    textureStore(dst, vec2<i32>(gid.xy), {stored});
+}}
+"""
+
+
+_REDUCE_WGSL = {
+    SCALAR_R32F: _reduce_wgsl(
+        value_type="f32", load_suffix="r", storage_format="r32float"
+    ),
+    COMPLEX_RG32F: _reduce_wgsl(
+        value_type="vec2<f32>", load_suffix="rg", storage_format="rg32float"
+    ),
+}
+
+
 @dataclass
 class _LodGrid:
     base: int
@@ -644,14 +724,17 @@ class WgpuPlaneExecutor:
         self._pools: dict[str, _Pool] = {}
         for rep in REPRESENTATIONS:
             layers = max(1, self._pool_budgets[rep])
+            usage = (
+                wgpu.TextureUsage.TEXTURE_BINDING
+                | wgpu.TextureUsage.COPY_DST
+                | wgpu.TextureUsage.COPY_SRC
+            )
+            if rep in _REDUCE_WGSL:
+                usage |= wgpu.TextureUsage.STORAGE_BINDING
             texture = d.create_texture(
                 size=(PAGE, PAGE, layers),
                 format=_POOL_FORMATS[rep],
-                usage=(
-                    wgpu.TextureUsage.TEXTURE_BINDING
-                    | wgpu.TextureUsage.COPY_DST
-                    | wgpu.TextureUsage.COPY_SRC
-                ),
+                usage=usage,
             )
             self._pools[rep] = _Pool(
                 representation=rep,
@@ -716,6 +799,16 @@ class WgpuPlaneExecutor:
             layout="auto",
             compute={"module": self._histo_mod, "entry_point": "bounds_merge"},
         )
+        self._reduce_pipes = {
+            representation: d.create_compute_pipeline(
+                layout="auto",
+                compute={
+                    "module": d.create_shader_module(code=shader),
+                    "entry_point": "reduce",
+                },
+            )
+            for representation, shader in _REDUCE_WGSL.items()
+        }
 
     # ---- internals ----------------------------------------------------------
 
@@ -856,6 +949,10 @@ class WgpuPlaneExecutor:
                 key.document_generation != plane.document_generation
                 or key.operation_key != plane.operation_key
                 or key.representation != plane.representation
+                or (
+                    not key.lod.is_native
+                    and key.lod.reducer != plane.lod_reducer
+                )
             ):
                 continue
             lod = key.lod.level
@@ -950,6 +1047,160 @@ class WgpuPlaneExecutor:
             self._table_dirty = True
         self._uploads_total += 1
         return 1
+
+    def _generate_lod_page(self, cmd: GenerateLodPages) -> bool:
+        """Run one resident 2x2 component-mean pass and bind its parent."""
+
+        destination = cmd.destination_key
+        if self.page_table.lookup(destination) is not None:
+            self.page_table.touch(destination)
+            return False
+        if destination.rank != 2 or tuple(destination.lod.reduction) != (
+            int(destination.lod.level),
+            int(destination.lod.level),
+        ):
+            raise ValueError(
+                "wgpu LOD generation requires one isotropic 2-D destination"
+            )
+        if destination.lod.level <= 0:
+            raise ValueError("wgpu LOD generation destination must be reduced")
+        if destination.lod.reducer != REDUCER_MEAN:
+            raise ValueError(
+                "wgpu LOD generation is reducer-honest for component mean only; "
+                f"got {destination.lod.reducer!r}"
+            )
+        representation = destination.representation
+        if representation not in self._reduce_pipes:
+            raise ValueError(
+                "wgpu component-mean LOD generation supports scalar_r32f and "
+                f"complex_rg32f only; got {representation!r}"
+            )
+
+        source_level = int(destination.lod.level) - 1
+        source_reducer = "native" if source_level == 0 else REDUCER_MEAN
+        destination_origin = tuple(int(value) for value in destination.chunk_origin)
+        source_page_extent = PAGE << source_level
+        ordered: list[tuple[DataChunkKey, PageSlot] | None] = [None, None, None, None]
+        for key in cmd.source_keys:
+            if (
+                key.rank != 2
+                or key.document_generation != destination.document_generation
+                or key.operation_key != destination.operation_key
+                or key.dtype != destination.dtype
+                or key.representation != representation
+                or int(key.lod.level) != source_level
+                or key.lod.reducer != source_reducer
+            ):
+                raise ValueError(
+                    "wgpu LOD generation child disagrees with destination value family"
+                )
+            dy_num = int(key.chunk_origin[0]) - destination_origin[0]
+            dx_num = int(key.chunk_origin[1]) - destination_origin[1]
+            if (
+                dy_num < 0
+                or dx_num < 0
+                or dy_num % source_page_extent
+                or dx_num % source_page_extent
+            ):
+                raise ValueError("wgpu LOD generation child is off the canonical parent grid")
+            dy, dx = dy_num // source_page_extent, dx_num // source_page_extent
+            if dy not in (0, 1) or dx not in (0, 1):
+                raise ValueError("wgpu LOD generation child lies outside its parent")
+            index = dy * 2 + dx
+            if ordered[index] is not None:
+                raise ValueError("wgpu LOD generation has duplicate child quadrants")
+            slot = self.page_table.lookup(key)
+            if slot is None:
+                raise KeyError(f"LOD generation source is not resident: {key}")
+            ordered[index] = (key, slot)
+
+        present = [item for item in ordered if item is not None]
+        if not present:  # command shape already prevents this
+            raise ValueError("wgpu LOD generation requires resident children")
+        pool = self._pools[representation]
+        if pool.layer_count == 0:
+            raise RuntimeError(
+                f"no layer budget configured for representation {representation!r}"
+            )
+        self.page_table.replace_pin_set(
+            _LOD_GENERATION_PIN_OWNER, tuple(key for key, _slot in present)
+        )
+        destination_layer = None
+        try:
+            if not pool.free_layers:
+                self._evict_one_unpinned(representation)
+            destination_layer = pool.free_layers.pop()
+
+            fallback = present[0]
+            source_views = []
+            valid_rows: list[tuple[int, int, int, int]] = []
+            for item in ordered:
+                key, slot = fallback if item is None else item
+                source_views.append(
+                    pool.texture.create_view(
+                        dimension="2d",
+                        base_array_layer=slot.page_index,
+                        array_layer_count=1,
+                    )
+                )
+                if item is None:
+                    valid_rows.append((0, 0, 0, 0))
+                else:
+                    factor = 1 << int(key.lod.level)
+                    valid_h = -(-int(key.chunk_shape[0]) // factor)
+                    valid_w = -(-int(key.chunk_shape[1]) // factor)
+                    valid_rows.append((valid_w, valid_h, 0, 0))
+
+            wgpu, d = self._wgpu, self.device
+            args = d.create_buffer_with_data(
+                data=np.asarray(valid_rows, np.uint32).tobytes(),
+                usage=wgpu.BufferUsage.UNIFORM,
+            )
+            destination_view = pool.texture.create_view(
+                dimension="2d",
+                base_array_layer=destination_layer,
+                array_layer_count=1,
+            )
+            pipe = self._reduce_pipes[representation]
+            bind = d.create_bind_group(
+                layout=pipe.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": args, "offset": 0, "size": 64}},
+                    *(
+                        {"binding": index + 1, "resource": view}
+                        for index, view in enumerate(source_views)
+                    ),
+                    {"binding": 5, "resource": destination_view},
+                ],
+            )
+            encoder = d.create_command_encoder()
+            compute = encoder.begin_compute_pass()
+            compute.set_pipeline(pipe)
+            compute.set_bind_group(0, bind)
+            compute.dispatch_workgroups(16, 16)
+            compute.end()
+            d.queue.submit([encoder.finish()])
+        except Exception:
+            if destination_layer is not None:
+                pool.free_layers.append(destination_layer)
+            raise
+        finally:
+            self.page_table.replace_pin_set(_LOD_GENERATION_PIN_OWNER, ())
+
+        slot = PageSlot(
+            pool_id=_POOL_IDS[representation],
+            page_index=destination_layer,
+            slot_index=0,
+        )
+        self.page_table.bind(
+            destination,
+            slot,
+            nbytes=PAGE * PAGE * _POOL_TEXEL_BYTES[representation],
+        )
+        for flat in self._flat_indices(destination):
+            self._flat_table[flat] = destination_layer
+            self._table_dirty = True
+        return True
 
     def _evict_one_unpinned(self, representation: str) -> None:
         for key in self.page_table.eviction_candidates():
@@ -1163,6 +1414,7 @@ class WgpuPlaneExecutor:
         """
 
         report = FrameReport(generation=submission.generation)
+        generated_pages = []
         for index, cmd in enumerate(submission.commands):
             if isinstance(cmd, BindContentPlanes):
                 self._bind_planes(cmd)
@@ -1170,6 +1422,9 @@ class WgpuPlaneExecutor:
                 report.uploads += self._ensure(cmd)
             elif isinstance(cmd, EvictChunk):
                 report.evictions += self._evict(cmd)
+            elif isinstance(cmd, GenerateLodPages):
+                if self._generate_lod_page(cmd):
+                    generated_pages.append(cmd.destination_key)
             elif isinstance(cmd, UpdateTileInstances):
                 self._set_tiles(cmd.tiles)
             elif isinstance(cmd, SetDisplayMapping):
@@ -1186,6 +1441,7 @@ class WgpuPlaneExecutor:
                 report.presented = True
             else:  # pragma: no cover - protocol/executor version skew guard
                 raise TypeError(f"unknown renderer command {type(cmd).__name__}")
+        report.lod_pages_generated = tuple(generated_pages)
         report.wait_completed = self.device.queue.on_submitted_work_done_sync
         return report
 
@@ -1215,3 +1471,29 @@ class WgpuPlaneExecutor:
             (w, h, 1),
         )
         return np.frombuffer(data, np.uint8).reshape(h, w, 4).copy()
+
+    def read_resident_page(self, key: DataChunkKey) -> np.ndarray:
+        """Physical-truth oracle: copy one exact page-table binding to CPU."""
+
+        slot = self.page_table.lookup(key)
+        if slot is None:
+            raise KeyError(f"cannot read non-resident page {key}")
+        representation = key.representation
+        pool = self._pools[representation]
+        data = self.device.queue.read_texture(
+            {"texture": pool.texture, "origin": (0, 0, slot.page_index)},
+            {
+                "bytes_per_row": PAGE * _POOL_TEXEL_BYTES[representation],
+                "rows_per_image": PAGE,
+            },
+            (PAGE, PAGE, 1),
+        )
+        if representation == SCALAR_R32F:
+            shape, dtype = (PAGE, PAGE), np.float32
+        elif representation == COMPLEX_RG32F:
+            shape, dtype = (PAGE, PAGE, 2), np.float32
+        elif representation == RGB8:
+            shape, dtype = (PAGE, PAGE, 4), np.uint8
+        else:
+            shape, dtype = (PAGE, PAGE, 4), np.float32
+        return np.frombuffer(data, dtype=dtype).reshape(shape).copy()

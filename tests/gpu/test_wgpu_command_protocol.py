@@ -19,6 +19,7 @@ from arrayscope.gpu.command_protocol import (  # noqa: E402
     EnsureChunkResident,
     EvictChunk,
     FrameSubmission,
+    GenerateLodPages,
     PresentGeneration,
     SetDisplayMapping,
     TileInstance,
@@ -29,6 +30,8 @@ from arrayscope.gpu.chunk_summary import (  # noqa: E402
 )
 from arrayscope.gpu.keys import (  # noqa: E402
     COMPLEX_RG32F,
+    REDUCER_MEAN_ABS,
+    REDUCER_PHASE_VECTOR,
     RGB8,
     RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
@@ -119,6 +122,177 @@ def _plane() -> np.ndarray:
     re += np.sin(xx / 37.0) * 2 + (xx / PLANE)
     im += np.cos(yy / 23.0) * 2
     return np.stack([re, im], axis=-1)
+
+
+def test_gpu_generated_complex_mean_page_matches_cpu_component_reference():
+    from arrayscope.display.pyramid import reduce_box_mean
+
+    rng = np.random.default_rng(20260718)
+    source = (
+        rng.standard_normal((PAGE * 2, PAGE * 2), dtype=np.float32)
+        + 1j * rng.standard_normal((PAGE * 2, PAGE * 2), dtype=np.float32)
+    ).astype(np.complex64)
+    executor = WgpuPlaneExecutor(
+        pool_layers={COMPLEX_RG32F: 8}, device=_shared_device()
+    )
+    sources = tuple(
+        plane_chunk_key(
+            "lod-doc",
+            "lod-op",
+            0,
+            cx,
+            cy,
+            plane_shape=source.shape,
+        )
+        for cy in range(2)
+        for cx in range(2)
+    )
+    destination = plane_chunk_key(
+        "lod-doc", "lod-op", 1, 0, 0, plane_shape=source.shape
+    )
+    upload = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes(
+                    (
+                        ContentPlane(
+                            "lod-doc",
+                            "lod-op",
+                            source.shape,
+                            max_lod=1,
+                            representation=COMPLEX_RG32F,
+                        ),
+                    )
+                ),
+                *(
+                    EnsureChunkResident(
+                        key,
+                        source[
+                            cy * PAGE : (cy + 1) * PAGE,
+                            cx * PAGE : (cx + 1) * PAGE,
+                        ],
+                    )
+                    for key, (cy, cx) in zip(
+                        sources,
+                        ((0, 0), (0, 1), (1, 0), (1, 1)),
+                        strict=True,
+                    )
+                ),
+            ),
+        )
+    )
+    assert upload.uploads == 4
+
+    generated = executor.submit(
+        FrameSubmission(2, (GenerateLodPages(sources, destination),))
+    )
+    generated.wait_completed()
+
+    assert generated.uploads == 0
+    assert generated.lod_pages_generated == (destination,)
+    assert executor.page_table.lookup(destination) is not None
+    gpu = executor.read_resident_page(destination)
+    expected = reduce_box_mean(source, (2, 2))
+    np.testing.assert_allclose(gpu[..., 0], expected.real, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(gpu[..., 1], expected.imag, rtol=1e-6, atol=1e-6)
+
+
+def test_gpu_lod_generation_rejects_non_mean_family_loudly():
+    executor = WgpuPlaneExecutor(
+        pool_layers={SCALAR_R32F: 8}, device=_shared_device()
+    )
+    source = plane_chunk_key(
+        "lod-doc",
+        "lod-op",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=(PAGE, PAGE),
+    )
+    destination = plane_chunk_key(
+        "lod-doc",
+        "lod-op",
+        1,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=(PAGE, PAGE),
+        reducer=REDUCER_MEAN_ABS,
+    )
+    executor.submit(
+        FrameSubmission(
+            1,
+            (EnsureChunkResident(source, np.ones((PAGE, PAGE), np.float32)),),
+        )
+    )
+    with pytest.raises(ValueError, match="reducer-honest.*component mean only"):
+        executor.submit(
+            FrameSubmission(2, (GenerateLodPages((source,), destination),))
+        )
+
+
+def test_bound_plane_reducer_selects_one_resident_complex_lod_family():
+    executor = WgpuPlaneExecutor(
+        pool_layers={COMPLEX_RG32F: 4}, device=_shared_device()
+    )
+    mean = plane_chunk_key("family-doc", "family-op", 1, 0, 0)
+    phase = plane_chunk_key(
+        "family-doc",
+        "family-op",
+        1,
+        0,
+        0,
+        reducer=REDUCER_PHASE_VECTOR,
+    )
+    values = np.zeros((PAGE, PAGE, 2), np.float32)
+    executor.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes(
+                    (
+                        ContentPlane(
+                            "family-doc",
+                            "family-op",
+                            (PAGE * 2, PAGE * 2),
+                            max_lod=1,
+                            representation=COMPLEX_RG32F,
+                        ),
+                    )
+                ),
+                EnsureChunkResident(mean, values),
+                EnsureChunkResident(phase, values),
+            ),
+        )
+    )
+    lod1_base = executor._plane_grids[0][1].base
+    assert executor._flat_table[lod1_base] == executor.page_table.lookup(mean).page_index
+
+    executor.submit(
+        FrameSubmission(
+            2,
+            (
+                BindContentPlanes(
+                    (
+                        ContentPlane(
+                            "family-doc",
+                            "family-op",
+                            (PAGE * 2, PAGE * 2),
+                            max_lod=1,
+                            representation=COMPLEX_RG32F,
+                            lod_reducer=REDUCER_PHASE_VECTOR,
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+    lod1_base = executor._plane_grids[0][1].base
+    assert executor._flat_table[lod1_base] == executor.page_table.lookup(phase).page_index
 
 
 class Scene:

@@ -23,7 +23,7 @@ this file says *what, in what order, and when it counts as done*.
 | # | Step | Exit gate |
 |---|---|---|
 | 1 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 2 | **G6 — GPU histogram/levels.** Slice **(a)** GPU histogram evidence IMPLEMENTED on wgpu (see Done 2026-07-18); real-Wayland acceptance rides the row-3 matrix. Remaining: **(b)** evidence-gated: collapse rough→refined into ONE exact pass IF measured inside the phase-1 budget (never by theory — ADR 0046); **(d)** GPU LOD generation from resident chunks — the executor's in-pool reduction pass exists; wire it into the live ladder the way G6(a) wired histograms. (**(c)** histogram widget: RESOLVED, keep PyQtGraph — see Done.) | Levels/histogram converge from chunk summaries; sampling measured ON the GPU; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
+| 2 | **G6 — GPU histogram/levels.** Slices **(a)** GPU histogram evidence and **(d)** reducer-honest GPU LOD generation from resident chunks are IMPLEMENTED on wgpu (see Done 2026-07-18); real-Wayland acceptance rides the row-3 matrix. Remaining: **(b)** evidence-gated: collapse rough→refined into ONE exact pass IF measured inside the phase-1 budget (never by theory — ADR 0046). (**(c)** histogram widget: RESOLVED, keep PyQtGraph — see Done.) | Levels/histogram converge from chunk summaries; sampling measured ON the GPU; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
 | 3 | **wgpu strangler — promotion evidence** (slices (a)–(c) LANDED, see Done; ADR 0057). Open: **zoom_out freshness red under full-matrix load** (2-for-2 in v6/v7 with `first_new_pixels_ms=None`; isolated reruns green; adjudication chip out — likely the freshness sampler keys on commit-report edges that a descriptor-only camera gesture never produces; acceptance = three consecutive full matrices with all five wgpu rows green or a reasoned shared-standing-red classification). The 2026-07-18 field stalls `259-1`/`1-1` are **not** the standing 272-tile fill: both are one wgpu physical-first-pass quality drift (exact latch followed by a mixed exact+fallback snapshot), fixed in `43287f8` and recorded in [the field-stall dossier](redesign/wgpu-field-stalls-2026-07-18.md). Then **(d)** promotion by evidence: perf bars vs VisPy on real data (the montage FFT-scroll 4→17 fps target is the headline number), Thomas dogfooding the explicit wgpu pin through daily use, VisPy retirement review only after a release cycle — never a flag-day switch. **Successor traps:** import rendercanvas ONLY via `import_qrenderwidget()`; every wgpu adapter probe pins `set_instance_extras(backends=["Vulkan"])` BEFORE its first request (an all-backends instance re-inits EGL during GL enumeration and SIGABRTs workers holding vispy GL state — `8c57a7bf`). | Promotion gate: journey matrix + perf bars on real data; written verdict in tensor-engine-endpoint.md |
 | 4 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 
@@ -91,6 +91,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-18 — **G6(d) live GPU LOD generation on wgpu:**
+  [`GenerateLodPages`](../arrayscope/gpu/command_protocol.py) runs one
+  disjoint-subresource 2×2 component-mean pass per parent, recursively builds a
+  requested coarser page from already-resident finer pages, and binds only the
+  destination identity into the executor page table. The live view substitutes
+  that path for a texel upload; physically cold targets and non-`mean` families
+  stay on the CPU path. Complex values reduce real and imaginary components
+  (never magnitude), and bound planes isolate reducer families. Default-ring
+  oracles: [`test_wgpu_command_protocol.py`](../tests/gpu/test_wgpu_command_protocol.py)
+  and [`test_wgpu_imageview2d.py`](../tests/display/test_wgpu_imageview2d.py).
 - 2026-07-18 — **wgpu live backend COMPLETE (row 3 slices a–c):** executor
   grown to multi-plane sessions + per-representation pools (`d675d57a`);
   live viewer commits every payload shape — scalar/complex/RGB8/windowable-
