@@ -154,13 +154,31 @@ def _presentation_oracle(
             and int(event.get("upload_bytes", 0) or 0) == 0
             and int(event.get("vertex_uploads", 0) or 0) == 0
         )
+        cold_upserts = tuple(event.get("cold_upsert_tiles", ()) or ())
+        bounded_mixed_rebind = bool(
+            backend in {"vispy", "wgpu"}
+            and "cold_upsert_tiles" in event
+            and limit > 0
+            and len(cold_upserts) <= limit
+            and set(int(tile) for tile in cold_upserts).issubset(
+                int(row[0]) for row in delta
+            )
+        )
         if limit > 0 and len(delta) > limit:
             record = {
                 "sequence": event.get("sequence"),
                 "size": len(delta),
                 "limit": limit,
             }
-            if zero_upload_rebind:
+            if bounded_mixed_rebind:
+                cap_exemptions.append(
+                    {
+                        **record,
+                        "cold_size": len(cold_upserts),
+                        "reason": f"{backend}_resident_rebind_with_bounded_cold_upserts",
+                    }
+                )
+            elif zero_upload_rebind:
                 cap_exemptions.append(
                     {**record, "reason": f"{backend}_zero_upload_rebind"}
                 )

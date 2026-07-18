@@ -541,6 +541,11 @@ class TileCommitReport:
     removed_tiles: frozenset[int] = field(default_factory=frozenset)
     texture_uploads: int = 0
     texture_upload_bytes: int = 0
+    # Delta tiles that performed cold backend data work.  This is distinct
+    # from committed_upserts: a persistent GPU backend atomically accepts
+    # already-resident retargets while only this subset consumes the upload
+    # cohort/cap.
+    cold_upsert_tiles: frozenset[int] = field(default_factory=frozenset)
     pyqtgraph_items_created: int = 0
     cpu_windowed_tiles: int = 0
     resident_rebinds: int = 0
@@ -591,6 +596,11 @@ class TileCommitReport:
                 frozenset(int(tile) for tile in self.committed_upserts),
             )
         object.__setattr__(self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles))
+        object.__setattr__(
+            self,
+            "cold_upsert_tiles",
+            frozenset(int(tile) for tile in self.cold_upsert_tiles),
+        )
         for name in (
             "texture_uploads",
             "texture_upload_bytes",

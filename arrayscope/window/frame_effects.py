@@ -2396,6 +2396,9 @@ class FramePipelineEffects:
             elapsed_ms=float(renderer._last_montage_tile_commit_ms),
             presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
             committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
+            cold_upsert_tiles=tuple(
+                sorted(getattr(report, "cold_upsert_tiles", ()) or ())
+            ),
             identity_rejected=tuple(
                 sorted(getattr(report, "identity_rejected_tiles", ()) or ())
             ),

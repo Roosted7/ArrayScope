@@ -2859,6 +2859,11 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         removed_tiles=frozenset(getattr(tile_delta, "removals", ()) or ()),
         texture_uploads=report_uploads,
         texture_upload_bytes=report_upload_bytes,
+        cold_upsert_tiles=frozenset(
+            int(tile)
+            for tile in updated_tiles
+            if int(tile) in dict(getattr(tile_delta, "upserts", {}) or {})
+        ),
         pyqtgraph_items_created=pyqtgraph_created_without_update,
         cpu_windowed_tiles=rgb_window_tiles,
         resident_rebinds=resident,

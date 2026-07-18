@@ -245,6 +245,55 @@ def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
     assert result["presentation"]["cap_exemptions"] == []
 
 
+@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+def test_gpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path, backend):
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["delta_qualities"] = [
+        [0, "preview", 2],
+        [1, "preview", 2],
+        [2, "preview", 2],
+    ]
+    trace[1]["delta_priority_ranks"] = [[0, 0], [1, 1], [2, 2]]
+    trace[1]["committed_upserts"] = [0, 1, 2]
+    trace[1]["cold_upsert_tiles"] = [2]
+    trace[1]["uploads"] = 1
+    trace[1]["upload_bytes"] = 4096
+    trace[1]["vertex_uploads"] = 0
+
+    result = _evaluate(trace, timeline, interval, backend=backend)
+
+    assert result["presentation"]["bounded"]
+    assert result["presentation"]["cap_exemptions"] == [
+        {
+            "sequence": 10,
+            "size": 3,
+            "limit": 1,
+            "cold_size": 1,
+            "reason": f"{backend}_resident_rebind_with_bounded_cold_upserts",
+        }
+    ]
+
+
+def test_gpu_mixed_resident_rebind_rejects_oversized_cold_subset(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["delta_qualities"] = [
+        [0, "preview", 2],
+        [1, "preview", 2],
+        [2, "preview", 2],
+    ]
+    trace[1]["delta_priority_ranks"] = [[0, 0], [1, 1], [2, 2]]
+    trace[1]["committed_upserts"] = [0, 1, 2]
+    trace[1]["cold_upsert_tiles"] = [1, 2]
+    trace[1]["uploads"] = 2
+    trace[1]["upload_bytes"] = 8192
+    trace[1]["vertex_uploads"] = 0
+
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
+
+    assert not result["presentation"]["bounded"]
+    assert result["presentation"]["cap_exemptions"] == []
+
+
 def test_demand_freshness_oracle_fault_injection(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     for sample in timeline[1:]:

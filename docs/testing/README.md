@@ -76,10 +76,11 @@ every applicable journey/backend cell:
    `no_phase2_submit_during_coverage`);
 2. at least the journey/backend's declared `N` payload commits, every commit
    within its emitted cap. Shader-backend atomic successors are unbounded;
-   GPU shader-backend commits that explicitly report zero texture uploads,
-   zero upload bytes, and zero vertex uploads may also exceed the item cap
-   because they only rebind already-resident pixels. Any pixel-upload commit
-   remains capped. Rank correlation compares each commit's local presentation ordinal
+   GPU shader-backend commits may atomically include already-resident rebinds
+   beyond the item cap when their explicitly reported cold-upsert tile subset
+   remains within it (the legacy all-zero texture/upload-byte/vertex-upload
+   proof is also accepted). Uploaded tiles never bypass the cold cap. Rank
+   correlation compares each commit's local presentation ordinal
    with the immutable current-camera ranks captured at its final backend
    boundary when two or more ranked payloads make ordering observable. Each
    batch is normalized to its first rank so batching offsets and later-ready
