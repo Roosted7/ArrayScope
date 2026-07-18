@@ -37,9 +37,40 @@ GRID1 = GRID0 // 2
 CANVAS = (768, 768)
 _MODES = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 
+# One wgpu device for the whole module (mirrors the live view's shared
+# device).  Each parameterless WgpuPlaneExecutor would otherwise request its
+# own adapter+device; with several executors per file across parallel xdist
+# workers that concurrency made wgpu-native abort inside
+# request_adapter_sync (full-suite worker crash, 2026-07-18).
+_DEVICE = None
+
+
+def _shared_device():
+    global _DEVICE
+    if _DEVICE is None:
+        from wgpu.backends.wgpu_native.extras import set_instance_extras
+
+        try:
+            # Vulkan-only instance: the GL backend's EGL re-init is fatal
+            # under Wayland (gate-B Tier 0).  Harmless if already set.
+            set_instance_extras(backends=["Vulkan"])
+        except RuntimeError:
+            pass
+        adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
+        _DEVICE = adapter.request_device_sync()
+    return _DEVICE
+
 
 def _adapter_available() -> bool:
     try:
+        from wgpu.backends.wgpu_native.extras import set_instance_extras
+
+        try:
+            # Vulkan-only instance BEFORE the first adapter request (the
+            # GL backend's EGL re-init is fatal in workers with GL state).
+            set_instance_extras(backends=["Vulkan"])
+        except RuntimeError:
+            pass  # instance already exists
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
     except Exception:
@@ -68,7 +99,9 @@ class Scene:
         self.plane = _plane()
         p = self.plane
         self.plane_l1 = (p[0::2, 0::2] + p[1::2, 0::2] + p[0::2, 1::2] + p[1::2, 1::2]) / 4.0
-        self.executor = WgpuPlaneExecutor((PLANE, PLANE), max_lod=1, target_size=CANVAS)
+        self.executor = WgpuPlaneExecutor(
+            (PLANE, PLANE), max_lod=1, target_size=CANVAS, device=_shared_device()
+        )
         self.doc, self.op = "doc-1", "op-identity"
 
         commands = [
@@ -382,7 +415,9 @@ class MultiScene:
 
     def __init__(self):
         self.planes = {doc: _scalar_plane(i + 1) for i, doc in enumerate("ABC")}
-        self.executor = WgpuPlaneExecutor(target_size=SP_CANVAS, pool_layers=16)
+        self.executor = WgpuPlaneExecutor(
+            target_size=SP_CANVAS, pool_layers=16, device=_shared_device()
+        )
         commands = [BindContentPlanes(tuple(_scalar_plane_binding(doc) for doc in "ABC"))]
         for doc in "ABC":
             commands.extend(_ensure_scalar_plane(doc, self.planes[doc]))
@@ -490,7 +525,9 @@ def test_tile_plane_index_outside_bound_planes_is_loud(multi_scene):
 
 def test_plane_rebind_keeps_warm_residency_zero_upload():
     planes = {doc: _scalar_plane(10 + i) for i, doc in enumerate("AB")}
-    executor = WgpuPlaneExecutor(target_size=SP_CANVAS, pool_layers=16)
+    executor = WgpuPlaneExecutor(
+            target_size=SP_CANVAS, pool_layers=16, device=_shared_device()
+        )
     tiles = _montage_tiles((0,))
 
     def commit(doc, generation):
@@ -524,7 +561,7 @@ def test_rgb8_pool_bypasses_levels_and_lut():
     rng = np.random.default_rng(7)
     rgb = rng.integers(0, 256, size=(PAGE, PAGE, 3), dtype=np.uint8)
     executor = WgpuPlaneExecutor(
-        target_size=(PAGE, PAGE), pool_layers={"rgb8": 4}
+        target_size=(PAGE, PAGE), pool_layers={"rgb8": 4}, device=_shared_device()
     )
     key = plane_chunk_key("doc-rgb", "op-live", 0, 0, 0, dtype="uint8", representation=RGB8)
     lut = rng.integers(0, 256, size=(256, 4), dtype=np.uint8).tobytes()
@@ -558,7 +595,9 @@ def test_rgb8_pool_bypasses_levels_and_lut():
 
 def test_per_pool_eviction_respects_budget_and_pins():
     executor = WgpuPlaneExecutor(
-        target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2, "complex_rg32f": 1}
+        target_size=(PAGE, PAGE),
+        pool_layers={"scalar_r32f": 2, "complex_rg32f": 1},
+        device=_shared_device(),
     )
     page = np.zeros((PAGE, PAGE), np.float32)
     complex_key = plane_chunk_key("doc-c", "op-live", 0, 0, 0)
@@ -609,7 +648,7 @@ def test_per_pool_eviction_respects_budget_and_pins():
 
 def test_unbudgeted_pool_rejects_residency_loudly():
     executor = WgpuPlaneExecutor(
-        target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2}
+        target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2}, device=_shared_device()
     )
     with pytest.raises(RuntimeError, match="no layer budget"):
         executor.submit(

@@ -20,7 +20,16 @@ from tests.display.test_imageview2d import _present_tiled, _view_class
 def _wgpu_adapter_available() -> bool:
     try:
         import wgpu
+        from wgpu.backends.wgpu_native.extras import set_instance_extras
 
+        try:
+            # Vulkan-only instance BEFORE the first adapter request: letting
+            # the probe create an all-backends instance makes GL adapter
+            # enumeration re-init EGL, which SIGABRTs in workers that hold
+            # live vispy GL state (gate-B Tier 0; full-suite crash 2026-07-18).
+            set_instance_extras(backends=["Vulkan"])
+        except RuntimeError:
+            pass  # instance already exists
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
     except Exception:
