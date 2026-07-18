@@ -869,6 +869,7 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ("arrayscope/kernel/qt_bridge.py", "QtKernelBridge.__init__", "QTimer", "anti-hang fallback"): 1,
             ("arrayscope/sync/bus.py", "SyncBus._schedule_retry", "QTimer", "anti-hang fallback"): 1,
             ("arrayscope/sync/controller.py", "WindowSyncController.schedule_publish", "QTimer", "UI cosmetic"): 1,
+            ("arrayscope/tools/g6_histogram_benchmark.py", "_HeartbeatProbe.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_EventLoopProbe.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_VisualTimelineProbe.__init__", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/tools/profile_montage_workflow.py", "_PresentationContinuityProbe.__init__", "QTimer", "UI cosmetic"): 1,
