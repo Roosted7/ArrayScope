@@ -96,7 +96,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
-<<<<<<< HEAD
 - 2026-07-18 — **G6(d) live GPU LOD generation on wgpu:**
   [`GenerateLodPages`](../arrayscope/gpu/command_protocol.py) runs one
   disjoint-subresource 2×2 component-mean pass per parent, recursively builds a
@@ -107,8 +106,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   (never magnitude), and bound planes isolate reducer families. Default-ring
   oracles: [`test_wgpu_command_protocol.py`](../tests/gpu/test_wgpu_command_protocol.py)
   and [`test_wgpu_imageview2d.py`](../tests/display/test_wgpu_imageview2d.py).
-||||||| parent of 15fad3d7 (Measure G6b exact histogram collapse and keep phasing)
-=======
 - 2026-07-18 — **G6(b) rough→refined collapse rejected by measurement:**
   timestamped resident-page evidence on the real T2 dataset, offscreen and in a
   real Wayland window, found the native-L0 candidate heartbeat-safe but absent
@@ -116,7 +113,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   tiles and 2.3× at 272. The existing quality machinery and phase-2 refinement stay
   unchanged; benchmark artifacts:
   `tests/artifacts/g6b-histogram-collapse-2026-07-18/`.
->>>>>>> 15fad3d7 (Measure G6b exact histogram collapse and keep phasing)
 - 2026-07-18 — **wgpu live backend COMPLETE (row 3 slices a–c):** executor
   grown to multi-plane sessions + per-representation pools (`d675d57a`);
   live viewer commits every payload shape — scalar/complex/RGB8/windowable-
