@@ -64,6 +64,7 @@ from arrayscope.gpu.page_table import PageSlot, PageTable
 PAGE = 256
 
 _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
+_SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
 
 #: Shader-side representation flags (PlaneInfo.rep / histogram layer entries).
 _REP_INDEX = {SCALAR_R32F: 0, COMPLEX_RG32F: 1, RGB8: 2}
@@ -118,9 +119,13 @@ def plane_chunk_key(
 _RENDER_WGSL = """
 struct Mapping {
     mode: u32,
-    _pad: u32,
+    scale: u32,
     level_lo: f32,
     level_hi: f32,
+    symlog_constant: f32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 };
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
 struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
@@ -182,6 +187,18 @@ fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
     return Resolved(-1, vec2<i32>(0, 0));
 }
 
+fn apply_scale(value: f32) -> f32 {
+    switch mapping.scale {
+        case 0u: { return value; }
+        case 1u: { return log(max(value, 0.0)) / log(10.0); }
+        default: {
+            return sign(value) * log(
+                1.0 + abs(value) / pow(10.0, mapping.symlog_constant)
+            ) / log(10.0);
+        }
+    }
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let p = planes[in.plane];
@@ -212,6 +229,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             default: { x = v.y; }
         }
     }
+    x = apply_scale(x);
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
     // Nearest-entry LUT indexing, mirroring the CPU display reference.
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
@@ -391,7 +409,7 @@ class WgpuPlaneExecutor:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self._mapping_buf = d.create_buffer(
-            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+            size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         self._lut_tex = d.create_texture(
             size=(256, 1, 1),
@@ -440,7 +458,7 @@ class WgpuPlaneExecutor:
             bind = self.device.create_bind_group(
                 layout=pipe.get_bind_group_layout(0),
                 entries=[
-                    {"binding": 0, "resource": {"buffer": self._mapping_buf, "offset": 0, "size": 16}},
+                    {"binding": 0, "resource": {"buffer": self._mapping_buf, "offset": 0, "size": 32}},
                     {"binding": 1, "resource": {"buffer": self._table_buf, "offset": 0, "size": self._table_buf.size}},
                     {"binding": 2, "resource": {"buffer": self._lod_info_buf, "offset": 0, "size": self._lod_info_buf.size}},
                     {"binding": 3, "resource": {"buffer": self._planes_buf, "offset": 0, "size": self._planes_buf.size}},
@@ -477,11 +495,15 @@ class WgpuPlaneExecutor:
             self._mapping_buf,
             0,
             struct.pack(
-                "2I2f",
+                "2I3f3I",
                 _MODE_INDEX[self._mapping.mode],
-                0,
+                _SCALE_INDEX[self._mapping.scale],
                 self._mapping.level_lo,
                 self._mapping.level_hi,
+                self._mapping.symlog_constant,
+                0,
+                0,
+                0,
             ),
         )
 

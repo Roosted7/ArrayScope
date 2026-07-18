@@ -19,6 +19,11 @@ def test_display_mapping_rejects_unknown_mode():
         DisplayMapping(mode="sqrt")
 
 
+def test_display_mapping_rejects_unknown_scale():
+    with pytest.raises(ValueError, match="unknown mapping scale"):
+        DisplayMapping(scale="sqrt")
+
+
 def test_display_mapping_rejects_empty_levels_window():
     with pytest.raises(ValueError, match="non-empty"):
         DisplayMapping(mode="magnitude", level_lo=1.0, level_hi=1.0)

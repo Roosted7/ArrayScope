@@ -37,6 +37,10 @@ from arrayscope.gpu.keys import REPRESENTATIONS, DataChunkKey
 #: ``"real"`` (imaginary plane is zero by construction).
 MAPPING_MODES = ("magnitude", "phase", "real", "imag")
 
+#: Display-scale formulas applied after component extraction and before
+#: levels normalization.
+MAPPING_SCALES = ("linear", "log", "symlog")
+
 
 #: Size of a display LUT: 256 RGBA8 entries.
 LUT_BYTES = 256 * 4
@@ -44,7 +48,7 @@ LUT_BYTES = 256 * 4
 
 @dataclass(frozen=True)
 class DisplayMapping:
-    """Shader-on-read display state: complex component + levels + LUT.
+    """Shader-on-read display state: component + scale + levels + LUT.
 
     ``lut`` is the resolved 256-entry RGBA8 table (raw bytes) — the protocol
     carries the table itself, never a colormap *name*, so backends need no
@@ -57,14 +61,21 @@ class DisplayMapping:
     level_lo: float = 0.0
     level_hi: float = 1.0
     lut: bytes | None = None
+    scale: str = "linear"
+    symlog_constant: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
             raise ValueError(
                 f"unknown mapping mode {self.mode!r}; expected one of {MAPPING_MODES}"
             )
+        if self.scale not in MAPPING_SCALES:
+            raise ValueError(
+                f"unknown mapping scale {self.scale!r}; expected one of {MAPPING_SCALES}"
+            )
         object.__setattr__(self, "level_lo", float(self.level_lo))
         object.__setattr__(self, "level_hi", float(self.level_hi))
+        object.__setattr__(self, "symlog_constant", float(self.symlog_constant))
         if not self.level_hi > self.level_lo:
             raise ValueError(
                 f"levels window must be non-empty, got [{self.level_lo}, {self.level_hi}]"

@@ -425,7 +425,7 @@ class WgpuImageView2D(ImageViewShell):
                 source_mapping = common_shader_mapping(
                     getattr(payload, "shader_mapping", None) for payload in payloads.values()
                 )
-            representation, mode = self._wgpu_commit_plan(
+            representation, mode, scale, symlog_constant = self._wgpu_commit_plan(
                 payloads, source_mapping, rgb_already_windowed
             )
             layout = tile_layout_map(geometry, frame_plan=frame_plan)
@@ -537,7 +537,12 @@ class WgpuImageView2D(ImageViewShell):
 
             lut = self._wgpu_resolve_lut_bytes(source_mapping)
             self._wgpu_mapping_state = DisplayMapping(
-                mode=mode, level_lo=level_lo, level_hi=level_hi, lut=lut
+                mode=mode,
+                level_lo=level_lo,
+                level_hi=level_hi,
+                lut=lut,
+                scale=scale,
+                symlog_constant=symlog_constant,
             )
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
@@ -634,7 +639,7 @@ class WgpuImageView2D(ImageViewShell):
             self._finish_upload_timing()
 
     def _wgpu_commit_plan(self, payloads, source_mapping, rgb_already_windowed):
-        """Validate one commit; return ``(representation, mapping mode)``.
+        """Validate one commit; return representation and mapping uniforms.
 
         Everything outside the committed scope raises ``NotImplementedError``
         loudly instead of guessing (montage of N scalar tiles; montage of
@@ -654,17 +659,18 @@ class WgpuImageView2D(ImageViewShell):
             getattr(source_mapping, "display_mode", None), "value", None
         )
         scale = getattr(getattr(source_mapping, "scale", None), "value", None)
-        if scale not in (None, ShaderScale.LINEAR.value):
-            raise NotImplementedError(
-                f"wgpu backend supports linear shader scale only; got {scale!r}"
-            )
+        if scale is None:
+            scale = ShaderScale.LINEAR.value
+        symlog_constant = float(
+            getattr(source_mapping, "symlog_constant", 0.0) or 0.0
+        )
         if representation == SCALAR_R32F:
             if display_mode not in (None, ShaderDisplayMode.SCALAR.value):
                 raise NotImplementedError(
                     "wgpu backend renders scalar payloads with scalar display "
                     f"mode only; got {display_mode!r}"
                 )
-            return representation, "real"
+            return representation, "real", scale, symlog_constant
         if representation == COMPLEX_RG32F:
             if len(payloads) != 1:
                 raise NotImplementedError(
@@ -696,7 +702,12 @@ class WgpuImageView2D(ImageViewShell):
                     "wgpu backend renders phase-color for phase components only "
                     f"(magnitude-modulated phase color is unsupported); got {component!r}"
                 )
-            return representation, _WGPU_COMPONENT_MODES[component]
+            return (
+                representation,
+                _WGPU_COMPONENT_MODES[component],
+                scale,
+                symlog_constant,
+            )
         # RGB8: display-ready bytes only — the executor pool bypasses
         # levels/LUT, which is honest solely for already-windowed content.
         if not rgb_already_windowed:
@@ -717,7 +728,7 @@ class WgpuImageView2D(ImageViewShell):
                     f"wgpu RGB tile {tile} payload does not fit rgb8 cleanly "
                     f"(need uint8 (h, w, 3|4), got {texture.dtype} {texture.shape})"
                 )
-        return representation, "real"
+        return representation, "real", scale, symlog_constant
 
     def _wgpu_payload_texture(self, payload, representation) -> np.ndarray:
         texture = payload.texture_data if payload.texture_data is not None else payload.image
@@ -945,6 +956,8 @@ class WgpuImageView2D(ImageViewShell):
             level_lo=level_lo,
             level_hi=level_hi,
             lut=self._wgpu_mapping_state.lut,
+            scale=self._wgpu_mapping_state.scale,
+            symlog_constant=self._wgpu_mapping_state.symlog_constant,
         )
         start = perf_counter()
         report = self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
@@ -974,6 +987,8 @@ class WgpuImageView2D(ImageViewShell):
             level_lo=self._wgpu_mapping_state.level_lo,
             level_hi=self._wgpu_mapping_state.level_hi,
             lut=_resample_lut_to_rgba256(lut),
+            scale=self._wgpu_mapping_state.scale,
+            symlog_constant=self._wgpu_mapping_state.symlog_constant,
         )
         if self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))

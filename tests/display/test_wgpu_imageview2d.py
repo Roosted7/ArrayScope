@@ -380,6 +380,60 @@ def test_complex_phase_color_uses_phase_lut(qt_app):
         view.close()
 
 
+def test_log_and_symlog_scale_switch_is_zero_upload(qt_app):
+    from arrayscope.display.shader_mapping import ShaderMapping, ShaderScale
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.full((16, 24), 100.0, dtype=np.float32)
+        geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
+
+        def payload(scale, *, symlog_constant=0.0):
+            return {
+                0: _payload(
+                    0,
+                    image,
+                    source_id=("wgpu-scale", 1),
+                    shader_mapping=ShaderMapping(
+                        scale=scale, symlog_constant=symlog_constant
+                    ),
+                )
+            }
+
+        report = _commit(
+            view,
+            geometry,
+            payload(ShaderScale.LOG),
+            levels=(0.0, 4.0),
+        )
+        assert set(report.presented_tiles) == {0}
+        assert report.texture_uploads == 1
+        assert view._wgpu_mapping_state.scale == "log"
+        view.getView().setRange(xRange=(0, 24), yRange=(0, 16), padding=0)
+        _rerender_internal(view)
+        # log10(100) = 2 in [0, 4] -> nearest grayscale entry 128.
+        assert np.allclose(_center_pixel(view), (128, 128, 128, 255), atol=2)
+
+        report = _commit(
+            view,
+            geometry,
+            payload(ShaderScale.SYMLOG, symlog_constant=1.0),
+            levels=(0.0, 2.0),
+        )
+        assert set(report.presented_tiles) == {0}
+        assert report.texture_uploads == 0
+        assert view._wgpu_mapping_state.scale == "symlog"
+        assert view._wgpu_mapping_state.symlog_constant == pytest.approx(1.0)
+        _rerender_internal(view)
+        # symlog(100, C=1) = log10(11), mapped through [0, 2].
+        expected = round(np.log10(11.0) / 2.0 * 255.0)
+        assert np.allclose(
+            _center_pixel(view), (*([expected] * 3), 255), atol=2
+        )
+    finally:
+        view.close()
+
+
 def test_rgb_display_ready_tile_renders_raw_bytes(qt_app):
     view = _shown_view(qt_app)
     try:
@@ -400,11 +454,6 @@ def test_rgb_display_ready_tile_renders_raw_bytes(qt_app):
 
 
 def test_out_of_scope_commits_reject_loudly(qt_app):
-    from arrayscope.display.shader_mapping import (
-        ShaderMapping,
-        ShaderScale,
-    )
-
     view = _shown_view(qt_app)
     try:
         scalar = np.zeros((20, 30), np.float32)
@@ -458,21 +507,6 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
                 },
                 levels=(0.0, 1.0),
                 rgb_already_windowed=True,
-            )
-        # Non-linear shader scale has no executor path yet.
-        with pytest.raises(NotImplementedError, match="linear"):
-            _commit(
-                view,
-                geometry1,
-                {
-                    0: _payload(
-                        0,
-                        scalar,
-                        source_id=("rej", 6),
-                        shader_mapping=ShaderMapping(scale=ShaderScale.LOG),
-                    )
-                },
-                levels=(0.0, 1.0),
             )
         # The rejected commits must not have left a half-presented surface.
         assert view.montageDisplayMode() == "none"

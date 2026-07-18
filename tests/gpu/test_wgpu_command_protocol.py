@@ -82,6 +82,27 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _scale_reference(values, mapping):
+    """Independent CPU mirror of the WGSL display-scale formulas."""
+
+    values = np.asarray(values, dtype=np.float32)
+    if mapping.scale == "linear":
+        return values
+    if mapping.scale == "log":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.log10(np.maximum(values, 0.0)).astype(np.float32, copy=False)
+    if mapping.scale == "symlog":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return (
+                np.sign(values)
+                * np.log10(
+                    1.0
+                    + np.abs(values) / (10.0 ** float(mapping.symlog_constant))
+                )
+            ).astype(np.float32, copy=False)
+    raise AssertionError(f"unhandled scale {mapping.scale!r}")
+
+
 def _plane() -> np.ndarray:
     rng = np.random.default_rng(42)
     re = rng.standard_normal((PLANE, PLANE), dtype=np.float32)
@@ -189,6 +210,7 @@ class Scene:
                 2: lambda: re,
                 3: lambda: im,
             }[mode]()
+            x = _scale_reference(x, mapping)
             g = np.clip((x.astype(np.float64) - lo) / (hi - lo), 0, 1)
             idx = np.clip(np.round(g * 255).astype(np.int32), 0, 255)
             if mapping.lut is not None:
@@ -232,6 +254,21 @@ def test_mode_and_levels_switches_render_exactly_with_zero_uploads(scene):
         DisplayMapping("magnitude", 0.5, 4.0),
     ):
         report = scene.render(FULL, mapping)
+        assert report.uploads == 0
+        scene.assert_matches(scene.executor.read_target(), scene.reference(FULL, mapping))
+
+
+def test_log_and_symlog_switches_render_exactly_with_zero_uploads(scene):
+    for generation, mapping in enumerate(
+        (
+            DisplayMapping("magnitude", -2.0, 1.0, scale="log"),
+            DisplayMapping(
+                "real", -1.0, 1.0, scale="symlog", symlog_constant=0.5
+            ),
+        ),
+        start=6,
+    ):
+        report = scene.render(FULL, mapping, generation=generation)
         assert report.uploads == 0
         scene.assert_matches(scene.executor.read_target(), scene.reference(FULL, mapping))
 
@@ -378,7 +415,7 @@ def _scalar_reference(tiles_with_data, mapping, canvas=SP_CANVAS):
         sxg, syg = np.meshgrid(sx, sy)
         cx = np.clip(sxg, 0, data.shape[1] - 1).astype(np.int64)
         cy = np.clip(syg, 0, data.shape[0] - 1).astype(np.int64)
-        value = data[cy, cx].astype(np.float64)
+        value = _scale_reference(data[cy, cx], mapping).astype(np.float64)
         g = np.clip((value - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0, 1)
         idx = np.clip(np.round(g * 255).astype(np.int32), 0, 255)
         out[y0 : y0 + th, x0 : x0 + tw] = table[idx]
