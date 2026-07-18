@@ -214,3 +214,36 @@ def test_live_profile_from_axis_sets_exactly_one_profile_axis(qtbot):
         assert win.profile_dock.isVisible()
     finally:
         win.close()
+
+
+def test_add_operation_leaves_dimension_strip_columns_consistent(qtbot):
+    """Ring 1 (offscreen) — the stale-reflow failure reproduces offscreen.
+
+    Regression (2026-07-18 dogfood report): adding an operation transiently
+    narrowed the strip's parent (dock/canvas-preserve churn), wrapping the
+    chips to an extra row; the strip stayed wrapped after the width came back
+    until the next data-driven relayout (e.g. scrolling an index).
+    """
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(8 * 9 * 10 * 11, dtype=float).reshape(8, 9, 10, 11))
+    qtbot.addWidget(win)
+    try:
+        win.resize(1000, 900)
+        win.show()
+        _process_events(qtbot, count=30)
+        # The user closed the operation dock earlier in the session, so adding
+        # an operation must not reopen it — and must not leave the strip laid
+        # out for a width it no longer has.
+        win._operation_dock_user_visible = False
+        strip = win.dimension_strip
+        assert strip._columns == strip._column_count()
+
+        win.request_operation("centered_fft", 0)
+        _process_events(qtbot, count=40)
+
+        assert not win.operation_dock.isVisible()
+        assert strip._columns == strip._column_count()
+    finally:
+        win.close()

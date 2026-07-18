@@ -71,6 +71,46 @@ def test_dimension_strip_wraps_to_allocated_width(qt_app):
     strip.close()
 
 
+def test_dimension_strip_reflows_when_parent_rewidens(qt_app):
+    """Ring 1 (offscreen) — the stale-reflow failure reproduces offscreen.
+
+    Regression (2026-07-18 dogfood report): a transient narrowing (dock
+    transition, scrollbar flicker) wrapped the chips to a second row; when the
+    parent re-widened, the strip stayed wrapped until the next data-driven
+    update because its own maximumWidth (set for the wrapped layout)
+    suppressed resize events and no parent-resize watcher was installed.
+    """
+    from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    parent = QtWidgets.QWidget()
+    layout = QtWidgets.QHBoxLayout(parent)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addStretch(1)
+    strip = DimensionStrip(4)
+    layout.addWidget(strip)
+    layout.addStretch(1)
+    parent.resize(1200, 120)
+    parent.show()
+    qt_app.processEvents()
+    strip._run_scheduled_relayout()
+    assert strip._columns == 4
+    assert strip.row_metrics()[0] == 1
+
+    parent.resize(600, 120)
+    qt_app.processEvents()
+    assert strip._columns < 4
+    assert strip.row_metrics()[0] > 1
+
+    parent.resize(1200, 120)
+    qt_app.processEvents()
+
+    assert strip._columns == 4
+    assert strip.row_metrics()[0] == 1
+    parent.close()
+
+
 def test_chip_labels_show_axis_metadata_when_available(qt_app):
     from arrayscope.core.axis_info import AxisInfo, default_axes
     from arrayscope.core.view_state import ViewState

@@ -6,6 +6,11 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- The dimension-chip strip no longer stays wrapped onto an extra row after a
+  transient narrowing (e.g. dock/layout churn while adding an operation): the
+  strip now watches its parent's resize stream and reflows as soon as the
+  width comes back, instead of waiting for the next data-driven relayout such
+  as scrolling an index.
 - Montage display-LOD level swaps no longer trigger redundant semantic work:
   the histogram stream and window/level statistics are keyed by semantic
   tile content, so zooming across LOD thresholds performs zero histogram

@@ -78,8 +78,6 @@ class DimensionChip(QtWidgets.QFrame):
 
     def __init__(self, axis, parent=None):
         super().__init__(parent)
-        if parent is not None:
-            parent.installEventFilter(self)
         self.axis = int(axis)
         self.setObjectName(f"DimensionChip{axis}")
         self.setProperty("dimensionChip", True)
@@ -294,6 +292,7 @@ class DimensionStrip(QtWidgets.QWidget):
         self._profile_available = True
         self._badge_width_count = None
         self._chip_geometry = None
+        self._watched_parent = None
         layout = QtWidgets.QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(4)
@@ -368,8 +367,32 @@ class DimensionStrip(QtWidgets.QWidget):
         if columns != self._columns:
             self._schedule_relayout()
 
+    def event(self, event):
+        if event.type() == QtCore.QEvent.Type.ParentChange:
+            self._watch_parent_resizes()
+        return super().event(event)
+
+    def _watch_parent_resizes(self):
+        # Column invalidation must come from the parent's resize stream: the
+        # strip's own maximumWidth is sized to the current grid, so after a
+        # transient narrowing (dock transition, scrollbar flicker) the parent
+        # can re-widen without the strip receiving a resizeEvent, leaving the
+        # chips wrapped onto an extra row that no longer matches the width.
+        parent = self.parentWidget()
+        previous = getattr(self, "_watched_parent", None)
+        if parent is previous:
+            return
+        if previous is not None:
+            try:
+                previous.removeEventFilter(self)
+            except RuntimeError:
+                pass
+        self._watched_parent = parent
+        if parent is not None:
+            parent.installEventFilter(self)
+
     def eventFilter(self, obj, event):
-        if obj is self.parent() and event.type() == QtCore.QEvent.Type.Resize:
+        if obj is getattr(self, "_watched_parent", None) and event.type() == QtCore.QEvent.Type.Resize:
             self._schedule_relayout()
         return super().eventFilter(obj, event)
 
