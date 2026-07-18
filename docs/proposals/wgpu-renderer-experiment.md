@@ -133,7 +133,7 @@ invocations. Native-Wayland screen presentation: see critical-review §1.
 NVIDIA A2000 enumerates as a second Vulkan adapter (multi-adapter
 selection stays a Tier-1 measurement, not a default).
 
-### Tier 1 — Qt presentation + overlay gate (the decisive tier)
+### Tier 1 — Qt presentation + overlay gate (the decisive tier)  ✅ PASSED 2026-07-18 (bitmap; screen = priced escape hatch)
 
 Question: on real Wayland, inside a dock-and-tab layout with ArrayScope's
 overlay reality (tile-truth boxes, ROI handles, coach marks) composited
@@ -162,7 +162,7 @@ Record the honest comparison: if only bitmap passes composition, its
 readback price at 4K decides whether "screen + GPU overlays" becomes the
 committed follow-up work.
 
-### Tier 2 — minimal virtual tensor (the architecture proof)
+### Tier 2 — minimal virtual tensor (the architecture proof)  ✅ PASSED 2026-07-18
 
 RG32F page pool as one 2D-array texture; integer page table in a storage
 buffer; per-tile instance buffer; ONE instanced draw; WGSL shader doing
@@ -178,7 +178,7 @@ Verify, with upload counters as the oracle (gate-A parity):
 
 Exit gate: all four oracles green + a frame is one encoder with ≤3 passes.
 
-### Tier 3 — compute (the G6 unblocking tier)
+### Tier 3 — compute (the G6 unblocking tier)  ✅ PASSED 2026-07-18
 
 64-bin workgroup-local histogram over resident pages → merge pass → small
 readback (gate-A parity: exact count, two passes); LOD reduction
@@ -190,7 +190,7 @@ Exit gate: exact histogram in ≤2 passes inside a frame budget slice;
 reduction writes a usable coarser page; G6 shader work can be written
 against this shape via the backend-neutral command protocol.
 
-### Tier 4 — upload paths (the gate-3 tier)
+### Tier 4 — upload paths (the gate-3 tier)  ✅ PASSED 2026-07-18
 
 Compare on the iGPU (UMA), per batch shape (many 256² pages vs contiguous
 batches vs whole plane): `queue.write_texture`, staging-buffer ring →
@@ -223,6 +223,56 @@ shader source; a Datoviz/Vulkan executor stays constructible.
 
 ## Evidence log
 
+All artifacts under `tests/artifacts/wgpu-gate-b/`; the gate-level verdict
+table lives in [tensor-engine-endpoint](tensor-engine-endpoint.md)
+(§ Experiment B findings). All measurements: Intel TGL iGPU, experiment
+scale, single machine.
+
 - 2026-07-18 Tier 0: adapter feature/limit probe + native-Wayland screen
-  presentation PASS (`tests/artifacts/wgpu-gate-b/probe-native-wayland.json`,
+  presentation PASS (`probe-native-wayland.json`,
   `experiments/wgpu_gate_b/probe_native_wayland.py`).
+- 2026-07-18 Tier 1 (`run_gate_b.py`; `tier1-*.json` + PNGs):
+  - **bitmap / native Wayland**: steady GUI-thread frame 3.96 ms p50 /
+    8.74 ms p95 / one-time 447 ms first-frame pipeline compile at
+    1300×650; dock float/re-dock 4.1–4.2 ms; tab restore 4.5 ms; resize
+    4.1 ms; two windows 6.3 ms; overlays present in the composited
+    backing store (5,482 magenta px — for bitmap the backing store IS the
+    composited buffer). Offscreen readback price: 7.0 ms @ 3.4 MB
+    (1300×650), 26.0 ms @ 33.2 MB (4K) → bitmap is comfortable at real
+    size, fails 60 Hz at 4K.
+  - **screen-native / native Wayland**: full journey 425/425 acquires
+    SuccessOptimal, zero surface errors incl. tab hide/restore and a
+    second surface on the same device; encode+submit 0.6 ms, present
+    0.08 ms; Fifo acquire blocks ~15 ms (vsync pacing — Mailbox or
+    off-thread acquire before production use).
+  - **screen-stock / xcb**: journey clean; overlay discrepancy
+    reproduced (backing store 5,416 px vs 0 on-screen — the Datoviz
+    gate-A signature). Compositor-side capture is impossible on this
+    GNOME Wayland session (shell screenshot API denies external callers;
+    X grabs return black under rootless XWayland), so the Wayland
+    overlay-stacking claim rests on wl_subsurface protocol semantics
+    plus this xcb evidence and Datoviz gate A's captures.
+- 2026-07-18 Tier 2+3 (`virtual_tensor.py`; `tier23-virtual-tensor.json`):
+  ALL oracles green — physical truth vs CPU mirror (max diff 1/255);
+  mode/levels/window-shift/montage-scroll all ZERO uploads; ancestor
+  fallback black fraction 0.0; refill exactly 1 upload then exact; GPU
+  LOD reduction max err 4.8e-7 (in-pool storage write via disjoint
+  subresource views); two-pass histogram EXACT 1,048,576 samples, max
+  bin diff 0, 3.2 ms wall incl. readback; one render pass per frame.
+- 2026-07-18 Tier 4 (`upload_bench.py`; `tier4-upload-bench.json`):
+  16-page burst 2.6 ms mean / 8 MB fenced (3.2 GB/s); per-page-fenced
+  anti-pattern 0.14 GB/s; whole-plane 2.4 GB/s; staging-ring re-map wait
+  0.11 ms p50 after fence; `on_submitted_work_done` token round-trip
+  0.19 ms; mappable-primary direct write 12.4 GB/s (2× CPU memcpy
+  baseline) — the UMA zero-copy candidate. Completion contract: PROVEN.
+
+## Verdict (2026-07-18)
+
+**GO.** All four tiers passed their exit gates; the three renderer gates
+pass at experiment scale (gate table in tensor-engine-endpoint.md). G6
+shader work is unblocked against wgpu through the backend-neutral command
+protocol. Production adoption still requires: journey-matrix integration;
+a bitmap-vs-screen policy (bitmap default at real sizes; screen + GPU
+overlays when readback cost bites, e.g. 4K); the standing caveats above
+(winId contract pinning, rendercanvas import hazard, Mailbox acquire,
+NVIDIA/discrete measurements).

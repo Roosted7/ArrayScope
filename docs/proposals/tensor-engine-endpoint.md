@@ -289,3 +289,32 @@ upstream**: tile identity, N-D chunking, LOD families/reducers, complex
 mappings, page policy, coverage frontier, histogram refinement, prefetch,
 compression, operation planning — Datoviz is the execution substrate,
 ArrayScope stays the tensor engine.
+
+### Experiment B findings (2026-07-18) — wgpu-py: renderer gates pass at experiment scale
+
+**Verdict: GO — write G6 shader work against wgpu via the backend-neutral
+command protocol.** All three renderer gates pass on real hardware (Intel
+TGL iGPU, native Wayland, PySide6 6.11 / wgpu-py 0.31.1 / rendercanvas
+2.7.0, pure-Python wheels, no compiled code). Full tiered plan, critical
+review of the scout research, and per-tier evidence:
+[wgpu-renderer-experiment](wgpu-renderer-experiment.md); machine-readable
+artifacts in `tests/artifacts/wgpu-gate-b/`.
+
+| Gate | Result | Evidence / reason |
+|---|---|---|
+| Qt GPU composition | **PASS (bitmap), escape hatch proven (screen)** | Bitmap keeps ALL Qt overlays working by construction; measured end-to-end GUI-thread frame ~4.0 ms p50 / 8.7 ms p95 at 1300×650 through docks/tabs/resize/two windows on native Wayland. Screen mode: native-Wayland presentation from pure Python (winId-as-wl_surface + QNativeInterface wl_display + Vulkan-only instance), 425/425 acquires clean across the journey — but Qt overlays do not composite above the native child (same signature as Datoviz gate A), so screen requires the GPU-overlay migration. 4K bitmap readback is 26 ms — bitmap fails 60 Hz at 4K; that is the boundary where screen+GPU-overlays becomes the committed follow-up. |
+| custom shaders + compute | **PASS** | Tier-2 virtual tensor (page pool array texture + page-table storage buffer + ONE instanced draw, WGSL): mode/levels switches, +1px window shift, and montage scroll all ZERO uploads and pixel-exact vs the CPU reference (tolerance 2/255, max diff 1); absent page renders the coarser resident ancestor (black fraction 0.0), refill = exactly 1 upload then exact. Tier-3: GPU 2×2-mean LOD reduction into the pool (storage-texture write, disjoint subresource views) max err 4.8e-7; two-pass 64-bin workgroup-local histogram EXACT — 1,048,576/1,048,576 samples, max bin diff 0, 3.2 ms wall including readback. |
+| upload + lifetime | **PASS** | 16-page RG32F burst (8 MB) via `write_texture`: 2.6 ms mean fenced (3.2 GB/s) — inside a frame slice; per-page-fenced is the recorded anti-pattern (0.14 GB/s). `on_submitted_work_done` completion token round-trips in 0.19 ms after a burst — the recycling contract Datoviz lacked. `mappable-primary-buffers` direct writes: 12.4 GB/s (2× the CPU memcpy baseline) — the UMA zero-copy page-pool candidate. |
+| never-black / physical truth | **PASS for the executed slices** | Every Tier-2 oracle compares the rendered framebuffer against the CPU mirror; ancestor-fallback black fraction 0.0; upload counter is the residency oracle throughout. |
+
+**Standing caveats (recorded, not blocking):** `winId == wl_surface*` is
+undocumented Qt behavior — pin per Qt minor and propose the surface hook
+upstream to rendercanvas (which also force-sets `QT_QPA_PLATFORM=xcb` at
+import time on Wayland — an integration hazard ArrayScope must guard);
+screen-mode Fifo acquire blocks the GUI thread ~15 ms/frame (Mailbox or
+off-thread acquire before any production screen use); compositor-side
+overlay capture is impossible on this GNOME Wayland session, so the
+Wayland overlay-stacking claim rests on protocol semantics plus the xcb
+evidence; all numbers are experiment-scale on the Intel iGPU (NVIDIA
+enumerates but was not driven); journey-matrix integration remains the
+production gate.
