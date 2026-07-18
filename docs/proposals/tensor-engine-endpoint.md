@@ -323,3 +323,22 @@ Wayland overlay-stacking claim rests on protocol semantics plus the xcb
 evidence; all numbers are experiment-scale on the Intel iGPU (NVIDIA
 enumerates but was not driven); journey-matrix integration remains the
 production gate.
+
+### Promotion evidence entry 1 (2026-07-19) — first full perf-bars comparison
+
+First complete vispy-vs-wgpu stage-ladder run on real data (real Wayland,
+Intel iGPU; artifacts `tests/artifacts/perf-bars-final-2026-07-18/`),
+enabled by the fill-throughput fix. Verdict: **wgpu trails VisPy on
+interactive composite throughput at roughly 0.5–0.7×** — deep-zoom fps
+37.4/19.1 (vispy scalar/fft) vs 24.3/13.3 (wgpu); erratic zoom-in
+27.4/8.0 vs 9.6/6.1; full-grid scroll+pause 11.2/8.8 vs 6.0/4.9; fast-
+scroll p95 event-loop gap 106–112 ms (vispy) vs 194–214 ms (wgpu). The
+gap exceeds the measured ~4–7 ms bitmap readback alone, so the deficit
+is not fully explained by the known presentation tax — profiling the
+per-frame path (full-canvas ondemand redraws, readback scheduling) is
+the first wgpu optimization target. Shared product red, both backends
+identically: `montage_zoompan_scalar` fails the 50 ms-callback/heartbeat/
+warm-input bars (vispy 146.5, wgpu 158.3) — row-1 material, not a
+backend delta. Promotion status: architecture goals met (zero-upload
+interactions, live compute, physical-truth acks, journey matrix green);
+interactive throughput parity NOT yet met — the ladder's next gate.
