@@ -189,6 +189,161 @@ def _center_pixel(view):
     return target[h // 2, w // 2]
 
 
+def _green_overlay_mask(target):
+    pixels = np.asarray(target, dtype=np.int16)
+    return (
+        (pixels[..., 1] > 150)
+        & (pixels[..., 1] > pixels[..., 0] + 45)
+        & (pixels[..., 1] > pixels[..., 2] + 45)
+    )
+
+
+def _orange_overlay_mask(target):
+    pixels = np.asarray(target, dtype=np.int16)
+    return (
+        (pixels[..., 0] > 150)
+        & (pixels[..., 0] > pixels[..., 1] + 45)
+        & (pixels[..., 2] < 120)
+    )
+
+
+def _mask_center(mask):
+    rows, columns = np.nonzero(mask)
+    assert len(rows), "expected physical pixels for this mask"
+    return (float(columns.mean()), float(rows.mean()))
+
+
+def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app):
+    """Thomas's 2026-07-18 dogfood report: both overlays were invisible.
+
+    The oracle reads the executor target, not the QWidget backing store, so a
+    QGraphics mirror cannot satisfy it (nor can a bookkeeping-only hook).
+    """
+
+    from arrayscope.core.roi import RoiKind
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.full((64, 64), 0.02, dtype=np.float32)
+        geometry = _montage_geometry(image.shape, 1, 1, loaded=1)
+        _commit(
+            view,
+            geometry,
+            {0: _payload(0, image, source_id="overlay-pixel-oracle")},
+            levels=(0.0, 1.0),
+        )
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        roi = view.createRoi(
+            RoiKind.RECTANGLE,
+            rect=(10.0, 12.0, 20.0, 18.0),
+            color=(40, 220, 80),
+        )
+        view.setProfileMarker(46.0, 42.0, visible=True)
+        _rerender_internal(view)
+
+        target = view._wgpu_executor.read_target()
+        assert np.count_nonzero(_green_overlay_mask(target)) > 100
+        assert np.count_nonzero(_orange_overlay_mask(target)) > 100
+
+        assert view.removeRoi(roi.id)
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        assert not np.any(_green_overlay_mask(target))
+        assert np.count_nonzero(_orange_overlay_mask(target)) > 100
+
+        view.hideProfileMarker()
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        assert not np.any(_orange_overlay_mask(target))
+    finally:
+        view.close()
+
+
+def test_world_overlay_and_tile_move_together_without_overlay_reupload(qt_app):
+    """A camera-only frame must rigidly move tiles and world overlays."""
+
+    from arrayscope.core.roi import RoiKind
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.zeros((64, 64), dtype=np.float32)
+        image[22:34, 24:38] = 1.0
+        geometry = _montage_geometry(image.shape, 1, 1, loaded=1)
+        _commit(
+            view,
+            geometry,
+            {0: _payload(0, image, source_id="overlay-camera-oracle")},
+            levels=(0.0, 1.0),
+        )
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        view.createRoi(
+            RoiKind.RECTANGLE,
+            rect=(24.0, 22.0, 14.0, 12.0),
+            color=(40, 220, 80),
+        )
+        _rerender_internal(view)
+        before = view._wgpu_executor.read_target()
+        tile_before = _mask_center(np.all(before[..., :3] > 180, axis=-1))
+        overlay_before = _mask_center(_green_overlay_mask(before))
+        overlay_writes = view._wgpu_executor.overlay_buffer_writes_total
+
+        view.getView().setRange(xRange=(4, 68), yRange=(0, 64), padding=0)
+        _rerender_internal(view)
+        after = view._wgpu_executor.read_target()
+        tile_after = _mask_center(np.all(after[..., :3] > 180, axis=-1))
+        overlay_after = _mask_center(_green_overlay_mask(after))
+
+        tile_shift = (tile_after[0] - tile_before[0], tile_after[1] - tile_before[1])
+        overlay_shift = (
+            overlay_after[0] - overlay_before[0],
+            overlay_after[1] - overlay_before[1],
+        )
+        assert tile_shift[0] < -20.0
+        assert tile_shift == pytest.approx(overlay_shift, abs=2.0)
+        assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
+    finally:
+        view.close()
+
+
+def test_loading_and_skipped_tile_geometry_is_in_executor_target(qt_app):
+    from arrayscope.display.overlays import MontageTileOverlay
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.full((32, 64), 0.02, dtype=np.float32)
+        geometry = _montage_geometry((32, 32), 2, 1, loaded=2)
+        _commit(
+            view,
+            geometry,
+            {
+                0: _payload(0, image[:, :32], source_id="loading-tile"),
+                1: _payload(1, image[:, 32:], source_id="skipped-tile"),
+            },
+            levels=(0.0, 1.0),
+        )
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 32), padding=0)
+        view.setMontageTileOverlays(
+            (
+                MontageTileOverlay(0, 0, 32, 32, "loading", "not rendered"),
+                MontageTileOverlay(32, 0, 32, 32, "skipped", "skipped"),
+            )
+        )
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        bright = np.all(target[..., :3] > 150, axis=-1)
+        midpoint = target.shape[1] // 2
+        assert np.count_nonzero(bright[:, :midpoint]) > 20
+        assert np.count_nonzero(bright[:, midpoint:]) > 20
+
+        view.clearMontageTileOverlays()
+        _rerender_internal(view)
+        assert not np.any(
+            np.all(view._wgpu_executor.read_target()[..., :3] > 150, axis=-1)
+        )
+    finally:
+        view.close()
+
+
 def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
     view = _shown_view(qt_app)
     try:
