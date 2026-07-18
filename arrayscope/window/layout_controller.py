@@ -130,6 +130,13 @@ class WindowLayoutManager:
         changed = False
         if hasattr(win, "operation_dock"):
             has_steps = bool(win.document.steps)
+            # Adding an operation auto-opens the dock, EXCEPT when the user
+            # closed it earlier in this session (user_visible False): that
+            # choice is deliberately remembered until the next launch
+            # (_reset_session_dock_visibility_preferences), not overridden by
+            # later operations. Pinned by
+            # test_operations_dock_does_not_auto_reopen_after_user_close and
+            # test_operation_dock_manual_close_is_not_persistent_across_launches.
             user_visible = getattr(win, "_operation_dock_user_visible", None)
             if has_steps and user_visible is not False:
                 changed = changed or not win.operation_dock.isVisible()
