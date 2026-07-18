@@ -139,6 +139,50 @@ def test_preview_first_pass_accepts_compatible_exact_overlap():
     assert session.first_pass_pixels_presented()
 
 
+def test_retained_physical_fallback_seeds_first_pass_without_settling_exact_target():
+    """A complete backend floor is coverage evidence, never exact acknowledgement."""
+
+    session = _session()
+    payloads = {}
+    for tile in session.plan.tiles:
+        tile_number = int(tile.montage_index)
+        image = np.ones((2, 2), dtype=np.float32)
+        payload = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=int(tile.source_index),
+            image=image,
+            histogram_data=image,
+            source_id=("tile", int(tile.source_index), "preview"),
+            quality="preview",
+            lod=LodInfo(level=2, factor=4, source_shape=image.shape, texture_shape=image.shape),
+        )
+        payloads[tile_number] = payload
+        session.display_tile_payloads[tile_number] = payload
+        session.record_tile_payload(payload)
+        session.lifecycle.commit_emitted({tile_number: payload})
+        session.lifecycle.backend_ack({tile_number: payload})
+        session.lifecycle.acknowledge_presented(
+            tile_number,
+            tile_ack_identity(payload),
+            payload.quality,
+            payload.lod.level,
+        )
+
+    assert session.first_pass_quality is None
+    assert session.required_target_unsettled_tiles() == (0, 1, 2, 3)
+
+    assert session.observe_physically_presented_first_pass_quality(payloads)
+
+    assert session.first_pass_quality == "preview"
+    assert session.first_pass_pixels_presented()
+    assert session.required_target_unsettled_tiles() == (0, 1, 2, 3)
+    assert all(
+        (record := session.lifecycle.peek(tile_number)) is not None
+        and not record.target_settled
+        for tile_number in session.required_tile_numbers()
+    )
+
+
 def test_montage_render_session_retarget_changes_canonical_priority():
     session = _session()
     session.view_range = ((0.0, 12.0), (0.0, 4.0))

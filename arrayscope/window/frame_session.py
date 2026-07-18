@@ -821,6 +821,45 @@ class FrameSession:
             self.first_pass_quality = quality
         return self.first_pass_quality == quality
 
+    def observe_physically_presented_first_pass_quality(self, payloads) -> bool:
+        """Latch first-pass quality from one complete backend identity snapshot.
+
+        Index-window retargeting deliberately resets the first-pass evidence
+        generation while retaining compatible backend pixels.  Those payloads
+        do not pass through admission again, so admission-time observation
+        alone can leave ``first_pass_quality`` unset forever.  The backend
+        snapshot is the canonical crossing: every required tile must report
+        the identity of the current payload before its quality can seed the
+        coverage evidence pass.
+
+        This is coverage truth only.  A preview/fallback quality remains a
+        non-exact first pass and does not acknowledge or settle the exact tile
+        target.
+        """
+
+        if self.first_pass_quality is not None:
+            return True
+        current_payloads = dict(payloads or {})
+        backend_identities = dict(self.lifecycle.backend_presented_identities)
+        qualities: set[str] = set()
+        for tile_number in self.required_tile_numbers():
+            index = int(tile_number)
+            payload = current_payloads.get(index)
+            if (
+                payload is None
+                or backend_identities.get(index) != tile_ack_identity(payload)
+            ):
+                return False
+            quality = str(getattr(payload, "quality", "exact") or "exact")
+            if quality not in {"preview", "exact"}:
+                return False
+            qualities.add(quality)
+        if not qualities:
+            return False
+        return self.note_first_pass_quality(
+            "preview" if "preview" in qualities else "exact"
+        )
+
     def first_pass_accepts_quality(self, quality: str) -> bool:
         """Whether a current payload proves its slot for the latched pass.
 

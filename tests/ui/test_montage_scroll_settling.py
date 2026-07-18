@@ -26,6 +26,7 @@ from tests.ui.helpers import (
     make_backend_window,
     restore_default_backend,
     use_vispy_backend,
+    use_wgpu_backend,
 )
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
@@ -41,6 +42,17 @@ def _window_settled(win, indices) -> bool:
     if plan_sources != tuple(indices):
         return False
     return frame_session_settled(win)
+
+
+def _window_first_pixels_presented(win, indices) -> bool:
+    session = getattr(win.renderer, "_frame_session", None)
+    if session is None or session.plan is None:
+        return False
+    plan_sources = tuple(int(tile.source_index) for tile in session.plan.tiles)
+    return bool(
+        plan_sources == tuple(indices)
+        and session.required_first_pixels_presented()
+    )
 
 
 def _scroll_to(win, qtbot, indices) -> None:
@@ -93,6 +105,65 @@ def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
         assert session.required_target_unsettled_tiles() == ()
         # The watchdog must never have asserted: the kernel may not sit idle
         # while required tiles are unsettled (dossier exit gate).
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
+    """Offscreen ring-1 pin for the 2026-07-18 fallback-forever livelock.
+
+    A scroll back reuses a complete set of physically presented wgpu floor
+    payloads after ``retarget_index_window`` resets first-pass evidence.  Those
+    fallback pixels must remain visible, but they must neither acknowledge the
+    exact target nor consume its producer.  Before the fix the retained report
+    left ``first_pass_quality`` unset, so ``coverage_evidence_ready`` never
+    fired and all target tiles parked with an idle kernel.
+    """
+
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
+    data = np.zeros((336, 336, 28), dtype=np.float32)
+
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(1200, 900)
+    try:
+        win.show()
+        initial = tuple(range(0, 20))
+        state = win.view_state.with_montage_axis(
+            2,
+            columns=5,
+            indices=initial,
+            text="0:20",
+        )
+        win._set_view_state(state)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: _window_first_pixels_presented(win, initial),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        for indices in (tuple(range(6, 26)), tuple(range(0, 20))):
+            state = win.view_state.with_montage_axis(
+                2,
+                columns=5,
+                indices=indices,
+                text=f"{indices[0]}:{indices[-1] + 1}",
+            )
+            win._set_view_state(state)
+            win.update_image_view()
+            qtbot.waitUntil(
+                lambda indices=indices: _window_first_pixels_presented(win, indices),
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+
+        qtbot.waitUntil(
+            lambda: _window_settled(win, initial),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        session = win.renderer._frame_session
+        assert session.required_target_unsettled_tiles() == ()
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()

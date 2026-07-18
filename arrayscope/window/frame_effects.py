@@ -2237,6 +2237,7 @@ class FramePipelineEffects:
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
         acknowledged = session.acknowledge_tile_presentation(tile_delta, report, levels=committed_levels)
+        session.observe_physically_presented_first_pass_quality(active_payloads)
         phase_closed = False
         if atomic_successor:
             # A successor is complete only after the lifecycle accepts
