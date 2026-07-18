@@ -49,8 +49,11 @@ from arrayscope.gpu.command_protocol import (
     FrameReport,
     FrameSubmission,
     GenerateLodPages,
+    OverlayPrimitive,
     PresentGeneration,
+    SetOverlayCamera,
     SetDisplayMapping,
+    UpdateOverlayGeometry,
     UpdateTileInstances,
 )
 from arrayscope.gpu.keys import (
@@ -70,6 +73,7 @@ MAX_HISTOGRAM_BINS = 512
 
 _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 _SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
+_OVERLAY_KIND_INDEX = {"line": 0, "world_rect": 1, "handle_quad": 2}
 
 #: Shader-side representation flags (PlaneInfo.rep / histogram layer entries).
 _REP_INDEX = {
@@ -305,6 +309,80 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Nearest-entry LUT indexing, mirroring the CPU display reference.
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
     return textureLoad(lut, vec2<i32>(idx, 0), 0);
+}
+"""
+
+_OVERLAY_WGSL = """
+struct OverlayCamera {
+    scale: vec2<f32>,
+    offset: vec2<f32>,
+    target_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
+struct Overlay {
+    p0: vec2<f32>,
+    p1: vec2<f32>,
+    color: vec4<f32>,
+    anchor: vec2<f32>,
+    width: f32,
+    kind: u32,
+    flags: u32,
+    _pad0: u32,
+    _pad1: vec2<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: OverlayCamera;
+@group(0) @binding(1) var<storage, read> overlays: array<Overlay>;
+
+struct OverlayOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+fn world_to_ndc(point: vec2<f32>) -> vec2<f32> {
+    return point * camera.scale + camera.offset;
+}
+
+@vertex
+fn vs_overlay(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> OverlayOut {
+    var quad = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0));
+    let primitive = overlays[instance_index];
+    let q = quad[vertex_index];
+    var ndc: vec2<f32>;
+    if (primitive.kind == 0u) {
+        let a = world_to_ndc(primitive.p0);
+        let b = world_to_ndc(primitive.p1);
+        let delta_pixels = (b - a) * camera.target_size * 0.5;
+        let length_pixels = max(length(delta_pixels), 0.0001);
+        let normal_pixels = vec2<f32>(-delta_pixels.y, delta_pixels.x) / length_pixels;
+        let normal_ndc = normal_pixels * primitive.width / camera.target_size;
+        ndc = mix(a, b, q.x) + normal_ndc * (q.y * 2.0 - 1.0);
+    } else if (primitive.kind == 1u) {
+        ndc = world_to_ndc(mix(primitive.p0, primitive.p1, q));
+    } else {
+        let center = world_to_ndc(primitive.p0);
+        let pixel_offset = (q - vec2<f32>(0.5)) * primitive.width;
+        ndc = center + pixel_offset * vec2<f32>(2.0) / camera.target_size;
+    }
+    if ((primitive.flags & 1u) != 0u) {
+        let anchor_ndc = world_to_ndc(primitive.anchor);
+        if (any(anchor_ndc < vec2<f32>(-1.0)) || any(anchor_ndc > vec2<f32>(1.0))) {
+            ndc = vec2<f32>(3.0, 3.0);
+        }
+    }
+    var out: OverlayOut;
+    out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    out.color = primitive.color;
+    return out;
+}
+
+@fragment
+fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 """
 
@@ -747,6 +825,9 @@ class WgpuPlaneExecutor:
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
         self._uploads_total = 0
+        self._overlay_geometry: tuple[OverlayPrimitive, ...] = ()
+        self._overlay_camera = SetOverlayCamera((0.0, 0.0, 1.0, 1.0))
+        self._overlay_buffer_writes_total = 0
 
         d = self.device
         self._pools: dict[str, _Pool] = {}
@@ -793,6 +874,14 @@ class WgpuPlaneExecutor:
         self._mapping_buf = d.create_buffer(
             size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
+        self._overlay_cap = 256
+        self._overlay_buf = d.create_buffer(
+            size=64 * self._overlay_cap,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+        self._overlay_camera_buf = d.create_buffer(
+            size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
         self._lut_tex = d.create_texture(
             size=(256, 1, 1),
             format="rgba8unorm",
@@ -812,6 +901,9 @@ class WgpuPlaneExecutor:
         self._shader = d.create_shader_module(code=_RENDER_WGSL)
         self._pipelines: dict[str, object] = {}
         self._binds: dict[str, tuple[object, int]] = {}
+        self._overlay_shader = d.create_shader_module(code=_OVERLAY_WGSL)
+        self._overlay_pipelines: dict[str, object] = {}
+        self._overlay_binds: dict[str, object] = {}
         self._histo_mod = d.create_shader_module(code=_HISTO_WGSL)
         self._partial_pipe = d.create_compute_pipeline(
             layout="auto", compute={"module": self._histo_mod, "entry_point": "partial"}
@@ -872,6 +964,129 @@ class WgpuPlaneExecutor:
             )
             self._binds[fmt] = (bind, self._bind_epoch)
         return pipe, self._binds[fmt][0]
+
+    def _overlay_pipeline(self, fmt: str):
+        if fmt not in self._overlay_pipelines:
+            self._overlay_pipelines[fmt] = self.device.create_render_pipeline(
+                layout="auto",
+                vertex={"module": self._overlay_shader, "entry_point": "vs_overlay"},
+                primitive={"topology": "triangle-list"},
+                fragment={
+                    "module": self._overlay_shader,
+                    "entry_point": "fs_overlay",
+                    "targets": [
+                        {
+                            "format": fmt,
+                            "blend": {
+                                "color": {
+                                    "src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha",
+                                    "operation": "add",
+                                },
+                                "alpha": {
+                                    "src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha",
+                                    "operation": "add",
+                                },
+                            },
+                        }
+                    ],
+                },
+            )
+        pipe = self._overlay_pipelines[fmt]
+        bind = self._overlay_binds.get(fmt)
+        if bind is None:
+            bind = self.device.create_bind_group(
+                layout=pipe.get_bind_group_layout(0),
+                entries=[
+                    {
+                        "binding": 0,
+                        "resource": {
+                            "buffer": self._overlay_camera_buf,
+                            "offset": 0,
+                            "size": 32,
+                        },
+                    },
+                    {
+                        "binding": 1,
+                        "resource": {
+                            "buffer": self._overlay_buf,
+                            "offset": 0,
+                            "size": self._overlay_buf.size,
+                        },
+                    },
+                ],
+            )
+            self._overlay_binds[fmt] = bind
+        return pipe, bind
+
+    def _set_overlay_geometry(self, primitives) -> int:
+        primitives = tuple(primitives)
+        self._overlay_geometry = primitives
+        needed = max(1, len(primitives))
+        if needed > self._overlay_cap:
+            while self._overlay_cap < needed:
+                self._overlay_cap *= 2
+            self._overlay_buf = self.device.create_buffer(
+                size=64 * self._overlay_cap,
+                usage=self._wgpu.BufferUsage.STORAGE | self._wgpu.BufferUsage.COPY_DST,
+            )
+            self._overlay_binds.clear()
+        if not primitives:
+            return 1
+        packed = bytearray()
+        for primitive in primitives:
+            anchor = primitive.visibility_anchor or (0.0, 0.0)
+            packed.extend(
+                struct.pack(
+                    "11f3I2f",
+                    *primitive.p0,
+                    *primitive.p1,
+                    *primitive.rgba,
+                    *anchor,
+                    primitive.width,
+                    _OVERLAY_KIND_INDEX[primitive.kind],
+                    1 if primitive.visibility_anchor is not None else 0,
+                    0,
+                    0.0,
+                    0.0,
+                )
+            )
+        self.device.queue.write_buffer(self._overlay_buf, 0, packed)
+        return 1
+
+    def _write_overlay_camera(self, target_size: tuple[int, int]) -> None:
+        x0, y0, x1, y1 = self._overlay_camera.world_rect
+        span_x = x1 - x0
+        span_y = y1 - y0
+        if self._overlay_camera.x_inverted:
+            scale_x = -2.0 / span_x
+            offset_x = 1.0 + 2.0 * x0 / span_x
+        else:
+            scale_x = 2.0 / span_x
+            offset_x = -1.0 - 2.0 * x0 / span_x
+        if self._overlay_camera.y_inverted:
+            scale_y = -2.0 / span_y
+            offset_y = 1.0 + 2.0 * y0 / span_y
+        else:
+            scale_y = 2.0 / span_y
+            offset_y = -1.0 - 2.0 * y0 / span_y
+        width, height = (max(1, int(value)) for value in target_size)
+        self.device.queue.write_buffer(
+            self._overlay_camera_buf,
+            0,
+            struct.pack(
+                "8f",
+                scale_x,
+                scale_y,
+                offset_x,
+                offset_y,
+                float(width),
+                float(height),
+                0.0,
+                0.0,
+            ),
+        )
 
     def _write_lut(self, lut: bytes | None) -> None:
         if lut == self._current_lut:
@@ -1467,9 +1682,18 @@ class WgpuPlaneExecutor:
         counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
         return counts, (float(cmd.lo), float(cmd.hi))
 
-    def _present(self, target_view, fmt: str) -> None:
+    def _present(
+        self,
+        target_view,
+        fmt: str,
+        *,
+        target_size: tuple[int, int],
+    ) -> None:
         self._flush_table()
         pipe, bind = self._pipeline(fmt)
+        if self._overlay_geometry:
+            self._write_overlay_camera(target_size)
+            overlay_pipe, overlay_bind = self._overlay_pipeline(fmt)
         enc = self.device.create_command_encoder()
         rp = enc.begin_render_pass(
             color_attachments=[
@@ -1485,13 +1709,22 @@ class WgpuPlaneExecutor:
             rp.set_pipeline(pipe)
             rp.set_bind_group(0, bind)
             rp.draw(6, len(self._tiles))
+        if self._overlay_geometry:
+            rp.set_pipeline(overlay_pipe)
+            rp.set_bind_group(0, overlay_bind)
+            rp.draw(6, len(self._overlay_geometry))
         rp.end()
         self.device.queue.submit([enc.finish()])
 
     # ---- RendererExecutor ---------------------------------------------------
 
     def submit(
-        self, submission: FrameSubmission, *, present_to=None, present_format="rgba8unorm"
+        self,
+        submission: FrameSubmission,
+        *,
+        present_to=None,
+        present_format="rgba8unorm",
+        present_size: tuple[int, int] | None = None,
     ) -> FrameReport:
         """Execute one ordered command batch.
 
@@ -1513,6 +1746,12 @@ class WgpuPlaneExecutor:
                     generated_pages.append(cmd.destination_key)
             elif isinstance(cmd, UpdateTileInstances):
                 self._set_tiles(cmd.tiles)
+            elif isinstance(cmd, UpdateOverlayGeometry):
+                writes = self._set_overlay_geometry(cmd.primitives)
+                report.overlay_buffer_writes += writes
+                self._overlay_buffer_writes_total += writes
+            elif isinstance(cmd, SetOverlayCamera):
+                self._overlay_camera = cmd
             elif isinstance(cmd, SetDisplayMapping):
                 self._mapping = cmd.mapping
                 self._write_mapping()
@@ -1523,7 +1762,15 @@ class WgpuPlaneExecutor:
                 report.histogram_bounds[index] = bounds
             elif isinstance(cmd, PresentGeneration):
                 view = present_to if present_to is not None else self._target.create_view()
-                self._present(view, present_format if present_to is not None else "rgba8unorm")
+                self._present(
+                    view,
+                    present_format if present_to is not None else "rgba8unorm",
+                    target_size=(
+                        tuple(int(value) for value in present_size)
+                        if present_to is not None and present_size is not None
+                        else self._target_size
+                    ),
+                )
                 report.presented = True
             else:  # pragma: no cover - protocol/executor version skew guard
                 raise TypeError(f"unknown renderer command {type(cmd).__name__}")
@@ -1536,6 +1783,10 @@ class WgpuPlaneExecutor:
     @property
     def uploads_total(self) -> int:
         return self._uploads_total
+
+    @property
+    def overlay_buffer_writes_total(self) -> int:
+        return self._overlay_buffer_writes_total
 
     @property
     def bound_planes(self) -> tuple:

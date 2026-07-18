@@ -20,9 +20,12 @@ from arrayscope.gpu.command_protocol import (  # noqa: E402
     EvictChunk,
     FrameSubmission,
     GenerateLodPages,
+    OverlayPrimitive,
     PresentGeneration,
+    SetOverlayCamera,
     SetDisplayMapping,
     TileInstance,
+    UpdateOverlayGeometry,
     UpdateTileInstances,
 )
 from arrayscope.gpu.chunk_summary import (  # noqa: E402
@@ -86,6 +89,63 @@ def _adapter_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def test_overlay_geometry_is_one_semantic_buffer_and_camera_is_uniform_only():
+    executor = WgpuPlaneExecutor(
+        target_size=(128, 96),
+        pool_layers={SCALAR_R32F: 1},
+        device=_shared_device(),
+    )
+    geometry = UpdateOverlayGeometry(
+        (
+            OverlayPrimitive(
+                "world_rect",
+                (0.20, 0.25),
+                (0.40, 0.45),
+                (0.1, 0.9, 0.2, 1.0),
+            ),
+        )
+    )
+    first = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                geometry,
+                SetOverlayCamera((0.0, 0.0, 1.0, 1.0)),
+                PresentGeneration(1),
+            ),
+        )
+    )
+    before = executor.read_target()
+    before_rows, before_columns = np.nonzero(before[..., 1] > 150)
+    assert len(before_rows) > 100
+    assert first.overlay_buffer_writes == 1
+    assert executor.overlay_buffer_writes_total == 1
+
+    camera_only = executor.submit(
+        FrameSubmission(
+            2,
+            (
+                SetOverlayCamera((0.10, 0.0, 1.10, 1.0)),
+                PresentGeneration(2),
+            ),
+        )
+    )
+    after = executor.read_target()
+    _after_rows, after_columns = np.nonzero(after[..., 1] > 150)
+    assert float(after_columns.mean()) < float(before_columns.mean()) - 8.0
+    assert camera_only.overlay_buffer_writes == 0
+    assert executor.overlay_buffer_writes_total == 1
+
+    cleared = executor.submit(
+        FrameSubmission(
+            3,
+            (UpdateOverlayGeometry(()), PresentGeneration(3)),
+        )
+    )
+    assert cleared.overlay_buffer_writes == 1
+    assert not np.any(executor.read_target()[..., :3])
 
 
 pytestmark = pytest.mark.skipif(

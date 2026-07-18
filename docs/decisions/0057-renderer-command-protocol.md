@@ -5,7 +5,11 @@
   behind the protocol with physical page-table acknowledgements, the LOD
   ladder and montage sessions run on `BindContentPlanes`, and both G6 compute
   consumers (resident-page histograms and reducer-honest resident-page LOD
-  generation) are live. Promotion vs VisPy is queue row 3 (evidence-gated).
+  generation) are live. Native flat overlay geometry is also live through
+  `UpdateOverlayGeometry` + the uniform-only `SetOverlayCamera`: ROIs,
+  profile cursor geometry, and tile-status geometry draw after tiles in the
+  same pass. Overlay text still needs a glyph atlas and remains an explicit
+  queue-row-3 promotion gap. Promotion vs VisPy is evidence-gated there.
 - **Date:** 2026-07-18
 - **Branch note:** authored on `codex/wgpu-renderer-gate-b`; renumber on
   integration if a parallel branch claimed 0057.
@@ -31,9 +35,10 @@ second one.
 1. **`arrayscope/gpu/command_protocol.py` is the only seam renderers
    implement.** Frozen command dataclasses — `EnsureChunkResident`,
    `EvictChunk`, `GenerateLodPages`, `UpdateTileInstances`,
-   `SetDisplayMapping`, `DispatchHistogram`, `PresentGeneration` — carried by
-   an ordered `FrameSubmission`, answered by an auditable `FrameReport` (uploads,
-   evictions, histogram results, completion token). Commands speak ADR
+   `UpdateOverlayGeometry`, `SetOverlayCamera`, `SetDisplayMapping`,
+   `DispatchHistogram`, `PresentGeneration` — carried by an ordered
+   `FrameSubmission`, answered by an auditable `FrameReport` (uploads,
+   overlay-buffer writes, evictions, histogram results, completion token). Commands speak ADR
    0055/0056 identities (`DataChunkKey`, `ChunkLod`) and normalized
    geometry; nothing in the protocol may name WGSL, GL objects, Qt, Datoviz
    IDs, or one-texture-per-tile.
@@ -44,7 +49,8 @@ second one.
 3. **`arrayscope/gpu/wgpu_executor.py` is the first implementation**
    (`WgpuPlaneExecutor`): bound 2-D plane pyramids, format-honest page pools,
    `PageTable` bookkeeping, GPU-side ancestor-fallback lookup, one instanced
-   draw, two-pass G6 histogram, and in-pool component-mean LOD generation.
+   tile draw followed by one flat instanced overlay draw in the same render
+   pass, two-pass G6 histogram, and in-pool component-mean LOD generation.
    Reducer family is physical binding identity: recursive GPU generation is
    accepted only for `mean`; mode-specific `mean_abs`/`phase_vector` families
    remain on their honest CPU route. Default-ring tests

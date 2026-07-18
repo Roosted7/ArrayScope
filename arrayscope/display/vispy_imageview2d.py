@@ -33,6 +33,11 @@ from arrayscope.display.model.tiled_histogram_identity import (
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.overlay_hit_test import roi_handle_points
+from arrayscope.display.overlay_geometry import (
+    montage_overlay_rgba,
+    montage_overlay_status_segments,
+    roi_outline_points,
+)
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
@@ -1732,28 +1737,8 @@ def _vispy_color(color):
 
 
 def _vispy_roi_points(geometry):
-    kind = str(getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", "")))
-    if kind == "rectangle":
-        rect = getattr(geometry, "rect", None)
-        if rect is None:
-            return None
-        x, y, width, height = (float(value) for value in rect)
-        return np.asarray(
-            [
-                [x, y],
-                [x + width, y],
-                [x + width, y + height],
-                [x, y + height],
-                [x, y],
-            ],
-            dtype=np.float32,
-        )
-    points = tuple(getattr(geometry, "points", ()) or ())
-    if kind == "line" and len(points) >= 2:
-        return np.asarray(points[:2], dtype=np.float32)
-    if kind in {"polyline", "freehand_polygon"} and len(points) >= 2:
-        return np.asarray(points, dtype=np.float32)
-    return None
+    points = roi_outline_points(geometry)
+    return None if not points else np.asarray(points, dtype=np.float32)
 
 
 def _overlay_batch_key(overlays):
@@ -1826,21 +1811,7 @@ def _overlay_line_arrays(overlays):
 
 
 def _overlay_vispy_colors(overlay):
-    if str(getattr(overlay, "state", "")) == "skipped":
-        return (
-            _rgba255(130, 70, 20, 95),
-            _rgba255(210, 130, 60, 180),
-            _rgba255(245, 245, 245, 230),
-        )
-    return (
-        _rgba255(35, 35, 35, 95),
-        _rgba255(170, 170, 170, 140),
-        _rgba255(245, 245, 245, 230),
-    )
-
-
-def _rgba255(r, g, b, a):
-    return (float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0)
+    return montage_overlay_rgba(overlay)
 
 
 def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
@@ -1858,26 +1829,7 @@ def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
 
 
 def _overlay_status_mark_points(overlay):
-    x = float(getattr(overlay, "x", 0.0))
-    y = float(getattr(overlay, "y", 0.0))
-    width = float(max(1.0, getattr(overlay, "width", 1.0)))
-    height = float(max(1.0, getattr(overlay, "height", 1.0)))
-    tile_extent = min(width, height)
-    size = max(tile_extent * 0.08, min(tile_extent * 0.18, 0.35))
-    cx = x + width * 0.5
-    cy = y + height * 0.5
-    if str(getattr(overlay, "state", "")) == "skipped":
-        points = (
-            (cx - size * 0.5, cy - size * 0.5),
-            (cx + size * 0.5, cy + size * 0.5),
-            (cx - size * 0.5, cy + size * 0.5),
-            (cx + size * 0.5, cy - size * 0.5),
-        )
-    else:
-        points = (
-            (cx, cy),
-            (cx, cy - size * 0.32),
-            (cx, cy),
-            (cx + size * 0.28, cy),
-        )
-    return np.asarray(points, dtype=np.float32)
+    return np.asarray(
+        [point for segment in montage_overlay_status_segments(overlay) for point in segment],
+        dtype=np.float32,
+    )

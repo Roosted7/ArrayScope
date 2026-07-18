@@ -20,6 +20,8 @@ Command → engine-seam mapping (from the endpoint doc):
 ``EnsureChunkResident``   ``ChunkStore.ensure`` / pool chunk plan (G1/G3b-2)
 ``EvictChunk``            ``PageTable.unbind``
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
+``UpdateOverlayGeometry`` shell overlay state -> flat primitive buffer
+``SetOverlayCamera``      world-space overlay camera (uniform-only)
 ``SetDisplayMapping``     shader-mapping uniforms + physical-truth audit
 ``GenerateLodPages``      G6 resident-page reduction
 ``DispatchHistogram``     G6 histogram reduction
@@ -41,6 +43,11 @@ MAPPING_MODES = ("magnitude", "phase", "real", "imag")
 #: Display-scale formulas applied after component extraction and before
 #: levels normalization.
 MAPPING_SCALES = ("linear", "log", "symlog")
+
+#: Flat overlay primitive kinds.  These are draw instructions, never scene
+#: objects: one instance is one line segment, filled world rectangle, or
+#: screen-sized handle quad.
+OVERLAY_PRIMITIVE_KINDS = ("line", "world_rect", "handle_quad")
 
 
 #: Size of a display LUT: 256 RGBA8 entries.
@@ -175,6 +182,55 @@ class TileInstance:
         object.__setattr__(self, "plane_index", plane_index)
 
 
+@dataclass(frozen=True)
+class OverlayPrimitive:
+    """One backend-neutral, world-anchored flat overlay primitive.
+
+    ``line`` uses ``p0``/``p1`` as endpoints and ``width`` as pixel line
+    width. ``world_rect`` uses them as opposite world-space corners and is
+    filled. ``handle_quad`` is centered on ``p0`` with pixel side length
+    ``width``. ``visibility_anchor`` lets cursor geometry disappear when its
+    semantic anchor leaves the viewport without rebuilding the instance
+    buffer on camera changes.
+    """
+
+    kind: str
+    p0: tuple[float, float]
+    p1: tuple[float, float] = (0.0, 0.0)
+    rgba: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    width: float = 1.0
+    visibility_anchor: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind)
+        if kind not in OVERLAY_PRIMITIVE_KINDS:
+            raise ValueError(
+                f"unknown overlay primitive kind {kind!r}; "
+                f"expected one of {OVERLAY_PRIMITIVE_KINDS}"
+            )
+        p0 = tuple(float(value) for value in self.p0)
+        p1 = tuple(float(value) for value in self.p1)
+        rgba = tuple(float(value) for value in self.rgba)
+        if len(p0) != 2 or len(p1) != 2:
+            raise ValueError("overlay primitive points must be 2-D")
+        if len(rgba) != 4 or any(value < 0.0 or value > 1.0 for value in rgba):
+            raise ValueError("overlay primitive RGBA must contain four values in [0, 1]")
+        width = float(self.width)
+        if width <= 0.0:
+            raise ValueError("overlay primitive width must be positive")
+        anchor = self.visibility_anchor
+        if anchor is not None:
+            anchor = tuple(float(value) for value in anchor)
+            if len(anchor) != 2:
+                raise ValueError("overlay visibility anchor must be 2-D")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "p0", p0)
+        object.__setattr__(self, "p1", p1)
+        object.__setattr__(self, "rgba", rgba)
+        object.__setattr__(self, "width", width)
+        object.__setattr__(self, "visibility_anchor", anchor)
+
+
 # ---- commands ---------------------------------------------------------------
 
 
@@ -252,6 +308,47 @@ class UpdateTileInstances:
 
 
 @dataclass(frozen=True)
+class UpdateOverlayGeometry:
+    """Replace the executor's one flat overlay instance buffer.
+
+    Only semantic overlay changes emit this command. Camera changes use
+    :class:`SetOverlayCamera`, leaving this geometry physically untouched.
+    """
+
+    primitives: tuple[OverlayPrimitive, ...]
+
+    def __post_init__(self) -> None:
+        primitives = tuple(self.primitives)
+        if any(not isinstance(value, OverlayPrimitive) for value in primitives):
+            raise TypeError("overlay geometry must contain OverlayPrimitive instances")
+        object.__setattr__(self, "primitives", primitives)
+
+
+@dataclass(frozen=True)
+class SetOverlayCamera:
+    """Set the sorted world viewport and axis direction for overlay drawing.
+
+    This is uniform-only state. ``world_rect`` is ``(x0, y0, x1, y1)``;
+    target pixel size is supplied by the executor's presentation surface.
+    """
+
+    world_rect: tuple[float, float, float, float]
+    x_inverted: bool = False
+    y_inverted: bool = True
+
+    def __post_init__(self) -> None:
+        rect = tuple(float(value) for value in self.world_rect)
+        if len(rect) != 4:
+            raise ValueError("overlay camera world rect must contain four values")
+        x0, y0, x1, y1 = rect
+        if not x1 > x0 or not y1 > y0:
+            raise ValueError(f"overlay camera world rect must be non-empty, got {rect}")
+        object.__setattr__(self, "world_rect", rect)
+        object.__setattr__(self, "x_inverted", bool(self.x_inverted))
+        object.__setattr__(self, "y_inverted", bool(self.y_inverted))
+
+
+@dataclass(frozen=True)
 class SetDisplayMapping:
     mapping: DisplayMapping
 
@@ -306,6 +403,8 @@ Command = (
     | EvictChunk
     | GenerateLodPages
     | UpdateTileInstances
+    | UpdateOverlayGeometry
+    | SetOverlayCamera
     | SetDisplayMapping
     | DispatchHistogram
     | PresentGeneration
@@ -342,6 +441,7 @@ class FrameReport:
     generation: int
     presented: bool = False
     uploads: int = 0
+    overlay_buffer_writes: int = 0
     evictions: int = 0
     lod_pages_generated: tuple[DataChunkKey, ...] = ()
     histograms: dict[int, object] = field(default_factory=dict)

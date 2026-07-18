@@ -180,7 +180,10 @@ def _rerender_internal(view):
 
     from arrayscope.gpu.command_protocol import UpdateTileInstances
 
-    view._submit_wgpu((UpdateTileInstances(view._wgpu_camera_tiles()),))
+    camera = view._wgpu_camera_command()
+    view._submit_wgpu(
+        (camera, UpdateTileInstances(view._wgpu_camera_tiles(camera)))
+    )
 
 
 def _center_pixel(view):
@@ -213,7 +216,7 @@ def _mask_center(mask):
     return (float(columns.mean()), float(rows.mean()))
 
 
-def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app):
+def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app, qtbot):
     """Thomas's 2026-07-18 dogfood report: both overlays were invisible.
 
     The oracle reads the executor target, not the QWidget backing store, so a
@@ -221,6 +224,7 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app):
     """
 
     from arrayscope.core.roi import RoiKind
+    from arrayscope.display.interaction import InteractionTarget
 
     view = _shown_view(qt_app)
     try:
@@ -239,11 +243,60 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app):
             color=(40, 220, 80),
         )
         view.setProfileMarker(46.0, 42.0, visible=True)
+        draws_before = int(view._wgpu_draw_count)
+        view._wgpu_canvas_update_pending = False
+        view._request_wgpu_canvas_draw()
+        qtbot.waitUntil(lambda: int(view._wgpu_draw_count) > draws_before, timeout=2000)
+        assert view._wgpu_last_draw_error == ""
         _rerender_internal(view)
 
         target = view._wgpu_executor.read_target()
-        assert np.count_nonzero(_green_overlay_mask(target)) > 100
-        assert np.count_nonzero(_orange_overlay_mask(target)) > 100
+        base_green = np.count_nonzero(_green_overlay_mask(target))
+        base_orange = np.count_nonzero(_orange_overlay_mask(target))
+        assert base_green > 100
+        assert base_orange > 100
+
+        state = view.interaction_controller.set_hover(
+            InteractionTarget(
+                "roi",
+                object_id=roi.id,
+                part="handle",
+                geometry_kind="rectangle",
+                handle_index=0,
+            ),
+            point=(10.0, 12.0),
+        )
+        view.sync_interaction_state(state)
+        _rerender_internal(view)
+        assert np.count_nonzero(
+            _green_overlay_mask(view._wgpu_executor.read_target())
+        ) > base_green
+        view.highlightRoi(roi.id)
+        _rerender_internal(view)
+
+        state = view.interaction_controller.set_hover(
+            InteractionTarget("profile", part="center"),
+            point=(46.0, 42.0),
+        )
+        view.sync_interaction_state(state)
+        _rerender_internal(view)
+        assert np.count_nonzero(
+            _orange_overlay_mask(view._wgpu_executor.read_target())
+        ) > base_orange
+
+        overlay_writes = view._wgpu_executor.overlay_buffer_writes_total
+        view.getView().setRange(xRange=(64, 128), yRange=(0, 64), padding=0)
+        _rerender_internal(view)
+        assert not np.any(
+            _orange_overlay_mask(view._wgpu_executor.read_target())
+        )
+        assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        _rerender_internal(view)
+        assert np.count_nonzero(
+            _orange_overlay_mask(view._wgpu_executor.read_target())
+        ) > 100
+        assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
 
         assert view.removeRoi(roi.id)
         _rerender_internal(view)
@@ -300,6 +353,24 @@ def test_world_overlay_and_tile_move_together_without_overlay_reupload(qt_app):
         )
         assert tile_shift[0] < -20.0
         assert tile_shift == pytest.approx(overlay_shift, abs=2.0)
+        assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
+
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        view.getView().invertX(True)
+        view.getView().invertY(False)
+        _rerender_internal(view)
+        mirrored = view._wgpu_executor.read_target()
+        tile_mirrored = _mask_center(np.all(mirrored[..., :3] > 180, axis=-1))
+        overlay_mirrored = _mask_center(_green_overlay_mask(mirrored))
+        target_h, target_w = mirrored.shape[:2]
+        assert tile_mirrored == pytest.approx(
+            (target_w - 1 - tile_before[0], target_h - 1 - tile_before[1]),
+            abs=2.0,
+        )
+        assert overlay_mirrored == pytest.approx(
+            (target_w - 1 - overlay_before[0], target_h - 1 - overlay_before[1]),
+            abs=2.0,
+        )
         assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
     finally:
         view.close()

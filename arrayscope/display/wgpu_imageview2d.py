@@ -45,6 +45,12 @@ from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHis
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+from arrayscope.display.overlay_geometry import (
+    montage_overlay_rgba,
+    montage_overlay_status_segments,
+    roi_outline_points,
+)
+from arrayscope.display.overlay_hit_test import roi_handle_points
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
@@ -65,9 +71,12 @@ from arrayscope.gpu.command_protocol import (
     EvictChunk,
     FrameSubmission,
     GenerateLodPages,
+    OverlayPrimitive,
     PresentGeneration,
+    SetOverlayCamera,
     SetDisplayMapping,
     TileInstance,
+    UpdateOverlayGeometry,
     UpdateTileInstances,
 )
 from arrayscope.gpu.chunk_summary import chunk_key_frontier
@@ -107,6 +116,11 @@ _WGPU_REP_TEXEL_BYTES = {
     RGB8: 4,
     RGB_WINDOWED_RGBA32F: 16,
 }
+
+
+def _wgpu_rgba(color, alpha: float = 1.0):
+    rgb = tuple(int(value) for value in tuple(color or (255, 255, 0))[:3])
+    return tuple(float(value) / 255.0 for value in rgb) + (float(alpha),)
 
 # One process-wide wgpu device: views (and executor rebuilds on plane growth)
 # share it so the canvas context never needs reconfiguration and tests do not
@@ -242,6 +256,10 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_tile_presentation_draw_count = 0
         self._wgpu_canvas_update_request_count = 0
         self._wgpu_canvas_update_pending = False
+        self._wgpu_overlay_geometry: tuple[OverlayPrimitive, ...] = ()
+        self._wgpu_overlay_geometry_dirty = True
+        self._wgpu_montage_tile_overlays: tuple[object, ...] = ()
+        self._wgpu_roi_drawing_points: tuple[tuple[float, float], ...] = ()
         self._wgpu_display_shape: tuple[int, int] = (1, 1)
         self._wgpu_last_levels: tuple[float, float] = (0.0, 1.0)
         self._last_wgpu_structure_key = None
@@ -311,6 +329,7 @@ class WgpuImageView2D(ImageViewShell):
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
+        self._wgpu_overlay_geometry_dirty = True
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
         return self._wgpu_executor
@@ -361,7 +380,14 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_generation += 1
         return self._wgpu_generation
 
-    def _submit_wgpu(self, commands, *, present_to=None, present_format="rgba8unorm"):
+    def _submit_wgpu(
+        self,
+        commands,
+        *,
+        present_to=None,
+        present_format="rgba8unorm",
+        present_size=None,
+    ):
         executor = self._wgpu_executor
         if executor is None:
             return None
@@ -369,7 +395,12 @@ class WgpuImageView2D(ImageViewShell):
         submission = FrameSubmission(generation, (*commands, PresentGeneration(generation)))
         if present_to is None:
             return executor.submit(submission)
-        return executor.submit(submission, present_to=present_to, present_format=present_format)
+        return executor.submit(
+            submission,
+            present_to=present_to,
+            present_format=present_format,
+            present_size=present_size,
+        )
 
     # ---- draw-ack discipline -------------------------------------------------
 
@@ -431,17 +462,43 @@ class WgpuImageView2D(ImageViewShell):
             fmt = preferred.removesuffix("-srgb")
             self._wgpu_context.configure(device=executor.device, format=fmt)
             self._wgpu_context_format = fmt
-        tiles = self._wgpu_camera_tiles()
+        camera = self._wgpu_camera_command()
+        if camera is None:
+            return
+        texture = self._wgpu_context.get_current_texture()
         self._submit_wgpu(
             (
                 SetDisplayMapping(self._wgpu_mapping_state),
-                UpdateTileInstances(tiles),
+                camera,
+                UpdateTileInstances(self._wgpu_camera_tiles(camera)),
             ),
-            present_to=self._wgpu_context.get_current_texture().create_view(),
+            present_to=texture.create_view(),
             present_format=self._wgpu_context_format,
+            present_size=tuple(int(value) for value in self._wgpu_canvas.get_physical_size()),
         )
 
-    def _wgpu_camera_tiles(self) -> tuple[TileInstance, ...]:
+    def _wgpu_camera_command(self) -> SetOverlayCamera | None:
+        """One camera owner for both tile normalization and overlay uniform."""
+
+        try:
+            (x0, x1), (y0, y1) = self.view.viewRange()
+        except Exception:
+            return None
+        span_x = float(x1) - float(x0)
+        span_y = float(y1) - float(y0)
+        if not (span_x > 0.0 and span_y > 0.0):
+            return None
+        state = getattr(self.view, "state", {}) or {}
+        return SetOverlayCamera(
+            (float(x0), float(y0), float(x1), float(y1)),
+            x_inverted=bool(state.get("xInverted", False)),
+            y_inverted=bool(state.get("yInverted", True)),
+        )
+
+    def _wgpu_camera_tiles(
+        self,
+        camera: SetOverlayCamera | None = None,
+    ) -> tuple[TileInstance, ...]:
         """Map committed per-tile world rects through the ViewBox to dst space.
 
         The executor's dst space is normalized [0, 1] with y down.  The
@@ -455,22 +512,19 @@ class WgpuImageView2D(ImageViewShell):
         committed = self._wgpu_committed
         if not committed or self._montage_display_mode != "wgpu_tile_layer":
             return ()
-        try:
-            (x0, x1), (y0, y1) = self.view.viewRange()
-        except Exception:
+        camera = self._wgpu_camera_command() if camera is None else camera
+        if camera is None:
             return ()
+        x0, y0, x1, y1 = camera.world_rect
         span_x = float(x1) - float(x0)
         span_y = float(y1) - float(y0)
-        if not (span_x > 0.0 and span_y > 0.0):
-            return ()
-        state = getattr(self.view, "state", {}) or {}
         # Both inversion axes must mirror the ViewBox (the interaction
         # truth): ignoring xInverted drew unmirrored content under flipped
         # interaction coordinates, so drags/zooms landed on mirrored
         # features (dogfood bug 2026-07-18). The negative-src-extent trick
         # is the same one the y branch always used.
-        x_inverted = bool(state.get("xInverted", False))
-        y_inverted = bool(state.get("yInverted", True))
+        x_inverted = camera.x_inverted
+        y_inverted = camera.y_inverted
         instances = []
         for tile in sorted(committed["tiles"]):
             info = committed["tiles"][tile]
@@ -500,6 +554,171 @@ class WgpuImageView2D(ImageViewShell):
                 )
             )
         return tuple(instances)
+
+    # ---- native overlay translation ----------------------------------------
+
+    def _backend_roi_visual_upserted(self, selection) -> None:
+        self._sync_wgpu_overlay_geometry()
+
+    def _backend_roi_visual_removed(self, roi_id) -> None:
+        self._sync_wgpu_overlay_geometry()
+
+    def _backend_roi_emphasis_changed(self, roi_id: str) -> None:
+        self._sync_wgpu_overlay_geometry()
+
+    def _backend_profile_emphasis_changed(self) -> None:
+        self._sync_wgpu_overlay_geometry()
+
+    def _after_profile_marker_sync(self) -> None:
+        self._sync_wgpu_overlay_geometry()
+
+    def _set_roi_drawing_preview(self, tool, points) -> None:
+        if tool is not None:
+            self.sync_interaction_state(self.interaction_controller.clear_hover())
+        normalized = tuple(
+            (float(point[0]), float(point[1])) for point in tuple(points or ())
+        )
+        if tool is None or len(normalized) < 2:
+            normalized = ()
+        if normalized == self._wgpu_roi_drawing_points:
+            return
+        self._wgpu_roi_drawing_points = normalized
+        self._sync_wgpu_overlay_geometry()
+
+    def setMontageTileOverlays(self, overlays):
+        # Native geometry replaces the inherited QGraphics painter entirely.
+        super().clearMontageTileOverlays()
+        self._montage_tile_overlay_items = []
+        overlays = tuple(overlays or ())
+        if overlays == self._wgpu_montage_tile_overlays:
+            return
+        self._wgpu_montage_tile_overlays = overlays
+        self._sync_wgpu_overlay_geometry()
+
+    def clearMontageTileOverlays(self):
+        super().clearMontageTileOverlays()
+        self._montage_tile_overlay_items = []
+        if not self._wgpu_montage_tile_overlays:
+            return
+        self._wgpu_montage_tile_overlays = ()
+        self._sync_wgpu_overlay_geometry()
+
+    def montageTileOverlayCount(self) -> int:
+        return len(self._wgpu_montage_tile_overlays)
+
+    def _sync_wgpu_overlay_geometry(self) -> None:
+        """Rebuild the one flat buffer from shell state after semantic change."""
+
+        primitives = self._wgpu_overlay_primitives()
+        if primitives == self._wgpu_overlay_geometry:
+            return
+        self._wgpu_overlay_geometry = primitives
+        self._wgpu_overlay_geometry_dirty = True
+        if self._wgpu_executor is not None:
+            commands = [UpdateOverlayGeometry(primitives)]
+            camera = self._wgpu_camera_command()
+            if camera is not None:
+                commands.extend((camera, UpdateTileInstances(self._wgpu_camera_tiles(camera))))
+            report = self._submit_wgpu(tuple(commands))
+            if report is not None:
+                self._wgpu_overlay_geometry_dirty = False
+        self._request_wgpu_canvas_draw()
+
+    def _wgpu_overlay_primitives(self) -> tuple[OverlayPrimitive, ...]:
+        primitives: list[OverlayPrimitive] = []
+
+        # Lifecycle truth boxes and geometry-only status marks. Text is
+        # deliberately absent: glyph rendering is outside this MVP.
+        for overlay in self._wgpu_montage_tile_overlays:
+            x = float(getattr(overlay, "x", 0.0))
+            y = float(getattr(overlay, "y", 0.0))
+            width = float(max(1.0, getattr(overlay, "width", 1.0)))
+            height = float(max(1.0, getattr(overlay, "height", 1.0)))
+            p0 = (x, y)
+            p1 = (x + width, y + height)
+            fill, border, mark = montage_overlay_rgba(overlay)
+            primitives.append(OverlayPrimitive("world_rect", p0, p1, fill))
+            for start, end in (
+                ((p0[0], p0[1]), (p1[0], p0[1])),
+                ((p1[0], p0[1]), (p1[0], p1[1])),
+                ((p1[0], p1[1]), (p0[0], p1[1])),
+                ((p0[0], p1[1]), (p0[0], p0[1])),
+            ):
+                primitives.append(OverlayPrimitive("line", start, end, border, 1.25))
+            for start, end in montage_overlay_status_segments(overlay):
+                primitives.append(OverlayPrimitive("line", start, end, mark, 2.5))
+
+        for roi_id, (_item, selection) in self._roi_items.items():
+            points = roi_outline_points(selection.geometry)
+            if len(points) < 2:
+                continue
+            width, rgb = self._roi_visual_style(roi_id, selection.color)
+            color = _wgpu_rgba(rgb)
+            for start, end in zip(points, points[1:]):
+                primitives.append(OverlayPrimitive("line", start, end, color, width))
+            highlighted, interactive = self._roi_visual_emphasis(roi_id)
+            handle_size = 12.0 if highlighted or interactive else 10.0
+            handle_edge = _wgpu_rgba((255, 255, 255) if interactive else rgb)
+            for point in roi_handle_points(selection.geometry):
+                center = (float(point[0]), float(point[1]))
+                primitives.append(
+                    OverlayPrimitive("handle_quad", center, rgba=handle_edge, width=handle_size)
+                )
+                primitives.append(
+                    OverlayPrimitive(
+                        "handle_quad",
+                        center,
+                        rgba=(0.05, 0.05, 0.05, 0.75),
+                        width=max(2.0, handle_size - 3.0),
+                    )
+                )
+
+        if len(self._wgpu_roi_drawing_points) >= 2:
+            color = _wgpu_rgba((255, 190, 60))
+            for start, end in zip(
+                self._wgpu_roi_drawing_points,
+                self._wgpu_roi_drawing_points[1:],
+            ):
+                primitives.append(OverlayPrimitive("line", start, end, color, 2.5))
+
+        if self.image is not None and bool(
+            getattr(self, "_profile_marker_requested_visible", False)
+        ):
+            position = self.profileMarkerPosition()
+            if position is not None:
+                x, y = (float(position[0]), float(position[1]))
+                x0, y0, x1, y1 = self._current_profile_bounds()
+                anchor = (x, y)
+                hovered = self._interaction_visual_profile_part is not None
+                rgb = (255, 125, 55) if hovered else (230, 60, 30)
+                color = _wgpu_rgba(rgb)
+                line_width = 2.5 if hovered else 1.5
+                primitives.extend(
+                    (
+                        OverlayPrimitive(
+                            "line", (x, y0), (x, y1), color, line_width, anchor
+                        ),
+                        OverlayPrimitive(
+                            "line", (x0, y), (x1, y), color, line_width, anchor
+                        ),
+                        OverlayPrimitive(
+                            "handle_quad",
+                            anchor,
+                            rgba=(1.0, 1.0, 1.0, 1.0),
+                            width=12.0 if hovered else 9.0,
+                            visibility_anchor=anchor,
+                        ),
+                        OverlayPrimitive(
+                            "handle_quad",
+                            anchor,
+                            rgba=color,
+                            width=8.0 if hovered else 6.0,
+                            visibility_anchor=anchor,
+                        ),
+                    )
+                )
+
+        return tuple(primitives)
 
     # ---- tiled presentation --------------------------------------------------
 
@@ -768,12 +987,22 @@ class WgpuImageView2D(ImageViewShell):
             self._montage_display_mode = "wgpu_tile_layer"
 
             start = perf_counter()
+            camera = self._wgpu_camera_command()
+            overlay_geometry_dirty = bool(self._wgpu_overlay_geometry_dirty)
             submission_commands = [
                 BindContentPlanes(tuple(planes)),
                 *commands,
                 SetDisplayMapping(self._wgpu_mapping_state),
-                UpdateTileInstances(self._wgpu_camera_tiles()),
             ]
+            if overlay_geometry_dirty:
+                submission_commands.append(
+                    UpdateOverlayGeometry(self._wgpu_overlay_geometry)
+                )
+            if camera is not None:
+                submission_commands.append(camera)
+            submission_commands.append(
+                UpdateTileInstances(self._wgpu_camera_tiles(camera))
+            )
             histogram_indices = []
             for _tile, _source_index, _evidence_key, frontier_keys in histogram_specs:
                 histogram_indices.append(len(submission_commands))
@@ -789,6 +1018,8 @@ class WgpuImageView2D(ImageViewShell):
                     )
                 )
             report = self._submit_wgpu(tuple(submission_commands))
+            if overlay_geometry_dirty:
+                self._wgpu_overlay_geometry_dirty = False
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
             for command_index, spec in zip(histogram_indices, histogram_specs):
@@ -841,6 +1072,7 @@ class WgpuImageView2D(ImageViewShell):
             if viewport_key != self._last_wgpu_viewport_key:
                 self._apply_viewport_policy(display_shape, viewport_policy, image_origin=(0.0, 0.0))
                 self._last_wgpu_viewport_key = viewport_key
+            self._sync_wgpu_overlay_geometry()
 
             uploads = int(report.uploads)
             resident_pages = len(executor.page_table.resident_keys())
