@@ -58,6 +58,17 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `display_tile_key`) and parity + fallback are pinned in
   `tests/operations/test_cache.py`. The runtime guard and counter stay until
   a release cycle shows the counter at zero.
+- **PRE-EXISTING: PyQtGraph 272-tile raw fill stalls (offscreen-deterministic
+  repro!).** `profile_montage_workflow --backend pyqtgraph --stages
+  raw_full_tiled_montage` times out at 0/272 presented with the commit
+  backlog gate armed and no progress (gate_no_progress climbing,
+  visible_upserts=272, dirty=77), IDENTICALLY on main `9a5c6465` and the
+  wgpu branch, offscreen AND real Wayland (2026-07-18 probes; branch
+  probes both with and without `--session-fixture ""`, main probed with
+  it). This blocks the `--backend all` perf-bars run and is the likely
+  identity of the journey matrix's all-day pyqtgraph cold_fill red.
+  Offscreen determinism makes this the first cheaply-bisectable member of
+  the stall family. Hunt chip out.
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
 - **Upstream rendercanvas contributions** (from gate B): a native-Wayland
