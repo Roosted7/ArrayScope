@@ -276,3 +276,12 @@ a bitmap-vs-screen policy (bitmap default at real sizes; screen + GPU
 overlays when readback cost bites, e.g. 4K); the standing caveats above
 (winId contract pinning, rendercanvas import hazard, Mailbox acquire,
 NVIDIA/discrete measurements).
+
+**Follow-up landed 2026-07-18:** the rendercanvas import hazard is
+mitigated at the application level — `arrayscope.app.qt_platform` now
+applies a deliberate display-server policy (`qt_platform` setting:
+auto / wayland / xcb, View → Display Server on Wayland sessions) before
+QApplication creation, with a supervised wayland→xcb early-crash
+fallback in the CLI. Any later import that pokes `QT_QPA_PLATFORM` is
+inert because the platform is already chosen and the QApplication
+already exists.

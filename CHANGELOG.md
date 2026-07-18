@@ -24,6 +24,15 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
+- Linux Wayland sessions get a deliberate display-server choice:
+  **View → Display Server** (shown only when a Wayland session is
+  detected) with *Auto (Wayland, X11 on early crash)*, *Force Wayland*,
+  and *Force X11 (XWayland)*. In Auto, the `arrayscope` CLI starts on
+  native Wayland and relaunches itself once on X11 if the process dies
+  abnormally shortly after launch; forced modes export
+  `QT_QPA_PLATFORM` before the UI starts. An explicit `QT_QPA_PLATFORM`
+  in the environment always wins. Changes take effect on the next
+  launch.
 - Operation capabilities declare a conservative `lod_commuting` contract
   (pointwise value maps only; FFT/domain transforms never) that gates ADR
   0050's future reduce-before-ops display evaluation lane.

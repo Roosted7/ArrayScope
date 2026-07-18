@@ -135,6 +135,20 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
                         help='Write structured render/kernel/presentation events to JSONL')
 
     args = parser.parse_args()
+
+    # Display-server policy (Linux/Wayland only), after argparse so --help
+    # and usage errors exit here without spawning anything: in "auto" this
+    # relaunches the CLI as a supervised child on wayland and retries once
+    # on xcb if it dies abnormally within the grace period; in forced modes
+    # it just exports QT_QPA_PLATFORM before any QApplication exists.  The
+    # supervised child re-enters main() with identical argv and owns trace
+    # configuration and all real work itself.
+    from arrayscope.app.qt_platform import supervise_cli_if_needed
+
+    supervised_rc = supervise_cli_if_needed()
+    if supervised_rc is not None:
+        raise SystemExit(supervised_rc)
+
     if args.trace:
         configure_trace(args.trace)
         atexit.register(close_trace)

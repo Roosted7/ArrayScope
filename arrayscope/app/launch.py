@@ -26,11 +26,27 @@ except ImportError:
 
 def _prepare_qt_environment():
     """Apply conservative Qt workarounds before QApplication creation."""
+    # Deliberate display-server choice on Linux/Wayland (qt_platform setting).
+    # Must run before the QPA plugin is initialized; inert when a
+    # QApplication already exists, when QT_QPA_PLATFORM is already set
+    # (including by the CLI supervisor), or off Linux/Wayland.
+    if not _qt_application_exists():
+        from arrayscope.app.qt_platform import (
+            apply_qt_platform_env,
+            platform_choice_applies,
+            read_qt_platform_setting,
+            resolve_qt_platform,
+        )
+
+        if platform_choice_applies():
+            decision = resolve_qt_platform(read_qt_platform_setting(), cli=False)
+            apply_qt_platform_env(decision)
+
     # On XWayland/XCB, Qt's MIT-SHM path can fail with:
     #   qt.qpa.xcb: xcb_shm_create_segment() failed
     #   The X11 connection broke
     # This must be set before QApplication / the QPA plugin is initialized.
-    if os.environ.get("QT_QPA_PLATFORM") == "xcb":
+    if "xcb" in (os.environ.get("QT_QPA_PLATFORM") or ""):
         os.environ.setdefault("QT_X11_NO_MITSHM", "1")
 
 

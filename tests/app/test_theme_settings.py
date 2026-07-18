@@ -87,6 +87,7 @@ def test_settings_round_trip_defaults_and_values():
             "montage_quality_policy": "resident",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
+            "qt_platform": "xcb",
         }
     )
     values = settings_state.settings_to_mapping(settings)
@@ -101,6 +102,7 @@ def test_settings_round_trip_defaults_and_values():
         "montage_quality_policy": "resident",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
+        "qt_platform": "xcb",
     }
     defaults = settings_state.settings_from_mapping({})
     assert defaults.theme == theme.ThemeChoice.SYSTEM
@@ -110,6 +112,7 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
+    assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
     # ADR 0050: resident LOD is the montage default once validated on hardware.
     assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from arrayscope.app.qt_platform import QtPlatformChoice, normalize_qt_platform_choice
 from arrayscope.app.theme import ThemeChoice, normalize_theme_choice
 from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_profile_choice
 
@@ -52,6 +53,8 @@ class AppSettingsState:
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
+    # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
+    qt_platform: QtPlatformChoice = QtPlatformChoice.AUTO
 
 
 def settings_from_mapping(values) -> AppSettingsState:
@@ -66,6 +69,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         montage_quality_policy=normalize_montage_quality_policy_choice(values.get("montage_quality_policy")),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
+        qt_platform=normalize_qt_platform_choice(values.get("qt_platform")),
     )
 
 
@@ -80,6 +84,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "montage_quality_policy": settings.montage_quality_policy.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
+        "qt_platform": settings.qt_platform.value,
     }
 
 

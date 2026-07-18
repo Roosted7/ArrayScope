@@ -5,6 +5,7 @@ import dataclasses
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
+from arrayscope.app.qt_platform import QtPlatformChoice
 from arrayscope.app.settings_state import (
     AppSettingsState,
     FFTBackendChoice,
@@ -39,6 +40,7 @@ class WindowMenuMixin:
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
                 "montage_quality_policy": self._settings.value("montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value),
+                "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
             }
         )
 
@@ -107,6 +109,7 @@ class WindowMenuMixin:
             self._panel_resize_actions[behavior] = action
         self._panel_resize_menu = panel_resize_menu
         self._sync_panel_resize_actions()
+        self._setup_qt_platform_menu(view_menu)
         reset_layout_action = QtGui.QAction("Reset layout", self)
         set_action_icon(reset_layout_action, "reset_wrench")
         reset_layout_action.triggered.connect(self.reset_layout)
@@ -420,6 +423,74 @@ class WindowMenuMixin:
     def _updated_app_settings(self, **changes):
         current = getattr(self, "app_settings", AppSettingsState())
         return dataclasses.replace(current, **changes)
+
+    def _setup_qt_platform_menu(self, view_menu):
+        """Display-server choice (only offered on Linux Wayland sessions).
+
+        The platform is fixed at QApplication creation, so changes apply on
+        the next launch (arrayscope.app.qt_platform applies the policy and,
+        in "auto", supervises the wayland->xcb crash fallback).
+        """
+        from arrayscope.app.qt_platform import platform_choice_applies
+
+        if not platform_choice_applies():
+            return
+        platform_menu = QtWidgets.QMenu("Display Server", self)
+        platform_menu.setToolTipsVisible(True)
+        view_menu.addMenu(platform_menu)
+        self._qt_platform_menu = platform_menu
+        active = QtWidgets.QApplication.instance().platformName()
+        active_action = QtGui.QAction(f"Active now: {active}", self)
+        active_action.setEnabled(False)
+        platform_menu.addAction(active_action)
+        platform_menu.addSeparator()
+        self._qt_platform_actions = {}
+        self._qt_platform_action_group = QtGui.QActionGroup(self)
+        self._qt_platform_action_group.setExclusive(True)
+        for choice, label, tip in (
+            (
+                QtPlatformChoice.AUTO,
+                "Auto (Wayland, X11 on early crash)",
+                "Start on native Wayland; if the app crashes shortly after "
+                "launch, relaunch once on X11/XWayland.",
+            ),
+            (
+                QtPlatformChoice.WAYLAND,
+                "Force Wayland",
+                "Always use the native Wayland platform.",
+            ),
+            (
+                QtPlatformChoice.XCB,
+                "Force X11 (XWayland)",
+                "Always use the X11 platform through XWayland.",
+            ),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tip)
+            self._qt_platform_action_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_qt_platform_choice(choice)
+            )
+            platform_menu.addAction(action)
+            self._qt_platform_actions[choice] = action
+        self._sync_qt_platform_actions()
+
+    def _sync_qt_platform_actions(self):
+        for choice, action in getattr(self, "_qt_platform_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.qt_platform == choice)
+            action.blockSignals(False)
+
+    def _set_qt_platform_choice(self, choice):
+        if self.app_settings.qt_platform == choice:
+            self._sync_qt_platform_actions()
+            return
+        self.app_settings = self._updated_app_settings(qt_platform=choice)
+        self._save_app_settings()
+        self._sync_qt_platform_actions()
+        show_status_message(
+            self, "Display server changes take effect after restarting ArrayScope."
+        )
 
     def _retheme_presentation_surfaces(self):
         """Restyle pyqtgraph surfaces in every open ArrayScope window.

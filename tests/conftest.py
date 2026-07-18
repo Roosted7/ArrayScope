@@ -17,6 +17,13 @@ import pytest
 # for serial runs (``PYTEST_XDIST_WORKER`` is unset under ``-n 0`` / no xdist),
 # so single-process runs keep their normal paths — which is what CI relies on
 # when generating artifacts into the canonical ``tests/artifacts/``.
+# Default the whole suite to the offscreen Qt platform at import time (rings
+# 0-2).  Ring-3/4 real-display runs pass QT_QPA_PLATFORM explicitly, which
+# wins over this setdefault.  This also makes the Linux/Wayland display-server
+# policy (arrayscope.app.qt_platform) env-overridden and therefore inert in
+# tests — no test that calls the CLI main() may spawn a supervised child.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 _XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
 if _XDIST_WORKER:
     _worker_root = os.path.join(tempfile.gettempdir(), f"arrayscope-xdist-{_XDIST_WORKER}")
