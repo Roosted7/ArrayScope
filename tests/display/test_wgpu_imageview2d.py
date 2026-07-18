@@ -14,6 +14,8 @@ import pytest
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+
 from tests.display.test_imageview2d import _present_tiled, _view_class
 
 
@@ -270,7 +272,10 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app, qtbot):
         draws_before = int(view._wgpu_draw_count)
         view._wgpu_canvas_update_pending = False
         view._request_wgpu_canvas_draw()
-        qtbot.waitUntil(lambda: int(view._wgpu_draw_count) > draws_before, timeout=2000)
+        qtbot.waitUntil(
+            lambda: int(view._wgpu_draw_count) > draws_before,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
         assert view._wgpu_last_draw_error == ""
         _rerender_internal(view)
 
