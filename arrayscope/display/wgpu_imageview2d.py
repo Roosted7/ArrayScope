@@ -1,20 +1,26 @@
-"""Experimental wgpu-backed 2D image view (MVP: scalar 2-D non-montage).
+"""Experimental wgpu-backed 2D image view (montage scalar/RGB + complex).
 
-Queue row 3 slice (b): the smallest live rendering backend driven purely by
-the renderer command protocol (ADR 0057).  The widget mirrors the VisPy
-hybrid exactly at the shell seam — PyQtGraph keeps the histogram widget and
-the transparent interaction overlay; a rendercanvas ``QRenderWidget`` in
-bitmap present mode owns the pixels — but every pixel decision is expressed
-as :class:`~arrayscope.gpu.command_protocol.FrameSubmission` commands into
-one :class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
+Queue row 3 slice (b): a live rendering backend driven purely by the
+renderer command protocol (ADR 0057).  The widget mirrors the VisPy hybrid
+exactly at the shell seam — PyQtGraph keeps the histogram widget and the
+transparent interaction overlay; a rendercanvas ``QRenderWidget`` in bitmap
+present mode owns the pixels — but every pixel decision is expressed as
+:class:`~arrayscope.gpu.command_protocol.FrameSubmission` commands into one
+:class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
 
-Scope is deliberately narrow and loud: exactly one scalar 2-D tile (the
-non-montage plane the single-tile geometry commits).  Complex, RGB, and
-montage (>1 tile) commits raise ``NotImplementedError`` instead of guessing.
-Residency is content-keyed (``plane_chunk_key`` with the payload's ack
-identity as ``document_generation``), so re-committing identical content is
-a physical zero-upload no-op — the executor report is the oracle, and the
-commit stats are derived from it, never invented.
+Committed scope (everything else raises ``NotImplementedError`` loudly
+instead of guessing): montages of N scalar 2-D tiles, montages of
+display-ready uint8 RGB tiles (``rgb_already_windowed``: levels/LUT
+bypassed by the executor's rgb8 pool), and a single complex tile with the
+shader-on-read component modes (magnitude/phase/real/imag) including the
+phase LUT.  Each tile is one bound :class:`ContentPlane` whose
+``document_generation`` is the payload's ack identity, so residency is
+content-keyed: re-committing identical content, switching complex modes,
+and moving levels are physical zero-upload operations — the executor report
+is the oracle, and the commit stats are derived from it, never invented.
+Acknowledgement is physical truth per tile: a tile enters
+``presented_tiles``/``presented_identities`` only when every one of its
+pages is actually resident in the executor page table after the submit.
 """
 
 from __future__ import annotations
@@ -35,9 +41,20 @@ from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHis
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
-from arrayscope.display.shader_mapping import ShaderDisplayMode, common_shader_mapping
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    ShaderScale,
+    TexturePlaneKind,
+    common_shader_mapping,
+    default_phase_lut,
+    pack_texture_data,
+)
+from arrayscope.display.tile_layout import tile_layout_map, tile_layout_shape
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.gpu.command_protocol import (
+    BindContentPlanes,
+    ContentPlane,
     DisplayMapping,
     EnsureChunkResident,
     EvictChunk,
@@ -47,6 +64,25 @@ from arrayscope.gpu.command_protocol import (
     TileInstance,
     UpdateTileInstances,
 )
+from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
+
+#: Complex shader components → protocol mapping modes.
+_WGPU_COMPONENT_MODES = {
+    ShaderComponent.REAL.value: "real",
+    ShaderComponent.IMAG.value: "imag",
+    ShaderComponent.ABS.value: "magnitude",
+    ShaderComponent.ANGLE.value: "phase",
+    ShaderComponent.COMPLEX_PHASE.value: "phase",
+}
+
+_WGPU_REP_BY_KIND = {
+    TexturePlaneKind.SCALAR_R32F: SCALAR_R32F,
+    TexturePlaneKind.COMPLEX_RG32F: COMPLEX_RG32F,
+    TexturePlaneKind.RGB8: RGB8,
+}
+
+_WGPU_REP_DTYPES = {SCALAR_R32F: "float32", COMPLEX_RG32F: "complex64", RGB8: "uint8"}
+_WGPU_REP_TEXEL_BYTES = {SCALAR_R32F: 4, COMPLEX_RG32F: 8, RGB8: 4}
 
 # One process-wide wgpu device: views (and executor rebuilds on plane growth)
 # share it so the canvas context never needs reconfiguration and tests do not
@@ -187,27 +223,27 @@ class WgpuImageView2D(ImageViewShell):
 
     # ---- executor management -------------------------------------------------
 
-    def _ensure_wgpu_executor(self, pixel_shape: tuple[int, int]):
-        from arrayscope.gpu.wgpu_executor import PAGE, WgpuPlaneExecutor
+    def _ensure_wgpu_executor(self, required_pages: dict[str, int]):
+        """Executor with per-pool budgets covering ``required_pages`` (+headroom)."""
 
-        height, width = (max(1, int(value)) for value in pixel_shape)
-        padded_h = -(-height // PAGE) * PAGE
-        padded_w = -(-width // PAGE) * PAGE
+        from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
         executor = self._wgpu_executor
-        if (
-            executor is not None
-            and executor.plane_shape[0] >= padded_h
-            and executor.plane_shape[1] >= padded_w
+        if executor is not None and all(
+            executor.pool_budget(representation) >= needed
+            for representation, needed in required_pages.items()
         ):
             return executor
-        if executor is not None:
-            padded_h = max(padded_h, executor.plane_shape[0])
-            padded_w = max(padded_w, executor.plane_shape[1])
-        grid = (padded_h // PAGE) * (padded_w // PAGE)
+        budgets: dict[str, int] = {}
+        for representation in (SCALAR_R32F, COMPLEX_RG32F, RGB8):
+            previous = 0 if executor is None else executor.pool_budget(representation)
+            needed = int(required_pages.get(representation, 0))
+            # 2x headroom keeps recently unbound planes warm (scroll-back).
+            budget = max(previous, 2 * needed + 8 if needed else 0)
+            if budget:
+                budgets[representation] = budget
         self._wgpu_executor = WgpuPlaneExecutor(
-            (padded_h, padded_w),
-            max_lod=0,
-            pool_layers=2 * grid + 8,
+            pool_layers=budgets or {SCALAR_R32F: 8},
             device=_shared_wgpu_device(),
         )
         # Rebuild discards residency; committed evidence must not survive it.
@@ -299,12 +335,14 @@ class WgpuImageView2D(ImageViewShell):
         )
 
     def _wgpu_camera_tiles(self) -> tuple[TileInstance, ...]:
-        """Map the committed world rect through the ViewBox range to dst space.
+        """Map committed per-tile world rects through the ViewBox to dst space.
 
         The executor's dst space is normalized [0, 1] with y down.  The
         ViewBox is the camera truth: ``viewRange`` returns sorted world
         bounds; ``yInverted`` (the image default) puts world y-min at the
-        top of the canvas, which is already dst-y-down order.
+        top of the canvas, which is already dst-y-down order.  Tile world
+        rects come from the shared montage layout (``tile_layout_map``), so
+        both drawn geometry and interaction mapping share one owner.
         """
 
         committed = self._wgpu_committed
@@ -318,24 +356,34 @@ class WgpuImageView2D(ImageViewShell):
         span_y = float(y1) - float(y0)
         if not (span_x > 0.0 and span_y > 0.0):
             return ()
-        wx, wy, ww, wh = committed["world_rect"]
-        src_w, src_h = committed["src_size"]
         state = getattr(self.view, "state", {}) or {}
         y_inverted = bool(state.get("yInverted", True))
-        dst_x = (wx - float(x0)) / span_x
-        dst_w = ww / span_x
-        dst_h = wh / span_y
-        if y_inverted:
-            dst_y = (wy - float(y0)) / span_y
-            src_origin = (0.0, 0.0)
-            src_size = (float(src_w), float(src_h))
-        else:
-            dst_y = (float(y1) - (wy + wh)) / span_y
-            src_origin = (0.0, float(src_h))
-            src_size = (float(src_w), -float(src_h))
-        return (
-            TileInstance((dst_x, dst_y, dst_w, dst_h), src_origin, src_size, 0),
-        )
+        instances = []
+        for tile in sorted(committed["tiles"]):
+            info = committed["tiles"][tile]
+            wx, wy, ww, wh = info["world_rect"]
+            src_w, src_h = info["src_size"]
+            dst_x = (wx - float(x0)) / span_x
+            dst_w = ww / span_x
+            dst_h = wh / span_y
+            if y_inverted:
+                dst_y = (wy - float(y0)) / span_y
+                src_origin = (0.0, 0.0)
+                src_size = (float(src_w), float(src_h))
+            else:
+                dst_y = (float(y1) - (wy + wh)) / span_y
+                src_origin = (0.0, float(src_h))
+                src_size = (float(src_w), -float(src_h))
+            instances.append(
+                TileInstance(
+                    (dst_x, dst_y, dst_w, dst_h),
+                    src_origin,
+                    src_size,
+                    0,
+                    plane_index=int(info["plane_index"]),
+                )
+            )
+        return tuple(instances)
 
     # ---- tiled presentation --------------------------------------------------
 
@@ -357,8 +405,6 @@ class WgpuImageView2D(ImageViewShell):
         tile_residency_budget_bytes: int,
         frame_plan,
     ):
-        from arrayscope.gpu.command_protocol import BindContentPlanes, ContentPlane
-        from arrayscope.gpu.keys import COMPLEX_RG32F
         from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
 
         self._start_upload_timing("wgpu_tile_layer")
@@ -374,63 +420,115 @@ class WgpuImageView2D(ImageViewShell):
                 stats = TileLayerUpdateStats(visible_items=0, presented_tiles=())
                 self._record_tile_layer_stats(stats)
                 return stats
-            self._reject_unsupported_wgpu_commit(payloads, shader_mapping)
-            payload = payloads[0]
-            plane = np.asarray(payload.image)
-            height, width = (int(plane.shape[0]), int(plane.shape[1]))
-            identity = tile_ack_identity(payload)
+            source_mapping = shader_mapping
+            if source_mapping is None:
+                source_mapping = common_shader_mapping(
+                    getattr(payload, "shader_mapping", None) for payload in payloads.values()
+                )
+            representation, mode = self._wgpu_commit_plan(
+                payloads, source_mapping, rgb_already_windowed
+            )
+            layout = tile_layout_map(geometry, frame_plan=frame_plan)
+            missing = sorted(set(payloads) - set(layout))
+            if missing:
+                raise NotImplementedError(
+                    f"wgpu commit payload tiles {missing} have no montage/frame-plan "
+                    "layout region — refusing to guess destination geometry"
+                )
             level_lo, level_hi = (float(levels[0]), float(levels[1]))
             if not level_hi > level_lo:
                 level_hi = level_lo + 1e-6
 
-            executor = self._ensure_wgpu_executor((height, width))
-            grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
-            plane32 = np.ascontiguousarray(plane, dtype=np.float32)
-            commands = [
-                BindContentPlanes(
-                    (
-                        ContentPlane(
-                            identity,
-                            "live",
-                            (grid_h * PAGE, grid_w * PAGE),
-                            max_lod=0,
-                            representation=COMPLEX_RG32F,
-                        ),
+            textures = {
+                tile: self._wgpu_payload_texture(payloads[tile], representation)
+                for tile in payloads
+            }
+            pages_needed = sum(
+                (-(-texture.shape[0] // PAGE)) * (-(-texture.shape[1] // PAGE))
+                for texture in textures.values()
+            )
+            executor = self._ensure_wgpu_executor({representation: pages_needed})
+
+            # One bound content plane per tile: document_generation is the
+            # payload's ack identity, so residency is content-keyed and a
+            # re-commit of previously seen content (scroll-back across
+            # planes) is a physical zero-upload rebind.
+            planes = []
+            committed_tiles: dict[int, dict[str, object]] = {}
+            commands = []
+            planned_upload_tiles = []
+            for tile in sorted(payloads):
+                payload = payloads[tile]
+                identity = tile_ack_identity(payload)
+                texture = textures[tile]
+                height, width = (int(texture.shape[0]), int(texture.shape[1]))
+                grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
+                plane_index = len(planes)
+                planes.append(
+                    ContentPlane(
+                        identity,
+                        "live",
+                        (grid_h * PAGE, grid_w * PAGE),
+                        max_lod=0,
+                        representation=representation,
                     )
                 )
-            ]
-            page_keys = []
-            for chunk_y in range(grid_h):
-                for chunk_x in range(grid_w):
-                    key = plane_chunk_key(identity, "live", 0, chunk_x, chunk_y)
-                    page_keys.append(key)
-                    page = np.zeros((PAGE, PAGE), np.float32)
-                    block = plane32[
-                        chunk_y * PAGE : (chunk_y + 1) * PAGE,
-                        chunk_x * PAGE : (chunk_x + 1) * PAGE,
-                    ]
-                    page[: block.shape[0], : block.shape[1]] = block
-                    # Content-keyed: re-ensuring a resident key is a no-op in
-                    # the executor (0 uploads); the frame report is the oracle.
-                    commands.append(EnsureChunkResident(key, page))
+                page_keys = []
+                will_upload = False
+                for chunk_y in range(grid_h):
+                    for chunk_x in range(grid_w):
+                        key = plane_chunk_key(
+                            identity,
+                            "live",
+                            0,
+                            chunk_x,
+                            chunk_y,
+                            dtype=_WGPU_REP_DTYPES[representation],
+                            representation=representation,
+                        )
+                        page_keys.append(key)
+                        if executor.page_table.lookup(key) is None:
+                            will_upload = True
+                        # Content-keyed: re-ensuring a resident key is a no-op
+                        # in the executor (0 uploads); the report is the oracle.
+                        commands.append(
+                            EnsureChunkResident(
+                                key,
+                                self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
+                            )
+                        )
+                if will_upload:
+                    planned_upload_tiles.append(tile)
+                region = layout[tile]
+                committed_tiles[tile] = {
+                    "identity": identity,
+                    "world_rect": (
+                        float(region.x),
+                        float(region.y),
+                        float(region.width),
+                        float(region.height),
+                    ),
+                    "src_size": (float(width), float(height)),
+                    "plane_index": plane_index,
+                    "page_keys": tuple(page_keys),
+                }
 
-            lut = self._wgpu_resolve_lut_bytes(shader_mapping)
+            lut = self._wgpu_resolve_lut_bytes(source_mapping)
             self._wgpu_mapping_state = DisplayMapping(
-                mode="real", level_lo=level_lo, level_hi=level_hi, lut=lut
+                mode=mode, level_lo=level_lo, level_hi=level_hi, lut=lut
             )
-            display_shape = tuple(int(value) for value in tuple(geometry.display_shape)[:2])
+            display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
-                "identity": identity,
-                "world_rect": (0.0, 0.0, float(width), float(height)),
-                "src_size": (float(width), float(height)),
-                "page_keys": tuple(page_keys),
-                "pixel_shape": (height, width),
+                "tiles": committed_tiles,
+                "representation": representation,
+                "display_shape": display_shape,
             }
             self._montage_display_mode = "wgpu_tile_layer"
 
             start = perf_counter()
             report = self._submit_wgpu(
                 (
+                    BindContentPlanes(tuple(planes)),
                     *commands,
                     SetDisplayMapping(self._wgpu_mapping_state),
                     UpdateTileInstances(self._wgpu_camera_tiles()),
@@ -439,10 +537,20 @@ class WgpuImageView2D(ImageViewShell):
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
 
-            # Physical truth: acknowledge only what the page table holds.
-            resident = all(executor.page_table.lookup(key) is not None for key in page_keys)
-            presented = (0,) if resident else ()
-            presented_identities = {0: identity} if resident else {}
+            # Physical truth per tile: acknowledge only tiles whose pages the
+            # page table actually holds after the submit — partial residency
+            # acknowledges the resident subset, never the request.
+            presented = tuple(
+                tile
+                for tile in sorted(committed_tiles)
+                if all(
+                    executor.page_table.lookup(key) is not None
+                    for key in committed_tiles[tile]["page_keys"]
+                )
+            )
+            presented_identities = {
+                tile: committed_tiles[tile]["identity"] for tile in presented
+            }
 
             # Shared shell bookkeeping (placeholder image, histogram bounds,
             # display levels) mirrors the VisPy backend's minimal set.
@@ -455,7 +563,7 @@ class WgpuImageView2D(ImageViewShell):
             self._wgpu_last_levels = (level_lo, level_hi)
             self._sync_wgpu_histogram_widget_bounds((level_lo, level_hi), histogramRange)
 
-            structure_key = (display_shape, bool(rgb_already_windowed))
+            structure_key = (display_shape, representation, bool(rgb_already_windowed))
             viewport_key = (
                 structure_key,
                 str(getattr(viewport_policy, "value", viewport_policy)),
@@ -471,22 +579,26 @@ class WgpuImageView2D(ImageViewShell):
 
             uploads = int(report.uploads)
             resident_pages = len(executor.page_table.resident_keys())
+            texel_bytes = _WGPU_REP_TEXEL_BYTES[representation]
+            updated = tuple(planned_upload_tiles) if uploads > 0 else ()
             stats = TileLayerUpdateStats(
-                visible_items=1,
+                visible_items=len(committed_tiles),
                 presented_tiles=presented,
                 presented_identities=presented_identities,
-                updated_tiles=(0,) if uploads > 0 else (),
+                updated_tiles=updated,
                 items_created=0,
-                items_updated=1 if uploads > 0 else 0,
-                items_skipped=0 if uploads > 0 else 1,
-                existing_items_shown=0 if uploads > 0 else 1,
-                resident_items=1 if resident else 0,
-                storage_capacity=executor.pool_free_layers(COMPLEX_RG32F) + resident_pages,
+                items_updated=len(updated),
+                items_skipped=len(committed_tiles) - len(updated),
+                existing_items_shown=len(committed_tiles) - len(updated),
+                resident_items=len(presented),
+                storage_capacity=executor.pool_budget(representation),
                 texture_uploads=uploads,
-                texture_upload_bytes=uploads * PAGE * PAGE * 8,
+                texture_upload_bytes=uploads * PAGE * PAGE * texel_bytes,
                 page_count=resident_pages,
-                active_pages=len(page_keys),
-                estimated_gpu_bytes=resident_pages * PAGE * PAGE * 8,
+                active_pages=sum(
+                    len(info["page_keys"]) for info in committed_tiles.values()
+                ),
+                estimated_gpu_bytes=resident_pages * PAGE * PAGE * texel_bytes,
                 budget_bytes=int(tile_residency_budget_bytes or 0),
                 shader_uniform_updates=1,
                 upload_ms=upload_ms,
@@ -499,31 +611,130 @@ class WgpuImageView2D(ImageViewShell):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def _reject_unsupported_wgpu_commit(self, payloads, shader_mapping) -> None:
-        if len(payloads) != 1 or 0 not in payloads:
+    def _wgpu_commit_plan(self, payloads, source_mapping, rgb_already_windowed):
+        """Validate one commit; return ``(representation, mapping mode)``.
+
+        Everything outside the committed scope raises ``NotImplementedError``
+        loudly instead of guessing (montage of N scalar tiles; montage of
+        display-ready uint8 RGB tiles; a single complex tile).
+        """
+
+        kinds = {tile: _wgpu_payload_kind(payload) for tile, payload in payloads.items()}
+        unique = {kind.value for kind in kinds.values()}
+        if len(unique) != 1:
             raise NotImplementedError(
-                "wgpu backend MVP renders exactly one non-montage tile; "
-                f"got tiles {sorted(payloads)}"
+                "wgpu backend requires one texture representation per commit; "
+                f"got {sorted(unique)}"
             )
-        payload = payloads[0]
-        plane = np.asarray(payload.image)
-        if np.iscomplexobj(plane) or plane.ndim != 2:
+        kind = next(iter(kinds.values()))
+        representation = _WGPU_REP_BY_KIND[kind]
+        display_mode = getattr(
+            getattr(source_mapping, "display_mode", None), "value", None
+        )
+        scale = getattr(getattr(source_mapping, "scale", None), "value", None)
+        if scale not in (None, ShaderScale.LINEAR.value):
             raise NotImplementedError(
-                "wgpu backend MVP renders scalar 2-D planes only; "
-                f"got dtype {plane.dtype} with shape {plane.shape}"
+                f"wgpu backend supports linear shader scale only; got {scale!r}"
             )
-        mapping = shader_mapping
-        if mapping is None:
-            mapping = common_shader_mapping(
-                getattr(candidate, "shader_mapping", None) for candidate in payloads.values()
+        if representation == SCALAR_R32F:
+            if display_mode not in (None, ShaderDisplayMode.SCALAR.value):
+                raise NotImplementedError(
+                    "wgpu backend renders scalar payloads with scalar display "
+                    f"mode only; got {display_mode!r}"
+                )
+            return representation, "real"
+        if representation == COMPLEX_RG32F:
+            if len(payloads) != 1:
+                raise NotImplementedError(
+                    "wgpu backend renders complex payloads as a single tile "
+                    f"only (montage is row 3c work); got tiles {sorted(payloads)}"
+                )
+            if display_mode not in (
+                None,
+                ShaderDisplayMode.COMPLEX.value,
+                ShaderDisplayMode.PHASE_COLOR.value,
+            ):
+                raise NotImplementedError(
+                    f"wgpu backend cannot render complex display mode {display_mode!r}"
+                )
+            component = getattr(
+                getattr(source_mapping, "component", None), "value", None
             )
-        display_mode = getattr(getattr(mapping, "display_mode", None), "value", None)
-        if display_mode not in (None, ShaderDisplayMode.SCALAR.value):
+            if component is None:
+                component = ShaderComponent.REAL.value
+            if component not in _WGPU_COMPONENT_MODES:
+                raise NotImplementedError(
+                    f"wgpu backend cannot render shader component {component!r}"
+                )
+            if display_mode == ShaderDisplayMode.PHASE_COLOR.value and component not in (
+                ShaderComponent.ANGLE.value,
+                ShaderComponent.COMPLEX_PHASE.value,
+            ):
+                raise NotImplementedError(
+                    "wgpu backend renders phase-color for phase components only "
+                    f"(magnitude-modulated phase color is unsupported); got {component!r}"
+                )
+            return representation, _WGPU_COMPONENT_MODES[component]
+        # RGB8: display-ready bytes only — the executor pool bypasses
+        # levels/LUT, which is honest solely for already-windowed content.
+        if not rgb_already_windowed:
             raise NotImplementedError(
-                f"wgpu backend MVP supports scalar display mode only; got {display_mode!r}"
+                "wgpu backend renders display-ready RGB only "
+                "(rgb_already_windowed=False needs shader windowing)"
             )
+        if display_mode not in (None, ShaderDisplayMode.RGB_DISPLAY_READY.value):
+            raise NotImplementedError(
+                f"wgpu backend cannot render RGB display mode {display_mode!r}"
+            )
+        for tile, payload in payloads.items():
+            texture = np.asarray(
+                payload.texture_data if payload.texture_data is not None else payload.image
+            )
+            if texture.dtype != np.uint8 or texture.ndim != 3 or texture.shape[-1] not in (3, 4):
+                raise NotImplementedError(
+                    f"wgpu RGB tile {tile} payload does not fit rgb8 cleanly "
+                    f"(need uint8 (h, w, 3|4), got {texture.dtype} {texture.shape})"
+                )
+        return representation, "real"
+
+    def _wgpu_payload_texture(self, payload, representation) -> np.ndarray:
+        texture = payload.texture_data if payload.texture_data is not None else payload.image
+        kind = {
+            SCALAR_R32F: TexturePlaneKind.SCALAR_R32F,
+            COMPLEX_RG32F: TexturePlaneKind.COMPLEX_RG32F,
+            RGB8: TexturePlaneKind.RGB8,
+        }[representation]
+        return pack_texture_data(texture, kind)
+
+    def _wgpu_page_block(self, texture, chunk_y, chunk_x, representation) -> np.ndarray:
+        from arrayscope.gpu.wgpu_executor import PAGE
+
+        if representation == SCALAR_R32F:
+            page = np.zeros((PAGE, PAGE), np.float32)
+        elif representation == COMPLEX_RG32F:
+            page = np.zeros((PAGE, PAGE, 2), np.float32)
+        else:
+            page = np.zeros((PAGE, PAGE, 3), np.uint8)
+        block = texture[
+            chunk_y * PAGE : (chunk_y + 1) * PAGE,
+            chunk_x * PAGE : (chunk_x + 1) * PAGE,
+        ]
+        page[: block.shape[0], : block.shape[1]] = block
+        return page
 
     def _wgpu_resolve_lut_bytes(self, shader_mapping) -> bytes | None:
+        display_mode = getattr(
+            getattr(shader_mapping, "display_mode", None), "value", None
+        )
+        if display_mode == ShaderDisplayMode.PHASE_COLOR.value:
+            explicit = getattr(shader_mapping, "lut_data", None)
+            if explicit is not None:
+                return _resample_lut_to_rgba256(explicit)
+            # A bare phase-color mapping means the canonical cyclic phase LUT
+            # (the VisPy _display_shader_mapping template): the view's initial
+            # grayscale LUT must not silently turn phase presentation gray.
+            if getattr(self, "_display_colormap", None) is None:
+                return _resample_lut_to_rgba256(default_phase_lut())
         lut = getattr(shader_mapping, "lut_data", None)
         if lut is None:
             lut = getattr(self, "_display_colormap_lut", None)
@@ -626,10 +837,11 @@ class WgpuImageView2D(ImageViewShell):
         report = self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
         upload_ms = (perf_counter() - start) * 1000.0
         committed = self._wgpu_committed
+        committed_tiles = tuple(sorted((committed or {}).get("tiles", ())))
         stats = TileLayerUpdateStats(
-            visible_items=1 if committed else 0,
-            presented_tiles=(0,) if committed else (),
-            items_skipped=1 if committed else 0,
+            visible_items=len(committed_tiles),
+            presented_tiles=committed_tiles,
+            items_skipped=len(committed_tiles),
             texture_uploads=int(getattr(report, "uploads", 0) or 0),
             level_updates=1,
             shader_uniform_updates=1,
@@ -767,6 +979,28 @@ class WgpuImageView2D(ImageViewShell):
             except Exception:
                 pass
         super().teardown_surface()
+
+
+def _wgpu_payload_kind(payload) -> TexturePlaneKind:
+    """Payload texture representation (declared kind first, then inference)."""
+
+    kind = getattr(payload, "texture_kind", None)
+    if kind is not None:
+        return kind if isinstance(kind, TexturePlaneKind) else TexturePlaneKind(
+            getattr(kind, "value", kind)
+        )
+    texture = np.asarray(
+        payload.texture_data if getattr(payload, "texture_data", None) is not None else payload.image
+    )
+    if np.iscomplexobj(texture) or (texture.ndim == 3 and texture.shape[-1] == 2):
+        return TexturePlaneKind.COMPLEX_RG32F
+    if texture.ndim == 3 and texture.shape[-1] in (3, 4):
+        return TexturePlaneKind.RGB8
+    if texture.ndim == 2:
+        return TexturePlaneKind.SCALAR_R32F
+    raise NotImplementedError(
+        f"wgpu backend cannot infer a texture representation for payload shape {texture.shape}"
+    )
 
 
 def _resample_lut_to_rgba256(lut) -> bytes | None:

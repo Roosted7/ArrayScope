@@ -92,6 +92,40 @@ def test_tiled_commit_acknowledges_presented_payloads(qt_app, backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_montage_commit_acknowledges_each_loaded_tile(qt_app, backend):
+    """A 2-tile montage commit must acknowledge both tiles on every backend."""
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.montage import MontageTileState
+
+    view = _shown_view(backend, qt_app)
+    try:
+        canvas = np.linspace(0.0, 1.0, 20 * 60, dtype=np.float32).reshape(20, 60)
+        geometry = DisplayGeometry(
+            view_state=ViewState.from_shape((20, 60)).with_image_axes(0, 1),
+            display_shape=(20, 60),
+            montage=MontageGeometry(
+                indices=(0, 1), tile_shape=(20, 30), columns=2, rows=1, gap=0
+            ),
+            montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
+        )
+        report = _present_tiled(
+            view,
+            canvas,
+            histogramData=canvas.copy(),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+        )
+        assert report is not None
+        assert set(report.presented_tiles) == {0, 1}
+        assert view.montageDisplayMode() != "none"
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_hide_tiled_presentation_deactivates_surface(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
