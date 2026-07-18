@@ -1060,17 +1060,30 @@ class LevelStatsService:
         accept_evidence = getattr(view, "acceptResidentHistogramEvidence", None)
         if not callable(evidence_for) or not callable(accept_evidence):
             raise RuntimeError("wgpu backend has no resident histogram evidence contract")
-        if bool(getattr(session, "level_evidence_inflight", False)):
+        from arrayscope.core.trace import emit_trace
+
+        def bail(reason: str) -> int:
+            # Ground rule: silent bails in the evidence chain latch the
+            # coverage barrier invisibly (journey-matrix v5: pending armed
+            # every generation, zero histogram submissions, no bail evidence).
+            emit_trace(
+                "wgpu_histogram_queue_bail",
+                reason=reason,
+                session_id=int(getattr(session, "session_id", -1) or -1),
+            )
             return 0
+
+        if bool(getattr(session, "level_evidence_inflight", False)):
+            return bail("evidence_inflight")
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
         rows = tuple(evidence_for(payloads))
         if not rows:
-            return 0
+            return bail("no_waiting_evidence_rows")
         work_class = SchedulingWork.COVERAGE
         if not session.scheduling_policy.verdict.admits(work_class):
-            return 0
+            return bail("coverage_not_admitted")
         # Refined-first shortcut: content whose family already has refined
         # remembered evidence needs no fresh rough pass — reuse it, mark the
         # obligation satisfied, and dispatch only for content with no
