@@ -402,7 +402,14 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
                     "results": results,
                 }
             )
-    _classify_reference_blocked_wgpu_rows(rows)
+    cold_stderr = artifact_dir / "wgpu" / "cold" / "driver.stderr.log"
+    _classify_reference_blocked_wgpu_rows(
+        rows,
+        wgpu_runtime_clean=(
+            not cold_stderr.exists()
+            or _wgpu_cold_runtime_clean(cold_stderr.read_text(encoding="utf-8"))
+        ),
+    )
     return {"ok": all(bool(row["ok"]) for row in rows), "rows": rows}
 
 
@@ -422,7 +429,28 @@ def _only_cold_level_oracle_red(row: dict[str, object]) -> bool:
     )
 
 
-def _classify_reference_blocked_wgpu_rows(rows: list[dict[str, object]]) -> None:
+def _wgpu_cold_runtime_clean(stderr: str) -> bool:
+    """Exclude actual backend exceptions from reference-blocked unsupported."""
+
+    exception_prefixes = (
+        "AssertionError:",
+        "GPUValidationError:",
+        "KeyError:",
+        "NotImplementedError:",
+        "RuntimeError:",
+        "TypeError:",
+        "ValueError:",
+    )
+    return not any(
+        marker in line
+        for line in str(stderr).splitlines()
+        for marker in exception_prefixes
+    )
+
+
+def _classify_reference_blocked_wgpu_rows(
+    rows: list[dict[str, object]], *, wgpu_runtime_clean: bool = True
+) -> None:
     """Record wgpu cold fill unsupported while its reference oracle is red.
 
     This does not forgive either backend's cold-level defect: the VisPy row
@@ -441,6 +469,7 @@ def _classify_reference_blocked_wgpu_rows(rows: list[dict[str, object]]) -> None
     if (
         vispy is None
         or wgpu is None
+        or not bool(wgpu_runtime_clean)
         or bool(wgpu.get("ok"))
         or not _only_cold_level_oracle_red(vispy)
         or not _only_cold_level_oracle_red(wgpu)

@@ -241,7 +241,12 @@ class WgpuImageView2D(ImageViewShell):
 
     # ---- executor management -------------------------------------------------
 
-    def _ensure_wgpu_executor(self, required_pages: dict[str, int]):
+    def _ensure_wgpu_executor(
+        self,
+        required_pages: dict[str, int],
+        *,
+        preferred_pages: dict[str, int] | None = None,
+    ):
         """Executor with per-pool budgets covering ``required_pages`` (+headroom)."""
 
         from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
@@ -252,6 +257,9 @@ class WgpuImageView2D(ImageViewShell):
             for representation, needed in required_pages.items()
         ):
             return executor
+        device = _shared_wgpu_device()
+        max_layers = int(device.limits["max-texture-array-layers"])
+        preferred_pages = dict(preferred_pages or {})
         budgets: dict[str, int] = {}
         for representation in (
             SCALAR_R32F,
@@ -261,13 +269,17 @@ class WgpuImageView2D(ImageViewShell):
         ):
             previous = 0 if executor is None else executor.pool_budget(representation)
             needed = int(required_pages.get(representation, 0))
-            # 2x headroom keeps recently unbound planes warm (scroll-back).
-            budget = max(previous, 2 * needed + 8 if needed else 0)
+            budget = _wgpu_pool_layer_budget(
+                previous=previous,
+                needed=needed,
+                preferred=int(preferred_pages.get(representation, 0) or 0),
+                max_layers=max_layers,
+            )
             if budget:
                 budgets[representation] = budget
         self._wgpu_executor = WgpuPlaneExecutor(
             pool_layers=budgets or {SCALAR_R32F: 8},
-            device=_shared_wgpu_device(),
+            device=device,
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
@@ -480,11 +492,19 @@ class WgpuImageView2D(ImageViewShell):
             # arriving in this commit.  Otherwise a coarse-first plane can
             # force an executor rebuild when L0 arrives, discarding the very
             # ancestor pages that make refinement never-black.
-            pages_needed = sum(
+            pages_preferred = sum(
                 _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
                 for lod_level, source_shape in lod_geometry.values()
             )
-            executor = self._ensure_wgpu_executor({representation: pages_needed})
+            pages_needed = sum(
+                -(-int(texture.shape[0]) // PAGE)
+                * -(-int(texture.shape[1]) // PAGE)
+                for texture in textures.values()
+            )
+            executor = self._ensure_wgpu_executor(
+                {representation: pages_needed},
+                preferred_pages={representation: pages_preferred},
+            )
 
             # One bound content plane per tile.  The plane key deliberately
             # excludes payload LOD: a coarse and fine acknowledgement are
@@ -1200,6 +1220,27 @@ def _wgpu_payload_plane_identity(payload) -> object:
         identity = tile_ack_identity(payload)
         source_id = getattr(identity, "semantic_key", identity)
     return ("wgpu-content-plane", source_id)
+
+
+def _wgpu_pool_layer_budget(
+    *, previous: int, needed: int, preferred: int = 0, max_layers: int
+) -> int:
+    """Keep warm-page headroom without exceeding the device array limit."""
+
+    previous = max(0, int(previous))
+    needed = max(0, int(needed))
+    preferred = max(0, int(preferred))
+    max_layers = max(1, int(max_layers))
+    if needed > max_layers:
+        raise RuntimeError(
+            "wgpu active plane pages exceed the device texture-array limit: "
+            f"needed={needed}, max_layers={max_layers}"
+        )
+    # 2x headroom keeps recently unbound planes warm for zero-upload
+    # scroll-back.  Headroom is optional; active coverage is not, so clamp
+    # the former at the physical device limit and reject only the latter.
+    desired = max(previous, preferred, 2 * needed + 8 if needed else 0)
+    return min(desired, max_layers)
 
 
 def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:

@@ -391,6 +391,42 @@ def test_wgpu_cold_level_red_stays_failed_if_reference_has_another_oracle_red():
     assert not rows[1]["ok"]
 
 
+def test_wgpu_cold_level_red_stays_failed_on_backend_runtime_error():
+    from arrayscope.tools.journey_matrix import (
+        _classify_reference_blocked_wgpu_rows,
+        _wgpu_cold_runtime_clean,
+    )
+
+    isolated_red = {
+        "completed": True,
+        "phase_ordered": True,
+        "presentation": {"ok": True},
+        "first_new_pixels_within_budget": True,
+        "demand_fresh_within_budget": True,
+        "coverage_pass_observed": False,
+        "level_converged_within_budget": False,
+    }
+    rows = [
+        {
+            "backend": backend,
+            "journey": "cold_fill",
+            "status": "failed",
+            "ok": False,
+            "results": [dict(isolated_red)],
+        }
+        for backend in ("vispy", "wgpu")
+    ]
+    stderr = "GPUValidationError: Dimension Z value 2832 exceeds the limit of 2048"
+
+    _classify_reference_blocked_wgpu_rows(
+        rows,
+        wgpu_runtime_clean=_wgpu_cold_runtime_clean(stderr),
+    )
+
+    assert rows[1]["status"] == "failed"
+    assert not rows[1]["ok"]
+
+
 def test_missing_coverage_close_oracle_fault_injection(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["coverage_pass_closed"] = False

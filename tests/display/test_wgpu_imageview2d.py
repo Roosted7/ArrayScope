@@ -41,6 +41,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_wgpu_pool_headroom_clamps_to_device_limit_but_active_pages_do_not():
+    from arrayscope.display.wgpu_imageview2d import _wgpu_pool_layer_budget
+
+    assert (
+        _wgpu_pool_layer_budget(
+            previous=0,
+            needed=272,
+            preferred=2084,
+            max_layers=2048,
+        )
+        == 2048
+    )
+    with pytest.raises(RuntimeError, match=r"needed=2049, max_layers=2048"):
+        _wgpu_pool_layer_budget(previous=0, needed=2049, max_layers=2048)
+
+
 def _montage_geometry(tile_shape, columns, rows, *, loaded, gap=0):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -303,7 +319,7 @@ def test_partial_residency_acknowledges_only_resident_tiles(qt_app):
             pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
         )
         view._wgpu_executor = small
-        view._ensure_wgpu_executor = lambda required: small
+        view._ensure_wgpu_executor = lambda required, **_kwargs: small
 
         geometry = _montage_geometry((20, 30), 2, 1, loaded=2)
         payloads = {
@@ -390,7 +406,7 @@ def test_complex_montage_acknowledges_only_resident_content_planes(qt_app):
             pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device()
         )
         view._wgpu_executor = small
-        view._ensure_wgpu_executor = lambda required: small
+        view._ensure_wgpu_executor = lambda required, **_kwargs: small
 
         geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
         payloads = {
@@ -606,7 +622,7 @@ def test_float_rgb_acknowledges_only_physically_resident_packed_pages(qt_app):
             device=_shared_wgpu_device(),
         )
         view._wgpu_executor = small
-        view._ensure_wgpu_executor = lambda required: small
+        view._ensure_wgpu_executor = lambda required, **_kwargs: small
         geometry = _montage_geometry((20, 30), 2, 1, loaded=2)
         mapping = ShaderMapping(display_mode=ShaderDisplayMode.RGB_WINDOWED)
         payloads = {
