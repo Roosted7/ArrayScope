@@ -1997,6 +1997,27 @@ class FramePipelineEffects:
     ) -> bool:
         renderer = self.renderer
         session = self.session
+        configure_gpu_evidence = getattr(
+            renderer.win.img_view,
+            "setResidentHistogramEvidenceRequired",
+            None,
+        )
+        if callable(configure_gpu_evidence):
+            gpu_evidence_required = bool(
+                session.scheduling_policy.verdict.coverage_open
+                and not getattr(session, "first_pass_histogram_published", False)
+            )
+            configure_gpu_evidence(
+                gpu_evidence_required,
+                (
+                    session.key,
+                    int(session.session_id),
+                    int(getattr(session, "viewport_revision", 0) or 0),
+                    session.level_key,
+                )
+                if gpu_evidence_required
+                else None,
+            )
         apply_start = perf_counter()
         if first_display_commit and self._commit_direct_delta(
             display_image,
@@ -2293,7 +2314,18 @@ class FramePipelineEffects:
             session.acknowledge_uniform_level_presentation(committed_levels)
         if not session.has_stale_level_presentations():
             session.set_level_update_pending(False)
-        if accepted_payloads:
+        resident_gpu_evidence = getattr(
+            renderer.win.img_view,
+            "residentHistogramEvidence",
+            None,
+        )
+        gpu_evidence_waiting = bool(
+            callable(resident_gpu_evidence)
+            and resident_gpu_evidence(active_payloads)
+        )
+        if gpu_evidence_waiting:
+            session.scheduling_policy.set_coverage_evidence_pending(True)
+        if accepted_payloads or gpu_evidence_waiting:
             # Evidence quality can advance only after the backend accepts the
             # payload. Scan the current active population at that transition
             # so a bounded final batch can close coherent first-pass evidence.
@@ -2307,6 +2339,7 @@ class FramePipelineEffects:
         )
         if first_pass_publication_transition:
             session.first_pass_histogram_published = True
+            session.scheduling_policy.set_coverage_evidence_pending(False)
         elif (
             renderer._first_pass_level_evidence_complete(session)
             and not bool(getattr(session, "first_pass_histogram_published", False))

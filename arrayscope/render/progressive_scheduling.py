@@ -84,6 +84,7 @@ class ProgressiveSchedulingPolicy:
         self._generation = 0
         self._required_tiles: tuple[int, ...] = ()
         self._phase = SchedulingPhase.REFINE
+        self._coverage_evidence_pending = False
 
     @property
     def verdict(self) -> SchedulingVerdict:
@@ -109,6 +110,7 @@ class ProgressiveSchedulingPolicy:
         self._scope_signature = signature
         self._generation += 1
         self._required_tiles = required
+        self._coverage_evidence_pending = False
         self._phase = (
             SchedulingPhase.COVERAGE
             if bool(progressive) and bool(required)
@@ -123,6 +125,22 @@ class ProgressiveSchedulingPolicy:
         )
         return True
 
+    def set_coverage_evidence_pending(self, pending: bool) -> bool:
+        """Own the phase-1 evidence barrier for the current generation."""
+
+        pending = bool(pending and self._phase is SchedulingPhase.COVERAGE)
+        if pending == self._coverage_evidence_pending:
+            return False
+        self._coverage_evidence_pending = pending
+        emit_trace(
+            "scheduling_phase",
+            event="coverage_evidence_pending" if pending else "coverage_evidence_ready",
+            generation=int(self._generation),
+            phase=str(self._phase.value),
+            required_tiles=len(self._required_tiles),
+        )
+        return True
+
     def observe(
         self,
         lifecycle,
@@ -132,6 +150,8 @@ class ProgressiveSchedulingPolicy:
         """Advance on lifecycle first-pixel truth and own the close wakeup."""
 
         if self._phase is not SchedulingPhase.COVERAGE:
+            return False
+        if self._coverage_evidence_pending:
             return False
         if not bool(lifecycle.first_pixels_presented(self._required_tiles)):
             return False

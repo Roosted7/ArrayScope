@@ -53,6 +53,23 @@ def test_coverage_closes_once_from_lifecycle_first_pixel_truth():
     assert replans == ["refine"]
 
 
+def test_coverage_waits_for_owner_registered_rough_evidence():
+    lifecycle = TileLifecycle()
+    targets = _targets(10, 11)
+    lifecycle.retarget(targets)
+    policy = ProgressiveSchedulingPolicy()
+    policy.retarget(tuple(targets.values()), tuple(targets), progressive=True)
+    _present(lifecycle, targets)
+
+    assert policy.set_coverage_evidence_pending(True) is True
+    assert policy.observe(lifecycle) is False
+    assert policy.verdict.phase is SchedulingPhase.COVERAGE
+
+    assert policy.set_coverage_evidence_pending(False) is True
+    assert policy.observe(lifecycle) is True
+    assert policy.verdict.phase is SchedulingPhase.REFINE
+
+
 def test_same_slots_with_new_sources_open_a_new_scope_generation():
     lifecycle = TileLifecycle()
     first = _targets(10, 11)

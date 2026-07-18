@@ -25,6 +25,7 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
     MontageLevelTracker,
     REFINED_TILE_SAMPLE_LIMIT,
+    TileLevelStats,
     aggregate_histogram_samples,
     montage_level_key,
     provisional_tile_level_stats,
@@ -38,6 +39,7 @@ from arrayscope.operations.evaluator import (
     evaluate_level_evidence_snapshot,
     stage_document_key,
 )
+from arrayscope.gpu.chunk_summary import representative_sample_from_histogram
 from arrayscope.render import effects as render_effects
 from arrayscope.render.progressive_scheduling import SchedulingWork
 from arrayscope.window import frame_effects as montage_commit
@@ -346,6 +348,10 @@ class LevelStatsService:
         if not bool(getattr(session, "shader_display", False)):
             return False
         if not session.note_first_pass_quality(quality):
+            return False
+        if image_view_backend_capabilities(self.win.img_view).name == "wgpu":
+            # The wgpu surface installs DispatchHistogram evidence only after
+            # the matching ContentPlane pages are physically resident.
             return False
         evidence_quality = (
             LevelEvidenceQuality.ROUGH_PREVIEW
@@ -899,6 +905,13 @@ class LevelStatsService:
     def _queue_montage_level_stats_for_payloads(self, session, payloads) -> int:
         """Request level evidence for a presentation delta without scanning it inline."""
 
+        capabilities = image_view_backend_capabilities(self.win.img_view)
+        if (
+            str(capabilities.name) == "wgpu"
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        ):
+            return self._queue_wgpu_resident_histogram_evidence(session, payloads)
+
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
@@ -979,6 +992,154 @@ class LevelStatsService:
         self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
         self._schedule_montage_cached_level_stats(session)
         return int(merged)
+
+    def _queue_wgpu_resident_histogram_evidence(self, session, payloads) -> int:
+        """Install fenced resident-page GPU evidence through the shared tracker."""
+
+        view = self.win.img_view
+        evidence_for = getattr(view, "residentHistogramEvidence", None)
+        accept_evidence = getattr(view, "acceptResidentHistogramEvidence", None)
+        if not callable(evidence_for) or not callable(accept_evidence):
+            raise RuntimeError("wgpu backend has no resident histogram evidence contract")
+        if bool(getattr(session, "level_evidence_inflight", False)):
+            return 0
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        tracker.ensure_expected(session.level_key, expected)
+        rows = tuple(evidence_for(payloads))
+        if not rows:
+            return 0
+        work_class = SchedulingWork.COVERAGE
+        if not session.scheduling_policy.verdict.admits(work_class):
+            return 0
+        generation = (
+            session.key,
+            int(session.session_id),
+            int(getattr(session, "viewport_revision", 0) or 0),
+            session.level_key,
+            "wgpu-resident-histogram",
+            tuple(evidence.evidence_key for evidence in rows),
+        )
+        session.level_evidence_inflight = True
+        session.level_evidence_generation = generation
+        quality = (
+            LevelEvidenceQuality.ROUGH_PREVIEW
+            if str(getattr(session, "first_pass_quality", "preview") or "preview")
+            == "preview"
+            else LevelEvidenceQuality.ROUGH_TARGET
+        )
+
+        def release(owner) -> bool:
+            if getattr(owner, "level_evidence_generation", None) != generation:
+                return False
+            owner.level_evidence_inflight = False
+            owner.level_evidence_generation = None
+            return True
+
+        def evaluate(rows=rows, quality=quality):
+            start = perf_counter()
+            waited = set()
+            for evidence in rows:
+                token = evidence.wait_completed
+                if not callable(token):
+                    raise RuntimeError("wgpu histogram report has no completion token")
+                token_key = id(token)
+                if token_key not in waited:
+                    token()
+                    waited.add(token_key)
+            result = []
+            for evidence in rows:
+                resolve = getattr(evidence.readback, "resolve", None)
+                if not callable(resolve):
+                    raise RuntimeError("wgpu histogram result has no deferred readback")
+                counts, bounds = resolve()
+                sample = (
+                    np.asarray((), dtype=np.float32)
+                    if bounds is None
+                    else representative_sample_from_histogram(counts, bounds)
+                )
+                result.append(
+                    (
+                        evidence,
+                        TileLevelStats(
+                            source_index=int(evidence.source_index),
+                            bounds=bounds,
+                            sample=sample,
+                            refined=False,
+                            evidence_quality=quality,
+                        ),
+                    )
+                )
+            return tuple(result), (perf_counter() - start) * 1000.0
+
+        def done(result):
+            evidence_rows, elapsed_ms = result
+            current = getattr(self, "_frame_session", None)
+            current_generation = None if current is None else (
+                current.key,
+                int(current.session_id),
+                int(getattr(current, "viewport_revision", 0) or 0),
+                current.level_key,
+                "wgpu-resident-histogram",
+                generation[5],
+            )
+            if current is not session or current_generation != generation:
+                release(session)
+                return
+            release(current)
+            processed = 0
+            accepted_keys = []
+            for evidence, stats in evidence_rows:
+                tracker.update_from_stats(current.level_key, stats, aggregate=False)
+                self._remember_montage_source_level_stats(current.level_key, stats)
+                accepted_keys.append(evidence.evidence_key)
+                processed += 1
+            accept_evidence(accepted_keys)
+            self._last_montage_level_stats_ms = float(elapsed_ms)
+            self._montage_level_sources_added_last_commit = int(processed)
+            self._maybe_publish_after_level_evidence(current, processed=processed)
+            current.flush_pending = True
+            current.final_commit_pending = True
+            pipeline = getattr(current, "pipeline", None)
+            effects = None if pipeline is None else getattr(pipeline, "effects", None)
+            request_presentation = (
+                None if effects is None else getattr(effects, "request_presentation", None)
+            )
+            if not callable(request_presentation):
+                raise RuntimeError("live frame session has no presentation effect gate")
+            request_presentation()
+
+        def stale():
+            release(session)
+
+        def failed(exc):
+            release(session)
+            handle_ui_exception("wgpu resident histogram evidence", exc)
+
+        handle = self.win.kernel.submit(
+            TaskSpec(
+                key=("wgpu-resident-histogram", generation),
+                fn=evaluate,
+                lane=WorkLane.DISPLAY_PREVIEW,
+                priority=Priority.VISIBLE_IMAGE,
+                scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                scope=f"montage:{session.key!r}:wgpu-histogram",
+                supersession=Supersession(
+                    ("wgpu-resident-histogram", session.key),
+                    generation,
+                ),
+                reusable=True,
+                pass_token=False,
+                **_presentation_trace_fields(session, work_class),
+            ),
+            on_done=done,
+            on_stale=stale,
+            on_error=failed,
+        )
+        if handle is None:
+            release(session)
+            return 0
+        return len(rows)
 
     def _take_montage_level_evidence_batch(
         self,

@@ -53,7 +53,7 @@ def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=N
 @dataclass(frozen=True)
 class TileLevelStats:
     source_index: int
-    bounds: tuple[float, float]
+    bounds: tuple[float, float] | None
     sample: np.ndarray
     refined: bool = False
     evidence_quality: LevelEvidenceQuality | int | str = LevelEvidenceQuality.ROUGH_TARGET

@@ -1328,6 +1328,93 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
     assert spec.coverage_pass_open is True
 
 
+def test_wgpu_resident_histogram_evidence_uses_coverage_lane_and_shared_tracker():
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        MontageLevelTracker,
+    )
+    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
+    from arrayscope.render.level_stats import LevelStatsService
+
+    submitted = []
+    accepted = []
+    requested = []
+    waited = []
+
+    class Kernel:
+        def submit(self, spec, **callbacks):
+            submitted.append((spec, callbacks))
+            return object()
+
+    class Readback:
+        def resolve(self):
+            assert waited == [True]
+            return np.asarray([1, 2, 1], dtype=np.uint32), (-2.0, 4.0)
+
+    evidence = SimpleNamespace(
+        evidence_key=("resident", 7),
+        source_index=7,
+        wait_completed=lambda: waited.append(True),
+        readback=Readback(),
+    )
+    view = SimpleNamespace(
+        rendering_capabilities=WGPU_CAPABILITIES,
+        residentHistogramEvidence=lambda _payloads: (evidence,),
+        acceptResidentHistogramEvidence=lambda keys: accepted.extend(keys),
+    )
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=3,
+        viewport_revision=5,
+        level_key=("levels", "wgpu-resident"),
+        level_expected_indices=(7,),
+        plan=SimpleNamespace(tiles=(SimpleNamespace(source_index=7),)),
+        scheduling_policy=_coverage_scheduling_policy(),
+        level_evidence_inflight=False,
+        level_evidence_generation=None,
+        first_pass_histogram_published=False,
+        first_pass_quality="preview",
+        flush_pending=False,
+        final_commit_pending=False,
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(
+                request_presentation=lambda: requested.append(True),
+            )
+        ),
+    )
+    tracker = MontageLevelTracker()
+    service = LevelStatsService()
+    service.win = SimpleNamespace(kernel=Kernel(), img_view=view)
+    service._frame_session = session
+    service._montage_level_tracker = lambda: tracker
+    service._remember_montage_source_level_stats = lambda *_args: None
+    service._maybe_publish_after_level_evidence = lambda *_args, **_kwargs: None
+
+    queued = service._queue_montage_level_stats_for_payloads(session, {0: object()})
+
+    assert queued == 1
+    assert len(submitted) == 1
+    spec, callbacks = submitted[0]
+    assert spec.lane == Lane.DISPLAY_PREVIEW
+    assert spec.priority == Priority.VISIBLE_IMAGE
+    assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+    assert spec.presentation_phase == 1
+    assert spec.coverage_pass_open is True
+    callbacks["on_done"](spec.fn())
+
+    stats = tracker.source_stats(session.level_key, 7)
+    assert stats is not None
+    assert stats.bounds == (-2.0, 4.0)
+    assert stats.sample.size == 4
+    assert stats.evidence_quality == LevelEvidenceQuality.ROUGH_PREVIEW
+    assert accepted == [evidence.evidence_key]
+    assert session.level_evidence_inflight is False
+    assert session.flush_pending is True
+    assert session.final_commit_pending is True
+    assert requested == [True]
+
+
 
 def test_initial_montage_plan_uses_pending_restored_viewport_range():
     from pyqtgraph.Qt import QtCore
