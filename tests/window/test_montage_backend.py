@@ -1211,6 +1211,137 @@ def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
     )
 
 
+def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
+    """A cold scope larger than one evidence batch presents on the first batch.
+
+    272-source montage entry held every evaluated floor behind the full
+    refined sweep (~7 s black window, 2026-07-18 dossier). One refined batch
+    (MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH sources) is an honest provisional
+    window for the whole frame; anything less, or rough-only evidence, still
+    waits.
+    """
+
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        MontageLevelStats,
+    )
+    from arrayscope.window.frame_effects import (
+        tile_layer_first_pixels_wait_for_level_source,
+    )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+        )
+    )
+    window.win = window
+    tile_count = 272
+    tiles = tuple(
+        SimpleNamespace(montage_index=number, source_index=number)
+        for number in range(tile_count)
+    )
+    session = SimpleNamespace(
+        plan=SimpleNamespace(tiles=tiles),
+        required_tile_numbers=lambda: tuple(range(tile_count)),
+    )
+    expected = frozenset(range(tile_count))
+    batch = int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+
+    def summary(count, *, refined):
+        return MontageLevelStats(
+            bounds=(0.0, 1.0),
+            source_indices=frozenset(range(count)),
+            expected_indices=expected,
+            rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+            refined=refined,
+            evidence_quality=(
+                LevelEvidenceQuality.REFINED
+                if refined
+                else LevelEvidenceQuality.ROUGH_TARGET
+            ),
+        )
+
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch - 1, refined=True)
+    ) is True
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch, refined=False)
+    ) is True
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch, refined=True)
+    ) is False
+
+
+def test_first_cpu_histogram_publishes_provisional_refined_first_batch():
+    """The provisional window source publishes to the histogram/levels widgets.
+
+    The first CPU pixels are windowed with the refined first batch, so the
+    widgets must carry that same source; sub-batch or rough-only coverage
+    stays unpublished.
+    """
+
+    import numpy as np
+
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        MontageLevelTracker,
+        TileLevelStats,
+    )
+    from arrayscope.render.level_stats import LevelStatsService
+
+    batch = int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+
+    def publish_with(covered, *, quality):
+        published = []
+        tracker = MontageLevelTracker()
+        level_key = ("levels", "provisional")
+        tracker.ensure_expected(level_key, range(272))
+        for source_index in range(covered):
+            tracker.update_from_stats(
+                level_key,
+                TileLevelStats(
+                    source_index=source_index,
+                    bounds=(0.0, float(source_index + 1)),
+                    sample=np.asarray([0.0, float(source_index + 1)], dtype=np.float32),
+                    refined=quality >= LevelEvidenceQuality.REFINED,
+                    evidence_quality=quality,
+                ),
+            )
+        service = LevelStatsService()
+        service.win = SimpleNamespace(
+            img_view=SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
+                applyHistogramMetadata=lambda **kwargs: (published.append(kwargs), True)[1],
+            )
+        )
+        service._montage_level_tracker = lambda: tracker
+        service._should_publish_montage_level_metadata = lambda _session, _summary: True
+        service._schedule_montage_histogram_aggregate = lambda _session: True
+        session = SimpleNamespace(
+            level_key=level_key,
+            display_committed=False,
+            histogram_aggregate_inflight=False,
+        )
+        result = service._publish_first_cpu_histogram(session)
+        return result, published
+
+    result, published = publish_with(batch, quality=LevelEvidenceQuality.REFINED)
+    assert result is True
+    assert len(published) == 1
+    assert published[0]["levels"] == (0.0, float(batch))
+
+    result, published = publish_with(batch - 1, quality=LevelEvidenceQuality.REFINED)
+    assert result is False
+    assert published == []
+
+    result, published = publish_with(batch, quality=LevelEvidenceQuality.ROUGH_TARGET)
+    assert result is False
+    assert published == []
+
+
 def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
@@ -1258,8 +1389,11 @@ def test_refined_evidence_resumes_parked_first_commit_with_dirty_payloads():
 
 @pytest.mark.parametrize("shader_windowing", [False, True])
 def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowing):
-    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
-    from arrayscope.render.level_stats import LevelStatsService
+    from arrayscope.kernel import Lane, Priority
+    from arrayscope.render.level_stats import (
+        FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
+        LevelStatsService,
+    )
 
     submitted = []
 
@@ -1297,15 +1431,22 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
     assert len(submitted) == 1
     spec, _callbacks = submitted[0]
     assert spec.lane == Lane.DISPLAY_PREVIEW
-    assert spec.priority == Priority.VISIBLE_IMAGE
-    assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+    # The continuation is the complement producer for the first-pixel wait:
+    # at VISIBLE_IMAGE/UNRANKED it queued behind every INTERACTIVE-priority
+    # tile evaluation, re-adding the full fill backlog to each evidence turn
+    # (montage-entry blackout, 2026-07-18 dossier).
+    assert spec.priority == Priority.INTERACTIVE
+    assert spec.scheduling_rank == FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK
     assert spec.presentation_phase == 1
     assert spec.coverage_pass_open is True
 
 
 def test_first_shader_payload_level_evidence_uses_visible_lane():
-    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
-    from arrayscope.render.level_stats import LevelStatsService
+    from arrayscope.kernel import Lane, Priority
+    from arrayscope.render.level_stats import (
+        FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
+        LevelStatsService,
+    )
 
     submitted = []
 
@@ -1347,8 +1488,8 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
     assert len(submitted) == 1
     spec, _callbacks = submitted[0]
     assert spec.lane == Lane.DISPLAY_PREVIEW
-    assert spec.priority == Priority.VISIBLE_IMAGE
-    assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
+    assert spec.priority == Priority.INTERACTIVE
+    assert spec.scheduling_rank == FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK
     assert spec.presentation_phase == 1
     assert spec.coverage_pass_open is True
 

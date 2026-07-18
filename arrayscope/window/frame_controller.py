@@ -762,6 +762,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         retain_stale_pixels = bool(transition.retain_pixels)
         session.atomic_successor_pending = bool(transition.atomic_successor)
+        # A bridge successor replaced before its first commit leaves the
+        # ORIGINAL bridge predecessor on the surface; the flag lets the next
+        # rebirth continue that bridge instead of blanking against a
+        # pixel-less dying session (plan_presentation_transition).
+        session.presentation_bridge_pending = bool(
+            transition.retain_pixels and transition.reason == "montage-axis-bridge"
+        )
         emit_trace(
             "presentation_transition_retention",
             session_id=int(session.session_id),

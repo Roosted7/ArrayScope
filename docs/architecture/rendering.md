@@ -275,11 +275,21 @@ COMPUTE GOES, never about what may be shown:
    so when resident LOD makes them progressive. A stuck-open phase silently
    starves refinement forever (PyQtGraph
    zoom regression, 2026-07-18: LOD never upgraded until a reindex).
-6. **CPU-LUT single-pass mode (PyQtGraph):** when the backend runs one
-   quality pass there is no coverage/refinement split: final levels are
-   decided before the first tile renders, and rough levels/histogram
-   publication is skipped entirely. Rough→refined level phasing is
-   shader-windowing (VisPy) behavior only.
+6. **CPU-LUT windowing (PyQtGraph):** levels bake into pixels at commit, so
+   level phasing is bounded, never per-batch (the auto-levels crawl stays
+   forbidden). A cold scope at or below one refined evidence batch
+   (`MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH` sources) keeps single-pass
+   semantics: final levels are decided before the first tile renders.
+   A larger cold scope must not hold every evaluated floor hostage to the
+   full evidence sweep (montage-entry blackout, 2026-07-18): its first
+   pixels window with the refined first batch as a provisional source
+   (rank `MONTAGE_VISIBLE_SUBSET`, published to the histogram/levels
+   widgets with those pixels), and the full-population sweep then delivers
+   exactly one refined re-window through the settled-metadata refresh.
+   The visible-dependency evidence producers run at the same INTERACTIVE
+   priority as the tiles they gate — evidence queued behind the fill it
+   unblocks is a self-inflicted wait. Rough→refined *preview* level
+   phasing remains shader-windowing (VisPy) behavior only.
 
 Work classification follows the presentation dependency, not a historical
 function or lane name. In particular, PyQtGraph semantic level evidence and

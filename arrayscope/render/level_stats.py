@@ -22,6 +22,7 @@ from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
     LevelEvidenceQuality,
+    MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
     MontageLevelStats,
     MontageLevelTracker,
     REFINED_TILE_SAMPLE_LIMIT,
@@ -51,12 +52,16 @@ from arrayscope.window.frame_session import (
 
 MONTAGE_LEVEL_STATS_COMMIT_BATCH = 4
 MONTAGE_LEVEL_STATS_BACKGROUND_BATCH = 2
-# Refined first-frame evidence is worker-side NumPy sampling. Four sources per
-# submission made a 60-tile PyQtGraph successor wait through 15 kernel/Qt
-# round-trips (~1.2 s before the first atomic frame). Sixteen keeps the merge
-# callback bounded while reducing the visible dependency to four handoffs.
-MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH = 16
 MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
+# Visible-dependency evidence tasks are the complement producer for the
+# first-pixel wait: every already-evaluated floor is held back until they
+# run. The ready set orders by (priority, scheduling_rank), and cold tile
+# evaluations run at Priority.INTERACTIVE — at VISIBLE_IMAGE/UNRANKED the
+# first (4 ms) evidence batch queued behind the whole 272-tile fill (~2.6 s,
+# 2026-07-18 blackout dossier). These submissions therefore carry the same
+# INTERACTIVE priority as the pixels they gate, at rank 0; the cost is one
+# bounded batch per turn.
+FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK = 0
 
 
 def _presentation_trace_fields(
@@ -563,8 +568,8 @@ class LevelStatsService:
                     key=task_key,
                     fn=lambda samples=samples: aggregate_histogram_samples(samples),
                     lane=WorkLane.DISPLAY_PREVIEW,
-                    priority=Priority.VISIBLE_IMAGE,
-                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    priority=Priority.INTERACTIVE,
+                    scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(
                         ("montage-histogram-aggregate", session.key),
@@ -787,8 +792,8 @@ class LevelStatsService:
                     key=task_key,
                     fn=evaluate,
                     lane=WorkLane.DISPLAY_PREVIEW,
-                    priority=Priority.VISIBLE_IMAGE,
-                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    priority=Priority.INTERACTIVE,
+                    scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
                     scope="montage:semantic-level-evidence",
                     supersession=Supersession(
                         ("semantic-level-evidence", session.key),
@@ -1586,8 +1591,8 @@ class LevelStatsService:
                     key=task_key,
                     fn=evaluate,
                     lane=WorkLane.DISPLAY_PREVIEW,
-                    priority=Priority.VISIBLE_IMAGE,
-                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    priority=Priority.INTERACTIVE,
+                    scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence", session.key), generation),
                     reusable=True,
@@ -1692,8 +1697,8 @@ class LevelStatsService:
                     key=task_key,
                     fn=lambda: True,
                     lane=WorkLane.DISPLAY_PREVIEW,
-                    priority=Priority.VISIBLE_IMAGE,
-                    scheduling_rank=UNRANKED_SCHEDULING_RANK,
+                    priority=Priority.INTERACTIVE,
+                    scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence-continuation", session.key), generation),
                     pass_token=False,
@@ -1824,11 +1829,24 @@ class LevelStatsService:
         if image_view is None or image_view_backend_capabilities(image_view).shader_windowing:
             return False
         summary = self._montage_level_tracker().summary_for(session.level_key)
+        if summary is None:
+            return False
+        # A refined first batch is publishable provisional metadata for a cold
+        # scope larger than the batch: it is what unblocks the first CPU
+        # pixels (tile_layer_first_pixels_wait_for_level_source), so the
+        # histogram/levels widgets must carry the same source those pixels
+        # are windowed with. Smaller scopes keep the full-population gate.
+        provisional_first_batch = bool(
+            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL
+            and bool(summary.refined)
+            and summary.expected_indices
+            and len(summary.source_indices)
+            >= min(len(summary.expected_indices), MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+        )
         if (
-            summary is None
-            or summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL
-            or not self._should_publish_montage_level_metadata(session, summary)
-        ):
+            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL
+            and not provisional_first_batch
+        ) or not self._should_publish_montage_level_metadata(session, summary):
             return False
         source = self._montage_level_source_for_session(session, allow_partial=True)
         histogram = self._montage_histogram_plot_data_for_session(session, allow_partial=True)

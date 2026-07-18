@@ -170,17 +170,44 @@ or every row dies `FileNotFoundError` with `instances: 0`.
 
 ## Follow-ups (pre-existing, unmasked or adjacent)
 
-- **pyqtgraph montage-entry blackout** (chip spawned): the topology-changing
-  handoff honestly degrades (`presentation_transition_retention
-  reason=montage-axis retained=false`), but the successor's first pixels
-  wait ~7.7 s because CPU windowing is gated on the full 272-source level
-  evidence sweep (`commit_bail level-evidence-wait` from 0.6→5.3 s;
-  evidence batches queue behind `display_preview` page reductions and the
-  publication waits for the full expected-indices scan). The continuity gate
-  fails with `blackout_observed=True, minimum_retained=0` — identical at the
-  pre-fix branch tip with only the harness budget applied, so pre-existing.
-  Likely the identity of the journey matrix's standing pyqtgraph cold_fill
-  red (demand-freshness axis) as well.
+- **pyqtgraph montage-entry blackout — FIXED 2026-07-19** (chip completed):
+  the successor's first pixels waited ~7.7 s because CPU windowing was gated
+  on the full 272-source level evidence sweep (`commit_bail
+  level-evidence-wait` from 0.6→5.3 s), while the montage-axis transition
+  blanked the predecessor at entry (`presentation_transition_retention
+  reason=montage-axis retained=false`). Three mechanisms, all fixed:
+  1. *Full-sweep gate:* `tile_layer_first_pixels_wait_for_level_source` and
+     `_publish_first_cpu_histogram` now accept a **provisional refined first
+     batch** (≥ `MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH` sources) for scopes
+     larger than one batch; rank stays `MONTAGE_VISIBLE_SUBSET` and the
+     settled-metadata refresh delivers the single refined re-window
+     (contract point 6 amended in `docs/architecture/rendering.md`).
+  2. *Evidence queued behind the fill it gates:* the visible-dependency
+     evidence producers (payload batch, continuation, semantic sweep,
+     histogram aggregate) ran at `VISIBLE_IMAGE`/UNRANKED while cold tile
+     evaluations run at `INTERACTIVE` — the 4 ms first batch queued ~2.6 s
+     deep. They now run at the same INTERACTIVE priority, rank 0
+     (`FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK`).
+  3. *Entry blank:* `plan_presentation_transition` now returns an honest
+     **montage-axis bridge** (retain, never atomic) when only the montage
+     selection differs and the predecessor is settled; a
+     `presentation_bridge_pending` flag carries the bridge through rebirths
+     that replace a successor before its first commit (the fixed3 trace
+     showed session 3 re-blanking at 0.25 s otherwise).
+  Result (offscreen repro): R8 gate **PASS**, first pixels 1.98 s (was
+  4.3–6.9 s offscreen / ~7.7 s field trace), `blackout_observed=False`,
+  `minimum_retained=1`, first visible windowed at provisional rank 3 /
+  quality REFINED, final levels converge to the refined full-population
+  bounds, fill completes 272/272.
+  Real-Wayland journey matrix
+  (`tests/artifacts/journey-matrix-blackoutfix-2026-07-19`): 14/15 green,
+  no new reds; `first_new_pixels_ms` on pyqtgraph cold_fill improved to
+  353 ms (960–1010 ms across every committed incumbent run). The one red is
+  the INCUMBENT pyqtgraph cold_fill `demand_fresh_within_budget` at
+  incumbent magnitude (5.5 s vs 5.4–6.3 s in v1/v2/v3/v7) — so the earlier
+  guess that the blackout was "likely the identity" of that standing red is
+  **refuted**: it is the AUTO-camera demand-freshness lane (queue standing
+  row), not the entry blackout.
 - **Kernel shutdown blocks ~19–26 s at teardown** (worker join in
   `kernel/scheduler.py shutdown`) — dominates repro wall-clock; harness-only
   pain today but worth a look.

@@ -27,6 +27,16 @@ class LevelEvidenceQuality(IntEnum):
     REFINED = 3
 
 
+# Refined first-frame evidence is worker-side NumPy sampling. Four sources per
+# submission made a 60-tile PyQtGraph successor wait through 15 kernel/Qt
+# round-trips (~1.2 s before the first atomic frame). Sixteen keeps the merge
+# callback bounded while reducing the visible dependency to four handoffs.
+# This is also the provisional first-pixel threshold: one refined batch is the
+# minimum honest window source for a cold CPU-windowed scope larger than the
+# batch (montage-entry blackout, 2026-07-18 dossier).
+MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH = 16
+
+
 def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=None) -> tuple[object, ...]:
     """Identity for semantic montage levels, independent of coverage and presentation.
 

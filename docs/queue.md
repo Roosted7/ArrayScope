@@ -70,14 +70,26 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   indexed floor lookups (lod.py), and a build-scale completion budget for
   the cold-fill harness stages (`COLD_FILL_BUILD_TIMEOUT_S`, churn-harness
   rule). Repro: vispy PASS 272/272 ~9.7 s, wgpu PASS ~10.9 s; pyqtgraph
-  completes 272/272 (~24 s) but its R8 gate is red on a PRE-EXISTING
+  completes 272/272 (~24 s) but its R8 gate was red on a PRE-EXISTING
   montage-entry blackout (CPU windowing gated on the full level-evidence
-  sweep — chip out). Journey matrix post-fix: cold_fill GREEN on all three
+  sweep — fixed 2026-07-19, Done entry). Journey matrix post-fix: cold_fill GREEN on all three
   backends (the standing vispy+pyqtgraph cold_fill reds were this
   mechanism); remaining reds are the demand-freshness family (pyqtgraph
   zoom_in stable, zoom_out flips backends run-to-run). Row-3(d) perf-bars
   measurement is UNBLOCKED. Dossier:
   [fill-throughput-2026-07-18](redesign/fill-throughput-2026-07-18.md).
+- **R8 continuity gate vs document-changing stages (adjudication needed).**
+  With the fill stall and entry blackout fixed, `profile_montage_workflow`'s
+  `fft_full_tiled_montage` fails `presentation_continuity` on BOTH vispy
+  (first tile 4.6 s) and pyqtgraph (3.4 s), offscreen 2026-07-19: applying
+  the FFT pipeline is a document change, ADR 0051 forbids retaining
+  old-operation pixels, so entry honestly blanks — and the gate's
+  no-blank-sample rule can never pass a document-changing stage slower than
+  the sampler's first tick. Either the gate learns a document-change
+  transition class (blank legal, successor latency still measured), or the
+  FFT successor needs its own first-pixel latency work. Pre-existing on all
+  backends; raw-stage entry (same document) now passes via the montage-axis
+  bridge.
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
 - **Upstream rendercanvas contributions** (from gate B): a native-Wayland
@@ -96,6 +108,24 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-19 — **PyQtGraph montage-entry blackout fixed (~7.5 s black → 2 s
+  to first pixels, R8 continuity gate green):** three mechanisms — CPU first
+  pixels accept a provisional refined first evidence batch instead of the
+  full population (`tile_layer_first_pixels_wait_for_level_source`,
+  `_publish_first_cpu_histogram`; contract point 6 amended in
+  [rendering.md](architecture/rendering.md)); visible-dependency evidence
+  producers run at INTERACTIVE/rank-0 instead of queueing behind the very
+  fill they gate (`FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK`); and
+  `plan_presentation_transition` keeps a settled predecessor visible as an
+  honest **montage-axis bridge** (never atomic, survives pixel-less rebirths
+  via `presentation_bridge_pending`). One refined levels/histogram update at
+  sweep completion — no per-batch re-bake. Suite green (one pre-existing
+  wgpu-test guard red, chip out); real-Wayland matrix 14/15 with NO new
+  reds and pyqtgraph cold_fill first pixels 353 ms (was ~1 s) —
+  the surviving cold_fill red is the incumbent demand-freshness lane at
+  incumbent magnitude (blackout-as-its-identity refuted). Details in the
+  [fill-throughput dossier](redesign/fill-throughput-2026-07-18.md)
+  follow-ups.
 - 2026-07-18 — **G6(d) live GPU LOD generation on wgpu:**
   [`GenerateLodPages`](../arrayscope/gpu/command_protocol.py) runs one
   disjoint-subresource 2×2 component-mean pass per parent, recursively builds a

@@ -4299,6 +4299,127 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
     assert decision.atomic_successor
 
 
+def test_montage_axis_entry_retains_settled_predecessor_as_bridge():
+    """Plane→montage keeps the settled plane visible until the first delta.
+
+    Blanking at the axis change put a multi-second black window between a
+    plane and its own montage (R8 continuity gate, 2026-07-18 blackout
+    dossier). The bridge is honest retention only: no all-slot atomic
+    handoff, and an unsettled predecessor still blanks.
+    """
+
+    previous = _session(count=1)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    plane_state = ViewState.from_shape((4, TILE, TILE)).with_image_axes(1, 2)
+    previous.montage_axis = None
+    previous.view_state = plane_state
+    successor.view_state = plane_state.with_montage_axis(
+        0, columns=4, indices=(0, 1, 2, 3), text="0:4"
+    )
+    _state, previous_delta = previous.build_tile_presentation({})
+    _acknowledge(previous, previous_delta)
+    previous.mark_presented(tuple(previous_delta.upserts))
+    assert previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "montage-axis-bridge"
+
+
+def test_montage_axis_entry_blanks_unsettled_predecessor():
+    previous = _session(count=1)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    plane_state = ViewState.from_shape((4, TILE, TILE)).with_image_axes(1, 2)
+    previous.montage_axis = None
+    previous.view_state = plane_state
+    successor.view_state = plane_state.with_montage_axis(
+        0, columns=4, indices=(0, 1, 2, 3), text="0:4"
+    )
+    assert not previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert not decision.retain_pixels
+    assert decision.reason == "montage-axis"
+    assert decision.detail == "predecessor-incomplete"
+
+
+def test_montage_rebirth_continues_pending_bridge_from_pixel_less_predecessor():
+    """A rebirth before the bridge successor's first commit keeps the bridge.
+
+    The surface still draws the ORIGINAL bridge predecessor; blanking against
+    the pixel-less dying session re-opened the entry black window (fixed3
+    trace: session 3 reject predecessor-incomplete at 0.25 s).
+    """
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    montage_state = ViewState.from_shape((4, TILE, TILE)).with_image_axes(
+        1, 2
+    ).with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    previous.view_state = montage_state
+    successor.view_state = montage_state
+    previous.presentation_bridge_pending = True
+    assert not previous.required_first_pixels_presented()
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "montage-axis-bridge"
+
+
+def test_montage_axis_change_with_other_view_state_drift_still_blanks():
+    """The bridge covers exactly the montage selection; any other drift hides."""
+
+    previous = _session(count=1)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((4, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    plane_state = ViewState.from_shape((4, TILE, TILE)).with_image_axes(1, 2)
+    previous.montage_axis = None
+    previous.view_state = plane_state
+    successor.view_state = plane_state.transposed_image_axes().with_montage_axis(
+        0, columns=4, indices=(0, 1, 2, 3), text="0:4"
+    )
+    _state, previous_delta = previous.build_tile_presentation({})
+    _acknowledge(previous, previous_delta)
+    previous.mark_presented(tuple(previous_delta.upserts))
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert not decision.retain_pixels
+    assert decision.reason == "montage-axis"
+
+
 def test_expanded_montage_rebirth_retains_pixels_without_atomic_wait():
     """A small predecessor cannot own the additional slots of a larger layout."""
 

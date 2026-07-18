@@ -138,7 +138,10 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     assert progress.inflight_generation is None
     assert progress.blocking_reason == "ready"
     assert all(task["lane"] == Lane.DISPLAY_PREVIEW for task in submitted)
-    assert all(task["priority"] == Priority.VISIBLE_IMAGE for task in submitted)
+    # The visible-lane sweep is the complement producer for the first-pixel
+    # wait; it carries the same INTERACTIVE priority as the tile evaluations
+    # it gates (montage-entry blackout, 2026-07-18 dossier).
+    assert all(task["priority"] == Priority.INTERACTIVE for task in submitted)
     assert all(task["pass_token"] is True for task in submitted)
     assert max(task["max_items"] for task in submitted) <= 16
     assert service.win.operation_evaluator.image_evaluations == 0

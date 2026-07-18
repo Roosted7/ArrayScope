@@ -18,7 +18,10 @@ from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
 from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
-from arrayscope.display.model.montage_levels import LevelEvidenceQuality
+from arrayscope.display.model.montage_levels import (
+    LevelEvidenceQuality,
+    MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+)
 from arrayscope.display.model.presentation_generation import levels_match
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
@@ -1844,7 +1847,18 @@ class FramePipelineEffects:
             self._install_warm_residency_scheduler(rendered_geometry)
             renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             prepare_source_start = perf_counter()
-            semantic_source = renderer._montage_level_source_for_session(session, allow_partial=publish_metadata)
+            # A cold CPU-windowed first commit may window from a provisional
+            # refined subset (first-batch acceptance in
+            # tile_layer_first_pixels_wait_for_level_source); the partial
+            # source must therefore be visible to the windowing decision on
+            # exactly that commit, not only when metadata publication is due.
+            first_cpu_commit_source = bool(
+                first_display_commit and not bool(capabilities.shader_windowing)
+            )
+            semantic_source = renderer._montage_level_source_for_session(
+                session,
+                allow_partial=bool(publish_metadata or first_cpu_commit_source),
+            )
             renderer._last_montage_tile_prepare_source_ms = (perf_counter() - prepare_source_start) * 1000.0
             prepare_histogram_start = perf_counter()
             histogram_plot_data = (
@@ -4070,9 +4084,12 @@ def tile_layer_first_pixels_wait_for_level_source(
 
     Explicit user levels change the window choice, not the semantic histogram
     source. Every first tiled frame still needs rough evidence for a shader
-    backend. A CPU-windowed backend may use either the full refined semantic
-    population or an honestly ranked refined subset covering every required
-    first-pixel tile; the owned full-population producer then improves it.
+    backend. A CPU-windowed backend may use the full refined semantic
+    population, an honestly ranked refined subset covering every required
+    first-pixel tile, or — for scopes larger than one evidence batch — a
+    provisional refined first batch; the owned full-population producer then
+    improves whichever source unblocked the frame, and the settled-metadata
+    refresh publishes the one refined update.
     """
 
     if not bool(first_display_commit):
@@ -4112,6 +4129,20 @@ def tile_layer_first_pixels_wait_for_level_source(
             for source in tuple(getattr(level_stats, "source_indices", ()) or ())
         }
         if required_sources and required_sources <= covered_sources:
+            return False
+        # Provisional first-batch acceptance: a large cold scope must not hold
+        # every already-evaluated floor hostage to the full evidence sweep
+        # (272-source montage entry: ~7 s of black window, 2026-07-18
+        # dossier). One refined batch is an honest provisional window for the
+        # whole frame — rank stays MONTAGE_VISIBLE_SUBSET, and the tracker's
+        # monotonic improvement plus the settled-metadata refresh deliver the
+        # single refined re-window when the population completes. Scopes at or
+        # below one batch keep exact pre-existing semantics.
+        if (
+            required_sources
+            and len(covered_sources & required_sources)
+            >= min(len(required_sources), MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+        ):
             return False
     return True
 

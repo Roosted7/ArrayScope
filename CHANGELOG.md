@@ -6,6 +6,15 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- Entering a montage on the PyQtGraph backend no longer shows a multi-second
+  black window: the previous plane stays visible as an honest bridge until
+  the montage's first tiles commit, and those first tiles now window with a
+  provisional refined first batch of level statistics (~2 s to first pixels
+  on the 272-slice reference volume, down from ~7.5 s of black) instead of
+  waiting for the full per-slice statistics sweep. The window/levels and
+  histogram then update once, to the final full-population values, when the
+  sweep completes.
+
 - The dimension-chip strip no longer stays wrapped onto an extra row after a
   transient narrowing (e.g. dock/layout churn while adding an operation): the
   strip now watches its parent's resize stream and reflows as soon as the

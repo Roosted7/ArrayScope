@@ -3958,8 +3958,7 @@ def plan_presentation_transition(
         return reject("predecessor-hidden")
     previous_axis = getattr(previous_session, "montage_axis", None)
     axis = getattr(session, "montage_axis", None)
-    if previous_axis != axis:
-        return reject("montage-axis")
+    montage_axis_changed = previous_axis != axis
     if axis is None and bool(getattr(session, "force_auto", False)):
         return reject("force-auto")
     if getattr(session, "skipped_tiles", None) or getattr(previous_session, "skipped_tiles", None):
@@ -3992,6 +3991,34 @@ def plan_presentation_transition(
     state = session.view_state
     if type(previous_state) is not type(state):
         return reject("view-state-type")
+    if montage_axis_changed:
+        # Montage entry/exit is a topology change of the same semantic
+        # source, not a new source: with every identity gate above already
+        # satisfied, the settled predecessor is an honest visual bridge
+        # ("video player between frames") until the successor's first
+        # bounded delta replaces it. Blanking here put a multi-second black
+        # window between a plane and its own montage (R8 continuity gate,
+        # 2026-07-18 blackout dossier). Only the montage selection fields may
+        # differ; the predecessor cannot complement successor slots across
+        # topologies, so the bridge never arms the all-slot atomic handoff.
+        try:
+            aligned = replace(
+                state,
+                montage_axis=previous_state.montage_axis,
+                montage_columns=previous_state.montage_columns,
+                montage_indices=previous_state.montage_indices,
+                montage_text=previous_state.montage_text,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return reject("montage-axis")
+        if aligned != previous_state:
+            return reject("montage-axis", "view-state")
+        first_pixels = getattr(previous_session, "required_first_pixels_presented", None)
+        if not bool(callable(first_pixels) and first_pixels()) and not bool(
+            getattr(previous_session, "presentation_bridge_pending", False)
+        ):
+            return reject("montage-axis", "predecessor-incomplete")
+        return PresentationTransitionDecision(True, False, "montage-axis-bridge")
     if axis is None:
         try:
             aligned = replace(state, slice_indices=previous_state.slice_indices)
@@ -4019,6 +4046,14 @@ def plan_presentation_transition(
         or getattr(previous_session, "atomic_successor_pending", False)
     )
     if not complete_predecessor:
+        # A rebirth can replace a bridge successor before its first commit.
+        # The physical surface then still draws the ORIGINAL bridge
+        # predecessor (predecessor_visible above is surface-owned truth), so
+        # the honest bridge continues; arming the all-slot atomic handoff
+        # against a pixel-less predecessor is what the completeness check
+        # exists to prevent.
+        if bool(getattr(previous_session, "presentation_bridge_pending", False)):
+            return PresentationTransitionDecision(True, False, "montage-axis-bridge")
         return reject("predecessor-incomplete")
     if not same_topology:
         # Retaining the predecessor is still an honest visual bridge, but it
