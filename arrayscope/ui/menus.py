@@ -209,6 +209,9 @@ class WindowMenuMixin:
             (ImageRenderingBackendChoice.AUTO, "Auto (hardware GL picks VisPy)"),
             (ImageRenderingBackendChoice.PYQTGRAPH, "PyQtGraph stable"),
             (ImageRenderingBackendChoice.VISPY, "VisPy experimental"),
+            # Explicit pin only — AUTO never resolves to wgpu (queue row 3d:
+            # promotion is an evidence decision, field hours count toward it).
+            (ImageRenderingBackendChoice.WGPU, "wgpu experimental (GPU compute)"),
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._image_rendering_backend_action_group.addAction(action)
