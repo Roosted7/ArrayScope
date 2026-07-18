@@ -38,7 +38,7 @@ MIN_COMMITS = {
     ("vispy", "index_scroll"): 1,
     ("pyqtgraph", "index_scroll"): 1,
     ("wgpu", "cold_fill"): 2,
-    ("wgpu", "zoom_in"): 1,
+    ("wgpu", "zoom_in"): 0,  # Finer resident pages need no payload commit.
     ("wgpu", "zoom_out"): 0,
     ("wgpu", "scroll_shuffle"): 2,
     ("wgpu", "index_scroll"): 1,

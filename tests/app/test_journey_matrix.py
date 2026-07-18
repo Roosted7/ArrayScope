@@ -119,6 +119,25 @@ def test_healthy_trajectory_fixture_exercises_all_oracles(tmp_path):
     assert result["coverage_pass_observed"]
 
 
+def test_wgpu_resident_zoom_in_does_not_require_a_payload_commit(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    interval["start"]["journey"] = "zoom_in"
+    interval["start"]["gesture_id"] = "zoom_in-1"
+    interval["end"]["journey"] = "zoom_in"
+    interval["end"]["gesture_id"] = "zoom_in-1"
+    interval["gesture_id"] = "zoom_in-1"
+    for sample in timeline:
+        sample["gesture_id"] = "zoom_in-1"
+    trace = [event for event in trace if event.get("kind") != "commit_batch"]
+
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
+
+    assert result["presentation"]["minimum_commits"] == 0
+    assert result["presentation"]["commit_count"] == 0
+    assert result["presentation"]["ok"]
+    assert result["ok"]
+
+
 def test_matrix_declares_every_backend_journey_cell():
     from arrayscope.tools.journey_matrix import BACKENDS, JOURNEYS, MIN_COMMITS
 
