@@ -40,6 +40,17 @@ VISPY_CAPABILITIES = ImageViewBackendCapabilities(
     native_pointer_interaction=False,
 )
 
+WGPU_CAPABILITIES = ImageViewBackendCapabilities(
+    name="wgpu",
+    # MVP scope (queue row 3b): scalar 2-D non-montage only.  Declaring no
+    # persistent tile residency keeps every montage warm/prefetch path off,
+    # so warmTiledResidency is never invoked against this backend.
+    persistent_tile_residency=False,
+    tile_residency_kind="gpu_atlas",
+    shader_windowing=True,
+    native_pointer_interaction=False,
+)
+
 
 def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
     """Return capabilities for a view or its composed image surface."""

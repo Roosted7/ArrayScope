@@ -35,6 +35,8 @@ class ImageRenderingBackendChoice(Enum):
     AUTO = "auto"
     PYQTGRAPH = "pyqtgraph"
     VISPY = "vispy"
+    # Experimental explicit pin only: AUTO never resolves to wgpu.
+    WGPU = "wgpu"
 
 
 class MontageQualityPolicyChoice(Enum):

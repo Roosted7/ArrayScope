@@ -34,6 +34,19 @@ def create_image_view(settings=None, *, notify=None):
         choice_value = resolved.value
         if callable(notify):
             notify(f"Image rendering backend: {choice_value} | {reason}")
+    if choice_value == ImageRenderingBackendChoice.WGPU.value:
+        try:
+            from arrayscope.display.backends.wgpu import WgpuSurface
+
+            view = WgpuSurface()
+            view._notify_status = notify
+            return view
+        except Exception as exc:
+            if callable(notify):
+                notify(f"wgpu renderer unavailable; using PyQtGraph ({exc})")
+        view = PyQtGraphSurface()
+        view._notify_status = notify
+        return view
     if choice_value == ImageRenderingBackendChoice.VISPY.value:
         try:
             from arrayscope.display.backends.vispy import VisPySurface
