@@ -947,3 +947,52 @@ def test_warm_tiled_residency_accepts_the_commit_plan_contract(qt_app):
         assert len(view._wgpu_executor.page_table.resident_keys()) >= resident_before
     finally:
         view.close()
+
+
+def test_axis_inversion_mirrors_content_and_redraws_without_commit(qt_app):
+    """Dogfood bugs 2026-07-18: (1) flips only took effect after the next
+    commit — the view listened to sigRangeChanged but not sigStateChanged;
+    (2) xInverted was ignored by the camera rect math entirely, so drawn
+    content disagreed with the ViewBox's (correctly inverted) interaction
+    mapping — drags and zoom rects landed on mirrored features."""
+
+    from arrayscope.gpu.command_protocol import PresentGeneration, UpdateTileInstances
+
+    view = _shown_view(qt_app)
+    try:
+        # One tile whose left half is dark and right half is bright.
+        image = np.zeros((32, 64), dtype=np.float32)
+        image[:, 32:] = 1.0
+        geometry = _montage_geometry((32, 64), 1, 1, loaded=1)
+        payloads = {0: _payload(0, image, source_id="flip-src")}
+        _commit(view, geometry, payloads, levels=(0.0, 1.0))
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 32), padding=0)
+
+        def render_columns():
+            view._submit_wgpu(
+                (UpdateTileInstances(view._wgpu_camera_tiles()), PresentGeneration(999))
+            )
+            target = view._wgpu_executor.read_target().astype(np.float32)
+            h, w = target.shape[:2]
+            row = target[h // 2, :, 0]
+            return float(row[: w // 4].mean()), float(row[-w // 4 :].mean())
+
+        left, right = render_columns()
+        assert right > left + 50  # bright half on the right pre-flip
+
+        uploads_before = view._wgpu_executor.uploads_total
+        draws_before = int(getattr(view, "_wgpu_draw_count", 0) or 0)
+        view._wgpu_canvas_update_pending = False
+        view.getView().invertX(True)
+        qt_app.processEvents()
+        # Bug 1: the inversion toggle alone must request a redraw (pending
+        # flag armed, or the ondemand draw already ran).
+        assert bool(getattr(view, "_wgpu_canvas_update_pending", False)) or (
+            int(getattr(view, "_wgpu_draw_count", 0) or 0) > draws_before
+        )
+        # Bug 2: the drawn content must mirror horizontally, with zero uploads.
+        left, right = render_columns()
+        assert left > right + 50, f"content not mirrored: left={left} right={right}"
+        assert view._wgpu_executor.uploads_total == uploads_before
+    finally:
+        view.close()

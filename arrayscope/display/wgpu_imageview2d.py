@@ -257,6 +257,12 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_bounds_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._layer_owner.add_bounds_item(self._wgpu_bounds_item)
         self.view.sigRangeChanged.connect(lambda *_args: self._request_wgpu_canvas_draw())
+        # Axis inversion (flips) changes ViewBox STATE without necessarily
+        # changing the range; without this hook a flip only became visible
+        # after the next commit (dogfood bug 2026-07-18). Mirrors VisPy.
+        state_signal = getattr(self.view, "sigStateChanged", None)
+        if state_signal is not None:
+            state_signal.connect(lambda *_args: self._request_wgpu_canvas_draw())
 
     # ---- executor management -------------------------------------------------
 
@@ -455,28 +461,37 @@ class WgpuImageView2D(ImageViewShell):
         if not (span_x > 0.0 and span_y > 0.0):
             return ()
         state = getattr(self.view, "state", {}) or {}
+        # Both inversion axes must mirror the ViewBox (the interaction
+        # truth): ignoring xInverted drew unmirrored content under flipped
+        # interaction coordinates, so drags/zooms landed on mirrored
+        # features (dogfood bug 2026-07-18). The negative-src-extent trick
+        # is the same one the y branch always used.
+        x_inverted = bool(state.get("xInverted", False))
         y_inverted = bool(state.get("yInverted", True))
         instances = []
         for tile in sorted(committed["tiles"]):
             info = committed["tiles"][tile]
             wx, wy, ww, wh = info["world_rect"]
             src_w, src_h = info["src_size"]
-            dst_x = (wx - float(x0)) / span_x
             dst_w = ww / span_x
             dst_h = wh / span_y
+            if x_inverted:
+                dst_x = (float(x1) - (wx + ww)) / span_x
+                src_x0, src_wx = float(src_w), -float(src_w)
+            else:
+                dst_x = (wx - float(x0)) / span_x
+                src_x0, src_wx = 0.0, float(src_w)
             if y_inverted:
                 dst_y = (wy - float(y0)) / span_y
-                src_origin = (0.0, 0.0)
-                src_size = (float(src_w), float(src_h))
+                src_y0, src_hy = 0.0, float(src_h)
             else:
                 dst_y = (float(y1) - (wy + wh)) / span_y
-                src_origin = (0.0, float(src_h))
-                src_size = (float(src_w), -float(src_h))
+                src_y0, src_hy = float(src_h), -float(src_h)
             instances.append(
                 TileInstance(
                     (dst_x, dst_y, dst_w, dst_h),
-                    src_origin,
-                    src_size,
+                    (src_x0, src_y0),
+                    (src_wx, src_hy),
                     0,
                     plane_index=int(info["plane_index"]),
                 )
