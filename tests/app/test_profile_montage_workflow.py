@@ -34,6 +34,93 @@ def test_tile_presentation_draw_wait_fails_loudly_when_request_is_not_drawn(monk
         )
 
 
+def _journey_gesture_win(pending_fn, capture_log):
+    return SimpleNamespace(
+        img_view=SimpleNamespace(presentationDrawPending=pending_fn),
+        _frame_session=None,
+        _arrayscope_active_gesture_id="zoom_out-1",
+        _arrayscope_active_journey="zoom_out",
+        _arrayscope_active_gesture_started_ns=1,
+        _arrayscope_visual_timeline_probe=SimpleNamespace(
+            capture=lambda reason: capture_log.append(reason)
+        ),
+    )
+
+
+def test_journey_end_sample_waits_for_pending_presentation_draw(monkeypatch):
+    """Matrix v6/v7 zoom_out red (2026-07-18): a descriptor-only gesture's
+    single repaint ran one scheduler tick after the last camera step, so the
+    journey-end screenshot recorded the stale predecessor frame and the
+    freshness oracle saw no pixel change ever. The end sample must key on
+    presentation-draw acks: capture only after pending draws execute."""
+
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    pending = {"pumps_left": 3}
+    monkeypatch.setattr(
+        workflow,
+        "_process_events",
+        lambda *_args, **_kwargs: pending.update(
+            pumps_left=max(0, pending["pumps_left"] - 1)
+        ),
+    )
+    events = []
+    monkeypatch.setattr(
+        workflow, "emit_trace", lambda kind, **payload: events.append((kind, payload))
+    )
+    captures = []
+    win = _journey_gesture_win(lambda: pending["pumps_left"] > 0, captures)
+
+    workflow._finish_journey_gesture(win, "zoom_out-1", app=object(), QtCore=object())
+
+    assert captures == ["journey-end"]
+    assert pending["pumps_left"] == 0  # the draw ran before the sample was taken
+    assert events[-1][1]["presentation_drained"] is True
+
+
+def test_journey_end_drain_is_bounded_when_redraw_never_comes(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    pumps = []
+    monkeypatch.setattr(
+        workflow, "_process_events", lambda *_args, **_kwargs: pumps.append(1)
+    )
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(presentationDrawPending=lambda: True)
+    )
+
+    settled = workflow._drain_presentation_draw_for_journey_sample(
+        win,
+        object(),
+        object(),
+        timeout_s=bounded_interaction_settle_timeout_s(0.05),
+    )
+
+    assert settled is False  # gave up within the bound instead of raising
+    assert pumps  # it did try to run the dispatcher
+
+
+def test_finish_journey_gesture_still_samples_when_redraw_is_missed(monkeypatch):
+    """Injected missed redraw: the pending flag never clears. The journey-end
+    sample must still be captured (its stale pixels keep the freshness oracle
+    red) and the give-up must be recorded as evidence, not raised."""
+
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    events = []
+    monkeypatch.setattr(
+        workflow, "emit_trace", lambda kind, **payload: events.append((kind, payload))
+    )
+    captures = []
+    win = _journey_gesture_win(lambda: True, captures)
+
+    workflow._finish_journey_gesture(win, "zoom_out-1", app=object(), QtCore=object())
+
+    assert captures == ["journey-end"]
+    assert events[-1][1]["presentation_drained"] is False
+
+
 def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 

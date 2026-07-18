@@ -138,6 +138,34 @@ def test_wgpu_resident_zoom_in_does_not_require_a_payload_commit(tmp_path):
     assert result["ok"]
 
 
+def test_wgpu_descriptor_only_missed_redraw_keeps_freshness_red(tmp_path):
+    """A wgpu zoom-out over resident content commits nothing by design, so
+    the freshness oracle rests entirely on sampled pixels. An injected missed
+    redraw — every gesture-tagged screenshot identical to the baseline —
+    must stay red even now that the journey-end sample drains pending
+    presentation draws first (the drain gives up bounded; it must never
+    substitute for an actual repaint)."""
+
+    trace, timeline, interval = _artifacts(tmp_path)
+    interval["start"]["journey"] = "zoom_out"
+    interval["start"]["gesture_id"] = "zoom_out-1"
+    interval["end"]["journey"] = "zoom_out"
+    interval["end"]["gesture_id"] = "zoom_out-1"
+    interval["gesture_id"] = "zoom_out-1"
+    baseline_path = timeline[0]["screenshot_path"]
+    for sample in timeline:
+        sample["gesture_id"] = "zoom_out-1"
+        sample["screenshot_path"] = baseline_path
+    trace = [event for event in trace if event.get("kind") != "commit_batch"]
+
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
+
+    assert result["presentation"]["ok"]  # zero commits is legal for this cell
+    assert result["first_new_pixels_ms"] is None
+    assert not result["first_new_pixels_within_budget"]
+    assert not result["ok"]
+
+
 def test_matrix_declares_every_backend_journey_cell():
     from arrayscope.tools.journey_matrix import BACKENDS, JOURNEYS, MIN_COMMITS
 

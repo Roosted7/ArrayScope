@@ -917,10 +917,55 @@ def _start_journey_gesture(win, journey: str) -> str:
     return gesture_id
 
 
-def _finish_journey_gesture(win, gesture_id: str, *, reached: bool | None = None) -> None:
+def _drain_presentation_draw_for_journey_sample(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = min(2.0, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> bool:
+    """Run the dispatcher until pending presentation draws have executed.
+
+    The journey freshness sampler keys on presented pixels.  A
+    descriptor-only gesture (wgpu zoom-out over resident content commits
+    nothing by design) produces exactly one repaint, which the on-demand
+    scheduler may run a tick after the last camera step; capturing the
+    journey-end sample synchronously recorded the stale predecessor frame
+    and reported first_new_pixels=None (matrix v6/v7, 2026-07-18).  Bounded
+    and non-raising: when an injected missed redraw never clears the
+    pending flag, the sample is still taken, still stale, and the freshness
+    oracle stays red.
+    """
+
+    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
+    if not callable(pending_fn):
+        return True
+    deadline = perf_counter() + max(0.05, timeout_s)
+    while bool(pending_fn()):
+        if perf_counter() >= deadline:
+            return False
+        _process_events(app, QtCore, count=2)
+        time.sleep(0.005)
+    return True
+
+
+def _finish_journey_gesture(
+    win,
+    gesture_id: str,
+    *,
+    reached: bool | None = None,
+    app=None,
+    QtCore=None,
+) -> None:
     if str(getattr(win, "_arrayscope_active_gesture_id", "")) != str(gesture_id):
         return
     visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+    presentation_drained = None
+    if visual_probe is not None and app is not None and QtCore is not None:
+        presentation_drained = _drain_presentation_draw_for_journey_sample(
+            win, app, QtCore
+        )
     if visual_probe is not None:
         visual_probe.capture("journey-end")
     started_ns = int(getattr(win, "_arrayscope_active_gesture_started_ns", 0) or 0)
@@ -937,6 +982,7 @@ def _finish_journey_gesture(win, gesture_id: str, *, reached: bool | None = None
             else (time.monotonic_ns() - started_ns) / 1_000_000.0
         ),
         reached=None if reached is None else bool(reached),
+        presentation_drained=presentation_drained,
         **_journey_lod_trace_state(win),
     )
     win._arrayscope_active_journey = ""
@@ -1752,7 +1798,7 @@ def _slow_scroll_lod_paced(
         # gesture (and capture its endpoint screenshot) until the matching
         # backend presentation request has actually drawn.
         _wait_for_tile_presentation_draw(win, app, QtCore)
-        _finish_journey_gesture(win, gesture_id, reached=bool(reached))
+        _finish_journey_gesture(win, gesture_id, reached=bool(reached), app=app, QtCore=QtCore)
         if tile_trace is not None:
             tile_trace.capture("slow-settled", requested_start=current)
         settle_times.append(float(settle_ms))
@@ -1941,6 +1987,8 @@ def _apply_montage_scroll_pattern(
         win,
         shuffle_gesture_id,
         reached=bool(fast_recovery_reached),
+        app=app,
+        QtCore=QtCore,
     )
     if tile_trace is not None:
         tile_trace.capture(
@@ -2265,6 +2313,8 @@ def _apply_montage_zoom_pan_stress(
             win,
             zoomin_gesture_id,
             reached=bool(first_checkpoint.get("visible_target_reached", False)),
+            app=app,
+            QtCore=QtCore,
         )
         record["lod_checkpoint_zoom"] = first_checkpoint
         first_active = set(int(tile) for tile in first_checkpoint["active_tiles"])
@@ -2292,6 +2342,8 @@ def _apply_montage_zoom_pan_stress(
             win,
             zoomout_gesture_id,
             reached=bool(reached),
+            app=app,
+            QtCore=QtCore,
         )
     record["final_settle_ms"] = float(settle_ms)
     record["final_reached_target_lod"] = bool(reached)
@@ -3662,7 +3714,7 @@ def _run_phase(
         )
     finally:
         if journey_gesture_id is not None:
-            _finish_journey_gesture(win, journey_gesture_id)
+            _finish_journey_gesture(win, journey_gesture_id, app=app, QtCore=QtCore)
         continuity_probe.stop()
         if visual_probe is not None:
             visual_probe.capture("phase-end")
