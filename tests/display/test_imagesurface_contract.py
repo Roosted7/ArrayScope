@@ -21,7 +21,26 @@ from tests.display.test_imageview2d import (
 )
 
 
-BACKENDS = ("pyqtgraph", "vispy")
+def _wgpu_adapter_available() -> bool:
+    try:
+        import wgpu
+
+        wgpu.gpu.request_adapter_sync(power_preference="low-power")
+        return True
+    except Exception:
+        return False
+
+
+BACKENDS = (
+    "pyqtgraph",
+    "vispy",
+    pytest.param(
+        "wgpu",
+        marks=pytest.mark.skipif(
+            not _wgpu_adapter_available(), reason="no wgpu adapter on this machine"
+        ),
+    ),
+)
 
 
 def _shown_view(backend, qt_app):
@@ -94,6 +113,9 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         if backend == "pyqtgraph":
             layer = view._montage_tile_layer
             resident_before = len(layer.states)
+        elif backend == "wgpu":
+            executor = view._wgpu_executor
+            resident_before = len(executor.page_table.resident_keys())
         else:
             layer = view._vispy_gpu_montage_layer
             resident_before = layer._pool.resident_count
@@ -105,6 +127,10 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         if backend == "pyqtgraph":
             assert len(layer.states) == resident_before
             assert all(not state.visible and not state.item.isVisible() for state in layer.states.values())
+        elif backend == "wgpu":
+            # Residency (page-table entries) survives; no tile is drawn.
+            assert len(executor.page_table.resident_keys()) == resident_before
+            assert len(executor._tiles) == 0
         else:
             assert layer._pool.resident_count == resident_before
             assert all(not visual.visible for visual in layer._visuals_by_page)

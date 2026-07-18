@@ -42,6 +42,19 @@ def _view_class(backend):
         from arrayscope.display.imageview2d import ImageView2D
 
         return ImageView2D
+    if backend == "wgpu":
+        pytest.importorskip("wgpu")
+        from arrayscope.display.wgpu_imageview2d import WgpuImageView2D, import_qrenderwidget
+
+        try:
+            # NOT importorskip("rendercanvas"): a bare rendercanvas import
+            # stomps QT_QPA_PLATFORM (Wayland hosts) and would poison the
+            # AUTO-backend probe for every later test in this process.
+            import_qrenderwidget()
+        except Exception as exc:
+            pytest.skip(f"rendercanvas unavailable: {exc}")
+
+        return WgpuImageView2D
     pytest.importorskip("vispy")
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
