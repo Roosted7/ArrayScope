@@ -183,6 +183,68 @@ def test_retained_physical_fallback_seeds_first_pass_without_settling_exact_targ
     )
 
 
+def test_physical_preview_widens_latched_exact_first_pass(monkeypatch):
+    """A later physical fallback must not strand the coverage barrier."""
+
+    session = _session()
+    _present_exact_tiles(session, 0, 1, 2, 3)
+    assert session.observe_physically_presented_first_pass_quality(
+        session.tile_presentation_state.payloads
+    )
+    assert session.first_pass_quality == "exact"
+
+    tile = session.plan.tiles[3]
+    image = np.ones((2, 2), dtype=np.float32)
+    fallback = DisplayTilePayload(
+        tile_number=3,
+        source_index=int(tile.source_index),
+        image=image,
+        histogram_data=image,
+        source_id=("tile", int(tile.source_index), "preview"),
+        quality="preview",
+        lod=LodInfo(
+            level=2,
+            factor=4,
+            source_shape=image.shape,
+            texture_shape=image.shape,
+        ),
+    )
+    session.display_tile_payloads[3] = fallback
+    session.record_tile_payload(fallback)
+    session.lifecycle.commit_emitted({3: fallback})
+    session.lifecycle.backend_ack({3: fallback})
+    session.lifecycle.acknowledge_presented(
+        3,
+        tile_ack_identity(fallback),
+        fallback.quality,
+        fallback.lod.level,
+    )
+    session.tile_presentation_state = TilePresentationState(
+        {**session.tile_presentation_state.payloads, 3: fallback}
+    )
+
+    events = []
+    monkeypatch.setattr(
+        "arrayscope.window.frame_session.emit_trace",
+        lambda kind, **fields: events.append((kind, fields)),
+    )
+    assert session.observe_physically_presented_first_pass_quality(
+        session.tile_presentation_state.payloads
+    )
+    assert session.first_pass_quality == "preview"
+    assert session.first_pass_pixels_presented()
+    assert events == [
+        (
+            "first_pass_quality",
+            {
+                "event": "widened_to_preview",
+                "session_id": 1,
+                "required_tiles": 4,
+            },
+        )
+    ]
+
+
 def test_montage_render_session_retarget_changes_canonical_priority():
     session = _session()
     session.view_range = ((0.0, 12.0), (0.0, 4.0))

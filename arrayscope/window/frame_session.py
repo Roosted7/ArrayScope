@@ -837,8 +837,6 @@ class FrameSession:
         target.
         """
 
-        if self.first_pass_quality is not None:
-            return True
         current_payloads = dict(payloads or {})
         backend_identities = dict(self.lifecycle.backend_presented_identities)
         qualities: set[str] = set()
@@ -851,13 +849,33 @@ class FrameSession:
             ):
                 return False
             quality = str(getattr(payload, "quality", "exact") or "exact")
+            if quality == "fallback":
+                quality = "preview"
             if quality not in {"preview", "exact"}:
                 return False
             qualities.add(quality)
         if not qualities:
             return False
-        return self.note_first_pass_quality(
-            "preview" if "preview" in qualities else "exact"
+        observed = "preview" if "preview" in qualities else "exact"
+        if self.first_pass_quality == "exact" and observed == "preview":
+            # The acknowledged backend snapshot is the quality owner.  A
+            # retained exact floor can complete first, then be replaced by a
+            # preview/fallback for the new target while wgpu histogram
+            # evidence is in flight.  Keeping the earlier exact latch makes
+            # the mixed physical frame incapable of closing first-pass
+            # coverage even though every required tile is on screen.
+            self.first_pass_quality = "preview"
+            emit_trace(
+                "first_pass_quality",
+                event="widened_to_preview",
+                session_id=int(self.session_id),
+                required_tiles=len(self.required_tile_numbers()),
+            )
+        if self.first_pass_quality is None:
+            return self.note_first_pass_quality(observed)
+        return bool(
+            self.first_pass_quality == observed
+            or (self.first_pass_quality == "preview" and observed == "exact")
         )
 
     def first_pass_accepts_quality(self, quality: str) -> bool:
@@ -870,6 +888,8 @@ class FrameSession:
 
         first_pass = self.first_pass_quality
         payload_quality = str(quality or "exact")
+        if payload_quality == "fallback":
+            payload_quality = "preview"
         return bool(
             first_pass is not None
             and (
