@@ -18,6 +18,7 @@ oracles A–G) to the live payload shapes (queue row 3a):
   loud error.
 - **Mapping correctness**: scalar planes ignore complex mapping modes (the
   value *is* the scalar); complex planes keep magnitude/phase/real/imag;
+  both apply validated linear/log/symlog scales before levels/LUT mapping;
   ``DispatchHistogram`` reduces scalar pages too (magnitude == value).
 
 The executor renders offscreen into its own target by default

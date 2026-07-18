@@ -343,6 +343,113 @@ def test_complex_tile_mode_switch_is_zero_upload_with_physical_truth(qt_app):
         view.close()
 
 
+def test_complex_montage_acknowledges_only_resident_content_planes(qt_app):
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        # One physical complex layer for two requested ContentPlanes: the
+        # second upload evicts the first, so only tile 1 can be acknowledged.
+        small = WgpuPlaneExecutor(
+            pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device()
+        )
+        view._wgpu_executor = small
+        view._ensure_wgpu_executor = lambda required: small
+
+        geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
+        payloads = {
+            0: _payload(
+                0,
+                np.full((16, 24), 3.0 + 4.0j, np.complex64),
+                source_id=("complex-partial", 0),
+            ),
+            1: _payload(
+                1,
+                np.full((16, 24), 6.0 + 8.0j, np.complex64),
+                source_id=("complex-partial", 1),
+            ),
+        }
+        report = _commit(view, geometry, payloads, levels=(0.0, 10.0))
+        assert set(report.presented_tiles) == {1}
+        assert report.presented_identities == {1: ("complex-partial", 1)}
+        assert len(view._wgpu_executor.bound_planes) == 2
+        assert all(
+            plane.representation == "complex_rg32f"
+            for plane in view._wgpu_executor.bound_planes
+        )
+    finally:
+        view.close()
+
+
+def test_complex_montage_mode_switch_is_zero_upload_per_tile(qt_app):
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+    )
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
+        images = {
+            0: np.full((16, 24), 3.0 + 4.0j, np.complex64),
+            1: np.full((16, 24), 6.0 + 8.0j, np.complex64),
+        }
+
+        def payloads(component):
+            mapping = ShaderMapping(
+                component=component, display_mode=ShaderDisplayMode.COMPLEX
+            )
+            return {
+                tile: _payload(
+                    tile,
+                    image,
+                    source_id=("complex-montage", tile),
+                    shader_mapping=mapping,
+                )
+                for tile, image in images.items()
+            }
+
+        report = _commit(
+            view, geometry, payloads(ShaderComponent.ABS), levels=(0.0, 10.0)
+        )
+        assert set(report.presented_tiles) == {0, 1}
+        assert report.presented_identities == {
+            0: ("complex-montage", 0),
+            1: ("complex-montage", 1),
+        }
+        assert report.texture_uploads == 2
+        assert len(view._wgpu_executor.bound_planes) == 2
+        view.getView().setRange(xRange=(0, 48), yRange=(0, 16), padding=0)
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        h, w = target.shape[:2]
+        # Each tile samples its own ContentPlane: magnitudes 5 and 10.
+        assert np.allclose(target[h // 2, w // 4], (128, 128, 128, 255), atol=2)
+        assert np.allclose(target[h // 2, 3 * w // 4], (255, 255, 255, 255), atol=2)
+
+        # Same per-tile content identities, new component uniform: both tiles
+        # remain physically acknowledged without another texture upload.
+        report = _commit(
+            view, geometry, payloads(ShaderComponent.REAL), levels=(0.0, 10.0)
+        )
+        assert set(report.presented_tiles) == {0, 1}
+        assert report.presented_identities == {
+            0: ("complex-montage", 0),
+            1: ("complex-montage", 1),
+        }
+        assert report.texture_uploads == 0
+        assert view._wgpu_mapping_state.mode == "real"
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        # Uniform-only mode switch exposes real components 3 and 6.
+        assert np.allclose(target[h // 2, w // 4], (76, 76, 76, 255), atol=2)
+        assert np.allclose(target[h // 2, 3 * w // 4], (153, 153, 153, 255), atol=2)
+    finally:
+        view.close()
+
+
 def test_complex_phase_color_uses_phase_lut(qt_app):
     from arrayscope.display.shader_mapping import (
         ShaderComponent,
@@ -454,6 +561,12 @@ def test_rgb_display_ready_tile_renders_raw_bytes(qt_app):
 
 
 def test_out_of_scope_commits_reject_loudly(qt_app):
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+    )
+
     view = _shown_view(qt_app)
     try:
         scalar = np.zeros((20, 30), np.float32)
@@ -462,17 +575,6 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
         geometry2 = _montage_geometry((20, 30), 2, 1, loaded=2)
         geometry1 = _montage_geometry((20, 30), 1, 1, loaded=1)
 
-        # Complex montage (>1 tile) is row 3c work.
-        with pytest.raises(NotImplementedError, match="complex"):
-            _commit(
-                view,
-                geometry2,
-                {
-                    0: _payload(0, cplx, source_id=("rej", 0)),
-                    1: _payload(1, cplx.copy(), source_id=("rej", 1)),
-                },
-                levels=(0.0, 1.0),
-            )
         # Mixed representations in one commit.
         with pytest.raises(NotImplementedError, match="one texture representation"):
             _commit(
@@ -507,6 +609,24 @@ def test_out_of_scope_commits_reject_loudly(qt_app):
                 },
                 levels=(0.0, 1.0),
                 rgb_already_windowed=True,
+            )
+        # Phase hue modulated by magnitude needs a distinct honest shader.
+        with pytest.raises(NotImplementedError, match="magnitude-modulated"):
+            _commit(
+                view,
+                geometry1,
+                {
+                    0: _payload(
+                        0,
+                        cplx,
+                        source_id=("rej", 6),
+                        shader_mapping=ShaderMapping(
+                            component=ShaderComponent.ABS,
+                            display_mode=ShaderDisplayMode.PHASE_COLOR,
+                        ),
+                    )
+                },
+                levels=(0.0, 1.0),
             )
         # The rejected commits must not have left a half-presented surface.
         assert view.montageDisplayMode() == "none"

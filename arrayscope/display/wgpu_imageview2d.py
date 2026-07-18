@@ -9,11 +9,12 @@ present mode owns the pixels — but every pixel decision is expressed as
 :class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
 
 Committed scope (everything else raises ``NotImplementedError`` loudly
-instead of guessing): montages of N scalar 2-D tiles, montages of
-display-ready uint8 RGB tiles (``rgb_already_windowed``: levels/LUT
-bypassed by the executor's rgb8 pool), and a single complex tile with the
-shader-on-read component modes (magnitude/phase/real/imag) including the
-phase LUT.  Each tile is one bound :class:`ContentPlane` whose
+instead of guessing): montages of N scalar or complex 2-D tiles and montages
+of display-ready uint8 RGB tiles (``rgb_already_windowed``: levels/LUT
+bypassed by the executor's rgb8 pool). Complex tiles use shader-on-read
+component modes (magnitude/phase/real/imag) including the phase LUT; scalar
+and complex mappings support linear/log/symlog display scales. Each tile is
+one bound :class:`ContentPlane` whose
 ``document_generation`` is the payload's ack identity, so residency is
 content-keyed: re-committing identical content, switching complex modes,
 and moving levels are physical zero-upload operations — the executor report
@@ -642,8 +643,8 @@ class WgpuImageView2D(ImageViewShell):
         """Validate one commit; return representation and mapping uniforms.
 
         Everything outside the committed scope raises ``NotImplementedError``
-        loudly instead of guessing (montage of N scalar tiles; montage of
-        display-ready uint8 RGB tiles; a single complex tile).
+        loudly instead of guessing (montages of N scalar/complex tiles and
+        display-ready uint8 RGB tiles).
         """
 
         kinds = {tile: _wgpu_payload_kind(payload) for tile, payload in payloads.items()}
@@ -672,11 +673,6 @@ class WgpuImageView2D(ImageViewShell):
                 )
             return representation, "real", scale, symlog_constant
         if representation == COMPLEX_RG32F:
-            if len(payloads) != 1:
-                raise NotImplementedError(
-                    "wgpu backend renders complex payloads as a single tile "
-                    f"only (montage is row 3c work); got tiles {sorted(payloads)}"
-                )
             if display_mode not in (
                 None,
                 ShaderDisplayMode.COMPLEX.value,
