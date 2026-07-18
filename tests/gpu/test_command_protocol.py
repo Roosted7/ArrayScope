@@ -3,6 +3,8 @@
 import pytest
 
 from arrayscope.gpu.command_protocol import (
+    BindContentPlanes,
+    ContentPlane,
     DispatchHistogram,
     DisplayMapping,
     FrameSubmission,
@@ -37,6 +39,29 @@ def test_tile_instance_rejects_malformed_geometry():
 def test_histogram_command_rejects_nonpositive_bins():
     with pytest.raises(ValueError, match="positive"):
         DispatchHistogram(keys=(), bins=0)
+
+
+def test_content_plane_validates_shape_and_representation():
+    plane = ContentPlane("doc", "op", (10.0, 20.0), max_lod=-1, representation="rgb8")
+    assert plane.plane_shape == (10, 20)
+    assert plane.max_lod == 0
+    with pytest.raises(ValueError, match="positive"):
+        ContentPlane("doc", "op", (0, 8))
+    with pytest.raises(ValueError, match="unknown plane representation"):
+        ContentPlane("doc", "op", (8, 8), representation="bgr")
+
+
+def test_bind_content_planes_requires_content_planes():
+    bind = BindContentPlanes([ContentPlane("doc", "op", (8, 8))])
+    assert isinstance(bind.planes, tuple)
+    with pytest.raises(TypeError, match="ContentPlane"):
+        BindContentPlanes(("not-a-plane",))
+
+
+def test_tile_instance_plane_index_validates():
+    assert TileInstance((0, 0, 1, 1), (0, 0), (1, 1), plane_index=3).plane_index == 3
+    with pytest.raises(ValueError, match="plane_index"):
+        TileInstance((0, 0, 1, 1), (0, 0), (1, 1), plane_index=-1)
 
 
 def test_frame_submission_freezes_command_order():

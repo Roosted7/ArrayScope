@@ -357,6 +357,8 @@ class WgpuImageView2D(ImageViewShell):
         tile_residency_budget_bytes: int,
         frame_plan,
     ):
+        from arrayscope.gpu.command_protocol import BindContentPlanes, ContentPlane
+        from arrayscope.gpu.keys import COMPLEX_RG32F
         from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
 
         self._start_upload_timing("wgpu_tile_layer")
@@ -384,7 +386,19 @@ class WgpuImageView2D(ImageViewShell):
             executor = self._ensure_wgpu_executor((height, width))
             grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
             plane32 = np.ascontiguousarray(plane, dtype=np.float32)
-            commands = []
+            commands = [
+                BindContentPlanes(
+                    (
+                        ContentPlane(
+                            identity,
+                            "live",
+                            (grid_h * PAGE, grid_w * PAGE),
+                            max_lod=0,
+                            representation=COMPLEX_RG32F,
+                        ),
+                    )
+                )
+            ]
             page_keys = []
             for chunk_y in range(grid_h):
                 for chunk_x in range(grid_w):
@@ -467,7 +481,7 @@ class WgpuImageView2D(ImageViewShell):
                 items_skipped=0 if uploads > 0 else 1,
                 existing_items_shown=0 if uploads > 0 else 1,
                 resident_items=1 if resident else 0,
-                storage_capacity=len(executor._free_layers) + resident_pages,
+                storage_capacity=executor.pool_free_layers(COMPLEX_RG32F) + resident_pages,
                 texture_uploads=uploads,
                 texture_upload_bytes=uploads * PAGE * PAGE * 8,
                 page_count=resident_pages,

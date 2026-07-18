@@ -16,6 +16,7 @@ ordering; a frame submission is already-ordered work).
 Command → engine-seam mapping (from the endpoint doc):
 
 ========================  ====================================================
+``BindContentPlanes``     session/montage plane set → flat-table spans
 ``EnsureChunkResident``   ``ChunkStore.ensure`` / pool chunk plan (G1/G3b-2)
 ``EvictChunk``            ``PageTable.unbind``
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
@@ -30,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from arrayscope.gpu.keys import DataChunkKey
+from arrayscope.gpu.keys import REPRESENTATIONS, DataChunkKey
 
 #: Display mapping modes for complex-valued chunks. Scalar chunks use
 #: ``"real"`` (imaginary plane is zero by construction).
@@ -78,21 +79,56 @@ class DisplayMapping:
 
 
 @dataclass(frozen=True)
+class ContentPlane:
+    """One bound 2-D content plane: identity + geometry + stored representation.
+
+    A plane is *which values* a tile instance samples from — the montage/
+    session unit.  ``plane_shape`` is ``(h, w)`` in native (LOD-0) pixels;
+    ``max_lod`` is the deepest reduction level a backend may fall back to for
+    this plane's chunks (ADR 0056 §5).  Binding carries no payloads and no
+    residency: chunks are ensured separately, and chunks of planes that are
+    currently *unbound* stay warm in the backend's page table.
+    """
+
+    document_generation: object
+    operation_key: object
+    plane_shape: tuple[int, int]
+    max_lod: int = 0
+    representation: str = "scalar_r32f"
+
+    def __post_init__(self) -> None:
+        shape = tuple(int(value) for value in self.plane_shape)
+        if len(shape) != 2 or any(value <= 0 for value in shape):
+            raise ValueError(f"plane shape must be positive (h, w), got {self.plane_shape}")
+        object.__setattr__(self, "plane_shape", shape)
+        object.__setattr__(self, "max_lod", max(0, int(self.max_lod)))
+        representation = str(self.representation)
+        if representation not in REPRESENTATIONS:
+            raise ValueError(
+                f"unknown plane representation {representation!r}; "
+                f"expected one of {REPRESENTATIONS}"
+            )
+        object.__setattr__(self, "representation", representation)
+
+
+@dataclass(frozen=True)
 class TileInstance:
     """One drawn tile: destination rect + source window + requested LOD.
 
     ``dst_rect`` is ``(x, y, w, h)`` in normalized target space ([0, 1] with
-    y down); ``src_origin``/``src_size`` are in native (LOD-0) source pixels.
-    The backend resolves source pixels through its page table at
-    ``lod_level``, falling back to coarser resident ancestors (never black,
-    ADR 0056 §5); which chunks are resident is NOT part of tile identity —
-    that is the whole point of the tile/chunk/page split (ADR 0055).
+    y down); ``src_origin``/``src_size`` are in native (LOD-0) source pixels
+    of the bound content plane selected by ``plane_index``.  The backend
+    resolves source pixels through its page table at ``lod_level``, falling
+    back to coarser resident ancestors (never black, ADR 0056 §5); which
+    chunks are resident is NOT part of tile identity — that is the whole
+    point of the tile/chunk/page split (ADR 0055).
     """
 
     dst_rect: tuple[float, float, float, float]
     src_origin: tuple[float, float]
     src_size: tuple[float, float]
     lod_level: int = 0
+    plane_index: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -107,9 +143,33 @@ class TileInstance:
         if len(self.dst_rect) != 4 or len(self.src_origin) != 2 or len(self.src_size) != 2:
             raise ValueError("malformed tile instance geometry")
         object.__setattr__(self, "lod_level", max(0, int(self.lod_level)))
+        plane_index = int(self.plane_index)
+        if plane_index < 0:
+            raise ValueError(f"plane_index must be non-negative, got {plane_index}")
+        object.__setattr__(self, "plane_index", plane_index)
 
 
 # ---- commands ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BindContentPlanes:
+    """Replace the full set of bound content planes for tile sampling.
+
+    ``TileInstance.plane_index`` indexes this tuple.  Binding is descriptor
+    work only: it never uploads and never evicts — resident chunks of planes
+    dropped from the bound set stay warm (scroll-back across planes is
+    zero-upload while their pages survive eviction pressure).
+    """
+
+    planes: tuple[ContentPlane, ...]
+
+    def __post_init__(self) -> None:
+        planes = tuple(self.planes)
+        for plane in planes:
+            if not isinstance(plane, ContentPlane):
+                raise TypeError(f"bound planes must be ContentPlane, got {type(plane).__name__}")
+        object.__setattr__(self, "planes", planes)
 
 
 @dataclass(frozen=True)
@@ -171,7 +231,8 @@ class PresentGeneration:
 
 
 Command = (
-    EnsureChunkResident
+    BindContentPlanes
+    | EnsureChunkResident
     | EvictChunk
     | UpdateTileInstances
     | SetDisplayMapping

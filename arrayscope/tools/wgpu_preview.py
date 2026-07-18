@@ -64,6 +64,8 @@ def main(argv=None) -> int:
     from rendercanvas.pyside6 import QRenderWidget  # AFTER QApplication: platform stays ours
 
     from arrayscope.gpu.command_protocol import (
+        BindContentPlanes,
+        ContentPlane,
         DisplayMapping,
         EnsureChunkResident,
         FrameSubmission,
@@ -72,6 +74,7 @@ def main(argv=None) -> int:
         TileInstance,
         UpdateTileInstances,
     )
+    from arrayscope.gpu.keys import COMPLEX_RG32F
     from arrayscope.gpu.wgpu_executor import PAGE, WgpuPlaneExecutor, plane_chunk_key
 
     plane = _load_plane(args.path, args.slice)
@@ -93,7 +96,19 @@ def main(argv=None) -> int:
     )
     l1 = (stacked[0::2, 0::2] + stacked[1::2, 0::2] + stacked[0::2, 1::2] + stacked[1::2, 1::2]) / 4
 
-    commands = []
+    commands = [
+        BindContentPlanes(
+            (
+                ContentPlane(
+                    "preview",
+                    "identity",
+                    (grid_h * PAGE, grid_w * PAGE),
+                    max_lod=1,
+                    representation=COMPLEX_RG32F,
+                ),
+            )
+        )
+    ]
     for cy in range(-(-grid_h // 2)):
         for cx in range(-(-grid_w // 2)):
             page = np.zeros((PAGE, PAGE, 2), np.float32)

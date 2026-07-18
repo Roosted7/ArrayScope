@@ -12,6 +12,8 @@ import pytest
 wgpu = pytest.importorskip("wgpu")
 
 from arrayscope.gpu.command_protocol import (  # noqa: E402
+    BindContentPlanes,
+    ContentPlane,
     DispatchHistogram,
     DisplayMapping,
     EnsureChunkResident,
@@ -22,6 +24,7 @@ from arrayscope.gpu.command_protocol import (  # noqa: E402
     TileInstance,
     UpdateTileInstances,
 )
+from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F  # noqa: E402
 from arrayscope.gpu.wgpu_executor import (  # noqa: E402
     PAGE,
     WgpuPlaneExecutor,
@@ -68,7 +71,19 @@ class Scene:
         self.executor = WgpuPlaneExecutor((PLANE, PLANE), max_lod=1, target_size=CANVAS)
         self.doc, self.op = "doc-1", "op-identity"
 
-        commands = []
+        commands = [
+            BindContentPlanes(
+                (
+                    ContentPlane(
+                        self.doc,
+                        self.op,
+                        (PLANE, PLANE),
+                        max_lod=1,
+                        representation=COMPLEX_RG32F,
+                    ),
+                )
+            )
+        ]
         for cy in range(GRID1):  # pinned coarse coverage first (ADR 0056)
             for cx in range(GRID1):
                 commands.append(
@@ -287,3 +302,324 @@ def test_completion_token_is_callable_and_returns(scene):
     report = scene.render(FULL, MAG, generation=40)
     assert callable(report.wait_completed)
     report.wait_completed()  # must not raise; fences the submitted work
+
+
+# ---- row 3(a) growth oracles: multi-plane binding + honest pools ------------
+
+SP_H, SP_W = 256, 512  # one 1x2 page grid per scalar plane
+SP_CANVAS = (512, 512)
+
+
+def _gray_table():
+    table = np.empty((256, 4), np.uint8)
+    table[:, 0] = table[:, 1] = table[:, 2] = np.arange(256)
+    table[:, 3] = 255
+    return table
+
+
+def _scalar_plane(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    plane = rng.standard_normal((SP_H, SP_W), dtype=np.float32)
+    yy, xx = np.mgrid[0:SP_H, 0:SP_W].astype(np.float32)
+    return plane + np.sin(xx / 29.0) * 2 + (yy / SP_H) * float(seed)
+
+
+def _scalar_reference(tiles_with_data, mapping, canvas=SP_CANVAS):
+    """CPU mirror for scalar planes: value IS the scalar, mode is ignored."""
+
+    w, h = canvas
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., 3] = 255
+    table = (
+        np.frombuffer(mapping.lut, np.uint8).reshape(256, 4)
+        if mapping.lut is not None
+        else _gray_table()
+    )
+    for tile, data in tiles_with_data:
+        x0 = int(round(tile.dst_rect[0] * w))
+        y0 = int(round(tile.dst_rect[1] * h))
+        tw = int(round(tile.dst_rect[2] * w))
+        th = int(round(tile.dst_rect[3] * h))
+        sx = tile.src_origin[0] + (np.arange(tw) + 0.5) / tw * tile.src_size[0]
+        sy = tile.src_origin[1] + (np.arange(th) + 0.5) / th * tile.src_size[1]
+        sxg, syg = np.meshgrid(sx, sy)
+        cx = np.clip(sxg, 0, data.shape[1] - 1).astype(np.int64)
+        cy = np.clip(syg, 0, data.shape[0] - 1).astype(np.int64)
+        value = data[cy, cx].astype(np.float64)
+        g = np.clip((value - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0, 1)
+        idx = np.clip(np.round(g * 255).astype(np.int32), 0, 255)
+        out[y0 : y0 + th, x0 : x0 + tw] = table[idx]
+    return out
+
+
+def _assert_matches(got, ref, tol=2, allow_px=0):
+    diff = np.abs(got.astype(np.int32) - ref.astype(np.int32))
+    bad = int((np.any(diff > tol, axis=-1)).sum())
+    assert bad <= allow_px, f"{bad} px over tol (max diff {diff.max()})"
+
+
+def _scalar_key(doc, cx, cy):
+    return plane_chunk_key(
+        doc, "op-live", 0, cx, cy, dtype="float32", representation=SCALAR_R32F
+    )
+
+
+def _scalar_plane_binding(doc):
+    return ContentPlane(doc, "op-live", (SP_H, SP_W), max_lod=0, representation=SCALAR_R32F)
+
+
+def _ensure_scalar_plane(doc, data, *, pinned=False):
+    return tuple(
+        EnsureChunkResident(
+            _scalar_key(doc, cx, 0), data[:, cx * PAGE : (cx + 1) * PAGE], pinned=pinned
+        )
+        for cx in range(SP_W // PAGE)
+    )
+
+
+class MultiScene:
+    """Three bound scalar planes sharing one executor (montage session)."""
+
+    def __init__(self):
+        self.planes = {doc: _scalar_plane(i + 1) for i, doc in enumerate("ABC")}
+        self.executor = WgpuPlaneExecutor(target_size=SP_CANVAS, pool_layers=16)
+        commands = [BindContentPlanes(tuple(_scalar_plane_binding(doc) for doc in "ABC"))]
+        for doc in "ABC":
+            commands.extend(_ensure_scalar_plane(doc, self.planes[doc]))
+        report = self.executor.submit(FrameSubmission(0, commands))
+        assert report.uploads == 3 * (SP_W // PAGE)
+
+    def render(self, tiles, mapping, generation=1):
+        report = self.executor.submit(
+            FrameSubmission(
+                generation,
+                (
+                    SetDisplayMapping(mapping),
+                    UpdateTileInstances(tuple(tiles)),
+                    PresentGeneration(generation),
+                ),
+            )
+        )
+        assert report.presented
+        return report
+
+
+@pytest.fixture(scope="module")
+def multi_scene():
+    return MultiScene()
+
+
+SCALAR_LEVELS = DisplayMapping("real", -4.0, 6.0)
+
+
+def _montage_tiles(plane_indices):
+    """Stack full planes vertically: montage rows selecting bound planes."""
+
+    rows = len(plane_indices)
+    return tuple(
+        TileInstance(
+            (0.0, i / rows, 1.0, 1.0 / rows),
+            (0.0, 0.0),
+            (float(SP_W), float(SP_H)),
+            0,
+            plane_index=index,
+        )
+        for i, index in enumerate(plane_indices)
+    )
+
+
+def test_multi_plane_montage_scroll_is_descriptor_only(multi_scene):
+    docs = "ABC"
+    view1 = _montage_tiles((0, 1))
+    report = multi_scene.render(view1, SCALAR_LEVELS)
+    assert report.uploads == 0  # everything resident: descriptor-only
+    ref = _scalar_reference(
+        [(t, multi_scene.planes[docs[t.plane_index]]) for t in view1], SCALAR_LEVELS
+    )
+    _assert_matches(multi_scene.executor.read_target(), ref)
+
+    view2 = _montage_tiles((1, 2))  # scroll one plane down across planes
+    report = multi_scene.render(view2, SCALAR_LEVELS, generation=2)
+    assert report.uploads == 0
+    ref = _scalar_reference(
+        [(t, multi_scene.planes[docs[t.plane_index]]) for t in view2], SCALAR_LEVELS
+    )
+    _assert_matches(multi_scene.executor.read_target(), ref)
+
+
+def test_scalar_plane_ignores_complex_mapping_modes(multi_scene):
+    tiles = _montage_tiles((0,))
+    baseline = None
+    for mode in ("real", "magnitude", "phase", "imag"):
+        mapping = DisplayMapping(mode, -4.0, 6.0)
+        report = multi_scene.render(tiles, mapping, generation=5)
+        assert report.uploads == 0
+        got = multi_scene.executor.read_target()
+        if baseline is None:
+            baseline = got
+            ref = _scalar_reference([(tiles[0], multi_scene.planes["A"])], mapping)
+            _assert_matches(got, ref)
+        else:
+            # The scalar value IS the sample: mode switches change nothing.
+            assert (got == baseline).all()
+
+
+def test_histogram_over_scalar_pool_pages(multi_scene):
+    keys = tuple(_scalar_key("B", cx, 0) for cx in range(SP_W // PAGE))
+    report = multi_scene.executor.submit(
+        FrameSubmission(30, (DispatchHistogram(keys, bins=64, lo=-4.0, hi=6.0),))
+    )
+    (bins,) = report.histograms.values()
+    values = multi_scene.planes["B"]
+    cpu = np.bincount(
+        np.clip(((values - -4.0) / 10.0 * 64).astype(np.int32), 0, 63).ravel(),
+        minlength=64,
+    )
+    assert int(bins.sum()) == SP_H * SP_W
+    assert (bins.astype(np.int64) == cpu.astype(np.int64)).all()
+
+
+def test_tile_plane_index_outside_bound_planes_is_loud(multi_scene):
+    with pytest.raises(ValueError, match="plane_index"):
+        multi_scene.executor.submit(
+            FrameSubmission(
+                40, (UpdateTileInstances(_montage_tiles((3,))),)
+            )
+        )
+
+
+def test_plane_rebind_keeps_warm_residency_zero_upload():
+    planes = {doc: _scalar_plane(10 + i) for i, doc in enumerate("AB")}
+    executor = WgpuPlaneExecutor(target_size=SP_CANVAS, pool_layers=16)
+    tiles = _montage_tiles((0,))
+
+    def commit(doc, generation):
+        return executor.submit(
+            FrameSubmission(
+                generation,
+                (
+                    BindContentPlanes((_scalar_plane_binding(doc),)),
+                    *_ensure_scalar_plane(doc, planes[doc]),
+                    SetDisplayMapping(SCALAR_LEVELS),
+                    UpdateTileInstances(tiles),
+                    PresentGeneration(generation),
+                ),
+            )
+        )
+
+    assert commit("A", 1).uploads == SP_W // PAGE
+    assert commit("B", 2).uploads == SP_W // PAGE
+    _assert_matches(
+        executor.read_target(), _scalar_reference([(tiles[0], planes["B"])], SCALAR_LEVELS)
+    )
+    # Scroll back: A's chunks stayed warm in the page table while unbound.
+    report = commit("A", 3)
+    assert report.uploads == 0
+    _assert_matches(
+        executor.read_target(), _scalar_reference([(tiles[0], planes["A"])], SCALAR_LEVELS)
+    )
+
+
+def test_rgb8_pool_bypasses_levels_and_lut():
+    rng = np.random.default_rng(7)
+    rgb = rng.integers(0, 256, size=(PAGE, PAGE, 3), dtype=np.uint8)
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE), pool_layers={"rgb8": 4}
+    )
+    key = plane_chunk_key("doc-rgb", "op-live", 0, 0, 0, dtype="uint8", representation=RGB8)
+    lut = rng.integers(0, 256, size=(256, 4), dtype=np.uint8).tobytes()
+    tiles = (TileInstance((0, 0, 1, 1), (0, 0), (PAGE, PAGE), 0),)
+    report = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes(
+                    (ContentPlane("doc-rgb", "op-live", (PAGE, PAGE), representation=RGB8),)
+                ),
+                EnsureChunkResident(key, rgb),
+                # Hostile levels + LUT: display-ready RGB must ignore both.
+                SetDisplayMapping(DisplayMapping("magnitude", 0.25, 0.26, lut=lut)),
+                UpdateTileInstances(tiles),
+                PresentGeneration(1),
+            ),
+        )
+    )
+    assert report.uploads == 1
+    got = executor.read_target()
+    assert (got[..., :3] == rgb).all()
+    assert (got[..., 3] == 255).all()
+    # Re-ensure + re-present: identical bytes, zero uploads.
+    report = executor.submit(
+        FrameSubmission(2, (EnsureChunkResident(key, rgb), PresentGeneration(2)))
+    )
+    assert report.uploads == 0
+    assert (executor.read_target()[..., :3] == rgb).all()
+
+
+def test_per_pool_eviction_respects_budget_and_pins():
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2, "complex_rg32f": 1}
+    )
+    page = np.zeros((PAGE, PAGE), np.float32)
+    complex_key = plane_chunk_key("doc-c", "op-live", 0, 0, 0)
+    scalar_keys = [
+        plane_chunk_key("doc-s", "op-live", 0, cx, 0, dtype="float32", representation=SCALAR_R32F)
+        for cx in range(3)
+    ]
+    # The complex chunk becomes the LRU-oldest resident entry overall.
+    report = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                EnsureChunkResident(complex_key, np.zeros((PAGE, PAGE, 2), np.float32)),
+                EnsureChunkResident(scalar_keys[0], page, pinned=True),
+                EnsureChunkResident(scalar_keys[1], page),
+                EnsureChunkResident(scalar_keys[2], page),
+            ),
+        )
+    )
+    assert report.uploads == 4
+    resident = set(executor.page_table.resident_keys())
+    # Scalar pool budget 2: the unpinned scalar LRU was evicted; the pinned
+    # page and the (older) complex chunk in the OTHER pool were untouched.
+    assert scalar_keys[0] in resident and scalar_keys[2] in resident
+    assert scalar_keys[1] not in resident
+    assert complex_key in resident
+    assert executor.pool_free_layers(SCALAR_R32F) == 0
+    assert executor.pool_free_layers(COMPLEX_RG32F) == 0
+
+    # Pin everything in the scalar pool: overflow must fail loudly.
+    executor.page_table.pin(scalar_keys[2])
+    with pytest.raises(RuntimeError, match="pinned"):
+        executor.submit(
+            FrameSubmission(
+                2,
+                (
+                    EnsureChunkResident(
+                        plane_chunk_key(
+                            "doc-s", "op-live", 0, 3, 0,
+                            dtype="float32", representation=SCALAR_R32F,
+                        ),
+                        page,
+                    ),
+                ),
+            )
+        )
+
+
+def test_unbudgeted_pool_rejects_residency_loudly():
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2}
+    )
+    with pytest.raises(RuntimeError, match="no layer budget"):
+        executor.submit(
+            FrameSubmission(
+                1,
+                (
+                    EnsureChunkResident(
+                        plane_chunk_key("doc", "op", 0, 0, 0),
+                        np.zeros((PAGE, PAGE, 2), np.float32),
+                    ),
+                ),
+            )
+        )
