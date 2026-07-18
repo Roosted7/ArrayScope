@@ -259,6 +259,22 @@ surface with a custom shader → RG32F complex upload → magnitude/phase/real/
 imag + levels switching WITHOUT re-upload → one compute histogram →
 measure GUI-thread time, submit time, upload time, offscreen→swapchain blit.
 
+> **Superseded 2026-07-18 (later the same day):** gate A ran on branch
+> `codex/datoviz-v04-renderer-gate-a` and FAILED the composition and
+> upload-lifetime gates (Qt overlays cannot paint above the native child;
+> no completion tokens) while passing shaders/compute/never-black at the
+> vklite level — see that branch's copy of this document for the full
+> verdict. Combined with the cost side (Datoviz modifications, C++ bridge,
+> our own binary distribution before any architectural answer), Thomas
+> inverted the ranking: **wgpu-py is the primary experiment**, per the
+> tiered plan in [wgpu-renderer-experiment](wgpu-renderer-experiment.md).
+> Datoviz is parked with retry conditions (supported hosted frame
+> producer; per-submission completion tokens; a proven overlay-migration
+> architecture; packaged PySide6 provider) — it remains the route if wgpu
+> fails composition/uploads or external-memory/explicit-queue control
+> becomes a measured requirement. The 10-step Datoviz experiment below is
+> retained for the record.
+
 **Known gaps to validate as blocking-vs-nice-to-have** (we would not lose
 these over VisPy either — judge accordingly): supported hosted-canvas /
 frame-producer insertion point (vs overwriting the scene callback);
