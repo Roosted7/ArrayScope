@@ -26,6 +26,9 @@ DEMAND_FRESHNESS_BUDGET_MS = 5_000.0
 LEVEL_CONVERGENCE_BUDGET_MS = 5_000.0
 MIN_PRIORITY_CORRELATION = 0.50
 DRIVER_WATCHDOG_S = 180.0
+PROFILE_SESSION_FIXTURE = (
+    Path(__file__).parents[2] / "tests" / "fixtures" / "profile_montage_session.json"
+)
 MIN_COMMITS = {
     ("vispy", "cold_fill"): 2,
     ("pyqtgraph", "cold_fill"): 2,
@@ -500,6 +503,32 @@ def _classify_reference_blocked_wgpu_rows(
     wgpu["ok"] = True
 
 
+def _profile_driver_command(*, backend: str, data, stages: str, output: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "arrayscope.tools.profile_montage_workflow",
+        "--backend",
+        str(backend),
+        "--data",
+        str(data),
+        "--session-fixture",
+        str(PROFILE_SESSION_FIXTURE),
+        "--stages",
+        str(stages),
+        "--trace",
+        str(output / "trace.jsonl"),
+        "--jsonl",
+        str(output / "metrics.jsonl"),
+        "--screenshot-dir",
+        str(output),
+        "--screenshot-interval-s",
+        "0.1",
+        "--timeout-s",
+        "5",
+    ]
+
+
 def run_matrix(args) -> int:
     artifact_dir = Path(args.artifact_dir).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -511,29 +540,12 @@ def run_matrix(args) -> int:
             output.mkdir(parents=True, exist_ok=True)
             unsupported_path = output / "unsupported.json"
             unsupported_path.unlink(missing_ok=True)
-            command = [
-                sys.executable,
-                "-m",
-                "arrayscope.tools.profile_montage_workflow",
-                "--backend",
-                backend,
-                "--data",
-                str(args.data),
-                "--session-fixture",
-                "",
-                "--stages",
-                stages,
-                "--trace",
-                str(output / "trace.jsonl"),
-                "--jsonl",
-                str(output / "metrics.jsonl"),
-                "--screenshot-dir",
-                str(output),
-                "--screenshot-interval-s",
-                "0.1",
-                "--timeout-s",
-                "5",
-            ]
+            command = _profile_driver_command(
+                backend=backend,
+                data=args.data,
+                stages=stages,
+                output=output,
+            )
             env = dict(os.environ)
             if args.offscreen_smoke:
                 env["QT_QPA_PLATFORM"] = "offscreen"

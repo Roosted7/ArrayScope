@@ -292,6 +292,11 @@ def run_profile_montage_workflow(
             if restored_fixture is None or restored_fixture.viewport is None
             else restored_fixture.viewport.viewport_shape
         )
+        win._profile_session_fixture_window_size = (
+            None
+            if restored_fixture is None or restored_fixture.panels is None
+            else restored_fixture.panels.window_size
+        )
         win._profile_session_fixture_image_axes = (
             None if restored_fixture is None else tuple(restored_fixture.recipe.view_state.image_axes or ())
         )
@@ -358,6 +363,7 @@ def run_profile_montage_workflow(
             geometry_deadline = perf_counter() + timeout_s
             while not (
                 _window_geometry_state(win)["session_viewport_shape_matches"]
+                and _window_geometry_state(win)["session_window_size_matches"]
                 and _window_geometry_state(win)["session_axis_orientation_matches"]
             ):
                 if perf_counter() >= geometry_deadline:
@@ -1236,19 +1242,40 @@ def _montage_view_range(win):
 def _apply_view_range(win, x_range, y_range) -> None:
     """Push a new camera range; the range-changed signal retargets the montage."""
 
+    image_view = win.img_view
     note_interaction = getattr(win, "_note_viewport_interaction", None)
     if callable(note_interaction):
         # setRange is the deterministic benchmark transport, but semantically
-        # these are wheel/pan inputs. Mark the same interaction lifetime so
-        # speculative work and native-quality deferral behave as they do for
-        # a real user gesture.
-        note_interaction("profile-zoom-pan")
-    view = win.img_view.getView()
-    view.setRange(
-        xRange=(float(x_range[0]), float(x_range[1])),
-        yRange=(float(y_range[0]), float(y_range[1])),
-        padding=0,
-    )
+        # these are wheel/pan inputs. Use the production pointer reason so a
+        # restored viewport-continuity transaction releases exactly as it does
+        # for an accepted wheel/pan gesture; custom profile reasons leave the
+        # saved camera authoritative and make demand measurements meaningless.
+        note_interaction("range-pointer")
+    # QApplication.mouseButtons() is empty for this deterministic transport.
+    # Carry the same synchronous wheel identity that ImageViewShell.eventFilter
+    # publishes for a real wheel event so ViewportBridge admits the production
+    # interactive retarget path instead of classifying the gesture as restore
+    # or fit replay.
+    image_view._viewport_wheel_range_pending = True
+    try:
+        view = image_view.getView()
+        view.setRange(
+            xRange=(float(x_range[0]), float(x_range[1])),
+            yRange=(float(y_range[0]), float(y_range[1])),
+            padding=0,
+        )
+        # The benchmark transport has no real QWheelEvent. If the production
+        # bridge cannot identify an extant committed tiled frame, its ordinary
+        # signal path deliberately does not schedule. Deliver the synthetic
+        # gesture through the same canonical retarget owner rather than
+        # deriving or mutating LOD state in the harness.
+        retarget = getattr(win, "retarget_montage_viewport", None)
+        if callable(retarget):
+            retarget()
+    finally:
+        # The bridge normally consumes the flag synchronously. Clear it here
+        # as well for a constrained/no-op range which emits no signal.
+        image_view._viewport_wheel_range_pending = False
 
 
 def _scaled_view_range(view_range, span_scale, center_frac=(0.5, 0.5)):
@@ -1811,6 +1838,11 @@ def _slow_scroll_lod_paced(
         # gesture (and capture its endpoint screenshot) until the matching
         # backend presentation request has actually drawn.
         _wait_for_tile_presentation_draw(win, app, QtCore)
+        # Do not let the next index input supersede this step's phase-1
+        # evidence. The target-LOD observation above deliberately records its
+        # 3 s performance result, but journey coverage is eventual semantic
+        # truth and must remain scoped to the gesture that produced it.
+        _wait_for_coverage_pass_close(win, app, QtCore)
         _finish_journey_gesture(win, gesture_id, reached=bool(reached), app=app, QtCore=QtCore)
         if tile_trace is not None:
             tile_trace.capture("slow-settled", requested_start=current)
@@ -2351,6 +2383,18 @@ def _apply_montage_zoom_pan_stress(
     win._arrayscope_profile_action = "final-target-settle"
     reached, settle_ms = _wait_for_target_lod(win, app, QtCore, budget_s=ZOOMPAN_FINAL_SETTLE_S)
     if zoomout_gesture_id is not None:
+        # Resident zoom-out is descriptor-only: target LOD can settle with no
+        # payload commit at all. The final ViewBox range still queues a real
+        # canvas paint, so keep the gesture-scoped sampler alive until that
+        # presentation request is physically acknowledged. Otherwise the
+        # journey-end grab can race the native child paint and falsely report
+        # that no pixels ever changed.
+        _wait_for_tile_presentation_draw(
+            win,
+            app,
+            QtCore,
+            timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+        )
         _finish_journey_gesture(
             win,
             zoomout_gesture_id,
@@ -2730,7 +2774,10 @@ class _VisualTimelineProbe:
         self._timer = QtCore.QTimer(win)
         self._timer.setInterval(self._interval_ms)
         self._timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
-        self._timer.timeout.connect(lambda: self.capture("interval"))
+        self._timer.timeout.connect(self._capture_interval)
+        self._presentation_drawn = getattr(
+            getattr(win, "img_view", None), "presentationDrawn", None
+        )
         self._started_ns = time.monotonic_ns()
         self._last_sample_ns = self._started_ns
         self._last_drawn: frozenset[int] = frozenset()
@@ -2744,13 +2791,37 @@ class _VisualTimelineProbe:
         self._directory.mkdir(parents=True, exist_ok=True)
         if self.timeline_path.exists():
             self.timeline_path.unlink()
+        if self._presentation_drawn is not None:
+            self._presentation_drawn.connect(self._capture_presentation_draw_ack)
         self.capture("start")
         self._timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+        if self._presentation_drawn is not None:
+            try:
+                self._presentation_drawn.disconnect(
+                    self._capture_presentation_draw_ack
+                )
+            except (RuntimeError, TypeError):
+                pass
         self.capture("stop")
         self._write_contact_sheet()
+
+    def _capture_presentation_draw_ack(self) -> None:
+        if str(getattr(self._win, "_arrayscope_active_gesture_id", "") or ""):
+            self.capture("presentation-draw-ack")
+
+    def _capture_interval(self) -> None:
+        # Wgpu gestures have a native presentation acknowledgement now. Avoid
+        # duplicate full-window grabs between those physical edges; incumbents
+        # and all non-gesture diagnostics retain the original periodic sampler.
+        active_gesture = str(
+            getattr(self._win, "_arrayscope_active_gesture_id", "") or ""
+        )
+        if self._backend == "wgpu" and active_gesture:
+            return
+        self.capture("interval")
 
     def capture(self, reason: str) -> None:
         now_ns = time.monotonic_ns()
@@ -2928,6 +2999,29 @@ class _VisualTimelineProbe:
             "physical_visible": physical_visible,
             "physically_visible_tile_count": physically_visible_tile_count,
             "backend_presented_tile_count": backend_presented_count,
+            "presentation_draw_count": int(
+                presentation_diagnostics.get("draw_count", 0) or 0
+            ),
+            "tile_presentation_request_count": int(
+                presentation_diagnostics.get("tile_presentation_request_count", 0) or 0
+            ),
+            "tile_presentation_draw_count": int(
+                presentation_diagnostics.get("tile_presentation_draw_count", 0) or 0
+            ),
+            "presentation_draw_pending": bool(
+                presentation_diagnostics.get("tile_presentation_draw_pending", False)
+                or presentation_diagnostics.get("canvas_update_pending", False)
+                or bool(
+                    callable(
+                        getattr(
+                            getattr(self._win, "img_view", None),
+                            "presentationDrawPending",
+                            None,
+                        )
+                    )
+                    and self._win.img_view.presentationDrawPending()
+                )
+            ),
             "physical_visible_page_count": physical_visible_pages,
             "physical_geometry": _visual_geometry_summary(
                 physical_draw_rows,
@@ -2981,6 +3075,12 @@ class _VisualTimelineProbe:
             journey=record["journey"],
             gesture_id=record["gesture_id"],
             physical_visible=bool(record["physical_visible"]),
+            presentation_draw_count=int(record["presentation_draw_count"]),
+            tile_presentation_request_count=int(
+                record["tile_presentation_request_count"]
+            ),
+            tile_presentation_draw_count=int(record["tile_presentation_draw_count"]),
+            presentation_draw_pending=bool(record["presentation_draw_pending"]),
             physical_visible_page_count=int(record["physical_visible_page_count"]),
             page_candidate_missing_tile_count=int(
                 record["page_candidate_missing_tile_count"]
@@ -4664,7 +4764,15 @@ def _wait_for_tile_presentation_draw(
     start = time.monotonic()
     deadline = start + max(float(timeout_s), float(target_s))
     while time.monotonic() < deadline:
-        if _vispy_tile_presentation_draw_count(win) >= _vispy_tile_presentation_request_count(win):
+        draw_pending_fn = getattr(
+            getattr(win, "img_view", None), "presentationDrawPending", None
+        )
+        draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
+        if (
+            _vispy_tile_presentation_draw_count(win)
+            >= _vispy_tile_presentation_request_count(win)
+            and not draw_pending
+        ):
             _process_events(app, QtCore, count=2)
             elapsed = time.monotonic() - start
             if elapsed > float(target_s):
@@ -4677,9 +4785,51 @@ def _wait_for_tile_presentation_draw(
         time.sleep(0.005)
     requested = _vispy_tile_presentation_request_count(win)
     drawn = _vispy_tile_presentation_draw_count(win)
+    draw_pending_fn = getattr(
+        getattr(win, "img_view", None), "presentationDrawPending", None
+    )
+    draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
     raise TimeoutError(
         "tile presentation draw did not settle within "
-        f"{max(float(timeout_s), float(target_s)):.3f}s: requested={requested} drawn={drawn}"
+        f"{max(float(timeout_s), float(target_s)):.3f}s: requested={requested} "
+        f"drawn={drawn} draw_pending={draw_pending}"
+    )
+
+
+def _wait_for_coverage_pass_close(
+    win,
+    app,
+    QtCore,
+    *,
+    timeout_s: float = 10.0,
+    target_s: float = min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
+) -> None:
+    """Keep one paced gesture alive until its scheduling coverage closes."""
+
+    start = time.monotonic()
+    deadline = start + max(float(timeout_s), float(target_s))
+    while time.monotonic() < deadline:
+        session = getattr(win, "_frame_session", None)
+        policy = None if session is None else getattr(session, "scheduling_policy", None)
+        verdict = None if policy is None else getattr(policy, "verdict", None)
+        if verdict is None or not bool(getattr(verdict, "coverage_open", False)):
+            _process_events(app, QtCore, count=2)
+            elapsed = time.monotonic() - start
+            if elapsed > float(target_s):
+                print(
+                    f"[perf] coverage pass closed in {elapsed:.3f}s "
+                    f"(target {float(target_s):.3f}s)"
+                )
+            return
+        _process_events(app, QtCore, count=2)
+        time.sleep(0.005)
+    session = getattr(win, "_frame_session", None)
+    policy = None if session is None else getattr(session, "scheduling_policy", None)
+    verdict = None if policy is None else getattr(policy, "verdict", None)
+    raise TimeoutError(
+        "coverage pass did not close within "
+        f"{max(float(timeout_s), float(target_s)):.3f}s: "
+        f"coverage_open={bool(getattr(verdict, 'coverage_open', False))}"
     )
 
 
@@ -4690,19 +4840,22 @@ def _wait_for_physical_presentation_quiet(
     *,
     timeout_s: float = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S),
 ) -> None:
-    """Drain restore-time paints before measured workflow phases start."""
+    """Drain restore-time presentation work before measured phases start.
+
+    A backend may redraw continuously for scene/cosmetic reasons even after
+    every requested presentation is acknowledged. Generic draw-count churn is
+    therefore diagnostic, not settlement truth; the shared pending contract is
+    the owner of whether physical presentation work is still owed.
+    """
 
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     deadline = perf_counter() + max(0.1, timeout_s)
     quiet_since = perf_counter()
-    previous_draw_count = _vispy_draw_count(win)
     while perf_counter() < deadline:
         _process_events(app, QtCore, count=1)
-        draw_count = _vispy_draw_count(win)
         pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
         pending = bool(callable(pending_fn) and pending_fn())
-        if draw_count != previous_draw_count or pending:
-            previous_draw_count = draw_count
+        if pending:
             quiet_since = perf_counter()
             continue
         if perf_counter() - quiet_since >= 0.1:
@@ -5016,6 +5169,19 @@ def _window_geometry_state(win) -> dict[str, object]:
             and abs(int(viewport_shape[1]) - int(target[1])) <= 1
         )
     )
+    raw_window_target = getattr(win, "_profile_session_fixture_window_size", None)
+    window_target = (
+        None
+        if raw_window_target is None
+        else [int(raw_window_target[0]), int(raw_window_target[1])]
+    )
+    window_size_matches = bool(
+        window_target is None
+        or (
+            window_size is not None
+            and [int(window_size[0]), int(window_size[1])] == window_target
+        )
+    )
     current_state = getattr(win, "view_state", None)
     current_image_axes = None if current_state is None else list(current_state.image_axes or ())
     current_axis_flipped = None if current_state is None else list(current_state.axis_flipped)
@@ -5023,6 +5189,8 @@ def _window_geometry_state(win) -> dict[str, object]:
     expected_axis_flipped = getattr(win, "_profile_session_fixture_axis_flipped", None)
     return {
         "window_size": window_size,
+        "session_window_size_target": window_target,
+        "session_window_size_matches": window_size_matches,
         "window_minimum_size": minimum_size,
         "viewport_shape": viewport_shape,
         "vispy_canvas_shape": vispy_canvas_shape,
@@ -5291,6 +5459,15 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             "target": record.get("session_viewport_shape_target"),
         },
         target="restored viewport shape retained",
+    )
+    require(
+        "session_window_geometry_stable",
+        bool(record.get("session_window_size_matches", False)),
+        evidence={
+            "actual": record.get("window_size"),
+            "target": record.get("session_window_size_target"),
+        },
+        target="restored outer window size retained",
     )
     require(
         "session_axis_orientation_stable",

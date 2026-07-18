@@ -23,8 +23,7 @@ this file says *what, in what order, and when it counts as done*.
 | # | Step | Exit gate |
 |---|---|---|
 | 1 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 2 | **G6 — GPU histogram/levels.** Slices **(a)** GPU histogram evidence and **(d)** reducer-honest GPU LOD generation from resident chunks are IMPLEMENTED on wgpu (see Done 2026-07-18); real-Wayland acceptance rides the row-3 matrix. Remaining: **(b) RESOLVED — measured NO:** keep rough→refined phasing. The real 336×336×272 T2 / Intel TGL Vulkan probe found that a native-L0, exact-bounds, 500-bin/8,192-representative pass preserves the live four-source heartbeat (Wayland max 9.28 ms at 60 tiles, 4.08 ms at 272), but it is **not the phase-1 resident population**: the representative montage frontier is retained L2. Making L0 available would move target/native residency into coverage, violating the binding phase order; marking the L2 mean population `REFINED` would violate ADR 0054. The lower-bound exact GPU cost is also 110.49 ms vs 29.56 ms rough at 60 tiles and 382.99 ms vs 163.78 ms at 272. Offscreen repeated the cost direction (136.61 vs 31.70 ms; 401.14 vs 164.73 ms). Evidence: `tests/artifacts/g6b-histogram-collapse-2026-07-18/{offscreen,wayland}.json`; no collapse or scheduling change. Remaining: Known-legal micro-follow-up (recorded, not scheduled): the SINGLE-SLICE session owns native L0 in phase 1 and exact measured FASTER than rough (2.6 vs 4.4 ms GPU) — a scoped collapse there would be honest; benefit ~10 ms on the fastest case. **(c)** histogram widget: RESOLVED, keep PyQtGraph — see Done.) | Levels/histogram converge from chunk summaries; sampling measured ON the GPU; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
-| 3 | **wgpu strangler — promotion evidence** (slices (a)–(c) LANDED, see Done; ADR 0057). zoom_out full-matrix red ADJUDICATED 2026-07-18: **harness gap, closed** (`da22dad7`, see Done — the canvas repainted ~24 ms after the journey-end capture; sampler now drains presentation-draw acks before the end sample; three consecutive FULL Wayland matrices v10/v11/v12 wgpu-green). The 2026-07-18 field stalls `259-1`/`1-1` are **not** the standing 272-tile fill: both are one wgpu physical-first-pass quality drift (exact latch followed by a mixed exact+fallback snapshot), fixed in `43287f8` and recorded in [the field-stall dossier](redesign/wgpu-field-stalls-2026-07-18.md). **Dogfood overlay parity:** wgpu now draws camera-locked ROI outlines/handles, live-profile cursor geometry, and tile loading/skipped boxes + symbols natively after the tiles in the same render pass; camera-only frames update one transform uniform and never rewrite the world-anchored overlay buffer. **TEXT REMAINS MISSING:** tile-truth labels, coach marks, and any other overlay text need a glyph atlas and remain an explicit promotion gap — do not treat geometry parity as complete overlay parity. Open: **(d)** promotion by evidence: perf bars vs VisPy on real data (the montage FFT-scroll 4→17 fps target is the headline number), Thomas dogfooding the explicit wgpu pin through daily use, VisPy retirement review only after a release cycle — never a flag-day switch. **Successor traps:** import rendercanvas ONLY via `import_qrenderwidget()`; every wgpu adapter probe pins `set_instance_extras(backends=["Vulkan"])` BEFORE its first request (an all-backends instance re-inits EGL during GL enumeration and SIGABRTs workers holding vispy GL state — `8c57a7bf`). | Promotion gate: journey matrix + perf bars on real data; written verdict in tensor-engine-endpoint.md |
+| 3 | **wgpu strangler — promotion evidence** (slices (a)–(c) LANDED, see Done; ADR 0057). zoom_out full-matrix red ADJUDICATED 2026-07-18: **harness gap, closed** (`da22dad7`, see Done — the canvas repainted ~24 ms after the journey-end capture; sampler now drains presentation-draw acks before the end sample; three consecutive FULL Wayland matrices v10/v11/v12 wgpu-green). The 2026-07-18 field stalls `259-1`/`1-1` are **not** the standing 272-tile fill: both are one wgpu physical-first-pass quality drift (exact latch followed by a mixed exact+fallback snapshot), fixed in `43287f8` and recorded in [the field-stall dossier](redesign/wgpu-field-stalls-2026-07-18.md). **Dogfood overlay parity:** wgpu now draws camera-locked ROI outlines/handles, live-profile cursor geometry, and tile loading/skipped boxes + symbols natively after the tiles in the same render pass; camera-only frames update one transform uniform and never rewrite the world-anchored overlay buffer. **TEXT REMAINS MISSING:** tile-truth labels, coach marks, and any other overlay text need a glyph atlas and remain an explicit promotion gap — do not treat geometry parity as complete overlay parity. Three consecutive full real-Wayland matrices v17/v18/v19 hold that geometry on every sample and pass all five wgpu rows outright (including index 10/10); zoom-in/out remain zero-commit. Open: **(d)** promotion by evidence: perf bars vs VisPy on real data (the montage FFT-scroll 4→17 fps target is the headline number), Thomas dogfooding the explicit wgpu pin through daily use, VisPy retirement review only after a release cycle — never a flag-day switch. **Successor traps:** import rendercanvas ONLY via `import_qrenderwidget()`; every wgpu adapter probe pins `set_instance_extras(backends=["Vulkan"])` BEFORE its first request (an all-backends instance re-inits EGL during GL enumeration and SIGABRTs workers holding vispy GL state — `8c57a7bf`). | Promotion gate: journey matrix + perf bars on real data; written verdict in tensor-engine-endpoint.md |
 | 4 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
@@ -98,7 +97,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 ## Done (most recent first — one line each, evidence linked)
 
 <<<<<<< HEAD
-<<<<<<< HEAD
 - 2026-07-18 — **G6(d) live GPU LOD generation on wgpu:**
   [`GenerateLodPages`](../arrayscope/gpu/command_protocol.py) runs one
   disjoint-subresource 2×2 component-mean pass per parent, recursively builds a
@@ -109,31 +107,6 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   (never magnitude), and bound planes isolate reducer families. Default-ring
   oracles: [`test_wgpu_command_protocol.py`](../tests/gpu/test_wgpu_command_protocol.py)
   and [`test_wgpu_imageview2d.py`](../tests/display/test_wgpu_imageview2d.py).
-||||||| parent of 5b18f039 (Queue row 3: zoom_out adjudicated harness-gap and closed with matrix evidence)
-=======
-- 2026-07-18 — **zoom_out full-matrix red adjudicated: harness gap, closed**
-  (`da22dad7`): the v7 trace walk proved the canvas repainted — 172k-pixel
-  screenshot delta with ZERO commits and no render_request, the
-  descriptor-only camera repaint working as designed — but ~24 ms AFTER the
-  journey-end capture, outside every gesture-tagged sample; under load the
-  on-demand scheduler defers the one repaint of a resident zoom-out past
-  gesture completion (isolated reruns pass because the draw lands inside the
-  glide's event pumping). Journey-end samples now drain
-  `presentationDrawPending()` — the only signal that sees a pure-camera
-  `request_draw`; `_wait_for_tile_presentation_draw` counts commit-keyed
-  requests only — bounded/non-raising, every gesture site, every backend;
-  incumbent oracles untouched (freshness clock still starts at gesture
-  start). Fault-injection proof both levels: a never-clearing pending flag
-  still captures the stale sample (`presentation_drained=false` in trace),
-  and an injected missed redraw on a zero-commit zoom_out stays red.
-  Acceptance: three consecutive FULL real-Wayland matrices — v10 wgpu 5/5
-  outright (zoom_out first_new 272 ms, commits=0), v11 4/5 + cold_fill
-  attributed `reference_vispy_cold_level_convergence_standing_red` by the
-  existing classification (zoom_out 446 ms), v12 5/5 outright (zoom_out
-  451 ms). Incumbent reds across runs are the standing
-  coverage/level-convergence stall family (present in v7 pre-change).
-  Suite 2427/0.
->>>>>>> 5b18f039 (Queue row 3: zoom_out adjudicated harness-gap and closed with matrix evidence)
 ||||||| parent of 15fad3d7 (Measure G6b exact histogram collapse and keep phasing)
 =======
 - 2026-07-18 — **G6(b) rough→refined collapse rejected by measurement:**

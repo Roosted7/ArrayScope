@@ -121,6 +121,53 @@ def test_finish_journey_gesture_still_samples_when_redraw_is_missed(monkeypatch)
     assert events[-1][1]["presentation_drained"] is False
 
 
+def test_tile_presentation_draw_wait_fails_loudly_when_camera_draw_is_pending(monkeypatch):
+    """A descriptor-only camera redraw is physical work even with no commit edge."""
+
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            presentationDrawPending=lambda: True,
+            wgpuPresentationDiagnostics=lambda: {
+                "draw_count": 8,
+                "tile_presentation_request_count": 3,
+                "tile_presentation_draw_count": 3,
+            },
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"draw_pending=True"):
+        workflow._wait_for_tile_presentation_draw(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
+
+def test_coverage_pass_wait_fails_loudly_when_evidence_never_closes(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
+    win = SimpleNamespace(
+        _frame_session=SimpleNamespace(
+            scheduling_policy=SimpleNamespace(
+                verdict=SimpleNamespace(coverage_open=True),
+            )
+        )
+    )
+
+    with pytest.raises(TimeoutError, match=r"coverage_open=True"):
+        workflow._wait_for_coverage_pass_close(
+            win,
+            object(),
+            object(),
+            timeout_s=bounded_interaction_settle_timeout_s(0.01),
+        )
+
+
 def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 
@@ -139,6 +186,108 @@ def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
             object(),
             timeout_s=bounded_interaction_settle_timeout_s(0.01),
         )
+
+
+def test_physical_quiet_wait_ignores_draw_churn_after_presentation_ack(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    draw_count = {"value": 7}
+
+    def process_events(*_args, **_kwargs):
+        draw_count["value"] += 1
+
+    monkeypatch.setattr(workflow, "_process_events", process_events)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            presentationDrawPending=lambda: False,
+            vispyPresentationDiagnostics=lambda: {
+                "draw_count": draw_count["value"],
+            },
+        )
+    )
+
+    workflow._wait_for_physical_presentation_quiet(
+        win,
+        object(),
+        object(),
+        timeout_s=bounded_interaction_settle_timeout_s(0.2),
+    )
+
+    assert draw_count["value"] > 7
+
+
+def test_profile_view_range_uses_canonical_pointer_interaction_reason():
+    from arrayscope.tools.profile_montage_workflow import _apply_view_range
+
+    reasons = []
+    ranges = []
+    retargets = []
+    image_view = SimpleNamespace()
+
+    def set_range(**kwargs):
+        ranges.append(
+            {
+                **kwargs,
+                "wheel_identity": image_view._viewport_wheel_range_pending,
+            }
+        )
+
+    view = SimpleNamespace(setRange=set_range)
+    image_view.getView = lambda: view
+    win = SimpleNamespace(
+        _note_viewport_interaction=lambda reason: reasons.append(reason),
+        img_view=image_view,
+        retarget_montage_viewport=lambda: retargets.append(True),
+    )
+
+    _apply_view_range(win, (1.0, 2.0), (3.0, 4.0))
+
+    assert reasons == ["range-pointer"]
+    assert ranges == [
+        {
+            "xRange": (1.0, 2.0),
+            "yRange": (3.0, 4.0),
+            "padding": 0,
+            "wheel_identity": True,
+        }
+    ]
+    assert image_view._viewport_wheel_range_pending is False
+    assert retargets == [True]
+
+
+def test_visual_sampler_captures_active_presentation_draw_ack():
+    from arrayscope.tools.profile_montage_workflow import _VisualTimelineProbe
+
+    reasons = []
+    probe = object.__new__(_VisualTimelineProbe)
+    probe._win = SimpleNamespace(_arrayscope_active_gesture_id="zoom_out-1")
+    probe.capture = lambda reason: reasons.append(reason)
+
+    probe._capture_presentation_draw_ack()
+    probe._win._arrayscope_active_gesture_id = ""
+    probe._capture_presentation_draw_ack()
+
+    assert reasons == ["presentation-draw-ack"]
+
+
+def test_visual_sampler_uses_draw_acks_only_during_wgpu_gesture():
+    from arrayscope.tools.profile_montage_workflow import _VisualTimelineProbe
+
+    reasons = []
+    probe = object.__new__(_VisualTimelineProbe)
+    probe._win = SimpleNamespace(_arrayscope_active_gesture_id="index_scroll-1")
+    probe._backend = "wgpu"
+    probe.capture = lambda reason: reasons.append(reason)
+
+    probe._capture_interval()
+    probe._capture_presentation_draw_ack()
+    probe._backend = "vispy"
+    probe._capture_interval()
+    probe._win._arrayscope_active_gesture_id = ""
+    probe._backend = "wgpu"
+    probe._capture_interval()
+
+    assert reasons == ["presentation-draw-ack", "interval", "interval"]
 
 
 def test_preview_floor_physical_rows_preserve_page_shader_evidence():
@@ -661,6 +810,9 @@ def _passing_r8_phase_record(*, backend="vispy"):
         "session_viewport_shape_matches": True,
         "viewport_shape": [753, 1245],
         "session_viewport_shape_target": [753, 1245],
+        "session_window_size_matches": True,
+        "window_size": [1400, 940],
+        "session_window_size_target": [1400, 940],
         "session_axis_orientation_matches": True,
         "image_axes": [0, 1],
         "axis_flipped": [False, True, False],
@@ -694,6 +846,22 @@ def test_r8_certification_passes_complete_semantic_and_responsive_phase():
         assert result["r8_performance_evidence"] is True
         assert result["r8_gate_passed"] is True
         assert result["r8_gate_failures"] == []
+
+
+def test_r8_certification_rejects_window_size_drift_from_session_fixture():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record.update(
+        session_window_size_matches=False,
+        window_size=[1399, 940],
+    )
+
+    result = _r8_certification(record)
+    failed = {failure["gate"] for failure in result["r8_gate_failures"]}
+
+    assert result["r8_gate_passed"] is False
+    assert "session_window_geometry_stable" in failed
 
 
 def test_r8_certification_names_first_pixel_and_latency_failures():

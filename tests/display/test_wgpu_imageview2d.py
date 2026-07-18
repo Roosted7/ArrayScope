@@ -41,6 +41,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_wgpu_camera_draw_publishes_presentation_ack(qt_app, monkeypatch):
+    view = _view_class("wgpu")()
+    requests = []
+    acknowledgements = []
+    try:
+        monkeypatch.setattr(
+            view._wgpu_canvas,
+            "request_draw",
+            lambda *args, **kwargs: requests.append((args, kwargs)),
+        )
+        view.presentationDrawn.connect(lambda: acknowledgements.append("drawn"))
+
+        view._request_wgpu_canvas_draw()
+
+        assert requests == [((), {})]
+        assert view.presentationDrawPending() is True
+        view._wgpu_canvas_update_pending = False
+        view._publish_wgpu_draw_ack(0)
+        assert acknowledgements == ["drawn"]
+        assert view.presentationDrawPending() is False
+    finally:
+        view.close()
+
+
 def test_wgpu_pool_headroom_clamps_to_device_limit_but_active_pages_do_not():
     from arrayscope.display.wgpu_imageview2d import _wgpu_pool_layer_budget
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -173,6 +175,27 @@ def test_matrix_declares_every_backend_journey_cell():
         (backend, journey) for backend in BACKENDS for journey in JOURNEYS
     }
     assert MIN_COMMITS[("pyqtgraph", "cold_fill")] >= 2
+
+
+def test_matrix_uses_checked_in_profile_session_fixture():
+    from arrayscope.tools.journey_matrix import (
+        PROFILE_SESSION_FIXTURE,
+        _profile_driver_command,
+    )
+
+    assert PROFILE_SESSION_FIXTURE.name == "profile_montage_session.json"
+    assert PROFILE_SESSION_FIXTURE.is_file()
+    payload = json.loads(PROFILE_SESSION_FIXTURE.read_text(encoding="utf-8"))
+    assert payload["panels"]["window_size"] == [1400, 940]
+    command = _profile_driver_command(
+        backend="wgpu",
+        data="scan.nii",
+        stages="montage_zoompan_scalar",
+        output=Path("artifacts/wgpu/zoom"),
+    )
+    fixture_index = command.index("--session-fixture") + 1
+    assert command[fixture_index] == str(PROFILE_SESSION_FIXTURE)
+    assert command[fixture_index]
 
 
 @pytest.mark.parametrize(
@@ -395,6 +418,21 @@ def test_first_new_pixels_oracle_fault_injection(tmp_path):
     assert not result["ok"]
     assert result["first_new_pixels_ms"] == 3_000.0
     assert not result["first_new_pixels_within_budget"]
+
+
+def test_missed_redraw_fault_injection_still_fails(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    baseline_path = timeline[0]["screenshot_path"]
+    for sample in timeline[1:]:
+        sample["screenshot_path"] = baseline_path
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert not result["ok"]
+    assert result["first_new_pixels_ms"] is None
+    assert not result["first_new_pixels_within_budget"]
+    assert result["demand_fresh_ms_after_gesture"] is None
+    assert not result["demand_fresh_within_budget"]
 
 
 def test_level_convergence_oracle_fault_injection(tmp_path):

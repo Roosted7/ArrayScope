@@ -418,10 +418,16 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_canvas_update_request_count = int(
             getattr(self, "_wgpu_canvas_update_request_count", 0) or 0
         ) + 1
+        # Camera-only descriptor draws have no payload-commit edge, but they
+        # are still physical presentation work. Publish them through the same
+        # draw-ack signal as tile commits so observers can sample the frame at
+        # the real presentation edge.
+        self._mark_presentation_draw_pending()
         try:
             canvas.request_draw()
         except Exception:
             self._wgpu_canvas_update_pending = False
+            self._presentation_draw_pending = False
 
     def _on_wgpu_draw(self, *_args) -> None:
         self._wgpu_draw_count = int(getattr(self, "_wgpu_draw_count", 0) or 0) + 1
