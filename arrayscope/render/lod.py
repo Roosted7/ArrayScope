@@ -1018,6 +1018,48 @@ def admit_retained_preview_level(
 # --------------------------------------------------------------------------
 
 
+def _plan_tile_for_source(session, source_index: int, tile_number: int | None):
+    """Indexed plan-tile lookup for the per-tile floor scans.
+
+    Floor derivation runs per tile per replan; a linear scan over
+    ``plan.tiles`` here made every ladder mark pass O(tiles^2) on a large
+    montage.  The index is keyed on the plan object's identity — ``plan`` is
+    reassigned wholesale on layout changes, never mutated in place.
+    """
+
+    plan = getattr(session, "plan", None)
+    cached = getattr(session, "_plan_tile_index_cache", None)
+    if cached is None or cached[0] is not plan:
+        by_number: dict[int, object] = {}
+        by_source: dict[int, object] = {}
+        for value in tuple(getattr(plan, "tiles", ()) or ()):
+            by_number[int(value.montage_index)] = value
+            by_source.setdefault(int(value.source_index), value)
+        cached = (plan, by_number, by_source)
+        session._plan_tile_index_cache = cached
+    _plan, by_number, by_source = cached
+    if tile_number is not None:
+        value = by_number.get(int(tile_number))
+        if value is None or int(value.source_index) != int(source_index):
+            return None
+        return value
+    return by_source.get(int(source_index))
+
+
+def _visible_tile_for_number(session, tile_number: int):
+    """Indexed visible-tile lookup (same rationale as the plan-tile index)."""
+
+    visible = getattr(session, "visible_tiles", ()) or ()
+    cached = getattr(session, "_visible_tile_index_cache", None)
+    if cached is None or cached[0] is not visible:
+        cached = (
+            visible,
+            {int(value.montage_index): value for value in tuple(visible)},
+        )
+        session._visible_tile_index_cache = cached
+    return cached[1].get(int(tile_number))
+
+
 def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
     """Best complete floor, ranked by physical rather than requested quality."""
 
@@ -1073,16 +1115,7 @@ def best_floor_key(session, source_index: int, *, tile_number: int | None = None
             if resolved is not None:
                 add_candidate(key, resolved, owner=entry.owner)
 
-    tile = next(
-        (
-            value
-            for value in tuple(getattr(session.plan, "tiles", ()) or ())
-            if int(value.source_index) == int(source_index)
-            and (tile_number is None or int(value.montage_index) == int(tile_number))
-        )
-        ,
-        None,
-    )
+    tile = _plan_tile_for_source(session, int(source_index), tile_number)
     if tile is not None:
         preview_level = int(getattr(session, "lod_preview_level", 0) or 0)
         exact_levels = tuple(
@@ -1160,10 +1193,7 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         # A BLANK tile is different — see ensure_floor_payloads.
         return False
     if tile is None:
-        tile = next(
-            (t for t in tuple(session.visible_tiles) if int(t.montage_index) == int(tile_number)),
-            None,
-        )
+        tile = _visible_tile_for_number(session, int(tile_number))
     if tile is None:
         return False
     best = best_floor_key(session, int(tile.source_index), tile_number=int(tile_number))

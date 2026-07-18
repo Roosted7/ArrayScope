@@ -507,6 +507,103 @@ def test_logical_page_cache_reuses_resolver_snapshot_until_residency_changes(mon
     assert bind_calls == 1
 
 
+def test_page_set_resolution_is_memoized_per_residency_revision(monkeypatch):
+    # The 272-tile cold-fill replans resolve the same page-set keys thousands
+    # of times between residency changes (floor scans run per tile per
+    # replan).  Resolution is a pure function of (residency revision,
+    # requested keys), so repeated queries at one revision must be memo hits
+    # — including the None incomplete-coverage verdict, which is the common
+    # case during a fill — and any residency change must invalidate.
+    resident_plan = plan(rect=(0, 4, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    missing_plan = plan(rect=(4, 8, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(0, 0),
+        plan=resident_plan,
+    )
+    cache = LodPageCache(max_bytes=1 << 20)
+    assert cache.begin_claim(page.key, "worker")
+    cache.admit(page, owner="worker")
+
+    resolve_calls = 0
+    original_resolve = pyramid_core.PageTable.resolve
+
+    def counted_resolve(table, *args, **kwargs):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(table, *args, **kwargs)
+
+    monkeypatch.setattr(pyramid_core.PageTable, "resolve", counted_resolve)
+
+    first = cache.resolved_page_set((resident_plan,))
+    assert first is not None
+    calls_after_first = resolve_calls
+    assert cache.resolved_page_set((resident_plan,)) is first
+    assert resolve_calls == calls_after_first
+
+    assert cache.resolved_page_set((missing_plan,)) is None
+    calls_after_missing = resolve_calls
+    assert cache.resolved_page_set((missing_plan,)) is None
+    assert resolve_calls == calls_after_missing
+
+    missing_page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(4, 0),
+        plan=missing_plan,
+    )
+    assert cache.begin_claim(missing_page.key, "worker-b")
+    cache.admit(missing_page, owner="worker-b")
+    filled = cache.resolved_page_set((missing_plan,))
+    assert filled is not None
+    assert cache.resolved_page_set((missing_plan,)) is filled
+
+
+def test_page_set_resolution_memo_rejects_stale_result_after_concurrent_admit(monkeypatch):
+    # A worker admit can bump residency while another thread is mid-compute;
+    # if a newer query refreshes the memo epoch first, storing the stale
+    # verdict would poison the fresh epoch — usually a stale None that keeps
+    # reporting a now-resident floor as missing until the next residency
+    # change, which at a convergence tail never comes (journey-matrix
+    # pyqtgraph scroll rows, 2026-07-18).  The reentrant hook below plays
+    # both interleaved parties on one thread via the RLock.
+    resident_plan = plan(rect=(0, 4, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    missing_plan = plan(rect=(4, 8, 0, 4), reduction=(1, 1), page_shape=(4, 4))[0]
+    resident_page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(0, 0),
+        plan=resident_plan,
+    )
+    late_page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=(4, 0),
+        plan=missing_plan,
+    )
+    cache = LodPageCache(max_bytes=1 << 20)
+    assert cache.begin_claim(resident_page.key, "worker-a")
+    cache.admit(resident_page, owner="worker-a")
+
+    original_resolve = pyramid_core.PageTable.resolve
+    hook_state = {"armed": True}
+
+    def racing_resolve(table, key, *args, **kwargs):
+        if hook_state["armed"] and key == missing_plan.key:
+            hook_state["armed"] = False
+            # Interleaved worker: the page lands mid-compute...
+            assert cache.begin_claim(late_page.key, "worker-b")
+            cache.admit(late_page, owner="worker-b")
+            # ...and a newer query refreshes the memo epoch.
+            assert cache.resolved_page_set((resident_plan,)) is not None
+        return original_resolve(table, key, *args, **kwargs)
+
+    monkeypatch.setattr(pyramid_core.PageTable, "resolve", racing_resolve)
+
+    # The outer query computed against pre-admit residency; its stale None
+    # must not be memoized into the refreshed epoch.
+    cache.resolved_page_set((missing_plan,))
+    monkeypatch.setattr(pyramid_core.PageTable, "resolve", original_resolve)
+    assert cache.resolved_page_set((missing_plan,)) is not None
+
+
 def test_exact_page_query_does_not_treat_coarse_ancestor_as_materialized_target():
     values = np.arange(64 * 64, dtype=np.float32).reshape(64, 64)
     coarse_plan = plan(

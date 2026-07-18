@@ -43,6 +43,17 @@ PY_SPY_FULL_ALLOWED_MISSED_STACKS = 1
 # slow scroll paces by target-LOD completion, and a single short settle runs
 # after the whole zoom/pan storm.
 SCROLL_FAST_DURATION_S = 5.0
+# Build-time budget for the cold full-montage fills (raw and FFT). A 272-tile
+# cold fill is a measured multi-second operation: an evidence sweep plus a
+# bounded commit walk over every tile. The five-second interaction budget
+# applies to per-gesture probes only; capping the build at the gesture budget
+# turned a slow-but-progressing fill into a false "stall" verdict while the
+# recorded fill milestones (perf-bars program) are the actual pass/fail
+# authority for fill time (same rule as the churn harness, 2026-07-17). A
+# genuine wedge still fails fast: the completion wait breaks after four
+# seconds of an unchanged no-work stall signature regardless of this budget.
+COLD_FILL_BUILD_TIMEOUT_S = 120.0
+
 SCROLL_SLOW_LOD_BUDGET_S = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S)
 ZOOMPAN_FINAL_SETTLE_S = min(3.0, INTERACTION_SETTLE_HARD_LIMIT_S)
 ZOOMPAN_INPUT_FPS = 120.0
@@ -411,10 +422,11 @@ def run_profile_montage_workflow(
                 win,
                 probe,
                 phase="raw_full_tiled_montage",
-                timeout_s=timeout_s,
+                timeout_s=COLD_FILL_BUILD_TIMEOUT_S,
                 action=apply_raw,
                 backend=backend,
                 screenshot_dir=screenshot_dir,
+                build_phase=True,
             )
             _attach_phase_screenshot(
                 raw_record, win, phase="raw_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir
@@ -451,10 +463,11 @@ def run_profile_montage_workflow(
                 win,
                 probe,
                 phase="fft_full_tiled_montage",
-                timeout_s=timeout_s,
+                timeout_s=COLD_FILL_BUILD_TIMEOUT_S,
                 action=apply_fft,
                 backend=backend,
                 screenshot_dir=screenshot_dir,
+                build_phase=True,
             )
             _attach_phase_screenshot(
                 fft_record, win, phase="fft_full_tiled_montage", backend=backend, screenshot_dir=screenshot_dir
@@ -3658,8 +3671,17 @@ def _run_phase(
     action,
     backend: str = "",
     screenshot_dir: Path | None = None,
+    build_phase: bool = False,
 ) -> dict[str, object]:
-    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    # Cold-fill build phases carry a build-scale completion budget
+    # (COLD_FILL_BUILD_TIMEOUT_S); the interaction clamp is for gesture
+    # probes.  The stall detector inside the completion wait still fails a
+    # genuine wedge fast under either budget.
+    timeout_s = (
+        max(float(timeout_s), bounded_interaction_settle_timeout_s(None))
+        if build_phase
+        else bounded_interaction_settle_timeout_s(timeout_s)
+    )
     win._arrayscope_profile_phase = str(phase)
     visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
     if visual_probe is not None:
@@ -3698,7 +3720,8 @@ def _run_phase(
             app,
             QtCore,
             win,
-            timeout_s=bounded_interaction_settle_timeout_s(timeout_s),
+            timeout_s=timeout_s,
+            build_budget=build_phase,
             start=start,
             draw_start=draw_start,
             preview_floor_session_id=preview_floor_session_id,
@@ -3862,8 +3885,10 @@ def _wait_for_montage_complete(
     predecessor_frame=None,
     predecessor_presentation_identity=None,
     predecessor_semantic_key=None,
+    build_budget: bool = False,
 ) -> dict[str, float | int | bool | None]:
-    timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    if not build_budget:
+        timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     deadline = time.monotonic() + timeout_s
     first_materialized_tile_ms = None
     first_presented_tile_ms = None

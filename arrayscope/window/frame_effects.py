@@ -781,6 +781,7 @@ class FramePipelineEffects:
 
         owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
         if getattr(self.renderer, "_montage_presentation_gate_owner", None) == owner:
+            emit_trace("presentation_gate", action="coalesced", owner_session=owner[0])
             return
         self.renderer._montage_presentation_gate_armed = True
         self.renderer._montage_presentation_gate_owner = owner
@@ -794,12 +795,14 @@ class FramePipelineEffects:
             # Without it, one worker completion caused one whole-frame commit
             # (600+ commits in a five-second scrub). Generation/current-session
             # checks remain in `_on_presentation_gate`.
+            emit_trace("presentation_gate", action="armed-timer", owner_session=owner[0])
             Qt.QtCore.QTimer.singleShot(
                 4,
                 receiver,
                 lambda effects=self: effects._on_presentation_gate(),
             )
             return
+        emit_trace("presentation_gate", action="armed-post", owner_session=owner[0])
         # Low priority is the fairness contract: already queued input, paint,
         # heartbeat, and kernel-delivery events run before the next bounded
         # presentation slice. The receiver is parented to the orchestrator,
@@ -816,11 +819,14 @@ class FramePipelineEffects:
             # A successor session armed its own continuation while this stale
             # callback was queued. It owns the shared gate now; this callback
             # must neither clear nor consume that wakeup.
+            emit_trace("presentation_gate", action="fired-stale", owner_session=owner[0])
             return
         self.renderer._montage_presentation_gate_owner = None
         self.renderer._montage_presentation_gate_armed = False
         if not self._session_is_current():
+            emit_trace("presentation_gate", action="fired-not-current", owner_session=owner[0])
             return
+        emit_trace("presentation_gate", action="fired-commit", owner_session=owner[0])
         self.commit_pending_session()
 
     def admit_tile_result(self, tile, result) -> int:
@@ -1179,11 +1185,25 @@ class FramePipelineEffects:
             or _call(session, "backend_identity_mismatch_tiles")
         )
         if not has_backlog:
+            emit_trace(
+                "commit_rearm",
+                decision="no-backlog",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+            )
             self.renderer._montage_gate_last_backlog = None
             return
         signature = self._backlog_signature()
         previous = getattr(self.renderer, "_montage_gate_last_backlog", None)
         self.renderer._montage_gate_last_backlog = signature
+        emit_trace(
+            "commit_rearm",
+            decision="repeat" if previous == signature else "rearm",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            dirty=len(getattr(session, "dirty_payloads", ()) or ()),
+            upserts=len(getattr(session, "pending_payload_upserts", ()) or ()),
+            flush=bool(getattr(session, "flush_pending", False)),
+            final=bool(getattr(session, "final_commit_pending", False)),
+        )
         if previous == signature:
             self.renderer._montage_gate_no_progress = (
                 int(getattr(self.renderer, "_montage_gate_no_progress", 0) or 0) + 1
@@ -3925,6 +3945,28 @@ def persistent_gpu_tile_residency_backend(window, _session=None) -> bool:
     return bool(capabilities.persistent_tile_residency and capabilities.shader_windowing and kind in {"gpu_atlas", "none"})
 
 
+def _idle_backlog_cohort(session, batch_limit: int) -> int:
+    """Fixed-cost-amortizing item cohort for idle commits with a deep backlog.
+
+    The tiled commit's measured cost is fixed-dominated: full-plan classify,
+    delta walk, acknowledgement, and state publication run once per commit
+    regardless of item count, while the marginal per-item upload cost is
+    small and separately byte-capped.  A latency-governed item clamp
+    therefore cannot shorten the callback; against a deep backlog it only
+    multiplies the fixed cost per remaining tile (the 272-tile cold fill at
+    4 items per turn outran its settlement budget).  Idle commits take a
+    cohort that amortizes the fixed cost; the interactive clamp and the
+    byte cap stay authoritative on their own axes.
+    """
+
+    backlog = len(getattr(session, "dirty_payloads", ()) or ()) + len(
+        getattr(session, "pending_payload_upserts", ()) or ()
+    )
+    if backlog > int(batch_limit):
+        return min(32, int(backlog))
+    return int(batch_limit)
+
+
 def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     if persistent_gpu_tile_residency_backend(window, session):
         return _persistent_tile_upsert_limits(window, session)
@@ -3948,6 +3990,13 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         batch_limit = 8 if feedback is None else int(feedback.batch_limit("tile_layer_commit", interactive=interactive))
     if interactive:
         batch_limit = min(8, max(4, int(batch_limit)))
+    # No idle-backlog cohort here: the CPU-windowed tile layer pays a real
+    # per-item cost (window + wrap per tile), so a deep-backlog cohort turns
+    # into one long GUI callback that delays the next gesture's pixels — the
+    # journey matrix caught exactly that on the pyqtgraph scroll rows. The
+    # fixed-cost amortization argument only holds for the upload-only
+    # shader-windowing path (`_persistent_tile_upsert_limits`), and the
+    # pyqtgraph cold fill is evidence-sweep-bound, not commit-bound.
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     limits = {
@@ -4179,6 +4228,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         # remains authoritative for large textures; four is only the minimum
         # item cohort when the byte budget admits it.
         batch_limit = max(4, int(batch_limit))
+        batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     limits: dict[str, object] = {

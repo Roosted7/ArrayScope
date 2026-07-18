@@ -2052,6 +2052,120 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
     assert limits["upsert_cost_fn"](payload) == texture.nbytes
 
 
+def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
+    # The tiled commit's cost is fixed-dominated (full-plan classify + delta
+    # walk + acknowledgement run once per commit regardless of item count),
+    # so a latency-governed item clamp multiplies the fixed cost across a
+    # large idle backlog instead of shortening any callback: the 272-tile
+    # cold fill at 4 items/turn outran its settlement budget.  Idle commits
+    # with a backlog larger than the governed limit take a fixed-cost
+    # amortizing cohort; the byte cap stays authoritative for upload size
+    # and the interactive clamp is untouched.
+    from arrayscope.window import frame_effects as montage_commit
+
+    def build_session(backlog: int):
+        return SimpleNamespace(
+            display_committed=True,
+            dirty_payloads={i: None for i in range(backlog)},
+            pending_payload_upserts={},
+        )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="vispy",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=4, byte_cap=32 * 1024 * 1024, budget_ms=2.0
+            )
+        ),
+    )
+    window.win = window
+
+    assert (
+        montage_commit._persistent_tile_upsert_limits(window, build_session(60))[
+            "max_upserts"
+        ]
+        == 32
+    )
+    assert (
+        montage_commit._persistent_tile_upsert_limits(window, build_session(10))[
+            "max_upserts"
+        ]
+        == 10
+    )
+    assert (
+        montage_commit._persistent_tile_upsert_limits(window, build_session(3))[
+            "max_upserts"
+        ]
+        == 4
+    )
+
+    window._viewport_interaction_active = True
+    assert (
+        montage_commit._persistent_tile_upsert_limits(window, build_session(60))[
+            "max_upserts"
+        ]
+        == 4
+    )
+
+
+def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
+    # The CPU-windowed tile layer pays a real per-item cost, so the
+    # idle-backlog cohort boost is reserved for the upload-only
+    # shader-windowing path: a 32-item pyqtgraph commit is one long GUI
+    # callback that delays the next gesture's pixels (journey-matrix
+    # pyqtgraph scroll rows, 2026-07-18).
+    from arrayscope.window import frame_effects as montage_commit
+
+    def build_session(backlog: int):
+        return SimpleNamespace(
+            display_committed=True,
+            dirty_payloads={i: None for i in range(backlog)},
+            pending_payload_upserts={},
+            pending_removals=set(),
+            has_pending_level_update=lambda: False,
+            has_stale_level_presentations=lambda: False,
+        )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=2, byte_cap=4096, budget_ms=2.0
+            )
+        ),
+    )
+    window.win = window
+
+    assert (
+        montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"]
+        == 2
+    )
+    assert (
+        montage_commit.tile_layer_upsert_limits(window, build_session(1))["max_upserts"]
+        == 2
+    )
+
+    window._viewport_interaction_active = True
+    assert (
+        montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"]
+        <= 8
+    )
+
+
 def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
     from arrayscope.window import frame_effects as montage_commit
 

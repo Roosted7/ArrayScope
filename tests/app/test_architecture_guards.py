@@ -386,6 +386,12 @@ def _interaction_timeout_offenders(tree, rel):
 # is owned by the bars program, not by widening correctness gates.
 _EVENTUAL_SETTLEMENT_BUDGET_ALLOWLIST = (
     ("arrayscope/tools/profile_montage_workflow.py", "_wait_for_tile_presentation_draw"),
+    # Build-time cold-fill completion budget (same rule as the churn
+    # harness's _FILL_TIMEOUT_S): fill-time pass/fail authority is the
+    # recorded milestones, and the wait's stall detector still fails a
+    # genuine wedge fast. Gesture stages keep the capped owner.
+    ("arrayscope/tools/profile_montage_workflow.py", "COLD_FILL_BUILD_TIMEOUT_S"),
+    ("arrayscope/tools/profile_montage_workflow.py", "_wait_for_montage_complete"),
     ("tests/stress/test_interaction_convergence.py", "_FILL_TIMEOUT_S"),
     ("tests/stress/test_interaction_convergence.py", "waitUntil"),
     # Build-time cold-fill wait; the per-gesture wait uses the capped owner.

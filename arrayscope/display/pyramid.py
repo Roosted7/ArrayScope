@@ -1271,6 +1271,10 @@ class LodPageCache:
         self._resolver_revision = -1
         self._resolver_table = PageTable()
         self._resolver_pages_by_key: dict[DataChunkKey, MaterializedLodPage] = {}
+        self._resolution_memo: dict[
+            tuple[DataChunkKey, ...], ResolvedLodPageSet | None
+        ] = {}
+        self._resolution_memo_revision = -1
 
     @property
     def revision(self) -> int:
@@ -1303,22 +1307,51 @@ class LodPageCache:
         return None if resolved is None else resolved.resolutions
 
     def resolved_page_set(self, plans) -> ResolvedLodPageSet | None:
-        """Return complete requested -> actual rows and their checked values."""
+        """Return complete requested -> actual rows and their checked values.
+
+        Resolution is a pure function of (residency revision, requested
+        keys), so results — including the None incomplete-coverage verdict —
+        are memoized until residency changes.  Floor derivation re-asks the
+        same page-set questions per tile per replan; uncached, a 272-tile
+        cold fill spent O(tiles x levels) resolutions per replan and starved
+        the bounded commit pump out of its settlement budget.
+        """
 
         requested = tuple(plans)
         keys = tuple(plan.key for plan in requested)
         if len(set(keys)) != len(keys):
             raise ValueError("duplicate LOD page targets are not allowed")
+        with self._lock:
+            if self._resolution_memo_revision != self._revision:
+                self._resolution_memo = {}
+                self._resolution_memo_revision = self._revision
+            memo = self._resolution_memo
+            if keys in memo:
+                return memo[keys]
+            computed_at_revision = self._revision
         table, pages_by_key = self._resolver_snapshot()
         resolutions = tuple(table.resolve(key) for key in keys)
         if any(item is None for item in resolutions):
-            return None
-        resolved = tuple(item for item in resolutions if item is not None)
-        actual_pages = tuple(
-            pages_by_key[key]
-            for key in dict.fromkeys(item.actual_key for item in resolved)
-        )
-        return ResolvedLodPageSet(requested, resolved, actual_pages)
+            result: ResolvedLodPageSet | None = None
+        else:
+            resolved = tuple(item for item in resolutions if item is not None)
+            actual_pages = tuple(
+                pages_by_key[key]
+                for key in dict.fromkeys(item.actual_key for item in resolved)
+            )
+            result = ResolvedLodPageSet(requested, resolved, actual_pages)
+        with self._lock:
+            # Store only when residency never moved between the miss check
+            # and here.  A worker admit can bump the revision while this
+            # thread computes; if a newer query has already refreshed the
+            # memo epoch, storing this result would poison the fresh epoch
+            # with a stale verdict — usually a stale None that reports a
+            # now-resident floor as missing until the NEXT residency change,
+            # which at a convergence tail never comes (the journey-matrix
+            # pyqtgraph scroll rows caught exactly that).
+            if computed_at_revision == self._revision == self._resolution_memo_revision:
+                self._resolution_memo[keys] = result
+        return result
 
     def resolved_pages(self, plans) -> tuple[MaterializedLodPage, ...] | None:
         """Return the complete actual page set, or None for missing coverage."""

@@ -271,11 +271,14 @@ class FrameRuntimeMixin:
         """
 
         if bool(getattr(self, "_montage_replan_gate_armed", False)):
+            emit_trace("replan_gate", action="coalesced")
             return
         self._montage_replan_gate_armed = True
+        emit_trace("replan_gate", action="armed")
 
         def fire() -> None:
             self._montage_replan_gate_armed = False
+            emit_trace("replan_gate", action="fired")
             # Replan whatever session is current when the gate fires — NOT the
             # one captured when it was armed.  During scroll churn the session
             # is reused/superseded between arm and fire (retarget_index_window

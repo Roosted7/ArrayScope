@@ -58,21 +58,27 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `display_tile_key`) and parity + fallback are pinned in
   `tests/operations/test_cache.py`. The runtime guard and counter stay until
   a release cycle shows the counter at zero.
-- **PRE-EXISTING, BACKEND-AGNOSTIC: 272-tile raw fill stalls (offscreen-deterministic
-  repro!).** `profile_montage_workflow --backend pyqtgraph --stages
-  raw_full_tiled_montage` times out at 0/272 presented with the commit
-  backlog gate armed and no progress (gate_no_progress climbing,
-  visible_upserts=272, dirty=77), for pyqtgraph AND vispy (271-272 unsettled) on main `9a5c6465`, at
-  pre-camera-reanchor `976ea275`, and on the wgpu branch (wgpu stalls in
-  the same stage), offscreen AND real Wayland (2026-07-18 probes; branch
-  probes both with and without `--session-fixture ""`, main probed with
-  it). This blocks the `--backend all` perf-bars run and is the likely
-  identity of the journey matrix's all-day pyqtgraph cold_fill red.
-  G5 measured this harness green 2026-07-17 (`raw 272/272 ~11.4 s`), so
-  the window is main `661b6ba5..976ea275` — or the invocation itself was
-  never re-validated. Offscreen determinism makes this the first cheaply
-  bisectable member of the stall family; it BLOCKS the row-3(d) perf-bars
-  measurement. Hunt chip out (re-scoped).
+- **CLOSED 2026-07-18 — the 272-tile raw fill "stall" was a throughput
+  collapse, not a lost wakeup.** Bisect verdict: no breaking commit in
+  `661b6ba5..976ea275` — the timeout reproduces at the G5 merge and at
+  `62904128` itself; the offscreen invocation was never validated green.
+  Gate-liveness instrumentation (now permanent trace events
+  `presentation_gate`/`replan_gate`/`commit_rearm`) proved every wakeup
+  fires; the fill was O(tiles²)-slow against a mis-applied 5 s gesture
+  budget. Fixed at the roots: page-set resolution memo per residency
+  revision (pyramid.py), fixed-cost-amortizing idle commit cohort for the
+  shader-windowing backends (frame_effects.py `_idle_backlog_cohort`),
+  indexed floor lookups (lod.py), and a build-scale completion budget for
+  the cold-fill harness stages (`COLD_FILL_BUILD_TIMEOUT_S`, churn-harness
+  rule). Repro: vispy PASS 272/272 ~9.7 s, wgpu PASS ~10.9 s; pyqtgraph
+  completes 272/272 (~24 s) but its R8 gate is red on a PRE-EXISTING
+  montage-entry blackout (CPU windowing gated on the full level-evidence
+  sweep — chip out). Journey matrix post-fix: cold_fill GREEN on all three
+  backends (the standing vispy+pyqtgraph cold_fill reds were this
+  mechanism); remaining reds are the demand-freshness family (pyqtgraph
+  zoom_in stable, zoom_out flips backends run-to-run). Row-3(d) perf-bars
+  measurement is UNBLOCKED. Dossier:
+  [fill-throughput-2026-07-18](redesign/fill-throughput-2026-07-18.md).
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
 - **Upstream rendercanvas contributions** (from gate B): a native-Wayland
