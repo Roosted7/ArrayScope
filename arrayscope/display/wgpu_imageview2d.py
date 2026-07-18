@@ -28,6 +28,7 @@ pages is actually resident in the executor page table after the submit.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
@@ -58,6 +59,7 @@ from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     ContentPlane,
+    DispatchHistogram,
     DisplayMapping,
     EnsureChunkResident,
     EvictChunk,
@@ -67,6 +69,7 @@ from arrayscope.gpu.command_protocol import (
     TileInstance,
     UpdateTileInstances,
 )
+from arrayscope.gpu.chunk_summary import chunk_key_frontier
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     RGB8,
@@ -106,6 +109,18 @@ _WGPU_REP_TEXEL_BYTES = {
 # share it so the canvas context never needs reconfiguration and tests do not
 # pay per-view device creation.
 _SHARED_WGPU_DEVICE = None
+
+
+@dataclass(frozen=True)
+class WgpuResidentHistogramEvidence:
+    """One fenced GPU histogram over a committed plane's page frontier."""
+
+    evidence_key: object
+    tile_number: int
+    source_index: int
+    frontier_keys: tuple[object, ...]
+    readback: object
+    wait_completed: object
 
 
 def import_qrenderwidget():
@@ -214,6 +229,10 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_committed: dict[str, object] | None = None
         self._wgpu_last_report_uploads = 0
         self._wgpu_last_draw_error: str = ""
+        self._wgpu_histogram_evidence_required = False
+        self._wgpu_histogram_evidence_obligation = None
+        self._wgpu_histogram_evidence: dict[object, WgpuResidentHistogramEvidence] = {}
+        self._wgpu_histogram_evidence_ready: set[object] = set()
         # Draw-ack discipline (mirrors VisPy's request/draw counters exactly).
         self._wgpu_draw_count = 0
         self._wgpu_tile_presentation_request_count = 0
@@ -283,7 +302,51 @@ class WgpuImageView2D(ImageViewShell):
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
+        self._wgpu_histogram_evidence.clear()
+        self._wgpu_histogram_evidence_ready.clear()
         return self._wgpu_executor
+
+    def setResidentHistogramEvidenceRequired(
+        self,
+        required: bool,
+        obligation: object = None,
+    ) -> None:
+        """Receive the phase owner's current evidence obligation."""
+
+        required = bool(required)
+        obligation = obligation if required else None
+        if not required or obligation != self._wgpu_histogram_evidence_obligation:
+            self._wgpu_histogram_evidence.clear()
+            self._wgpu_histogram_evidence_ready.clear()
+        self._wgpu_histogram_evidence_required = required
+        self._wgpu_histogram_evidence_obligation = obligation
+
+    def residentHistogramEvidence(self, payloads) -> tuple[WgpuResidentHistogramEvidence, ...]:
+        """Return fenced evidence matching the currently committed payloads."""
+
+        committed = self._wgpu_committed or {}
+        committed_tiles = dict(committed.get("tiles", {}) or {})
+        rows = []
+        seen = set()
+        for tile, payload in dict(payloads or {}).items():
+            info = committed_tiles.get(int(tile))
+            if info is None or info.get("identity") != tile_ack_identity(payload):
+                continue
+            evidence_key = info.get("histogram_evidence_key")
+            evidence = self._wgpu_histogram_evidence.get(evidence_key)
+            if (
+                evidence is not None
+                and evidence_key not in self._wgpu_histogram_evidence_ready
+                and evidence_key not in seen
+            ):
+                rows.append(evidence)
+                seen.add(evidence_key)
+        return tuple(rows)
+
+    def acceptResidentHistogramEvidence(self, evidence_keys) -> None:
+        """Mark worker-installed evidence satisfied for this obligation."""
+
+        self._wgpu_histogram_evidence_ready.update(tuple(evidence_keys or ()))
 
     def _next_wgpu_generation(self) -> int:
         self._wgpu_generation += 1
@@ -505,6 +568,16 @@ class WgpuImageView2D(ImageViewShell):
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
             )
+            resident_by_plane: dict[tuple[object, object, str], list[object]] = {}
+            for key in executor.page_table.resident_keys():
+                resident_by_plane.setdefault(
+                    (
+                        key.document_generation,
+                        key.operation_key,
+                        key.representation,
+                    ),
+                    [],
+                ).append(key)
 
             # One bound content plane per tile.  The plane key deliberately
             # excludes payload LOD: a coarse and fine acknowledgement are
@@ -516,6 +589,7 @@ class WgpuImageView2D(ImageViewShell):
             committed_tiles: dict[int, dict[str, object]] = {}
             commands = []
             planned_upload_tiles = []
+            histogram_specs = []
             for tile in sorted(payloads):
                 payload = payloads[tile]
                 identity = tile_ack_identity(payload)
@@ -525,13 +599,10 @@ class WgpuImageView2D(ImageViewShell):
                 height, width = (int(texture.shape[0]), int(texture.shape[1]))
                 source_height, source_width = source_shape
                 grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
-                resident_lods = (
-                    int(key.lod.level)
-                    for key in executor.page_table.resident_keys()
-                    if key.document_generation == plane_identity
-                    and key.operation_key == "live"
-                    and key.representation == representation
+                resident_plane_keys = tuple(
+                    resident_by_plane.get((plane_identity, "live", representation), ())
                 )
+                resident_lods = (int(key.lod.level) for key in resident_plane_keys)
                 max_lod = max((lod_level, *resident_lods))
                 plane_index = len(planes)
                 planes.append(
@@ -555,6 +626,7 @@ class WgpuImageView2D(ImageViewShell):
                             chunk_y,
                             dtype=_WGPU_REP_DTYPES[representation],
                             representation=representation,
+                            plane_shape=source_shape,
                         )
                         page_keys.append(key)
                         if executor.page_table.lookup(key) is None:
@@ -569,6 +641,10 @@ class WgpuImageView2D(ImageViewShell):
                         )
                 if will_upload:
                     planned_upload_tiles.append(tile)
+                plane_residency_key = (plane_identity, "live", representation)
+                resident_by_plane[plane_residency_key] = list(
+                    dict.fromkeys((*resident_plane_keys, *page_keys))
+                )
                 region = layout[tile]
                 committed_tiles[tile] = {
                     "identity": identity,
@@ -582,7 +658,47 @@ class WgpuImageView2D(ImageViewShell):
                     "plane_index": plane_index,
                     "page_keys": tuple(page_keys),
                     "lod_level": lod_level,
+                    "plane_identity": plane_identity,
+                    "source_index": int(getattr(payload, "source_index", tile)),
                 }
+
+            histogram_capable = representation != RGB8
+            scheduled_evidence_keys = set()
+            for tile, info in committed_tiles.items():
+                frontier_keys = (
+                    chunk_key_frontier(
+                        resident_by_plane[
+                            (info["plane_identity"], "live", representation)
+                        ]
+                    )
+                    if histogram_capable
+                    else ()
+                )
+                histogram_evidence_key = (
+                    "wgpu-resident-histogram",
+                    self._wgpu_histogram_evidence_obligation,
+                    info["plane_identity"],
+                    tuple(frontier_keys),
+                    mode,
+                    scale,
+                    float(symlog_constant),
+                )
+                info["histogram_evidence_key"] = histogram_evidence_key
+                if (
+                    self._wgpu_histogram_evidence_required
+                    and frontier_keys
+                    and histogram_evidence_key not in self._wgpu_histogram_evidence
+                    and histogram_evidence_key not in scheduled_evidence_keys
+                ):
+                    histogram_specs.append(
+                        (
+                            int(tile),
+                            int(info["source_index"]),
+                            histogram_evidence_key,
+                            tuple(frontier_keys),
+                        )
+                    )
+                    scheduled_evidence_keys.add(histogram_evidence_key)
 
             lut = self._wgpu_resolve_lut_bytes(source_mapping)
             self._wgpu_mapping_state = DisplayMapping(
@@ -603,16 +719,39 @@ class WgpuImageView2D(ImageViewShell):
             self._montage_display_mode = "wgpu_tile_layer"
 
             start = perf_counter()
-            report = self._submit_wgpu(
-                (
-                    BindContentPlanes(tuple(planes)),
-                    *commands,
-                    SetDisplayMapping(self._wgpu_mapping_state),
-                    UpdateTileInstances(self._wgpu_camera_tiles()),
+            submission_commands = [
+                BindContentPlanes(tuple(planes)),
+                *commands,
+                SetDisplayMapping(self._wgpu_mapping_state),
+                UpdateTileInstances(self._wgpu_camera_tiles()),
+            ]
+            histogram_indices = []
+            for _tile, _source_index, _evidence_key, frontier_keys in histogram_specs:
+                histogram_indices.append(len(submission_commands))
+                submission_commands.append(
+                    DispatchHistogram(
+                        frontier_keys,
+                        bins=64,
+                        lo=None,
+                        hi=None,
+                        mode=mode,
+                        scale=scale,
+                        symlog_constant=symlog_constant,
+                    )
                 )
-            )
+            report = self._submit_wgpu(tuple(submission_commands))
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
+            for command_index, spec in zip(histogram_indices, histogram_specs):
+                tile, source_index, evidence_key, frontier_keys = spec
+                self._wgpu_histogram_evidence[evidence_key] = WgpuResidentHistogramEvidence(
+                    evidence_key=evidence_key,
+                    tile_number=tile,
+                    source_index=source_index,
+                    frontier_keys=frontier_keys,
+                    readback=report.histograms[command_index],
+                    wait_completed=report.wait_completed,
+                )
 
             # Physical truth per tile: acknowledge only tiles whose pages the
             # page table actually holds after the submit — partial residency
@@ -875,6 +1014,8 @@ class WgpuImageView2D(ImageViewShell):
 
     def hide_tiled_presentation(self, reason: str) -> None:
         self._wgpu_committed = None
+        self._wgpu_histogram_evidence.clear()
+        self._wgpu_histogram_evidence_ready.clear()
         self._clear_wgpu_tiles()
         self.clearMontageTileOverlays()
         self._montage_display_mode = "none"
@@ -904,6 +1045,8 @@ class WgpuImageView2D(ImageViewShell):
             self._submit_wgpu((*evictions, UpdateTileInstances(())))
             self._request_wgpu_canvas_draw()
         self._wgpu_committed = None
+        self._wgpu_histogram_evidence.clear()
+        self._wgpu_histogram_evidence_ready.clear()
         self._last_wgpu_structure_key = None
         self._last_wgpu_viewport_key = None
         self._last_wgpu_tiled_reset_reason = str(reason)
@@ -950,7 +1093,7 @@ class WgpuImageView2D(ImageViewShell):
         commands = []
         for tile in sorted(payloads):
             texture = textures[tile]
-            lod_level, _source_shape = lod_geometry[tile]
+            lod_level, source_shape = lod_geometry[tile]
             grid_h = -(-int(texture.shape[0]) // PAGE)
             grid_w = -(-int(texture.shape[1]) // PAGE)
             plane_identity = _wgpu_payload_plane_identity(payloads[tile])
@@ -966,6 +1109,7 @@ class WgpuImageView2D(ImageViewShell):
                                 chunk_y,
                                 dtype=_WGPU_REP_DTYPES[representation],
                                 representation=representation,
+                                plane_shape=source_shape,
                             ),
                             self._wgpu_page_block(
                                 texture, chunk_y, chunk_x, representation
@@ -1008,7 +1152,7 @@ class WgpuImageView2D(ImageViewShell):
         ):
             representation = RGB_WINDOWED_RGBA32F
         texture = self._wgpu_payload_texture(payload, representation)
-        lod_level, _source_shape = _wgpu_payload_lod_geometry(payload, texture)
+        lod_level, source_shape = _wgpu_payload_lod_geometry(payload, texture)
         plane_identity = _wgpu_payload_plane_identity(payload)
         grid_h = -(-int(texture.shape[0]) // PAGE)
         grid_w = -(-int(texture.shape[1]) // PAGE)
@@ -1022,6 +1166,7 @@ class WgpuImageView2D(ImageViewShell):
                     chunk_y,
                     dtype=_WGPU_REP_DTYPES[representation],
                     representation=representation,
+                    plane_shape=source_shape,
                 )
             )
             is not None
@@ -1180,6 +1325,10 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
             "wgpu_last_draw_error": str(getattr(self, "_wgpu_last_draw_error", "") or ""),
+            "wgpu_histogram_evidence_pending": len(
+                set(self._wgpu_histogram_evidence)
+                - set(self._wgpu_histogram_evidence_ready)
+            ),
         }
 
     def presentation_diagnostics(self) -> dict[str, object]:

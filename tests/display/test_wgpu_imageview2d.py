@@ -236,6 +236,75 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
         view.close()
 
 
+def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        image = np.linspace(-2.0, 5.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {0: _payload(0, image, source_id=("g6a", 0))}
+        view.setResidentHistogramEvidenceRequired(True)
+
+        report = _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+
+        assert report.presented_tiles == frozenset({0})
+        (evidence,) = view.residentHistogramEvidence(payloads)
+        evidence.wait_completed()
+        counts, bounds = evidence.readback.resolve()
+        assert bounds == pytest.approx((-2.0, 5.0))
+        assert int(counts.sum()) == image.size
+        assert evidence.frontier_keys == tuple(
+            view._wgpu_committed["tiles"][0]["page_keys"]
+        )
+
+        view.acceptResidentHistogramEvidence((evidence.evidence_key,))
+        report = _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+        assert set(report.presented_tiles) == {0}
+        assert report.texture_uploads == 0
+
+        view.setResidentHistogramEvidenceRequired(False)
+        view.setResidentHistogramEvidenceRequired(True, ("next-coverage", 2))
+        report = _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+        assert report.presented_tiles == frozenset({0})
+        assert report.texture_uploads == 0
+        (next_evidence,) = view.residentHistogramEvidence(payloads)
+        assert next_evidence.evidence_key != evidence.evidence_key
+    finally:
+        view.close()
+
+
+def test_phase1_windowable_rgb_uses_resident_alpha_histogram_signal(qt_app):
+    from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderMapping
+
+    view = _shown_view(qt_app)
+    try:
+        histogram = np.linspace(2.0, 8.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        image = np.full((20, 30, 3), 0.5, dtype=np.float32)
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {
+            0: _payload(
+                0,
+                image,
+                source_id=("g6a-windowed-rgb", 0),
+                shader_mapping=ShaderMapping(
+                    display_mode=ShaderDisplayMode.RGB_WINDOWED
+                ),
+                histogram_data=histogram,
+            )
+        }
+        view.setResidentHistogramEvidenceRequired(True)
+
+        report = _commit(view, geometry, payloads, levels=(2.0, 8.0))
+
+        assert report.presented_tiles == frozenset({0})
+        (evidence,) = view.residentHistogramEvidence(payloads)
+        evidence.wait_completed()
+        counts, bounds = evidence.readback.resolve()
+        assert bounds == pytest.approx((2.0, 8.0))
+        assert int(counts.sum()) == histogram.size
+    finally:
+        view.close()
+
+
 def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app):
     view = _shown_view(qt_app)
     try:
