@@ -23,8 +23,8 @@ this file says *what, in what order, and when it counts as done*.
 | # | Step | Exit gate |
 |---|---|---|
 | 1 | **Performance-bars program on the engine** (parked — Thomas 2026-07-17: act only on true stalls/no-progress, never on merely-slow). The bars (below) are the product promise. One measured cause at a time, before/after real-Wayland harness evidence per commit; a step that regresses a bar is reverted and buried in the graveyard. | Bars trend green in `profile_montage_workflow` on real Wayland, both backends (PyQtGraph at 2× allowance) |
-| 2 | **G6 — GPU histogram/levels** (slice 1 landed 2026-07-18: bounded source-weighted chunk summaries + ADR 0056 frontier feeding phase-1 rough evidence). Remaining slices per the endpoint scope in [gpu-engine-plan.md](proposals/gpu-engine-plan.md#g6--gpu-compute-consumers) (Thomas 2026-07-18): **(a)** GPU-side sampling/reduction shaders over resident pages (GL fragment-reduction interim; workgroup compute lands with the wgpu runtime — coordinate with row 3); **(b)** evidence-gated: collapse rough→refined into one exact pass on shader backends IF measured inside the phase-1 budget; **(c)** VisPy histogram widget replacing the PyQtGraph one (parity → better; retires the private-pyqtgraph-API risk); **(d)** GPU LOD generation from resident chunks. | Levels/histogram converge from chunk summaries; sampling measured ON the GPU; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
-| 3 | **Renderer runtime experiments** (G6's shader slices wait on this verdict so they are written once, against the winner, via the backend-neutral command protocol). **Slice A (Datoviz v0.4-dev) COMPLETE 2026-07-18** — gate A verdict on branch `codex/datoviz-v04-renderer-gate-a` (awaiting integration): custom shaders/compute/never-black PASS at vklite level, but Qt-overlay composition over the native child and the upload completion/lifetime contract FAIL; winning would additionally require Datoviz modifications, a C++ Qt-bridge, and our own binary distribution. **Thomas 2026-07-18: wgpu-py promoted to PRIMARY** — pure-Python wheels reach the same architectural questions now; tiered plan + evidence log in [wgpu-renderer-experiment](proposals/wgpu-renderer-experiment.md) (T0 adapter/native-Wayland probe PASSED — native Wayland screen presentation works from pure Python, contra the scout report; T1 presentation+overlay gate is decisive; T2 virtual tensor; T3 compute; T4 uploads+completion). Datoviz stays parked with recorded retry conditions, not buried. | wgpu tiers measured on real Wayland per the plan's exit gates; a written verdict in tensor-engine-endpoint.md; G6 shader work unblocked against the winner |
+| 2 | **G6 — GPU histogram/levels** (slice 1 landed 2026-07-18: bounded source-weighted chunk summaries + ADR 0056 frontier feeding phase-1 rough evidence). Remaining slices per the endpoint scope in [gpu-engine-plan.md](proposals/gpu-engine-plan.md#g6--gpu-compute-consumers), now written ONCE against the renderer command protocol (ADR 0057) and executed on the wgpu executor — the gate-B verdict unblocked this (row 3 Done): **(a)** GPU-side sampling/reduction over resident pages (the protocol `DispatchHistogram` + LOD reduction passes exist and are exact at harness scale; wire them to the ADR 0056 frontier + phase-1 rough evidence); **(b)** evidence-gated: collapse rough→refined into one exact pass IF measured inside the phase-1 budget; **(c)** VisPy histogram widget replacing the PyQtGraph one (parity → better; retires the private-pyqtgraph-API risk); **(d)** GPU LOD generation from resident chunks (protocol executor has the in-pool reduction pass). | Levels/histogram converge from chunk summaries; sampling measured ON the GPU; no GUI-thread aggregation; real-GL gate; journey matrix not regressed |
+| 3 | **wgpu strangler integration** (ADR 0057; verdict + seed landed — see Done). Ordered slices, each behind tests: **(a)** grow `WgpuPlaneExecutor` to the live payload shapes (scalar pool without zero-imag waste, RGB8, multi-plane/montage sessions, eviction budgets) with the gate-B oracles extended per feature; **(b)** a live `image_rendering_backend=wgpu` viewer slice consuming the SAME presenter seams as VisPy (payload upsert → `EnsureChunkResident`, draw parts → `UpdateTileInstances`, commit report → `PresentGeneration` audit), bitmap presentation, overlays untouched; **(c)** journey-matrix wgpu cells (5 journeys × wgpu) green alongside both incumbent backends; **(d)** promotion decision by evidence: perf bars vs VisPy on real data, then VisPy retirement review after a release cycle — never a flag-day switch. | Each slice: default-ring tests + real-Wayland journey rows green; promotion gate: journey matrix + perf bars on real data, written verdict in tensor-engine-endpoint.md |
 | 4 | **G7 — compressed transport.** Codec ladder, measured topology; ZFP-class first. After G6. | Measured end-to-end win on real data |
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
@@ -60,9 +60,41 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   a release cycle shows the counter at zero.
 - **Audit `_resident_source_matches_expected(source, None) → True`**
   (controller-side expected-source coverage during session switches).
+- **Upstream rendercanvas contributions** (from gate B): a native-Wayland
+  screen-presentation hook (wl_display via QNativeInterface + winId-as-
+  wl_surface, Vulkan-only instance) and making the import-time
+  `QT_QPA_PLATFORM=xcb` override opt-out. Until merged upstream, ArrayScope's
+  `qt_platform` policy owns the platform decision.
+- **Screen-mode follow-ups, evidence-gated by 4K/high-res need** (bitmap is
+  the default; its measured boundary is ~26 ms readback at 4K): Mailbox or
+  off-thread acquire (Fifo acquire blocks the GUI thread ~15 ms/frame), and
+  the GPU-overlay layer design that screen mode requires.
+- **Renderer measurements not yet taken:** NVIDIA/discrete adapter cells for
+  Tier 1/4 (PRIME copy changes upload and present arithmetic), real 4K
+  swapchain, `winId == wl_surface*` verification per Qt minor (pin in a
+  test that fails loudly on a Qt upgrade).
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-18 — **Renderer command protocol (ADR 0057) + wgpu executor seed
+  landed:** `arrayscope/gpu/command_protocol.py` (the only renderer seam) +
+  `WgpuPlaneExecutor` carrying the gate-B oracles as default-ring tests
+  (14 green: zero-upload mode/levels/shift/scroll, pinned-ancestor fallback,
+  exact histogram, completion token), plus `arrayscope.tools.wgpu_preview`
+  rendering the real T2 NIfTI through protocol commands in a bitmap
+  QRenderWidget with a live Qt overlay (smoke artifact:
+  `tests/artifacts/wgpu-gate-b/preview-smoke.png`).
+- 2026-07-18 — **Renderer runtime experiments CLOSED — verdict: wgpu GO.**
+  Datoviz gate A (branch `codex/datoviz-v04-renderer-gate-a`): overlay
+  composition + upload lifetime FAIL. wgpu gate B: all tiers pass —
+  native-Wayland screen presentation from pure Python; bitmap = default
+  composition mode (4 ms p50 @1300×650, overlays intact; 26 ms @4K is its
+  boundary); virtual tensor pixel-exact with zero-upload interactions;
+  exact 2-pass histogram 3.2 ms; 16-page burst 2.6 ms; completion token
+  0.19 ms; mappable-primary 12.4 GB/s. Verdict tables in
+  [tensor-engine-endpoint](proposals/tensor-engine-endpoint.md); plan +
+  evidence in [wgpu-renderer-experiment](proposals/wgpu-renderer-experiment.md);
+  artifacts `tests/artifacts/wgpu-gate-b/`.
 - 2026-07-18 — **Camera re-anchor order retained end to end:** priority
   retargets atomically rebuild the kernel ready heap for unstarted session
   tasks, and the final presentation boundary reorders delta upserts against
