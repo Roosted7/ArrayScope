@@ -4374,3 +4374,123 @@ def test_incomplete_first_pass_evidence_does_not_arm_publication_flush():
     assert session.flush_pending is False
     assert session.final_commit_pending is False
     assert session._presentation_requests == []
+
+
+# ---------------------------------------------------------------------------
+# Superseded wgpu histogram tasks: results are content-keyed evidence, never
+# discarded (2026-07-18 journey-matrix v4: the discard latched
+# coverage_evidence_pending on settled sessions), and refined remembered
+# evidence satisfies the rough obligation without a fresh dispatch.
+# ---------------------------------------------------------------------------
+
+
+def _wgpu_evidence_service(session, *, cached=None):
+    from arrayscope.render.level_stats import LevelStatsService
+
+    service = LevelStatsService()
+    accepted = []
+    service.win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            acceptResidentHistogramEvidence=lambda keys: accepted.extend(keys),
+        ),
+        kernel=SimpleNamespace(visible_backlog=0),
+    )
+    tracker_updates = []
+    service._montage_level_tracker = lambda: SimpleNamespace(
+        ensure_expected=lambda key, expected: None,
+        update_from_stats=lambda key, stats, aggregate=True: tracker_updates.append(
+            (key, stats)
+        ),
+    )
+    remembered = []
+    service._remember_montage_source_level_stats = (
+        lambda level_key, stats: remembered.append((level_key, stats))
+    )
+    service._cached_montage_source_level_stats = (
+        lambda level_key, source_index, quality: (cached or {}).get(int(source_index))
+    )
+    published = []
+    service._maybe_publish_after_level_evidence = (
+        lambda current, processed: published.append(processed)
+    )
+    service._frame_session = session
+    service._probes = SimpleNamespace(
+        accepted=accepted,
+        tracker_updates=tracker_updates,
+        remembered=remembered,
+        published=published,
+    )
+    return service
+
+
+def _wgpu_evidence_rows(*source_indices):
+    return tuple(
+        (
+            SimpleNamespace(evidence_key=("ev", index), source_index=index),
+            SimpleNamespace(source_index=index, refined=False, evidence_quality=1),
+        )
+        for index in source_indices
+    )
+
+
+def test_superseded_wgpu_histogram_results_absorb_into_current_session():
+    session = _late_evidence_session()
+    service = _wgpu_evidence_service(session)
+
+    processed = service._absorb_late_wgpu_histogram_evidence(
+        _wgpu_evidence_rows(100, 101),
+        source_level_key=session.level_key,
+        elapsed_ms=5.0,
+    )
+
+    probes = service._probes
+    assert processed == 2
+    assert [key for key, _ in probes.tracker_updates] == [session.level_key] * 2
+    assert probes.accepted == [("ev", 100), ("ev", 101)]
+    assert probes.published == [2]
+    assert session.flush_pending
+    assert session._presentation_requests  # re-arm turn requested
+
+
+def test_superseded_wgpu_results_for_other_level_are_remembered_not_tracked():
+    session = _late_evidence_session()
+    service = _wgpu_evidence_service(session)
+
+    processed = service._absorb_late_wgpu_histogram_evidence(
+        _wgpu_evidence_rows(100),
+        source_level_key=("levels", "previous-level"),
+        elapsed_ms=5.0,
+    )
+
+    probes = service._probes
+    assert processed == 0
+    assert probes.tracker_updates == []
+    assert [key for key, _ in probes.remembered] == [("levels", "previous-level")]
+    assert probes.accepted == [("ev", 100)]
+    assert probes.published == []
+    assert session._presentation_requests  # settled session still un-latches
+
+
+def test_refined_remembered_evidence_satisfies_rough_obligation_without_dispatch():
+    refined = SimpleNamespace(source_index=100, refined=True, evidence_quality=3)
+    session = _late_evidence_session(
+        level_expected_indices=(100, 101),
+        level_evidence_inflight=False,
+        scheduling_policy=SimpleNamespace(
+            verdict=SimpleNamespace(admits=lambda work: True)
+        ),
+    )
+    service = _wgpu_evidence_service(session, cached={100: refined, 101: refined})
+    rows = tuple(row for row, _ in _wgpu_evidence_rows(100, 101))
+    service.win.img_view.residentHistogramEvidence = lambda payloads: rows
+    service.win.kernel.submit = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no dispatch expected when refined evidence is cached")
+    )
+
+    reused = service._queue_wgpu_resident_histogram_evidence(session, payloads={})
+
+    probes = service._probes
+    assert reused == 2
+    assert probes.accepted == [("ev", 100), ("ev", 101)]
+    assert [stats for _, stats in probes.tracker_updates] == [refined, refined]
+    assert probes.published == [2]

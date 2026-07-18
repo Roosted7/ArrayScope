@@ -993,6 +993,65 @@ class LevelStatsService:
         self._schedule_montage_cached_level_stats(session)
         return int(merged)
 
+    def _absorb_late_wgpu_histogram_evidence(
+        self, evidence_rows, *, source_level_key, elapsed_ms
+    ) -> int:
+        """Absorb a superseded task's fenced results as content-keyed evidence.
+
+        Monotonic by construction: the tracker's improvement rule and the
+        memory cache's quality ordering mean late rough evidence fills gaps
+        but never replaces refined. Levels absorbed here drive presentation
+        and the histogram widget only — commit identity is untouched (the
+        stale-level-identity class). Ends with one presentation turn so the
+        resulting commit report re-queues any still-waiting evidence and the
+        publication transition can clear the coverage barrier; without that
+        nudge a settled session has no edge left to unlatch it.
+        """
+
+        view = self.win.img_view
+        accept_evidence = getattr(view, "acceptResidentHistogramEvidence", None)
+        current = getattr(self, "_frame_session", None)
+        tracker = self._montage_level_tracker()
+        processed = 0
+        accepted_keys = []
+        for evidence, stats in evidence_rows:
+            self._remember_montage_source_level_stats(source_level_key, stats)
+            if current is not None and current.level_key == source_level_key:
+                tracker.update_from_stats(current.level_key, stats, aggregate=False)
+                processed += 1
+            accepted_keys.append(evidence.evidence_key)
+        if callable(accept_evidence):
+            accept_evidence(accepted_keys)
+        if current is None:
+            return 0
+        if processed:
+            self._last_montage_level_stats_ms = float(elapsed_ms)
+            self._montage_level_sources_added_last_commit = int(processed)
+            self._maybe_publish_after_level_evidence(current, processed=processed)
+        self._rearm_wgpu_histogram_evidence()
+        return processed
+
+    def _rearm_wgpu_histogram_evidence(self) -> None:
+        """Request one presentation turn so waiting evidence gets re-queued.
+
+        The queue path only runs from commit reports; a superseded or failed
+        task on a settled session otherwise leaves ``coverage_evidence_pending``
+        latched with nothing scheduled to clear it (the drain re-arm rule —
+        same family as the 2026-07-15 prefetch dead-arm).
+        """
+
+        current = getattr(self, "_frame_session", None)
+        if current is None or bool(getattr(current, "level_evidence_inflight", False)):
+            return
+        current.flush_pending = True
+        pipeline = getattr(current, "pipeline", None)
+        effects = None if pipeline is None else getattr(pipeline, "effects", None)
+        request_presentation = (
+            None if effects is None else getattr(effects, "request_presentation", None)
+        )
+        if callable(request_presentation):
+            request_presentation()
+
     def _queue_wgpu_resident_histogram_evidence(self, session, payloads) -> int:
         """Install fenced resident-page GPU evidence through the shared tracker."""
 
@@ -1012,6 +1071,32 @@ class LevelStatsService:
         work_class = SchedulingWork.COVERAGE
         if not session.scheduling_policy.verdict.admits(work_class):
             return 0
+        # Refined-first shortcut: content whose family already has refined
+        # remembered evidence needs no fresh rough pass — reuse it, mark the
+        # obligation satisfied, and dispatch only for content with no
+        # evidence at all. During scroll the inter-slice delta is typically
+        # smaller than the rough-vs-refined delta, so going straight to the
+        # retained refined levels is both cheaper and visually better.
+        reused = 0
+        pending_rows = []
+        for evidence in rows:
+            cached = self._cached_montage_source_level_stats(
+                session.level_key,
+                int(evidence.source_index),
+                LevelEvidenceQuality.REFINED,
+            )
+            if cached is not None and bool(getattr(cached, "refined", False)):
+                tracker.update_from_stats(session.level_key, cached, aggregate=False)
+                accept_evidence([evidence.evidence_key])
+                reused += 1
+            else:
+                pending_rows.append(evidence)
+        rows = tuple(pending_rows)
+        if reused:
+            self._montage_level_sources_added_last_commit = int(reused)
+            self._maybe_publish_after_level_evidence(session, processed=reused)
+        if not rows:
+            return reused
         generation = (
             session.key,
             int(session.session_id),
@@ -1085,6 +1170,20 @@ class LevelStatsService:
             )
             if current is not session or current_generation != generation:
                 release(session)
+                # The session advanced while the GPU worked, but the results
+                # are CONTENT-keyed: for every tile that survives into the
+                # current session this is current evidence that arrived late,
+                # not stale data. Absorb instead of discarding (cancellation
+                # cancels presentation ownership, never useful computation) —
+                # discarding here latched coverage_evidence_pending forever
+                # once the settled session stopped producing commit reports
+                # (journey-matrix v4, all four interactive wgpu rows red on
+                # coverage_pass_observed).
+                self._absorb_late_wgpu_histogram_evidence(
+                    evidence_rows,
+                    source_level_key=generation[3],
+                    elapsed_ms=elapsed_ms,
+                )
                 return
             release(current)
             processed = 0
@@ -1111,10 +1210,12 @@ class LevelStatsService:
 
         def stale():
             release(session)
+            self._rearm_wgpu_histogram_evidence()
 
         def failed(exc):
             release(session)
             handle_ui_exception("wgpu resident histogram evidence", exc)
+            self._rearm_wgpu_histogram_evidence()
 
         handle = self.win.kernel.submit(
             TaskSpec(
