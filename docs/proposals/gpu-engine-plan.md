@@ -356,6 +356,36 @@ materialization. Three explicit ambitions beyond the first landing:
    full-population GPU stats inside the phase-1 budget. The CPU-LUT
    single-pass rule for PyQtGraph (rendering.md contract rule 6) is
    unaffected either way.
+
+   **Measured verdict (2026-07-18): NO; keep ADR 0054 phasing.**
+   `arrayscope.tools.g6_histogram_benchmark` compared the live rough shape
+   (retained L2 population, exact bounds, 64 bins/512 representatives) with
+   the strongest refined-grade candidate (native L0 resident population,
+   exact bounds, the histogram UI's 500-bin cap, and 8,192 representatives),
+   using the live four-source commit cap. GPU timestamp queries cover the
+   bounds+histogram passes; GUI submit, worker fence/readback/reconstruction,
+   total publication, and a Qt heartbeat are separate fields. Five warm
+   measurements on the real 336×336×272 float64 T2 and Intel TGL Vulkan gave:
+
+   | Session | Real Wayland rough → exact GPU p95 | Exact heartbeat max | Exact verdict |
+   |---|---:|---:|---|
+   | single slice (L0 → L0) | 4.37 → 2.57 ms | 1.49 ms | eligible; fits |
+   | 60 tiles (L2 → L0) | 29.56 → 110.49 ms | 9.28 ms | **ineligible population** |
+   | 272 tiles (L2 → L0) | 163.78 → 382.99 ms | 4.08 ms | **ineligible population** |
+
+   Offscreen repeated the montage cost direction (60 tiles: 31.70 → 136.61
+   ms GPU p95; 272 tiles: 164.73 → 401.14 ms). The compute-only exact pass is
+   heartbeat-safe, but the measurement also makes the decisive eligibility
+   fact explicit: representative phase 1 owns retained L2 pages, whereas
+   refined semantic evidence samples the native population. Promoting the L2
+   mean distribution would contradict ADR 0054; making L0 resident before the
+   barrier would move target work into coverage and contradict the binding
+   progressive contract / ADR 0053. The singleton cannot set a backend-wide
+   policy while both montage populations require that forbidden phase change.
+   Publication therefore continues to mark the phase-1 evidence rough and the
+   existing phase-2 semantic refinement remains real work; no scheduling order
+   or `ProgressiveSchedulingPolicy` decision changed. Raw evidence:
+   `tests/artifacts/g6b-histogram-collapse-2026-07-18/{offscreen,wayland}.json`.
 3. **VisPy histogram widget:** replace/replicate the PyQtGraph histogram
    UI with a VisPy-rendered equivalent fed straight from chunk/GPU
    summaries — parity first, then improvements. This also retires the

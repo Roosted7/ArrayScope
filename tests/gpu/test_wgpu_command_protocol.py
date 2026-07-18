@@ -812,6 +812,53 @@ def test_dynamic_histogram_discovers_mapped_bounds_and_fences_readback(scene):
     assert np.array_equal(bins.astype(np.int64), cpu.astype(np.int64))
 
 
+def test_refined_grade_histogram_supports_the_histogram_widget_bin_cap(scene):
+    bins_requested = 500
+    keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))
+    report = scene.executor.submit(
+        FrameSubmission(
+            31,
+            (
+                DispatchHistogram(
+                    keys,
+                    bins=bins_requested,
+                    lo=None,
+                    hi=None,
+                    mode="real",
+                ),
+            ),
+        )
+    )
+
+    report.wait_completed()
+    bins, bounds = next(iter(report.histograms.values())).resolve()
+    values = scene.plane[..., 0]
+    assert bounds == pytest.approx((float(values.min()), float(values.max())))
+    cpu = np.bincount(
+        np.clip(
+            (
+                (values - bounds[0])
+                / (bounds[1] - bounds[0])
+                * bins_requested
+            ).astype(np.int32),
+            0,
+            bins_requested - 1,
+        ).ravel(),
+        minlength=bins_requested,
+    )
+    assert bins.shape == (bins_requested,)
+    assert int(bins.sum()) == values.size
+    normalized_l1 = float(
+        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum()
+        / max(1, int(cpu.sum()))
+    )
+    # WGSL performs the bin coordinate in float32; NumPy can place values
+    # exactly on one of the 500 boundaries a bin to either side after its
+    # scalar promotion. Population and bounds remain exact, and the tiny
+    # distribution delta is far below the G6 5% histogram oracle.
+    assert normalized_l1 <= 0.001
+
+
 def test_dynamic_complex_histogram_matches_cpu_over_same_resident_pages(scene):
     keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))
     report = scene.executor.submit(

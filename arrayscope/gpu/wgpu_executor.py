@@ -66,6 +66,7 @@ from arrayscope.gpu.keys import (
 from arrayscope.gpu.page_table import PageSlot, PageTable
 
 PAGE = 256
+MAX_HISTOGRAM_BINS = 512
 
 _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 _SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
@@ -336,7 +337,7 @@ struct HPage {
 @group(0) @binding(5) var<storage, read_write> partials: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read> final_bounds: array<u32>;
 
-var<workgroup> local_bins: array<atomic<u32>, 64>;
+var<workgroup> local_bins: array<atomic<u32>, 512>;
 
 fn ordered_float(value: f32) -> u32 {
     let bits = bitcast<u32>(value);
@@ -487,7 +488,9 @@ fn bounds_merge(@builtin(local_invocation_index) li: u32) {
 
 @compute @workgroup_size(256)
 fn partial(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    if (li < args.bins) { atomicStore(&local_bins[li], 0u); }
+    for (var bin = li; bin < args.bins; bin = bin + 256u) {
+        atomicStore(&local_bins[bin], 0u);
+    }
     workgroupBarrier();
     let page = pages[wg.x];
     var low = args.lo;
@@ -512,8 +515,8 @@ fn partial(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         }
     }
     workgroupBarrier();
-    if (li < args.bins) {
-        atomicStore(&partials[wg.x * args.bins + li], atomicLoad(&local_bins[li]));
+    for (var bin = li; bin < args.bins; bin = bin + 256u) {
+        atomicStore(&partials[wg.x * args.bins + bin], atomicLoad(&local_bins[bin]));
     }
 }
 
@@ -521,14 +524,15 @@ fn partial(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
 @group(0) @binding(1) var<storage, read> merged_in: array<u32>;
 @group(0) @binding(2) var<storage, read_write> final_bins: array<u32>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn merge(@builtin(local_invocation_index) li: u32) {
-    if (li >= margs.bins) { return; }
-    var acc = 0u;
-    for (var p = 0u; p < margs.n_pages; p = p + 1u) {
-        acc = acc + merged_in[p * margs.bins + li];
+    for (var bin = li; bin < margs.bins; bin = bin + 256u) {
+        var acc = 0u;
+        for (var p = 0u; p < margs.n_pages; p = p + 1u) {
+            acc = acc + merged_in[p * margs.bins + bin];
+        }
+        final_bins[bin] = acc;
     }
-    final_bins[li] = acc;
 }
 """
 
@@ -634,7 +638,12 @@ class _DeferredHistogramReadback:
     counts_buffer: object
     bounds_buffer: object
     bins: int
+    timestamp_buffer: object | None = None
+    timestamp_query_set: object | None = None
+    timestamp_period_ns: float | None = None
+    timestamp_indices: tuple[int, ...] = ()
     _resolved: tuple[np.ndarray, tuple[float, float] | None] | None = None
+    _gpu_elapsed_ms: float | None = None
 
     def resolve(self) -> tuple[np.ndarray, tuple[float, float] | None]:
         if self._resolved is None:
@@ -653,7 +662,26 @@ class _DeferredHistogramReadback:
                 )
             )
             self._resolved = (counts[: int(self.bins)], finite_bounds)
+            if self.timestamp_buffer is not None:
+                timestamps = np.frombuffer(
+                    self.device.queue.read_buffer(self.timestamp_buffer), np.uint64
+                ).copy()
+                indices = tuple(int(index) for index in self.timestamp_indices)
+                elapsed_ticks = sum(
+                    max(0, int(timestamps[stop]) - int(timestamps[start]))
+                    for start, stop in zip(indices[::2], indices[1::2])
+                )
+                self._gpu_elapsed_ms = (
+                    float(elapsed_ticks)
+                    * float(self.timestamp_period_ns or 1.0)
+                    / 1_000_000.0
+                )
         return self._resolved
+
+    @property
+    def gpu_elapsed_ms(self) -> float | None:
+        self.resolve()
+        return self._gpu_elapsed_ms
 
 
 class WgpuPlaneExecutor:
@@ -1252,8 +1280,10 @@ class WgpuPlaneExecutor:
         self, cmd: DispatchHistogram
     ) -> tuple[object, tuple[float, float] | None]:
         wgpu, d = self._wgpu, self.device
-        if cmd.bins > 64:
-            raise ValueError("seed executor supports up to 64 bins (workgroup array)")
+        if cmd.bins > MAX_HISTOGRAM_BINS:
+            raise ValueError(
+                f"executor supports up to {MAX_HISTOGRAM_BINS} histogram bins"
+            )
         entries = []
         for key in cmd.keys:
             if key.representation == RGB8:
@@ -1339,6 +1369,21 @@ class WgpuPlaneExecutor:
             ],
         )
         enc = d.create_command_encoder()
+        timestamp_query_set = None
+        timestamp_buffer = None
+        timestamp_period_ns = None
+        timestamp_indices: tuple[int, ...] = ()
+        if "timestamp-query" in d.features:
+            timestamp_query_set = d.create_query_set(type="timestamp", count=4)
+            timestamp_buffer = d.create_buffer(
+                size=32,
+                usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC,
+            )
+            from wgpu.backends.wgpu_native._api import libf
+
+            timestamp_period_ns = float(
+                libf.wgpuQueueGetTimestampPeriod(d.queue._internal)
+            )
         if dynamic_bounds:
             bounds_bind1 = d.create_bind_group(
                 layout=self._bounds_partial_pipe.get_bind_group_layout(0),
@@ -1359,7 +1404,17 @@ class WgpuPlaneExecutor:
                     {"binding": 2, "resource": {"buffer": bounds, "offset": 0, "size": 8}},
                 ],
             )
-            cp = enc.begin_compute_pass()
+            cp = enc.begin_compute_pass(
+                timestamp_writes=(
+                    None
+                    if timestamp_query_set is None
+                    else {
+                        "query_set": timestamp_query_set,
+                        "beginning_of_pass_write_index": 0,
+                        "end_of_pass_write_index": 1,
+                    }
+                )
+            )
             cp.set_pipeline(self._bounds_partial_pipe)
             cp.set_bind_group(0, bounds_bind1)
             cp.dispatch_workgroups(n)
@@ -1367,7 +1422,21 @@ class WgpuPlaneExecutor:
             cp.set_bind_group(0, bounds_bind2)
             cp.dispatch_workgroups(1)
             cp.end()
-        cp = enc.begin_compute_pass()
+            timestamp_indices = (0, 1, 2, 3)
+        elif timestamp_query_set is not None:
+            timestamp_indices = (0, 1)
+        histogram_timestamp_start = 2 if dynamic_bounds else 0
+        cp = enc.begin_compute_pass(
+            timestamp_writes=(
+                None
+                if timestamp_query_set is None
+                else {
+                    "query_set": timestamp_query_set,
+                    "beginning_of_pass_write_index": histogram_timestamp_start,
+                    "end_of_pass_write_index": histogram_timestamp_start + 1,
+                }
+            )
+        )
         cp.set_pipeline(self._partial_pipe)
         cp.set_bind_group(0, bind1)
         cp.dispatch_workgroups(n)
@@ -1375,9 +1444,26 @@ class WgpuPlaneExecutor:
         cp.set_bind_group(0, bind2)
         cp.dispatch_workgroups(1)
         cp.end()
+        if timestamp_query_set is not None:
+            enc.resolve_query_set(
+                timestamp_query_set,
+                0,
+                4 if dynamic_bounds else 2,
+                timestamp_buffer,
+                0,
+            )
         d.queue.submit([enc.finish()])
         if dynamic_bounds:
-            return _DeferredHistogramReadback(d, final, bounds, cmd.bins), None
+            return _DeferredHistogramReadback(
+                d,
+                final,
+                bounds,
+                cmd.bins,
+                timestamp_buffer=timestamp_buffer,
+                timestamp_query_set=timestamp_query_set,
+                timestamp_period_ns=timestamp_period_ns,
+                timestamp_indices=timestamp_indices,
+            ), None
         counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
         return counts, (float(cmd.lo), float(cmd.hi))
 
