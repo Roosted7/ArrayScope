@@ -472,7 +472,19 @@ class LevelStatsService:
 
         if bool(getattr(session, "histogram_aggregate_inflight", False)):
             return True
-        visible_dependency = not bool(getattr(session, "display_committed", False))
+        # A displayed fallback closes the never-black pixel obligation, not
+        # the first-pass evidence obligation.  Until that evidence is
+        # published, its aggregate is coverage work even when the backend has
+        # already committed retained pixels; classifying it as refinement
+        # strands the coverage barrier because refinement is not admitted yet.
+        wgpu_first_pass_dependency = bool(
+            image_view_backend_capabilities(self.win.img_view).name == "wgpu"
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        )
+        visible_dependency = bool(
+            not bool(getattr(session, "display_committed", False))
+            or wgpu_first_pass_dependency
+        )
         work_class = (
             SchedulingWork.COVERAGE
             if visible_dependency

@@ -252,7 +252,19 @@ def test_montage_source_level_cache_reuses_overlapping_selection_and_keeps_refin
     assert cached.bounds == (10.0, 20.0)
 
 
-def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
+@pytest.mark.parametrize(
+    ("scheduling_policy", "first_pass_histogram_published"),
+    (
+        (_refine_scheduling_policy, True),
+        (_coverage_scheduling_policy, False),
+    ),
+    ids=("refinement", "displayed-fallback-coverage"),
+)
+def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation(
+    scheduling_policy,
+    first_pass_histogram_published,
+):
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     from arrayscope.render.level_stats import LevelStatsService
 
@@ -266,6 +278,17 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
             self.submissions.append(kwargs)
             return object()
 
+        def submit(self, spec, *, on_done, on_stale, on_error):
+            self.submissions.append(
+                {
+                    "fn": spec.fn,
+                    "on_done": on_done,
+                    "on_stale": on_stale,
+                    "on_error": on_error,
+                }
+            )
+            return object()
+
         def finish(self):
             submission = self.submissions.pop(0)
             submission["on_done"](submission["fn"]())
@@ -276,7 +299,8 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
         session_id=3,
         level_key=("levels", "aggregate"),
         display_committed=True,
-        scheduling_policy=_refine_scheduling_policy(),
+        scheduling_policy=scheduling_policy(),
+        first_pass_histogram_published=first_pass_histogram_published,
         histogram_aggregate_inflight=False,
         histogram_aggregate_generation=None,
         pending_level_tiles=deque(),
@@ -298,6 +322,7 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation():
     class Window(LevelStatsService):
         def __init__(self):
             self.win = self
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self.kernel = DeferredKernel()
             self._frame_session = session
             self._tracker = MontageLevelTracker()

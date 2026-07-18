@@ -123,18 +123,19 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
     """
 
     settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
-    data = np.zeros((336, 336, 28), dtype=np.float32)
+    slice_values = np.arange(104, dtype=np.float32)
+    data = np.broadcast_to(slice_values, (336, 336, 104))
 
     win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(1200, 900)
     try:
         win.show()
-        initial = tuple(range(0, 20))
+        initial = tuple(range(40, 100))
         state = win.view_state.with_montage_axis(
             2,
-            columns=5,
+            columns=7,
             indices=initial,
-            text="0:20",
+            text="40:100",
         )
         win._set_view_state(state)
         win.update_image_view()
@@ -143,10 +144,10 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
-        for indices in (tuple(range(6, 26)), tuple(range(0, 20))):
+        for indices in (tuple(range(41, 101)), initial):
             state = win.view_state.with_montage_axis(
                 2,
-                columns=5,
+                columns=7,
                 indices=indices,
                 text=f"{indices[0]}:{indices[-1] + 1}",
             )
