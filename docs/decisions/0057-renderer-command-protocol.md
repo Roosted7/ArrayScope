@@ -1,7 +1,11 @@
 # ADR 0057: Backend-neutral renderer command protocol
 
-- **Status:** Accepted; protocol module + first executor (wgpu) landed on
-  `codex/wgpu-renderer-gate-b`; live-flow migration is queue work.
+- **Status:** Accepted and implemented through the live backend
+  (2026-07-18): the wgpu executor commits every ArrayScope payload shape
+  behind the protocol with physical page-table acknowledgements, the LOD
+  ladder and montage sessions run on `BindContentPlanes`, and the first
+  compute consumer (G6a resident-page histograms) is live. Promotion vs
+  VisPy is queue row 3 (evidence-gated).
 - **Date:** 2026-07-18
 - **Branch note:** authored on `codex/wgpu-renderer-gate-b`; renumber on
   integration if a parallel branch claimed 0057.

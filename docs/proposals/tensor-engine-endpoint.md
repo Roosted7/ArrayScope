@@ -224,7 +224,12 @@ survive VisPy's disappearance?
    the virtual page table with pinned coarse fallback.
 3. **Then:** renderer-protocol vertical slices (VisPy / Datoviz / wgpu or
    Vulkan), chosen by benchmark on integrated + discrete + low-power +
-   workstation hardware.
+   workstation hardware. **DONE 2026-07-18 for the first hardware class:**
+   the protocol (ADR 0057) is implemented by a live wgpu backend covering
+   every payload shape with a real-Wayland journey record; the promotion
+   decision ladder is queue row 3 (perf bars → AUTO flip at field parity →
+   VisPy demotion review at G7 start → removal one release later;
+   PyQtGraph keeps the headless role permanently).
 4. **Endpoint:** native deadline-aware data plane; software-defined sparse
    virtual tensor; optional hardware-sparse allocator; adaptive compression;
    CPU/GPU cost-based planner with learned statistics; shared multi-window
