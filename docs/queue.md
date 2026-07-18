@@ -71,8 +71,8 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   the GPU-overlay layer design that screen mode requires.
 - **Renderer measurements not yet taken:** NVIDIA/discrete adapter cells for
   Tier 1/4 (PRIME copy changes upload and present arithmetic), real 4K
-  swapchain, `winId == wl_surface*` verification per Qt minor (pin in a
-  test that fails loudly on a Qt upgrade).
+  swapchain. (The `winId == wl_surface*` per-Qt-minor pin is DONE:
+  `tests/gpu_interaction/test_wgpu_native_wayland_pin.py`, ring 4.)
 
 ## Done (most recent first — one line each, evidence linked)
 
