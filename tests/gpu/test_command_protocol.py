@@ -46,6 +46,17 @@ def test_histogram_command_rejects_nonpositive_bins():
         DispatchHistogram(keys=(), bins=0)
 
 
+def test_histogram_command_dynamic_bounds_and_mapping_are_validated():
+    command = DispatchHistogram(
+        keys=(), lo=None, hi=None, mode="real", scale="symlog", symlog_constant=2.0
+    )
+    assert command.lo is None and command.hi is None
+    with pytest.raises(ValueError, match="both be set or both be omitted"):
+        DispatchHistogram(keys=(), lo=None, hi=1.0)
+    with pytest.raises(ValueError, match="mapping mode"):
+        DispatchHistogram(keys=(), mode="power")
+
+
 def test_content_plane_validates_shape_and_representation():
     plane = ContentPlane("doc", "op", (10.0, 20.0), max_lod=-1, representation="rgb8")
     assert plane.plane_shape == (10, 20)

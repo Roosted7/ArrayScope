@@ -24,7 +24,15 @@ from arrayscope.gpu.command_protocol import (  # noqa: E402
     TileInstance,
     UpdateTileInstances,
 )
-from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F  # noqa: E402
+from arrayscope.gpu.chunk_summary import (  # noqa: E402
+    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
+)
+from arrayscope.gpu.keys import (  # noqa: E402
+    COMPLEX_RG32F,
+    RGB8,
+    RGB_WINDOWED_RGBA32F,
+    SCALAR_R32F,
+)
 from arrayscope.gpu.wgpu_executor import (  # noqa: E402
     PAGE,
     WgpuPlaneExecutor,
@@ -594,6 +602,162 @@ def test_histogram_over_scalar_pool_pages(multi_scene):
     )
     assert int(bins.sum()) == SP_H * SP_W
     assert (bins.astype(np.int64) == cpu.astype(np.int64)).all()
+
+
+def test_dynamic_histogram_discovers_mapped_bounds_and_fences_readback(scene):
+    keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))
+    report = scene.executor.submit(
+        FrameSubmission(
+            31,
+            (
+                DispatchHistogram(
+                    keys,
+                    bins=64,
+                    lo=None,
+                    hi=None,
+                    mode="real",
+                ),
+            ),
+        )
+    )
+
+    report.wait_completed()
+    readback = next(iter(report.histograms.values()))
+    bins, bounds = readback.resolve()
+    values = scene.plane[..., 0]
+    assert bounds == pytest.approx((float(values.min()), float(values.max())))
+    cpu = np.bincount(
+        np.clip(
+            ((values - bounds[0]) / (bounds[1] - bounds[0]) * 64).astype(np.int32),
+            0,
+            63,
+        ).ravel(),
+        minlength=64,
+    )
+    assert int(bins.sum()) == values.size
+    assert np.array_equal(bins.astype(np.int64), cpu.astype(np.int64))
+
+
+def test_dynamic_complex_histogram_matches_cpu_over_same_resident_pages(scene):
+    keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))
+    report = scene.executor.submit(
+        FrameSubmission(
+            31,
+            (
+                DispatchHistogram(
+                    keys,
+                    bins=64,
+                    lo=None,
+                    hi=None,
+                    mode="magnitude",
+                ),
+            ),
+        )
+    )
+
+    report.wait_completed()
+    bins, bounds = next(iter(report.histograms.values())).resolve()
+    values = np.sqrt(
+        scene.plane[..., 0] ** 2 + scene.plane[..., 1] ** 2,
+        dtype=np.float32,
+    )
+    assert bounds == pytest.approx((float(values.min()), float(values.max())))
+    cpu = np.bincount(
+        np.clip(
+            ((values - bounds[0]) / (bounds[1] - bounds[0]) * 64).astype(np.int32),
+            0,
+            63,
+        ).ravel(),
+        minlength=64,
+    )
+    assert int(bins.sum()) == values.size
+    normalized_l1 = float(
+        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum()
+        / max(1, int(cpu.sum()))
+    )
+    assert normalized_l1 <= HISTOGRAM_NORMALIZED_L1_TOLERANCE
+
+
+def test_dynamic_histogram_excludes_padding_and_weights_source_coverage():
+    shape = (17, 23)
+    values = np.linspace(-3.0, 7.0, shape[0] * shape[1], dtype=np.float32).reshape(shape)
+    page = np.zeros((PAGE, PAGE), dtype=np.float32)
+    page[: shape[0], : shape[1]] = values
+    executor = WgpuPlaneExecutor(
+        pool_layers={SCALAR_R32F: 2}, device=_shared_device()
+    )
+    key = plane_chunk_key(
+        "boundary-doc",
+        "op-live",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=shape,
+    )
+    report = executor.submit(
+        FrameSubmission(
+            32,
+            (
+                BindContentPlanes(
+                    (ContentPlane("boundary-doc", "op-live", shape, representation=SCALAR_R32F),)
+                ),
+                EnsureChunkResident(key, page),
+                DispatchHistogram((key,), bins=64, lo=None, hi=None, mode="real"),
+            ),
+        )
+    )
+
+    report.wait_completed()
+    readback = next(iter(report.histograms.values()))
+    bins, bounds = readback.resolve()
+    assert bounds == pytest.approx((float(values.min()), float(values.max())))
+    assert int(bins.sum()) == values.size
+
+
+def test_dynamic_histogram_uses_windowable_rgb_scalar_signal():
+    values = np.linspace(1.0, 9.0, PAGE * PAGE, dtype=np.float32).reshape(PAGE, PAGE)
+    page = np.zeros((PAGE, PAGE, 4), dtype=np.float32)
+    page[..., :3] = 0.5
+    page[..., 3] = values
+    executor = WgpuPlaneExecutor(
+        pool_layers={RGB_WINDOWED_RGBA32F: 2}, device=_shared_device()
+    )
+    key = plane_chunk_key(
+        "windowed-rgb-doc",
+        "op-live",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=RGB_WINDOWED_RGBA32F,
+        plane_shape=values.shape,
+    )
+    report = executor.submit(
+        FrameSubmission(
+            33,
+            (
+                BindContentPlanes(
+                    (
+                        ContentPlane(
+                            "windowed-rgb-doc",
+                            "op-live",
+                            values.shape,
+                            representation=RGB_WINDOWED_RGBA32F,
+                        ),
+                    )
+                ),
+                EnsureChunkResident(key, page),
+                DispatchHistogram((key,), bins=64, lo=None, hi=None, mode="real"),
+            ),
+        )
+    )
+
+    report.wait_completed()
+    bins, bounds = next(iter(report.histograms.values())).resolve()
+    assert bounds == pytest.approx((1.0, 9.0))
+    assert int(bins.sum()) == values.size
 
 
 def test_tile_plane_index_outside_bound_planes_is_loud(multi_scene):

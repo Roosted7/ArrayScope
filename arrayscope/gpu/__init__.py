@@ -18,7 +18,9 @@ from arrayscope.gpu.chunk_summary import (
     ChunkHistogramSummary,
     HISTOGRAM_NORMALIZED_L1_TOLERANCE,
     aggregate_chunk_summaries,
+    chunk_key_frontier,
     chunk_summary_frontier,
+    representative_sample_from_histogram,
     summarize_chunk,
 )
 from arrayscope.gpu.chunk_grid import ChunkGrid, WindowDelta
@@ -50,6 +52,8 @@ __all__ = [
     "ViewTileKey",
     "WindowDelta",
     "aggregate_chunk_summaries",
+    "chunk_key_frontier",
     "chunk_summary_frontier",
+    "representative_sample_from_histogram",
     "summarize_chunk",
 ]

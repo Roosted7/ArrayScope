@@ -222,18 +222,37 @@ class SetDisplayMapping:
 
 @dataclass(frozen=True)
 class DispatchHistogram:
-    """Magnitude histogram over the given resident chunks (G6 evidence)."""
+    """Mapped-scalar histogram over the given resident chunks (G6 evidence).
+
+    ``lo``/``hi`` may both be omitted to ask the executor to derive exact
+    finite bounds on the GPU before binning. Scalar pages and the scalar
+    level signal packed with windowable RGB ignore ``mode``; complex pages
+    use the same component and scale vocabulary as :class:`DisplayMapping`.
+    """
 
     keys: tuple[DataChunkKey, ...]
     bins: int = 64
-    lo: float = 0.0
-    hi: float = 1.0
+    lo: float | None = 0.0
+    hi: float | None = 1.0
+    mode: str = "magnitude"
+    scale: str = "linear"
+    symlog_constant: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "keys", tuple(self.keys))
         object.__setattr__(self, "bins", int(self.bins))
-        object.__setattr__(self, "lo", float(self.lo))
-        object.__setattr__(self, "hi", float(self.hi))
+        if (self.lo is None) != (self.hi is None):
+            raise ValueError("histogram lo/hi must both be set or both be omitted")
+        if self.lo is not None:
+            object.__setattr__(self, "lo", float(self.lo))
+            object.__setattr__(self, "hi", float(self.hi))
+            if not self.hi > self.lo:
+                raise ValueError("histogram range must be non-empty")
+        if self.mode not in MAPPING_MODES:
+            raise ValueError(f"unknown histogram mapping mode {self.mode!r}")
+        if self.scale not in MAPPING_SCALES:
+            raise ValueError(f"unknown histogram mapping scale {self.scale!r}")
+        object.__setattr__(self, "symlog_constant", float(self.symlog_constant))
         if self.bins <= 0:
             raise ValueError("histogram bins must be positive")
 
@@ -287,6 +306,7 @@ class FrameReport:
     uploads: int = 0
     evictions: int = 0
     histograms: dict[int, object] = field(default_factory=dict)
+    histogram_bounds: dict[int, tuple[float, float] | None] = field(default_factory=dict)
     wait_completed: object = None  # callable () -> None
 
 

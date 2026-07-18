@@ -94,6 +94,17 @@ _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
 
 
+def _ordered_float32(value: float) -> int:
+    bits = int(np.asarray(np.float32(value)).view(np.uint32))
+    return int((~bits) & 0xFFFFFFFF) if bits & 0x80000000 else int(bits ^ 0x80000000)
+
+
+def _float32_from_ordered(value: int) -> float:
+    value = int(value) & 0xFFFFFFFF
+    bits = ((~value) & 0xFFFFFFFF) if value < 0x80000000 else (value ^ 0x80000000)
+    return float(np.asarray(np.uint32(bits)).view(np.float32))
+
+
 def plane_chunk_key(
     document_generation: object,
     operation_key: object,
@@ -103,11 +114,13 @@ def plane_chunk_key(
     *,
     dtype: str = "complex64",
     representation: str = COMPLEX_RG32F,
+    plane_shape: tuple[int, int] | None = None,
 ) -> DataChunkKey:
     """Canonical key for one 256² page of a 2-D plane pyramid.
 
-    ``chunk_origin`` is expressed in the LOD's own sample space (uniform
-    plane-pixel pages across LODs, ADR 0056 §3).
+    Key geometry is canonical native-source space (ADR 0056).  The physical
+    page remains 256² stored samples; ``lod.reduction`` tells the executor how
+    to map this source footprint onto that page.
     """
 
     if lod_level == 0:
@@ -119,12 +132,26 @@ def plane_chunk_key(
             reduction=(lod_level, lod_level),
             reducer=REDUCER_MEAN,
         )
+    factor = 1 << int(lod_level)
+    origin = (chunk_y * PAGE * factor, chunk_x * PAGE * factor)
+    shape = (PAGE * factor, PAGE * factor)
+    if plane_shape is not None:
+        plane_h, plane_w = (int(value) for value in plane_shape)
+        shape = (
+            min(shape[0], max(0, plane_h - origin[0])),
+            min(shape[1], max(0, plane_w - origin[1])),
+        )
+        if any(value <= 0 for value in shape):
+            raise ValueError(
+                f"chunk ({chunk_y}, {chunk_x}) at LOD {lod_level} lies outside "
+                f"plane shape {plane_shape}"
+            )
     return DataChunkKey(
         document_generation=document_generation,
         operation_key=operation_key,
         lod=lod,
-        chunk_origin=(chunk_y * PAGE, chunk_x * PAGE),
-        chunk_shape=(PAGE, PAGE),
+        chunk_origin=origin,
+        chunk_shape=shape,
         dtype=dtype,
         representation=representation,
     )
@@ -278,34 +305,208 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 """
 
 _HISTO_WGSL = """
-struct HArgs { lo: f32, hi: f32, n_pages: u32, bins: u32 };
+struct HArgs {
+    lo: f32,
+    hi: f32,
+    n_pages: u32,
+    bins: u32,
+    mode: u32,
+    scale: u32,
+    symlog_constant: f32,
+    dynamic_bounds: u32,
+};
+struct HPage {
+    layer: i32,
+    rep: i32,
+    source_h: u32,
+    source_w: u32,
+    factor: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
 @group(0) @binding(0) var<uniform> args: HArgs;
-// One entry per page: x = pool layer, y = representation flag (0 scalar, 1 complex).
-@group(0) @binding(1) var<storage, read> layers: array<vec2<i32>>;
+@group(0) @binding(1) var<storage, read> pages: array<HPage>;
 @group(0) @binding(2) var scalar_pool: texture_2d_array<f32>;
 @group(0) @binding(3) var complex_pool: texture_2d_array<f32>;
-@group(0) @binding(4) var<storage, read_write> partials: array<atomic<u32>>;
+@group(0) @binding(4) var rgb_windowed_pool: texture_2d_array<f32>;
+@group(0) @binding(5) var<storage, read_write> partials: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read> final_bounds: array<u32>;
 
 var<workgroup> local_bins: array<atomic<u32>, 64>;
+
+fn ordered_float(value: f32) -> u32 {
+    let bits = bitcast<u32>(value);
+    return select(bits ^ 0x80000000u, ~bits, (bits & 0x80000000u) != 0u);
+}
+
+fn float_from_ordered(value: u32) -> f32 {
+    let bits = select(value ^ 0x80000000u, ~value, value < 0x80000000u);
+    return bitcast<f32>(bits);
+}
+
+fn finite_value(value: f32) -> bool {
+    return value == value && abs(value) <= 3.402823466e+38;
+}
+
+fn mapped_value(page: HPage, coord: vec2<i32>) -> f32 {
+    var value: f32;
+    if (page.rep == 0) {
+        value = textureLoad(scalar_pool, coord, page.layer, 0).r;
+    } else if (page.rep == 1) {
+        let pair = textureLoad(complex_pool, coord, page.layer, 0).rg;
+        switch args.mode {
+            case 0u: { value = length(pair); }
+            case 1u: { value = atan2(pair.y, pair.x); }
+            case 2u: { value = pair.x; }
+            default: { value = pair.y; }
+        }
+    } else {
+        value = textureLoad(rgb_windowed_pool, coord, page.layer, 0).a;
+    }
+    switch args.scale {
+        case 0u: { return value; }
+        case 1u: { return log(max(value, 0.0)) / log(10.0); }
+        default: {
+            return sign(value) * log(
+                1.0 + abs(value) / pow(10.0, args.symlog_constant)
+            ) / log(10.0);
+        }
+    }
+}
+
+fn stored_h(page: HPage) -> u32 {
+    return (page.source_h + page.factor - 1u) / page.factor;
+}
+
+fn stored_w(page: HPage) -> u32 {
+    return (page.source_w + page.factor - 1u) / page.factor;
+}
+
+fn source_weight(page: HPage, y: u32, x: u32) -> u32 {
+    let y0 = y * page.factor;
+    let x0 = x * page.factor;
+    return min(page.factor, page.source_h - y0) * min(page.factor, page.source_w - x0);
+}
+
+@group(0) @binding(0) var<uniform> bargs: HArgs;
+@group(0) @binding(1) var<storage, read> bpages: array<HPage>;
+@group(0) @binding(2) var bscalar_pool: texture_2d_array<f32>;
+@group(0) @binding(3) var bcomplex_pool: texture_2d_array<f32>;
+@group(0) @binding(4) var brgb_windowed_pool: texture_2d_array<f32>;
+@group(0) @binding(5) var<storage, read_write> page_bounds: array<u32>;
+
+var<workgroup> local_low: atomic<u32>;
+var<workgroup> local_high: atomic<u32>;
+
+fn bounds_mapped_value(page: HPage, coord: vec2<i32>) -> f32 {
+    var value: f32;
+    if (page.rep == 0) {
+        value = textureLoad(bscalar_pool, coord, page.layer, 0).r;
+    } else if (page.rep == 1) {
+        let pair = textureLoad(bcomplex_pool, coord, page.layer, 0).rg;
+        switch bargs.mode {
+            case 0u: { value = length(pair); }
+            case 1u: { value = atan2(pair.y, pair.x); }
+            case 2u: { value = pair.x; }
+            default: { value = pair.y; }
+        }
+    } else {
+        value = textureLoad(brgb_windowed_pool, coord, page.layer, 0).a;
+    }
+    switch bargs.scale {
+        case 0u: { return value; }
+        case 1u: { return log(max(value, 0.0)) / log(10.0); }
+        default: {
+            return sign(value) * log(
+                1.0 + abs(value) / pow(10.0, bargs.symlog_constant)
+            ) / log(10.0);
+        }
+    }
+}
+
+@compute @workgroup_size(256)
+fn bounds_partial(
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+) {
+    if (li == 0u) {
+        atomicStore(&local_low, 0xffffffffu);
+        atomicStore(&local_high, 0u);
+    }
+    workgroupBarrier();
+    let page = bpages[wg.x];
+    if (li < stored_h(page)) {
+        for (var x = 0u; x < stored_w(page); x = x + 1u) {
+            let value = bounds_mapped_value(page, vec2<i32>(i32(x), i32(li)));
+            if (finite_value(value)) {
+                let ordered = ordered_float(value);
+                atomicMin(&local_low, ordered);
+                atomicMax(&local_high, ordered);
+            }
+        }
+    }
+    workgroupBarrier();
+    if (li == 0u) {
+        page_bounds[wg.x * 2u] = atomicLoad(&local_low);
+        page_bounds[wg.x * 2u + 1u] = atomicLoad(&local_high);
+    }
+}
+
+@group(0) @binding(0) var<uniform> bmargs: HArgs;
+@group(0) @binding(1) var<storage, read> merged_bounds_in: array<u32>;
+@group(0) @binding(2) var<storage, read_write> merged_bounds_out: array<u32>;
+
+var<workgroup> merged_low: atomic<u32>;
+var<workgroup> merged_high: atomic<u32>;
+
+@compute @workgroup_size(256)
+fn bounds_merge(@builtin(local_invocation_index) li: u32) {
+    if (li == 0u) {
+        atomicStore(&merged_low, 0xffffffffu);
+        atomicStore(&merged_high, 0u);
+    }
+    workgroupBarrier();
+    for (var page = li; page < bmargs.n_pages; page = page + 256u) {
+        let low = merged_bounds_in[page * 2u];
+        let high = merged_bounds_in[page * 2u + 1u];
+        if (low != 0xffffffffu) {
+            atomicMin(&merged_low, low);
+            atomicMax(&merged_high, high);
+        }
+    }
+    workgroupBarrier();
+    if (li == 0u) {
+        merged_bounds_out[0] = atomicLoad(&merged_low);
+        merged_bounds_out[1] = atomicLoad(&merged_high);
+    }
+}
 
 @compute @workgroup_size(256)
 fn partial(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     if (li < args.bins) { atomicStore(&local_bins[li], 0u); }
     workgroupBarrier();
-    let ent = layers[wg.x];
-    let y = i32(li);
-    for (var x = 0; x < 256; x = x + 1) {
-        var mag: f32;
-        if (ent.y == 0) {
-            // Scalar page: magnitude == value.
-            mag = textureLoad(scalar_pool, vec2<i32>(x, y), ent.x, 0).r;
-        } else {
-            let v = textureLoad(complex_pool, vec2<i32>(x, y), ent.x, 0).rg;
-            mag = length(v);
+    let page = pages[wg.x];
+    var low = args.lo;
+    var high = args.hi;
+    if (args.dynamic_bounds != 0u) {
+        low = float_from_ordered(final_bounds[0]);
+        high = float_from_ordered(final_bounds[1]);
+    }
+    if (high <= low) {
+        let radius = max(abs(low) * 0.03, 0.5);
+        low = low - radius;
+        high = high + radius;
+    }
+    if (li < stored_h(page) && final_bounds[0] != 0xffffffffu) {
+        for (var x = 0u; x < stored_w(page); x = x + 1u) {
+            let value = mapped_value(page, vec2<i32>(i32(x), i32(li)));
+            if (finite_value(value)) {
+                let t = (value - low) / (high - low);
+                let bin = clamp(i32(t * f32(args.bins)), 0, i32(args.bins) - 1);
+                atomicAdd(&local_bins[bin], source_weight(page, li, x));
+            }
         }
-        let t = (mag - args.lo) / (args.hi - args.lo);
-        let b = clamp(i32(t * f32(args.bins)), 0, i32(args.bins) - 1);
-        atomicAdd(&local_bins[b], 1u);
     }
     workgroupBarrier();
     if (li < args.bins) {
@@ -343,6 +544,36 @@ class _Pool:
     view: object
     free_layers: list[int] = field(default_factory=list)
     layer_count: int = 0
+
+
+@dataclass
+class _DeferredHistogramReadback:
+    """Small readback resolved only after the report completion token fences."""
+
+    device: object
+    counts_buffer: object
+    bounds_buffer: object
+    bins: int
+    _resolved: tuple[np.ndarray, tuple[float, float] | None] | None = None
+
+    def resolve(self) -> tuple[np.ndarray, tuple[float, float] | None]:
+        if self._resolved is None:
+            counts = np.frombuffer(
+                self.device.queue.read_buffer(self.counts_buffer), np.uint32
+            ).copy()
+            raw_bounds = np.frombuffer(
+                self.device.queue.read_buffer(self.bounds_buffer), np.uint32
+            ).copy()
+            finite_bounds = (
+                None
+                if int(raw_bounds[0]) == 0xFFFFFFFF
+                else (
+                    _float32_from_ordered(int(raw_bounds[0])),
+                    _float32_from_ordered(int(raw_bounds[1])),
+                )
+            )
+            self._resolved = (counts[: int(self.bins)], finite_bounds)
+        return self._resolved
 
 
 class WgpuPlaneExecutor:
@@ -477,6 +708,14 @@ class WgpuPlaneExecutor:
         self._merge_pipe = d.create_compute_pipeline(
             layout="auto", compute={"module": self._histo_mod, "entry_point": "merge"}
         )
+        self._bounds_partial_pipe = d.create_compute_pipeline(
+            layout="auto",
+            compute={"module": self._histo_mod, "entry_point": "bounds_partial"},
+        )
+        self._bounds_merge_pipe = d.create_compute_pipeline(
+            layout="auto",
+            compute={"module": self._histo_mod, "entry_point": "bounds_merge"},
+        )
 
     # ---- internals ----------------------------------------------------------
 
@@ -609,7 +848,7 @@ class WgpuPlaneExecutor:
     def _flat_indices(self, key: DataChunkKey) -> tuple[int, ...]:
         """Flat-table entries for ``key`` across every bound plane it feeds."""
 
-        if key.rank != 2 or key.chunk_shape != (PAGE, PAGE):
+        if key.rank != 2:
             return ()
         out = []
         for plane, grids in zip(self._bound_planes, self._plane_grids):
@@ -624,7 +863,8 @@ class WgpuPlaneExecutor:
                 continue
             grid = grids[lod]
             oy, ox = key.chunk_origin
-            cx, cy = ox // PAGE, oy // PAGE
+            source_page = PAGE << int(lod)
+            cx, cy = ox // source_page, oy // source_page
             if not (0 <= cx < grid.grid_w and 0 <= cy < grid.grid_h):
                 continue
             out.append(grid.base + cy * grid.grid_w + cx)
@@ -757,49 +997,125 @@ class WgpuPlaneExecutor:
             self.device.queue.write_buffer(self._table_buf, 0, self._flat_table.tobytes())
             self._table_dirty = False
 
-    def _histogram(self, cmd: DispatchHistogram) -> np.ndarray:
+    def _histogram(
+        self, cmd: DispatchHistogram
+    ) -> tuple[object, tuple[float, float] | None]:
         wgpu, d = self._wgpu, self.device
         if cmd.bins > 64:
             raise ValueError("seed executor supports up to 64 bins (workgroup array)")
         entries = []
         for key in cmd.keys:
-            if key.representation in (RGB8, RGB_WINDOWED_RGBA32F):
+            if key.representation == RGB8:
                 raise ValueError(f"histogram over RGB presentation chunk {key}")
             slot = self.page_table.lookup(key)
             if slot is None:
                 raise KeyError(f"histogram over non-resident chunk {key}")
-            entries.append((slot.page_index, _REP_INDEX[key.representation]))
+            factor = 1 << int(key.lod.level)
+            entries.append(
+                (
+                    slot.page_index,
+                    _REP_INDEX[key.representation],
+                    int(key.chunk_shape[0]),
+                    int(key.chunk_shape[1]),
+                    factor,
+                    0,
+                    0,
+                    0,
+                )
+            )
         n = len(entries)
+        if n == 0:
+            return np.zeros(cmd.bins, dtype=np.uint32), None
+        dynamic_bounds = cmd.lo is None
+        lo = 0.0 if dynamic_bounds else float(cmd.lo)
+        hi = 1.0 if dynamic_bounds else float(cmd.hi)
         uargs = d.create_buffer_with_data(
-            data=struct.pack("2f2I", cmd.lo, cmd.hi, n, cmd.bins),
+            data=struct.pack(
+                "2f4IfI",
+                lo,
+                hi,
+                n,
+                cmd.bins,
+                _MODE_INDEX[cmd.mode],
+                _SCALE_INDEX[cmd.scale],
+                float(cmd.symlog_constant),
+                int(dynamic_bounds),
+            ),
             usage=wgpu.BufferUsage.UNIFORM,
         )
-        layers_buf = d.create_buffer_with_data(
-            data=np.asarray(entries, np.int32).tobytes(), usage=wgpu.BufferUsage.STORAGE
+        pages_buf = d.create_buffer_with_data(
+            data=np.asarray(entries, np.int32).tobytes(),
+            usage=wgpu.BufferUsage.STORAGE,
         )
         partials = d.create_buffer(size=4 * cmd.bins * n, usage=wgpu.BufferUsage.STORAGE)
         final = d.create_buffer(
             size=4 * cmd.bins, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
         )
+        page_bounds = d.create_buffer(
+            size=8 * n,
+            usage=wgpu.BufferUsage.STORAGE,
+        )
+        initial_bounds = (
+            np.asarray((0xFFFFFFFF, 0), dtype=np.uint32)
+            if dynamic_bounds
+            else np.asarray(
+                (_ordered_float32(float(cmd.lo)), _ordered_float32(float(cmd.hi))),
+                dtype=np.uint32,
+            )
+        )
+        bounds = d.create_buffer_with_data(
+            data=initial_bounds.tobytes(),
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+        )
         bind1 = d.create_bind_group(
             layout=self._partial_pipe.get_bind_group_layout(0),
             entries=[
-                {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 16}},
-                {"binding": 1, "resource": {"buffer": layers_buf, "offset": 0, "size": 8 * n}},
+                {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
+                {"binding": 1, "resource": {"buffer": pages_buf, "offset": 0, "size": 32 * n}},
                 {"binding": 2, "resource": self._pools[SCALAR_R32F].view},
                 {"binding": 3, "resource": self._pools[COMPLEX_RG32F].view},
-                {"binding": 4, "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n}},
+                {"binding": 4, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
+                {"binding": 5, "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n}},
+                {"binding": 6, "resource": {"buffer": bounds, "offset": 0, "size": 8}},
             ],
         )
         bind2 = d.create_bind_group(
             layout=self._merge_pipe.get_bind_group_layout(0),
             entries=[
-                {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 16}},
+                {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
                 {"binding": 1, "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n}},
                 {"binding": 2, "resource": {"buffer": final, "offset": 0, "size": 4 * cmd.bins}},
             ],
         )
         enc = d.create_command_encoder()
+        if dynamic_bounds:
+            bounds_bind1 = d.create_bind_group(
+                layout=self._bounds_partial_pipe.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
+                    {"binding": 1, "resource": {"buffer": pages_buf, "offset": 0, "size": 32 * n}},
+                    {"binding": 2, "resource": self._pools[SCALAR_R32F].view},
+                    {"binding": 3, "resource": self._pools[COMPLEX_RG32F].view},
+                    {"binding": 4, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
+                    {"binding": 5, "resource": {"buffer": page_bounds, "offset": 0, "size": 8 * n}},
+                ],
+            )
+            bounds_bind2 = d.create_bind_group(
+                layout=self._bounds_merge_pipe.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
+                    {"binding": 1, "resource": {"buffer": page_bounds, "offset": 0, "size": 8 * n}},
+                    {"binding": 2, "resource": {"buffer": bounds, "offset": 0, "size": 8}},
+                ],
+            )
+            cp = enc.begin_compute_pass()
+            cp.set_pipeline(self._bounds_partial_pipe)
+            cp.set_bind_group(0, bounds_bind1)
+            cp.dispatch_workgroups(n)
+            cp.set_pipeline(self._bounds_merge_pipe)
+            cp.set_bind_group(0, bounds_bind2)
+            cp.dispatch_workgroups(1)
+            cp.end()
         cp = enc.begin_compute_pass()
         cp.set_pipeline(self._partial_pipe)
         cp.set_bind_group(0, bind1)
@@ -809,7 +1125,10 @@ class WgpuPlaneExecutor:
         cp.dispatch_workgroups(1)
         cp.end()
         d.queue.submit([enc.finish()])
-        return np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
+        if dynamic_bounds:
+            return _DeferredHistogramReadback(d, final, bounds, cmd.bins), None
+        counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
+        return counts, (float(cmd.lo), float(cmd.hi))
 
     def _present(self, target_view, fmt: str) -> None:
         self._flush_table()
@@ -858,7 +1177,9 @@ class WgpuPlaneExecutor:
                 self._write_mapping()
                 self._write_lut(cmd.mapping.lut)
             elif isinstance(cmd, DispatchHistogram):
-                report.histograms[index] = self._histogram(cmd)
+                counts, bounds = self._histogram(cmd)
+                report.histograms[index] = counts
+                report.histogram_bounds[index] = bounds
             elif isinstance(cmd, PresentGeneration):
                 view = present_to if present_to is not None else self._target.create_view()
                 self._present(view, present_format if present_to is not None else "rgba8unorm")

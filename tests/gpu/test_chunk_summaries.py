@@ -8,6 +8,7 @@ from arrayscope.gpu import (
     DataChunkKey,
     HISTOGRAM_NORMALIZED_L1_TOLERANCE,
     aggregate_chunk_summaries,
+    chunk_key_frontier,
     chunk_summary_frontier,
     summarize_chunk,
 )
@@ -81,6 +82,23 @@ def test_frontier_keeps_parent_until_children_cover_it_then_replaces_atomically(
     aggregate = aggregate_chunk_summaries(complete)
     assert aggregate.source_weight == 16.0
     assert aggregate.bounds == (1.0, 4.0)
+
+
+def test_key_frontier_allows_native_root_of_one_reducer_family():
+    parent = _key(origin=(0, 0), shape=(4, 4), reduction=(2, 2))
+    native_children = tuple(
+        DataChunkKey(
+            document_generation=parent.document_generation,
+            operation_key=parent.operation_key,
+            lod=ChunkLod(),
+            chunk_origin=origin,
+            chunk_shape=(2, 2),
+            dtype=parent.dtype,
+        )
+        for origin in ((0, 0), (0, 2), (2, 0), (2, 2))
+    )
+
+    assert set(chunk_key_frontier((parent, *native_children))) == set(native_children)
 
 
 def test_aggregate_histogram_is_bounded_and_preserves_population_weight():

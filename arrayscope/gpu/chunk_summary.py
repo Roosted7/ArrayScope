@@ -157,42 +157,63 @@ def chunk_summary_frontier(summaries) -> tuple[ChunkHistogramSummary, ...]:
             raise ValueError("G6 coverage frontiers currently require 2D chunk keys")
         unique[summary.key] = summary
     rows = tuple(unique.values())
-    if not rows:
+    selected_keys = set(chunk_key_frontier(tuple(row.key for row in rows)))
+    return tuple(
+        sorted(
+            (row for row in rows if row.key in selected_keys),
+            key=lambda item: (item.key.chunk_origin, item.key.lod.reduction),
+        )
+    )
+
+
+def chunk_key_frontier(keys) -> tuple[DataChunkKey, ...]:
+    """Return the ADR 0056 non-overlapping frontier for chunk identities.
+
+    Native pages are the root of one derived reducer family, so they may mix
+    with that family's reduced pages.  Multiple non-native reducers remain
+    incompatible semantic evidence and are rejected loudly.
+    """
+
+    unique = tuple(dict.fromkeys(tuple(keys or ())))
+    for key in unique:
+        if not isinstance(key, DataChunkKey):
+            raise TypeError("coverage frontiers require DataChunkKey values")
+        if key.rank != 2:
+            raise ValueError("G6 coverage frontiers currently require 2D chunk keys")
+    if not unique:
         return ()
-    if len({_summary_family(row.key) for row in rows}) != 1:
+    base_families = {_summary_base_family(key) for key in unique}
+    reducers = {key.lod.reducer for key in unique if not key.lod.is_native}
+    if len(base_families) != 1 or len(reducers) > 1:
         raise ValueError("one chunk-summary frontier cannot mix value families")
-    ordered = sorted(rows, key=_coarse_first_key)
-    selected: list[ChunkHistogramSummary] = []
+    ordered = sorted(unique, key=_coarse_first_key_for_key)
+    selected: list[DataChunkKey] = []
     excluded: set[DataChunkKey] = set()
     for candidate in ordered:
-        if candidate.key in excluded:
+        if candidate in excluded:
             continue
         finer = tuple(
             other
-            for other in rows
-            if other.key != candidate.key
-            and other.key not in excluded
-            and _strictly_finer(other.key, candidate.key)
-            and _rect_contains(_key_rect(candidate.key), _key_rect(other.key))
+            for other in unique
+            if other != candidate
+            and other not in excluded
+            and _strictly_finer(other, candidate)
+            and _rect_contains(_key_rect(candidate), _key_rect(other))
         )
         if finer and _rect_fully_covered(
-            _key_rect(candidate.key), tuple(_key_rect(item.key) for item in finer)
+            _key_rect(candidate), tuple(_key_rect(item) for item in finer)
         ):
             continue
         selected.append(candidate)
-        candidate_rect = _key_rect(candidate.key)
+        candidate_rect = _key_rect(candidate)
         excluded.update(
-            other.key
-            for other in rows
-            if other.key != candidate.key
-            and _strictly_finer(other.key, candidate.key)
-            and _rects_overlap(candidate_rect, _key_rect(other.key))
+            other
+            for other in unique
+            if other != candidate
+            and _strictly_finer(other, candidate)
+            and _rects_overlap(candidate_rect, _key_rect(other))
         )
-    return tuple(
-        sorted(
-            selected, key=lambda item: (item.key.chunk_origin, item.key.lod.reduction)
-        )
-    )
+    return tuple(sorted(selected, key=lambda key: (key.chunk_origin, key.lod.reduction)))
 
 
 def aggregate_chunk_summaries(
@@ -240,6 +261,23 @@ def aggregate_chunk_summaries(
     )
 
 
+def representative_sample_from_histogram(
+    counts,
+    bounds: tuple[float, float],
+    *,
+    sample_limit: int = DEFAULT_REPRESENTATIVE_SAMPLE_LIMIT,
+) -> np.ndarray:
+    """Turn GPU/readback bins into the bounded sample used by level tracking."""
+
+    counts = np.asarray(counts, dtype=np.float64).reshape(-1)
+    if counts.size == 0:
+        return np.asarray((), dtype=np.float32)
+    low, high = (float(bounds[0]), float(bounds[1]))
+    edge_low, edge_high = _histogram_edge_bounds(low, high)
+    edges = np.linspace(edge_low, edge_high, counts.size + 1, dtype=np.float32)
+    return _representative_sample(counts, edges, limit=max(1, int(sample_limit)))
+
+
 def _broadcast_weights(array: np.ndarray, weights) -> np.ndarray:
     if weights is None:
         return np.ones(array.shape, dtype=np.float64)
@@ -263,18 +301,16 @@ def _histogram_edge_bounds(low: float, high: float) -> tuple[float, float]:
     return low - radius, high + radius
 
 
-def _summary_family(key: DataChunkKey) -> tuple[object, ...]:
+def _summary_base_family(key: DataChunkKey) -> tuple[object, ...]:
     return (
         key.document_generation,
         key.operation_key,
-        key.lod.reducer,
         key.dtype,
         key.representation,
     )
 
 
-def _coarse_first_key(summary: ChunkHistogramSummary) -> tuple[object, ...]:
-    key = summary.key
+def _coarse_first_key_for_key(key: DataChunkKey) -> tuple[object, ...]:
     return (
         -prod(key.chunk_shape),
         -sum(int(value) for value in key.lod.reduction),
@@ -283,8 +319,18 @@ def _coarse_first_key(summary: ChunkHistogramSummary) -> tuple[object, ...]:
 
 
 def _strictly_finer(candidate: DataChunkKey, parent: DataChunkKey) -> bool:
-    child = tuple(int(value) for value in candidate.lod.reduction)
-    coarse = tuple(int(value) for value in parent.lod.reduction)
+    child = tuple(
+        int(candidate.lod.reduction[axis])
+        if axis < len(candidate.lod.reduction)
+        else 0
+        for axis in range(candidate.rank)
+    )
+    coarse = tuple(
+        int(parent.lod.reduction[axis])
+        if axis < len(parent.lod.reduction)
+        else 0
+        for axis in range(parent.rank)
+    )
     return bool(
         len(child) == len(coarse)
         and all(fine <= broad for fine, broad in zip(child, coarse))
@@ -404,6 +450,8 @@ __all__ = [
     "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "aggregate_chunk_summaries",
     "chunk_summary_frontier",
+    "chunk_key_frontier",
     "chunk_summary_storage_nbytes",
+    "representative_sample_from_histogram",
     "summarize_chunk",
 ]
