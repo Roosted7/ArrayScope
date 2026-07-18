@@ -124,6 +124,14 @@ def main(argv=None) -> int:
         float(np.percentile(finite, 0.5)),
         float(np.percentile(finite, 99.5)),
     )
+    # A smooth non-gray LUT (toggled with 'v') to demonstrate that LUT swaps
+    # are pure mapping state — zero uploads, like mode/levels changes.
+    ramp = np.arange(256)
+    color_lut = np.stack(
+        [ramp, (ramp * ramp) // 255, np.sqrt(ramp / 255.0) * 255, np.full(256, 255)],
+        axis=-1,
+    ).astype(np.uint8).tobytes()
+
     state = {
         "mode": "magnitude" if is_complex else "real",
         "lo": lo,
@@ -132,6 +140,7 @@ def main(argv=None) -> int:
         "size": [float(w), float(h)],
         "lod": 0,
         "generation": 0,
+        "lut": None,
     }
 
     win = QWidget()
@@ -169,7 +178,9 @@ def main(argv=None) -> int:
             FrameSubmission(
                 state["generation"],
                 (
-                    SetDisplayMapping(DisplayMapping(state["mode"], state["lo"], state["hi"])),
+                    SetDisplayMapping(
+                        DisplayMapping(state["mode"], state["lo"], state["hi"], lut=state["lut"])
+                    ),
                     UpdateTileInstances(tiles),
                     PresentGeneration(state["generation"]),
                 ),
@@ -201,6 +212,8 @@ def main(argv=None) -> int:
             state["hi"] = state["lo"] + span * 0.8
         elif text == "]":
             state["hi"] = state["lo"] + span * 1.25
+        elif text == "v":
+            state["lut"] = color_lut if state["lut"] is None else None
         elif text == "0":
             state["lod"] = 0
         elif text == "1":

@@ -37,13 +37,25 @@ from arrayscope.gpu.keys import DataChunkKey
 MAPPING_MODES = ("magnitude", "phase", "real", "imag")
 
 
+#: Size of a display LUT: 256 RGBA8 entries.
+LUT_BYTES = 256 * 4
+
+
 @dataclass(frozen=True)
 class DisplayMapping:
-    """Shader-on-read display state: complex component + levels window."""
+    """Shader-on-read display state: complex component + levels + LUT.
+
+    ``lut`` is the resolved 256-entry RGBA8 table (raw bytes) — the protocol
+    carries the table itself, never a colormap *name*, so backends need no
+    knowledge of ArrayScope's colormap library. ``None`` means the backend's
+    neutral grayscale ramp. Levels-normalized values index the table by
+    nearest entry (``round(g * 255)``), matching the CPU display mirror.
+    """
 
     mode: str = "magnitude"
     level_lo: float = 0.0
     level_hi: float = 1.0
+    lut: bytes | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
@@ -56,6 +68,13 @@ class DisplayMapping:
             raise ValueError(
                 f"levels window must be non-empty, got [{self.level_lo}, {self.level_hi}]"
             )
+        if self.lut is not None:
+            lut = bytes(self.lut)
+            if len(lut) != LUT_BYTES:
+                raise ValueError(
+                    f"lut must be {LUT_BYTES} bytes (256 RGBA8 entries), got {len(lut)}"
+                )
+            object.__setattr__(self, "lut", lut)
 
 
 @dataclass(frozen=True)

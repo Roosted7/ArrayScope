@@ -106,6 +106,7 @@ struct Tile {
 @group(0) @binding(2) var<storage, read> lod_info: array<LodInfo>;
 @group(0) @binding(3) var<storage, read> tiles: array<Tile>;
 @group(0) @binding(4) var pool: texture_2d_array<f32>;
+@group(0) @binding(5) var lut: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -155,7 +156,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         default: { x = v.y; }
     }
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
-    return vec4<f32>(g, g * g, sqrt(g), 1.0);
+    // Nearest-entry LUT indexing, mirroring the CPU display reference.
+    let idx = clamp(i32(round(g * 255.0)), 0, 255);
+    return textureLoad(lut, vec2<i32>(idx, 0), 0);
 }
 """
 
@@ -291,6 +294,13 @@ class WgpuPlaneExecutor:
         self._mapping_buf = d.create_buffer(
             size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
+        self._lut_tex = d.create_texture(
+            size=(256, 1, 1),
+            format="rgba8unorm",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        self._current_lut = object()  # sentinel: force the first write
+        self._write_lut(None)
         self._write_mapping()
 
         self._target_size = tuple(int(v) for v in target_size)
@@ -335,10 +345,29 @@ class WgpuPlaneExecutor:
                     {"binding": 2, "resource": {"buffer": self._lod_info_buf, "offset": 0, "size": self._lod_info_buf.size}},
                     {"binding": 3, "resource": {"buffer": self._tiles_buf, "offset": 0, "size": self._tiles_buf.size}},
                     {"binding": 4, "resource": self._pool_view},
+                    {"binding": 5, "resource": self._lut_tex.create_view()},
                 ],
             )
             self._pipelines[fmt] = (pipe, bind)
         return self._pipelines[fmt]
+
+    def _write_lut(self, lut: bytes | None) -> None:
+        if lut == self._current_lut:
+            return
+        if lut is None:  # neutral grayscale ramp
+            ramp = np.empty((256, 4), np.uint8)
+            ramp[:, 0] = ramp[:, 1] = ramp[:, 2] = np.arange(256)
+            ramp[:, 3] = 255
+            data = ramp.tobytes()
+        else:
+            data = lut
+        self.device.queue.write_texture(
+            {"texture": self._lut_tex},
+            data,
+            {"bytes_per_row": 256 * 4, "rows_per_image": 1},
+            (256, 1, 1),
+        )
+        self._current_lut = lut
 
     def _write_mapping(self) -> None:
         self.device.queue.write_buffer(
@@ -518,6 +547,7 @@ class WgpuPlaneExecutor:
             elif isinstance(cmd, SetDisplayMapping):
                 self._mapping = cmd.mapping
                 self._write_mapping()
+                self._write_lut(cmd.mapping.lut)
             elif isinstance(cmd, DispatchHistogram):
                 report.histograms[index] = self._histogram(cmd)
             elif isinstance(cmd, PresentGeneration):

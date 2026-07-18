@@ -142,15 +142,23 @@ class Scene:
                 3: lambda: im,
             }[mode]()
             g = np.clip((x.astype(np.float64) - lo) / (hi - lo), 0, 1)
-            rgba = np.stack(
-                [g * 255, g * g * 255, np.sqrt(g) * 255, np.full_like(g, 255)], axis=-1
-            )
-            out[y0 : y0 + th, x0 : x0 + tw] = np.round(rgba).astype(np.uint8)
+            idx = np.clip(np.round(g * 255).astype(np.int32), 0, 255)
+            if mapping.lut is not None:
+                table = np.frombuffer(mapping.lut, np.uint8).reshape(256, 4)
+            else:  # executor's neutral grayscale ramp
+                table = np.empty((256, 4), np.uint8)
+                table[:, 0] = table[:, 1] = table[:, 2] = np.arange(256)
+                table[:, 3] = 255
+            out[y0 : y0 + th, x0 : x0 + tw] = table[idx]
         return out
 
-    def assert_matches(self, got, ref, tol=2):
+    def assert_matches(self, got, ref, tol=2, allow_px=0):
+        """``allow_px`` absorbs GPU-f32 vs CPU-f64 LUT-index rounding at
+        exact .5 boundaries — only meaningful for discontinuous LUTs, where
+        an off-by-one index is a large color diff on a handful of pixels."""
         diff = np.abs(got.astype(np.int32) - ref.astype(np.int32))
-        assert int((diff > tol).sum()) == 0, f"max diff {diff.max()}"
+        bad = int((np.any(diff > tol, axis=-1)).sum())
+        assert bad <= allow_px, f"{bad} px over tol (max diff {diff.max()})"
 
 
 @pytest.fixture(scope="module")
@@ -214,8 +222,13 @@ def test_evicted_page_falls_back_to_pinned_ancestor_then_refills(scene):
     report = scene.render(WIN_A, MAG, generation=11)
     assert report.uploads == 0
     got = scene.executor.read_target()
-    scene.assert_matches(got, scene.reference(WIN_A, MAG, absent_l0=[(1, 1)]))
-    assert float((got[..., :3].sum(axis=-1) == 0).mean()) == 0.0  # never black
+    ref = scene.reference(WIN_A, MAG, absent_l0=[(1, 1)])
+    scene.assert_matches(got, ref)
+    # Never-black: the fallback region may contain DATA black (g=0 maps to
+    # LUT[0]), but must not contain MORE black than the ancestor reference —
+    # a missing-page hole would.
+    black = lambda img: float((img[..., :3].sum(axis=-1) == 0).mean())  # noqa: E731
+    assert black(got) <= black(ref) + 1e-6
     report = scene.executor.submit(
         FrameSubmission(
             12,
@@ -252,6 +265,22 @@ def test_histogram_exact_over_all_l0_pages(scene):
     )
     assert int(bins.sum()) == PLANE * PLANE
     assert (bins.astype(np.int64) == cpu.astype(np.int64)).all()
+
+
+def test_custom_lut_is_applied_exactly_with_zero_uploads(scene):
+    rng = np.random.default_rng(3)
+    table = rng.integers(0, 256, size=(256, 4), dtype=np.uint8)
+    table[:, 3] = 255
+    mapping = DisplayMapping("magnitude", 0.0, 6.0, lut=table.tobytes())
+    report = scene.render(FULL, mapping, generation=35)
+    assert report.uploads == 0  # LUT changes are mapping state, not residency
+    scene.assert_matches(
+        scene.executor.read_target(), scene.reference(FULL, mapping), allow_px=64
+    )
+    # And back to the neutral ramp.
+    report = scene.render(FULL, MAG, generation=36)
+    assert report.uploads == 0
+    scene.assert_matches(scene.executor.read_target(), scene.reference(FULL, MAG))
 
 
 def test_completion_token_is_callable_and_returns(scene):
