@@ -424,6 +424,41 @@ class DisplayTilePayload:
         return int(getattr(self.lod, "level", 0) or 0)
 
     @property
+    def actual_lod_factor(self) -> int:
+        """Physical isotropic reduction factor of this singular texture.
+
+        ``lod`` names the requested ladder rung.  A page-backed presentation
+        may temporarily satisfy that request from a coarser canonical page,
+        so executors must use the resolved page reduction instead of treating
+        the rung label as a pyramid exponent.  Mixed or anisotropic bindings
+        have no one scalar factor and must be handled as page sets by a
+        capable backend rather than guessed here.
+        """
+
+        backing = self.page_backing
+        if backing is None:
+            return int(getattr(self.lod, "factor", 1) or 1)
+        resolved = backing.resolved_page_set
+        if not isinstance(resolved, ResolvedLodPageSet):
+            raise ValueError("page-backed payload has no complete actual LOD resolution")
+        reductions = {
+            tuple(int(step) for step in reduction)
+            for reduction in resolved.actual_reductions_yx
+        }
+        if len(reductions) != 1:
+            raise ValueError(
+                "page-backed payload has mixed actual LOD reductions: "
+                f"{tuple(sorted(reductions))}"
+            )
+        reduction = next(iter(reductions))
+        if len(reduction) != 2 or reduction[0] != reduction[1]:
+            raise ValueError(
+                "page-backed payload has anisotropic actual LOD reduction: "
+                f"{reduction}"
+            )
+        return 1 << int(reduction[0])
+
+    @property
     def nbytes(self) -> int:
         arrays = [
             self.texture_data if self.texture_data is not None else self.image,

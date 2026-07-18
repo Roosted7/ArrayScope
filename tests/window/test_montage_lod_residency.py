@@ -2219,6 +2219,7 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     assert initial.lod.level == 2
     assert initial.page_backing.requested_lod.level == 2
     assert initial.page_backing.resolved_page_set.coarsest_actual_level == 4
+    assert initial.actual_lod_factor == 16
     assert initial.page_backing.materialized_pages[0].key.lod.reduction == (4, 4)
     record = session.lifecycle.peek(1)
     assert record is not None and not record.target_settled
@@ -2239,6 +2240,7 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     assert upgraded.lod.level == 2
     assert upgraded.page_backing.requested_lod.level == 2
     assert upgraded.page_backing.resolved_page_set.coarsest_actual_level == 2
+    assert upgraded.actual_lod_factor == 4
     assert upgraded.page_backing.materialized_pages[0].key.lod.reduction == (2, 2)
 
 

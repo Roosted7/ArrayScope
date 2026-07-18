@@ -1208,7 +1208,7 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
     texture_shape = tuple(int(value) for value in np.shape(texture)[:2])
     lod = getattr(payload, "lod", None)
     if lod is None:
-        level = 0
+        rung_level = 0
         factor = 1
         source_shape = tuple(
             int(value)
@@ -1216,8 +1216,13 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
         )
         declared_texture_shape = texture_shape
     else:
-        level = int(getattr(lod, "level", 0) or 0)
-        factor = int(getattr(lod, "factor", 1) or 1)
+        rung_level = int(getattr(lod, "level", 0) or 0)
+        try:
+            factor = int(payload.actual_lod_factor)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise NotImplementedError(
+                "wgpu executor requires one isotropic actual payload reduction factor"
+            ) from exc
         gutter = int(getattr(lod, "gutter", 0) or 0)
         # Live ingest-reduced payloads may carry the reduced evaluated plane
         # in DisplayTilePayload.source_shape. LodInfo.source_shape is the
@@ -1228,17 +1233,22 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
             raise NotImplementedError(
                 f"wgpu backend does not yet support LOD gutters; got {gutter}"
             )
-    expected_factor = 1 << level
-    if factor != expected_factor:
+    if factor < 1 or factor & (factor - 1):
         raise NotImplementedError(
-            "wgpu executor supports isotropic power-of-two LODs only; "
-            f"level {level} requires factor {expected_factor}, got {factor}"
+            "wgpu executor requires a power-of-two actual reduction factor; "
+            f"got factor {factor} for rung label {rung_level}"
         )
+    level = factor.bit_length() - 1
     expected_texture_shape = tuple(-(-extent // factor) for extent in source_shape)
-    if declared_texture_shape != texture_shape or texture_shape != expected_texture_shape:
+    requested_shape_mismatch = (
+        getattr(payload, "page_backing", None) is None
+        and declared_texture_shape != texture_shape
+    )
+    if requested_shape_mismatch or texture_shape != expected_texture_shape:
         raise ValueError(
             "wgpu payload texture geometry does not match its native LOD ladder: "
-            f"source={source_shape}, level={level}, declared={declared_texture_shape}, "
+            f"source={source_shape}, rung_label={rung_level}, factor={factor}, "
+            f"executor_level={level}, declared={declared_texture_shape}, "
             f"actual={texture_shape}, expected={expected_texture_shape}"
         )
     return level, source_shape

@@ -42,10 +42,11 @@ VISPY_CAPABILITIES = ImageViewBackendCapabilities(
 
 WGPU_CAPABILITIES = ImageViewBackendCapabilities(
     name="wgpu",
-    # MVP scope (queue row 3b): scalar 2-D non-montage only.  Declaring no
-    # persistent tile residency keeps every montage warm/prefetch path off,
-    # so warmTiledResidency is never invoked against this backend.
-    persistent_tile_residency=False,
+    # Queue row 3(b) now binds content-keyed montage planes through the wgpu
+    # page table and implements both tiled and single-plane warming.  This
+    # declaration also selects the shared bounded GPU commit policy; leaving
+    # the obsolete MVP value false made journey commits report no item cap.
+    persistent_tile_residency=True,
     tile_residency_kind="gpu_atlas",
     shader_windowing=True,
     native_pointer_interaction=False,

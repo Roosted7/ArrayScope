@@ -93,13 +93,14 @@ def _lod_payload(
     level,
     source_shape,
     payload_source_shape=None,
+    factor=None,
 ):
     from arrayscope.display.lod import LodInfo
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
     from arrayscope.display.shader_mapping import TexturePlaneKind
 
-    factor = 1 << int(level)
+    factor = 1 << int(level) if factor is None else int(factor)
     lod = LodInfo(
         level=level,
         factor=factor,
@@ -223,11 +224,14 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
         coarse = _lod_payload(
             0,
-            np.full((256, 256), 0.25, np.float32),
+            np.full((32, 32), 0.25, np.float32),
             base_source_id="lod-plane",
-            level=1,
+            # Rung labels describe quality role, not pyramid exponent.  The
+            # physical factor is the executor's LOD owner (ADR 0050).
+            level=3,
+            factor=16,
             source_shape=source_shape,
-            payload_source_shape=(256, 256),
+            payload_source_shape=(32, 32),
         )
         fine = _lod_payload(
             0,
@@ -240,7 +244,7 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         report = _commit(view, geometry, {0: coarse}, levels=(0.0, 1.0))
         assert report.texture_uploads == 1
         assert report.presented_identities == {0: coarse.tile_identity}
-        assert view._wgpu_executor._bound_planes[0].max_lod == 1
+        assert view._wgpu_executor._bound_planes[0].max_lod == 4
         assert view._wgpu_camera_tiles()[0].lod_level == 0
         assert view._wgpu_camera_tiles()[0].src_size == (512.0, 512.0)
         view.getView().setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
@@ -251,7 +255,7 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         report = _commit(view, geometry, {0: fine}, levels=(0.0, 1.0))
         assert report.texture_uploads == 4
         assert report.presented_identities == {0: fine.tile_identity}
-        assert view._wgpu_executor._bound_planes[0].max_lod == 1
+        assert view._wgpu_executor._bound_planes[0].max_lod == 4
         assert coarse_keys <= set(view._wgpu_executor.page_table.resident_keys())
         assert all(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
         assert {
@@ -260,6 +264,26 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         } == {view._wgpu_executor._bound_planes[0].document_generation}
         _rerender_internal(view)
         assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
+    finally:
+        view.close()
+
+
+def test_non_power_of_two_payload_factor_is_rejected_loudly(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        source_shape = (48, 48)
+        geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
+        payload = _lod_payload(
+            0,
+            np.zeros((16, 16), np.float32),
+            base_source_id="bad-lod-factor",
+            level=2,
+            factor=3,
+            source_shape=source_shape,
+        )
+
+        with pytest.raises(NotImplementedError, match="power-of-two.*factor 3"):
+            _commit(view, geometry, {0: payload}, levels=(0.0, 1.0))
     finally:
         view.close()
 
