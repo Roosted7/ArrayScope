@@ -390,6 +390,57 @@ def test_early_old_demand_match_does_not_mask_stale_final_camera(tmp_path):
     assert not result["demand_fresh_within_budget"]
 
 
+def test_demand_freshness_uses_transition_trace_when_sample_confirms(tmp_path):
+    # The sampled timeline starves during the post-transition replan burst;
+    # the product's lod_demand transition trace is the ground-truth
+    # timestamp, honored only because a later sample confirms the state.
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace.insert(
+        2,
+        {"kind": "lod_demand", "level": 1, "previous_level": 2, "ts_ns": 1_050_000_000},
+    )
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert result["demand_fresh_ms_after_gesture"] == 50.0
+    assert result["demand_fresh_within_budget"]
+
+
+def test_demand_freshness_transition_event_alone_cannot_pass(tmp_path):
+    # An injected transition trace with no confirming sample stays red: the
+    # oracle remains output-driven.
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace.insert(
+        2,
+        {"kind": "lod_demand", "level": 1, "previous_level": 2, "ts_ns": 1_050_000_000},
+    )
+    for sample in timeline[1:]:
+        sample["session_desired_level"] = 2
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert result["demand_fresh_ms_after_gesture"] is None
+    assert not result["demand_fresh_within_budget"]
+
+
+def test_demand_freshness_late_transition_still_fails(tmp_path):
+    # A genuinely late transition carries a late ground-truth timestamp.
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[-1]["ts_ns"] = 8_000_000_000
+    interval["end"] = trace[-1]
+    trace.insert(
+        2,
+        {"kind": "lod_demand", "level": 1, "previous_level": 2, "ts_ns": 7_050_000_000},
+    )
+    timeline[1]["session_desired_level"] = 2
+    timeline[2]["monotonic_ns"] = 7_400_000_000
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert result["demand_fresh_ms_after_gesture"] == 6_050.0
+    assert not result["demand_fresh_within_budget"]
+
+
 def test_demand_freshness_budget_starts_at_gesture_not_first_pixels(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[-1]["ts_ns"] = 7_000_000_000

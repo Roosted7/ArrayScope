@@ -256,6 +256,7 @@ def evaluate_gesture(
         final_camera = (
             None if final_sample is None else final_sample.get("camera_desired_level")
         )
+        confirm_ns = None
         for sample in samples:
             sample_ns = int(sample.get("monotonic_ns", 0) or 0)
             if sample_ns < output_ns:
@@ -269,8 +270,32 @@ def evaluate_gesture(
                 and int(camera) == int(final_camera)
                 and int(session) == int(final_camera)
             ):
+                confirm_ns = sample_ns
                 demand_fresh_ms = (sample_ns - start_ns) / 1_000_000.0
                 break
+        if confirm_ns is not None:
+            # The sampled timeline starves for hundreds of milliseconds while
+            # the GUI thread runs the post-transition replan burst, so the
+            # confirming sample over-reports freshness latency (2026-07-19
+            # v6: transition 4 276 ms, first sample 5 178 ms). The product's
+            # ``lod_demand`` transition trace is the ground-truth timestamp;
+            # it only substitutes when a sample CONFIRMS the fresh state
+            # stuck — an injected transition event with no confirming sample
+            # stays red, and a genuinely late transition carries a late
+            # timestamp.
+            transition_ns = max(
+                (
+                    int(event.get("ts_ns", 0) or 0)
+                    for event in segment
+                    if event.get("kind") == "lod_demand"
+                    and event.get("level") is not None
+                    and int(event.get("level")) == int(final_camera)
+                    and start_ns <= int(event.get("ts_ns", 0) or 0) <= confirm_ns
+                ),
+                default=None,
+            )
+            if transition_ns is not None:
+                demand_fresh_ms = (transition_ns - start_ns) / 1_000_000.0
 
     close_event = next(
         (event for event in commits if bool(event.get("coverage_pass_closed", False))),
