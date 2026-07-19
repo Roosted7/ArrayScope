@@ -1060,8 +1060,77 @@ def _visible_tile_for_number(session, tile_number: int):
     return cached[1].get(int(tile_number))
 
 
+def _best_floor_memo_guard(session) -> tuple[object, ...]:
+    pyramid = session.lod_page_cache
+    lifecycle = getattr(session, "lifecycle", None)
+    demand = session.lod_policy_decision.demand
+    return (
+        getattr(session, "plan", None),
+        _demand_key_sig(demand),
+        pyramid,
+        int(getattr(pyramid, "revision", 0) or 0),
+        int(getattr(lifecycle, "level_revision", 0) or 0),
+        int(getattr(session, "lod_preview_level", 0) or 0),
+    )
+
+
+def _best_floor_guard_matches(left, right) -> bool:
+    return bool(
+        left[0] is right[0]
+        and left[1] == right[1]
+        and left[2] is right[2]
+        and left[3:] == right[3:]
+    )
+
+
 def best_floor_key(session, source_index: int, *, tile_number: int | None = None):
-    """Best complete floor, ranked by physical rather than requested quality."""
+    """Best complete floor, memoized for one immutable residency epoch.
+
+    Retarget planning has several consumers of the same per-tile verdict.
+    Plan/demand objects are immutable, while page-cache and lifecycle epochs
+    advance on every residency mutation. The memo is therefore exact for one
+    guard and discarded wholesale when any owner changes.
+    """
+
+    guard = _best_floor_memo_guard(session)
+    state = getattr(session, "_best_floor_key_memo", None)
+    if state is None or not _best_floor_guard_matches(state[0], guard):
+        state = (guard, {})
+        session._best_floor_key_memo = state
+    memo_key = (
+        int(source_index),
+        None if tile_number is None else int(tile_number),
+    )
+    if memo_key in state[1]:
+        return state[1][memo_key]
+
+    result = _compute_best_floor_key(
+        session,
+        int(source_index),
+        tile_number=tile_number,
+    )
+    live_guard = _best_floor_memo_guard(session)
+    live_state = getattr(session, "_best_floor_key_memo", None)
+    if (
+        live_state is state
+        and _best_floor_guard_matches(guard, live_guard)
+        and _best_floor_guard_matches(state[0], live_guard)
+    ):
+        state[1][memo_key] = result
+    return result
+
+
+def _compute_best_floor_key(
+    session,
+    source_index: int,
+    *,
+    tile_number: int | None = None,
+):
+    """Compute one floor verdict without the epoch memo."""
+
+    session._best_floor_key_compute_count = int(
+        getattr(session, "_best_floor_key_compute_count", 0) or 0
+    ) + 1
 
     pyramid = session.lod_page_cache
     demand = session.lod_policy_decision.demand

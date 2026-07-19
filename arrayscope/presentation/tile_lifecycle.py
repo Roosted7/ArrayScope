@@ -458,6 +458,7 @@ class TileLifecycle:
         #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
         self._identity_rejection_counts: dict[tuple[int, object, object], int] = {}
         self._level_order = 0
+        self._level_revision = 0
 
     #: After this many identical rejections the machine records the backend's
     #: identity as the presented truth and stops the re-emit loop: a backend
@@ -471,6 +472,12 @@ class TileLifecycle:
         """Acks refused because the backend slot held a different identity."""
 
         return int(self._identity_rejections)
+
+    @property
+    def level_revision(self) -> int:
+        """Monotonic epoch for presentation-floor residency truth."""
+
+        return int(self._level_revision)
 
     @property
     def backend_presented_identities(self) -> dict[int, object]:
@@ -1193,6 +1200,7 @@ class TileLifecycle:
     ) -> None:
         rec = self.record(tile_number)
         self._level_order += 1
+        self._level_revision += 1
         rec.levels[level_key] = _LevelEntry(
             LevelPhase.CLAIMED,
             ClaimOwner(owner),
@@ -1205,6 +1213,7 @@ class TileLifecycle:
         entry = rec.levels.get(level_key)
         if entry is not None and entry.phase is LevelPhase.CLAIMED:
             entry.phase = LevelPhase.MATERIALIZING
+            self._level_revision += 1
             _trace_lifecycle(rec, "level_materializing", level_key=level_key)
 
     def level_resident(self, tile_number: int, level_key) -> None:
@@ -1214,6 +1223,9 @@ class TileLifecycle:
             rec.levels[level_key] = _LevelEntry(LevelPhase.RESIDENT, ClaimOwner.INGEST)
         else:
             entry.phase = LevelPhase.RESIDENT
+        # Repeated resident publication can carry updated preview metadata
+        # even when the phase itself is unchanged.
+        self._level_revision += 1
         _trace_lifecycle(rec, "level_resident", level_key=level_key)
 
     def level_declined(self, tile_number: int, level_key) -> tuple[ReleaseClaim, ...]:
@@ -1222,6 +1234,7 @@ class TileLifecycle:
         if entry is None or entry.phase in (LevelPhase.RESIDENT, LevelPhase.RELEASED):
             return ()
         entry.phase = LevelPhase.RELEASED
+        self._level_revision += 1
         return (ReleaseClaim(rec.tile_number, level_key, entry.owner),)
 
     def materialization_planned(
@@ -1249,6 +1262,7 @@ class TileLifecycle:
         for rec, level_key, entry in self._entries_for_request(request):
             if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING):
                 entry.phase = LevelPhase.RELEASED
+                self._level_revision += 1
                 effects.append(ReleaseClaim(rec.tile_number, level_key, entry.owner))
         return tuple(effects)
 
@@ -1297,6 +1311,7 @@ class TileLifecycle:
                         ReleaseClaim(rec.tile_number, level_key, entry.owner)
                     )
                     entry.phase = LevelPhase.RELEASED
+                    self._level_revision += 1
         return tuple(effects)
 
     def dangling_claims(self) -> tuple[ReleaseClaim, ...]:
@@ -1619,6 +1634,7 @@ class TileLifecycle:
             ):
                 effects.append(ReleaseClaim(rec.tile_number, level_key, entry.owner))
                 entry.phase = LevelPhase.RELEASED
+                self._level_revision += 1
         return tuple(effects)
 
     def _entries_for_request(

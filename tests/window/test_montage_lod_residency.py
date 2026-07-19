@@ -3688,6 +3688,85 @@ def test_floor_prefers_resident_l2_over_l4_for_coarser_l6_demand():
     assert best[1] == 2
 
 
+def test_best_floor_key_memo_bounds_scans_per_residency_revision(monkeypatch):
+    """Repeated retarget consumers scan each tile once per residency epoch."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=8)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    session.lod_policy_decision = replace(session.lod_policy_decision, demand=demand)
+    for tile_number, rendered in tuple(session.rendered_tiles.items()):
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=2,
+            semantic_source_id=session.tile_semantic_source_id(
+                rendered.tile.source_index
+            ),
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        _claim_preview_resident(session, tile_number, key)
+
+    resolutions = 0
+    original = render_lod._page_set_resolution
+
+    def counted_resolution(*args, **kwargs):
+        nonlocal resolutions
+        resolutions += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(render_lod, "_page_set_resolution", counted_resolution)
+    first = tuple(
+        render_lod.best_floor_key(
+            session,
+            int(tile.source_index),
+            tile_number=int(tile.montage_index),
+        )
+        for tile in session.plan.tiles
+    )
+    first_pass_resolutions = resolutions
+    second = tuple(
+        render_lod.best_floor_key(
+            session,
+            int(tile.source_index),
+            tile_number=int(tile.montage_index),
+        )
+        for tile in session.plan.tiles
+    )
+
+    assert first == second
+    assert first_pass_resolutions > 0
+    assert resolutions == first_pass_resolutions
+
+
+def test_best_floor_key_memo_rejects_stale_store_after_epoch_race(monkeypatch):
+    """An older compute cannot overwrite a memo refreshed at a newer epoch."""
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 20), count=1)
+    stale = object()
+    fresh = object()
+    computes = 0
+
+    def racing_compute(*args, **kwargs):
+        nonlocal computes
+        computes += 1
+        if computes == 1:
+            session.lifecycle.level_claimed(
+                0,
+                ("interleaved-floor",),
+                ClaimOwner.CHAIN,
+            )
+            assert render_lod.best_floor_key(session, 0, tile_number=0) is fresh
+            return stale
+        return fresh
+
+    monkeypatch.setattr(render_lod, "_compute_best_floor_key", racing_compute)
+
+    assert render_lod.best_floor_key(session, 0, tile_number=0) is stale
+    assert render_lod.best_floor_key(session, 0, tile_number=0) is fresh
+    assert computes == 2
+
+
 def test_floor_ranks_better_physical_fallback_ahead_of_coarser_exact_target():
     """Exact requested identity cannot outrank the pixels actually sampled."""
 
