@@ -101,15 +101,42 @@ extended `test_interaction_stop_rearms_deferred_wgpu_histogram_evidence`
   (59 @ 742 ms). Intermittent, pre-existing, unrelated to this change; the
   ungoverned early preview commit deserves its own owner.
 
+## Follow-up fixes landed during acceptance
+
+- **Ungoverned floor-progress commit closed** (`b30d9940`): the zoom_in
+  flake above turned out to be systematic, not racy —
+  `tile_layer_upsert_limits` returned `{}` whenever no dirty/pending work
+  existed at decision time, but a floor-progress commit materializes
+  frontier preview upserts during assembly. The gate now also computes
+  limits while unsettled required targets exist. Red-first:
+  `test_pyqtgraph_floor_progress_commits_stay_governed`. zoom_in green in
+  every subsequent run.
+- **Oracle precision** (`f2dbd556`): v6 re-red at 5 178 ms decomposed (via
+  the new `lod_demand` trace) into transition 4 276 ms — in budget — plus
+  902 ms sampler starvation during the gen-2 replan burst. The oracle now
+  uses the transition timestamp as ground truth, honored only when a later
+  sample confirms the fresh state stuck. Fault-injection pins: an injected
+  transition with no confirming sample stays red; a late transition
+  carries a late timestamp. Sample-only artifacts evaluate as before.
+
 ## Evidence
 
-- Full offscreen suite at `6fd0c262` (rebased on `b0c3699b`): **2484 passed,
+- Full offscreen suite at `f2dbd556` (on `b0c3699b`): **2488 passed,
   0 failed**, 36 skipped, 1 xfailed.
-- Real-Wayland full matrices (`tests/artifacts/journey-matrix-2026-07-19-v1/v2/v3`):
-  v1 **15/15**, v2 14/15 (only the pre-existing zoom_in flake above),
-  v3 see artifact. pyqtgraph cold_fill green in every run:
-  demand fresh 3 195 / 3 357 ms (was 5 250–6 300), first pixels 351–360 ms.
-  vispy cold_fill margin also widened (1 890 ms, was ~4 728) — it was one
-  load spike away from the same red.
+- Seven real-Wayland full matrices
+  (`tests/artifacts/journey-matrix-2026-07-19-v1…v7`), all re-verified
+  with the final oracle: v1 **15/15**, v2/v3/v4 14/15 (single red = the
+  ungoverned zoom_in commit, pre-dating its fix `b30d9940`; identical
+  committed incumbent signature in `journey-matrix-wgpu-2026-07-18-v19`/
+  `-v11`), v5 **15/15**, v6 **15/15**, v7 **15/15** — three consecutive
+  full-matrix 15/15 runs (v5–v7) executed with the full fix stack. pyqtgraph cold_fill green in every run:
+  ground-truth demand freshness 2 601–4 276 ms (was 5 250–6 300 sampled),
+  first pixels 337–360 ms. vispy cold margin widened to 1 834–2 975 ms
+  (was ~4 728 — one load spike from the same red).
 - Offscreen repro: pyqtgraph 272/272 PASS, demand flip 1.9 s; wgpu 272/272
   PASS (stall fixed).
+- Residual lane, honestly stated: the transition time equals gen-1
+  coverage close (+ one commit teardown), which is pyqtgraph fill-speed
+  dependent (2.6 s typical, 4.3 s under heavy load). Bringing that tail
+  further down belongs to the fill/perf-bars program, not to freshness
+  plumbing.

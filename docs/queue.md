@@ -40,40 +40,45 @@ this file says *what, in what order, and when it counts as done*.
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **AUTO-camera demand freshness / dead gesture edge.** After montage
-  entry, a programmatic `setRange` zoom invokes NOTHING in the viewport
-  chain within 5 s — zero calls to `retarget_montage_viewport` /
-  `apply_montage_viewport_retarget` / `_montage_viewport_plan`, identical
-  offscreen and on real Wayland — so LOD demand freezes at the fit level.
-  The post-policy journey matrix measures fresh demand on every live cell,
-  so the unit gate's fixture (window carries no committed display frame) is
-  a prime suspect; field zoom verdict pending. Red pin (strict xfail with
-  instrumented probes): `tests/ui/test_lod_demand_freshness.py`.
-- **CLOSED 2026-07-19 — kernel whole-process exit is bounded by cooperative
-  cancellation at evaluation chunk edges.** Diagnosis split the symptom in
-  two: (1) the slab/stage paths already observe their token at every
-  read/op/chunk boundary (real-Wayland close during a running
-  stage-materialization FFT joined in ≤0.34 s), but the two token-less
-  evidence sweeps — the montage-level-evidence batch
-  (`sample_level_evidence_batch`, 3.5 s/task in the 2026-07-19 wgpu zoompan
-  profile) and the wgpu histogram fence-resolve
-  (`resolve_wgpu_histogram_evidence`) — pinned the five-second join for
-  their whole batch; both now take `pass_token=True` and bail at tile/row
-  edges (never inside one FFTW/fence call). (2) The process outliving
-  `kernel_shutdown complete` was the non-daemon module histogram executor:
-  a terminally declined submitter result ("admission", i.e. controllers
-  closed for shutdown) fell through to `_HISTOGRAM_EXECUTOR`, whose
-  `concurrent.futures` atexit join outlives the kernel; declined work is
-  now dropped and the executor serves only submitter-less standalone
-  widgets. Cancelled sweeps complete through the existing stale callback
-  exactly once. Pins: `tests/render/test_level_stats_shutdown.py`
-  (shutdown-during-sweep join bound + stale-exactly-once + row-edge
-  cancellation), `tests/display/test_histogram_controller_fallback.py`
-  (no executor leak / standalone fallback retained). Real-Wayland
-  ArrayScopeWindow close mid-FFT-evaluation: wgpu real-data close→exit
-  0.91 s, vispy 448³ 0.73 s, no shutdown RuntimeWarning, empty
-  `last_shutdown_diagnostics`.
-- **PyQtGraph ungoverned early preview commit (intermittent zoom_in red).
+- **AUTO-camera demand freshness / dead gesture edge — LIVE PATH FIXED
+  2026-07-19** (`6fd0c262`, [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md)):
+  the live-path form was `ViewportBridge.on_view_range_changed` dropping a
+  montage range change whenever no committed *tiled* frame existed yet —
+  exactly the montage-entry auto-fit, whose loss froze `session.view_range`
+  and LOD demand at the stale entry fit and was the standing pyqtgraph
+  cold_fill demand-freshness red (adjudicated REAL latency, not a sampler
+  gap). Camera intent now defers to commit teardown and replays after the
+  coverage pass closes. Remaining open item here: the unit gate's fixture
+  (window carries no committed display frame, so the deferred obligation
+  never replays) — red pin stays strict xfail with instrumented probes:
+  `tests/ui/test_lod_demand_freshness.py`.
+- **PyQtGraph ungoverned early preview commit — FIXED 2026-07-19**
+  (`b30d9940`): an early frontier-tile preview commit ran with
+  `max_upserts=0` and no recorded `unbounded_reason` (journey zoom_in red
+  in `journey-matrix-wgpu-2026-07-18-v19`/`-v11` and
+  `journey-matrix-2026-07-19-v2/v3/v4`). Not a race: floor-progress
+  commits carry no dirty/pending work at limits-decision time — the
+  build's floor pass materializes preview upserts during assembly, so
+  `tile_layer_upsert_limits`' early-`{}` gate systematically skipped
+  them. The gate now also governs commits while unsettled required
+  targets exist; red-first pin
+  `test_pyqtgraph_floor_progress_commits_stay_governed`. zoom_in green in
+  v5/v6/v7.
+- **PyQtGraph cold-fill tail stall under screenshot-flag load (offscreen
+  only).** With the matrix driver's `--screenshot-interval-s 0.1
+  --timeout-s 5`, the offscreen pyqtgraph cold driver intermittently
+  freezes at the refine tail (all 272 presented, `level_stale=111`,
+  planned-but-unsubmitted level-2 steps, armed presentation gate) — 1-of-2
+  on unfixed main `b0c3699b`, so pre-existing; the known tile-limbo/levels
+  family. Real-Wayland rows complete; gate effect is diagnostic-only.
+- **Kernel whole-process exit remains unbounded by current-item work.** The
+  2026-07-19 shutdown change closes admission, cancels queued work/tokens and
+  bounds the GUI close callback under one five-second join deadline, but the
+  final real-Wayland matrix showed current non-daemon worker evaluations can
+  keep the process alive after `kernel_shutdown complete`. Diagnose a
+  cooperative cancellation boundary inside long slab/evidence evaluations;
+  do not daemon-abandon NumPy/FFTW work. Exit gate: a real workflow process
+  terminates in <5 s and the suite emits no leaked-thread diagnostics.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -178,17 +183,36 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 - 2026-07-19 — **Last standing journey-matrix red closed: pyqtgraph
   cold_fill demand freshness ADJUDICATED = real product latency at the
   viewport bridge, fixed** (`6fd0c262`,
-  [dossier](redesign/demand-freshness-cold-fill-2026-07-19.
-Evidence: suite
-  2484/0; real-Wayland matrices `journey-matrix-2026-07-19-v1/v2/v3` —
-  v1 15/15, v2 14/15 (only the pre-existing zoom_in
-  unbounded-preview-commit flake, identical in committed v19), v3 in the
-  artifact dir; pyqtgraph cold demand fresh 3.
-md)): the
+  [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md)): the
   montage-entry auto-fit range change (~170 ms) was dropped by
   `ViewportBridge` (no committed tiled frame yet — the dead-gesture-edge
   live path), freezing LOD demand at the entry fit until the profile
-  driver's fit pulse rescued it at 4.
+  driver's fit pulse rescued it at 4.9–5.8 s under matrix load (straddling
+  the 5 s budget; in the field nothing rescues it). Camera intent now
+  defers and replays at the first commit teardown after the coverage pass
+  closes (two-phase contract preserved; replay-at-first-commit was tried
+  and rejected — it perturbed entry choreography). Companion fixes: the
+  interaction-deferred wgpu histogram-evidence queue is pumped directly at
+  the settle edge (deterministic offscreen wgpu cold stall — the barrier
+  latched with an idle kernel because the pump lived only in the
+  commit-ack path), and `selected_lod_factor` emits a permanent
+  `lod_demand` transition trace. Follow-ups landed during acceptance:
+  the intermittent zoom_in red proved to be a systematic ungoverned
+  floor-progress commit — `tile_layer_upsert_limits` now governs commits
+  while unsettled required targets exist (`b30d9940`, red-first pin) —
+  and the freshness oracle reads the `lod_demand` transition timestamp,
+  honored only when a later sample confirms the state stuck
+  (`f2dbd556`, dual fault-injection pins: unconfirmed transition stays
+  red, late transition stays red; sampler starvation during the gen-2
+  replan burst was over-reporting by 350–900 ms). Evidence: suite
+  **2488/0**; seven real-Wayland matrices
+  `journey-matrix-2026-07-19-v1…v7` re-verified with the final oracle —
+  **v5/v6/v7 = three consecutive 15/15** with the full stack (v1 also
+  15/15; v2–v4's single red is the zoom_in commit pre-dating its fix);
+  pyqtgraph cold ground-truth demand freshness 2.6–4.3 s (was
+  5.25–6.3 s), first pixels ~350 ms; vispy cold margin widened to
+  1.8–3.0 s (was 4.7). Residual lane = gen-1 coverage-close time itself
+  (pyqtgraph fill speed, perf-bars territory).
 - 2026-07-19 — **wgpu native overlay TEXT landed — last overlay gap closed,
   screen-present-mode experiment unblocked (ceiling program step 1):**
   CPU-baked glyph atlas (`arrayscope/display/glyph_atlas.py`; QPainter bake
