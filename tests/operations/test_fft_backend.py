@@ -38,6 +38,31 @@ def test_resolve_fft_workers_all_minus_one():
     assert fft_backend.resolve_fft_workers("all_minus_one", cpu_count=8) == 7
 
 
+@pytest.mark.parametrize(
+    "backend",
+    [fft_backend.NumpyFFTBackend(), fft_backend.ScipyFFTBackend(), fft_backend.PyFFTWBackend()],
+    ids=lambda backend: backend.name,
+)
+@pytest.mark.parametrize(
+    "input_dtype,expected",
+    [
+        (np.float32, np.complex64),
+        (np.complex64, np.complex64),
+        (np.float64, np.complex128),
+        (np.complex128, np.complex128),
+    ],
+)
+def test_backends_honor_declared_output_dtype(backend, input_dtype, expected):
+    if backend.name == "pyfftw":
+        pytest.importorskip("pyfftw")
+    # The op layer declares result_type(input, complex64) (CenteredFFT.output_dtype);
+    # numpy < 2.0 computes in double, so the backend must narrow back itself.
+    data = np.arange(4 * 5, dtype=input_dtype).reshape(4, 5)
+
+    assert backend.centered_fft(data, 1, workers=1).dtype == expected
+    assert backend.centered_ifft(data, 1, workers=1).dtype == expected
+
+
 def test_numpy_backend_available_as_fallback():
     assert "numpy" in fft_backend.available_fft_backends()
     assert fft_backend.resolve_fft_backend("numpy").name == "numpy"

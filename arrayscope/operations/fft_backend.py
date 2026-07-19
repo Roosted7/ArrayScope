@@ -65,16 +65,26 @@ class NumpyFFTBackend:
     def centered_fft(self, data, axis: int, *, workers: int = 1):
         if int(workers) < 1:
             raise ValueError("workers must be at least 1")
-        return np.fft.ifftshift(
+        result = np.fft.ifftshift(
             np.fft.ifft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis
         )
+        return _match_declared_complex_dtype(result, data)
 
     def centered_ifft(self, data, axis: int, *, workers: int = 1):
         if int(workers) < 1:
             raise ValueError("workers must be at least 1")
-        return np.fft.ifftshift(
+        result = np.fft.ifftshift(
             np.fft.fft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis
         )
+        return _match_declared_complex_dtype(result, data)
+
+
+def _match_declared_complex_dtype(result, data):
+    # numpy < 2.0 computes every FFT in double precision; the op layer
+    # declares result_type(input, complex64), and the stage cache retains
+    # whatever comes back — a silent 2x for float32/complex64 inputs.
+    declared = np.result_type(np.asarray(data).dtype, np.complex64)
+    return result.astype(declared, copy=False)
 
 
 @dataclass(frozen=True)
