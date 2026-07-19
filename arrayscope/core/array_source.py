@@ -160,6 +160,12 @@ class ScaledArraySource:
         self._closed = False
 
     @property
+    def backing(self):
+        """The compact backing store (exposed for mappability checks)."""
+
+        return self._array
+
+    @property
     def shape(self) -> tuple[int, ...]:
         return tuple(int(size) for size in self._array.shape)
 

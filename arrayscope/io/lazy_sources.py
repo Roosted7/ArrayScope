@@ -102,27 +102,46 @@ def open_scaled_nifti_source(filepath):
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise ValueError("nibabel is required to open NIfTI sources lazily") from exc
 
-    from arrayscope.io.file_interpreters import _nifti_axes, remove_trailing_singletons
+    from arrayscope.io.file_interpreters import _nifti_axes
 
     image = nib.load(filepath, mmap=True)
-    proxy = image.dataobj
-    raw = proxy.get_unscaled()
-    if not isinstance(raw, np.memmap):
+    source = scaled_nifti_source(image, label=f"nii-memmap:{filepath.name}")
+    if not isinstance(source.backing, np.memmap):
         # get_unscaled() copied into memory (compressed / non-mappable dtype);
         # a lazy source over a resident array would give no memory benefit.
         raise ValueError(f"{filepath} cannot be memory-mapped for a lazy NIfTI source")
+    axes = _nifti_axes(image.header, source.shape)
+    return LazySourceArray(source), axes
+
+
+def scaled_nifti_source(image, *, label: str) -> ScaledArraySource:
+    """Wrap a loaded nibabel image's raw voxels in a :class:`ScaledArraySource`.
+
+    Shared by the lazy seam and the eager :class:`NiftiLoader` so both produce
+    identical values: raw on-disk samples (memmap for uncompressed ``.nii``,
+    in-memory for ``.nii.gz``) expanded per read into float32 — or complex64
+    when the voxels are complex on disk, preserving the imaginary part that a
+    float cast would silently discard — with ``scl_slope``/``scl_inter``
+    applied. Never routes through nibabel's float64 scaling path.
+    """
+
+    from arrayscope.io.file_interpreters import remove_trailing_singletons
+
+    proxy = image.dataobj
+    raw = proxy.get_unscaled() if hasattr(proxy, "get_unscaled") else np.asanyarray(proxy)
     raw = remove_trailing_singletons(raw)
-    slope = 1.0 if proxy.slope is None else float(proxy.slope)
-    inter = 0.0 if proxy.inter is None else float(proxy.inter)
-    source = ScaledArraySource(
+    kind = np.dtype(raw.dtype).kind
+    if kind not in "biufc":
+        raise ValueError(f"unsupported NIfTI on-disk dtype {raw.dtype!r} (RGB/structured voxels)")
+    slope = float(getattr(proxy, "slope", 1.0) or 1.0)
+    inter = float(getattr(proxy, "inter", 0.0) or 0.0)
+    return ScaledArraySource(
         raw,
         slope=slope,
         inter=inter,
-        out_dtype=np.float32,
-        label=f"nii-memmap:{filepath.name}",
+        out_dtype=np.complex64 if kind == "c" else np.float32,
+        label=label,
     )
-    axes = _nifti_axes(image.header, source.shape)
-    return LazySourceArray(source), axes
 
 
 def open_lazy_source(filepath):
@@ -146,6 +165,7 @@ __all__ = [
     "open_lazy_source",
     "open_memmap_source",
     "open_scaled_nifti_source",
+    "scaled_nifti_source",
     "should_load_lazily",
     "supports_lazy_source",
     "supports_memmap_source",

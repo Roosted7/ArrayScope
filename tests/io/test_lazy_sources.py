@@ -60,7 +60,7 @@ def test_open_scaled_nifti_source_maps_int16_and_rescales(tmp_path):
     voxels = np.arange(4 * 5 * 6, dtype=np.int16).reshape(4, 5, 6)
     path = _write_scaled_nifti(tmp_path, voxels, slope=100.0, inter=7.0)
 
-    source, axes = open_scaled_nifti_source(path)
+    source, _axes = open_scaled_nifti_source(path)
 
     assert isinstance(source, LazySourceArray)
     assert source.dtype == np.float32
@@ -75,7 +75,7 @@ def test_open_scaled_nifti_source_maps_int16_and_rescales(tmp_path):
 
 
 def test_load_path_lazy_nifti_matches_eager_and_carries_axes(tmp_path):
-    nib = pytest.importorskip("nibabel")
+    pytest.importorskip("nibabel")
     voxels = np.arange(3 * 4 * 5, dtype=np.int16).reshape(3, 4, 5)
     path = _write_scaled_nifti(tmp_path, voxels, slope=50.0, inter=0.0)
 
@@ -84,13 +84,46 @@ def test_load_path_lazy_nifti_matches_eager_and_carries_axes(tmp_path):
 
     assert isinstance(lazy.data, LazySourceArray)
     assert lazy.metadata["lazy"] is True
-    assert lazy.metadata["detected_format"] == "nii"
+    assert lazy.metadata["detected_format"] == "nifti"
     assert isinstance(eager.data, np.ndarray)
     assert eager.data.dtype == np.float32
-    np.testing.assert_allclose(np.asarray(lazy.data), eager.data, rtol=1e-5)
+    # Eager and lazy share the same scaled read path — values are identical.
+    np.testing.assert_array_equal(np.asarray(lazy.data), eager.data)
     # Axis metadata survives the lazy path.
     assert lazy.axes is not None
     assert tuple(axis.size for axis in lazy.axes) == voxels.shape
+
+
+def test_complex_nifti_keeps_imaginary_part_as_complex64(tmp_path):
+    nib = pytest.importorskip("nibabel")
+    voxels = (np.arange(24, dtype=np.float32) + 1j * np.arange(24, dtype=np.float32)[::-1]).reshape(2, 3, 4).astype(np.complex64)
+    image = nib.Nifti1Image(voxels, np.eye(4))
+    image.header.set_data_dtype(np.complex64)
+    path = tmp_path / "complex.nii"
+    nib.save(image, path)
+
+    eager = load_path(path, lazy=False)
+    lazy = load_path(path, lazy=True)
+
+    assert eager.data.dtype == np.complex64
+    np.testing.assert_array_equal(eager.data, voxels)
+    assert lazy.data.dtype == np.complex64
+    np.testing.assert_array_equal(np.asarray(lazy.data), voxels)
+
+
+def test_compressed_nifti_falls_back_to_eager(tmp_path):
+    nib = pytest.importorskip("nibabel")
+    voxels = np.arange(24, dtype=np.int16).reshape(2, 3, 4)
+    image = nib.Nifti1Image(voxels, np.eye(4))
+    image.header.set_data_dtype(np.int16)
+    path = tmp_path / "scan.nii.gz"
+    nib.save(image, path)
+
+    loaded = load_path(path, lazy="auto", lazy_threshold_bytes=1)
+
+    # .nii.gz cannot be mapped; auto stays eager (and still narrows to float32).
+    assert isinstance(loaded.data, np.ndarray)
+    assert loaded.data.dtype == np.float32
 
 
 def test_lazy_load_threshold_scales_with_available_memory():

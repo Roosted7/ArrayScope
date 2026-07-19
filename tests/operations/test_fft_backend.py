@@ -44,7 +44,7 @@ def test_resolve_fft_workers_all_minus_one():
     ids=lambda backend: backend.name,
 )
 @pytest.mark.parametrize(
-    "input_dtype,expected",
+    ("input_dtype", "expected"),
     [
         (np.float32, np.complex64),
         (np.complex64, np.complex64),

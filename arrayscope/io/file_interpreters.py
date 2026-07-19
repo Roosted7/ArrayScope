@@ -601,12 +601,17 @@ class NiftiLoader:
                 "nibabel is required to read NIfTI files.\nInstall it with: pip install nibabel"
             ) from err
 
-        image = nib.load(self.file_path)
-        # float32 keeps the whole downstream pipeline narrow (FFT -> complex64,
-        # LOD pyramid float32); NIfTI voxels are almost always int16/float32 on
-        # disk, so float64 here would only inflate memory 2-4x.
-        data = image.get_fdata(dtype=np.float32)
-        data = remove_trailing_singletons(data)
+        from arrayscope.io.lazy_sources import scaled_nifti_source
+
+        # float32 (complex64 for complex voxels) keeps the whole downstream
+        # pipeline narrow (FFT -> complex64, LOD pyramid float32); NIfTI voxels
+        # are almost always int16/float32 on disk, so float64 here would only
+        # inflate memory 2-4x. Reading the raw samples and scaling ourselves
+        # also avoids get_fdata()'s float64 intermediate (3x the float32 peak)
+        # and keeps eager values identical to the lazy out-of-core source.
+        image = nib.load(self.file_path, mmap=True)
+        source = scaled_nifti_source(image, label=f"nii:{self.file_path.name}")
+        data = source.read_region(tuple(slice(None) for _ in source.shape))
         self.axes = _nifti_axes(image.header, data.shape)
         self.metadata.update(
             {
@@ -822,11 +827,12 @@ def _load_lazy_source(filepath, suffix, *, lazy, lazy_threshold_bytes):
         if lazy is True:
             raise
         return None
+    detected_format = {'.npy': 'numpy', '.nii': 'nifti'}.get(suffix, suffix.lstrip('.'))
     return LoadedPath(
         data=source,
         metadata={
             "source_path": str(filepath),
-            "detected_format": "numpy" if suffix == ".npy" else suffix.lstrip("."),
+            "detected_format": detected_format,
             "shape": tuple(source.shape),
             "dtype": str(source.dtype),
             "lazy": True,
