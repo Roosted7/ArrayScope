@@ -35,9 +35,14 @@ def _refine_scheduling_policy():
 
 
 def _coverage_scheduling_policy():
-    return SimpleNamespace(
-        verdict=SchedulingVerdict(1, SchedulingPhase.COVERAGE, ())
+    policy = SimpleNamespace(
+        verdict=SchedulingVerdict(1, SchedulingPhase.COVERAGE, ()),
+        evidence_pending_calls=[],
     )
+    policy.set_coverage_evidence_pending = (
+        lambda pending: policy.evidence_pending_calls.append(bool(pending))
+    )
+    return policy
 
 
 def _geometry():
@@ -1638,7 +1643,161 @@ def test_wgpu_resident_histogram_evidence_defers_while_interaction_is_active():
     assert submitted == []
     assert resolved == []
     assert session._wgpu_histogram_evidence_deferred is True
+    # The deferral is still phase-1 evidence debt: the coverage barrier arms.
+    assert session.scheduling_policy.evidence_pending_calls == [True]
 
+
+def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_quiet_edge():
+    """Codex review 2026-07-19 finding 1: the coverage-evidence bypass.
+
+    A COLD histogram obligation deferred during interaction is still phase-1
+    evidence debt. Without the barrier, first pixels close COVERAGE
+    evidence-empty; the quiet-edge forced commit then runs in REFINE, where
+    dispatch is gated off, and the rough histogram never runs — violating the
+    progressive contract (phase 1 owns rough evidence; the phase owner is
+    ``ProgressiveSchedulingPolicy``).
+
+    Real phase owner, real deferral bail, real evidence-obligation
+    configuration, real quiet-edge replan. Only the view/backend seam is
+    modeled: dispatch happens iff the obligation is configured required, and
+    evidence rows exist only after a dispatch.
+    """
+
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
+    from arrayscope.render.level_stats import LevelStatsService
+    from arrayscope.render.progressive_scheduling import ProgressiveSchedulingPolicy
+    from arrayscope.window.frame_effects import FramePipelineEffects
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    policy = ProgressiveSchedulingPolicy()
+    assert policy.retarget(("scope", 1), (7,), progressive=True)
+    assert policy.verdict.coverage_open
+
+    class ViewSeam:
+        rendering_capabilities = WGPU_CAPABILITIES
+
+        def __init__(self):
+            self.required_calls = []
+            self.dispatched = False
+            self.accepted = []
+
+        def setResidentHistogramEvidenceRequired(self, required, obligation=None):
+            self.required_calls.append((bool(required), obligation))
+            if required:
+                self.dispatched = True
+
+        def residentHistogramEvidence(self, _payloads):
+            if not self.dispatched:
+                return ()
+            return (
+                SimpleNamespace(
+                    evidence_key=("resident", 7),
+                    source_index=7,
+                    wait_completed=lambda: None,
+                    readback=SimpleNamespace(
+                        resolve=lambda: (
+                            np.asarray([1, 2, 1], dtype=np.uint32),
+                            (-2.0, 4.0),
+                        )
+                    ),
+                ),
+            )
+
+        def acceptResidentHistogramEvidence(self, keys):
+            self.accepted.extend(keys)
+
+    view = ViewSeam()
+    submitted = []
+    win = SimpleNamespace(
+        img_view=view,
+        _viewport_interaction_active=True,
+        kernel=SimpleNamespace(
+            submit=lambda spec, **callbacks: submitted.append((spec, callbacks)) or object()
+        ),
+    )
+    win.win = win
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=3,
+        viewport_revision=5,
+        level_key=("levels", "wgpu-resident"),
+        level_expected_indices=(7,),
+        plan=SimpleNamespace(tiles=(SimpleNamespace(source_index=7),)),
+        scheduling_policy=policy,
+        level_evidence_inflight=False,
+        level_evidence_generation=None,
+        first_pass_histogram_published=False,
+        first_pass_quality="preview",
+        flush_pending=False,
+        final_commit_pending=False,
+        lifecycle=SimpleNamespace(first_pixels_presented=lambda _tiles: True),
+        _interactive_residency_deferred=False,
+        pipeline=SimpleNamespace(
+            counters=SimpleNamespace(interactive_native_deferred=0),
+        ),
+    )
+    renderer = SimpleNamespace(win=win)
+    effects = FramePipelineEffects(renderer, session)
+    service = LevelStatsService()
+    service.win = win
+    service._frame_session = session
+    service._montage_level_tracker = lambda: SimpleNamespace(
+        ensure_expected=lambda *_args: None,
+        update_from_stats=lambda *_args, **_kwargs: None,
+    )
+    service._remember_montage_source_level_stats = lambda *_args: None
+    service._maybe_publish_after_level_evidence = lambda *_args, **_kwargs: None
+
+    # -- gesture: the cold obligation is deferred, no dispatch happens -------
+    effects._configure_wgpu_evidence_obligation()
+    assert view.dispatched is False
+    assert service._queue_montage_level_stats_for_payloads(session, {0: object()}) == 0
+    assert session._wgpu_histogram_evidence_deferred is True
+
+    # First pixels present during the gesture. The deferred cold obligation is
+    # phase-1 evidence debt: the barrier must hold COVERAGE open.
+    assert policy.observe(session.lifecycle) is False
+    assert policy.verdict.coverage_open, (
+        "COVERAGE closed evidence-empty while a cold histogram obligation "
+        "was deferred"
+    )
+
+    # -- quiet edge: the interaction stops and the forced commit re-runs the
+    # evidence configuration and the level-stats producer, exactly as the
+    # real retarget-driven commit does.
+    win._viewport_interaction_active = False
+    quiet_edge_queued = []
+
+    def forced_commit(current, *, force_commit=False):
+        assert force_commit is True
+        effects._configure_wgpu_evidence_obligation()
+        quiet_edge_queued.append(
+            service._queue_montage_level_stats_for_payloads(current, {0: object()})
+        )
+
+    owner = SimpleNamespace(
+        _frame_session=session,
+        _frame_session_is_current=lambda candidate: candidate is session,
+        retarget_frame_pipeline=forced_commit,
+    )
+    assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
+
+    # The histogram dispatches: the obligation is re-installed as required and
+    # the resolve task is actually submitted to the kernel.
+    assert view.required_calls[-1] == (
+        True,
+        ("wgpu-resident-histogram", session.level_key),
+    )
+    assert view.dispatched is True
+    assert quiet_edge_queued == [1]
+    assert len(submitted) == 1
+    assert session._wgpu_histogram_evidence_deferred is False
+
+    # Publication releases the barrier and only then does coverage close.
+    assert policy.observe(session.lifecycle) is False
+    policy.set_coverage_evidence_pending(False)
+    assert policy.observe(session.lifecycle) is True
+    assert policy.verdict.refinement_admissible
 
 
 def test_initial_montage_plan_uses_pending_restored_viewport_range():

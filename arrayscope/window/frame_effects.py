@@ -2012,6 +2012,54 @@ class FramePipelineEffects:
         finally:
             _finish_presentation_commit(renderer)
 
+    def _configure_wgpu_evidence_obligation(self) -> None:
+        """Install, defer, or clear the phase-1 resident-histogram obligation."""
+
+        renderer = self.renderer
+        session = self.session
+        configure_gpu_evidence = getattr(
+            renderer.win.img_view,
+            "setResidentHistogramEvidenceRequired",
+            None,
+        )
+        if not callable(configure_gpu_evidence):
+            return
+        gpu_evidence_required = bool(
+            session.scheduling_policy.verdict.coverage_open
+            and not getattr(session, "first_pass_histogram_published", False)
+        )
+        gpu_evidence_deferred = bool(
+            gpu_evidence_required and interactive_active(renderer)
+        )
+        session._wgpu_histogram_evidence_deferred = gpu_evidence_deferred
+        # The backend evidence key already includes the committed plane
+        # identity, resident frontier, and shader mapping. The phase key
+        # supplies only the semantic population; session/viewport
+        # generations are presentation ownership and must not churn a
+        # content obligation during zoom/pan.
+        evidence_obligation = (
+            "wgpu-resident-histogram",
+            session.level_key,
+        )
+        configure_gpu_evidence(
+            gpu_evidence_required and not gpu_evidence_deferred,
+            evidence_obligation if gpu_evidence_required else None,
+        )
+        if gpu_evidence_deferred:
+            # A deferred COLD obligation is still phase-1 evidence debt.
+            # Without the barrier, first pixels close COVERAGE evidence-empty
+            # and the quiet-edge forced commit lands in REFINE, where
+            # ``gpu_evidence_required`` is gated off — the rough histogram
+            # never dispatches (codex review 2026-07-19, finding 1). The
+            # publication transition in ``_acknowledge_and_publish`` releases
+            # the barrier; a scope retarget resets it.
+            session.scheduling_policy.set_coverage_evidence_pending(True)
+            emit_trace(
+                "wgpu_histogram_deferred",
+                reason="interaction_active",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+            )
+
     def _present_tile_delta(
         self,
         display_image,
@@ -2031,39 +2079,7 @@ class FramePipelineEffects:
     ) -> bool:
         renderer = self.renderer
         session = self.session
-        configure_gpu_evidence = getattr(
-            renderer.win.img_view,
-            "setResidentHistogramEvidenceRequired",
-            None,
-        )
-        if callable(configure_gpu_evidence):
-            gpu_evidence_required = bool(
-                session.scheduling_policy.verdict.coverage_open
-                and not getattr(session, "first_pass_histogram_published", False)
-            )
-            gpu_evidence_deferred = bool(
-                gpu_evidence_required and interactive_active(renderer)
-            )
-            session._wgpu_histogram_evidence_deferred = gpu_evidence_deferred
-            # The backend evidence key already includes the committed plane
-            # identity, resident frontier, and shader mapping. The phase key
-            # supplies only the semantic population; session/viewport
-            # generations are presentation ownership and must not churn a
-            # content obligation during zoom/pan.
-            evidence_obligation = (
-                "wgpu-resident-histogram",
-                session.level_key,
-            )
-            configure_gpu_evidence(
-                gpu_evidence_required and not gpu_evidence_deferred,
-                evidence_obligation if gpu_evidence_required else None,
-            )
-            if gpu_evidence_deferred:
-                emit_trace(
-                    "wgpu_histogram_deferred",
-                    reason="interaction_active",
-                    session_id=int(getattr(session, "session_id", 0) or 0),
-                )
+        self._configure_wgpu_evidence_obligation()
         apply_start = perf_counter()
         if first_display_commit and self._commit_direct_delta(
             display_image,

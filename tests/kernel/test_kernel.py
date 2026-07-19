@@ -616,6 +616,62 @@ def test_handle_cancel_before_start_delivers_cancelled():
     assert stale == [True]
 
 
+def test_cancelling_last_visible_item_releases_parked_optional_work():
+    """Lost-wakeup family #7 (codex review 2026-07-19, reproduced).
+
+    Optional records park behind visible backlog and only a parked-quota
+    release returns them to the ready heap. Completions run that release on
+    every ``_finish``, but a queued/parked visible record removed by
+    cancellation never reaches ``_finish`` — cancelling the final visible
+    item must produce the same wake edge a completion does, or the optional
+    record strands (``wait_idle`` false) until an unrelated quota transition.
+    """
+
+    kernel, backend = make_manual()
+    lane = Lane.VISIBLE_MATERIALIZATION
+    kernel.set_lane_quota(lane, 0)
+    ran = []
+    handle = kernel.submit(TaskSpec(key="vis", fn=lambda: ran.append("vis"), lane=lane))
+    kernel.submit(
+        TaskSpec(key="opt", fn=lambda: ran.append("opt"), lane=Lane.SPECULATIVE_RESIDENCY)
+    )
+    # One pull parks both: the visible item behind its zero lane quota, the
+    # optional item behind the visible backlog.
+    assert backend.take() is None
+    handle.cancel()
+    backend.run_all()
+    assert ran == ["opt"]
+    assert kernel.wait_idle(timeout=1.0)
+    outcomes = dict(drain(kernel))
+    assert outcomes["vis"] == TaskOutcome.CANCELLED
+    assert outcomes["opt"] == TaskOutcome.COMPLETED
+
+
+def test_scope_clear_dropping_last_visible_item_releases_parked_optional_work():
+    """The drop paths share the lost-wakeup edge with cancellation."""
+
+    kernel, backend = make_manual()
+    lane = Lane.VISIBLE_MATERIALIZATION
+    kernel.set_lane_quota(lane, 0)
+    ran = []
+    kernel.submit(
+        TaskSpec(key="vis", fn=lambda: ran.append("vis"), lane=lane, scope="montage:s")
+    )
+    kernel.submit(
+        TaskSpec(
+            key="opt",
+            fn=lambda: ran.append("opt"),
+            lane=Lane.SPECULATIVE_RESIDENCY,
+            scope="warm:s",
+        )
+    )
+    assert backend.take() is None
+    kernel.clear_scope("montage:s")
+    backend.run_all()
+    assert ran == ["opt"]
+    assert kernel.wait_idle(timeout=1.0)
+
+
 def test_cooperative_cancellation_via_evaluation_cancelled():
     kernel, backend = make_manual()
 
@@ -775,6 +831,29 @@ def test_shutdown_cancels_queued_work_instead_of_draining_it(monkeypatch):
     assert start["action"] == "cancel"
     assert start["queued_cancelled"] == 20
     assert start["running_cancelled"] == 2
+
+
+def test_shutdown_delivers_cancelled_completions_for_queued_cleanup_owners():
+    """Shutdown teardown must not skip queued cleanup callbacks silently.
+
+    Every admitted task owes exactly one terminal completion: ``on_stale``
+    owners (in-flight dedup, residency pins) rely on it for cleanup, and
+    deleting queued records at shutdown without delivery skipped them
+    (codex review 2026-07-19, finding 4). The Qt bridge closes before kernel
+    shutdown by design — delivery is the kernel's contract; whether the
+    events are drained afterwards is the consumer's decision.
+    """
+
+    kernel, backend = make_manual()
+    stale = []
+    kernel.submit(
+        TaskSpec(key="queued-cleanup", fn=lambda: None),
+        on_stale=lambda: stale.append("queued-cleanup"),
+    )
+    kernel.shutdown(timeout=0.1)
+    outcomes = dict(drain(kernel))
+    assert outcomes["queued-cleanup"] == TaskOutcome.CANCELLED
+    assert stale == ["queued-cleanup"]
 
 
 def test_shutdown_timeout_is_one_global_deadline_and_lists_running_scopes():

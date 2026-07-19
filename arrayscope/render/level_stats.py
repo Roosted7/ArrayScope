@@ -1095,6 +1095,11 @@ class LevelStatsService:
             return bail("evidence_inflight")
         if _interactive_active(self):
             session._wgpu_histogram_evidence_deferred = True
+            # Phase-1 evidence debt survives the deferral: hold the coverage
+            # barrier so the phase cannot close evidence-empty before the
+            # quiet-edge forced commit re-runs this producer (codex review
+            # 2026-07-19, finding 1).
+            session.scheduling_policy.set_coverage_evidence_pending(True)
             return bail("interaction_active")
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)

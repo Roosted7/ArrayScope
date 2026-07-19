@@ -141,6 +141,10 @@ class Kernel:
         self._handler_error_hook = handler_error_hook or _default_handler_error_hook
         self._shutting_down = False
         self._last_shutdown_diagnostics: tuple[dict[str, object], ...] = ()
+        # Set under the lock when a cancel/drop released parked work; public
+        # entry points flush it into a backend wake after releasing the lock
+        # (the inline backend executes task functions from ``wake``).
+        self._release_wake_pending = False
         self._backend.attach(self)
 
     # ------------------------------------------------------------------ API
@@ -193,6 +197,9 @@ class Kernel:
             self._cond.notify_all()
         if wake:
             self._backend.wake()
+        # Superseding the previous instance may have dropped the last
+        # blocking item while the replacement parked on dependencies.
+        self._flush_release_wake()
         emit_trace(
             "kernel_submit",
             task_seq=int(seq),
@@ -269,6 +276,7 @@ class Kernel:
         with self._lock:
             self._advance_supersession_locked(Supersession(family, value))
             self._cond.notify_all()
+        self._flush_release_wake()
 
     def clear_scope(self, scope: str) -> None:
         """Make every task in ``scope`` (and child scopes) stale.
@@ -288,6 +296,7 @@ class Kernel:
                 elif record.state == _RUNNING and not record.spec.reusable:
                     record.token.cancel()
             self._cond.notify_all()
+        self._flush_release_wake()
 
     def rerank_unstarted_tile_tasks(
         self,
@@ -412,6 +421,16 @@ class Kernel:
                     self._lane(record.spec.lane).cancelled += 1
                     self._decrement_queued_locked(record.spec)
                     self._forget_record_locked(record)
+                    # Every admitted task owes exactly one terminal
+                    # completion: queued ``on_stale`` cleanup owners
+                    # (in-flight dedup, residency pins) silently skipped when
+                    # shutdown deleted their records without delivery (codex
+                    # review 2026-07-19, finding 4). The Qt bridge closes
+                    # before kernel shutdown by design; delivery is the
+                    # kernel's contract, draining is the consumer's.
+                    self._deliver_locked(
+                        record, TaskOutcome.CANCELLED, reason="kernel_shutdown"
+                    )
                     queued_cancelled += 1
                 elif record.state == _RUNNING:
                     running_cancelled += 1
@@ -677,6 +696,8 @@ class Kernel:
         )
         if wake:
             self._backend.wake()
+        # Failing dependents may have dropped the last blocking item.
+        self._flush_release_wake()
 
     def _deliver_locked(
         self, record: _Record, outcome: TaskOutcome, *, value=None, error=None, reason: str = ""
@@ -717,6 +738,7 @@ class Kernel:
                 self._decrement_queued_locked(spec)
                 self._forget_record_locked(record)
                 self._deliver_locked(record, TaskOutcome.CANCELLED, reason="cancelled_before_start")
+                self._wake_after_blocking_removal_locked(spec)
                 continue
             if spec.deadline_ns and perf_counter_ns() > spec.deadline_ns:
                 counters.deadline_missed += 1
@@ -793,6 +815,47 @@ class Kernel:
         self._decrement_queued_locked(record.spec)
         self._forget_record_locked(record)
         self._deliver_locked(record, TaskOutcome.DROPPED, reason=reason)
+        self._wake_after_blocking_removal_locked(record.spec)
+
+    def _wake_after_blocking_removal_locked(self, spec: TaskSpec) -> None:
+        """Removing the last blocking item is the same wake edge a completion is.
+
+        Optional records park behind visible backlog and only
+        ``_release_parked_quota_locked`` returns them to the ready heap.
+        Every completion runs that release in ``_finish``, but a queued or
+        parked visible record removed by cancellation/drop never reaches
+        ``_finish`` — without this edge the parked optional work strands
+        until an unrelated quota transition (lost-wakeup family #7,
+        codex review 2026-07-19; fix conventions in
+        docs/redesign/stale-empty-tiles-2026-07-16.md).
+        """
+
+        if not spec.visible:
+            return
+        if (self._queued_visible + self._running_visible) > 0:
+            return
+        if not self._parked_quota:
+            return
+        released = len(self._parked_quota)
+        self._release_parked_quota_locked()
+        self._release_wake_pending = True
+        emit_trace(
+            "kernel_wake_edge",
+            reason="last_blocking_item_removed",
+            released=int(released),
+            key=spec.key,
+            lane=str(spec.lane),
+        )
+        self._cond.notify_all()
+
+    def _flush_release_wake(self) -> None:
+        """Turn a pending parked-work release into a backend wake, lock-free."""
+
+        with self._lock:
+            pending = self._release_wake_pending
+            self._release_wake_pending = False
+        if pending:
+            self._backend.wake()
 
     def _supersede_instance_locked(self, seq: int) -> None:
         record = self._records.get(seq)
@@ -815,7 +878,9 @@ class Kernel:
                 self._decrement_queued_locked(record.spec)
                 self._forget_record_locked(record)
                 self._deliver_locked(record, TaskOutcome.CANCELLED, reason="cancelled")
+                self._wake_after_blocking_removal_locked(record.spec)
             self._cond.notify_all()
+        self._flush_release_wake()
 
     def _decrement_queued_locked(self, spec: TaskSpec) -> None:
         if spec.visible:
