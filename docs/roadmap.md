@@ -16,6 +16,20 @@ above.
 
 ## Now — one architecture: the GPU tensor engine
 
+**2026-07-19 update:** the renderer decision is made and implemented. The
+wgpu backend (ADR 0057 command protocol) is live behind an explicit pin
+with every payload shape, native GPU overlays incl. glyph text, GPU
+histogram/LOD compute (G6 complete), and opt-in screen presentation
+(bitmap remains default; AUTO = screen on native Wayland). The journey
+matrix reached its first 15/15; wgpu leads fast-scroll. What "Now" means
+until further notice: **promotion evidence** (queue row 3d — shared row-1
+callback bars, dogfood hours, the FFT-scroll headline) on the VisPy
+decision ladder (perf bars → AUTO backend flip at field parity → VisPy
+demotion review at G7 start → removal one release later; PyQtGraph keeps
+the headless role permanently), then **G7 compressed transport**, whose
+decompress-on-GPU form compounds only on wgpu.
+
+
 As of 2026-07-16, `main` **is** the GPU engine (ADR 0055/0056, G1–G5 slice 1
 landed and real-GL verified). The direction record is
 [`proposals/tensor-engine-endpoint.md`](proposals/tensor-engine-endpoint.md):

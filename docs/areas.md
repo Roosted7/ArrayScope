@@ -58,3 +58,27 @@ chokepoints below are where areas meet.
    signatures; then run ring 1 plus the owning area's focused tests, and
    ring 3/4 if the area is display/scheduling
    ([testing/README.md](testing/README.md)).
+
+## Integration workflow rules (earned 2026-07-18/19)
+
+- **Queue conflicts**: resolve per-row taking the newest row-truth, then
+  graft unique passages from the other side — never drop a recorded
+  fact. After ANY resolution, rescan the WHOLE file for conflict
+  markers (two committed-marker incidents; `git diff --check` cannot see
+  markers that are already committed).
+- **Resolution scripts**: write→verify→stage as ONE guarded step; never
+  `git add` after a script that may have failed before writing.
+- **Shell verification chains**: `pytest | tail` hands the pipe's exit
+  code to `&&` — redirect to a log and test `$?` explicitly.
+- **Scheduler-adjacent branches get a codex second-opinion review before
+  the fast-forward**: it caught two real defects (a coverage-evidence
+  bypass and lost-wakeup family member #7, reproduced) that survived
+  deep human review, red-first gates, two full suites, and a green
+  journey matrix.
+- **Parallel landings compose**: three semantic-seam breaks in two days
+  came from textually-clean rebases (arity change, oracle-vs-behavior,
+  dispatch-edge move). The full suite after EVERY fast-forward is the
+  net — focused gates never substitute (an architecture-guard red hid
+  from three focused runs).
+- Background watchers: `pgrep -f` patterns must not match the watcher's
+  own command line (bracket idiom: `[j]ourney`).

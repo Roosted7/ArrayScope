@@ -170,3 +170,32 @@ failure, but it cannot turn a step that exceeded 5 s into a pass.
 - Artifacts convention: `tests/artifacts/<gate>-<date>/` (gitignored);
   diagnostics land as `arrayscope-diagnostics-<stamp>.jsonl` in the repo
   root (gitignored).
+
+## wgpu environment traps (2026-07-18/19, all field-proven)
+
+1. Import rendercanvas ONLY through
+   `arrayscope.display.wgpu_imageview2d.import_qrenderwidget()` — a bare
+   import force-sets `QT_QPA_PLATFORM=xcb` on Wayland hosts at import
+   time, silently flipping the AUTO backend probe for every later window
+   in the process (cross-file test pollution, 2026-07-18).
+2. Every wgpu adapter probe pins
+   `set_instance_extras(backends=["Vulkan"])` BEFORE its first
+   `request_adapter_sync`: an all-backends instance re-inits EGL during
+   GL adapter enumeration and SIGABRTs workers holding vispy GL state
+   (wgpu-hal panic `gles/egl.rs:305`).
+3. `winId() == wl_surface*` is undocumented Qt behavior, pinned per Qt
+   minor by `tests/gpu_interaction/test_wgpu_native_wayland_pin.py`
+   (ring 4) — run it after any Qt upgrade.
+
+## Load-variance measurement protocol (perf claims)
+
+- Attribution profiles (cProfile) may run under load; TIMING claims may
+  not: quiet machine, no concurrent suites/agents (xdist worker storms
+  turned real-Wayland journey rows red spuriously more than once).
+- p95 claims need repeat runs; discard the first run immediately after a
+  matrix/fill (cold caches: a 13.8 s cold fill poisoned a 157 ms sample).
+- Benchmark completion must require equal visual maturity (level
+  convergence), or faster useful work reads as regression — pinned by
+  the 2026-07-19 perf program.
+- py-spy is unusable on this machine (ptrace_scope); use cProfile
+  in-process, GPU timestamp queries, and the trace timeline.
