@@ -367,11 +367,17 @@ class Kernel:
         """
 
         lane = Lane(str(lane))
+        normalized = None if quota is None else max(0, int(quota))
         with self._lock:
-            if quota is None:
+            current = self._lane_quotas.get(lane)
+            if current == normalized and (
+                normalized is not None or lane not in self._lane_quotas
+            ):
+                return
+            if normalized is None:
                 self._lane_quotas.pop(lane, None)
             else:
-                self._lane_quotas[lane] = max(0, int(quota))
+                self._lane_quotas[lane] = normalized
             self._release_parked_quota_locked()
             self._cond.notify_all()
         self._backend.wake()

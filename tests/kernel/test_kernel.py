@@ -565,6 +565,21 @@ def test_zero_lane_quota_parks_and_releases_lane_work():
     assert record.spec.key == "hist"
 
 
+def test_unchanged_lane_quota_does_not_wake_scheduler():
+    kernel, backend = make_manual()
+    wakes = []
+    backend.wake = lambda: wakes.append(True)
+    lane = Lane.VISIBLE_MATERIALIZATION
+
+    kernel.set_lane_quota(lane, 2)
+    kernel.set_lane_quota(lane, 2)
+    assert len(wakes) == 1
+
+    kernel.set_lane_quota(lane, None)
+    kernel.set_lane_quota(lane, None)
+    assert len(wakes) == 2
+
+
 def test_expired_deadline_drops_optional_but_runs_visible():
     kernel, backend = make_manual()
     ran = []
