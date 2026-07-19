@@ -433,8 +433,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         if memory_policy is not None:
             session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
-        lod_swap_ready = session.mark_ladder_swaps_for_viewport()
-        self.retarget_frame_pipeline(session)
+        lod_swap_ready = session.mark_ladder_swaps_for_viewport(refresh_demand=False)
+        self.retarget_frame_pipeline(
+            session,
+            prepared_lod_swap_ready=lod_swap_ready,
+        )
         if presentation_changed or lod_swap_ready:
             self._commit_montage_resize_presentation_retarget(session)
         return True
@@ -1328,8 +1331,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # black/too-coarse tiles improve immediately, while already-presented
         # finer tiles stay put unless visible residency pressure requires a
         # quality demotion. Demand math only; reduction stays on worker lanes.
-        lod_swap_ready = session.mark_ladder_swaps_for_viewport()
-        self.retarget_frame_pipeline(session)
+        lod_swap_ready = session.mark_ladder_swaps_for_viewport(refresh_demand=False)
+        self.retarget_frame_pipeline(
+            session,
+            prepared_lod_swap_ready=lod_swap_ready,
+        )
         required_tile_numbers = frozenset(session.required_tile_numbers())
         # The frame pipeline derives visible work from the lifecycle's
         # required scope. Keep the viewport-only cache/evaluation path on that

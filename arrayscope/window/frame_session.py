@@ -2053,10 +2053,13 @@ class FrameSession:
 
         return render_lod.ingest_lod_demand(self)
 
-    def mark_ladder_swaps_for_viewport(self) -> bool:
+    def mark_ladder_swaps_for_viewport(self, *, refresh_demand: bool = True) -> bool:
         """Re-evaluate LOD demand after a camera-only retarget; see :mod:`render_lod`."""
 
-        return render_lod.mark_ladder_swaps_for_viewport(self)
+        return render_lod.mark_ladder_swaps_for_viewport(
+            self,
+            refresh_demand=bool(refresh_demand),
+        )
 
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         return render_lod.session_resident_levels(self, previous_factor)

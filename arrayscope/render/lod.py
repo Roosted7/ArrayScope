@@ -826,7 +826,7 @@ def plan_materialization(
     )
 
 
-def mark_ladder_swaps_for_viewport(session) -> bool:
+def mark_ladder_swaps_for_viewport(session, *, refresh_demand: bool = True) -> bool:
     """Re-evaluate LOD demand after a camera-only retarget (ADR 0050).
 
     Camera changes never restart evaluation. They only request presentation
@@ -855,7 +855,8 @@ def mark_ladder_swaps_for_viewport(session) -> bool:
         # retarget replan — bumping it here changed priority-retarget
         # work identities without replanning, churning work at idle.
         session.lod_target_revision += 1
-    selected_lod_factor(session)
+    if refresh_demand:
+        selected_lod_factor(session)
     return mark_ladder_swaps_for_current_demand(session)
 
 

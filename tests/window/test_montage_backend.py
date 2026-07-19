@@ -171,6 +171,18 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     assert calls[:2] == ["select", "mark"]
     assert calls.count("commit") == 1
 
+    calls.clear()
+    submitted = FrameRuntimeMixin.retarget_frame_pipeline(
+        runtime,
+        session,
+        prepared_lod_swap_ready=True,
+    )
+
+    assert submitted == 0
+    assert "select" not in calls
+    assert "mark" not in calls
+    assert calls.count("commit") == 1
+
 
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
@@ -3123,7 +3135,7 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
         def apply_montage_presentation(self, session):
             self.commits += 1
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             self.pipeline_retargets += 1
 
     document = ArrayDocument(np.zeros((20, 20, 16), dtype=np.float32))
@@ -3238,7 +3250,7 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             self.pipeline_retargets += 1
 
         def apply_montage_presentation(self, session):
@@ -3403,7 +3415,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
             assert session is self._frame_session
             self.commits += 1
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             assert session is self._frame_session
             self.pipeline_retargets += 1
 
@@ -3609,7 +3621,7 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
             self.retargeted = True
             return (), True
 
-        def mark_ladder_swaps_for_viewport(self):
+        def mark_ladder_swaps_for_viewport(self, **_kwargs):
             return False
 
         pending_rung_materializations = ()
@@ -3640,7 +3652,7 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
             assert session is self._frame_session
             self.commits += 1
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             assert session is self._frame_session
 
         def apply_montage_presentation(self, session):
@@ -3700,7 +3712,7 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
         def _evaluation_colormap_lut(self, view_state, *, shader_display=None):
             return None
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             self.pipeline_retargets += 1
 
         def apply_montage_presentation(self, session):
@@ -3776,7 +3788,7 @@ def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
         def _is_current_frame_session(self, session_id, key):
             return True
 
-        def retarget_frame_pipeline(self, session):
+        def retarget_frame_pipeline(self, session, **_kwargs):
             ordered = prioritize_tiles(
                 session.plan.tiles,
                 context=session.tile_priority_context(),

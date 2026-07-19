@@ -304,15 +304,29 @@ class FrameRuntimeMixin:
         # dispatcher opportunity between replans.
         Qt.QtCore.QTimer.singleShot(1, self, fire)
 
-    def retarget_frame_pipeline(self, session, *, force_commit: bool = False) -> int:
+    def retarget_frame_pipeline(
+        self,
+        session,
+        *,
+        force_commit: bool = False,
+        prepared_lod_swap_ready: bool | None = None,
+    ) -> int:
         if session is None or not self._frame_session_is_current(session):
             return 0
-        render_lod.selected_lod_factor(session)
-        # This is the final demand snapshot used by lifecycle retargeting.
-        # A preceding viewport callback may have marked swaps for an earlier
-        # camera delivery; re-mark against this exact decision so resident
-        # TARGET_READY tiles cannot be stranded with no presentation owner.
-        lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
+        if prepared_lod_swap_ready is None:
+            render_lod.selected_lod_factor(session)
+            # This is the final demand snapshot used by lifecycle retargeting.
+            # A preceding viewport callback may have marked swaps for an earlier
+            # camera delivery; re-mark against this exact decision so resident
+            # TARGET_READY tiles cannot be stranded with no presentation owner.
+            lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
+        else:
+            # Viewport retargets compute demand and mark swaps immediately
+            # before entering the pipeline. Carry that exact result across
+            # this boundary instead of repeating the all-visible-tile scan.
+            # Completion-driven replans omit this argument and refresh from
+            # their live residency/lifecycle epochs above.
+            lod_swap_ready = bool(prepared_lod_swap_ready)
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
