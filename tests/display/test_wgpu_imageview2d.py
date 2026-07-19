@@ -527,6 +527,83 @@ def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
         view.close()
 
 
+def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(
+    qt_app, monkeypatch
+):
+    """Dogfood crash 2026-07-19: pool pressure inside one submission evicted a
+    snapshotted histogram frontier page; the executor's loud KeyError then
+    killed the whole commit mid-batch (ensures applied, present never ran).
+    The commit must instead complete, drop that evidence spec with a loud
+    bail trace, and let the normal re-queue machinery retry the evidence."""
+
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        # One physical complex layer for two planes with evidence required:
+        # tile 1's upload evicts tile 0's page after tile 0's frontier was
+        # snapshotted, inside the same submission.
+        small = WgpuPlaneExecutor(
+            pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device()
+        )
+        view._wgpu_executor = small
+        view._ensure_wgpu_executor = lambda required, **_kwargs: small
+        view.setResidentHistogramEvidenceRequired(True)
+
+        bail_events = []
+        monkeypatch.setattr(
+            "arrayscope.display.wgpu_imageview2d.emit_trace",
+            lambda kind, **fields: bail_events.append((kind, fields)),
+        )
+
+        geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
+        payloads = {
+            0: _payload(
+                0,
+                np.full((16, 24), 3.0 + 4.0j, np.complex64),
+                source_id=("hist-race", 0),
+            ),
+            1: _payload(
+                1,
+                np.full((16, 24), 6.0 + 8.0j, np.complex64),
+                source_id=("hist-race", 1),
+            ),
+        }
+        report = _commit(view, geometry, payloads, levels=(0.0, 10.0))
+
+        # Blast radius: the commit completes with partial residency and only
+        # the evicted frontier's evidence spec is dropped — loudly.
+        assert set(report.presented_tiles) == {1}
+        assert [
+            (kind, fields.get("reason")) for kind, fields in bail_events
+        ] == [("wgpu_histogram_queue_bail", "evicted_in_batch")]
+        (evidence,) = view.residentHistogramEvidence(payloads)
+        assert evidence.tile_number == 1
+        evidence.wait_completed()
+        counts, _bounds = evidence.readback.resolve()
+        assert int(counts.sum()) == 16 * 24
+
+        # The frontier shield is submission-scoped: no permanent pins.
+        remaining = small.page_table.resident_keys()
+        assert remaining
+        assert not any(small.page_table.is_pinned(key) for key in remaining)
+        assert set(small.page_table.eviction_candidates()) == set(remaining)
+
+        # Dropped evidence retries via the normal re-queue machinery: a
+        # commit that fits the pool delivers tile 0's evidence after all.
+        solo_geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
+        report = _commit(view, solo_geometry, {0: payloads[0]}, levels=(0.0, 10.0))
+        assert set(report.presented_tiles) == {0}
+        (retried,) = view.residentHistogramEvidence({0: payloads[0]})
+        assert retried.tile_number == 0
+        retried.wait_completed()
+        counts, _bounds = retried.readback.resolve()
+        assert int(counts.sum()) == 16 * 24
+    finally:
+        view.close()
+
+
 def test_phase1_windowable_rgb_uses_resident_alpha_histogram_signal(qt_app):
     from arrayscope.display.shader_mapping import ShaderDisplayMode, ShaderMapping
 

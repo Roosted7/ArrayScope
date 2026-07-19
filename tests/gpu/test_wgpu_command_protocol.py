@@ -1173,6 +1173,90 @@ def test_per_pool_eviction_respects_budget_and_pins():
         )
 
 
+def test_histogram_frontier_survives_same_submission_eviction_pressure():
+    """A key a later DispatchHistogram samples must not be LRU-evicted by the
+    same submission's ensures: the executor pre-scans the batch and shields
+    the frontier for the submission's duration (2026-07-19 dogfood crash)."""
+
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE),
+        pool_layers={"scalar_r32f": 2},
+        device=_shared_device(),
+    )
+    values = np.linspace(0.0, 1.0, PAGE * PAGE, dtype=np.float32).reshape(PAGE, PAGE)
+    filler = np.zeros((PAGE, PAGE), np.float32)
+
+    def key(doc):
+        return plane_chunk_key(
+            doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F
+        )
+
+    frontier_key, filler_key, pressure_key = key("doc-hf"), key("doc-hb"), key("doc-hc")
+    report = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                EnsureChunkResident(frontier_key, values),
+                EnsureChunkResident(filler_key, filler),
+                # Pool budget 2: this ensure must evict something.  Plain LRU
+                # would take the frontier page (oldest); the shield redirects
+                # the eviction to the unshielded filler page.
+                EnsureChunkResident(pressure_key, filler),
+                DispatchHistogram((frontier_key,), bins=64, lo=0.0, hi=1.0),
+            ),
+        )
+    )
+    assert report.histogram_missing == {}
+    resident = set(executor.page_table.resident_keys())
+    assert frontier_key in resident and pressure_key in resident
+    assert filler_key not in resident
+    counts = np.asarray(report.histograms[3])
+    assert int(counts.sum()) == PAGE * PAGE
+    # The shield is submission-scoped: nothing stays pinned afterwards.
+    assert not any(executor.page_table.is_pinned(k) for k in resident)
+    assert set(executor.page_table.eviction_candidates()) == resident
+
+
+def test_histogram_key_sacrificed_to_pool_pressure_reports_missing_not_abort():
+    """When pool pressure exceeds even the frontier shield, the executor
+    yields the shielded page and marks the histogram partial via
+    ``FrameReport.histogram_missing`` — never a mid-batch raise."""
+
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE),
+        pool_layers={"scalar_r32f": 1},
+        device=_shared_device(),
+    )
+    values = np.linspace(0.0, 1.0, PAGE * PAGE, dtype=np.float32).reshape(PAGE, PAGE)
+
+    def key(doc):
+        return plane_chunk_key(
+            doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F
+        )
+
+    first_key, second_key = key("doc-sa"), key("doc-sb")
+    report = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                EnsureChunkResident(first_key, values),
+                EnsureChunkResident(second_key, values),
+                DispatchHistogram((first_key,), bins=64, lo=0.0, hi=1.0),
+                DispatchHistogram((second_key,), bins=64, lo=0.0, hi=1.0),
+            ),
+        )
+    )
+    assert report.histogram_missing == {2: (first_key,)}
+    assert not np.asarray(report.histograms[2]).any()
+    assert report.histogram_bounds[2] is None
+    assert int(np.asarray(report.histograms[3]).sum()) == PAGE * PAGE
+    assert report.histogram_bounds[3] == (0.0, 1.0)
+    assert executor.page_table.resident_keys() == (second_key,)
+    # Sacrifice released the first pin; the survivor's pin releases with the
+    # submission — pool-exhaustion honesty for OTHER owners is untouched.
+    assert executor.page_table.eviction_candidates() == (second_key,)
+
+
 def test_unbudgeted_pool_rejects_residency_loudly():
     executor = WgpuPlaneExecutor(
         target_size=(PAGE, PAGE), pool_layers={"scalar_r32f": 2}, device=_shared_device()

@@ -361,6 +361,16 @@ class DispatchHistogram:
     finite bounds on the GPU before binning. Scalar pages and the scalar
     level signal packed with windowable RGB ignore ``mode``; complex pages
     use the same component and scale vocabulary as :class:`DisplayMapping`.
+
+    Residency contract (2026-07-19 dogfood crash): keys referenced here must
+    survive the *same submission's* earlier residency work — an executor's
+    own LRU eviction (triggered by this batch's ensures/LOD generation) must
+    shield them for the submission's duration while its pool budget allows.
+    When pool pressure genuinely exceeds that shield, or a key was never
+    resident, the executor skips the key and reports it in
+    :attr:`FrameReport.histogram_missing` — it never fails the submission.
+    Consumers must treat evidence with missing keys as unsatisfied and retry
+    through their normal scheduling machinery.
     """
 
     keys: tuple[DataChunkKey, ...]
@@ -433,7 +443,11 @@ class FrameReport:
     ``uploads`` counts texel uploads performed by THIS submission (the
     zero-upload oracles read it); ``lod_pages_generated`` names pages created
     wholly inside the resident pool; ``histograms`` maps DispatchHistogram
-    order-index → bins array; ``wait_completed`` blocks until the GPU
+    order-index → bins array over the keys that were resident at dispatch;
+    ``histogram_missing`` maps the same order-index → keys the executor had
+    to skip (not resident at dispatch, e.g. sacrificed to pool pressure
+    within this very submission) — evidence with missing keys is partial and
+    must not be consumed as truth; ``wait_completed`` blocks until the GPU
     finished the submitted work — the completion token that page/staging
     recycling requires (renderer gate 3).
     """
@@ -446,6 +460,7 @@ class FrameReport:
     lod_pages_generated: tuple[DataChunkKey, ...] = ()
     histograms: dict[int, object] = field(default_factory=dict)
     histogram_bounds: dict[int, tuple[float, float] | None] = field(default_factory=dict)
+    histogram_missing: dict[int, tuple[DataChunkKey, ...]] = field(default_factory=dict)
     wait_completed: object = None  # callable () -> None
 
 

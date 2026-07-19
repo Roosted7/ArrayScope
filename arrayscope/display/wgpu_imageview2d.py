@@ -34,6 +34,7 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.app.qt_binding import prefer_pyside6
+from arrayscope.core.trace import emit_trace
 
 prefer_pyside6()
 
@@ -1030,6 +1031,23 @@ class WgpuImageView2D(ImageViewShell):
             self._wgpu_last_report_uploads = int(report.uploads)
             for command_index, spec in zip(histogram_indices, histogram_specs):
                 tile, source_index, evidence_key, frontier_keys = spec
+                missing = tuple(report.histogram_missing.get(command_index, ()))
+                if missing:
+                    # Pool pressure inside this very submission evicted part
+                    # of the snapshotted frontier; the partial histogram is
+                    # not honest evidence.  Drop the spec loudly (ground
+                    # rule: silent bails latch the coverage barrier) — it
+                    # stays uninstalled, so the normal evidence machinery
+                    # re-schedules it on the next commit.
+                    emit_trace(
+                        "wgpu_histogram_queue_bail",
+                        reason="evicted_in_batch",
+                        tile=int(tile),
+                        source_index=int(source_index),
+                        missing_keys=len(missing),
+                        frontier_keys=len(frontier_keys),
+                    )
+                    continue
                 self._wgpu_histogram_evidence[evidence_key] = WgpuResidentHistogramEvidence(
                     evidence_key=evidence_key,
                     tile_number=tile,

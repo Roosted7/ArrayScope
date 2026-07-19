@@ -16,7 +16,12 @@ oracles A–G) to the live payload shapes (queue row 3a):
   levels/LUT bypassed), and windowable RGB in ``rgba32float`` (VisPy-faithful
   color RGB + scalar-window signal in alpha). Pool budgets are per
   representation; LRU eviction touches unpinned pages of the same pool only
-  and pinned exhaustion is a loud error.
+  and pinned exhaustion is a loud error.  Keys a submission's own
+  ``DispatchHistogram`` commands reference are shielded from that
+  submission's eviction pressure (pre-scan pin, released before ``submit``
+  returns); when pool pressure exceeds even the shield, the shielded page
+  is yielded and the histogram reports the key via
+  ``FrameReport.histogram_missing`` instead of aborting the batch.
 - **Mapping correctness**: scalar planes ignore complex mapping modes (the
   value *is* the scalar); complex planes keep magnitude/phase/real/imag;
   both apply validated linear/log/symlog scales before levels/LUT mapping;
@@ -99,6 +104,7 @@ _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
 _LOD_GENERATION_PIN_OWNER = "wgpu-lod-generation-sources"
+_HISTOGRAM_SHIELD_PIN_OWNER = "wgpu-histogram-frontier-shield"
 
 
 def _ordered_float32(value: float) -> int:
@@ -825,6 +831,12 @@ class WgpuPlaneExecutor:
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
         self._uploads_total = 0
+        # Submission-scoped histogram frontier shield (2026-07-19 dogfood
+        # crash): keys a DispatchHistogram later in the CURRENT submission
+        # will sample.  Populated by submit()'s pre-scan, pinned as they
+        # become resident, always released before submit() returns.
+        self._histogram_shield_wanted: frozenset[DataChunkKey] = frozenset()
+        self._histogram_shield_pins: set[DataChunkKey] = set()
         self._overlay_geometry: tuple[OverlayPrimitive, ...] = ()
         self._overlay_camera = SetOverlayCamera((0.0, 0.0, 1.0, 1.0))
         self._overlay_buffer_writes_total = 0
@@ -1451,11 +1463,43 @@ class WgpuPlaneExecutor:
                 continue
             self._evict(EvictChunk(key))
             return
+        # Pool pressure inside one submission may exceed the histogram
+        # frontier shield.  Yielding the least-recently-used shield-only pin
+        # keeps eviction honest without turning evidence work into a dead
+        # commit: the skipped key surfaces as FrameReport.histogram_missing
+        # and the consumer retries.  Pins held by any other owner (bound
+        # coverage, LOD sources) stay hard, so genuine exhaustion still
+        # raises loudly below.
+        for key in sorted(
+            (
+                key
+                for key in self._histogram_shield_pins
+                if key.representation == representation
+            ),
+            key=self.page_table.last_use,
+        ):
+            self._histogram_shield_pins.discard(key)
+            self.page_table.replace_pin_set(
+                _HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins
+            )
+            if self.page_table.is_pinned(key):
+                # Another owner still protects this page; restore the shield.
+                self._histogram_shield_pins.add(key)
+                self.page_table.replace_pin_set(
+                    _HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins
+                )
+                continue
+            self._evict(EvictChunk(key))
+            return
         raise RuntimeError(
             f"page pool {representation!r} exhausted and every resident page is pinned"
         )
 
     def _evict(self, cmd: EvictChunk) -> int:
+        # PageTable.unbind purges the key from its stored pin sets; the
+        # executor's shield mirror must not drift or the next replace_pin_set
+        # would name a non-resident key.
+        self._histogram_shield_pins.discard(cmd.key)
         slot = self.page_table.unbind(cmd.key)
         if slot is None:
             return 0
@@ -1493,19 +1537,24 @@ class WgpuPlaneExecutor:
 
     def _histogram(
         self, cmd: DispatchHistogram
-    ) -> tuple[object, tuple[float, float] | None]:
+    ) -> tuple[object, tuple[float, float] | None, tuple[DataChunkKey, ...]]:
         wgpu, d = self._wgpu, self.device
         if cmd.bins > MAX_HISTOGRAM_BINS:
             raise ValueError(
                 f"executor supports up to {MAX_HISTOGRAM_BINS} histogram bins"
             )
         entries = []
+        missing: list[DataChunkKey] = []
         for key in cmd.keys:
             if key.representation == RGB8:
                 raise ValueError(f"histogram over RGB presentation chunk {key}")
             slot = self.page_table.lookup(key)
             if slot is None:
-                raise KeyError(f"histogram over non-resident chunk {key}")
+                # Correct refusal, wrong blast radius as a raise (2026-07-19
+                # dogfood crash): a key sacrificed to pool pressure must mark
+                # this result partial, never abort the whole submission.
+                missing.append(key)
+                continue
             factor = 1 << int(key.lod.level)
             entries.append(
                 (
@@ -1521,7 +1570,7 @@ class WgpuPlaneExecutor:
             )
         n = len(entries)
         if n == 0:
-            return np.zeros(cmd.bins, dtype=np.uint32), None
+            return np.zeros(cmd.bins, dtype=np.uint32), None, tuple(missing)
         dynamic_bounds = cmd.lo is None
         lo = 0.0 if dynamic_bounds else float(cmd.lo)
         hi = 1.0 if dynamic_bounds else float(cmd.hi)
@@ -1678,9 +1727,9 @@ class WgpuPlaneExecutor:
                 timestamp_query_set=timestamp_query_set,
                 timestamp_period_ns=timestamp_period_ns,
                 timestamp_indices=timestamp_indices,
-            ), None
+            ), None, tuple(missing)
         counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
-        return counts, (float(cmd.lo), float(cmd.hi))
+        return counts, (float(cmd.lo), float(cmd.hi)), tuple(missing)
 
     def _present(
         self,
@@ -1734,49 +1783,92 @@ class WgpuPlaneExecutor:
 
         report = FrameReport(generation=submission.generation)
         generated_pages = []
-        for index, cmd in enumerate(submission.commands):
-            if isinstance(cmd, BindContentPlanes):
-                self._bind_planes(cmd)
-            elif isinstance(cmd, EnsureChunkResident):
-                report.uploads += self._ensure(cmd)
-            elif isinstance(cmd, EvictChunk):
-                report.evictions += self._evict(cmd)
-            elif isinstance(cmd, GenerateLodPages):
-                if self._generate_lod_page(cmd):
-                    generated_pages.append(cmd.destination_key)
-            elif isinstance(cmd, UpdateTileInstances):
-                self._set_tiles(cmd.tiles)
-            elif isinstance(cmd, UpdateOverlayGeometry):
-                writes = self._set_overlay_geometry(cmd.primitives)
-                report.overlay_buffer_writes += writes
-                self._overlay_buffer_writes_total += writes
-            elif isinstance(cmd, SetOverlayCamera):
-                self._overlay_camera = cmd
-            elif isinstance(cmd, SetDisplayMapping):
-                self._mapping = cmd.mapping
-                self._write_mapping()
-                self._write_lut(cmd.mapping.lut)
-            elif isinstance(cmd, DispatchHistogram):
-                counts, bounds = self._histogram(cmd)
-                report.histograms[index] = counts
-                report.histogram_bounds[index] = bounds
-            elif isinstance(cmd, PresentGeneration):
-                view = present_to if present_to is not None else self._target.create_view()
-                self._present(
-                    view,
-                    present_format if present_to is not None else "rgba8unorm",
-                    target_size=(
-                        tuple(int(value) for value in present_size)
-                        if present_to is not None and present_size is not None
-                        else self._target_size
-                    ),
-                )
-                report.presented = True
-            else:  # pragma: no cover - protocol/executor version skew guard
-                raise TypeError(f"unknown renderer command {type(cmd).__name__}")
+        # Histogram frontier shield: keys a DispatchHistogram in THIS batch
+        # will sample must survive the batch's own residency churn (the view
+        # snapshots frontiers before the submission is built; an earlier
+        # ensure LRU-evicting one killed a live commit, 2026-07-19).  The
+        # executor sees the whole ordered command tuple up front, so it pins
+        # those keys — already-resident ones now, planned ones as they bind —
+        # and releases every shield pin before returning.
+        self._histogram_shield_wanted = frozenset(
+            key
+            for command in submission.commands
+            if isinstance(command, DispatchHistogram)
+            for key in command.keys
+        )
+        self._histogram_shield_pins = {
+            key for key in self._histogram_shield_wanted if key in self.page_table
+        }
+        if self._histogram_shield_pins:
+            self.page_table.replace_pin_set(
+                _HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins
+            )
+        try:
+            for index, cmd in enumerate(submission.commands):
+                if isinstance(cmd, BindContentPlanes):
+                    self._bind_planes(cmd)
+                elif isinstance(cmd, EnsureChunkResident):
+                    report.uploads += self._ensure(cmd)
+                    self._shield_histogram_key(cmd.key)
+                elif isinstance(cmd, EvictChunk):
+                    report.evictions += self._evict(cmd)
+                elif isinstance(cmd, GenerateLodPages):
+                    if self._generate_lod_page(cmd):
+                        generated_pages.append(cmd.destination_key)
+                    self._shield_histogram_key(cmd.destination_key)
+                elif isinstance(cmd, UpdateTileInstances):
+                    self._set_tiles(cmd.tiles)
+                elif isinstance(cmd, UpdateOverlayGeometry):
+                    writes = self._set_overlay_geometry(cmd.primitives)
+                    report.overlay_buffer_writes += writes
+                    self._overlay_buffer_writes_total += writes
+                elif isinstance(cmd, SetOverlayCamera):
+                    self._overlay_camera = cmd
+                elif isinstance(cmd, SetDisplayMapping):
+                    self._mapping = cmd.mapping
+                    self._write_mapping()
+                    self._write_lut(cmd.mapping.lut)
+                elif isinstance(cmd, DispatchHistogram):
+                    counts, bounds, missing = self._histogram(cmd)
+                    report.histograms[index] = counts
+                    report.histogram_bounds[index] = bounds
+                    if missing:
+                        report.histogram_missing[index] = missing
+                elif isinstance(cmd, PresentGeneration):
+                    view = present_to if present_to is not None else self._target.create_view()
+                    self._present(
+                        view,
+                        present_format if present_to is not None else "rgba8unorm",
+                        target_size=(
+                            tuple(int(value) for value in present_size)
+                            if present_to is not None and present_size is not None
+                            else self._target_size
+                        ),
+                    )
+                    report.presented = True
+                else:  # pragma: no cover - protocol/executor version skew guard
+                    raise TypeError(f"unknown renderer command {type(cmd).__name__}")
+        finally:
+            self._histogram_shield_wanted = frozenset()
+            self._histogram_shield_pins = set()
+            self.page_table.replace_pin_set(_HISTOGRAM_SHIELD_PIN_OWNER, ())
         report.lod_pages_generated = tuple(generated_pages)
         report.wait_completed = self.device.queue.on_submitted_work_done_sync
         return report
+
+    def _shield_histogram_key(self, key: DataChunkKey) -> None:
+        """Pin a freshly-bound key the current submission's histograms need."""
+
+        if (
+            key not in self._histogram_shield_wanted
+            or key in self._histogram_shield_pins
+            or key not in self.page_table
+        ):
+            return
+        self._histogram_shield_pins.add(key)
+        self.page_table.replace_pin_set(
+            _HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins
+        )
 
     # ---- audit oracles ------------------------------------------------------
 

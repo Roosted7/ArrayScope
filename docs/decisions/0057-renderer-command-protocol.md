@@ -5,7 +5,19 @@
   behind the protocol with physical page-table acknowledgements, the LOD
   ladder and montage sessions run on `BindContentPlanes`, and both G6 compute
   consumers (resident-page histograms and reducer-honest resident-page LOD
-  generation) are live. Native flat overlay geometry is also live through
+  generation) are live. Histogram frontier integrity added 2026-07-19 (live
+  dogfood crash: a submission's own ensures LRU-evicted a snapshotted
+  frontier page and the executor's loud `KeyError` killed the whole commit
+  mid-batch): the fix is deliberately **executor-internal**, not new
+  `PinChunks`/`UnpinChunks` protocol commands — an ordered submission already
+  tells the executor everything a later `DispatchHistogram` will sample, so
+  it pre-scans and shields those keys from its own eviction for the
+  submission's duration (scoped pin owner, always released). That keeps the
+  protocol free of residency-pinning plumbing (backend-neutral: an executor
+  without eviction needs nothing) and keeps eviction honest: when pool
+  pressure exceeds the shield, the executor yields the shielded page and
+  reports it in `FrameReport.histogram_missing` instead of failing the
+  submission; consumers treat such evidence as unsatisfied and retry. Native flat overlay geometry is also live through
   `UpdateOverlayGeometry` + the uniform-only `SetOverlayCamera`: ROIs,
   profile cursor geometry, and tile-status geometry draw after tiles in the
   same pass. Overlay text still needs a glyph atlas and remains an explicit
