@@ -114,6 +114,7 @@ def run_profile_montage_workflow(
     *,
     data_path: str | Path = DEFAULT_DATA_PATH,
     backend: str = "pyqtgraph",
+    wgpu_present_method: str = "bitmap",
     jsonl: str | Path | None = None,
     timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
     max_tiles: int | None = None,
@@ -177,6 +178,8 @@ def run_profile_montage_workflow(
         "image_rendering_backend",
         backend_choice.value,
     )
+    wgpu_present_method = str(wgpu_present_method or "bitmap")
+    settings.setValue("wgpu_present_method", wgpu_present_method)
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
 
@@ -310,6 +313,20 @@ def run_profile_montage_workflow(
         )
         win.show()
         _process_events(app, QtCore, count=20)
+        if backend == "wgpu":
+            effective = str(
+                getattr(win.img_view, "wgpuPresentMethod", lambda: "bitmap")()
+            )
+            base_large["wgpu_present_method"] = effective
+            base_scroll["wgpu_present_method"] = effective
+            if effective != wgpu_present_method:
+                # Evidence honesty: a "screen" run must never silently
+                # measure the bitmap path.
+                raise RuntimeError(
+                    f"wgpu present method {wgpu_present_method!r} requested but "
+                    f"the view activated {effective!r} "
+                    f"({win.img_view.wgpuPresentMethodFallbackReason()})"
+                )
         if screenshot_dir is not None and float(screenshot_interval_s) > 0.0:
             visual_probe = _VisualTimelineProbe(
                 QtCore,
@@ -6906,6 +6923,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend", choices=("pyqtgraph", "vispy", "wgpu", "all"), default="pyqtgraph"
     )
+    parser.add_argument(
+        "--wgpu-present-method",
+        choices=("bitmap", "screen"),
+        default="bitmap",
+        help=(
+            "wgpu backend presentation path: bitmap (default) or the "
+            "native-Wayland screen swapchain; ignored by other backends"
+        ),
+    )
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument("--screenshot-dir", default=None, help="Optional directory for phase screenshots")
@@ -7013,6 +7039,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                 run_profile_montage_workflow(
                     data_path=args.data,
                     backend=backend,
+                    wgpu_present_method=str(args.wgpu_present_method),
                     jsonl=jsonl,
                     timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
                     max_tiles=None if args.max_tiles <= 0 else args.max_tiles,

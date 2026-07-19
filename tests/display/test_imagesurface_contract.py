@@ -40,6 +40,20 @@ def _wgpu_adapter_available() -> bool:
         return False
 
 
+def _live_wayland_session() -> bool:
+    """True only when the suite actually runs on the wayland QPA.
+
+    The default ring pins ``QT_QPA_PLATFORM=offscreen`` (tests/conftest.py),
+    so the screen-path twin below runs only in explicit real-Wayland
+    invocations — the same opt-in shape as ``tests/gpu_interaction``.
+    """
+
+    return (
+        os.environ.get("QT_QPA_PLATFORM") == "wayland"
+        and bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+
+
 BACKENDS = (
     "pyqtgraph",
     "vispy",
@@ -47,6 +61,16 @@ BACKENDS = (
         "wgpu",
         marks=pytest.mark.skipif(
             not _wgpu_adapter_available(), reason="no wgpu adapter on this machine"
+        ),
+    ),
+    # Focused twin for the native-Wayland screen present path (queue row 3):
+    # the full contract runs against present_method="screen"; the view factory
+    # fails loudly if the screen path does not activate.
+    pytest.param(
+        "wgpu-screen",
+        marks=pytest.mark.skipif(
+            not (_live_wayland_session() and _wgpu_adapter_available()),
+            reason="wgpu screen path needs a live Wayland session and adapter",
         ),
     ),
 )
@@ -156,7 +180,7 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         if backend == "pyqtgraph":
             layer = view._montage_tile_layer
             resident_before = len(layer.states)
-        elif backend == "wgpu":
+        elif backend in ("wgpu", "wgpu-screen"):
             executor = view._wgpu_executor
             resident_before = len(executor.page_table.resident_keys())
         else:
@@ -170,7 +194,7 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         if backend == "pyqtgraph":
             assert len(layer.states) == resident_before
             assert all(not state.visible and not state.item.isVisible() for state in layer.states.values())
-        elif backend == "wgpu":
+        elif backend in ("wgpu", "wgpu-screen"):
             # Residency (page-table entries) survives; no tile is drawn.
             assert len(executor.page_table.resident_keys()) == resident_before
             assert len(executor._tiles) == 0

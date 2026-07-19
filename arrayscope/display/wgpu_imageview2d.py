@@ -4,7 +4,11 @@ Queue row 3 slice (b): a live rendering backend driven purely by the
 renderer command protocol (ADR 0057).  The widget mirrors the VisPy hybrid
 exactly at the shell seam — PyQtGraph keeps the histogram widget and the
 transparent interaction overlay; a rendercanvas ``QRenderWidget`` in bitmap
-present mode owns the pixels — but every pixel decision is expressed as
+present mode owns the pixels by default, and the ``wgpu_present_method``
+setting can pin the native-Wayland screen path instead
+(:mod:`arrayscope.display.backends.wgpu.screen_canvas`: a paint-less native
+child driving its own swapchain, bypassing rendercanvas and the per-frame
+bitmap readback) — but every pixel decision is expressed as
 :class:`~arrayscope.gpu.command_protocol.FrameSubmission` commands into one
 :class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
 
@@ -228,15 +232,45 @@ class WgpuImageView2D(ImageViewShell):
         self._display_stack.setContentsMargins(0, 0, 0, 0)
         self._display_stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
 
-        # Imported lazily: a QApplication exists by now, so rendercanvas's
-        # import-time environment fiddling cannot change the live Qt platform.
-        QRenderWidget = import_qrenderwidget()
+        # Present-method decision (wgpu_present_method setting).  ``screen``
+        # is explicit opt-in and exists only on a live Wayland session; every
+        # other environment falls back to bitmap with a recorded reason so
+        # offscreen/xcb runs keep working without configuration changes.
+        requested = str(getattr(self, "_wgpu_present_method_requested", "bitmap"))
+        self._wgpu_present_method = "bitmap"
+        self._wgpu_present_method_fallback_reason = ""
+        if requested == "screen":
+            from arrayscope.display.backends.wgpu.screen_canvas import (
+                screen_present_unavailable_reason,
+            )
 
-        self._wgpu_canvas = QRenderWidget(
-            parent=self._display_container,
-            present_method="bitmap",
-            update_mode="ondemand",
-        )
+            reason = screen_present_unavailable_reason()
+            if reason is None:
+                self._wgpu_present_method = "screen"
+            else:
+                self._wgpu_present_method_fallback_reason = reason
+                emit_trace(
+                    "wgpu_screen_present_fallback",
+                    reason=reason,
+                    requested=requested,
+                )
+
+        if self._wgpu_present_method == "screen":
+            # Paint-less native child driving its own swapchain; rendercanvas
+            # is bypassed entirely (no import, no env stomping).
+            from arrayscope.display.backends.wgpu.screen_canvas import WgpuScreenCanvas
+
+            self._wgpu_canvas = WgpuScreenCanvas(parent=self._display_container)
+        else:
+            # Imported lazily: a QApplication exists by now, so rendercanvas's
+            # import-time environment fiddling cannot change the live Qt platform.
+            QRenderWidget = import_qrenderwidget()
+
+            self._wgpu_canvas = QRenderWidget(
+                parent=self._display_container,
+                present_method="bitmap",
+                update_mode="ondemand",
+            )
         self._wgpu_canvas.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._display_stack.addWidget(self._wgpu_canvas)
 
@@ -253,14 +287,25 @@ class WgpuImageView2D(ImageViewShell):
         self.layout.addWidget(self.histogram)
         self._histogram_adapter = PyQtGraphHistogramAdapter(self.histogram)
 
-        # Executor / protocol state.  The context must exist before any draw:
-        # rendercanvas cancels draw events while the canvas has no context
-        # (configuration is still deferred until an executor provides the
-        # device in the first real draw).
+        # Executor / protocol state.  Bitmap: the rendercanvas context must
+        # exist before any draw (rendercanvas cancels draw events while the
+        # canvas has no context; configuration is still deferred until an
+        # executor provides the device in the first real draw).  Screen: the
+        # swapchain context can only exist once the native window is exposed,
+        # so it is created lazily inside the draw.
         self._wgpu_executor = None
         self._wgpu_generation = 0
-        self._wgpu_context = self._wgpu_canvas.get_context("wgpu")
+        if self._wgpu_present_method == "screen":
+            self._wgpu_context = None
+        else:
+            self._wgpu_context = self._wgpu_canvas.get_context("wgpu")
         self._wgpu_context_format = None
+        # Screen-path present-edge diagnostics (Fifo-acquire guard rail).
+        self._wgpu_screen_presents = 0
+        self._wgpu_screen_acquire_ms_last = 0.0
+        self._wgpu_screen_acquire_ms_max = 0.0
+        self._wgpu_screen_present_ms_last = 0.0
+        self._wgpu_screen_present_ms_max = 0.0
         self._wgpu_mapping_state = DisplayMapping(mode="real")
         self._wgpu_committed: dict[str, object] | None = None
         self._wgpu_last_report_uploads = 0
@@ -294,7 +339,14 @@ class WgpuImageView2D(ImageViewShell):
 
         self._wgpu_canvas.request_draw(self._on_wgpu_draw)
 
-    def __init__(self, parent=None, view=None, imageItem=None):
+    def __init__(self, parent=None, view=None, imageItem=None, present_method="bitmap"):
+        from arrayscope.app.settings_state import normalize_wgpu_present_method_choice
+
+        # setupUI (called by the shell constructor) reads the request, so it
+        # must be normalized and stored before super().__init__ runs.
+        self._wgpu_present_method_requested = normalize_wgpu_present_method_choice(
+            present_method
+        ).value
         super().__init__(parent=parent, view=view, imageItem=imageItem)
         self._view_navigation = QtViewNavigationDriver(self)
         self.imageItem.setVisible(False)
@@ -515,6 +567,9 @@ class WgpuImageView2D(ImageViewShell):
             dpr = float(self._wgpu_canvas.devicePixelRatio() or 1.0)
             if dpr != self._wgpu_text_dpr:
                 self._sync_wgpu_overlay_geometry()
+        if self._wgpu_present_method == "screen":
+            self._present_wgpu_frame_to_screen(executor)
+            return
         if self._wgpu_context_format is None:
             preferred = self._wgpu_context.get_preferred_format(None)
             fmt = preferred.removesuffix("-srgb")
@@ -534,6 +589,57 @@ class WgpuImageView2D(ImageViewShell):
             present_format=self._wgpu_context_format,
             present_size=tuple(int(value) for value in self._wgpu_canvas.get_physical_size()),
         )
+
+    def _present_wgpu_frame_to_screen(self, executor) -> None:
+        """Render into the native child's swapchain and present it.
+
+        The draw-ack contract keys on THIS edge: ``context.present()`` is the
+        real swapchain present (``wgpuSurfacePresent``), executed inside the
+        draw callback before ``_on_wgpu_draw`` publishes the physical
+        acknowledgement.  When the surface cannot exist yet (window not
+        exposed, zero pixels) the frame returns without presenting; the
+        canvas's show/resize/paint hooks schedule a fresh draw once pixels
+        are possible, and the ack still publishes so the presentation gate
+        can never stay armed forever on a hidden or headless surface.
+        """
+
+        canvas = self._wgpu_canvas
+        context = canvas.ensure_context(executor.device)
+        if context is None:
+            return
+        if self._wgpu_context is None:
+            self._wgpu_context = context
+            self._wgpu_context_format = canvas.configured_format
+        size = tuple(int(value) for value in canvas.get_physical_size())
+        if size[0] < 1 or size[1] < 1:
+            return
+        # DPR or widget-size change: the context reconfigures the swapchain
+        # only when the physical size actually differs.
+        context.set_physical_size(*size)
+        camera = self._wgpu_camera_command()
+        if camera is None:
+            return
+        acquire_start = perf_counter()
+        texture = context.get_current_texture()
+        acquire_ms = (perf_counter() - acquire_start) * 1000.0
+        self._submit_wgpu(
+            (
+                SetDisplayMapping(self._wgpu_mapping_state),
+                camera,
+                UpdateTileInstances(self._wgpu_camera_tiles(camera)),
+            ),
+            present_to=texture.create_view(),
+            present_format=self._wgpu_context_format,
+            present_size=size,
+        )
+        present_start = perf_counter()
+        context.present()
+        present_ms = (perf_counter() - present_start) * 1000.0
+        self._wgpu_screen_presents = int(self._wgpu_screen_presents) + 1
+        self._wgpu_screen_acquire_ms_last = acquire_ms
+        self._wgpu_screen_acquire_ms_max = max(self._wgpu_screen_acquire_ms_max, acquire_ms)
+        self._wgpu_screen_present_ms_last = present_ms
+        self._wgpu_screen_present_ms_max = max(self._wgpu_screen_present_ms_max, present_ms)
 
     def _wgpu_camera_command(self) -> SetOverlayCamera | None:
         """One camera owner for both tile normalization and overlay uniform."""
@@ -1790,6 +1896,16 @@ class WgpuImageView2D(ImageViewShell):
     def _paints_qgraphics_scene(self) -> bool:
         return False
 
+    def wgpuPresentMethod(self) -> str:
+        """Effective present method ("bitmap" or "screen") after fallback."""
+
+        return str(getattr(self, "_wgpu_present_method", "bitmap"))
+
+    def wgpuPresentMethodFallbackReason(self) -> str:
+        """Why a requested screen path fell back to bitmap ("" when it did not)."""
+
+        return str(getattr(self, "_wgpu_present_method_fallback_reason", "") or "")
+
     def _wgpu_tile_presentation_draw_pending(self) -> bool:
         return int(getattr(self, "_wgpu_tile_presentation_draw_count", 0) or 0) < int(
             getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0
@@ -1834,6 +1950,24 @@ class WgpuImageView2D(ImageViewShell):
                 set(self._wgpu_histogram_evidence)
                 - set(self._wgpu_histogram_evidence_ready)
             ),
+            "wgpu_present_method": self.wgpuPresentMethod(),
+            "wgpu_present_method_fallback_reason": self.wgpuPresentMethodFallbackReason(),
+            "wgpu_screen_present_mode": str(
+                getattr(self._wgpu_canvas, "present_mode", "") or ""
+            ),
+            "wgpu_screen_presents": int(getattr(self, "_wgpu_screen_presents", 0) or 0),
+            "wgpu_screen_acquire_ms_last": float(
+                getattr(self, "_wgpu_screen_acquire_ms_last", 0.0) or 0.0
+            ),
+            "wgpu_screen_acquire_ms_max": float(
+                getattr(self, "_wgpu_screen_acquire_ms_max", 0.0) or 0.0
+            ),
+            "wgpu_screen_present_ms_last": float(
+                getattr(self, "_wgpu_screen_present_ms_last", 0.0) or 0.0
+            ),
+            "wgpu_screen_present_ms_max": float(
+                getattr(self, "_wgpu_screen_present_ms_max", 0.0) or 0.0
+            ),
         }
 
     def presentation_diagnostics(self) -> dict[str, object]:
@@ -1851,6 +1985,14 @@ class WgpuImageView2D(ImageViewShell):
             return
         canvas = getattr(self, "_wgpu_canvas", None)
         if canvas is not None:
+            teardown = getattr(canvas, "teardown", None)
+            if callable(teardown):  # screen path: release the swapchain first
+                try:
+                    teardown()
+                except Exception:
+                    pass
+                self._wgpu_context = None
+                self._wgpu_context_format = None
             try:
                 canvas.close()
             except Exception:

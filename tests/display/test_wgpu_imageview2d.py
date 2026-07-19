@@ -1514,3 +1514,62 @@ def test_axis_inversion_mirrors_content_and_redraws_without_commit(qt_app):
         assert view._wgpu_executor.uploads_total == uploads_before
     finally:
         view.close()
+
+
+# ---- present-method selection (queue row 3 screen experiment) ---------------
+
+
+def test_screen_request_falls_back_to_bitmap_off_wayland(qt_app):
+    """Anywhere the screen path cannot exist, the view keeps the bitmap
+    canvas, records a loud reason, and every commit contract still holds."""
+
+    view = _view_class("wgpu")(present_method="screen")
+    try:
+        assert view.wgpuPresentMethod() == "bitmap"
+        reason = view.wgpuPresentMethodFallbackReason()
+        assert "wayland" in reason
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_present_method"] == "bitmap"
+        assert diagnostics["wgpu_present_method_fallback_reason"] == reason
+        assert diagnostics["wgpu_screen_presents"] == 0
+
+        canvas = np.linspace(0.0, 1.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        report = _present_tiled(
+            view,
+            canvas,
+            histogramData=canvas.copy(),
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+        )
+        assert set(report.presented_tiles) == {0}
+    finally:
+        view.close()
+
+
+def test_present_method_request_normalizes_unknown_values(qt_app):
+    view = _view_class("wgpu")(present_method="garbage")
+    try:
+        # Unknown values normalize to the bitmap default; nothing "fell back".
+        assert view.wgpuPresentMethod() == "bitmap"
+        assert view.wgpuPresentMethodFallbackReason() == ""
+    finally:
+        view.close()
+
+
+def test_factory_routes_present_method_setting_to_wgpu_view(qt_app):
+    from arrayscope.app.settings_state import settings_from_mapping
+    from arrayscope.display.image_view_factory import create_image_view
+
+    settings = settings_from_mapping(
+        {"image_rendering_backend": "wgpu", "wgpu_present_method": "screen"}
+    )
+    messages = []
+    view = create_image_view(settings, notify=messages.append)
+    try:
+        assert view.surface_kind == "wgpu"
+        assert view._wgpu_present_method_requested == "screen"
+        # Offscreen ring: the fallback is loud through the notify channel.
+        if view.wgpuPresentMethod() == "bitmap":
+            assert any("screen presentation unavailable" in m for m in messages)
+    finally:
+        view.close()

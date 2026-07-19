@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import platform
 
-from arrayscope.app.settings_state import ImageRenderingBackendChoice
+from arrayscope.app.settings_state import (
+    ImageRenderingBackendChoice,
+    WgpuPresentMethodChoice,
+)
 from arrayscope.display.backends.pyqtgraph import PyQtGraphSurface
 
 _SOFTWARE_RENDERER_MARKERS = ("llvmpipe", "softpipe", "swrast", "software rasterizer")
@@ -35,11 +38,23 @@ def create_image_view(settings=None, *, notify=None):
         if callable(notify):
             notify(f"Image rendering backend: {choice_value} | {reason}")
     if choice_value == ImageRenderingBackendChoice.WGPU.value:
+        present_method = getattr(
+            settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP
+        )
+        present_method_value = getattr(present_method, "value", present_method)
         try:
             from arrayscope.display.backends.wgpu import WgpuSurface
 
-            view = WgpuSurface()
+            view = WgpuSurface(present_method=present_method_value)
             view._notify_status = notify
+            if (
+                callable(notify)
+                and view.wgpuPresentMethod() != present_method_value
+            ):
+                notify(
+                    "wgpu screen presentation unavailable; using bitmap "
+                    f"({view.wgpuPresentMethodFallbackReason()})"
+                )
             return view
         except Exception as exc:
             if callable(notify):

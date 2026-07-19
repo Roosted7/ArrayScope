@@ -84,6 +84,7 @@ def test_settings_round_trip_defaults_and_values():
             "fft_backend": "pyfftw",
             "fft_workers": "2",
             "image_rendering_backend": "vispy",
+            "wgpu_present_method": "screen",
             "montage_quality_policy": "resident",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
@@ -99,6 +100,7 @@ def test_settings_round_trip_defaults_and_values():
         "fft_backend": "pyfftw",
         "fft_workers": "2",
         "image_rendering_backend": "vispy",
+        "wgpu_present_method": "screen",
         "montage_quality_policy": "resident",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
@@ -110,6 +112,13 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
+    # Screen presentation is explicit opt-in (queue row 3): bitmap default,
+    # unknown values normalize back to bitmap.
+    assert defaults.wgpu_present_method == settings_state.WgpuPresentMethodChoice.BITMAP
+    assert (
+        settings_state.settings_from_mapping({"wgpu_present_method": "unknown"}).wgpu_present_method
+        == settings_state.WgpuPresentMethodChoice.BITMAP
+    )
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO

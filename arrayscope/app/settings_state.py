@@ -39,6 +39,13 @@ class ImageRenderingBackendChoice(Enum):
     WGPU = "wgpu"
 
 
+class WgpuPresentMethodChoice(Enum):
+    BITMAP = "bitmap"
+    # Experimental explicit opt-in only (native-Wayland swapchain; the view
+    # falls back to bitmap loudly anywhere the screen path cannot exist).
+    SCREEN = "screen"
+
+
 class MontageQualityPolicyChoice(Enum):
     NATIVE_ONLY = "native-only"
     RESIDENT = "resident"
@@ -52,6 +59,8 @@ class AppSettingsState:
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
     image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.AUTO
+    # wgpu backend only; screen is an explicit experimental pin (queue row 3).
+    wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
@@ -68,6 +77,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
         image_rendering_backend=normalize_image_rendering_backend_choice(values.get("image_rendering_backend")),
+        wgpu_present_method=normalize_wgpu_present_method_choice(values.get("wgpu_present_method")),
         montage_quality_policy=normalize_montage_quality_policy_choice(values.get("montage_quality_policy")),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
@@ -83,6 +93,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "fft_backend": settings.fft_backend.value,
         "fft_workers": settings.fft_workers.value,
         "image_rendering_backend": settings.image_rendering_backend.value,
+        "wgpu_present_method": settings.wgpu_present_method.value,
         "montage_quality_policy": settings.montage_quality_policy.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
@@ -127,6 +138,16 @@ def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoi
         return ImageRenderingBackendChoice(str(value))
     except Exception:
         return ImageRenderingBackendChoice.AUTO
+
+def normalize_wgpu_present_method_choice(value) -> WgpuPresentMethodChoice:
+    if isinstance(value, WgpuPresentMethodChoice):
+        return value
+    value = getattr(value, "value", value)
+    try:
+        return WgpuPresentMethodChoice(str(value))
+    except Exception:
+        return WgpuPresentMethodChoice.BITMAP
+
 
 def normalize_montage_quality_policy_choice(value) -> MontageQualityPolicyChoice:
     if isinstance(value, MontageQualityPolicyChoice):

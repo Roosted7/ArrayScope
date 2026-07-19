@@ -503,13 +503,25 @@ def _classify_reference_blocked_wgpu_rows(
     wgpu["ok"] = True
 
 
-def _profile_driver_command(*, backend: str, data, stages: str, output: Path) -> list[str]:
+def _profile_driver_command(
+    *,
+    backend: str,
+    data,
+    stages: str,
+    output: Path,
+    wgpu_present_method: str = "bitmap",
+) -> list[str]:
     return [
         sys.executable,
         "-m",
         "arrayscope.tools.profile_montage_workflow",
         "--backend",
         str(backend),
+        # Backend-specific presentation pin; the driver fails loudly if the
+        # requested method cannot activate, so a "screen" matrix can never
+        # silently score bitmap evidence.
+        "--wgpu-present-method",
+        str(wgpu_present_method if backend == "wgpu" else "bitmap"),
         "--data",
         str(data),
         "--session-fixture",
@@ -545,6 +557,9 @@ def run_matrix(args) -> int:
                 data=args.data,
                 stages=stages,
                 output=output,
+                wgpu_present_method=str(
+                    getattr(args, "wgpu_present_method", "bitmap") or "bitmap"
+                ),
             )
             env = dict(os.environ)
             if args.offscreen_smoke:
@@ -613,6 +628,9 @@ def run_matrix(args) -> int:
     report["driver_failures"] = failures
     report["driver_unsupported"] = unsupported_runs
     report["ring"] = "offscreen-smoke" if args.offscreen_smoke else "real-wayland"
+    report["wgpu_present_method"] = str(
+        getattr(args, "wgpu_present_method", "bitmap") or "bitmap"
+    )
     report["ok"] = bool(
         report["ok"]
         and not any("timed_out_after_s" in failure for failure in failures)
@@ -634,6 +652,13 @@ def main(argv=None) -> int:
     run.add_argument("--artifact-dir", required=True)
     run.add_argument("--data", default="data/_WIPDelRec-tT2_20260223150234_14.nii")
     run.add_argument("--offscreen-smoke", action="store_true")
+    run.add_argument(
+        "--wgpu-present-method",
+        choices=("bitmap", "screen"),
+        default="bitmap",
+        dest="wgpu_present_method",
+        help="Presentation path for the wgpu rows (screen needs real Wayland)",
+    )
     args = parser.parse_args(argv)
     if args.command == "run":
         return run_matrix(args)

@@ -14,6 +14,7 @@ from arrayscope.app.settings_state import (
     MemoryProfileChoice,
     MontageQualityPolicyChoice,
     PanelResizeBehavior,
+    WgpuPresentMethodChoice,
     settings_from_mapping,
     settings_to_mapping,
 )
@@ -37,6 +38,8 @@ class WindowMenuMixin:
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
                 "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
+                # Settings-file pin only (like the wgpu backend itself): no menu.
+                "wgpu_present_method": self._settings.value("wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
                 "montage_quality_policy": self._settings.value("montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value),

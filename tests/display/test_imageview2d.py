@@ -55,6 +55,21 @@ def _view_class(backend):
             pytest.skip(f"rendercanvas unavailable: {exc}")
 
         return WgpuImageView2D
+    if backend == "wgpu-screen":
+        pytest.importorskip("wgpu")
+        from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+        def _screen_view(*args, **kwargs):
+            view = WgpuImageView2D(*args, present_method="screen", **kwargs)
+            # The twin exists to test the SCREEN path; a silent bitmap
+            # fallback here would green-light untested code.
+            if view.wgpuPresentMethod() != "screen":
+                reason = view.wgpuPresentMethodFallbackReason()
+                view.close()
+                pytest.fail(f"screen present path did not activate: {reason}")
+            return view
+
+        return _screen_view
     pytest.importorskip("vispy")
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
