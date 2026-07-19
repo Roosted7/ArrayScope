@@ -207,7 +207,10 @@ or every row dies `FileNotFoundError` with `instances: 0`.
   incumbent magnitude (5.5 s vs 5.4–6.3 s in v1/v2/v3/v7) — so the earlier
   guess that the blackout was "likely the identity" of that standing red is
   **refuted**: it is the AUTO-camera demand-freshness lane (queue standing
-  row), not the entry blackout.
+  row), not the entry blackout. **CLOSED 2026-07-19:** adjudicated real
+  latency at the viewport bridge (entry auto-fit camera intent dropped
+  pre-first-commit) and fixed —
+  [demand-freshness-cold-fill-2026-07-19](demand-freshness-cold-fill-2026-07-19.md).
 - **Kernel queued-work shutdown drain fixed 2026-07-19:** shutdown now closes
   admission, cancels queued work plus running tokens, and applies one global
   five-second join deadline with loud live-thread/task-scope diagnostics.

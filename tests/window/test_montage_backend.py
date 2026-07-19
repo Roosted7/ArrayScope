@@ -2525,6 +2525,49 @@ def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
     )
 
 
+def test_pyqtgraph_floor_progress_commits_stay_governed():
+    # A floor-progress commit carries no dirty/pending work at limits
+    # decision time — the build's floor pass materializes preview upserts
+    # during assembly (zoom-in frontier tiles). With unsettled required
+    # targets the commit must still be governed: the ungoverned batch
+    # (max_upserts=0, unbounded_reason="") failed the journey matrix's
+    # bounded-commit oracle (pyqtgraph zoom_in, v19/v11/2026-07-19 v2-v4).
+    from arrayscope.window import frame_effects as montage_commit
+
+    def build_session(unsettled):
+        return SimpleNamespace(
+            display_committed=True,
+            dirty_payloads={},
+            pending_payload_upserts={},
+            pending_removals=set(),
+            has_pending_level_update=lambda: False,
+            has_stale_level_presentations=lambda: False,
+            required_target_unsettled_tiles=lambda: tuple(unsettled),
+        )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=6, byte_cap=4096, budget_ms=2.0
+            )
+        ),
+    )
+    window.win = window
+
+    governed = montage_commit.tile_layer_upsert_limits(window, build_session((3, 4, 5)))
+    assert governed["max_upserts"] == 6
+
+    assert montage_commit.tile_layer_upsert_limits(window, build_session(())) == {}
+
+
 def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
     from arrayscope.window import frame_effects as montage_commit
 

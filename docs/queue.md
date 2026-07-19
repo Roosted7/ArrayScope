@@ -73,6 +73,7 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   ArrayScopeWindow close mid-FFT-evaluation: wgpu real-data close→exit
   0.91 s, vispy 448³ 0.73 s, no shutdown RuntimeWarning, empty
   `last_shutdown_diagnostics`.
+- **PyQtGraph ungoverned early preview commit (intermittent zoom_in red).
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -174,6 +175,20 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   (`tests/artifacts/journey-matrix-2026-07-19-codexfix{,-v2}/`), wgpu
   fast-scroll p95 83.2/88.3 ms on warm repeats — inside the accepted
   77–100 ms band (`tests/artifacts/codex-review-fixes-2026-07-19/`).
+- 2026-07-19 — **Last standing journey-matrix red closed: pyqtgraph
+  cold_fill demand freshness ADJUDICATED = real product latency at the
+  viewport bridge, fixed** (`6fd0c262`,
+  [dossier](redesign/demand-freshness-cold-fill-2026-07-19.
+Evidence: suite
+  2484/0; real-Wayland matrices `journey-matrix-2026-07-19-v1/v2/v3` —
+  v1 15/15, v2 14/15 (only the pre-existing zoom_in
+  unbounded-preview-commit flake, identical in committed v19), v3 in the
+  artifact dir; pyqtgraph cold demand fresh 3.
+md)): the
+  montage-entry auto-fit range change (~170 ms) was dropped by
+  `ViewportBridge` (no committed tiled frame yet — the dead-gesture-edge
+  live path), freezing LOD demand at the entry fit until the profile
+  driver's fit pulse rescued it at 4.
 - 2026-07-19 — **wgpu native overlay TEXT landed — last overlay gap closed,
   screen-present-mode experiment unblocked (ceiling program step 1):**
   CPU-baked glyph atlas (`arrayscope/display/glyph_atlas.py`; QPainter bake

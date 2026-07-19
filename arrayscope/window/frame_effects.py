@@ -4031,6 +4031,14 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
             or getattr(session, "pending_payload_upserts", None)
             or getattr(session, "pending_removals", None)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
+            # Floor-progress commits carry no dirty/pending work at decision
+            # time — the build's floor pass materializes preview upserts
+            # during assembly (frontier tiles at a zoom-in). Unsettled
+            # required targets mean such upserts can appear, and an
+            # ungoverned batch here failed the journey matrix's
+            # bounded-commit oracle (pyqtgraph zoom_in, v19/v11/2026-07-19
+            # v2-v4: max_upserts=0, unbounded_reason="").
+            or getattr(session, "required_target_unsettled_tiles", tuple)()
         )
     ):
         return {}
