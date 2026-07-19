@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+from time import monotonic
 from typing import Protocol
 
 
@@ -29,8 +30,8 @@ class WorkerBackend(Protocol):
     def wake(self) -> None:
         """Signal that ready work may be available. Cheap, thread-safe."""
 
-    def shutdown(self, timeout: float = 5.0) -> None:
-        """Stop pulling work. Running tasks finish; queued tasks stay queued."""
+    def shutdown(self, timeout: float = 5.0) -> tuple[str, ...]:
+        """Stop pulling work and report threads alive after one total deadline."""
 
 
 class ThreadWorkerBackend:
@@ -66,13 +67,18 @@ class ThreadWorkerBackend:
         if kernel is not None:
             kernel._notify_workers()
 
-    def shutdown(self, timeout: float = 5.0) -> None:
+    def shutdown(self, timeout: float = 5.0) -> tuple[str, ...]:
         self._stop.set()
         kernel = self._kernel
         if kernel is not None:
             kernel._notify_workers(all_workers=True)
+        deadline = monotonic() + max(0.0, float(timeout))
         for thread in self._threads:
-            thread.join(timeout=timeout)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        return tuple(thread.name for thread in self._threads if thread.is_alive())
 
     def _worker_loop(self) -> None:
         kernel = self._kernel
@@ -116,8 +122,9 @@ class InlineWorkerBackend:
         finally:
             self._draining = False
 
-    def shutdown(self, timeout: float = 5.0) -> None:
+    def shutdown(self, timeout: float = 5.0) -> tuple[str, ...]:
         self._kernel = None
+        return ()
 
 
 __all__ = [

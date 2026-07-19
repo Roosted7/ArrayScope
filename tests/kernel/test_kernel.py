@@ -717,6 +717,82 @@ def test_shutdown_cancels_running_tokens_and_stops_accepting():
 
     kernel.submit(TaskSpec(key="slow", fn=slow, pass_token=True))
     assert started.wait(timeout=5.0)
-    kernel.shutdown(timeout=0.1)
+    with pytest.warns(RuntimeWarning, match="default"):
+        kernel.shutdown(timeout=0.1)
     release.set()
     assert kernel.submit(TaskSpec(key="late", fn=lambda: None)) is None
+
+
+def test_shutdown_cancels_queued_work_instead_of_draining_it(monkeypatch):
+    traces = []
+    monkeypatch.setattr(
+        "arrayscope.kernel.scheduler.emit_trace",
+        lambda kind, **fields: traces.append((kind, fields)),
+    )
+    kernel = Kernel(ThreadWorkerBackend(workers=2, name="test-kernel-cancel-queue"))
+    started = threading.Barrier(3)
+    ran = []
+
+    def current(token):
+        started.wait(timeout=5.0)
+        while not token.cancelled:
+            time.sleep(0.005)
+        ran.append("current")
+
+    for index in range(2):
+        kernel.submit(
+            TaskSpec(key=("current", index), fn=current, pass_token=True)
+        )
+    started.wait(timeout=5.0)
+    for index in range(20):
+        kernel.submit(
+            TaskSpec(key=("queued", index), fn=lambda: ran.append("queued"))
+        )
+
+    before = time.monotonic()
+    kernel.shutdown(timeout=0.5)
+    elapsed = time.monotonic() - before
+
+    assert elapsed < 0.5
+    assert ran == ["current", "current"]
+    assert kernel.diagnostics().queued == 0
+    start = [fields for kind, fields in traces if kind == "kernel_shutdown"][0]
+    assert start["action"] == "cancel"
+    assert start["queued_cancelled"] == 20
+    assert start["running_cancelled"] == 2
+
+
+def test_shutdown_timeout_is_one_global_deadline_and_lists_running_scopes():
+    backend = ThreadWorkerBackend(workers=4, name="test-kernel-global-deadline")
+    kernel = Kernel(backend)
+    started = threading.Barrier(5)
+    release = threading.Event()
+
+    def uncooperative():
+        started.wait(timeout=5.0)
+        release.wait(timeout=5.0)
+
+    for index in range(4):
+        kernel.submit(
+            TaskSpec(
+                key=("uncooperative", index),
+                fn=uncooperative,
+                scope=f"shutdown:test:{index}",
+            )
+        )
+    started.wait(timeout=5.0)
+
+    before = time.monotonic()
+    with pytest.warns(RuntimeWarning, match="shutdown:test"):
+        kernel.shutdown(timeout=0.08)
+    elapsed = time.monotonic() - before
+
+    assert elapsed < 0.2
+    diagnostics = kernel.last_shutdown_diagnostics
+    assert len(diagnostics) == 4
+    assert {row["scope"] for row in diagnostics} == {
+        f"shutdown:test:{index}" for index in range(4)
+    }
+
+    release.set()
+    backend.shutdown(timeout=1.0)

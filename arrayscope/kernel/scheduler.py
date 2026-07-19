@@ -24,6 +24,7 @@ import heapq
 import itertools
 import threading
 import traceback
+import warnings
 from dataclasses import dataclass, field, replace
 from time import monotonic, perf_counter_ns
 from typing import Any, Callable
@@ -139,6 +140,7 @@ class Kernel:
         self.optional_value_threshold = float(optional_value_threshold)
         self._handler_error_hook = handler_error_hook or _default_handler_error_hook
         self._shutting_down = False
+        self._last_shutdown_diagnostics: tuple[dict[str, object], ...] = ()
         self._backend.attach(self)
 
     # ------------------------------------------------------------------ API
@@ -393,12 +395,77 @@ class Kernel:
             self._completed_keys.add(item.key)
 
     def shutdown(self, timeout: float = 5.0) -> None:
+        shutdown_started = monotonic()
+        queued_cancelled = 0
+        running_cancelled = 0
         with self._lock:
             self._shutting_down = True
-            for record in self._records.values():
+            for record in tuple(self._records.values()):
                 record.token.cancel()
+                if record.state in (_QUEUED, _PARKED_DEPS, _PARKED_QUOTA):
+                    self._lane(record.spec.lane).cancelled += 1
+                    self._decrement_queued_locked(record.spec)
+                    self._forget_record_locked(record)
+                    queued_cancelled += 1
+                elif record.state == _RUNNING:
+                    running_cancelled += 1
+            # Heap/parked entries are indexes over records. Every unstarted
+            # record is gone, so retaining their sequence numbers only makes
+            # post-shutdown diagnostics lie about queued work.
+            self._ready.clear()
+            self._parked_quota.clear()
             self._cond.notify_all()
-        self._backend.shutdown(timeout=timeout)
+        emit_trace(
+            "kernel_shutdown",
+            action="cancel",
+            queued_cancelled=int(queued_cancelled),
+            running_cancelled=int(running_cancelled),
+            timeout_s=float(timeout),
+        )
+        alive_threads = tuple(self._backend.shutdown(timeout=timeout) or ())
+        with self._lock:
+            diagnostics = tuple(
+                {
+                    "task_seq": int(record.seq),
+                    "key": record.spec.key,
+                    "lane": str(record.spec.lane),
+                    "scope": str(record.spec.scope or ""),
+                    "scopes": tuple(record.spec.scope_prefixes()),
+                }
+                for record in self._records.values()
+                if record.state == _RUNNING
+            )
+            self._last_shutdown_diagnostics = diagnostics
+        if alive_threads:
+            elapsed_ms = (monotonic() - shutdown_started) * 1000.0
+            scopes = tuple(
+                row["scope"] or repr(row["key"])
+                for row in diagnostics
+            )
+            emit_trace(
+                "kernel_shutdown",
+                action="timeout",
+                timeout_s=float(timeout),
+                elapsed_ms=float(elapsed_ms),
+                alive_threads=alive_threads,
+                running_tasks=diagnostics,
+            )
+            warnings.warn(
+                "ArrayScope kernel shutdown exceeded "
+                f"{float(timeout):.3f}s; alive_threads={alive_threads!r}; "
+                f"running_scopes={scopes!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            elapsed_ms = (monotonic() - shutdown_started) * 1000.0
+            emit_trace(
+                "kernel_shutdown",
+                action="complete",
+                elapsed_ms=float(elapsed_ms),
+                queued_cancelled=int(queued_cancelled),
+                running_cancelled=int(running_cancelled),
+            )
 
     def wait_idle(self, timeout: float = 10.0) -> bool:
         """Block until no task is queued, dep-parked, quota-parked, or running.
@@ -490,6 +557,11 @@ class Kernel:
     def visible_backlog(self) -> int:
         with self._lock:
             return int(self._queued_visible + self._running_visible)
+
+    @property
+    def last_shutdown_diagnostics(self) -> tuple[dict[str, object], ...]:
+        with self._lock:
+            return tuple(dict(row) for row in self._last_shutdown_diagnostics)
 
     def has_live_task(self, key: object) -> bool:
         with self._lock:
