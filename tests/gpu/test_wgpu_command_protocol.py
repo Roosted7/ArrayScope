@@ -148,6 +148,76 @@ def test_overlay_geometry_is_one_semantic_buffer_and_camera_is_uniform_only():
     assert not np.any(executor.read_target()[..., :3])
 
 
+def test_glyph_quads_sample_the_atlas_pan_with_camera_and_upload_once():
+    """Text gap oracle (queue row 3): atlas-textured quads are real pixels.
+
+    Offscreen GPU ring.  Pins all four red-first properties at the executor
+    seam: glyph pixels appear exactly where the quad says (and vanish on
+    removal), a camera-only pan moves text WITH the image in the same frame,
+    and a frame whose glyphs are cached performs zero atlas uploads.
+    """
+
+    from arrayscope.gpu.command_protocol import UpdateGlyphAtlas
+
+    executor = WgpuPlaneExecutor(
+        target_size=(256, 128),
+        pool_layers={SCALAR_R32F: 1},
+        device=_shared_device(),
+    )
+    atlas = np.zeros((8, 8), np.uint8)
+    atlas[0:4, 0:4] = 255  # one solid 4x4 "glyph" cell
+    glyph = OverlayPrimitive(
+        "glyph_quad",
+        (0.25, 0.5),
+        rgba=(1.0, 0.0, 0.0, 1.0),
+        screen_offset=(0.0, 0.0),
+        size=(4.0, 4.0),
+        uv_rect=(0.0, 0.0, 0.5, 0.5),
+    )
+    first = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                UpdateGlyphAtlas(8, 8, atlas.tobytes()),
+                UpdateOverlayGeometry((glyph,)),
+                SetOverlayCamera((0.0, 0.0, 1.0, 1.0)),
+                PresentGeneration(1),
+            ),
+        )
+    )
+    assert first.glyph_atlas_uploads == 1
+    assert executor.glyph_atlas_uploads_total == 1
+    rows, columns = np.nonzero(executor.read_target()[..., 0] > 150)
+    # Anchor (0.25, 0.5) of a 256x128 target is pixel (64, 64); the quad is
+    # exactly the 4x4 atlas cell, top-left at the anchor (y-down offsets).
+    assert (rows.min(), rows.max()) == (64, 67)
+    assert (columns.min(), columns.max()) == (64, 67)
+    # Only the solid atlas cell may produce ink: 16 texels -> 16 pixels.
+    assert len(rows) == 16
+
+    pan = executor.submit(
+        FrameSubmission(
+            2,
+            (
+                SetOverlayCamera((0.125, 0.0, 1.125, 1.0)),
+                PresentGeneration(2),
+            ),
+        )
+    )
+    assert pan.glyph_atlas_uploads == 0, "cached glyphs must upload nothing"
+    assert pan.overlay_buffer_writes == 0
+    assert executor.glyph_atlas_uploads_total == 1
+    _pan_rows, pan_columns = np.nonzero(executor.read_target()[..., 0] > 150)
+    # 0.125 world of a 1.0-span camera over 256 px = 32 px shift left:
+    # the text moved WITH the image in the same camera-only frame.
+    assert (pan_columns.min(), pan_columns.max()) == (32, 35)
+
+    executor.submit(
+        FrameSubmission(3, (UpdateOverlayGeometry(()), PresentGeneration(3)))
+    )
+    assert not np.any(executor.read_target()[..., :3]), "removal clears the glyphs"
+
+
 pytestmark = pytest.mark.skipif(
     not _adapter_available(), reason="no wgpu adapter on this machine"
 )

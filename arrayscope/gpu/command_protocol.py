@@ -21,6 +21,7 @@ Command → engine-seam mapping (from the endpoint doc):
 ``EvictChunk``            ``PageTable.unbind``
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
 ``UpdateOverlayGeometry`` shell overlay state -> flat primitive buffer
+``UpdateGlyphAtlas``      CPU-baked glyph alpha atlas -> sampled overlay texture
 ``SetOverlayCamera``      world-space overlay camera (uniform-only)
 ``SetDisplayMapping``     shader-mapping uniforms + physical-truth audit
 ``GenerateLodPages``      G6 resident-page reduction
@@ -45,9 +46,16 @@ MAPPING_MODES = ("magnitude", "phase", "real", "imag")
 MAPPING_SCALES = ("linear", "log", "symlog")
 
 #: Flat overlay primitive kinds.  These are draw instructions, never scene
-#: objects: one instance is one line segment, filled world rectangle, or
-#: screen-sized handle quad.
-OVERLAY_PRIMITIVE_KINDS = ("line", "world_rect", "handle_quad")
+#: objects: one instance is one line segment, filled world rectangle,
+#: screen-sized handle quad, screen-sized filled rectangle, or one textured
+#: glyph quad sampling the executor's glyph atlas.
+OVERLAY_PRIMITIVE_KINDS = (
+    "line",
+    "world_rect",
+    "handle_quad",
+    "screen_rect",
+    "glyph_quad",
+)
 
 
 #: Size of a display LUT: 256 RGBA8 entries.
@@ -192,6 +200,14 @@ class OverlayPrimitive:
     ``width``. ``visibility_anchor`` lets cursor geometry disappear when its
     semantic anchor leaves the viewport without rebuilding the instance
     buffer on camera changes.
+
+    ``screen_rect`` and ``glyph_quad`` are screen-space-sized quads anchored
+    at world point ``p0``: ``screen_offset`` is the quad's top-left offset
+    from the anchor in physical pixels (y down) and ``size`` its physical
+    pixel extent — constant on screen under zoom, moving with the image
+    under pan because the anchor is world space.  ``glyph_quad``
+    additionally samples the executor's glyph atlas over normalized
+    ``uv_rect`` ``(u0, v0, u1, v1)`` as an alpha mask on ``rgba``.
     """
 
     kind: str
@@ -200,6 +216,9 @@ class OverlayPrimitive:
     rgba: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     width: float = 1.0
     visibility_anchor: tuple[float, float] | None = None
+    screen_offset: tuple[float, float] = (0.0, 0.0)
+    size: tuple[float, float] = (0.0, 0.0)
+    uv_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
         kind = str(self.kind)
@@ -223,12 +242,24 @@ class OverlayPrimitive:
             anchor = tuple(float(value) for value in anchor)
             if len(anchor) != 2:
                 raise ValueError("overlay visibility anchor must be 2-D")
+        screen_offset = tuple(float(value) for value in self.screen_offset)
+        size = tuple(float(value) for value in self.size)
+        uv_rect = tuple(float(value) for value in self.uv_rect)
+        if len(screen_offset) != 2 or len(size) != 2:
+            raise ValueError("overlay screen offset/size must be 2-D")
+        if len(uv_rect) != 4:
+            raise ValueError("overlay uv rect must contain four values")
+        if kind in ("screen_rect", "glyph_quad") and (size[0] <= 0.0 or size[1] <= 0.0):
+            raise ValueError(f"{kind} primitives need a positive pixel size")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "p0", p0)
         object.__setattr__(self, "p1", p1)
         object.__setattr__(self, "rgba", rgba)
         object.__setattr__(self, "width", width)
         object.__setattr__(self, "visibility_anchor", anchor)
+        object.__setattr__(self, "screen_offset", screen_offset)
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "uv_rect", uv_rect)
 
 
 # ---- commands ---------------------------------------------------------------
@@ -325,6 +356,39 @@ class UpdateOverlayGeometry:
 
 
 @dataclass(frozen=True)
+class UpdateGlyphAtlas:
+    """Replace the executor's one glyph alpha atlas (rare, off the frame path).
+
+    ``data`` is a tightly-packed ``height`` x ``width`` single-channel alpha
+    image (uint8).  The atlas is baked on the CPU (Qt is allowed there — it
+    happens only when new glyphs appear); a frame whose glyphs are all cached
+    must emit NO atlas command, and :attr:`FrameReport.glyph_atlas_uploads`
+    is the oracle that it did not.  Glyph quads reference this atlas via
+    normalized ``uv_rect`` coordinates, so a re-uploaded atlas must come with
+    (or precede) overlay geometry laid out against the same atlas revision.
+    """
+
+    width: int
+    height: int
+    data: bytes
+
+    def __post_init__(self) -> None:
+        width = int(self.width)
+        height = int(self.height)
+        data = bytes(self.data)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"glyph atlas must be non-empty, got {width}x{height}")
+        if len(data) != width * height:
+            raise ValueError(
+                f"glyph atlas data must be {width * height} bytes "
+                f"({width}x{height} alpha8), got {len(data)}"
+            )
+        object.__setattr__(self, "width", width)
+        object.__setattr__(self, "height", height)
+        object.__setattr__(self, "data", data)
+
+
+@dataclass(frozen=True)
 class SetOverlayCamera:
     """Set the sorted world viewport and axis direction for overlay drawing.
 
@@ -414,6 +478,7 @@ Command = (
     | GenerateLodPages
     | UpdateTileInstances
     | UpdateOverlayGeometry
+    | UpdateGlyphAtlas
     | SetOverlayCamera
     | SetDisplayMapping
     | DispatchHistogram
@@ -441,7 +506,9 @@ class FrameReport:
     """What physically happened; the auditable half of the contract.
 
     ``uploads`` counts texel uploads performed by THIS submission (the
-    zero-upload oracles read it); ``lod_pages_generated`` names pages created
+    zero-upload oracles read it); ``glyph_atlas_uploads`` counts glyph-atlas
+    texture writes the same way (zero once every drawn glyph is cached);
+    ``lod_pages_generated`` names pages created
     wholly inside the resident pool; ``histograms`` maps DispatchHistogram
     order-index → bins array over the keys that were resident at dispatch;
     ``histogram_missing`` maps the same order-index → keys the executor had
@@ -456,6 +523,7 @@ class FrameReport:
     presented: bool = False
     uploads: int = 0
     overlay_buffer_writes: int = 0
+    glyph_atlas_uploads: int = 0
     evictions: int = 0
     lod_pages_generated: tuple[DataChunkKey, ...] = ()
     histograms: dict[int, object] = field(default_factory=dict)

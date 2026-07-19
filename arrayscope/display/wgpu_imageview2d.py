@@ -44,6 +44,7 @@ import pyqtgraph as pg
 from arrayscope.core.trace import emit_trace
 from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
+from arrayscope.display.glyph_atlas import GlyphAtlas
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
@@ -63,6 +64,10 @@ from arrayscope.display.shader_mapping import (
     pack_texture_data,
 )
 from arrayscope.display.tile_layout import tile_layout_map, tile_layout_shape
+from arrayscope.display.tile_truth_overlay import (
+    tile_truth_overlay_row_text,
+    tile_truth_overlay_text,
+)
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
@@ -78,6 +83,7 @@ from arrayscope.gpu.command_protocol import (
     SetOverlayCamera,
     SetDisplayMapping,
     TileInstance,
+    UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
 )
@@ -123,6 +129,17 @@ _WGPU_REP_TEXEL_BYTES = {
 def _wgpu_rgba(color, alpha: float = 1.0):
     rgb = tuple(int(value) for value in tuple(color or (255, 255, 0))[:3])
     return tuple(float(value) / 255.0 for value in rgb) + (float(alpha),)
+
+
+#: Native tile-truth label styling — mirrors ``tile_truth_overlay._label_style``
+#: (the QLabel stylesheet used by the raster backends) in linear RGBA.
+_TRUTH_LABEL_FONT_KEY = "monospace"
+_TRUTH_LABEL_FONT_PX = 9
+_TRUTH_LABEL_BACKGROUND = _wgpu_rgba((8, 18, 24), 210.0 / 255.0)
+_TRUTH_LABEL_STYLES = {
+    True: (_wgpu_rgba((34, 211, 238)), _wgpu_rgba((165, 243, 252))),  # draw
+    False: (_wgpu_rgba((245, 158, 11)), _wgpu_rgba((253, 230, 138))),  # load
+}
 
 # One process-wide wgpu device: views (and executor rebuilds on plane growth)
 # share it so the canvas context never needs reconfiguration and tests do not
@@ -261,6 +278,14 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_overlay_geometry: tuple[OverlayPrimitive, ...] = ()
         self._wgpu_overlay_geometry_dirty = True
         self._wgpu_montage_tile_overlays: tuple[object, ...] = ()
+        # Native text: CPU-baked glyph atlas + tile-truth rows drawn as
+        # glyph quads in the same instanced overlay pass (queue row 3 text
+        # gap; Qt only bakes the atlas, never touches the frame path).
+        self._wgpu_glyph_atlas = GlyphAtlas()
+        self._wgpu_glyph_atlas_uploaded_version: int | None = None
+        self._wgpu_tile_truth_rows: tuple[dict[str, object], ...] = ()
+        self._wgpu_tile_truth_visible_rows: tuple[dict[str, object], ...] = ()
+        self._wgpu_text_dpr = 1.0
         self._wgpu_roi_drawing_points: tuple[tuple[float, float], ...] = ()
         self._wgpu_display_shape: tuple[int, int] = (1, 1)
         self._wgpu_last_levels: tuple[float, float] = (0.0, 1.0)
@@ -279,7 +304,7 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_bounds_item.setBrush(QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush))
         self._wgpu_bounds_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._layer_owner.add_bounds_item(self._wgpu_bounds_item)
-        self.view.sigRangeChanged.connect(lambda *_args: self._request_wgpu_canvas_draw())
+        self.view.sigRangeChanged.connect(lambda *_args: self._on_wgpu_range_changed())
         # Axis inversion (flips) changes ViewBox STATE without necessarily
         # changing the range; without this hook a flip only became visible
         # after the next commit (dogfood bug 2026-07-18). Mirrors VisPy.
@@ -332,6 +357,7 @@ class WgpuImageView2D(ImageViewShell):
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
         self._wgpu_overlay_geometry_dirty = True
+        self._wgpu_glyph_atlas_uploaded_version = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
         return self._wgpu_executor
@@ -396,16 +422,31 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._wgpu_executor
         if executor is None:
             return None
+        # Atlas currency is a submission invariant: any frame drawn against a
+        # glyph revision the executor has not seen uploads it in the same
+        # ordered batch, before the present.  Appended (never prepended) so
+        # callers' command indices — the histogram report keys — stay stable.
+        # The version compare is one int; frames with fully cached glyphs
+        # emit no atlas command (FrameReport.glyph_atlas_uploads stays 0).
+        atlas = self._wgpu_glyph_atlas
+        if atlas.version != self._wgpu_glyph_atlas_uploaded_version:
+            commands = (
+                *commands,
+                UpdateGlyphAtlas(atlas.size, atlas.size, atlas.image_bytes()),
+            )
         generation = self._next_wgpu_generation()
         submission = FrameSubmission(generation, (*commands, PresentGeneration(generation)))
         if present_to is None:
-            return executor.submit(submission)
-        return executor.submit(
-            submission,
-            present_to=present_to,
-            present_format=present_format,
-            present_size=present_size,
-        )
+            report = executor.submit(submission)
+        else:
+            report = executor.submit(
+                submission,
+                present_to=present_to,
+                present_format=present_format,
+                present_size=present_size,
+            )
+        self._wgpu_glyph_atlas_uploaded_version = atlas.version
+        return report
 
     # ---- draw-ack discipline -------------------------------------------------
 
@@ -468,6 +509,12 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._wgpu_executor
         if executor is None:
             return
+        # DPR is baked into glyph rasters and label pixel offsets; a monitor
+        # move re-lays the text out at the new density before this frame.
+        if self._wgpu_tile_truth_rows:
+            dpr = float(self._wgpu_canvas.devicePixelRatio() or 1.0)
+            if dpr != self._wgpu_text_dpr:
+                self._sync_wgpu_overlay_geometry()
         if self._wgpu_context_format is None:
             preferred = self._wgpu_context.get_preferred_format(None)
             fmt = preferred.removesuffix("-srgb")
@@ -617,10 +664,37 @@ class WgpuImageView2D(ImageViewShell):
     def montageTileOverlayCount(self) -> int:
         return len(self._wgpu_montage_tile_overlays)
 
+    def setTileTruthOverlayRows(self, rows) -> None:
+        # Native glyph quads replace the inherited QLabel layer entirely:
+        # Qt widgets cannot composite over a native child in screen-present
+        # mode, so truth labels must live inside the wgpu frame.
+        rows = tuple(dict(row) for row in tuple(rows or ()))
+        if rows == self._wgpu_tile_truth_rows:
+            return
+        self._wgpu_tile_truth_rows = rows
+        self._sync_wgpu_overlay_geometry()
+
+    def tileTruthOverlayText(self) -> str:
+        return tile_truth_overlay_text(self._wgpu_tile_truth_visible_rows)
+
+    def _on_wgpu_range_changed(self) -> None:
+        # Truth-label anchors are world-locked, so pans/zooms move them for
+        # free; the resync only rewrites the buffer when the *set* changes
+        # (the too-small-to-read visibility rule flips under zoom).
+        if self._wgpu_tile_truth_rows:
+            self._sync_wgpu_overlay_geometry()
+        self._request_wgpu_canvas_draw()
+
     def _sync_wgpu_overlay_geometry(self) -> None:
         """Rebuild the one flat buffer from shell state after semantic change."""
 
+        evictions_before = self._wgpu_glyph_atlas.evictions
         primitives = self._wgpu_overlay_primitives()
+        if self._wgpu_glyph_atlas.evictions != evictions_before:
+            # The working set overflowed the bounded atlas mid-build and the
+            # cache reset (loudly, via wgpu_glyph_atlas_evicted); rebake once
+            # so every UV references the fresh atlas revision.
+            primitives = self._wgpu_overlay_primitives()
         if primitives == self._wgpu_overlay_geometry:
             return
         self._wgpu_overlay_geometry = primitives
@@ -729,6 +803,119 @@ class WgpuImageView2D(ImageViewShell):
                     )
                 )
 
+        primitives.extend(self._wgpu_tile_truth_primitives())
+
+        return tuple(primitives)
+
+    def _wgpu_tile_truth_primitives(self) -> tuple[OverlayPrimitive, ...]:
+        """Tile-truth labels as atlas-textured glyph quads (screen-sized).
+
+        Mirrors the raster backends' QLabel layer: anchored at each tile's
+        on-screen top-left corner, constant pixel size under zoom, hidden
+        when the tile's screen footprint is too small to read.  All layouts
+        are computed before any UV is emitted so mid-build atlas growth
+        cannot leave earlier glyphs referencing stale normalized coords.
+        """
+
+        rows = self._wgpu_tile_truth_rows
+        self._wgpu_tile_truth_visible_rows = ()
+        if not rows:
+            return ()
+        camera = self._wgpu_camera_command()
+        canvas = getattr(self, "_wgpu_canvas", None)
+        if camera is None or canvas is None:
+            return ()
+        dpr = float(canvas.devicePixelRatio() or 1.0)
+        self._wgpu_text_dpr = dpr
+        try:
+            target_w, target_h = (
+                max(1, int(value)) for value in canvas.get_physical_size()
+            )
+        except Exception:
+            return ()
+        x0, y0, x1, y1 = camera.world_rect
+        pixels_per_world_x = target_w / (x1 - x0)
+        pixels_per_world_y = target_h / (y1 - y0)
+        atlas = self._wgpu_glyph_atlas
+        font_px = max(1, int(round(_TRUTH_LABEL_FONT_PX * dpr)))
+
+        labels = []
+        visible_rows = []
+        for row in rows:
+            tile_rect = row.get("tile_rect")
+            if tile_rect is None:
+                continue
+            x, y, width, height = (float(value) for value in tile_rect)
+            # Same readability rule as TileTruthOverlayLayer.reposition
+            # (16x12 logical px), expressed in physical pixels.
+            if (
+                width * pixels_per_world_x < 16.0 * dpr
+                or height * pixels_per_world_y < 12.0 * dpr
+            ):
+                continue
+            anchor = (
+                x + width if camera.x_inverted else x,
+                y + height if not camera.y_inverted else y,
+            )
+            layout = atlas.layout_text(
+                tile_truth_overlay_row_text(row), _TRUTH_LABEL_FONT_KEY, font_px
+            )
+            labels.append((anchor, bool(row.get("drawable")), layout))
+            visible_rows.append(row)
+        if not labels:
+            return ()
+
+        atlas_size = float(atlas.size)
+        inset = 2.0 * dpr
+        pad = 3.0 * dpr
+        border_px = max(1.0, round(dpr))
+        primitives: list[OverlayPrimitive] = []
+        for anchor, drawable, layout in labels:
+            border_rgba, text_rgba = _TRUTH_LABEL_STYLES[drawable]
+            box_w = layout.width + 2.0 * pad
+            box_h = layout.height + 2.0 * pad
+            primitives.append(
+                OverlayPrimitive(
+                    "screen_rect",
+                    anchor,
+                    rgba=_TRUTH_LABEL_BACKGROUND,
+                    screen_offset=(inset, inset),
+                    size=(box_w, box_h),
+                )
+            )
+            for offset, size in (
+                ((inset, inset), (box_w, border_px)),
+                ((inset, inset + box_h - border_px), (box_w, border_px)),
+                ((inset, inset), (border_px, box_h)),
+                ((inset + box_w - border_px, inset), (border_px, box_h)),
+            ):
+                primitives.append(
+                    OverlayPrimitive(
+                        "screen_rect",
+                        anchor,
+                        rgba=border_rgba,
+                        screen_offset=offset,
+                        size=size,
+                    )
+                )
+            for placement in layout.placements:
+                entry = placement.entry
+                primitives.append(
+                    OverlayPrimitive(
+                        "glyph_quad",
+                        anchor,
+                        rgba=text_rgba,
+                        screen_offset=(inset + pad + placement.x, inset + pad + placement.y),
+                        size=(float(entry.width), float(entry.height)),
+                        uv_rect=(
+                            entry.x / atlas_size,
+                            entry.y / atlas_size,
+                            (entry.x + entry.width) / atlas_size,
+                            (entry.y + entry.height) / atlas_size,
+                        ),
+                    )
+                )
+        self._wgpu_tile_truth_visible_rows = tuple(visible_rows)
         return tuple(primitives)
 
     # ---- tiled presentation --------------------------------------------------

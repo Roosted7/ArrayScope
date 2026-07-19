@@ -444,6 +444,105 @@ def test_loading_and_skipped_tile_geometry_is_in_executor_target(qt_app):
         view.close()
 
 
+def _truth_text_mask(target):
+    # Truth-label glyph ink is #a5f3fc (165, 243, 252); the label border
+    # (#22d3ee, red 34) and tile pixels fail the red-channel bound.
+    pixels = np.asarray(target, dtype=np.int16)
+    return (pixels[..., 0] > 120) & (pixels[..., 1] > 180) & (pixels[..., 2] > 200)
+
+
+def _truth_border_mask(target):
+    # The DRAW-state label border is #22d3ee (34, 211, 238) at full alpha.
+    pixels = np.asarray(target, dtype=np.int16)
+    return (
+        (np.abs(pixels[..., 0] - 34) < 30)
+        & (pixels[..., 1] > 180)
+        & (pixels[..., 2] > 200)
+    )
+
+
+def _label_anchor_px(view, target_shape, world_point):
+    """Expected on-target pixel of a world-space label anchor."""
+
+    camera = view._wgpu_camera_command()
+    x0, y0, x1, y1 = camera.world_rect
+    height, width = target_shape[:2]
+    wx, wy = world_point
+    px = (x1 - wx if camera.x_inverted else wx - x0) / (x1 - x0) * width
+    py = (y1 - wy if not camera.y_inverted else wy - y0) / (y1 - y0) * height
+    return px, py
+
+
+def test_tile_truth_labels_are_native_glyph_pixels_pan_with_camera_and_clear(qt_app):
+    """Queue row 3 text gap: truth labels are executor pixels, not QLabels.
+
+    Offscreen GPU ring.  Red-first oracles: glyph pixels render at the
+    tile's on-screen corner (derived from the shared camera command, the
+    same transform that places tiles) and vanish on removal; a camera-only
+    pan moves the text WITH the image with zero atlas uploads and zero
+    overlay buffer rewrites; zooming out far enough hides unreadable labels.
+    """
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.zeros((64, 64), dtype=np.float32)
+        geometry = _montage_geometry(image.shape, 1, 1, loaded=1)
+        _commit(
+            view,
+            geometry,
+            {0: _payload(0, image, source_id="truth-label-oracle")},
+            levels=(0.0, 1.0),
+        )
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        view.setTileTruthOverlayRows(
+            ({"tile": 0, "drawable": True, "tile_rect": (0.0, 0.0, 64.0, 64.0)},)
+        )
+        _rerender_internal(view)
+        target = view._wgpu_executor.read_target()
+        assert np.count_nonzero(_truth_text_mask(target)) > 80, (
+            "a truth label is many glyph pixels"
+        )
+        border_rows, border_columns = np.nonzero(_truth_border_mask(target))
+        assert len(border_rows), "the label draws its state border"
+        anchor_x, anchor_y = _label_anchor_px(view, target.shape, (0.0, 0.0))
+        # Label box top-left sits at the anchor plus the 2 px inset.
+        assert float(border_columns.min()) == pytest.approx(anchor_x + 2.0, abs=2.0)
+        assert float(border_rows.min()) == pytest.approx(anchor_y + 2.0, abs=2.0)
+        assert view.tileTruthOverlayText().startswith("slot 0  DRAW")
+
+        atlas_uploads = view._wgpu_executor.glyph_atlas_uploads_total
+        overlay_writes = view._wgpu_executor.overlay_buffer_writes_total
+
+        view.getView().setRange(xRange=(-16, 48), yRange=(0, 64), padding=0)
+        _rerender_internal(view)
+        after = view._wgpu_executor.read_target()
+        assert np.count_nonzero(_truth_text_mask(after)) > 80
+        after_rows, after_columns = np.nonzero(_truth_border_mask(after))
+        anchor_x, anchor_y = _label_anchor_px(view, after.shape, (0.0, 0.0))
+        assert float(after_columns.min()) == pytest.approx(anchor_x + 2.0, abs=2.0)
+        assert float(after_rows.min()) == pytest.approx(anchor_y + 2.0, abs=2.0)
+        assert view._wgpu_executor.glyph_atlas_uploads_total == atlas_uploads, (
+            "camera-only frames must never re-upload cached glyphs"
+        )
+        assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes, (
+            "world-anchored text must ride the camera uniform, not a rewrite"
+        )
+
+        # Unreadably small tiles hide their labels (QLabel-layer parity).
+        view.getView().setRange(xRange=(0, 6400), yRange=(0, 6400), padding=0)
+        _rerender_internal(view)
+        assert not np.any(_truth_text_mask(view._wgpu_executor.read_target()))
+        assert view.tileTruthOverlayText() == ""
+
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        view.setTileTruthOverlayRows(())
+        _rerender_internal(view)
+        assert not np.any(_truth_text_mask(view._wgpu_executor.read_target()))
+        assert view.tileTruthOverlayText() == ""
+    finally:
+        view.close()
+
+
 def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
     view = _shown_view(qt_app)
     try:

@@ -58,6 +58,7 @@ from arrayscope.gpu.command_protocol import (
     PresentGeneration,
     SetOverlayCamera,
     SetDisplayMapping,
+    UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
 )
@@ -78,7 +79,15 @@ MAX_HISTOGRAM_BINS = 512
 
 _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 _SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
-_OVERLAY_KIND_INDEX = {"line": 0, "world_rect": 1, "handle_quad": 2}
+_OVERLAY_KIND_INDEX = {
+    "line": 0,
+    "world_rect": 1,
+    "handle_quad": 2,
+    "screen_rect": 3,
+    "glyph_quad": 4,
+}
+#: Bytes per packed overlay instance (must mirror the WGSL Overlay struct).
+_OVERLAY_INSTANCE_BYTES = 96
 
 #: Shader-side representation flags (PlaneInfo.rep / histogram layer entries).
 _REP_INDEX = {
@@ -335,13 +344,20 @@ struct Overlay {
     flags: u32,
     _pad0: u32,
     _pad1: vec2<f32>,
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
+    screen_offset: vec2<f32>,
+    size: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: OverlayCamera;
 @group(0) @binding(1) var<storage, read> overlays: array<Overlay>;
+@group(0) @binding(2) var glyph_atlas: texture_2d<f32>;
 
 struct OverlayOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) @interpolate(flat) textured: u32,
 };
 
 fn world_to_ndc(point: vec2<f32>) -> vec2<f32> {
@@ -359,6 +375,8 @@ fn vs_overlay(
     let primitive = overlays[instance_index];
     let q = quad[vertex_index];
     var ndc: vec2<f32>;
+    var uv = vec2<f32>(0.0, 0.0);
+    var textured = 0u;
     if (primitive.kind == 0u) {
         let a = world_to_ndc(primitive.p0);
         let b = world_to_ndc(primitive.p1);
@@ -369,10 +387,21 @@ fn vs_overlay(
         ndc = mix(a, b, q.x) + normal_ndc * (q.y * 2.0 - 1.0);
     } else if (primitive.kind == 1u) {
         ndc = world_to_ndc(mix(primitive.p0, primitive.p1, q));
-    } else {
+    } else if (primitive.kind == 2u) {
         let center = world_to_ndc(primitive.p0);
         let pixel_offset = (q - vec2<f32>(0.5)) * primitive.width;
         ndc = center + pixel_offset * vec2<f32>(2.0) / camera.target_size;
+    } else {
+        // Screen-space-sized quad anchored at world p0: pixel offsets are
+        // y-down physical pixels, so screen size is constant under zoom
+        // while the anchor pans with the image.
+        let anchor_ndc = world_to_ndc(primitive.p0);
+        let pixels = primitive.screen_offset + q * primitive.size;
+        ndc = anchor_ndc + pixels * vec2<f32>(2.0, -2.0) / camera.target_size;
+        if (primitive.kind == 4u) {
+            uv = mix(primitive.uv0, primitive.uv1, q);
+            textured = 1u;
+        }
     }
     if ((primitive.flags & 1u) != 0u) {
         let anchor_ndc = world_to_ndc(primitive.anchor);
@@ -383,12 +412,26 @@ fn vs_overlay(
     var out: OverlayOut;
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
     out.color = primitive.color;
+    out.uv = uv;
+    out.textured = textured;
     return out;
 }
 
 @fragment
 fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
-    return in.color;
+    var color = in.color;
+    if (in.textured != 0u) {
+        // Nearest texel load: glyph quads are laid out 1:1 with their atlas
+        // cells, so exact loads keep text crisp (no sampler filtering).
+        let dims = textureDimensions(glyph_atlas);
+        let texel = clamp(
+            vec2<i32>(in.uv * vec2<f32>(dims)),
+            vec2<i32>(0),
+            vec2<i32>(dims) - vec2<i32>(1),
+        );
+        color.a = color.a * textureLoad(glyph_atlas, texel, 0).r;
+    }
+    return color;
 }
 """
 
@@ -896,12 +939,22 @@ class WgpuPlaneExecutor:
         )
         self._overlay_cap = 256
         self._overlay_buf = d.create_buffer(
-            size=64 * self._overlay_cap,
+            size=_OVERLAY_INSTANCE_BYTES * self._overlay_cap,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self._overlay_camera_buf = d.create_buffer(
             size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
+        # Glyph atlas: CPU-baked alpha mask sampled by glyph_quad instances.
+        # Replaced wholesale by UpdateGlyphAtlas (rare); starts as one
+        # transparent texel so the bind group is always valid.
+        self._glyph_atlas_size = (1, 1)
+        self._glyph_atlas_tex = d.create_texture(
+            size=(1, 1, 1),
+            format="r8unorm",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        self._glyph_atlas_uploads_total = 0
         self._lut_tex = d.create_texture(
             size=(256, 1, 1),
             format="rgba8unorm",
@@ -1035,6 +1088,7 @@ class WgpuPlaneExecutor:
                             "size": self._overlay_buf.size,
                         },
                     },
+                    {"binding": 2, "resource": self._glyph_atlas_tex.create_view()},
                 ],
             )
             self._overlay_binds[fmt] = bind
@@ -1048,7 +1102,7 @@ class WgpuPlaneExecutor:
             while self._overlay_cap < needed:
                 self._overlay_cap *= 2
             self._overlay_buf = self.device.create_buffer(
-                size=64 * self._overlay_cap,
+                size=_OVERLAY_INSTANCE_BYTES * self._overlay_cap,
                 usage=self._wgpu.BufferUsage.STORAGE | self._wgpu.BufferUsage.COPY_DST,
             )
             self._overlay_binds.clear()
@@ -1059,7 +1113,7 @@ class WgpuPlaneExecutor:
             anchor = primitive.visibility_anchor or (0.0, 0.0)
             packed.extend(
                 struct.pack(
-                    "11f3I2f",
+                    "11f3I2f8f",
                     *primitive.p0,
                     *primitive.p1,
                     *primitive.rgba,
@@ -1070,9 +1124,32 @@ class WgpuPlaneExecutor:
                     0,
                     0.0,
                     0.0,
+                    *primitive.uv_rect,
+                    *primitive.screen_offset,
+                    *primitive.size,
                 )
             )
         self.device.queue.write_buffer(self._overlay_buf, 0, packed)
+        return 1
+
+    def _update_glyph_atlas(self, cmd: UpdateGlyphAtlas) -> int:
+        wgpu, d = self._wgpu, self.device
+        size = (int(cmd.width), int(cmd.height))
+        if size != self._glyph_atlas_size:
+            self._glyph_atlas_tex = d.create_texture(
+                size=(*size, 1),
+                format="r8unorm",
+                usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+            )
+            self._glyph_atlas_size = size
+            self._overlay_binds.clear()
+        d.queue.write_texture(
+            {"texture": self._glyph_atlas_tex},
+            cmd.data,
+            {"bytes_per_row": size[0], "rows_per_image": size[1]},
+            (*size, 1),
+        )
+        self._glyph_atlas_uploads_total += 1
         return 1
 
     def _write_overlay_camera(self, target_size: tuple[int, int]) -> None:
@@ -1848,6 +1925,8 @@ class WgpuPlaneExecutor:
                     writes = self._set_overlay_geometry(cmd.primitives)
                     report.overlay_buffer_writes += writes
                     self._overlay_buffer_writes_total += writes
+                elif isinstance(cmd, UpdateGlyphAtlas):
+                    report.glyph_atlas_uploads += self._update_glyph_atlas(cmd)
                 elif isinstance(cmd, SetOverlayCamera):
                     self._overlay_camera = cmd
                 elif isinstance(cmd, SetDisplayMapping):
@@ -1917,6 +1996,10 @@ class WgpuPlaneExecutor:
     @property
     def plane_lookup_candidates_total(self) -> int:
         return int(self._plane_lookup_candidates_total)
+
+    @property
+    def glyph_atlas_uploads_total(self) -> int:
+        return self._glyph_atlas_uploads_total
 
     @property
     def bound_planes(self) -> tuple:

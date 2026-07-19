@@ -20,8 +20,20 @@
   submission; consumers treat such evidence as unsatisfied and retry. Native flat overlay geometry is also live through
   `UpdateOverlayGeometry` + the uniform-only `SetOverlayCamera`: ROIs,
   profile cursor geometry, and tile-status geometry draw after tiles in the
-  same pass. Overlay text still needs a glyph atlas and remains an explicit
-  queue-row-3 promotion gap. Promotion vs VisPy is evidence-gated there.
+  same pass. Native overlay TEXT landed 2026-07-19 and closed the last
+  overlay gap: `OverlayPrimitive` grew screen-space-sized `screen_rect` /
+  `glyph_quad` kinds (world anchor + physical-pixel offset/size + normalized
+  atlas UVs) and one new `UpdateGlyphAtlas` command carries the CPU-baked
+  glyph alpha atlas (`arrayscope/display/glyph_atlas.py` — QPainter/
+  QFontMetrics bake off the frame path, cached by (font-key, pixel-size,
+  glyph), DPR in the cache key, bounded growth with loud
+  `wgpu_glyph_atlas_evicted` eviction). Glyph quads join the SAME flat
+  instanced overlay pipeline (one extra sampled `r8unorm` binding, nearest
+  `textureLoad` for crispness); `FrameReport.glyph_atlas_uploads` is the
+  zero-per-frame-upload oracle. Tile-truth labels render natively in the
+  wgpu view (QLabels replaced — Qt widgets cannot composite over a native
+  child), which unblocks the screen-present-mode experiment. Promotion vs
+  VisPy is evidence-gated in queue row 3.
 - **Date:** 2026-07-18
 - **Branch note:** authored on `codex/wgpu-renderer-gate-b`; renumber on
   integration if a parallel branch claimed 0057.
@@ -47,10 +59,11 @@ second one.
 1. **`arrayscope/gpu/command_protocol.py` is the only seam renderers
    implement.** Frozen command dataclasses — `EnsureChunkResident`,
    `EvictChunk`, `GenerateLodPages`, `UpdateTileInstances`,
-   `UpdateOverlayGeometry`, `SetOverlayCamera`, `SetDisplayMapping`,
-   `DispatchHistogram`, `PresentGeneration` — carried by an ordered
-   `FrameSubmission`, answered by an auditable `FrameReport` (uploads,
-   overlay-buffer writes, evictions, histogram results, completion token). Commands speak ADR
+   `UpdateOverlayGeometry`, `UpdateGlyphAtlas`, `SetOverlayCamera`,
+   `SetDisplayMapping`, `DispatchHistogram`, `PresentGeneration` — carried
+   by an ordered `FrameSubmission`, answered by an auditable `FrameReport`
+   (uploads, overlay-buffer writes, glyph-atlas uploads, evictions,
+   histogram results, completion token). Commands speak ADR
    0055/0056 identities (`DataChunkKey`, `ChunkLod`) and normalized
    geometry; nothing in the protocol may name WGSL, GL objects, Qt, Datoviz
    IDs, or one-texture-per-tile.
