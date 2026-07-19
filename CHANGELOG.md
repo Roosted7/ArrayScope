@@ -14,6 +14,12 @@ This file records user-visible release changes. Detailed development history and
   new `installers` GitHub Actions workflow builds all of them on demand and
   attaches them to published releases. Launching a bundle without arguments
   opens a file dialog. Python users keep the usual `pip/pipx/uv` routes.
+- The README's feature animations are now produced by an automated pipeline
+  (`tools/demo_recorder.py`): scripted walkthroughs of the real application
+  recorded headless with a clearly visible synthetic cursor and captions,
+  encoded as optimized GIF, animated AVIF, and MP4 under `docs/media/`. A CI
+  smoke test records every scenario so UI changes that would break the demos
+  fail loudly. The old hand-recorded GIFs under `docs/images/` are gone.
 
 ### Fixed
 

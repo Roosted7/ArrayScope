@@ -18,6 +18,9 @@ Organized by the question you're asking. Stop at the first useful level.
   owner per decision, no silent fallbacks, repro-first.
 - [Testing](testing/README.md) — the rings, what runs in CI vs by hand, the
   defect→ring law, environment facts and harness commands.
+- [README demo media](media/README.md) — the front-page animations are
+  rendered by `tools/demo_recorder.py`, not screen-recorded; how to
+  regenerate them and what keeps the scenarios from rotting.
 - [Areas](areas.md) — how to split parallel work, the chokepoint files, ADR
   numbering and integration conventions.
 - [Graveyard](graveyard.md) — rejected approaches with evidence. **Read

@@ -9,7 +9,12 @@ ArrayScope is a Python/Qt viewer for quickly understanding n-dimensional NumPy a
 
 The current repository is the ArrayScope `0.8.0` release-candidate line. It has moved well beyond the original lightweight ndslice viewer: the implementation now contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
 
-![ArrayScope showcase](docs/images/showcase.gif)
+<picture>
+  <source srcset="docs/media/showcase.avif" type="image/avif">
+  <img src="docs/media/showcase.gif" alt="ArrayScope walkthrough: hovering values, scrubbing dimensions, re-mapping image axes, zooming and panning" width="880">
+</picture>
+
+<sub>Every demo on this page is [rendered automatically](docs/media/README.md) from a scripted walkthrough of the real application — higher-quality MP4: [showcase.mp4](docs/media/showcase.mp4).</sub>
 
 ## Start here
 
@@ -71,11 +76,23 @@ See [Invocation](docs/invocation.md) for all routes and the handoff efficiency c
 - View live profiles and ROI statistics/histograms.
 - Adjust window/level from the histogram, use automatic levels, or enter values directly.
 
+<picture>
+  <source srcset="docs/media/roi.avif" type="image/avif">
+  <img src="docs/media/roi.gif" alt="Drawing ROIs, live statistics and histograms, and pointer-following line profiles" width="880">
+</picture>
+
+<sub>[roi.mp4](docs/media/roi.mp4)</sub>
+
 ### Transform data without replacing the source
 
 The operation stack supports reversible, ordered steps such as crop, reverse, reductions, centered FFT/IFFT, FFT shift, and complex-axis conversion. The document keeps the source array and operation history separate; runtime optimization does not rewrite the visible operation stack.
 
-![Centered FFT](docs/images/fft.gif)
+<picture>
+  <source srcset="docs/media/fft.avif" type="image/avif">
+  <img src="docs/media/fft.gif" alt="Adding centered FFT steps, viewing magnitude on a log scale and phase, and toggling a step in the operation stack" width="880">
+</picture>
+
+<sub>[fft.mp4](docs/media/fft.mp4)</sub>
 
 ### Work with larger views
 
@@ -85,6 +102,13 @@ The operation stack supports reversible, ordered steps such as crop, reverse, re
 - Runtime memory policy, latency feedback, a resource governor, and diagnostics expose why work was admitted, delayed, degraded, or refused.
 - PyQtGraph is the default backend. VisPy provides experimental shader windowing and persistent tiled residency.
 
+<picture>
+  <source srcset="docs/media/montage.avif" type="image/avif">
+  <img src="docs/media/montage.gif" alt="Typing ':' to montage a dimension, tiles rendering progressively, and zooming into the montage" width="880">
+</picture>
+
+<sub>[montage.mp4](docs/media/montage.mp4)</sub>
+
 These mechanisms substantially improve bounded behavior. The unified frame planner, work-graph
 admission, backend composition, and the v32 render-orchestrator extraction are in place; the live
 plan (token unification, backend de-duplication, hardware evidence) is in the
@@ -93,8 +117,6 @@ plan (token unification, backend de-duplication, hardware evidence) is in the
 ### Export and load data
 
 Video/PNG-frame export is available from a dimension action.
-
-![Video export](docs/images/video_export.gif)
 
 Supported command-line inputs include:
 

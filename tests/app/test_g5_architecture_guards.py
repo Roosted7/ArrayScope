@@ -46,6 +46,7 @@ def test_render_and_gate_paths_cannot_resurrect_frame_session_pending_queue():
         ROOT / "tools" / "probes" / "verify_scrub_fastpath.py",
         ROOT / "tools" / "probes" / "verify_stale.py",
         ROOT / "tools" / "ui_gallery.py",
+        ROOT / "tools" / "demo_recorder.py",
     )
     forbidden_helpers = {
         "next_tile",
