@@ -912,6 +912,38 @@ def test_presentation_commit_replays_extent_camera_retarget_after_guard_release(
     assert scheduled == [1]
 
 
+def test_presentation_commit_holds_camera_replay_while_coverage_is_open():
+    """Phase 1 completes before the camera rescope replays (two-phase contract)."""
+
+    from arrayscope.window.frame_effects import _finish_presentation_commit
+
+    scheduled = []
+    session = SimpleNamespace(
+        scheduling_policy=SimpleNamespace(
+            verdict=SimpleNamespace(coverage_open=True),
+        ),
+    )
+    renderer = SimpleNamespace(
+        _montage_presentation_commit_active=True,
+        _frame_viewport_retarget_after_commit=True,
+        _frame_session=session,
+        _schedule_frame_viewport_update=lambda *, delay_ms=None: scheduled.append(delay_ms),
+    )
+
+    _finish_presentation_commit(renderer)
+
+    assert renderer._montage_presentation_commit_active is False
+    assert renderer._frame_viewport_retarget_after_commit is True
+    assert scheduled == []
+
+    session.scheduling_policy.verdict = SimpleNamespace(coverage_open=False)
+    renderer._montage_presentation_commit_active = True
+    _finish_presentation_commit(renderer)
+
+    assert renderer._frame_viewport_retarget_after_commit is False
+    assert scheduled == [1]
+
+
 def test_chunk_summary_levels_share_complex_shader_mapping():
     values = np.asarray(
         [[1.0 + 10.0j, 2.0 + 20.0j], [3.0 + 30.0j, 4.0 + 40.0j]],

@@ -419,6 +419,24 @@ class FrameRuntimeMixin:
         session._interactive_residency_deferred = False
         session._wgpu_histogram_evidence_deferred = False
         self._montage_native_deferred_replanned = deferred_generation
+        if histogram_deferred:
+            # The wgpu resident-histogram evidence queue is normally pumped
+            # from a commit's backend acknowledgement.  A deferral at the
+            # fill tail has no further commits — the coverage plan is empty
+            # while the evidence barrier is latched — so the settle edge
+            # must pump the queue directly or the barrier latches with an
+            # idle kernel (deterministic offscreen wgpu cold-fill stall,
+            # 2026-07-19: dispatch deferred interaction_active, zero
+            # commits afterward, 212 targets unsettled).
+            acknowledged = dict(
+                getattr(
+                    getattr(session, "tile_presentation_state", None),
+                    "payloads",
+                    {},
+                )
+                or {}
+            )
+            self._queue_montage_level_stats_for_payloads(session, acknowledged)
         self.retarget_frame_pipeline(
             session,
             force_commit=bool(residency_deferred or histogram_deferred),

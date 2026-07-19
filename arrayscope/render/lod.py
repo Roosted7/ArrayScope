@@ -51,6 +51,7 @@ from arrayscope.display.pyramid import (
     plan_source_grid_pages,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, TexturePlaneKind
+from arrayscope.core.trace import emit_trace
 from arrayscope.gpu import DataChunkKey
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
@@ -494,7 +495,35 @@ def selected_lod_factor(session) -> int:
             previous_factor=previous,
             deferred_reason=session.lod_native_reason,
         )
+    _trace_demand_transition(session)
     return int(session.lod_policy_decision.applied_factor)
+
+
+def _trace_demand_transition(session) -> None:
+    """Emit one ``lod_demand`` trace per desired-level transition.
+
+    The journey demand-freshness oracle samples session demand on a timeline
+    that starves under fill load; this trace is the ground-truth timestamp of
+    the transition itself (the 2026-07-19 pyqtgraph cold_fill adjudication
+    had to bracket it between unrelated events).
+    """
+
+    demand = session.lod_policy_decision.demand
+    level = int(demand.desired_level)
+    previous = getattr(session, "_traced_desired_level", None)
+    if previous == level:
+        return
+    session._traced_desired_level = level
+    texels_x, texels_y = demand.source_texels_per_pixel_xy
+    emit_trace(
+        "lod_demand",
+        session_id=int(getattr(session, "session_id", 0) or 0),
+        level=level,
+        previous_level=previous,
+        factor=int(demand.desired_factor),
+        texels_x=float(texels_x),
+        texels_y=float(texels_y),
+    )
 
 
 def _demand_key_sig(demand) -> tuple:

@@ -920,7 +920,15 @@ def test_tiled_single_scene_range_change_schedules_frame_viewport_update(qt_app,
     assert scheduled == [("frame", 0)]
 
 
-def test_uncommitted_preview_range_does_not_retarget_viewport(qt_app, monkeypatch):
+def test_uncommitted_montage_range_defers_retarget_to_commit_teardown(qt_app, monkeypatch):
+    """Pre-commit camera intent is deferred, never dropped.
+
+    The montage-entry auto-fit range change arrives before any committed
+    tiled frame; discarding it froze session.view_range (and LOD demand) at
+    the stale entry fit until an unrelated retarget rescued it — the
+    2026-07-19 pyqtgraph cold_fill demand-freshness red.
+    """
+
     from pyqtgraph.Qt import QtCore
 
     import arrayscope.window.viewport_bridge as viewport_bridge
@@ -934,6 +942,7 @@ def test_uncommitted_preview_range_does_not_retarget_viewport(qt_app, monkeypatc
         _update_display_group_title=lambda: None,
         _committed_display_frame=None,
         _frame_session=SimpleNamespace(display_committed=True),
+        _frame_viewport_retarget_after_commit=False,
         retarget_montage_viewport=lambda: retargeted.append(True),
         view_state=SimpleNamespace(montage_axis=2),
     )
@@ -947,6 +956,34 @@ def test_uncommitted_preview_range_does_not_retarget_viewport(qt_app, monkeypatc
     ViewportBridge(owner).on_view_range_changed()
 
     assert retargeted == []
+    assert owner._frame_viewport_retarget_after_commit is True
+
+
+def test_uncommitted_single_view_range_records_no_montage_obligation(qt_app, monkeypatch):
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False),
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _update_display_group_title=lambda: None,
+        _committed_display_frame=None,
+        _frame_viewport_retarget_after_commit=False,
+        view_state=SimpleNamespace(montage_axis=None),
+    )
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.NoButton,
+    )
+
+    owner.win = owner
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert owner._frame_viewport_retarget_after_commit is False
 
 
 def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatch):

@@ -170,24 +170,34 @@ def test_interaction_stop_rearms_deferred_wgpu_histogram_evidence():
     pipeline = SimpleNamespace(
         counters=SimpleNamespace(interactive_native_deferred=0),
     )
+    acknowledged = {3: object(), 7: object()}
     session = SimpleNamespace(
         session_id=1,
         pipeline=pipeline,
         _interactive_residency_deferred=False,
         _wgpu_histogram_evidence_deferred=True,
+        tile_presentation_state=SimpleNamespace(payloads=acknowledged),
     )
     replanned = []
+    pumped = []
     owner = SimpleNamespace(
         _frame_session=session,
         _frame_session_is_current=lambda candidate: candidate is session,
         retarget_frame_pipeline=lambda current, **kwargs: replanned.append(
             (current, kwargs)
         ),
+        _queue_montage_level_stats_for_payloads=lambda current, payloads: pumped.append(
+            (current, payloads)
+        ),
     )
     owner.win = owner
 
     assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
     assert session._wgpu_histogram_evidence_deferred is False
+    # The evidence queue is pumped directly at the settle edge: the forced
+    # commit alone cannot re-own a deferral at the fill tail (no further
+    # backend acknowledgements arrive while the coverage barrier is latched).
+    assert pumped == [(session, acknowledged)]
     assert replanned == [(session, {"force_commit": True})]
 
 

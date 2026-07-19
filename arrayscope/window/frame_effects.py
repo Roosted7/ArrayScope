@@ -136,6 +136,17 @@ def _finish_presentation_commit(renderer) -> None:
     renderer._montage_presentation_commit_active = False
     if not bool(getattr(renderer, "_frame_viewport_retarget_after_commit", False)):
         return
+    session = getattr(renderer, "_frame_session", None)
+    if session is not None and bool(
+        session.scheduling_policy.verdict.coverage_open
+    ):
+        # Phase 1 fully completes before the camera's rescope replays: the
+        # retarget re-derives LOD demand and supersedes the lifecycle scope,
+        # which mid-coverage disturbs the entry choreography (first-pixel
+        # ordering, evidence barriers).  The flag stays armed; commits keep
+        # arriving through coverage close, so the first teardown after the
+        # pass closes owns the replay.
+        return
     renderer._frame_viewport_retarget_after_commit = False
     schedule_viewport = getattr(renderer, "_schedule_frame_viewport_update", None)
     if not callable(schedule_viewport):

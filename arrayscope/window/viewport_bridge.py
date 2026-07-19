@@ -28,9 +28,9 @@ class ViewportBridge:
         # The title depends on display mode, image shape, and viewport size,
         # never on camera range. Calling QGroupBox.setTitle here synchronously
         # entered style/layout work for every wheel and pan signal.
+        montage = getattr(self.owner.win.view_state, "montage_axis", None) is not None
         if _owner_has_tiled_scene(self.owner):
             scheduler = getattr(self.owner, "_schedule_frame_viewport_update", None)
-            montage = getattr(self.owner.win.view_state, "montage_axis", None) is not None
             if montage and getattr(self.owner, "_montage_presentation_commit_active", False):
                 # The commit guard prevents re-entry, but it must not erase
                 # camera intent.  Commit teardown already owns the one replay
@@ -56,6 +56,18 @@ class ViewportBridge:
                 scheduler(delay_ms=0)
             elif montage:
                 self.owner.retarget_montage_viewport()
+        elif montage:
+            # Camera intent must never be dropped. Before the first committed
+            # tiled frame, the montage-entry auto-fit range change arrives
+            # while the committed frame is still the (non-tiled) predecessor;
+            # discarding it left session.view_range — and therefore LOD
+            # demand, scope, and priorities — at the stale entry fit until an
+            # unrelated retarget rescued it (under full-matrix load that took
+            # ~5 s: the 2026-07-19 pyqtgraph cold_fill demand-freshness red).
+            # The acknowledged frame owns camera coordinates, so defer the
+            # replay to commit teardown instead of replanning against
+            # uncommitted state.
+            self.owner._frame_viewport_retarget_after_commit = True
         elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 4.0:
             record = getattr(self.owner.win, "_record_ui_work", None)
