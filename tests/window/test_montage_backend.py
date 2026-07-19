@@ -573,8 +573,10 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
     class InlineKernel:
         visible_backlog = 0
 
-        def submit_speculative_batch(self, *, fn, on_done, **_kwargs):
-            on_done(fn())
+        def submit_speculative_batch(self, *, fn, on_done, pass_token=False, **_kwargs):
+            from arrayscope.kernel.task import CancellationToken
+
+            on_done(fn(CancellationToken()) if pass_token else fn())
             return object()
 
     class Window(LevelStatsService):
@@ -1579,7 +1581,9 @@ def test_wgpu_resident_histogram_evidence_uses_coverage_lane_and_shared_tracker(
     assert spec.scheduling_rank == UNRANKED_SCHEDULING_RANK
     assert spec.presentation_phase == 1
     assert spec.coverage_pass_open is True
-    callbacks["on_done"](spec.fn())
+    from arrayscope.kernel.task import CancellationToken
+
+    callbacks["on_done"](spec.fn(CancellationToken()) if spec.pass_token else spec.fn())
 
     stats = tracker.source_stats(session.level_key, 7)
     assert stats is not None

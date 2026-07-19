@@ -262,6 +262,12 @@ class HistogramDisplayController(QtCore.QObject):
                 if not self._refresh_timer.isActive():
                     self._refresh_timer.start(max(8, int(getattr(self.owner, "_histogram_retry_interval_ms", 33))))
                 return
+            # Terminal decline (owner closed for shutdown, or no controller
+            # behind the submitter): drop the refresh. The module executor
+            # below is non-daemon and joined at interpreter exit, so work
+            # rescheduled there would outlive kernel shutdown.
+            self._running_request_signature = None
+            return
         self_ref = weakref.ref(self)
 
         def done(future):

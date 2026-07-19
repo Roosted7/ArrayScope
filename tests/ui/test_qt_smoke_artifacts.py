@@ -121,6 +121,9 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
 
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1, 1))
         win.getPixel(scene_pos)
+        deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
+        while time.monotonic() < deadline and not win.widgets["labels"]["pixelValue"].text():
+            _process_events(qt_app, count=2)
         assert win.widgets["labels"]["pixelValue"].text()
         assert win.pixel_hud.isVisible()
     finally:

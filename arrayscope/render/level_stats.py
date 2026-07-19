@@ -35,6 +35,7 @@ from arrayscope.display.model.montage_levels import (
 )
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
+from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.evaluator import (
     _document_key,
     evaluate_level_evidence_snapshot,
@@ -1154,47 +1155,20 @@ class LevelStatsService:
             owner.level_evidence_generation = None
             return True
 
-        def evaluate(rows=rows, quality=quality):
+        def evaluate(cancellation_token, rows=rows, quality=quality):
             start = perf_counter()
-            waited = set()
-            for evidence in rows:
-                token = evidence.wait_completed
-                if not callable(token):
-                    raise RuntimeError("wgpu histogram report has no completion token")
-                token_key = id(token)
-                if token_key not in waited:
-                    token()
-                    waited.add(token_key)
-            result = []
-            for evidence in rows:
-                resolve = getattr(evidence.readback, "resolve", None)
-                if not callable(resolve):
-                    raise RuntimeError("wgpu histogram result has no deferred readback")
-                counts, bounds = resolve()
-                sample = (
-                    np.asarray((), dtype=np.float32)
-                    if bounds is None
-                    else representative_sample_from_histogram(counts, bounds)
-                )
-                result.append(
-                    (
-                        evidence,
-                        TileLevelStats(
-                            source_index=int(evidence.source_index),
-                            bounds=bounds,
-                            sample=sample,
-                            refined=False,
-                            evidence_quality=quality,
-                        ),
-                    )
-                )
+            result = resolve_wgpu_histogram_evidence(
+                rows,
+                quality=quality,
+                cancellation_token=cancellation_token,
+            )
             emit_trace(
                 "wgpu_histogram_resolve",
                 session_id=int(getattr(session, "session_id", 0) or 0),
                 evidence_rows=len(result),
                 interaction_active=bool(_interactive_active(self)),
             )
-            return tuple(result), (perf_counter() - start) * 1000.0
+            return result, (perf_counter() - start) * 1000.0
 
         def done(result):
             evidence_rows, elapsed_ms = result
@@ -1269,7 +1243,7 @@ class LevelStatsService:
                     generation,
                 ),
                 reusable=True,
-                pass_token=False,
+                pass_token=True,
                 **_presentation_trace_fields(session, work_class),
             ),
             on_done=done,
@@ -1466,25 +1440,13 @@ class LevelStatsService:
             current.level_evidence_generation = None
             return True
 
-        def evaluate(batch=batch, require_refined=require_refined):
-            start = perf_counter()
-            rows = []
-            total_bytes = 0
-            for rendered in batch:
-                source_index = int(rendered.tile.source_index)
-                quality = _rendered_level_evidence_quality_for_session(
-                    session,
-                    rendered,
-                    refined=bool(require_refined),
-                )
-                stats = _sample_rendered_level_evidence(
-                    rendered,
-                    refined=bool(require_refined),
-                    evidence_quality=quality,
-                )
-                rows.append((source_index, stats))
-                total_bytes += montage_commit.rendered_tile_nbytes(rendered)
-            return tuple(rows), (perf_counter() - start) * 1000.0, int(total_bytes)
+        def evaluate(token, batch=batch, require_refined=require_refined):
+            return sample_level_evidence_batch(
+                session,
+                batch,
+                require_refined=require_refined,
+                cancellation_token=token,
+            )
 
         def done(result, batch=batch, generation=generation, expected=expected, require_refined=require_refined):
             rows, elapsed_ms, total_bytes = result
@@ -1605,7 +1567,7 @@ class LevelStatsService:
                     scope=f"montage:{session.key!r}:histogram",
                     supersession=Supersession(("montage-level-evidence", session.key), generation),
                     reusable=True,
-                    pass_token=False,
+                    pass_token=True,
                     **_presentation_trace_fields(session, work_class),
                 ),
                 on_done=done,
@@ -1626,6 +1588,7 @@ class LevelStatsService:
                 priority=Priority.HISTOGRAM,
                 lane=WorkLane.HISTOGRAM_REFINEMENT,
                 max_items=len(batch),
+                pass_token=True,
                 **_presentation_trace_fields(session, work_class),
             )
         if handle is None:
@@ -2106,6 +2069,85 @@ def _rendered_level_evidence_quality_for_session(session, rendered, *, refined: 
     if lod_level <= desired:
         return LevelEvidenceQuality.REFINED if bool(refined) else LevelEvidenceQuality.ROUGH_TARGET
     return quality
+
+
+def sample_level_evidence_batch(session, batch, *, require_refined: bool, cancellation_token=None):
+    """Sample per-tile level evidence, observing cancellation at tile edges.
+
+    Only kernel shutdown and explicit handle cancellation set a running
+    reusable task's token (scope clears leave it alone), so bailing between
+    tiles never discards evidence a live session still wants.
+    """
+
+    start = perf_counter()
+    rows = []
+    total_bytes = 0
+    for rendered in batch:
+        _check_cancelled(cancellation_token)
+        source_index = int(rendered.tile.source_index)
+        quality = _rendered_level_evidence_quality_for_session(
+            session,
+            rendered,
+            refined=bool(require_refined),
+        )
+        stats = _sample_rendered_level_evidence(
+            rendered,
+            refined=bool(require_refined),
+            evidence_quality=quality,
+        )
+        rows.append((source_index, stats))
+        total_bytes += montage_commit.rendered_tile_nbytes(rendered)
+    return tuple(rows), (perf_counter() - start) * 1000.0, int(total_bytes)
+
+
+def resolve_wgpu_histogram_evidence(rows, *, quality, cancellation_token=None):
+    """Wait out GPU fences and resolve readbacks, cancellable at row edges.
+
+    A single fence wait stays uninterruptible (it is bounded by in-flight GPU
+    work); cancellation is observed between rows so a shutdown never waits
+    for the whole evidence set.
+    """
+
+    waited = set()
+    for evidence in rows:
+        _check_cancelled(cancellation_token)
+        wait_completed = evidence.wait_completed
+        if not callable(wait_completed):
+            raise RuntimeError("wgpu histogram report has no completion token")
+        wait_key = id(wait_completed)
+        if wait_key not in waited:
+            wait_completed()
+            waited.add(wait_key)
+    result = []
+    for evidence in rows:
+        _check_cancelled(cancellation_token)
+        resolve = getattr(evidence.readback, "resolve", None)
+        if not callable(resolve):
+            raise RuntimeError("wgpu histogram result has no deferred readback")
+        counts, bounds = resolve()
+        sample = (
+            np.asarray((), dtype=np.float32)
+            if bounds is None
+            else representative_sample_from_histogram(counts, bounds)
+        )
+        result.append(
+            (
+                evidence,
+                TileLevelStats(
+                    source_index=int(evidence.source_index),
+                    bounds=bounds,
+                    sample=sample,
+                    refined=False,
+                    evidence_quality=quality,
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _check_cancelled(token) -> None:
+    if token is not None and getattr(token, "cancelled", False):
+        raise EvaluationCancelled()
 
 
 def _sample_rendered_level_evidence(rendered, *, refined: bool, evidence_quality=None):

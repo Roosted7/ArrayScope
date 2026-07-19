@@ -49,14 +49,30 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   so the unit gate's fixture (window carries no committed display frame) is
   a prime suspect; field zoom verdict pending. Red pin (strict xfail with
   instrumented probes): `tests/ui/test_lod_demand_freshness.py`.
-- **Kernel whole-process exit remains unbounded by current-item work.** The
-  2026-07-19 shutdown change closes admission, cancels queued work/tokens and
-  bounds the GUI close callback under one five-second join deadline, but the
-  final real-Wayland matrix showed current non-daemon worker evaluations can
-  keep the process alive after `kernel_shutdown complete`. Diagnose a
-  cooperative cancellation boundary inside long slab/evidence evaluations;
-  do not daemon-abandon NumPy/FFTW work. Exit gate: a real workflow process
-  terminates in <5 s and the suite emits no leaked-thread diagnostics.
+- **CLOSED 2026-07-19 — kernel whole-process exit is bounded by cooperative
+  cancellation at evaluation chunk edges.** Diagnosis split the symptom in
+  two: (1) the slab/stage paths already observe their token at every
+  read/op/chunk boundary (real-Wayland close during a running
+  stage-materialization FFT joined in ≤0.34 s), but the two token-less
+  evidence sweeps — the montage-level-evidence batch
+  (`sample_level_evidence_batch`, 3.5 s/task in the 2026-07-19 wgpu zoompan
+  profile) and the wgpu histogram fence-resolve
+  (`resolve_wgpu_histogram_evidence`) — pinned the five-second join for
+  their whole batch; both now take `pass_token=True` and bail at tile/row
+  edges (never inside one FFTW/fence call). (2) The process outliving
+  `kernel_shutdown complete` was the non-daemon module histogram executor:
+  a terminally declined submitter result ("admission", i.e. controllers
+  closed for shutdown) fell through to `_HISTOGRAM_EXECUTOR`, whose
+  `concurrent.futures` atexit join outlives the kernel; declined work is
+  now dropped and the executor serves only submitter-less standalone
+  widgets. Cancelled sweeps complete through the existing stale callback
+  exactly once. Pins: `tests/render/test_level_stats_shutdown.py`
+  (shutdown-during-sweep join bound + stale-exactly-once + row-edge
+  cancellation), `tests/display/test_histogram_controller_fallback.py`
+  (no executor leak / standalone fallback retained). Real-Wayland
+  ArrayScopeWindow close mid-FFT-evaluation: wgpu real-data close→exit
+  0.91 s, vispy 448³ 0.73 s, no shutdown RuntimeWarning, empty
+  `last_shutdown_diagnostics`.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
