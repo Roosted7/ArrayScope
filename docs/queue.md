@@ -108,6 +108,13 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-19 — **Wgpu interaction-path stalls and kernel teardown closed:**
+  gesture histogram resolves are deferred to settle (`1fa2e0f2`), floor lookup
+  is residency-epoch memoized with a stale-store guard (`f6a9e329`), and queued
+  kernel work cancels under one global shutdown deadline (`112343f8`). Real-
+  Wayland fast-scroll p95 is 100.8 ms (was 194–214 ms), all five Wgpu journey
+  rows pass, and teardown completes in 56.8 ms; the shared callback/heartbeat
+  red remains open. [Promotion evidence](proposals/tensor-engine-endpoint.md#promotion-evidence-entry-2-2026-07-19--interaction-stalls-removed-at-their-owners).
 - 2026-07-19 — **PyQtGraph montage-entry blackout fixed (~7.5 s black → 2 s
   to first pixels, R8 continuity gate green):** three mechanisms — CPU first
   pixels accept a provisional refined first evidence batch instead of the

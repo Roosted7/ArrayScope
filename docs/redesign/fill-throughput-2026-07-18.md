@@ -208,9 +208,12 @@ or every row dies `FileNotFoundError` with `instances: 0`.
   guess that the blackout was "likely the identity" of that standing red is
   **refuted**: it is the AUTO-camera demand-freshness lane (queue standing
   row), not the entry blackout.
-- **Kernel shutdown blocks ~19–26 s at teardown** (worker join in
-  `kernel/scheduler.py shutdown`) — dominates repro wall-clock; harness-only
-  pain today but worth a look.
+- **Kernel shutdown teardown fixed 2026-07-19:** shutdown now closes
+  admission, cancels queued work plus running tokens, and applies one global
+  five-second join deadline with loud live-thread/task-scope diagnostics.
+  The real-Wayland workflow trace completes shutdown in 56.8 ms instead of
+  draining for the recorded ~19–26 s; focused cancellation and global-deadline
+  tests plus the full offscreen suite are green (`112343f8`).
 - The commit's fixed cost itself (~80–120 ms full-plan walk per commit) is
   perf-bars territory (50 ms GUI-callback bar is already red and owned
   there); the cohort change amortizes it but does not shrink it.

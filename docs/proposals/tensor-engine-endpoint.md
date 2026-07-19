@@ -342,3 +342,49 @@ warm-input bars (vispy 146.5, wgpu 158.3) — row-1 material, not a
 backend delta. Promotion status: architecture goals met (zero-upload
 interactions, live compute, physical-truth acks, journey matrix green);
 interactive throughput parity NOT yet met — the ladder's next gate.
+
+### Promotion evidence entry 2 (2026-07-19) — interaction stalls removed at their owners
+
+Three bounded changes, rebased over the same-submission histogram-frontier
+shield (`656f8c1c`), removed the two attributed retarget costs and the teardown
+drain:
+
+- Wgpu histogram obligations are now content+mapping keyed and survive pure
+  camera retargets. During interaction the view records one deferred
+  obligation instead of dispatching/resolving it; the quiet edge performs the
+  single fenced resolve. The real-Wayland zoom/pan trace records 61 deferrals,
+  two settled resolves, and **zero resolves while interaction was active**.
+- `best_floor_key` now memoizes against plan identity and demand value,
+  pyramid/residency revisions, lifecycle level revision, and preview level.
+  A stale-store epoch guard preserves the journey-matrix race contract.
+  Wgpu zoom/pan cProfile attribution fell from 48,324 uncached calls / 13.16 s
+  to 4,791 uncached computations / 2.40 s (33,201 cheap wrapper calls /
+  2.78 s); `retarget_frame_pipeline` cumulative time fell from 14.24 s to
+  5.70 s. cProfile timings are attribution only, not pacing evidence.
+- Kernel shutdown closes admission, cancels queued work and running tokens,
+  then applies one global five-second join deadline. A real-Wayland workflow
+  cancelled its one in-flight scope and emitted `kernel_shutdown complete`
+  after **56.8 ms**, replacing the recorded 19–26 s drain. A timeout remains
+  loud and names live threads and task scopes; workers are never silently
+  abandoned.
+
+Paired plain real-Wayland acceptance
+(`tests/artifacts/wgpu-performance-2026-07-19/acceptance/`) materially closes
+the Wgpu-specific gap: scalar fast-scroll p95 is **100.8 ms** (the prior Wgpu
+range was 194–214 ms; paired VisPy is 74.6 ms), while scalar zoom/pan worst
+p95 is **157.5 ms** versus VisPy **118.1 ms**. Wgpu deep zoom reaches 72.2 fps
+versus VisPy 58.2 fps; full-grid scroll+pause remains behind at 7.2 versus
+9.3 fps. Histogram and sync timings are both 0.0 ms in both Wgpu acceptance
+stages. The product 50 ms callback/16 ms heartbeat bars remain red on both
+backends; the Wgpu trace now attributes its worst resident-camera callbacks to
+60-item `presentation_upsert`/`montage_commit` work, not histogram readback.
+That shared presentation cost is the next measured owner, not a reason to
+weaken the bars.
+
+Acceptance: full offscreen suite **2472 passed, 36 skipped, 1 xfailed**; the
+real-Wayland journey matrix passes all five Wgpu rows, including zero phase-2
+submissions during coverage. VisPy and PyQtGraph cold-fill retain only the
+standing AUTO-camera demand-freshness red (5.18/5.37 s respectively); no Wgpu
+row regressed. Promotion verdict remains **not yet parity** because full-grid
+scroll and the shared callback/heartbeat bars remain open, but the
+GPU-synchronization defect and retarget floor-scan hotspot are closed.
