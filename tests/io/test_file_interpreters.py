@@ -84,3 +84,21 @@ def test_nifti_loader_extracts_spacing_and_units(tmp_path):
     assert tuple(axis.spacing for axis in loaded.axes) == (2.0, 1.5, 3.0)
     assert tuple(axis.unit for axis in loaded.axes) == ("mm", "mm", "mm")
     assert tuple(axis.size for axis in loaded.axes) == loaded.data.shape
+
+
+def test_nifti_loader_narrows_to_float32_and_applies_scaling(tmp_path):
+    nib = pytest.importorskip("nibabel")
+
+    voxels = np.arange(24, dtype=np.int16).reshape(2, 3, 4)
+    image = nib.Nifti1Image(voxels, np.eye(4))
+    image.header.set_data_dtype(np.int16)
+    image.header["scl_slope"] = 123.25
+    image.header["scl_inter"] = 4.5
+    path = tmp_path / "scaled.nii"
+    nib.save(image, path)
+
+    loaded = load_path(path)
+
+    assert loaded.data.dtype == np.float32
+    expected = voxels.astype(np.float64) * 123.25 + 4.5
+    np.testing.assert_allclose(loaded.data, expected, rtol=1e-6)

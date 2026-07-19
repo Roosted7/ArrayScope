@@ -602,7 +602,10 @@ class NiftiLoader:
             ) from err
 
         image = nib.load(self.file_path)
-        data = image.get_fdata()
+        # float32 keeps the whole downstream pipeline narrow (FFT -> complex64,
+        # LOD pyramid float32); NIfTI voxels are almost always int16/float32 on
+        # disk, so float64 here would only inflate memory 2-4x.
+        data = image.get_fdata(dtype=np.float32)
         data = remove_trailing_singletons(data)
         self.axes = _nifti_axes(image.header, data.shape)
         self.metadata.update(
