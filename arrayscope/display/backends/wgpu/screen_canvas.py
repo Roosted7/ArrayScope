@@ -107,7 +107,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         if self._draw_scheduled or self._draw_callback is None:
             return
         self._draw_scheduled = True
-        QtCore.QTimer.singleShot(0, self._invoke_draw)
+        QtCore.QTimer.singleShot(0, self, self._invoke_draw)
 
     def _invoke_draw(self) -> None:
         self._draw_scheduled = False

@@ -171,3 +171,23 @@ def test_close_cancels_active_drag_on_screen_path(qt_app, screen_view):
     assert view.interactionState().phase is not PointerPhase.IDLE
     view.close()
     assert view.interactionState().phase is PointerPhase.IDLE
+
+
+def test_grab_presented_framebuffer_sees_the_committed_content(qt_app, screen_view):
+    """The harness capture oracle: a Qt widget grab is blind to swapchain
+    pixels (all-red screen journey matrix, 2026-07-19), so the physical
+    readback must show the committed ramp where the widget grab cannot."""
+
+    view = screen_view
+    _commit_ramp(view)
+    assert wait_for_qt_condition(
+        qt_app,
+        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1,
+        timeout_s=10.0,
+    )
+    frame = view.grabPresentedFramebuffer()
+    assert frame is not None and frame.ndim == 3 and frame.shape[2] == 4
+    gray = frame[..., :3].astype(np.float32).mean(axis=2)
+    # The ramp spans dark to bright; a blind capture would be uniform.
+    assert float(gray.max() - gray.min()) > 100.0
+    assert float((gray > 10.0).mean()) > 0.05

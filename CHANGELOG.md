@@ -38,6 +38,13 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
+- The experimental wgpu renderer can present directly to the screen on
+  native Wayland: the new `wgpu_present_method` setting (`bitmap` default,
+  `screen` opt-in; settings file only, like the wgpu backend pin itself)
+  drives the display through the compositor swapchain instead of a per-frame
+  GPU→CPU bitmap readback. Anywhere the screen path cannot exist
+  (offscreen, X11) the view falls back to bitmap and reports why in a
+  status message and the presentation diagnostics.
 - Linux Wayland sessions get a deliberate display-server choice:
   **View → Display Server** (shown only when a Wayland session is
   detected) with *Auto (Wayland, X11 on early crash)*, *Force Wayland*,

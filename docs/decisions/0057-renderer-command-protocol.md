@@ -32,8 +32,21 @@
   `textureLoad` for crispness); `FrameReport.glyph_atlas_uploads` is the
   zero-per-frame-upload oracle. Tile-truth labels render natively in the
   wgpu view (QLabels replaced — Qt widgets cannot composite over a native
-  child), which unblocks the screen-present-mode experiment. Promotion vs
-  VisPy is evidence-gated in queue row 3.
+  child), which unblocked the screen-present-mode experiment. Screen
+  presentation landed 2026-07-19 behind the `wgpu_present_method` setting
+  (bitmap default, explicit opt-in): a paint-less native child
+  (`arrayscope/display/backends/wgpu/screen_canvas.py`) drives its own
+  swapchain from the gate-B recipe (QNativeInterface wl_display +
+  winId-as-wl_surface, Vulkan-only instance, Mailbox present mode when the
+  surface offers it), bypassing rendercanvas and the per-frame bitmap
+  readback. The presentation path is deliberately OUTSIDE the protocol: the
+  executor still only receives `PresentGeneration` plus a target texture
+  view — whether that view is a rendercanvas bitmap target or an acquired
+  swapchain texture is view-side plumbing, so the protocol stays free of
+  windowing vocabulary. Draw acknowledgements key on the real swapchain
+  present edge, and everywhere the screen path cannot exist (offscreen,
+  xcb) the view falls back to bitmap with a loud recorded reason.
+  Promotion vs VisPy is evidence-gated in queue row 3.
 - **Date:** 2026-07-18
 - **Branch note:** authored on `codex/wgpu-renderer-gate-b`; renumber on
   integration if a parallel branch claimed 0057.

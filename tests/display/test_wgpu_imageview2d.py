@@ -1573,3 +1573,13 @@ def test_factory_routes_present_method_setting_to_wgpu_view(qt_app):
             assert any("screen presentation unavailable" in m for m in messages)
     finally:
         view.close()
+
+
+def test_grab_presented_framebuffer_is_screen_path_only(qt_app):
+    view = _view_class("wgpu")()
+    try:
+        # Bitmap path: the Qt widget grab is already honest; the physical
+        # capture must decline so harnesses keep using the widget grab.
+        assert view.grabPresentedFramebuffer() is None
+    finally:
+        view.close()

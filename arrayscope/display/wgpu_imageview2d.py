@@ -1896,6 +1896,26 @@ class WgpuImageView2D(ImageViewShell):
     def _paints_qgraphics_scene(self) -> bool:
         return False
 
+    def grabPresentedFramebuffer(self) -> np.ndarray | None:
+        """Physical-truth harness capture for the screen present path.
+
+        Screen-mode pixels live in the compositor swapchain, which a Qt
+        widget grab cannot see (a paint-less native child rasterizes as
+        nothing).  Re-render the executor's CURRENT bound state — the exact
+        tiles/overlay/mapping/camera the last swapchain present drew — into
+        the internal offscreen target and read it back.  Returns ``None`` on
+        the bitmap path (the widget grab is already honest there) and when
+        no executor exists yet.
+        """
+
+        if self._wgpu_present_method != "screen":
+            return None
+        executor = self._wgpu_executor
+        if executor is None:
+            return None
+        self._submit_wgpu(())
+        return executor.read_target()
+
     def wgpuPresentMethod(self) -> str:
         """Effective present method ("bitmap" or "screen") after fallback."""
 

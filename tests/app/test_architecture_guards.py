@@ -870,6 +870,9 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D.setupUI", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D._on_vispy_draw", "singleShot", "anti-hang fallback"): 1,
             ("arrayscope/display/wgpu_imageview2d.py", "WgpuImageView2D._on_wgpu_draw", "singleShot", "anti-hang fallback"): 1,
+            # Screen present path: the canvas owns its ondemand draw cadence
+            # (Qt cannot deliver paint work to a paint-less native child).
+            ("arrayscope/display/backends/wgpu/screen_canvas.py", "WgpuScreenCanvas.request_draw", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D._request_vispy_camera_sync", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/kernel/eval_adapter.py", "KernelEvaluationController._submit", "singleShot", "UI cosmetic"): 1,
             ("arrayscope/kernel/qt_bridge.py", "QtKernelBridge.__init__", "QTimer", "anti-hang fallback"): 1,

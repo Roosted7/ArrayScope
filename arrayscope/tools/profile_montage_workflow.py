@@ -4730,6 +4730,26 @@ def _attach_phase_screenshot(
 
 def _save_view_screenshot(win, path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Screen-present wgpu pixels live in the compositor swapchain; a Qt
+    # widget grab rasterizes the paint-less native child as nothing and every
+    # pixel-diff oracle goes blind (all-red screen matrix, 2026-07-19).  The
+    # view re-renders its current physical state offscreen for the capture.
+    grab_physical = getattr(win.img_view, "grabPresentedFramebuffer", None)
+    if callable(grab_physical):
+        frame = grab_physical()
+        if frame is not None:
+            from pyqtgraph.Qt import QtGui
+
+            frame = np.ascontiguousarray(frame)
+            height, width = frame.shape[:2]
+            image = QtGui.QImage(
+                frame.data,
+                width,
+                height,
+                width * 4,
+                QtGui.QImage.Format.Format_RGBA8888,
+            )
+            return bool(image.save(str(path)))
     pixmap = win.img_view.grab()
     return bool(pixmap.save(str(path)))
 
