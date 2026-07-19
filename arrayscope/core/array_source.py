@@ -127,6 +127,78 @@ class NdArraySource:
             self._close()
 
 
+class ScaledArraySource:
+    """Adapt an integer (or otherwise narrow) backing store that carries an
+    affine ``value = raw * slope + inter`` rescaling.
+
+    The backing store — typically a ``np.memmap`` of the on-disk voxels — stays
+    resident at its compact dtype (int16 is 2 bytes vs. 4 for float32, 8 for
+    float64). Only the region actually read is expanded, and it is expanded
+    straight into ``out_dtype`` (default float32) so no float64 temporary is
+    built along the way. :attr:`nbytes` reports the *expanded* footprint so
+    memory planning budgets the real cost of materializing.
+    """
+
+    def __init__(
+        self,
+        array,
+        *,
+        slope: float = 1.0,
+        inter: float = 0.0,
+        out_dtype=np.float32,
+        label: str | None = None,
+        chunk_shape: tuple[int, ...] | None = None,
+        close=None,
+    ) -> None:
+        self._array = array
+        self._slope = float(slope)
+        self._inter = float(inter)
+        self._out_dtype = np.dtype(out_dtype)
+        self._label = str(label) if label is not None else type(array).__name__
+        self._chunk_shape = None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        self._close = close
+        self._closed = False
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(int(size) for size in self._array.shape)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._out_dtype
+
+    @property
+    def nbytes(self) -> int:
+        return int(np.prod(self.shape, dtype=np.int64)) * self._out_dtype.itemsize
+
+    @property
+    def chunk_shape(self) -> tuple[int, ...] | None:
+        return self._chunk_shape
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    def read_region(self, index_spec: tuple, *, cancellation_token: object | None = None) -> np.ndarray:
+        del cancellation_token  # single bounded read; the caller checks around it
+        raw = read_index_spec(self._array, index_spec)
+        # Expand directly into the output dtype: astype makes the one copy we
+        # need (never aliasing the memmap), then scale in place.
+        result = np.asarray(raw).astype(self._out_dtype, copy=True)
+        if self._slope != 1.0:
+            result *= self._out_dtype.type(self._slope)
+        if self._inter != 0.0:
+            result += self._out_dtype.type(self._inter)
+        return result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._close is not None:
+            self._close()
+
+
 class LazySourceArray:
     """Document base-data proxy backed by an :class:`ArraySource`.
 
@@ -255,6 +327,7 @@ __all__ = [
     "ArraySource",
     "LazySourceArray",
     "NdArraySource",
+    "ScaledArraySource",
     "SourceReadRefused",
     "is_lazy_source_array",
     "read_index_spec",

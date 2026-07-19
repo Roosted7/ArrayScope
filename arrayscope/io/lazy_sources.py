@@ -2,8 +2,10 @@
 
 First adapters for the out-of-core source protocol (ADR 0049): NumPy ``.npy``
 via ``np.load(mmap_mode="r")`` and BART ``.cfl`` via a Fortran-order
-``np.memmap``. Chunked stores (Zarr/HDF5-like) are a later adapter behind the
-same protocol.
+``np.memmap``. Uncompressed NIfTI ``.nii`` is mapped at its on-disk integer
+dtype and rescaled per read (:class:`ScaledArraySource`), so a 2-byte int16
+scan never inflates to a resident float32/float64 copy. Chunked stores
+(Zarr/HDF5-like) are a later adapter behind the same protocol.
 """
 
 from __future__ import annotations
@@ -13,17 +15,28 @@ from pathlib import Path
 
 import numpy as np
 
-from arrayscope.core.array_source import LazySourceArray, NdArraySource
+from arrayscope.core.array_source import LazySourceArray, NdArraySource, ScaledArraySource
 from arrayscope.core.memory_policy import MiB, sample_system_memory
 
 DEFAULT_LAZY_FRACTION_OF_AVAILABLE = 0.25
 MIN_LAZY_THRESHOLD_BYTES = 64 * MiB
 
 MEMMAP_SOURCE_SUFFIXES = (".npy", ".cfl")
+# Uncompressed NIfTI stores its voxels contiguously, so nibabel can hand back a
+# memmap of the raw integer samples; the affine scl_slope/scl_inter are applied
+# per read. ``.nii.gz`` is compressed and cannot be mapped, so it is excluded.
+SCALED_SOURCE_SUFFIXES = (".nii",)
 
 
 def supports_memmap_source(suffix: str) -> bool:
     return str(suffix).lower() in MEMMAP_SOURCE_SUFFIXES
+
+
+def supports_lazy_source(suffix: str) -> bool:
+    """True for any suffix ArrayScope can open through the out-of-core seam."""
+
+    suffix = str(suffix).lower()
+    return suffix in MEMMAP_SOURCE_SUFFIXES or suffix in SCALED_SOURCE_SUFFIXES
 
 
 def lazy_load_threshold_bytes(*, system_available_bytes: int | None = None) -> int:
@@ -41,7 +54,7 @@ def should_load_lazily(filepath, *, lazy="auto", threshold_bytes: int | None = N
     """Decide whether ``load_path`` should open ``filepath`` as a lazy source."""
 
     filepath = Path(filepath)
-    if lazy is False or not supports_memmap_source(filepath.suffix):
+    if lazy is False or not supports_lazy_source(filepath.suffix):
         return False
     if lazy is True:
         return True
@@ -73,12 +86,67 @@ def open_memmap_source(filepath) -> LazySourceArray:
     )
 
 
+def open_scaled_nifti_source(filepath):
+    """Open an uncompressed ``.nii`` as a rescaled, memory-mapped source.
+
+    Returns ``(LazySourceArray, axes)``. The raw integer voxels stay mapped;
+    :class:`ScaledArraySource` applies ``scl_slope``/``scl_inter`` and narrows to
+    float32 per region read. Raises ``ValueError`` when the file cannot be
+    mapped (e.g. a scaled dtype nibabel refuses to memmap), so ``lazy="auto"``
+    falls back to eager loading.
+    """
+
+    filepath = Path(filepath)
+    try:
+        import nibabel as nib
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ValueError("nibabel is required to open NIfTI sources lazily") from exc
+
+    from arrayscope.io.file_interpreters import _nifti_axes, remove_trailing_singletons
+
+    image = nib.load(filepath, mmap=True)
+    proxy = image.dataobj
+    raw = proxy.get_unscaled()
+    if not isinstance(raw, np.memmap):
+        # get_unscaled() copied into memory (compressed / non-mappable dtype);
+        # a lazy source over a resident array would give no memory benefit.
+        raise ValueError(f"{filepath} cannot be memory-mapped for a lazy NIfTI source")
+    raw = remove_trailing_singletons(raw)
+    slope = 1.0 if proxy.slope is None else float(proxy.slope)
+    inter = 0.0 if proxy.inter is None else float(proxy.inter)
+    source = ScaledArraySource(
+        raw,
+        slope=slope,
+        inter=inter,
+        out_dtype=np.float32,
+        label=f"nii-memmap:{filepath.name}",
+    )
+    axes = _nifti_axes(image.header, source.shape)
+    return LazySourceArray(source), axes
+
+
+def open_lazy_source(filepath):
+    """Open any lazy-capable ``filepath``; returns ``(LazySourceArray, axes)``.
+
+    ``axes`` is ``None`` for formats that carry no axis metadata (.npy/.cfl).
+    """
+
+    suffix = Path(filepath).suffix.lower()
+    if suffix in SCALED_SOURCE_SUFFIXES:
+        return open_scaled_nifti_source(filepath)
+    return open_memmap_source(filepath), None
+
+
 __all__ = [
     "DEFAULT_LAZY_FRACTION_OF_AVAILABLE",
     "MEMMAP_SOURCE_SUFFIXES",
     "MIN_LAZY_THRESHOLD_BYTES",
+    "SCALED_SOURCE_SUFFIXES",
     "lazy_load_threshold_bytes",
+    "open_lazy_source",
     "open_memmap_source",
+    "open_scaled_nifti_source",
     "should_load_lazily",
+    "supports_lazy_source",
     "supports_memmap_source",
 ]

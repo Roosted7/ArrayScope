@@ -6,7 +6,9 @@ from arrayscope.io.file_interpreters import load_file, load_path
 from arrayscope.io.lazy_sources import (
     lazy_load_threshold_bytes,
     open_memmap_source,
+    open_scaled_nifti_source,
     should_load_lazily,
+    supports_lazy_source,
     supports_memmap_source,
 )
 
@@ -33,6 +35,62 @@ def test_supports_memmap_source_suffixes():
     assert supports_memmap_source(".CFL")
     assert not supports_memmap_source(".nii.gz")
     assert not supports_memmap_source(".txt")
+
+
+def test_supports_lazy_source_includes_uncompressed_nifti():
+    assert supports_lazy_source(".nii")
+    assert supports_lazy_source(".npy")
+    # compressed NIfTI cannot be mapped, so it is not a lazy candidate
+    assert not supports_lazy_source(".nii.gz")
+    assert not supports_lazy_source(".txt")
+
+
+def _write_scaled_nifti(tmp_path, voxels, slope, inter, name="scan.nii"):
+    nib = pytest.importorskip("nibabel")
+    image = nib.Nifti1Image(voxels, np.eye(4))
+    image.header.set_data_dtype(voxels.dtype)
+    image.header["scl_slope"] = slope
+    image.header["scl_inter"] = inter
+    path = tmp_path / name
+    nib.save(image, path)
+    return path
+
+
+def test_open_scaled_nifti_source_maps_int16_and_rescales(tmp_path):
+    voxels = np.arange(4 * 5 * 6, dtype=np.int16).reshape(4, 5, 6)
+    path = _write_scaled_nifti(tmp_path, voxels, slope=100.0, inter=7.0)
+
+    source, axes = open_scaled_nifti_source(path)
+
+    assert isinstance(source, LazySourceArray)
+    assert source.dtype == np.float32
+    assert source.shape == voxels.shape
+    # The backing store stays int16 (2 bytes); nbytes reports the float32 cost.
+    assert source.nbytes == voxels.size * 4
+    expected = voxels.astype(np.float64) * 100.0 + 7.0
+    region = source.read_region((slice(1, 3), 2, slice(None)))
+    assert region.dtype == np.float32
+    np.testing.assert_allclose(region, expected[1:3, 2, :], rtol=1e-5)
+    source.close()
+
+
+def test_load_path_lazy_nifti_matches_eager_and_carries_axes(tmp_path):
+    nib = pytest.importorskip("nibabel")
+    voxels = np.arange(3 * 4 * 5, dtype=np.int16).reshape(3, 4, 5)
+    path = _write_scaled_nifti(tmp_path, voxels, slope=50.0, inter=0.0)
+
+    lazy = load_path(path, lazy=True)
+    eager = load_path(path, lazy=False)
+
+    assert isinstance(lazy.data, LazySourceArray)
+    assert lazy.metadata["lazy"] is True
+    assert lazy.metadata["detected_format"] == "nii"
+    assert isinstance(eager.data, np.ndarray)
+    assert eager.data.dtype == np.float32
+    np.testing.assert_allclose(np.asarray(lazy.data), eager.data, rtol=1e-5)
+    # Axis metadata survives the lazy path.
+    assert lazy.axes is not None
+    assert tuple(axis.size for axis in lazy.axes) == voxels.shape
 
 
 def test_lazy_load_threshold_scales_with_available_memory():

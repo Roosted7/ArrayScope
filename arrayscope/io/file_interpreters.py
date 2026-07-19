@@ -801,23 +801,23 @@ def consume_handoff_file(filepath):
 
 
 def _load_lazy_source(filepath, suffix, *, lazy, lazy_threshold_bytes):
-    """Open .npy/.cfl files as lazy memory-mapped sources when requested or large.
+    """Open .npy/.cfl/.nii files as lazy memory-mapped sources when requested or large.
 
     Returns None to fall through to eager loading. Explicit lazy=True raises on
     unmappable files; lazy="auto" silently falls back to eager for them.
     """
     from arrayscope.io.lazy_sources import (
-        open_memmap_source,
+        open_lazy_source,
         should_load_lazily,
-        supports_memmap_source,
+        supports_lazy_source,
     )
 
-    if not supports_memmap_source(suffix):
+    if not supports_lazy_source(suffix):
         return None
     if not should_load_lazily(filepath, lazy=lazy, threshold_bytes=lazy_threshold_bytes):
         return None
     try:
-        source = open_memmap_source(filepath)
+        source, axes = open_lazy_source(filepath)
     except ValueError:
         if lazy is True:
             raise
@@ -832,6 +832,7 @@ def _load_lazy_source(filepath, suffix, *, lazy, lazy_threshold_bytes):
             "lazy": True,
             "source_label": source.label,
         },
+        axes=_axes_matching_shape(axes, source.shape),
     )
 
 
