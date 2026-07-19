@@ -1767,6 +1767,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     # real retarget-driven commit does.
     win._viewport_interaction_active = False
     quiet_edge_queued = []
+    settle_pumped = []
 
     def forced_commit(current, *, force_commit=False):
         assert force_commit is True
@@ -1775,20 +1776,36 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
             service._queue_montage_level_stats_for_payloads(current, {0: object()})
         )
 
+    def settle_pump(current, payloads):
+        # The composed design (settle-edge pump, 6c32ed2b) dispatches the
+        # deferred evidence BEFORE the forced commit — strictly earlier than
+        # the quiet-edge-only flow this test originally encoded.
+        settle_pumped.append(
+            service._queue_montage_level_stats_for_payloads(current, payloads)
+        )
+
+    session.tile_presentation_state = SimpleNamespace(payloads={0: object()})
     owner = SimpleNamespace(
         _frame_session=session,
         _frame_session_is_current=lambda candidate: candidate is session,
         retarget_frame_pipeline=forced_commit,
+        _queue_montage_level_stats_for_payloads=settle_pump,
     )
     assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
 
-    # The histogram dispatches: the obligation is re-installed as required and
-    # the resolve task is actually submitted to the kernel.
+    # Two dispatch edges exist in the composed design and BOTH sub-cases are
+    # contract-legal with exactly one dispatch total: (a) an already-installed
+    # obligation at the fill tail dispatches at the settle-edge pump (the
+    # 6c32ed2b wgpu cold-fill stall case); (b) THIS case — a cold obligation
+    # deferred before configuration — no-ops at the pump (0: nothing
+    # installed yet) and dispatches when the forced commit re-runs the
+    # evidence configuration (the codex finding-1 case).
     assert view.required_calls[-1] == (
         True,
         ("wgpu-resident-histogram", session.level_key),
     )
     assert view.dispatched is True
+    assert settle_pumped == [0]
     assert quiet_edge_queued == [1]
     assert len(submitted) == 1
     assert session._wgpu_histogram_evidence_deferred is False
