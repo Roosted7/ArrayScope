@@ -147,7 +147,7 @@ class Mean:
 
     def apply(self, data):
         axis = _validate_axis(data.shape, self.axis)
-        return np.mean(data, axis=axis)
+        return _mean(data, axis)
 
     def output_shape(self, shape: Shape) -> Shape:
         axis = _validate_axis(shape, self.axis)
@@ -156,6 +156,8 @@ class Mean:
     def output_dtype(self, input_dtype):
         if input_dtype is None:
             return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
         return np.mean(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
@@ -175,7 +177,7 @@ class Mean:
         self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
     ):
         del output_region
-        return np.mean(data, axis=axis_in_region_result(input_region, self.axis))
+        return _mean(data, axis_in_region_result(input_region, self.axis))
 
 
 @dataclass(frozen=True)
@@ -184,7 +186,7 @@ class RootSumSquares:
 
     def apply(self, data):
         axis = _validate_axis(data.shape, self.axis)
-        return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis))
+        return _root_sum_squares(data, axis)
 
     def output_shape(self, shape: Shape) -> Shape:
         axis = _validate_axis(shape, self.axis)
@@ -193,6 +195,8 @@ class RootSumSquares:
     def output_dtype(self, input_dtype):
         if input_dtype is None:
             return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
         return np.asarray(np.abs(np.empty((1,), dtype=np.dtype(input_dtype)))).dtype
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
@@ -213,9 +217,7 @@ class RootSumSquares:
         self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
     ):
         del output_region
-        return np.sqrt(
-            np.sum(np.abs(data) ** 2, axis=axis_in_region_result(input_region, self.axis))
-        )
+        return _root_sum_squares(data, axis_in_region_result(input_region, self.axis))
 
 
 @dataclass(frozen=True)
@@ -766,6 +768,30 @@ def _fftshift_axis_region(axis_region: AxisRegion, size: int) -> AxisRegion:
 
 def _same_dtype(input_dtype):
     return None if input_dtype is None else np.dtype(input_dtype)
+
+
+def _is_integer_dtype(dtype) -> bool:
+    return np.dtype(dtype).kind in "biu"
+
+
+def _mean(data, axis):
+    # Integer sources reduce at float32 so long-lived stage payloads stay at
+    # 4 bytes/px; integers up to 2**24 are exact in float32 and numpy's
+    # pairwise accumulation keeps the reduction error negligible.
+    dtype = getattr(data, "dtype", None)
+    if dtype is not None and _is_integer_dtype(dtype):
+        return np.mean(data, axis=axis, dtype=np.float32)
+    return np.mean(data, axis=axis)
+
+
+def _root_sum_squares(data, axis):
+    # Integer inputs must widen before squaring: e.g. int16 ** 2 wraps
+    # silently for |value| > 181. float32 also matches the integer-reduction
+    # policy used by _mean.
+    dtype = getattr(data, "dtype", None)
+    if dtype is not None and _is_integer_dtype(dtype):
+        data = np.asarray(data, dtype=np.float32)
+    return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis))
 
 
 def _capabilities(

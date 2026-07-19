@@ -84,6 +84,7 @@ Mean = operation_pipeline.Mean
 ReverseAxis = operation_pipeline.ReverseAxis
 RootSumSquares = operation_pipeline.RootSumSquares
 SplitComplexAxis = operation_pipeline.SplitComplexAxis
+Sum = operation_pipeline.Sum
 
 
 def test_crop_reverse_and_conjugate_preserve_base_data_reference_and_values():
@@ -115,6 +116,41 @@ def test_mean_and_root_sum_squares_remove_axes_predictably():
     assert document.current_shape == (2,)
     expected = np.sqrt(np.sum(np.abs(np.mean(data, axis=1)) ** 2, axis=1))
     np.testing.assert_allclose(result, expected)
+
+
+def test_mean_and_root_sum_squares_reduce_integer_inputs_at_float32():
+    data = np.arange(2 * 3, dtype=np.uint16).reshape(2, 3)
+
+    mean_result = Mean(axis=0).apply(data)
+    assert mean_result.dtype == np.dtype(np.float32)
+    assert Mean(axis=0).output_dtype(np.uint16) == np.dtype(np.float32)
+    np.testing.assert_allclose(mean_result, np.mean(np.asarray(data, dtype=np.float64), axis=0))
+
+    rss_result = RootSumSquares(axis=1).apply(np.array([[300, 400]], dtype=np.int16))
+    assert rss_result.dtype == np.dtype(np.float32)
+    assert RootSumSquares(axis=1).output_dtype(np.int16) == np.dtype(np.float32)
+    # int16 ** 2 wraps for |value| > 181; the float32 cast must happen first.
+    np.testing.assert_allclose(rss_result, [500.0])
+
+
+def test_sum_keeps_exact_integer_promotion():
+    data = np.full((3, 2), 40_000, dtype=np.uint16)
+
+    result = Sum(axis=0).apply(data)
+
+    assert result.dtype == Sum(axis=0).output_dtype(np.uint16)
+    assert np.issubdtype(result.dtype, np.integer)
+    np.testing.assert_array_equal(result, [120_000, 120_000])
+
+
+@pytest.mark.parametrize(
+    "dtype", [np.uint8, np.int16, np.uint16, np.float32, np.float64, np.complex64]
+)
+@pytest.mark.parametrize("operation", [Mean(axis=0), Sum(axis=0), RootSumSquares(axis=0)])
+def test_reduction_declared_output_dtype_matches_actual(operation, dtype):
+    data = np.ones((2, 3), dtype=dtype)
+
+    assert operation.apply(data).dtype == operation.output_dtype(dtype)
 
 
 def test_centered_fft_and_ifft_operations_wrap_existing_dim_ops():
