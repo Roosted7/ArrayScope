@@ -364,9 +364,11 @@ drain:
 - Kernel shutdown closes admission, cancels queued work and running tokens,
   then applies one global five-second join deadline. A real-Wayland workflow
   cancelled its one in-flight scope and emitted `kernel_shutdown complete`
-  after **56.8 ms**, replacing the recorded 19–26 s drain. A timeout remains
-  loud and names live threads and task scopes; workers are never silently
-  abandoned.
+  after **56.8 ms**. This bounds the GUI close callback and queued-work drain,
+  but not yet whole-process exit: the final matrix exposed current non-daemon
+  worker items continuing after that diagnostic. The original **<5 s process
+  exit** gate therefore remains open. A timeout stays loud and names live
+  threads and task scopes; workers are never silently abandoned.
 
 Paired plain real-Wayland acceptance
 (`tests/artifacts/wgpu-performance-2026-07-19/acceptance/`) materially closes
@@ -388,3 +390,49 @@ standing AUTO-camera demand-freshness red (5.18/5.37 s respectively); no Wgpu
 row regressed. Promotion verdict remains **not yet parity** because full-grid
 scroll and the shared callback/heartbeat bars remain open, but the
 GPU-synchronization defect and retarget floor-scan hotspot are closed.
+
+### Promotion evidence entry 3 (2026-07-19) — quality-equivalent system pacing
+
+The next pass followed the retarget through presentation, the resource
+governor, residency and the benchmark's own settlement rule. Four bounded
+changes landed:
+
+- Wgpu bound-plane lookup now indexes resident bindings by content family.
+  This retains every useful resident ancestor while reducing `_flat_indices`
+  from 2.635 to 0.106 s and `_bind_planes` from 2.617 to 0.282 s in the
+  attributed zoom/pan profile. A candidate-count oracle prevents a return to
+  the all-plane scan.
+- The perf stage now requires level convergence, not merely pixel coverage.
+  A faster renderer may legitimately materialize and upload more higher-
+  quality tiles; the harness scores that useful work rather than treating a
+  lower upload count as the objective.
+- Reapplying an unchanged resource-governor lane quota is wake-free. In the
+  attributed profile `set_lane_quota` fell from 3.882 to 0.042 s and
+  `_apply_resource_governor_decisions` from 2.570 to 0.854 s. The governor
+  still wakes workers immediately when a quota actually changes.
+- A viewport retarget now hands its already-computed LOD demand and swap
+  verdict to the immediate frame-pipeline pass. Completion-driven replans
+  still refresh from current lifecycle/residency truth. This removes one
+  complete visible-tile decision scan without carrying a verdict across a
+  backend acknowledgement.
+
+On matched 60/60-exact, zero-pending, zero-stale real-Wayland runs, the
+representative Wgpu progression was fast-scroll p95 109.1 → 88.7 →
+77.3 ms and zoom/pan worst p95 137.8 → 108.3 ms. The accepted stack's two
+additional zoom/pan controls measured 141.5 and 145.2 ms, so 108.3 ms is a
+best run, not a steady-state claim. Uploads in the representative zoom/pan
+run moved 112 → 108 while final LOD and exact pixels remained identical;
+that incidental reduction is not the success criterion—more uploads are a
+win whenever they deliver more useful quality within the interaction budget.
+
+The final full real-Wayland journey matrix is **14/15**: all five Wgpu and all
+five VisPy rows pass, including zero phase-2 submissions during coverage; the
+only red is the standing PyQtGraph `cold_fill` AUTO-camera demand-freshness
+lane. The full offscreen suite is **2474 passed, 36 skipped, 1 xfailed**.
+The real-Wayland GPU interaction ring is **21 passed**; the serial stress ring
+is **4 passed, 1 skipped, 1 xpassed**.
+Rejected variants are preserved in `docs/graveyard.md`: frontier-only
+pins discarded useful ancestors, finer floor epochs added guard cost, exact-
+bind memoization found only 2/104 stable descriptors, a pre-ack LOD verdict
+crossed the wrong lifecycle boundary, and trace-edge compression reduced
+instrumentation volume without reducing pacing gaps.

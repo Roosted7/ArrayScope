@@ -208,12 +208,15 @@ or every row dies `FileNotFoundError` with `instances: 0`.
   guess that the blackout was "likely the identity" of that standing red is
   **refuted**: it is the AUTO-camera demand-freshness lane (queue standing
   row), not the entry blackout.
-- **Kernel shutdown teardown fixed 2026-07-19:** shutdown now closes
+- **Kernel queued-work shutdown drain fixed 2026-07-19:** shutdown now closes
   admission, cancels queued work plus running tokens, and applies one global
   five-second join deadline with loud live-thread/task-scope diagnostics.
-  The real-Wayland workflow trace completes shutdown in 56.8 ms instead of
-  draining for the recorded ~19–26 s; focused cancellation and global-deadline
-  tests plus the full offscreen suite are green (`112343f8`).
+  The real-Wayland workflow trace completes the GUI close callback in 56.8 ms
+  instead of draining queued work for the recorded ~19–26 s; focused
+  cancellation and global-deadline tests are green (`112343f8`). Whole-
+  process exit is not yet bounded: a current non-daemon worker evaluation can
+  continue after the loud deadline. The active queue retains the <5 s process
+  exit gate rather than misreporting the callback result as full closure.
 - The commit's fixed cost itself (~80–120 ms full-plan walk per commit) is
   perf-bars territory (50 ms GUI-callback bar is already red and owned
   there); the cohort change amortizes it but does not shrink it.

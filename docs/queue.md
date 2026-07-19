@@ -49,6 +49,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   so the unit gate's fixture (window carries no committed display frame) is
   a prime suspect; field zoom verdict pending. Red pin (strict xfail with
   instrumented probes): `tests/ui/test_lod_demand_freshness.py`.
+- **Kernel whole-process exit remains unbounded by current-item work.** The
+  2026-07-19 shutdown change closes admission, cancels queued work/tokens and
+  bounds the GUI close callback under one five-second join deadline, but the
+  final real-Wayland matrix showed current non-daemon worker evaluations can
+  keep the process alive after `kernel_shutdown complete`. Diagnose a
+  cooperative cancellation boundary inside long slab/evidence evaluations;
+  do not daemon-abandon NumPy/FFTW work. Exit gate: a real workflow process
+  terminates in <5 s and the suite emits no leaked-thread diagnostics.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
@@ -108,13 +116,23 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
 ## Done (most recent first — one line each, evidence linked)
 
-- 2026-07-19 — **Wgpu interaction-path stalls and kernel teardown closed:**
+- 2026-07-19 — **Wgpu interaction-path stalls and queued shutdown drain closed:**
   gesture histogram resolves are deferred to settle (`1fa2e0f2`), floor lookup
   is residency-epoch memoized with a stale-store guard (`f6a9e329`), and queued
   kernel work cancels under one global shutdown deadline (`112343f8`). Real-
   Wayland fast-scroll p95 is 100.8 ms (was 194–214 ms), all five Wgpu journey
-  rows pass, and teardown completes in 56.8 ms; the shared callback/heartbeat
-  red remains open. [Promotion evidence](proposals/tensor-engine-endpoint.md#promotion-evidence-entry-2-2026-07-19--interaction-stalls-removed-at-their-owners).
+  rows pass, and the close callback completes in 56.8 ms; whole-process exit
+  on a current long worker item remains explicitly open above, as do the
+  shared callback/heartbeat bars. [Promotion evidence](proposals/tensor-engine-endpoint.md#promotion-evidence-entry-2-2026-07-19--interaction-stalls-removed-at-their-owners).
+- 2026-07-19 — **Wgpu/system interaction follow-through:** content-family
+  plane indexing (`a8e0ee06`), quality-converged perf phases (`18986810`),
+  wake-free unchanged governor quotas (`17dfb948`), and single-consumption
+  viewport LOD decisions (`ca2b1846`). Every measured row finished 60/60
+  exact with zero pending/stale levels; representative Wgpu fast-scroll p95
+  reached 77.3 ms, while accepted repeat zoom/pan controls were 141.5–145.2
+  ms. Final real-Wayland matrix: 14/15 overall, Wgpu 5/5 and VisPy 5/5; only
+  the standing PyQtGraph cold-fill freshness row is red. Rejected variants
+  are recorded in the graveyard. [Promotion evidence](proposals/tensor-engine-endpoint.md#promotion-evidence-entry-3-2026-07-19--quality-equivalent-system-pacing).
 - 2026-07-19 — **PyQtGraph montage-entry blackout fixed (~7.5 s black → 2 s
   to first pixels, R8 continuity gate green):** three mechanisms — CPU first
   pixels accept a provisional refined first evidence batch instead of the
