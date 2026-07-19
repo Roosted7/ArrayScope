@@ -232,14 +232,16 @@ class WgpuImageView2D(ImageViewShell):
         self._display_stack.setContentsMargins(0, 0, 0, 0)
         self._display_stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
 
-        # Present-method decision (wgpu_present_method setting).  ``screen``
-        # is explicit opt-in and exists only on a live Wayland session; every
-        # other environment falls back to bitmap with a recorded reason so
-        # offscreen/xcb runs keep working without configuration changes.
+        # Present-method decision (wgpu_present_method setting).  The screen
+        # swapchain exists only on a live Wayland session: an explicit
+        # ``screen`` pin falls back to bitmap with a recorded reason, and
+        # ``auto`` resolves to screen exactly where the measured gate-B
+        # recipe applies (bitmap everywhere else — offscreen/xcb runs keep
+        # working without configuration changes).
         requested = str(getattr(self, "_wgpu_present_method_requested", "bitmap"))
         self._wgpu_present_method = "bitmap"
         self._wgpu_present_method_fallback_reason = ""
-        if requested == "screen":
+        if requested in ("screen", "auto"):
             from arrayscope.display.backends.wgpu.screen_canvas import (
                 screen_present_unavailable_reason,
             )
@@ -248,6 +250,9 @@ class WgpuImageView2D(ImageViewShell):
             if reason is None:
                 self._wgpu_present_method = "screen"
             else:
+                # For the explicit pin this is a loud fallback; for AUTO it
+                # is the resolution rule doing its job.  Recorded either way
+                # so diagnostics always answer "why bitmap?".
                 self._wgpu_present_method_fallback_reason = reason
                 emit_trace(
                     "wgpu_screen_present_fallback",
@@ -1971,6 +1976,9 @@ class WgpuImageView2D(ImageViewShell):
                 - set(self._wgpu_histogram_evidence_ready)
             ),
             "wgpu_present_method": self.wgpuPresentMethod(),
+            "wgpu_present_method_requested": str(
+                getattr(self, "_wgpu_present_method_requested", "bitmap")
+            ),
             "wgpu_present_method_fallback_reason": self.wgpuPresentMethodFallbackReason(),
             "wgpu_screen_present_mode": str(
                 getattr(self._wgpu_canvas, "present_mode", "") or ""

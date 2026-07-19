@@ -47,8 +47,11 @@ def create_image_view(settings=None, *, notify=None):
 
             view = WgpuSurface(present_method=present_method_value)
             view._notify_status = notify
+            # Only an EXPLICIT screen pin warrants a warning; AUTO resolving
+            # to bitmap is the resolution rule working as designed.
             if (
                 callable(notify)
+                and present_method_value == WgpuPresentMethodChoice.SCREEN.value
                 and view.wgpuPresentMethod() != present_method_value
             ):
                 notify(

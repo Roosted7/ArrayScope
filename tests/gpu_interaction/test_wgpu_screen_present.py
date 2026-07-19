@@ -191,3 +191,27 @@ def test_grab_presented_framebuffer_sees_the_committed_content(qt_app, screen_vi
     # The ramp spans dark to bright; a blind capture would be uniform.
     assert float(gray.max() - gray.min()) > 100.0
     assert float((gray > 10.0).mean()) > 0.05
+
+
+def test_auto_present_method_activates_screen_on_wayland(qt_app):
+    """AUTO's whole point: on a live Wayland session it flips screen on."""
+
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    view = WgpuImageView2D(present_method="auto")
+    view.resize(420, 320)
+    view.show()
+    try:
+        for _ in range(30):
+            qt_app.processEvents()
+        assert view.wgpuPresentMethod() == "screen", (
+            view.wgpuPresentMethodFallbackReason()
+        )
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_present_method_requested"] == "auto"
+        assert diagnostics["wgpu_present_method_fallback_reason"] == ""
+    finally:
+        view.close()
+        view.teardown_surface()
+        for _ in range(20):
+            qt_app.processEvents()

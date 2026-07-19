@@ -319,9 +319,10 @@ def run_profile_montage_workflow(
             )
             base_large["wgpu_present_method"] = effective
             base_scroll["wgpu_present_method"] = effective
-            if effective != wgpu_present_method:
-                # Evidence honesty: a "screen" run must never silently
-                # measure the bitmap path.
+            if wgpu_present_method == "screen" and effective != "screen":
+                # Evidence honesty: an explicit "screen" run must never
+                # silently measure the bitmap path.  ("auto" records whatever
+                # it resolved to — the effective method is in every record.)
                 raise RuntimeError(
                     f"wgpu present method {wgpu_present_method!r} requested but "
                     f"the view activated {effective!r} "
@@ -6945,11 +6946,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wgpu-present-method",
-        choices=("bitmap", "screen"),
+        choices=("bitmap", "screen", "auto"),
         default="bitmap",
         help=(
-            "wgpu backend presentation path: bitmap (default) or the "
-            "native-Wayland screen swapchain; ignored by other backends"
+            "wgpu backend presentation path: bitmap (default), the "
+            "native-Wayland screen swapchain (fails loudly if unavailable), "
+            "or auto (screen where possible; effective method recorded); "
+            "ignored by other backends"
         ),
     )
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")

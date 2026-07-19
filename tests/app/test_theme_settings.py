@@ -112,13 +112,17 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
-    # Screen presentation is explicit opt-in (queue row 3): bitmap default,
-    # unknown values normalize back to bitmap.
+    # Screen presentation is opt-in (queue row 3): bitmap default, unknown
+    # values normalize back to bitmap, and auto (screen where the measured
+    # native-Wayland path exists) round-trips.
     assert defaults.wgpu_present_method == settings_state.WgpuPresentMethodChoice.BITMAP
     assert (
         settings_state.settings_from_mapping({"wgpu_present_method": "unknown"}).wgpu_present_method
         == settings_state.WgpuPresentMethodChoice.BITMAP
     )
+    auto = settings_state.settings_from_mapping({"wgpu_present_method": "auto"})
+    assert auto.wgpu_present_method == settings_state.WgpuPresentMethodChoice.AUTO
+    assert settings_state.settings_to_mapping(auto)["wgpu_present_method"] == "auto"
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO

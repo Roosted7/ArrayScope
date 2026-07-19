@@ -38,7 +38,6 @@ class WindowMenuMixin:
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
                 "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
-                # Settings-file pin only (like the wgpu backend itself): no menu.
                 "wgpu_present_method": self._settings.value("wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value),
                 "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
@@ -222,6 +221,40 @@ class WindowMenuMixin:
             image_backend_menu.addAction(action)
             self._image_rendering_backend_actions[choice] = action
 
+        self._wgpu_present_method_actions = {}
+        self._wgpu_present_method_action_group = QtGui.QActionGroup(self)
+        self._wgpu_present_method_action_group.setExclusive(True)
+        wgpu_present_menu = QtWidgets.QMenu("wgpu Presentation", self)
+        wgpu_present_menu.setToolTipsVisible(True)
+        performance_menu.addMenu(wgpu_present_menu)
+        self._wgpu_present_method_menu = wgpu_present_menu
+        for choice, label, tooltip in (
+            (
+                WgpuPresentMethodChoice.AUTO,
+                "Auto (screen on native Wayland)",
+                "Present through the compositor swapchain wherever the measured "
+                "native-Wayland path exists; bitmap everywhere else.",
+            ),
+            (
+                WgpuPresentMethodChoice.BITMAP,
+                "Bitmap (readback compositing)",
+                "Render offscreen and composite through Qt; works everywhere, "
+                "pays a per-frame GPU→CPU readback.",
+            ),
+            (
+                WgpuPresentMethodChoice.SCREEN,
+                "Screen (native swapchain pin)",
+                "Always request the native-Wayland swapchain; falls back to "
+                "bitmap with a status message where it cannot exist.",
+            ),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tooltip)
+            self._wgpu_present_method_action_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=choice: self._set_wgpu_present_method_choice(choice))
+            wgpu_present_menu.addAction(action)
+            self._wgpu_present_method_actions[choice] = action
+
         self._montage_quality_actions = {}
         self._montage_quality_action_group = QtGui.QActionGroup(self)
         self._montage_quality_action_group.setExclusive(True)
@@ -321,6 +354,17 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.image_rendering_backend == choice)
             action.blockSignals(False)
+        for choice, action in getattr(self, "_wgpu_present_method_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.wgpu_present_method == choice)
+            action.blockSignals(False)
+        if hasattr(self, "_wgpu_present_method_menu"):
+            # Presentation is a wgpu-backend concern; the submenu greys out
+            # (choice preserved) while another backend is selected.
+            self._wgpu_present_method_menu.setEnabled(
+                self.app_settings.image_rendering_backend
+                == ImageRenderingBackendChoice.WGPU
+            )
         for choice, action in getattr(self, "_montage_quality_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.montage_quality_policy == choice)
@@ -375,6 +419,11 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(image_rendering_backend=choice)
         self._apply_performance_settings(persist=True)
         show_status_message(self, "Image rendering backend changes apply to newly opened windows.")
+
+    def _set_wgpu_present_method_choice(self, choice):
+        self.app_settings = self._updated_app_settings(wgpu_present_method=choice)
+        self._apply_performance_settings(persist=True)
+        show_status_message(self, "wgpu presentation changes apply to newly opened windows.")
 
     def _set_montage_quality_policy_choice(self, choice):
         if self.app_settings.montage_quality_policy == choice:

@@ -1583,3 +1583,37 @@ def test_grab_presented_framebuffer_is_screen_path_only(qt_app):
         assert view.grabPresentedFramebuffer() is None
     finally:
         view.close()
+
+
+def test_auto_present_method_resolves_to_bitmap_off_wayland(qt_app):
+    """AUTO means "screen where the measured native-Wayland path exists" —
+    everywhere else it quietly resolves to bitmap (reason still recorded in
+    diagnostics; no fallback warning, unlike the explicit screen pin)."""
+
+    view = _view_class("wgpu")(present_method="auto")
+    try:
+        assert view.wgpuPresentMethod() == "bitmap"
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_present_method_requested"] == "auto"
+        assert "wayland" in diagnostics["wgpu_present_method_fallback_reason"]
+    finally:
+        view.close()
+
+
+def test_factory_auto_resolution_to_bitmap_is_not_a_warning(qt_app):
+    from arrayscope.app.settings_state import settings_from_mapping
+    from arrayscope.display.image_view_factory import create_image_view
+
+    settings = settings_from_mapping(
+        {"image_rendering_backend": "wgpu", "wgpu_present_method": "auto"}
+    )
+    messages = []
+    view = create_image_view(settings, notify=messages.append)
+    try:
+        assert view.surface_kind == "wgpu"
+        assert view._wgpu_present_method_requested == "auto"
+        # AUTO resolving to bitmap offscreen is the rule working, not a
+        # fallback worth a status message.
+        assert not any("unavailable" in message for message in messages)
+    finally:
+        view.close()

@@ -40,9 +40,14 @@ class ImageRenderingBackendChoice(Enum):
 
 
 class WgpuPresentMethodChoice(Enum):
+    # AUTO resolves per session: the screen swapchain exactly where the
+    # measured gate-B recipe applies (native Wayland), bitmap everywhere
+    # else.  Screen on other platforms (e.g. xcb) would be a different,
+    # unmeasured path — AUTO widens only behind new evidence.
+    AUTO = "auto"
     BITMAP = "bitmap"
-    # Experimental explicit opt-in only (native-Wayland swapchain; the view
-    # falls back to bitmap loudly anywhere the screen path cannot exist).
+    # SCREEN is the explicit pin (native-Wayland swapchain; the view falls
+    # back to bitmap loudly anywhere the screen path cannot exist).
     SCREEN = "screen"
 
 

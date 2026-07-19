@@ -221,3 +221,69 @@ def test_montage_quality_policy_change_applies_to_next_montage_session(qtbot):
             assert str(session.lod_policy_mode) == "native-only"
     finally:
         win.close()
+
+
+def test_wgpu_present_method_menu_switches_and_persists(qtbot):
+    """Performance → wgpu Presentation: Auto/Bitmap/Screen radio group.
+
+    The submenu is enabled only while the wgpu backend is selected (the
+    setting is a wgpu-backend concern); choices persist through QSettings
+    and apply to newly opened windows like the backend choice itself.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import (
+        ImageRenderingBackendChoice,
+        WgpuPresentMethodChoice,
+    )
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        auto = _submenu_action(
+            win, "Performance", "wgpu Presentation", "Auto (screen on native Wayland)"
+        )
+        bitmap = _submenu_action(
+            win, "Performance", "wgpu Presentation", "Bitmap (readback compositing)"
+        )
+        screen = _submenu_action(
+            win, "Performance", "wgpu Presentation", "Screen (native swapchain pin)"
+        )
+        # Bitmap is the default and the menu reflects it.
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.BITMAP
+        assert bitmap.isChecked() and not auto.isChecked() and not screen.isChecked()
+        # Greyed out until the wgpu backend is selected.
+        assert not win._wgpu_present_method_menu.isEnabled()
+
+        _submenu_action(
+            win,
+            "Performance",
+            "Image Rendering Backend",
+            "wgpu experimental (GPU compute)",
+        ).trigger()
+        _process_events(qtbot)
+        assert win._wgpu_present_method_menu.isEnabled()
+
+        auto.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.AUTO
+        assert win._settings.value("wgpu_present_method") == "auto"
+        assert auto.isChecked() and not bitmap.isChecked()
+
+        screen.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
+        assert win._settings.value("wgpu_present_method") == "screen"
+
+        # Switching the backend away greys the submenu but keeps the choice.
+        _submenu_action(
+            win, "Performance", "Image Rendering Backend", "PyQtGraph stable"
+        ).trigger()
+        _process_events(qtbot)
+        assert not win._wgpu_present_method_menu.isEnabled()
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
+        assert win.app_settings.image_rendering_backend == ImageRenderingBackendChoice.PYQTGRAPH
+    finally:
+        win.close()
