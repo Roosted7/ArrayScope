@@ -4665,6 +4665,9 @@ def _phase_record(
         "vispy_tile_presentation_draw_pending": bool(vispy.get("tile_presentation_draw_pending", False)),
         "vispy_presented_tile_count": int(vispy.get("presented_tile_count", 0)),
         "vispy_presented_tiles": list(vispy.get("presented_tiles", ()) or ()),
+        "wgpu_plane_lookup_candidates_total": int(
+            vispy.get("wgpu_plane_lookup_candidates_total", 0) or 0
+        ),
         "vispy_tile_visual_visible_pages": int(vispy.get("tile_visual_visible_pages", 0)),
         "vispy_tile_visual_min_order": vispy.get("tile_visual_min_order"),
         "vispy_overlay_visual_visible_items": int(vispy.get("overlay_visual_visible_items", 0)),

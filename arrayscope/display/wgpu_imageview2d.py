@@ -1638,6 +1638,9 @@ class WgpuImageView2D(ImageViewShell):
             "presented_tiles": committed_tiles,
             "page_table_resident_count": resident,
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
+            "wgpu_plane_lookup_candidates_total": int(
+                getattr(executor, "plane_lookup_candidates_total", 0) or 0
+            ),
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
             "wgpu_last_draw_error": str(getattr(self, "_wgpu_last_draw_error", "") or ""),
             "wgpu_histogram_evidence_pending": len(

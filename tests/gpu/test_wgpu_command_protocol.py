@@ -1084,6 +1084,33 @@ def test_plane_rebind_keeps_warm_residency_zero_upload():
     )
 
 
+def test_plane_binding_indexes_resident_keys_by_content_family():
+    data = _scalar_plane(21)
+    wanted = _scalar_plane_binding("wanted")
+    unrelated = tuple(
+        _scalar_plane_binding(f"other-{index}") for index in range(59)
+    )
+    executor = WgpuPlaneExecutor(
+        target_size=SP_CANVAS,
+        pool_layers=8,
+        device=_shared_device(),
+    )
+
+    executor.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes((*unrelated, wanted)),
+                *_ensure_scalar_plane("wanted", data),
+            ),
+        )
+    )
+
+    # Binding and ensuring visit the one indexed content-family candidate,
+    # not every one of the 60 montage planes for each page lookup.
+    assert executor.plane_lookup_candidates_total == SP_W // PAGE
+
+
 def test_rgb8_pool_bypasses_levels_and_lut():
     rng = np.random.default_rng(7)
     rgb = rng.integers(0, 256, size=(PAGE, PAGE, 3), dtype=np.uint8)

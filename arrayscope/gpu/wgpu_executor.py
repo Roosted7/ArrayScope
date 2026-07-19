@@ -830,6 +830,8 @@ class WgpuPlaneExecutor:
         self.page_table = PageTable()
         self._bound_planes: tuple = ()
         self._plane_grids: list[list[_LodGrid]] = []
+        self._plane_family_indices: dict[tuple[object, ...], tuple[int, ...]] = {}
+        self._plane_lookup_candidates_total = 0
         self._flat_table = np.full(1, -1, dtype=np.int32)
         self._table_dirty = True
         self._tiles: tuple = ()
@@ -1147,10 +1149,11 @@ class WgpuPlaneExecutor:
         wgpu = self._wgpu
         self._bound_planes = tuple(cmd.planes)
         self._plane_grids = []
+        family_indices: dict[tuple[object, ...], list[int]] = {}
         lod_rows: list[tuple[int, int, int, int]] = []
         plane_rows: list[tuple[int, int, int, int]] = []
         base = 0
-        for plane in self._bound_planes:
+        for plane_index, plane in enumerate(self._bound_planes):
             h, w = plane.plane_shape
             lod_base = len(lod_rows)
             grids: list[_LodGrid] = []
@@ -1164,6 +1167,18 @@ class WgpuPlaneExecutor:
             plane_rows.append(
                 (_REP_INDEX[plane.representation], plane.max_lod, lod_base, 0)
             )
+            family = (
+                plane.document_generation,
+                plane.operation_key,
+                plane.representation,
+            )
+            family_indices.setdefault((*family, None), []).append(plane_index)
+            family_indices.setdefault((*family, plane.lod_reducer), []).append(
+                plane_index
+            )
+        self._plane_family_indices = {
+            family: tuple(indices) for family, indices in family_indices.items()
+        }
 
         # Bound physical coverage is the active never-black fallback set.
         # Protect every currently resident page that feeds these plane spans
@@ -1205,17 +1220,16 @@ class WgpuPlaneExecutor:
         if key.rank != 2:
             return ()
         out = []
-        for plane, grids in zip(self._bound_planes, self._plane_grids):
-            if (
-                key.document_generation != plane.document_generation
-                or key.operation_key != plane.operation_key
-                or key.representation != plane.representation
-                or (
-                    not key.lod.is_native
-                    and key.lod.reducer != plane.lod_reducer
-                )
-            ):
-                continue
+        family = (
+            key.document_generation,
+            key.operation_key,
+            key.representation,
+            None if key.lod.is_native else key.lod.reducer,
+        )
+        plane_indices = self._plane_family_indices.get(family, ())
+        self._plane_lookup_candidates_total += len(plane_indices)
+        for plane_index in plane_indices:
+            grids = self._plane_grids[plane_index]
             lod = key.lod.level
             if lod >= len(grids):
                 continue
@@ -1899,6 +1913,10 @@ class WgpuPlaneExecutor:
     @property
     def histogram_readback_resolves_total(self) -> int:
         return int(self._histogram_readback_resolves_total)
+
+    @property
+    def plane_lookup_candidates_total(self) -> int:
+        return int(self._plane_lookup_candidates_total)
 
     @property
     def bound_planes(self) -> tuple:
