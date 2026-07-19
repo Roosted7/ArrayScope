@@ -478,6 +478,66 @@ def test_scope_epoch_applies_only_to_older_submissions():
     assert ran == ["fresh"]
 
 
+def test_clear_scope_purges_completed_keys_so_the_set_stays_bounded():
+    """Completion memory must not grow monotonically across scope clears."""
+
+    kernel, backend = make_manual()
+    kernel.submit(TaskSpec(key="sibling", fn=lambda: None, scope="other"))
+    backend.run_all()
+    for cycle in range(5):
+        kernel.submit(TaskSpec(key=("tile", cycle), fn=lambda: None, scope="view:tiles"))
+        kernel.submit(TaskSpec(key=("plan", cycle), fn=lambda: None, scope="view:levels"))
+        backend.run_all()
+        assert kernel.diagnostics().completed_keys == 3  # sibling + this cycle
+        kernel.clear_scope("view")  # parent purges both child scopes
+        assert kernel.diagnostics().completed_keys == 1
+        assert not kernel.has_completed_task(("tile", cycle))
+    assert kernel.has_completed_task("sibling")
+    drain(kernel)
+
+
+def test_cleared_scope_result_no_longer_satisfies_dependencies():
+    kernel, backend = make_manual()
+    ran = []
+    kernel.submit(TaskSpec(key="a", fn=lambda: ran.append("a"), scope="view"))
+    backend.run_all()
+    kernel.clear_scope("view")
+    kernel.submit(TaskSpec(key="b", fn=lambda: ran.append("b"), deps=("a",)))
+    backend.run_all()
+    assert ran == ["a"]  # b parks: the cleared result is not a live producer
+    assert kernel.diagnostics().parked_deps == 1
+    kernel.submit(TaskSpec(key="a", fn=lambda: ran.append("a2"), scope="view"))
+    backend.run_all()
+    assert ran == ["a", "a2", "b"]
+    drain(kernel)
+
+
+def test_forget_results_releases_completion_memory_without_staleness():
+    kernel, backend = make_manual()
+    ran = []
+    kernel.submit(TaskSpec(key="g1", fn=lambda: None, scope="eval:g1"))
+    kernel.submit(TaskSpec(key="g2", fn=lambda: None, scope="eval:g2"))
+    kernel.submit(TaskSpec(key="live", fn=lambda: ran.append("live"), scope="eval:g1"))
+    assert backend.run_next()  # g1 completes; live still queued
+    assert backend.run_next()  # g2 completes
+    assert kernel.forget_results("eval:g1") == 1
+    assert not kernel.has_completed_task("g1")
+    assert kernel.has_completed_task("g2")
+    backend.run_all()  # forgetting is not a clear: live work still runs
+    assert ran == ["live"]
+    drain(kernel)
+
+
+def test_forget_results_root_prefix_covers_inline_work():
+    from arrayscope.kernel import WorkItem
+
+    kernel, _backend = make_manual()
+    kernel.note_inline_work(WorkItem(key="inline", lane=Lane.BACKEND_COMMIT))
+    assert kernel.has_completed_task("inline")
+    assert kernel.forget_results("") == 1
+    assert not kernel.has_completed_task("inline")
+
+
 # ------------------------------------------------- quotas and deadlines
 
 

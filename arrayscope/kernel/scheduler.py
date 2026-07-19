@@ -124,10 +124,12 @@ class Kernel:
         self._ready: list[tuple[int, int, int, float, int]] = []
         self._parked_quota: list[int] = []
         self._dep_waiters: dict[object, set[int]] = {}
-        # Keys whose newest instance completed non-stale. Satisfies deps.
-        # TODO(redesign R1): bound this set — purge on scope clear and add an
-        # explicit `forget_results(prefix)` for long sessions.
-        self._completed_keys: set = set()
+        # Keys whose newest instance completed non-stale, mapped to the scope
+        # they completed under. Satisfies deps. Bounded: ``clear_scope`` purges
+        # the cleared scope's entries (a cleared result must not satisfy a
+        # later dependency), and ``forget_results`` releases memory for long
+        # sessions without touching staleness.
+        self._completed_keys: dict[object, str] = {}
         self._scope_epochs: dict[str, int] = {}
         self._supersession: dict[object, object] = {}
         self._counters: dict[Lane, LaneCounters] = {}
@@ -288,6 +290,7 @@ class Kernel:
         scope = str(scope)
         with self._lock:
             self._scope_epochs[scope] = next(self._epoch)
+            self._purge_completed_locked(scope)
             for record in tuple(self._records.values()):
                 if not self._record_is_stale_locked(record):
                     continue
@@ -297,6 +300,22 @@ class Kernel:
                     record.token.cancel()
             self._cond.notify_all()
         self._flush_release_wake()
+
+    def forget_results(self, prefix: str) -> int:
+        """Forget completion memory for ``prefix`` and its child scopes.
+
+        Releases dependency-satisfaction records for long sessions without
+        making anything stale: live tasks keep running, and epochs are
+        untouched. A later submission depending on a forgotten key parks
+        until that key is produced again. Returns the number of keys
+        forgotten. Inline work (``note_inline_work``) completes under the
+        root scope ``""`` and is forgotten by ``forget_results("")``.
+        """
+
+        with self._lock:
+            forgotten = self._purge_completed_locked(str(prefix))
+        emit_trace("kernel_forget_results", prefix=str(prefix), forgotten=int(forgotten))
+        return forgotten
 
     def rerank_unstarted_tile_tasks(
         self,
@@ -405,7 +424,7 @@ class Kernel:
             counters.admitted += 1
             counters.started += 1
             counters.completed += 1
-            self._completed_keys.add(item.key)
+            self._completed_keys[item.key] = ""
 
     def shutdown(self, timeout: float = 5.0) -> None:
         shutdown_started = monotonic()
@@ -522,7 +541,7 @@ class Kernel:
                     counters = self._lane(event.spec.lane)
                     counters.completed -= 1
                     counters.stale += 1
-                    self._completed_keys.discard(event.spec.key)
+                    self._completed_keys.pop(event.spec.key, None)
         on_done = on_error = on_stale = on_reuse = None
         if record is not None:
             on_done, on_error = record.on_done, record.on_error
@@ -663,7 +682,7 @@ class Kernel:
                 outcome = TaskOutcome.STALE
             if outcome == TaskOutcome.COMPLETED:
                 counters.completed += 1
-                self._completed_keys.add(spec.key)
+                self._completed_keys[spec.key] = spec.scope
                 self._promote_dependents_locked(spec.key)
                 wake = True
             elif outcome == TaskOutcome.STALE:
@@ -913,6 +932,17 @@ class Kernel:
                 self._drop_record_locked(record, reason="superseded")
             elif record.state == _RUNNING and not spec.reusable:
                 record.token.cancel()
+
+    def _purge_completed_locked(self, prefix: str) -> int:
+        child_prefix = f"{prefix}:"
+        stale_keys = tuple(
+            key
+            for key, scope in self._completed_keys.items()
+            if scope == prefix or scope.startswith(child_prefix)
+        )
+        for key in stale_keys:
+            del self._completed_keys[key]
+        return len(stale_keys)
 
     def _scope_snapshot_locked(self, spec: TaskSpec) -> tuple[tuple[str, int], ...]:
         return tuple(
