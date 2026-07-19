@@ -1418,7 +1418,7 @@ def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
     assert all(0 < call["window_start"] < 212 for call in scroll_calls)
 
 
-def test_profile_montage_completion_waits_for_level_generation_when_requested():
+def test_profile_montage_completion_waits_for_level_generation_by_default():
     from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
     from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
@@ -1490,7 +1490,6 @@ def test_profile_montage_completion_waits_for_level_generation_when_requested():
         timeout_s=bounded_interaction_settle_timeout_s(0.5),
         start=0.0,
         draw_start=0,
-        require_presentation_settled=True,
     )
 
     assert app.calls >= 3

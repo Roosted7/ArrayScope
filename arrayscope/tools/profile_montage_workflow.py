@@ -3978,7 +3978,7 @@ def _wait_for_montage_complete(
     timeout_s: float,
     start: float,
     draw_start: int,
-    require_presentation_settled: bool = False,
+    require_presentation_settled: bool = True,
     preview_floor_session_id: int | None = None,
     preview_floor_count_start: int = 0,
     preview_floor_screenshot_path: Path | None = None,
