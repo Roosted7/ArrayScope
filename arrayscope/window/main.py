@@ -5,6 +5,7 @@ from arrayscope.app.qt_binding import prefer_pyside6
 prefer_pyside6()
 
 import platform
+from pathlib import Path
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
@@ -238,6 +239,8 @@ class ArrayScopeWindow(
         self.profile_axes = (self.line_plot_dimension,)
         self.roi_store = RoiStore()
         self.interaction_mode = InteractionMode.CURSOR
+        # Dropping supported files onto the viewer opens them in new windows.
+        self.setAcceptDrops(True)
 
         self._build_window_ui(data, filepath)
         self._update_array_info_label()
@@ -646,6 +649,32 @@ class ArrayScopeWindow(
         controller = getattr(self, "sync_controller", None)
         if controller is not None:
             controller.set_facet_enabled(facet, bool(enabled))
+
+    def _droppable_file_paths(self, mime):
+        """Local paths from a drag payload that ArrayScope can open."""
+        if not mime.hasUrls():
+            return []
+        from arrayscope.app.open_flow import is_supported_path
+
+        paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+        return [path for path in paths if path.exists() and is_supported_path(path)]
+
+    def dragEnterEvent(self, event):
+        if self._droppable_file_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._droppable_file_paths(event.mimeData())
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        from arrayscope.app.open_flow import open_any_path
+
+        for path in paths:
+            open_any_path(path)
 
     def closeEvent(self, event):
         self._closing = True

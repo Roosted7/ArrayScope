@@ -5,41 +5,10 @@ Command-line interface for arrayscope.
 
 import argparse
 import atexit
+import sys
 from pathlib import Path
 
-from arrayscope.app.launch import arrayscope
 from arrayscope.core.trace import close_trace, configure_trace
-from arrayscope.io.file_interpreters import consume_handoff_file, data_file_suffix, load_path
-from arrayscope.io.selectors import H5DatasetSelector, MatDatasetSelector, NpzDatasetSelector
-
-_CLI_WINDOWS = []
-
-
-def _open_array_window(
-    *, data, title, block, filepath, dataset_path=None, selector_class_name=None, axes=None
-):
-    if block:
-        return arrayscope(
-            data=data,
-            title=title,
-            block=True,
-            filepath=filepath,
-            dataset_path=dataset_path,
-            selector_class_name=selector_class_name,
-            axes=axes,
-        )
-    from arrayscope.app.launch import _create_window
-
-    _app, win = _create_window(
-        data,
-        title=title,
-        filepath=filepath,
-        dataset_path=dataset_path,
-        selector_class_name=selector_class_name,
-        axes=axes,
-    )
-    _CLI_WINDOWS.append(win)
-    return win
 
 
 def _run_cli_event_loop():
@@ -48,71 +17,40 @@ def _run_cli_event_loop():
     return pg.mkQApp().exec()
 
 
-def _selector_for_suffix(filepath, suffix):
-    if suffix in [".h5", ".hdf5"]:
-        return H5DatasetSelector(filepath)
-    if suffix == ".npz":
-        return NpzDatasetSelector(filepath)
-    if suffix == ".mat":
-        return MatDatasetSelector(filepath)
-    return None
+def _open_file_async(
+    filepath: Path, *, mmap: bool = False, consume: bool = False, title: str | None = None
+):
+    """Open one path (data file, DICOM dir, or dataset container) without
+    blocking: a loading window appears immediately, the viewer as soon as
+    data starts being available."""
+    from arrayscope.app.open_flow import open_any_path
+
+    return open_any_path(filepath, title=title, mmap=mmap, consume=consume)
 
 
-def _open_loaded_file(
-    filepath: Path,
-    *,
-    block: bool,
-    mmap: bool = False,
-    consume: bool = False,
-    title: str | None = None,
-) -> bool:
-    loaded = load_path(filepath, mmap=mmap)
-    if consume:
-        # Loaded (or mapped) — the handoff file can go. On POSIX unlinking a
-        # memory-mapped file is safe; on Windows it fails and the language
-        # wrappers' stale-file cleanup removes it later.
-        consume_handoff_file(filepath)
-    if title is None:
-        title = filepath.name or str(filepath)
-        detected_format = loaded.metadata.get("detected_format")
-        if detected_format:
-            suffix = ", lazy" if loaded.metadata.get("lazy") else ""
-            title = f"{title} [{detected_format}{suffix}]"
-    _open_array_window(
-        data=loaded.data,
-        title=title,
-        block=block,
-        filepath=filepath,
-        axes=getattr(loaded, "axes", None),
+def _show_launcher():
+    from arrayscope.app.open_flow import show_launcher_window
+
+    return show_launcher_window()
+
+
+def _run_desktop_integration(args) -> int:
+    from arrayscope.desktop import (
+        install_desktop_integration,
+        uninstall_desktop_integration,
     )
-    return not block
 
-
-def _open_selector_file(filepath: Path, selector, *, block: bool) -> bool:
-    if block:
-        if not selector.view(block=True):
-            print(f"No compatible datasets found in {filepath}")
-        return False
-    if not selector.requires_gui():
-        result = selector.get_single_data()
-        if not result:
-            selector.close()
-            print(f"No compatible datasets found in {filepath}")
-            return False
-        name, data = result
-        selector.close()
-        _open_array_window(
-            data=data,
-            title=f"{filepath.name} - {name}",
-            block=False,
-            filepath=filepath,
-            dataset_path=name,
-            selector_class_name=selector.__class__.__name__,
-        )
-        return True
-    if not selector.view(block=False):
-        print(f"No compatible datasets found in {filepath}")
-    return False
+    try:
+        if args.install_desktop:
+            report = install_desktop_integration()
+        else:
+            report = uninstall_desktop_integration()
+    except Exception as exc:
+        print(f"Desktop integration failed: {exc}", file=sys.stderr)
+        return 1
+    for line in report.lines:
+        print(line)
+    return 0 if report.ok else 1
 
 
 def main():
@@ -122,21 +60,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  arrayscope                               # Launcher window (open files via dialog or drag-and-drop)
   arrayscope data.npy                      # View single file
   arrayscope data.h5 data2.npy data3.npz   # View multiple files
   arrayscope scan.REC                      # View Philips REC/XML pair
   arrayscope ref.cfl                       # View BART CFL/HDR pair
-    arrayscope dicomdir/                     # Convert DICOM directory via dcm2niix, then view
+  arrayscope dicomdir/                     # Convert DICOM directory via dcm2niix, then view
   arrayscope scan.dcm                      # View DICOM file
   arrayscope scan.nii                      # View NIfTI file
   arrayscope data.txt                      # View text file with numeric data
   arrayscope --mmap --consume handoff.npy  # Language-wrapper handoff (Julia/MATLAB)
+  arrayscope --install-desktop             # Register with the desktop shell (menu entry, icons, file types)
 
+Files open asynchronously: a loading window shows progress, and for formats
+that support it the viewer opens while the file is still being read.
 For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatically appear.
         """,
     )
     parser.add_argument(
-        "files", type=str, nargs="+", help="Path(s) to data files or DICOM directories"
+        "files",
+        type=str,
+        nargs="*",
+        help="Path(s) to data files or DICOM directories (omit to open the launcher window)",
     )
     parser.add_argument(
         "--title", type=str, default=None, help="Window title override for single-dataset files"
@@ -155,8 +100,24 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
     parser.add_argument(
         "--trace", default=None, help="Write structured render/kernel/presentation events to JSONL"
     )
+    parser.add_argument(
+        "--install-desktop",
+        action="store_true",
+        help="Integrate ArrayScope with the desktop shell (application menu "
+        "entry, icons, and file-type associations), then exit",
+    )
+    parser.add_argument(
+        "--uninstall-desktop",
+        action="store_true",
+        help="Remove the desktop shell integration, then exit",
+    )
 
     args = parser.parse_args()
+
+    # Desktop (un)registration is a plain filesystem operation: run it before
+    # the supervisors below so no GUI child process is spawned.
+    if args.install_desktop or args.uninstall_desktop:
+        raise SystemExit(_run_desktop_integration(args))
 
     # Free-threading policy (free-threaded builds only), after argparse for
     # the same reason as below and OUTERMOST so the display-server retry
@@ -188,8 +149,11 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
         configure_trace(args.trace)
         atexit.register(close_trace)
 
-    block_each = len(args.files) == 1
     needs_event_loop = False
+
+    if not args.files:
+        _show_launcher()
+        needs_event_loop = True
 
     for file_arg in args.files:
         filepath = Path(file_arg)
@@ -199,42 +163,17 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
             continue
 
         try:
-            suffix = data_file_suffix(filepath)
-            # Single-dataset formats and DICOM directories are handled by file_interpreters.load_path
-            if filepath.is_dir() or suffix in [
-                ".npy",
-                ".rec",
-                ".cfl",
-                ".dcm",
-                ".nii",
-                ".nii.gz",
-                ".txt",
-            ]:
-                needs_event_loop = (
-                    _open_loaded_file(
+            needs_event_loop = (
+                bool(
+                    _open_file_async(
                         filepath,
-                        block=block_each,
                         mmap=args.mmap,
                         consume=args.consume,
                         title=args.title,
                     )
-                    or needs_event_loop
                 )
-                continue
-
-            # Multi-dataset formats - use selectors
-            selector = _selector_for_suffix(filepath, suffix)
-            if selector is None:
-                print(
-                    f"Unsupported file type: {suffix}. Supported types: directories with DICOM .dcm files, .h5, .hdf5, .npy, .npz, .mat, .REC, .cfl, .dcm, .nii, .nii.gz, .txt"
-                )
-                continue
-
-            # Select and view dataset (shows GUI if multiple datasets)
-            needs_event_loop = (
-                _open_selector_file(filepath, selector, block=block_each) or needs_event_loop
+                or needs_event_loop
             )
-
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
             import traceback
@@ -242,7 +181,7 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
             traceback.print_exc()
             continue
 
-    if not block_each and needs_event_loop:
+    if needs_event_loop:
         _run_cli_event_loop()
 
 

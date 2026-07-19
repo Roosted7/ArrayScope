@@ -78,41 +78,30 @@ def test_calling_package_delegates_to_launch(monkeypatch):
     assert calls == [("data", (), {"title": "demo"})]
 
 
-def test_cli_file_launch_blocks(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    import numpy as np
-
+def test_cli_single_file_opens_async_and_runs_event_loop(monkeypatch, tmp_path):
     from arrayscope import __main__ as cli
 
     path = tmp_path / "subject.session.npy"
     path.write_bytes(b"placeholder")
-    calls = []
+    events = []
 
-    def fake_load_path(filepath, *, mmap=False):
-        assert filepath == path
-        return SimpleNamespace(data=np.zeros((2, 2)), metadata={})
-
-    def fake_arrayscope(**kwargs):
-        calls.append(kwargs)
-        return 0
-
-    monkeypatch.setattr(cli, "load_path", fake_load_path)
-    monkeypatch.setattr(cli, "arrayscope", fake_arrayscope)
+    monkeypatch.setattr(
+        cli,
+        "_open_file_async",
+        lambda filepath, **kwargs: events.append(("open", filepath.name, kwargs)) or object(),
+    )
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
     monkeypatch.setattr("sys.argv", ["arrayscope", str(path)])
 
     cli.main()
 
-    assert calls
-    assert calls[0]["block"] is True
-    assert calls[0]["filepath"] == path
+    assert events == [
+        ("open", "subject.session.npy", {"mmap": False, "consume": False, "title": None}),
+        ("loop",),
+    ]
 
 
-def test_cli_multi_file_launches_valid_paths_before_final_block(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    import numpy as np
-
+def test_cli_multi_file_opens_valid_paths_and_survives_errors(monkeypatch, tmp_path):
     from arrayscope import __main__ as cli
 
     first = tmp_path / "first.npy"
@@ -122,161 +111,69 @@ def test_cli_multi_file_launches_valid_paths_before_final_block(monkeypatch, tmp
         path.write_bytes(b"placeholder")
     events = []
 
-    def fake_load_path(filepath, *, mmap=False):
-        events.append(("load", filepath.name))
+    def fake_open(filepath, **kwargs):
+        events.append(("open", filepath.name))
         if filepath == bad:
             raise RuntimeError("broken file")
-        return SimpleNamespace(data=np.zeros((2, 2)), metadata={})
-
-    def fake_open_array_window(**kwargs):
-        events.append(("open", kwargs["filepath"].name, kwargs["block"]))
         return object()
 
-    def fake_run_loop():
-        events.append(("loop",))
-
-    monkeypatch.setattr(cli, "load_path", fake_load_path)
-    monkeypatch.setattr(cli, "_open_array_window", fake_open_array_window)
-    monkeypatch.setattr(cli, "_run_cli_event_loop", fake_run_loop)
+    monkeypatch.setattr(cli, "_open_file_async", fake_open)
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
     monkeypatch.setattr("sys.argv", ["arrayscope", str(first), str(bad), str(third)])
 
     cli.main()
 
     assert events == [
-        ("load", "first.npy"),
-        ("open", "first.npy", False),
-        ("load", "bad.npy"),
-        ("load", "third.npy"),
-        ("open", "third.npy", False),
+        ("open", "first.npy"),
+        ("open", "bad.npy"),
+        ("open", "third.npy"),
         ("loop",),
     ]
 
 
-def test_cli_multi_path_selector_uses_nonblocking_view(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    import numpy as np
-
+def test_cli_missing_file_is_reported_and_skipped(monkeypatch, tmp_path, capsys):
     from arrayscope import __main__ as cli
 
-    array_path = tmp_path / "array.npy"
-    selector_path = tmp_path / "stack.npz"
-    array_path.write_bytes(b"placeholder")
-    selector_path.write_bytes(b"placeholder")
+    missing = tmp_path / "nope.npy"
     events = []
-
-    class FakeSelector:
-        def __init__(self, filepath):
-            self.filepath = filepath
-
-        def requires_gui(self):
-            return True
-
-        def view(self, *, block=False):
-            events.append(("selector", self.filepath.name, block))
-            return True
-
-    monkeypatch.setattr(
-        cli,
-        "load_path",
-        lambda filepath, **kwargs: SimpleNamespace(data=np.zeros((2, 2)), metadata={}),
-    )
-    monkeypatch.setattr(cli, "NpzDatasetSelector", FakeSelector)
-    monkeypatch.setattr(
-        cli,
-        "_open_array_window",
-        lambda **kwargs: (
-            events.append(("open", kwargs["filepath"].name, kwargs["block"])) or object()
-        ),
-    )
-    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
-    monkeypatch.setattr("sys.argv", ["arrayscope", str(array_path), str(selector_path)])
+    monkeypatch.setattr(cli, "_open_file_async", lambda *a, **k: events.append("open") or object())
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append("loop"))
+    monkeypatch.setattr("sys.argv", ["arrayscope", str(missing)])
 
     cli.main()
 
-    assert events == [
-        ("open", "array.npy", False),
-        ("selector", "stack.npz", False),
-        ("loop",),
-    ]
+    assert events == []
+    assert "File not found" in capsys.readouterr().out
 
 
-def test_cli_multi_path_single_dataset_selector_opens_inline(monkeypatch, tmp_path):
-    import numpy as np
-
+def test_cli_without_files_opens_launcher(monkeypatch):
     from arrayscope import __main__ as cli
 
-    selector_path = tmp_path / "single.npz"
-    selector_path.write_bytes(b"placeholder")
     events = []
-
-    class FakeSelector:
-        def __init__(self, filepath):
-            self.filepath = filepath
-
-        def requires_gui(self):
-            return False
-
-        def get_single_data(self):
-            return "arr", np.zeros((2, 2))
-
-        def close(self):
-            events.append(("close", self.filepath.name))
-
-    monkeypatch.setattr(cli, "NpzDatasetSelector", FakeSelector)
-    monkeypatch.setattr(
-        cli,
-        "_open_array_window",
-        lambda **kwargs: (
-            events.append(
-                (
-                    "open",
-                    kwargs["filepath"].name,
-                    kwargs["dataset_path"],
-                    kwargs["selector_class_name"],
-                    kwargs["block"],
-                )
-            )
-            or object()
-        ),
-    )
-    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
-    monkeypatch.setattr("sys.argv", ["arrayscope", str(selector_path), str(selector_path)])
+    monkeypatch.setattr(cli, "_show_launcher", lambda: events.append("launcher") or object())
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append("loop"))
+    monkeypatch.setattr("sys.argv", ["arrayscope"])
 
     cli.main()
 
-    assert events == [
-        ("close", "single.npz"),
-        ("open", "single.npz", "arr", "FakeSelector", False),
-        ("close", "single.npz"),
-        ("open", "single.npz", "arr", "FakeSelector", False),
-        ("loop",),
-    ]
+    assert events == ["launcher", "loop"]
 
 
-def test_cli_wrapper_handoff_flags(monkeypatch, tmp_path):
+def test_cli_wrapper_handoff_flags_forwarded(monkeypatch, tmp_path):
     """--mmap/--consume/--title: the language-wrapper invocation contract."""
-    from types import SimpleNamespace
-
-    import numpy as np
-
     from arrayscope import __main__ as cli
 
     path = tmp_path / "kspace-123.npy"
     path.write_bytes(b"placeholder")
     seen = {}
 
-    def fake_load_path(filepath, *, mmap=False):
-        seen["mmap"] = mmap
-        return SimpleNamespace(data=np.zeros((2, 2)), metadata={"detected_format": "numpy"})
-
-    def fake_open_array_window(**kwargs):
-        seen["title"] = kwargs["title"]
-        seen["file_exists_at_open"] = kwargs["filepath"].exists()
+    def fake_open(filepath, **kwargs):
+        seen["filepath"] = filepath
+        seen.update(kwargs)
         return object()
 
-    monkeypatch.setattr(cli, "load_path", fake_load_path)
-    monkeypatch.setattr(cli, "_open_array_window", fake_open_array_window)
+    monkeypatch.setattr(cli, "_open_file_async", fake_open)
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: None)
     monkeypatch.setattr(
         "sys.argv",
         ["arrayscope", "--mmap", "--consume", "--title", "kspace", str(path)],
@@ -284,8 +181,34 @@ def test_cli_wrapper_handoff_flags(monkeypatch, tmp_path):
 
     cli.main()
 
-    assert seen["mmap"] is True
-    assert seen["title"] == "kspace"
-    # --consume removes the handoff file before the window opens.
-    assert seen["file_exists_at_open"] is False
-    assert not path.exists()
+    assert seen == {
+        "filepath": path,
+        "mmap": True,
+        "consume": True,
+        "title": "kspace",
+    }
+
+
+def test_cli_install_desktop_short_circuits_before_gui(monkeypatch):
+    import pytest
+
+    import arrayscope.desktop as desktop
+    from arrayscope import __main__ as cli
+
+    events = []
+
+    class FakeReport:
+        ok = True
+        lines = ("installed",)
+
+    monkeypatch.setattr(
+        desktop, "install_desktop_integration", lambda: events.append("install") or FakeReport()
+    )
+    monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append("loop"))
+    monkeypatch.setattr("sys.argv", ["arrayscope", "--install-desktop"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code == 0
+    assert events == ["install"]

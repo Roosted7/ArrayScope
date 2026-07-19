@@ -78,6 +78,29 @@ This file records user-visible release changes. Detailed development history and
   just as fast, the auto-disable is reverted because the failure is not
   free-threading-specific. On regular (with-GIL) builds the menu explains
   the build requirement and the policy is inert.
+- Files now load asynchronously with visible progress: `arrayscope <file>`
+  shows a loading window immediately (name, stage, byte/slice progress,
+  Cancel) instead of a blank wait. For formats whose layout allows it
+  (`.npy`, `.cfl`, Philips `.REC`) the viewer opens as soon as the array is
+  allocated and fills while the file streams in, with a status-bar readout
+  of how much of the file is actually available; the view refreshes
+  periodically during the stream and once more (with re-windowed levels)
+  when the load completes. Cancelling mid-stream keeps the data read so
+  far. Load errors are reported in the loading window instead of a silent
+  console traceback.
+- ArrayScope is now installable as a full desktop application:
+  `arrayscope --install-desktop` registers it with the native shell —
+  on Linux an XDG desktop entry, shared-mime-info types for the formats
+  ArrayScope owns (`.npy`, `.npz`, `.cfl`, `.rec`, `.nii`, `.mat`) plus
+  "Open with" entries for DICOM/HDF5, and hicolor icons; on Windows
+  per-user (HKCU) file associations, ProgID icons, and a Start Menu
+  shortcut; on macOS an `ArrayScope.app` bundle in `~/Applications`
+  declaring document types. `--uninstall-desktop` reverses it. The app
+  ships an icon set, sets a window icon, and handles macOS Finder
+  open-document events.
+- Running `arrayscope` with no arguments opens a launcher window with an
+  Open dialog and drag-and-drop; supported files can also be dropped onto
+  any open viewer window to open them in new windows.
 - The experimental wgpu renderer can present directly to the screen on
   native Wayland: the `wgpu_present_method` setting drives the display
   through the compositor swapchain instead of a per-frame GPU→CPU bitmap

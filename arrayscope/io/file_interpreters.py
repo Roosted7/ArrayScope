@@ -258,14 +258,38 @@ class PhilipsRECLoader:
                     np.exp(1j * scaled_slice * scale_factor)
                 )
 
-    def load(self):
-        with open(self.rec_path, "rb") as fid:
-            for img_idx in range(len(self.image_infos)):
-                self._next_slice(fid, img_idx)
+    def streaming_view(self):
+        """The final-shaped view over the pre-allocated buffer being filled.
 
+        ``load()`` writes into ``self.data`` in place, so this view (a
+        reshape sharing the same memory) lets a caller display the array
+        while slices are still arriving.
+        """
         data = remove_trailing_singletons(self.data)
         self.axes = _labeled_axes(data.shape, labels=_PHILIPS_REC_AXIS_LABELS)
         return data
+
+    def load(self, *, progress=None, cancel=None):
+        from arrayscope.io.progressive import LoadCancelled, LoadProgress
+
+        n_images = len(self.image_infos)
+        bytes_per_image = self.bytes_per_pixel * self.n_pixels_per_image
+        with open(self.rec_path, "rb") as fid:
+            for img_idx in range(n_images):
+                if cancel is not None and cancel.is_set():
+                    raise LoadCancelled("file load cancelled")
+                self._next_slice(fid, img_idx)
+                if progress is not None:
+                    progress(
+                        LoadProgress(
+                            stage="reading",
+                            fraction=(img_idx + 1) / n_images,
+                            bytes_done=(img_idx + 1) * bytes_per_image,
+                            bytes_total=n_images * bytes_per_image,
+                        )
+                    )
+
+        return self.streaming_view()
 
 
 class BartLoader:
@@ -713,7 +737,16 @@ class TextLoader:
         return data
 
 
-def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
+def load_path(
+    filepath,
+    *,
+    mmap=False,
+    lazy="auto",
+    lazy_threshold_bytes=None,
+    progress=None,
+    cancel=None,
+    on_streaming_probe=None,
+):
     """Load a supported file into a LoadedPath.
 
     Two distinct memory-mapped ``.npy`` strategies coexist here:
@@ -729,11 +762,31 @@ def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
       out-of-core :class:`LazySourceArray` proxies through the budgeted read
       seam (ADR 0049). ``"auto"`` maps files at or above a memory-based size
       threshold.
+
+    Progressive-load hooks (all optional, GUI-agnostic; see
+    :mod:`arrayscope.io.progressive`):
+
+    - ``progress``: callable receiving :class:`LoadProgress` observations.
+    - ``cancel``: ``threading.Event``-like; readers raise ``LoadCancelled``.
+    - ``on_streaming_probe``: called with a :class:`StreamingProbe` as soon
+      as a streaming-capable format (.npy, .cfl, .rec) has pre-allocated its
+      destination array, before the bytes arrive.
     """
+    from arrayscope.io.progressive import (
+        LoadProgress,
+        load_cfl_progressive,
+        load_npy_progressive,
+    )
+
+    def emit(stage, fraction=None, message=""):
+        if progress is not None:
+            progress(LoadProgress(stage=stage, fraction=fraction, message=message))
+
     filepath = Path(filepath)
 
     if filepath.is_dir():
         loader = DicomDirectoryLoader(filepath)
+        emit("converting", message="Converting DICOM directory (dcm2niix)")
         data = loader.load()
         return LoadedPath(
             data=data,
@@ -744,14 +797,24 @@ def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
     suffix = data_file_suffix(filepath)
 
     if not mmap:
+        emit("probing", message="Checking file size")
         lazy_loaded = _load_lazy_source(
             filepath, suffix, lazy=lazy, lazy_threshold_bytes=lazy_threshold_bytes
         )
         if lazy_loaded is not None:
+            emit("finalizing", fraction=1.0, message="Memory-mapped (lazy)")
             return lazy_loaded
 
     if suffix == ".npy":
-        data = np.load(filepath, mmap_mode="c" if mmap else None)
+        if mmap:
+            data = np.load(filepath, mmap_mode="c")
+        else:
+            data = load_npy_progressive(
+                filepath,
+                progress=progress,
+                cancel=cancel,
+                on_streaming_probe=on_streaming_probe,
+            )
         return LoadedPath(
             data=data,
             metadata={
@@ -762,20 +825,55 @@ def load_path(filepath, *, mmap=False, lazy="auto", lazy_threshold_bytes=None):
             },
         )
 
-    if suffix == ".rec":
-        loader = PhilipsRECLoader(filepath)
-    elif suffix == ".cfl":
-        loader = BartLoader(filepath)
-    elif suffix == ".dcm":
-        loader = DicomLoader(filepath)
-    elif suffix in [".nii", ".nii.gz"]:
-        loader = NiftiLoader(filepath)
-    elif suffix == ".txt":
-        loader = TextLoader(filepath)
-    else:
-        raise ValueError(f"Unsupported file format: {suffix}")
+    if suffix == ".cfl":
+        data = load_cfl_progressive(
+            filepath,
+            progress=progress,
+            cancel=cancel,
+            on_streaming_probe=on_streaming_probe,
+        )
+        return LoadedPath(
+            data=data,
+            metadata={
+                "source_path": str(filepath),
+                "detected_format": "cfl",
+                "shape": tuple(data.shape),
+                "dtype": str(data.dtype),
+            },
+        )
 
-    data = loader.load()
+    if suffix == ".rec":
+        emit("probing", message="Parsing XML metadata")
+        loader = PhilipsRECLoader(filepath)
+        if on_streaming_probe is not None:
+            from arrayscope.io.progressive import StreamingProbe
+
+            view = loader.streaming_view()
+            on_streaming_probe(
+                StreamingProbe(
+                    data=view,
+                    axes=_axes_matching_shape(loader.axes, view.shape),
+                    metadata={
+                        "source_path": str(filepath),
+                        "detected_format": "rec",
+                        "shape": tuple(view.shape),
+                        "dtype": str(view.dtype),
+                    },
+                )
+            )
+        data = loader.load(progress=progress, cancel=cancel)
+    else:
+        if suffix == ".dcm":
+            loader = DicomLoader(filepath)
+        elif suffix in [".nii", ".nii.gz"]:
+            loader = NiftiLoader(filepath)
+        elif suffix == ".txt":
+            loader = TextLoader(filepath)
+        else:
+            raise ValueError(f"Unsupported file format: {suffix}")
+        emit("reading", message=f"Reading {suffix} file")
+        data = loader.load()
+
     metadata = {
         "source_path": str(filepath),
         "detected_format": suffix.lstrip("."),

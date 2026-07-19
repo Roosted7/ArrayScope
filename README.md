@@ -135,6 +135,18 @@ When a container contains several datasets, ArrayScope shows a selector and high
 
 ![Dataset selector](docs/images/selector.png)
 
+Files load asynchronously: a loading window with progress appears immediately, and for `.npy`, `.cfl`, and `.REC` the viewer opens while the file is still streaming in, with a status-bar indicator of how much of the file is available. Running `arrayscope` without arguments opens a launcher window; files can also be dropped onto any viewer window.
+
+### Desktop integration
+
+Register ArrayScope with your desktop shell (application menu entry, icons, and file-type associations, per-user, no root/admin needed):
+
+```bash
+arrayscope --install-desktop     # register; --uninstall-desktop reverses it
+```
+
+On Linux this installs an XDG desktop entry, MIME types, and icons under `~/.local/share`; on Windows per-user file associations and a Start Menu shortcut; on macOS an `ArrayScope.app` bundle in `~/Applications`. See [docs/desktop-integration.md](docs/desktop-integration.md).
+
 ## Installation
 
 ### Just want a viewer? (no Python required)

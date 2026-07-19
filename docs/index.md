@@ -37,6 +37,9 @@ Organized by the question you're asking. Stop at the first useful level.
 - [Invocation](invocation.md) — launch routes and wrappers.
 - [Packaging](../packaging/README.md) — standalone installers (AppImage,
   Windows setup, macOS DMG) and the release workflow that builds them.
+- [Desktop integration](desktop-integration.md) — async/progressive file
+  loading, the launcher window, and native shell registration
+  (`--install-desktop`).
 - [Current state](current-state.md) — maturity snapshot and material risks.
 
 ## "Why is it this way?"
