@@ -436,3 +436,56 @@ pins discarded useful ancestors, finer floor epochs added guard cost, exact-
 bind memoization found only 2/104 stable descriptors, a pre-ack LOD verdict
 crossed the wrong lifecycle boundary, and trace-edge compression reduced
 instrumentation volume without reducing pacing gaps.
+
+### Promotion evidence entry 4 (2026-07-19) — screen presentation landed; the readback tax measured out of the frame
+
+The ceiling program's tax flip, unblocked by the native-text landing:
+`wgpu_present_method` (bitmap default, `screen` explicit opt-in) now drives
+the wgpu view through the gate-B native-Wayland recipe as a paint-less
+native child with its own swapchain (`arrayscope/display/backends/wgpu/
+screen_canvas.py`), bypassing rendercanvas entirely on that path. The
+tier-1 caveats are closed at their owners:
+
+- **Fifo acquire (~15 ms GUI-thread block):** the swapchain re-configures
+  for **Mailbox** when the surface offers it (this machine does). Measured
+  in-view: steady-state acquire 0.09–0.16 ms, present 0.03–0.12 ms — both
+  the acquire block and the 4–7 ms bitmap readback are out of the frame
+  loop. The mode plus per-frame acquire/present timings are recorded in the
+  presentation diagnostics; Fifo-only surfaces keep the timing guard rail.
+- **Draw pacing is load-bearing:** unpaced, a 60 fps camera glide requests
+  a present per input event, exhausts the mailbox image chain and blocks in
+  acquire — paired zoompan controls measured consistently ~1.5–2× worse
+  event-loop p95 than bitmap (67–135 ms vs 32–70 ms). Capping the screen
+  canvas at rendercanvas's own `max_fps=30` default returned it to the
+  bitmap band (55–66 ms).
+- **Qt cannot composite over a native child** — resolved by construction
+  (all overlays are executor pixels since the glyph landing) and pinned by
+  ring-4 oracles: input transparency (hit-testing resolves to the
+  interaction viewport over the canvas), close-cancels-drag on the screen
+  path, draw-acks keyed on the real `wgpuSurfacePresent` edge with the
+  never-armed-forever counter oracle, resize reconfigure
+  (`tests/gpu_interaction/test_wgpu_screen_present.py`), and the full
+  contract suite parameterized over a `wgpu-screen` twin (44/44 on real
+  Wayland).
+
+**Paired same-tip perf, real Wayland, Intel iGPU**
+(`tests/artifacts/wgpu-screen-perf-2026-07-19/`): fast-scroll p95
+event-loop gap **118.0 ms (bitmap) → 107.1/109.5 ms (screen)** with input
+fps 9.2 → 9.6 — a consistent ~8–10 % improvement in line with removing the
+readback. Zoom/pan is **parity within the standing jank band**, not a win:
+worst p95 across three runs per method overlaps completely (bitmap 109.6/
+216.9/241.6 vs paced screen 211.2/250.5), because at this window size the
+4–7 ms readback is a small slice of a ~110–250 ms tail owned by the shared
+presentation-cost bars (row 1). Honest verdict: the tax flip is real and
+already pays on fast-scroll; the decisive case remains the measured 26 ms
+bitmap readback at 4K, which is exactly where the screen path should be
+re-measured (still open, with the NVIDIA cells).
+
+**Harness note:** the first screen-enabled journey matrix came back all-red
+with `first_new_pixels_ms=None` on every wgpu row — a Qt widget grab
+rasterizes a paint-less native child as nothing, so every pixel-diff oracle
+was blind. `WgpuImageView2D.grabPresentedFramebuffer()` re-renders the
+executor's current bound state offscreen for harness captures; with that,
+the screen-enabled matrix passes **all five wgpu rows**
+(`tests/artifacts/journey-matrix-wgpu-screen-2026-07-19/`; the only reds
+are the standing vispy/pyqtgraph cold-fill demand-freshness lane).

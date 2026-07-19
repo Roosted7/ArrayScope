@@ -30,6 +30,8 @@ fallback reason and the view keeps the bitmap path.
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.core.trace import emit_trace
 
@@ -80,6 +82,14 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     rendercanvas's ``ondemand`` update mode.
     """
 
+    #: Draw-rate cap, mirroring rendercanvas's ``max_fps=30`` default that the
+    #: bitmap canvas runs under.  Without a cap, a 60 fps camera glide requests
+    #: a present per input event, exhausts the mailbox swapchain, and every
+    #: subsequent acquire blocks the GUI thread — measured as consistently
+    #: ~1.5-2x worse zoompan event-loop gaps than bitmap (2026-07-19 paired
+    #: controls) until this pacing landed.
+    max_draws_per_second = 30.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_PaintOnScreen, True)  # implies WA_NativeWindow
@@ -87,6 +97,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self._draw_callback = None
         self._draw_scheduled = False
+        self._last_draw_started = float("-inf")
         self._context = None
         self._context_error: str = ""
         self._configured_format: str | None = None
@@ -107,13 +118,17 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         if self._draw_scheduled or self._draw_callback is None:
             return
         self._draw_scheduled = True
-        QtCore.QTimer.singleShot(0, self, self._invoke_draw)
+        interval = 1000.0 / float(self.max_draws_per_second or 30.0)
+        elapsed_ms = (perf_counter() - self._last_draw_started) * 1000.0
+        delay_ms = 0 if elapsed_ms >= interval else int(round(interval - elapsed_ms))
+        QtCore.QTimer.singleShot(delay_ms, self, self._invoke_draw)
 
     def _invoke_draw(self) -> None:
         self._draw_scheduled = False
         callback = self._draw_callback
         if callback is None or not self.isVisible():
             return
+        self._last_draw_started = perf_counter()
         callback()
 
     def paintEvent(self, event) -> None:  # expose/damage -> redraw, never paint
