@@ -6,6 +6,15 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-19 — **Kernel completed-key memory bounded (redesign-R1 TODO
+  close-out):** `Kernel._completed_keys` now maps key → completion scope;
+  `clear_scope` purges the cleared scope's entries (a cleared result no
+  longer satisfies a later dependency) and `forget_results(prefix)` releases
+  completion memory for long sessions without touching staleness. Evidence:
+  `tests/kernel/test_kernel.py` pins non-monotonic growth across scope
+  clears, post-clear dependency parking, and scoped/inline forget;
+  kernel/scheduler/pipeline/montage-residency rings green.
+
 - 2026-07-19 — **wgpu SCREEN presentation landed (ceiling program step 2 —
   the tax flip):** `wgpu_present_method` setting (bitmap default, screen
   opt-in) drives a paint-less native child with its own Mailbox swapchain
