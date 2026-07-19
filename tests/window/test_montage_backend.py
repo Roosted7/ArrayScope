@@ -1581,6 +1581,49 @@ def test_wgpu_resident_histogram_evidence_uses_coverage_lane_and_shared_tracker(
     assert requested == [True]
 
 
+def test_wgpu_resident_histogram_evidence_defers_while_interaction_is_active():
+    from arrayscope.render.level_stats import LevelStatsService
+
+    resolved = []
+    submitted = []
+    evidence = SimpleNamespace(
+        evidence_key=("resident", 7),
+        source_index=7,
+        wait_completed=lambda: resolved.append("waited"),
+        readback=SimpleNamespace(resolve=lambda: resolved.append("resolved")),
+    )
+    session = SimpleNamespace(
+        key=("frame",),
+        session_id=3,
+        viewport_revision=5,
+        level_key=("levels", "wgpu-resident"),
+        level_expected_indices=(7,),
+        plan=SimpleNamespace(tiles=(SimpleNamespace(source_index=7),)),
+        scheduling_policy=_coverage_scheduling_policy(),
+        level_evidence_inflight=False,
+        first_pass_histogram_published=False,
+    )
+    service = LevelStatsService()
+    service.win = SimpleNamespace(
+        _viewport_interaction_active=True,
+        kernel=SimpleNamespace(submit=lambda *args, **kwargs: submitted.append(args)),
+        img_view=SimpleNamespace(
+            residentHistogramEvidence=lambda _payloads: (evidence,),
+            acceptResidentHistogramEvidence=lambda _keys: None,
+        ),
+    )
+    service._montage_level_tracker = lambda: SimpleNamespace(
+        ensure_expected=lambda *_args: None,
+    )
+
+    queued = service._queue_wgpu_resident_histogram_evidence(session, {0: object()})
+
+    assert queued == 0
+    assert submitted == []
+    assert resolved == []
+    assert session._wgpu_histogram_evidence_deferred is True
+
+
 
 def test_initial_montage_plan_uses_pending_restored_viewport_range():
     from pyqtgraph.Qt import QtCore

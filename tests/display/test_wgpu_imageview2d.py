@@ -576,7 +576,9 @@ def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(
         # the evicted frontier's evidence spec is dropped — loudly.
         assert set(report.presented_tiles) == {1}
         assert [
-            (kind, fields.get("reason")) for kind, fields in bail_events
+            (kind, fields.get("reason"))
+            for kind, fields in bail_events
+            if kind == "wgpu_histogram_queue_bail"
         ] == [("wgpu_histogram_queue_bail", "evicted_in_batch")]
         (evidence,) = view.residentHistogramEvidence(payloads)
         assert evidence.tile_number == 1
@@ -600,6 +602,38 @@ def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(
         retried.wait_completed()
         counts, _bounds = retried.readback.resolve()
         assert int(counts.sum()) == 16 * 24
+    finally:
+        view.close()
+
+
+def test_resident_histogram_obligation_survives_camera_only_coverage_reopen(qt_app):
+    """Resident content must not dispatch/resolve again for a camera retarget."""
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.linspace(-2.0, 5.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {0: _payload(0, image, source_id=("camera-histogram", 0))}
+        obligation = ("content-and-mapping", 1)
+
+        view.setResidentHistogramEvidenceRequired(True, obligation)
+        _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+        (evidence,) = view.residentHistogramEvidence(payloads)
+        evidence.wait_completed()
+        evidence.readback.resolve()
+        view.acceptResidentHistogramEvidence((evidence.evidence_key,))
+
+        # Closing/reopening the coverage phase is what a camera-only retarget
+        # does. The completed content+mapping evidence remains authoritative.
+        view.setResidentHistogramEvidenceRequired(False)
+        view.getView().setRange(xRange=(2, 28), yRange=(0, 20), padding=0)
+        _rerender_internal(view)
+        view.setResidentHistogramEvidenceRequired(True, obligation)
+        _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+
+        assert view.residentHistogramEvidence(payloads) == ()
+        assert view._wgpu_executor.histogram_dispatches_total == 1
+        assert view._wgpu_executor.histogram_readback_resolves_total == 1
     finally:
         view.close()
 

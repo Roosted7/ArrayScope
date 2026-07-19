@@ -41,6 +41,7 @@ prefer_pyside6()
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
+from arrayscope.core.trace import emit_trace
 from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
@@ -343,12 +344,15 @@ class WgpuImageView2D(ImageViewShell):
         """Receive the phase owner's current evidence obligation."""
 
         required = bool(required)
-        obligation = obligation if required else None
-        if not required or obligation != self._wgpu_histogram_evidence_obligation:
+        # Completion belongs to content+mapping, not to the transient coverage
+        # phase which asked for it. Closing a phase during a camera gesture
+        # must therefore retain accepted evidence. A genuinely new obligation
+        # replaces the small current-view cache explicitly.
+        if obligation is not None and obligation != self._wgpu_histogram_evidence_obligation:
             self._wgpu_histogram_evidence.clear()
             self._wgpu_histogram_evidence_ready.clear()
+            self._wgpu_histogram_evidence_obligation = obligation
         self._wgpu_histogram_evidence_required = required
-        self._wgpu_histogram_evidence_obligation = obligation
 
     def residentHistogramEvidence(self, payloads) -> tuple[WgpuResidentHistogramEvidence, ...]:
         """Return fenced evidence matching the currently committed payloads."""
@@ -1023,6 +1027,12 @@ class WgpuImageView2D(ImageViewShell):
                         scale=scale,
                         symlog_constant=symlog_constant,
                     )
+                )
+            if histogram_specs:
+                emit_trace(
+                    "wgpu_histogram_dispatch",
+                    evidence_rows=len(histogram_specs),
+                    obligation=self._wgpu_histogram_evidence_obligation,
                 )
             report = self._submit_wgpu(tuple(submission_commands))
             if overlay_geometry_dirty:

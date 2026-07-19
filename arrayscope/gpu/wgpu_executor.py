@@ -726,6 +726,7 @@ class _DeferredHistogramReadback:
     timestamp_query_set: object | None = None
     timestamp_period_ns: float | None = None
     timestamp_indices: tuple[int, ...] = ()
+    on_resolve: object = None
     _resolved: tuple[np.ndarray, tuple[float, float] | None] | None = None
     _gpu_elapsed_ms: float | None = None
 
@@ -746,6 +747,9 @@ class _DeferredHistogramReadback:
                 )
             )
             self._resolved = (counts[: int(self.bins)], finite_bounds)
+            if callable(self.on_resolve):
+                self.on_resolve()
+                self.on_resolve = None
             if self.timestamp_buffer is not None:
                 timestamps = np.frombuffer(
                     self.device.queue.read_buffer(self.timestamp_buffer), np.uint64
@@ -837,6 +841,8 @@ class WgpuPlaneExecutor:
         # become resident, always released before submit() returns.
         self._histogram_shield_wanted: frozenset[DataChunkKey] = frozenset()
         self._histogram_shield_pins: set[DataChunkKey] = set()
+        self._histogram_dispatches_total = 0
+        self._histogram_readback_resolves_total = 0
         self._overlay_geometry: tuple[OverlayPrimitive, ...] = ()
         self._overlay_camera = SetOverlayCamera((0.0, 0.0, 1.0, 1.0))
         self._overlay_buffer_writes_total = 0
@@ -1568,6 +1574,7 @@ class WgpuPlaneExecutor:
                     0,
                 )
             )
+        self._histogram_dispatches_total += 1
         n = len(entries)
         if n == 0:
             return np.zeros(cmd.bins, dtype=np.uint32), None, tuple(missing)
@@ -1727,9 +1734,14 @@ class WgpuPlaneExecutor:
                 timestamp_query_set=timestamp_query_set,
                 timestamp_period_ns=timestamp_period_ns,
                 timestamp_indices=timestamp_indices,
+                on_resolve=self._note_histogram_readback_resolve,
             ), None, tuple(missing)
+        self._note_histogram_readback_resolve()
         counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
         return counts, (float(cmd.lo), float(cmd.hi)), tuple(missing)
+
+    def _note_histogram_readback_resolve(self) -> None:
+        self._histogram_readback_resolves_total += 1
 
     def _present(
         self,
@@ -1879,6 +1891,14 @@ class WgpuPlaneExecutor:
     @property
     def overlay_buffer_writes_total(self) -> int:
         return self._overlay_buffer_writes_total
+
+    @property
+    def histogram_dispatches_total(self) -> int:
+        return int(self._histogram_dispatches_total)
+
+    @property
+    def histogram_readback_resolves_total(self) -> int:
+        return int(self._histogram_readback_resolves_total)
 
     @property
     def bound_planes(self) -> tuple:

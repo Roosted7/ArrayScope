@@ -365,6 +365,9 @@ class FrameRuntimeMixin:
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
         residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
+        histogram_deferred = bool(
+            getattr(session, "_wgpu_histogram_evidence_deferred", False)
+        )
         # Interactive montage retargets also park their MISSING-tile producer:
         # stage planning is deferred (``stage_planning_deferred``) and the
         # immutable missing-tile set remains in ``deferred_missing_tiles``.
@@ -382,19 +385,30 @@ class FrameRuntimeMixin:
             int(getattr(session, "session_id", 0) or 0),
             id(pipeline),
             deferred,
+            histogram_deferred,
         )
-        if not residency_deferred and not stage_deferred and deferred <= 0:
+        if (
+            not residency_deferred
+            and not stage_deferred
+            and not histogram_deferred
+            and deferred <= 0
+        ):
             return False
         if (
             not residency_deferred
             and not stage_deferred
+            and not histogram_deferred
             and deferred_generation
             == getattr(self, "_montage_native_deferred_replanned", None)
         ):
             return False
         session._interactive_residency_deferred = False
+        session._wgpu_histogram_evidence_deferred = False
         self._montage_native_deferred_replanned = deferred_generation
-        self.retarget_frame_pipeline(session, force_commit=residency_deferred)
+        self.retarget_frame_pipeline(
+            session,
+            force_commit=bool(residency_deferred or histogram_deferred),
+        )
         return True
 
     # -- loud non-convergence assertion (V3) ----------------------------------

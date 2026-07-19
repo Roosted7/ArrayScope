@@ -164,6 +164,33 @@ def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
     assert replanned == [first_session, second_session]
 
 
+def test_interaction_stop_rearms_deferred_wgpu_histogram_evidence():
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    pipeline = SimpleNamespace(
+        counters=SimpleNamespace(interactive_native_deferred=0),
+    )
+    session = SimpleNamespace(
+        session_id=1,
+        pipeline=pipeline,
+        _interactive_residency_deferred=False,
+        _wgpu_histogram_evidence_deferred=True,
+    )
+    replanned = []
+    owner = SimpleNamespace(
+        _frame_session=session,
+        _frame_session_is_current=lambda candidate: candidate is session,
+        retarget_frame_pipeline=lambda current, **kwargs: replanned.append(
+            (current, kwargs)
+        ),
+    )
+    owner.win = owner
+
+    assert FrameRuntimeMixin.replan_deferred_interactive_native_quality(owner)
+    assert session._wgpu_histogram_evidence_deferred is False
+    assert replanned == [(session, {"force_commit": True})]
+
+
 def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot):
     clear_arrayscope_settings()
     from arrayscope.core.compute_policy import ComputeLane

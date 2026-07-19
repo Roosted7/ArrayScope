@@ -1092,6 +1092,9 @@ class LevelStatsService:
 
         if bool(getattr(session, "level_evidence_inflight", False)):
             return bail("evidence_inflight")
+        if _interactive_active(self):
+            session._wgpu_histogram_evidence_deferred = True
+            return bail("interaction_active")
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
@@ -1185,6 +1188,12 @@ class LevelStatsService:
                         ),
                     )
                 )
+            emit_trace(
+                "wgpu_histogram_resolve",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+                evidence_rows=len(result),
+                interaction_active=bool(_interactive_active(self)),
+            )
             return tuple(result), (perf_counter() - start) * 1000.0
 
         def done(result):

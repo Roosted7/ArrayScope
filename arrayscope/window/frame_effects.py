@@ -2041,17 +2041,29 @@ class FramePipelineEffects:
                 session.scheduling_policy.verdict.coverage_open
                 and not getattr(session, "first_pass_histogram_published", False)
             )
-            configure_gpu_evidence(
-                gpu_evidence_required,
-                (
-                    session.key,
-                    int(session.session_id),
-                    int(getattr(session, "viewport_revision", 0) or 0),
-                    session.level_key,
-                )
-                if gpu_evidence_required
-                else None,
+            gpu_evidence_deferred = bool(
+                gpu_evidence_required and interactive_active(renderer)
             )
+            session._wgpu_histogram_evidence_deferred = gpu_evidence_deferred
+            # The backend evidence key already includes the committed plane
+            # identity, resident frontier, and shader mapping. The phase key
+            # supplies only the semantic population; session/viewport
+            # generations are presentation ownership and must not churn a
+            # content obligation during zoom/pan.
+            evidence_obligation = (
+                "wgpu-resident-histogram",
+                session.level_key,
+            )
+            configure_gpu_evidence(
+                gpu_evidence_required and not gpu_evidence_deferred,
+                evidence_obligation if gpu_evidence_required else None,
+            )
+            if gpu_evidence_deferred:
+                emit_trace(
+                    "wgpu_histogram_deferred",
+                    reason="interaction_active",
+                    session_id=int(getattr(session, "session_id", 0) or 0),
+                )
         apply_start = perf_counter()
         if first_display_commit and self._commit_direct_delta(
             display_image,
