@@ -43,6 +43,9 @@ These are **not archive**: queue steps and tests cite them.
 | [slice-retention-staleness-2026-07-16.md](slice-retention-staleness-2026-07-16.md) | Retained-transition replacement latency (fixed at the rung-label owner) |
 | [g5-source-grid-pyramid-2026-07-16.md](g5-source-grid-pyramid-2026-07-16.md) | **Authoritative implementation contract** for the remaining ADR 0056 work (queue row 1) |
 | [retro-2026-07.md](retro-2026-07.md) | Why the circling happened; the rules that stop it |
+| [fill-throughput-2026-07-18.md](fill-throughput-2026-07-18.md) | 272-tile raw-fill "stall" adjudication: O(tiles²) throughput collapse, not a lost wakeup (fixed at the roots) |
+| [wgpu-field-stalls-2026-07-18.md](wgpu-field-stalls-2026-07-18.md) | wgpu field stalls 259-1/1-1: physical first-pass quality drift (fixed `43287f8`) |
+| [demand-freshness-cold-fill-2026-07-19.md](demand-freshness-cold-fill-2026-07-19.md) | AUTO-camera demand-freshness cold_fill red: ViewportBridge dropped entry camera intent (live path fixed `6fd0c262`; unit-gate fixture still open) |
 
 **Dossier convention:** a dossier is created when a field defect or design
 slice needs evidence that outlives one commit. It records symptom → trace

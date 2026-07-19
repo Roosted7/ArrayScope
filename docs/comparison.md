@@ -1,5 +1,11 @@
 # ArrayScope, ArrayShow, and ArrayView
 
+> **2026-07-19:** for the broader competitive landscape (napari/npe2, ndv,
+> ImageJ, FSLeyes, 3D Slicer, glue-viz, fastplotlib, sigpy/BART tooling) and
+> its course implications, see
+> [reviews/2026-07-19-course-review.md](reviews/2026-07-19-course-review.md) §5.
+> This file remains the deep ArrayShow/ArrayView three-way study.
+
 This comparison uses the ArrayScope v28 audit line, ArrayShow’s reviewed `develop` branch, and the supplied ArrayView `v0.26.3` checkout. It is a product/architecture assessment, not a checklist requiring ArrayScope to match every feature.
 
 ## Different aims

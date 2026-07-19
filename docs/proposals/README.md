@@ -11,6 +11,15 @@ Proposals describe a concrete design that has not yet become an accepted archite
   [ADR 0055](../decisions/0055-view-tiles-data-chunks-residency-pages.md) three-way
   view-tile/data-chunk/residency-page separation to a virtual, streamed, optionally
   compressed N-D GPU data store. Active on `codex/gpu-engine`.
+- [Tensor ops on the GPU — G8 candidate](tensor-ops-g8.md): the T0–T4 ladder for running
+  operations as GPU compute over the ADR 0057 command protocol ("upload the source once,
+  derive on the GPU"), with explicit triggers, the FFT-scroll kill-gate at T1, and the
+  CPU-as-value-oracle trust split. Explicitly not now; named so the deferred experiment is
+  designed instead of improvised.
+- [wgpu renderer experiment](wgpu-renderer-experiment.md): the wgpu-py evidence program that
+  produced the ADR 0057 backend (gates, measurements, native-Wayland recipe).
+- [GPU-port continuation](gpu-port-continuation.md): continuation record for the GPU-engine
+  port sessions.
 - [LOD multi-resolution implementation plan](lod-multires-implementation-plan.md): historical —
   implemented by [ADR 0050](../decisions/0050-async-multi-resolution-tile-residency.md) and
   [ADR 0051](../decisions/0051-single-owner-tile-lifecycle.md); retained for its cache-key and

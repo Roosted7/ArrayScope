@@ -36,7 +36,7 @@ Organized by the question you're asking. Stop at the first useful level.
 
 ## "Why is it this way?"
 
-- [Architecture decisions](decisions/README.md) — accepted ADRs (0001–0056).
+- [Architecture decisions](decisions/README.md) — accepted ADRs (0001–0057).
 - [Proposals](proposals/README.md) — designed but not (yet) accepted
   direction; includes the
   [tensor-engine endpoint](proposals/tensor-engine-endpoint.md) and the

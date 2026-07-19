@@ -84,6 +84,7 @@ Status terminology:
 | [0054](0054-montage-level-evidence-phasing.md) | Montage level evidence phasing | Implemented for montage level/histogram evidence ordering; rough preview, rough target, and refined stats are ranked explicitly. |
 | [0055](0055-view-tiles-data-chunks-residency-pages.md) | View tiles / data chunks / residency pages | Accepted on `codex/gpu-engine`; G1–G3 and G4a implemented (chunked content-keyed residency live, real-GL verified). |
 | [0056](0056-sparse-virtual-multiresolution-pyramid.md) | Sparse virtual multiresolution pyramid | Accepted; canonical page route/cache/backend cutover implemented on the G5 landing candidate; final real-Wayland/stress acceptance pending. |
+| [0057](0057-renderer-command-protocol.md) | Renderer command protocol (wgpu backend) | Accepted; implemented — wgpu backend live behind explicit pin with native overlays/glyph text, G6 compute, and opt-in screen presentation; promotion evidence is queue row 3d. |
 
 ## Adding or changing a decision
 

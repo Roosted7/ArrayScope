@@ -2,6 +2,7 @@
 
 Reviews are dated assessments and trace interpretations. They may identify risks or recommend direction, but the current source of truth remains tested code, accepted ADRs, and the live architecture/roadmap.
 
+- [2026-07-19 course review](2026-07-19-course-review.md): whole-project review and reshaped course — engine-bet status, bug-archaeology roots, backend verdict (VisPy retirement, PyQtGraph roles, QPainter end-state), competitive whitespace, Programs A–F (2026-07-19).
 - [T1/V1 adversarial review](2026-07-14-t1-v1-adversarial-review.md): hardening of the import guard, workflow harness, and trace_verify; the idle re-commit/re-ack livelock finding (2026-07-14, addenda through P8/P9).
 - [UI visual audit](2026-07-10-ui-visual-audit.md): dated visual findings (2026-07-10).
 - [LOD resident A/B](lod-resident-ab-2026-07-04.md): resident-policy A/B measurements (2026-07-04).

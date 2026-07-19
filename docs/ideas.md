@@ -117,6 +117,98 @@ Single semantic launch/session protocol that hosts can invoke. Learn from ArrayV
 - Orientation/spacing adapters for NIfTI/DICOM metadata while keeping the core array model generic.
 - Export of ROI/profile measurements with source/operation/view provenance.
 
+## 2026-07-19 brainstorm (course-review follow-up)
+
+Creative candidates from the [2026-07-19 course review](reviews/2026-07-19-course-review.md)
+session. Same contract as the rest of this file: parking, not commitment.
+Starred items were judged highest-leverage.
+
+### Trust & explainability UX
+
+- ★ **"Why this pixel" provenance receipts.** Click a pixel → source
+  value(s), op chain + parameters, LOD/interpolation actually used, window
+  mapping, colormap bin. Ground rule 8 already forces the engine to know
+  presentation-qualified vs exact; no other viewer has that distinction to
+  expose. Mostly a popover over existing facts.
+- ★ **"Explain the wait."** Busy indicator → "waiting on FFT of a 1.2 GB
+  slab (will be cached), stage 2/6." Renders existing trace-bus/stage
+  facts as first-person UI copy.
+- **Freshness veil.** Subtle visual treatment on preview-grade tiles, gone
+  when exact — the progressive contract as visible trust (productized
+  tile-truth overlay).
+- **Session → code / provenance-carrying figures.** Export the current
+  view as runnable Python; embed the recipe JSON in exported PNG metadata.
+
+### Complex-native visuals
+
+- ★ **Phase spinner.** Circular slider multiplying display by e^{iθ} —
+  one shader uniform on GPU backends, zero re-evaluation. First concrete
+  consumer of `SHADER_ON_READ` ([tensor-ops T0](proposals/tensor-ops-g8.md)).
+- **Domain coloring** channel mode (hue=phase, lightness=magnitude).
+- **Phasor glyph lens** at high zoom (complex value as geometry; rides the
+  wgpu instanced-overlay pass).
+
+### Compare 2.0 (beyond queue rows 5–7)
+
+- ★ **Chunk-hash structural diff.** The chunk store is content-keyed:
+  comparing two recon variants, identical chunks are *known identical at
+  residency level* before any difference pixel is computed. Entry view of
+  compare = a change-map; identical chunks dedupe GPU memory across
+  windows. Signature-feature potential.
+- **Magic lens.** Hold a key → cursor becomes a movable lens rendering B
+  (or A−B) inside A. Scissored second draw over shared residency.
+- **Blink comparator** (radiology flicker; presentation-identity swap over
+  shared residency) and **correlation cursor** (live A-vs-B scatter of ROI
+  values with identity line).
+
+### The pipeline as a place
+
+- ★ **Pipeline time-travel.** Click any op-stack step → view the array at
+  that stage (StageCache already holds the intermediates); two-pane
+  before/after any op.
+- ★ **ROI teleportation.** Map an ROI through the region algebra
+  (`required_input_region`) to any pipeline stage — "show this artifact in
+  k-space." Exposes the most sophisticated machinery in the codebase.
+- **Dimension grammar bar.** Einops-style one-liner
+  (`coil:rss echo:2 x,y:image rep:scrub`) as an alternate head for the
+  dimension strip; doubles as human-readable recipe serialization.
+
+### Reach
+
+- ★ **Command protocol as wire protocol.** ADR 0057 + G7 compression =
+  run kernel+engine near the data, stream commits to a thin client;
+  remote viewing falls out of architecture already being built (browser/
+  WebGPU client is the far end). Reframes "PyQtGraph targets remote."
+- **Watch mode / recon debugger.** `--watch out.cfl` or
+  `viewer.push(x, iteration=n)`: iteration as a growing scrubbable
+  dimension; chunk-hash diff highlights what moved per iteration.
+- **Anomaly navigator.** "Jump to next NaN/Inf/zero-block/max" — add
+  NaN/Inf counts to the existing per-chunk summaries; navigation becomes a
+  residency-metadata query, not a scan.
+- **Zero-copy launch.** shm handoff instead of npy write for
+  `arrayscope(x)` on multi-GB arrays.
+
+### Engine & testing internals
+
+- ★ **Deterministic kernel simulation.** The kernel is Qt-free, one
+  lock/condvar: run it under a simulated clock with virtual workers and
+  seeded schedule exploration (FoundationDB-style). Attacks the dominant
+  lost-wakeup bug family in ring 0 by enumeration instead of by
+  real-Wayland luck.
+- **Command-stream record/replay.** Record semantic command streams in
+  dogfooding; replay deterministically against any backend; backends
+  become differential oracles for each other. Upgrades the flight-recorder
+  idea from screenshots to semantics.
+
+### UI feel
+
+- **Filmstrip scrub** (LOD-preview thumbnails along the scrub dim,
+  video-editor style; preview pyramid exists).
+- **Controls that recede** (panels fade to edge-hints until hover — the
+  array is the UI).
+- **Vim-for-arrays** (dimension letters + counts, `3e` = echo 3, on the
+  existing command registry).
+
 ## Avoid
 
 Do not pursue these as shortcuts:

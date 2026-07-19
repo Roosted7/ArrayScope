@@ -83,11 +83,6 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
 10. **Backends: both first-class for correctness.** VisPy is the Linux
    certification bar; PyQtGraph targets GPU-headless/remote use and gets 2×
    the performance allowance (Thomas, 2026-07-14).
-10. **One scheduler.** No new scheduling systems beside the kernel, no new
-    pacing timers, no parallel tile-state collections (ADR 0053). Required
-    tile debt belongs to `TileLifecycle`; stage waiters belong to the stage
-    fan-in; deferred planning owns an immutable missing set. A session-level
-    pending/repair queue must not duplicate any of those facts.
 11. **No wait without an owner.** Every deferral, bail, or barrier names the
     event that resumes it, and that event must have a live owner — "a later
     replan will pick it up" is not an owner. Six stall defects in 2026-07
@@ -98,3 +93,8 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
     in-flight work is a defect, never pacing — `commit_bail` /
     `commit_gate_no_progress` trace events exist to make this visible on
     the first read of a stall dump.
+12. **One scheduler.** No new scheduling systems beside the kernel, no new
+    pacing timers, no parallel tile-state collections (ADR 0053). Required
+    tile debt belongs to `TileLifecycle`; stage waiters belong to the stage
+    fan-in; deferred planning owns an immutable missing set. A session-level
+    pending/repair queue must not duplicate any of those facts.
