@@ -1003,7 +1003,9 @@ class FrameSession:
             return
         self.stage_fan_in = LifecycleStageFanIn(self.lifecycle, state)
 
-    def sync_lifecycle_scope(self) -> None:
+    def _sync_lifecycle_targets(self) -> dict[int, TileTarget]:
+        """Publish the current semantic targets without opening scheduling."""
+
         demand = getattr(getattr(self, "lod_policy_decision", None), "demand", None)
         target_level = int(getattr(demand, "desired_level", 0) or 0)
         targets: dict[int, TileTarget] = {}
@@ -1026,6 +1028,10 @@ class FrameSession:
         if getattr(self, "_lifecycle_target_signature", None) != target_signature:
             self.lifecycle.retarget(targets)
             self._lifecycle_target_signature = target_signature
+        return targets
+
+    def sync_lifecycle_scope(self) -> None:
+        targets = self._sync_lifecycle_targets()
         scheduling_scope_signature = tuple(
             (tile, target.source_index, target.semantic_source_id)
             for tile, target in sorted(targets.items())
@@ -1266,6 +1272,19 @@ class FrameSession:
         # renderer re-marks the scan whenever a commit parks on evidence).
         self.level_scan_cursor = 0
         self.level_scan_remaining_tiles = 0
+        # Publish the successor target before cache hits enter the ordinary
+        # materialization seam. A source retarget must first retire the old
+        # source's evaluation/loading claims; mark_materialized then creates
+        # the new source's loading obligation. Doing this in the opposite
+        # order made lifecycle.retarget erase the successor claim it had just
+        # created (the old implementation only passed by carrying the stale
+        # predecessor claim across the source change).
+        self.visible_tiles = tuple(visible_tiles)
+        self.visible_tile_numbers = frozenset(
+            int(tile.montage_index) for tile in self.visible_tiles
+        )
+        self._selected_lod_factor()
+        self._sync_lifecycle_targets()
         hits = misses = unchanged = remapped = 0
         changed_slots: set[int] = set()
         plan_tiles_by_number = {
@@ -1395,11 +1414,6 @@ class FrameSession:
                     retained_state,
                     revision=int(getattr(self.tile_presentation_state, "revision", 0)),
                 )
-        self.visible_tiles = tuple(visible_tiles)
-        self.visible_tile_numbers = frozenset(
-            int(tile.montage_index) for tile in self.visible_tiles
-        )
-        self._selected_lod_factor()
         self.sync_lifecycle_scope()
         self.update_level_presentation_scope()
         self.mark_ladder_swaps_for_viewport()

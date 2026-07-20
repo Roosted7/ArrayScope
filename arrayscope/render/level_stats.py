@@ -1080,16 +1080,28 @@ class LevelStatsService:
         return processed
 
     def _rearm_wgpu_histogram_evidence(self) -> None:
-        """Request one presentation turn so waiting evidence gets re-queued.
+        """Queue evidence installed while the previous batch was in flight.
 
-        The queue path only runs from commit reports; a superseded or failed
-        task on a settled session otherwise leaves ``coverage_evidence_pending``
-        latched with nothing scheduled to clear it (the drain re-arm rule —
-        same family as the 2026-07-15 prefetch dead-arm).
+        A later tile commit can install new resident evidence while the prior
+        batch is still resolving.  Its queue attempt then correctly bails as
+        in-flight, so completion must pump the acknowledged population
+        directly.  Requesting a synthetic presentation turn is insufficient:
+        a settled tile delta has no backend report and therefore never reaches
+        the evidence queue.
         """
 
         current = getattr(self, "_frame_session", None)
         if current is None or bool(getattr(current, "level_evidence_inflight", False)):
+            return
+        acknowledged = dict(
+            getattr(
+                getattr(current, "tile_presentation_state", None),
+                "payloads",
+                {},
+            )
+            or {}
+        )
+        if self._queue_wgpu_resident_histogram_evidence(current, acknowledged):
             return
         current.flush_pending = True
         pipeline = getattr(current, "pipeline", None)
@@ -1250,14 +1262,7 @@ class LevelStatsService:
             self._maybe_publish_after_level_evidence(current, processed=processed)
             current.flush_pending = True
             current.final_commit_pending = True
-            pipeline = getattr(current, "pipeline", None)
-            effects = None if pipeline is None else getattr(pipeline, "effects", None)
-            request_presentation = (
-                None if effects is None else getattr(effects, "request_presentation", None)
-            )
-            if not callable(request_presentation):
-                raise RuntimeError("live frame session has no presentation effect gate")
-            request_presentation()
+            self._rearm_wgpu_histogram_evidence()
 
         def stale():
             release(session)

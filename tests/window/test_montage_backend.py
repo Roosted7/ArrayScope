@@ -1587,9 +1587,13 @@ def test_wgpu_resident_histogram_evidence_uses_coverage_lane_and_shared_tracker(
         wait_completed=lambda: waited.append(True),
         readback=Readback(),
     )
+
+    def waiting_evidence(_payloads):
+        return () if evidence.evidence_key in accepted else (evidence,)
+
     view = SimpleNamespace(
         rendering_capabilities=WGPU_CAPABILITIES,
-        residentHistogramEvidence=lambda _payloads: (evidence,),
+        residentHistogramEvidence=waiting_evidence,
         acceptResidentHistogramEvidence=lambda keys: accepted.extend(keys),
     )
     session = SimpleNamespace(
@@ -1689,6 +1693,40 @@ def test_wgpu_resident_histogram_evidence_defers_while_interaction_is_active():
     assert session._wgpu_histogram_evidence_deferred is True
     # The deferral is still phase-1 evidence debt: the coverage barrier arms.
     assert session.scheduling_policy.evidence_pending_calls == [True]
+
+
+def test_wgpu_histogram_rearm_queues_acknowledged_evidence_before_noop_commit():
+    """A tile can become resident while the preceding evidence batch runs.
+
+    Its first queue attempt bails as in-flight.  Once that batch releases, a
+    settled presentation has no backend report to pump the queue, so the
+    evidence owner must re-scan the acknowledged population directly.
+    """
+
+    from arrayscope.render.level_stats import LevelStatsService
+
+    requested = []
+    acknowledged = {0: object(), 1: object()}
+    session = SimpleNamespace(
+        level_evidence_inflight=False,
+        tile_presentation_state=SimpleNamespace(payloads=acknowledged),
+        flush_pending=False,
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(request_presentation=lambda: requested.append(True))
+        ),
+    )
+    service = LevelStatsService()
+    service._frame_session = session
+    queued = []
+    service._queue_wgpu_resident_histogram_evidence = lambda owner, payloads: (
+        queued.append((owner, payloads)) or 1
+    )
+
+    service._rearm_wgpu_histogram_evidence()
+
+    assert queued == [(session, acknowledged)]
+    assert requested == []
+    assert session.flush_pending is False
 
 
 def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_quiet_edge():
@@ -5089,6 +5127,7 @@ def _wgpu_evidence_service(session, *, cached=None):
     service.win = SimpleNamespace(
         img_view=SimpleNamespace(
             acceptResidentHistogramEvidence=lambda keys: accepted.extend(keys),
+            residentHistogramEvidence=lambda _payloads: (),
         ),
         kernel=SimpleNamespace(visible_backlog=0),
     )
