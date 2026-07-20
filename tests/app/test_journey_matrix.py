@@ -200,6 +200,80 @@ def test_matrix_uses_checked_in_profile_session_fixture():
     assert command[fixture_index]
 
 
+def test_driver_health_blocks_correctness_and_stall_diagnostics(tmp_path):
+    from arrayscope.tools.journey_matrix import _driver_health
+
+    metrics = tmp_path / "metrics.jsonl"
+    stderr = tmp_path / "driver.stderr.log"
+    metrics.write_text(
+        json.dumps(
+            {
+                "phase": "montage_scroll_scalar",
+                "presentation_settled": True,
+                "required_target_settled": True,
+                "stale_level_tiles": 0,
+                "r8_gate_failures": [
+                    {
+                        "category": "correctness",
+                        "gate": "slow_scroll_converged",
+                        "evidence": 1,
+                    },
+                    {
+                        "category": "performance",
+                        "gate": "event_loop_heartbeat",
+                        "evidence": 100.0,
+                    },
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stderr.write_text("[arrayscope] STALL TILE PROBE: {'tile': 59}\n", encoding="utf-8")
+
+    health = _driver_health(metrics, stderr)
+
+    assert health["ok"] is False
+    assert {row["reason"] for row in health["blocking_failures"]} == {
+        "correctness_gate",
+        "stall_tile_probe",
+    }
+    assert [row["gate"] for row in health["performance_diagnostics"]] == ["event_loop_heartbeat"]
+
+
+def test_driver_health_keeps_screenshot_timing_reds_diagnostic(tmp_path):
+    from arrayscope.tools.journey_matrix import _driver_health
+
+    metrics = tmp_path / "metrics.jsonl"
+    stderr = tmp_path / "driver.stderr.log"
+    metrics.write_text(
+        json.dumps(
+            {
+                "phase": "montage_zoompan_scalar",
+                "presentation_settled": True,
+                "required_target_settled": True,
+                "stale_level_tiles": 0,
+                "r8_gate_failures": [
+                    {
+                        "category": "performance",
+                        "gate": "gui_callbacks_below_50ms",
+                        "evidence": 75.0,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stderr.write_text("", encoding="utf-8")
+
+    health = _driver_health(metrics, stderr)
+
+    assert health["ok"] is True
+    assert health["blocking_failures"] == []
+    assert len(health["performance_diagnostics"]) == 1
+
+
 @pytest.mark.parametrize(
     ("stderr", "reason"),
     [

@@ -71,6 +71,56 @@ def read_jsonl(path: str | Path) -> list[dict[str, object]]:
     ]
 
 
+def _driver_health(metrics_path: Path, stderr_path: Path) -> dict[str, object]:
+    """Classify profile-driver reds by product truth, not process status.
+
+    The profile tool intentionally returns non-zero for both correctness and
+    performance bars.  Screenshot sampling makes its timing bars diagnostic
+    inside the journey ring, but correctness failures, incomplete final state,
+    stall probes, and tracebacks must remain blocking.  Treating every non-zero
+    driver as diagnostic let a matrix report ``ok`` while the driver's own
+    bottom-right diagnostics had already reported a stale tile.
+    """
+
+    blocking: list[dict[str, object]] = []
+    performance: list[dict[str, object]] = []
+    records = read_jsonl(metrics_path) if metrics_path.exists() else []
+    for record in records:
+        phase = str(record.get("phase", "") or "")
+        for failure in tuple(record.get("r8_gate_failures", ()) or ()):
+            row = dict(failure or {})
+            row["phase"] = phase
+            if str(row.get("category", "") or "") == "correctness":
+                blocking.append({"reason": "correctness_gate", **row})
+            else:
+                performance.append(row)
+        if record.get("presentation_settled") is False:
+            blocking.append({"reason": "presentation_unsettled", "phase": phase})
+        if record.get("required_target_settled") is False:
+            blocking.append({"reason": "required_target_unsettled", "phase": phase})
+        if int(record.get("stale_level_tiles", 0) or 0) > 0:
+            blocking.append(
+                {
+                    "reason": "stale_level_tiles",
+                    "phase": phase,
+                    "count": int(record.get("stale_level_tiles", 0) or 0),
+                }
+            )
+
+    stderr = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+    if "[arrayscope] STALL TILE PROBE:" in stderr:
+        blocking.append({"reason": "stall_tile_probe"})
+    if "Traceback (most recent call last):" in stderr:
+        blocking.append({"reason": "driver_traceback"})
+    if "TimeoutError: timed out waiting for montage completion" in stderr:
+        blocking.append({"reason": "montage_completion_timeout"})
+    return {
+        "ok": not blocking,
+        "blocking_failures": blocking,
+        "performance_diagnostics": performance,
+    }
+
+
 def _gesture_intervals(events: Iterable[dict[str, object]]) -> list[dict[str, object]]:
     starts: dict[str, dict[str, object]] = {}
     intervals: list[dict[str, object]] = []
@@ -445,6 +495,17 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
                     "results": results,
                 }
             )
+    driver_health = []
+    for backend in BACKENDS:
+        for run_name in DRIVER_RUNS:
+            output = artifact_dir / backend / run_name
+            metrics_path = output / "metrics.jsonl"
+            stderr_path = output / "driver.stderr.log"
+            if not metrics_path.exists() and not stderr_path.exists():
+                continue
+            health = _driver_health(metrics_path, stderr_path)
+            driver_health.append({"backend": backend, "run": run_name, **health})
+
     cold_stderr = artifact_dir / "wgpu" / "cold" / "driver.stderr.log"
     _classify_reference_blocked_wgpu_rows(
         rows,
@@ -453,7 +514,12 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
             or _wgpu_cold_runtime_clean(cold_stderr.read_text(encoding="utf-8"))
         ),
     )
-    return {"ok": all(bool(row["ok"]) for row in rows), "rows": rows}
+    return {
+        "ok": all(bool(row["ok"]) for row in rows)
+        and all(bool(item["ok"]) for item in driver_health),
+        "rows": rows,
+        "driver_health": driver_health,
+    }
 
 
 def _only_cold_level_oracle_red(row: dict[str, object]) -> bool:
@@ -618,13 +684,18 @@ def run_matrix(args) -> int:
                         encoding="utf-8",
                     )
                 else:
+                    health = _driver_health(output / "metrics.jsonl", stderr_path)
                     failures.append(
                         {
                             "backend": backend,
                             "run": run_name,
                             "returncode": returncode,
                             "stderr": str(stderr_path),
-                            "gate_effect": "diagnostic_only",
+                            "gate_effect": "blocking"
+                            if not bool(health["ok"])
+                            else "diagnostic_only",
+                            "blocking_failures": health["blocking_failures"],
+                            "performance_diagnostics": health["performance_diagnostics"],
                         }
                     )
             elif timed_out:
@@ -644,7 +715,11 @@ def run_matrix(args) -> int:
     report["ring"] = "offscreen-smoke" if args.offscreen_smoke else "real-wayland"
     report["wgpu_present_method"] = str(getattr(args, "wgpu_present_method", "bitmap") or "bitmap")
     report["ok"] = bool(
-        report["ok"] and not any("timed_out_after_s" in failure for failure in failures)
+        report["ok"]
+        and not any(
+            "timed_out_after_s" in failure or failure.get("gate_effect") == "blocking"
+            for failure in failures
+        )
     )
     (artifact_dir / "journey-matrix.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",

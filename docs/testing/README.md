@@ -110,10 +110,12 @@ rendering, scheduling, timing, GPU, or Wayland acceptance result and never
 replaces the command above.
 
 The driver also reports the older `profile_montage_workflow` R8 verdicts as
-`driver_failures`. Those nonzero exits are diagnostic only when the owned
-journey artifacts are complete: the matrix verdict comes exclusively from
-the output oracles above. A 180 s whole-process watchdog remains a blocking
-failure, but it cannot turn a step that exceeded 5 s into a pass.
+`driver_failures`. Screenshot capture perturbs its timing bars, so
+performance-only nonzero exits remain diagnostic inside this ring. Correctness
+bars, unsettled/stale final state, stall-tile probes, tracebacks, completion
+timeouts, and the 180 s whole-process watchdog are blocking. The matrix keeps
+its output oracles as the primary verdict, but it may not report green after a
+driver has already observed stale pixels or incomplete product state.
 
 ## Known suite state (2026-07-17)
 
