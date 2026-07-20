@@ -450,6 +450,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             memory_policy=memory_policy,
             montage_plan=viewport_plan.plan,
         )
+        session.sync_lifecycle_scope()
         if memory_policy is not None:
             session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
         lod_swap_ready = session.mark_ladder_swaps_for_viewport(refresh_demand=False)
@@ -1361,6 +1362,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             memory_policy=memory_policy,
             montage_plan=viewport_plan.plan,
         )
+        session.sync_lifecycle_scope()
         if memory_policy is not None:
             session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
         # Camera-only changes must retarget the LOD decision immediately:

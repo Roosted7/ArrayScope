@@ -678,7 +678,7 @@ def presented_lod_summary(session) -> tuple[int, int, tuple[int, int]]:
     """
 
     payloads = dict(getattr(session.tile_presentation_state, "payloads", {}) or {})
-    visible = session.visible_tile_numbers
+    visible = session.required_tile_numbers()
     if visible:
         scoped = {tile: payload for tile, payload in payloads.items() if int(tile) in visible}
         payloads = scoped or payloads
@@ -914,7 +914,7 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
     # newer viewport supersedes the rest is the work nearest the
     # focus/pointer — never wasted, never waited for (Thomas's rule:
     # optimal ordering and cancellation beat debouncing every time).
-    for tile_number in session._prioritized_tile_numbers(tuple(session.visible_tile_numbers)):
+    for tile_number in session._prioritized_tile_numbers(session.required_tile_numbers()):
         rendered = session.rendered_tiles.get(int(tile_number))
         if rendered is None:
             # Unrendered tiles never enter dirty_payloads: the dirty set

@@ -813,10 +813,15 @@ class FrameSession:
     def required_tile_numbers(self) -> tuple[int, ...]:
         """The one set that admission, evidence, and completion must render."""
 
+        frame_plan = getattr(self, "frame_plan", None)
+        required = (
+            tuple(getattr(frame_plan, "active_region_ids", ()) or ())
+            if frame_plan is not None
+            else tuple(self.visible_tile_numbers)
+        )
         return tuple(
             sorted(
-                {int(tile) for tile in self.visible_tile_numbers}
-                - {int(tile) for tile in self.skipped_tiles}
+                {int(tile) for tile in required} - {int(tile) for tile in self.skipped_tiles}
             )
         )
 
@@ -3801,7 +3806,7 @@ class FrameSession:
         return bool(self.unrefined_preview_tiles(include_already_dirty=True))
 
     def unrefined_preview_tiles(self, *, include_already_dirty: bool = False) -> tuple[int, ...]:
-        planned = {int(tile) for tile in self.visible_tile_numbers} - {
+        planned = {int(tile) for tile in self.required_tile_numbers()} - {
             int(tile) for tile in self.skipped_tiles
         }
         if not planned:
@@ -3837,7 +3842,7 @@ class FrameSession:
         return self.required_target_settled()
 
     def visible_first_pixels_presented(self) -> bool:
-        return self.lifecycle.visible_first_pixels_presented()
+        return self.required_first_pixels_presented()
 
     def _tile_presentation_matches_current_plan(self, tile_number: int) -> bool:
         index = int(tile_number)

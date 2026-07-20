@@ -3567,6 +3567,7 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
 
     required = set(session.required_tile_numbers())
     assert required
+    assert required == set(session.frame_plan.active_region_ids)
     assert len(required) < len(plan.tiles), "the fixture needs a non-required coverage shell"
     assert len(win.resolved_batches) == len(required)
     resolved = [tile for batch in win.resolved_batches for tile in batch]
@@ -3999,6 +4000,9 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
 
         def mark_ladder_swaps_for_viewport(self, **_kwargs):
             return False
+
+        def sync_lifecycle_scope(self):
+            return None
 
         pending_rung_materializations = ()
 
