@@ -191,10 +191,20 @@ def test_streaming_rec_updates_viewer_before_completion(open_app, tmp_path, monk
     session = open_path_async(path)
     _pump_until(open_app, lambda: session.window is not None)
     saw_status_widget = session._status_widget is not None
+    autolevel_refreshes = []
+    original_notify = session.window.notify_data_changed
+
+    def record_notify(*, force_autolevel=False):
+        autolevel_refreshes.append(bool(force_autolevel))
+        return original_notify(force_autolevel=force_autolevel)
+
+    monkeypatch.setattr(session.window, "notify_data_changed", record_notify)
     _run_session(open_app, session)
     try:
         assert saw_status_widget
         assert session._status_widget is None
+        assert autolevel_refreshes
+        assert all(autolevel_refreshes)
         np.testing.assert_array_equal(np.asarray(session.window.base_data), expected)
         assert "loading" not in session.window.windowTitle()
     finally:

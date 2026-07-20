@@ -399,7 +399,7 @@ class StateSyncMixin:
         self._update_channel_controls()
         self._update_operation_dock()
 
-    def notify_data_changed(self):
+    def notify_data_changed(self, *, force_autolevel=False):
         self.operation_coordinator.mark_base_data_changed()
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
@@ -408,7 +408,7 @@ class StateSyncMixin:
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._coerce_channel_for_current_dtype()
         self._sync_controls_to_current_data()
-        self.render(reason="data-changed", force_autolevel=False)
+        self.render(reason="data-changed", force_autolevel=bool(force_autolevel))
         return self.document.revision
 
     def _derived_info(self):

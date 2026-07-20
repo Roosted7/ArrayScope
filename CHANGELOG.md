@@ -23,6 +23,15 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- Progressive `.npy`, `.cfl`, and Philips `.REC` viewers now read through a
+  synchronized array source instead of aliasing the destination buffer while
+  its loader thread mutates it. Unread regions start at zero, and each
+  evaluation receives a detached, atomic region snapshot, preventing torn or
+  uninitialized values from contaminating pixels, levels, histograms, or
+  caches while preserving viewer-before-completion behavior. Each throttled
+  publication also re-windows from current evidence instead of leaving the
+  initial zero-only 0–1 levels active until loading finishes.
+
 - The experimental wgpu screen presentation mode (`wgpu_present_method:
   screen`, native Wayland) no longer glitches: previously the native canvas
   child caused Qt to shatter the window into many desynchronized Wayland

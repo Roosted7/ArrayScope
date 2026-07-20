@@ -269,7 +269,7 @@ class PhilipsRECLoader:
         self.axes = _labeled_axes(data.shape, labels=_PHILIPS_REC_AXIS_LABELS)
         return data
 
-    def load(self, *, progress=None, cancel=None):
+    def load(self, *, progress=None, cancel=None, write_transaction=None):
         from arrayscope.io.progressive import LoadCancelled, LoadProgress
 
         n_images = len(self.image_infos)
@@ -278,7 +278,11 @@ class PhilipsRECLoader:
             for img_idx in range(n_images):
                 if cancel is not None and cancel.is_set():
                     raise LoadCancelled("file load cancelled")
-                self._next_slice(fid, img_idx)
+                if write_transaction is None:
+                    self._next_slice(fid, img_idx)
+                else:
+                    with write_transaction():
+                        self._next_slice(fid, img_idx)
                 if progress is not None:
                     progress(
                         LoadProgress(
@@ -845,13 +849,16 @@ def load_path(
     if suffix == ".rec":
         emit("probing", message="Parsing XML metadata")
         loader = PhilipsRECLoader(filepath)
+        published_source = None
         if on_streaming_probe is not None:
-            from arrayscope.io.progressive import StreamingProbe
+            from arrayscope.core.array_source import LazySourceArray
+            from arrayscope.io.progressive import ProgressiveArraySource, StreamingProbe
 
             view = loader.streaming_view()
+            published_source = ProgressiveArraySource(view, label=str(filepath))
             on_streaming_probe(
                 StreamingProbe(
-                    data=view,
+                    data=LazySourceArray(published_source, materialize_budget_bytes=None),
                     axes=_axes_matching_shape(loader.axes, view.shape),
                     metadata={
                         "source_path": str(filepath),
@@ -861,7 +868,13 @@ def load_path(
                     },
                 )
             )
-        data = loader.load(progress=progress, cancel=cancel)
+        data = loader.load(
+            progress=progress,
+            cancel=cancel,
+            write_transaction=(
+                None if published_source is None else published_source.write_transaction
+            ),
+        )
     else:
         if suffix == ".dcm":
             loader = DicomLoader(filepath)

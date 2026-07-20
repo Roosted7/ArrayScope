@@ -19,8 +19,14 @@ on file I/O:
    opens while the file streams in; a status-bar widget shows *"Loading…
    N% available"*. Unread regions render as zeros; the view refreshes on a
    throttle (`notify_data_changed()`, which bumps the document revision so
-   no stale caches survive) and once more with re-windowed levels on
-   completion.
+   no stale caches survive) and re-windows from the evidence available at
+   each publication, including completion.
+
+   The viewer does not receive the mutable destination `ndarray` directly.
+   A synchronized progressive source owns that buffer: loader writes and
+   bounded `read_region()` snapshots share one lock, and every evaluation
+   read gets a detached array. This is the publication boundary that keeps
+   partially written bytes out of pixels, levels, histograms, and caches.
 3. **Cancellation.** Cancel in the loading window aborts the open; the ✕
    in the status-bar widget stops a stream but keeps the viewer open on
    the partial data.

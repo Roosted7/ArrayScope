@@ -51,6 +51,14 @@ this file says *what, in what order, and when it counts as done*.
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **Progressive-load publication correctness (2026-07-20 integration
+  blocker).** The new asynchronous `.npy`/`.cfl`/Philips `.REC` flow must keep
+  viewer-before-completion, but may not expose the raw destination while its
+  reader thread mutates it. Owner: the progressive array source at the
+  existing budgeted `read_region` seam; no renderer-specific locks or cache
+  exceptions. Exit gate: deterministic atomic-read test, open-flow suite,
+  full combined suite, and real-Wayland visual opens showing zero unread
+  regions and correct final pixels/levels on WGPU then PyQtGraph then VisPy.
 - **Demand-freshness unit-gate fixture** (live path FIXED 2026-07-19 `6fd0c262`,
   [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md); full history in the
   [Done ledger](queue-done.md)): the unit gate's fixture carries no committed display

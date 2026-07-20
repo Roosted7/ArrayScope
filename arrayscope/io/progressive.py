@@ -8,10 +8,10 @@ Design goals:
   libraries only offer a monolithic read (NIfTI, single DICOM, text) report
   indeterminate stages instead of fake percentages.
 - **Streaming**: formats whose on-disk layout lets us pre-allocate the final
-  array after a cheap header probe (.npy, .cfl, Philips .rec) expose the
-  destination buffer *before* the bytes arrive, so a viewer can open
-  immediately and watch the fill. The buffer handed out by
-  :class:`StreamingProbe` is the same memory the reader fills in place.
+  array after a cheap header probe (.npy, .cfl, Philips .rec) expose a
+  synchronized array source before the bytes arrive, so a viewer can open
+  immediately and watch completed writes appear without reading a buffer
+  while the loader mutates it.
 - **Cancellation**: readers poll a ``threading.Event``-like object between
   chunks and raise :class:`LoadCancelled`.
 
@@ -20,11 +20,15 @@ Everything here is Qt-free; GUI marshalling lives in ``arrayscope.app``.
 
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import numpy.lib.format as _npformat
+
+from arrayscope.core.array_source import LazySourceArray, NdArraySource
 
 # Chunk size for sequential reads/copies. Large enough to reach disk
 # throughput, small enough that progress updates and cancellation polls
@@ -52,17 +56,54 @@ class LoadProgress:
     bytes_total: int | None = None
 
 
+class ProgressiveArraySource(NdArraySource):
+    """One-writer array source with atomic, detached region publication.
+
+    The loader owns the backing array and mutates it only inside
+    :meth:`write_transaction`. Evaluation reads use :meth:`read_region`,
+    which holds the same lock while copying the requested region. A reader
+    therefore observes either the old zero-filled region or a completed
+    write, never an in-place mutation.
+    """
+
+    def __init__(self, array, *, label="progressive load"):
+        super().__init__(array, label=label)
+        self._lock = threading.RLock()
+
+    def read_region(self, index_spec, *, cancellation_token=None):
+        with self._lock:
+            return np.array(
+                super().read_region(index_spec, cancellation_token=cancellation_token), copy=True
+            )
+
+    @contextmanager
+    def write_transaction(self):
+        with self._lock:
+            yield self._array
+
+    def write_bytes(self, start, payload):
+        values = np.frombuffer(payload, dtype=np.uint8)
+        with self.write_transaction() as array:
+            view = _flat_byte_view(array)
+            view[int(start) : int(start) + values.size] = values
+
+    def write_flat(self, start, values):
+        with self.write_transaction() as array:
+            flat = array.ravel(order="K")
+            flat[int(start) : int(start) + len(values)] = values
+
+
 @dataclass
 class StreamingProbe:
     """Early result of a streaming-capable load.
 
-    ``data`` is the final-shaped destination array, pre-allocated and being
-    filled in place by the reader thread. ``axes`` / ``metadata`` carry what
-    is already known from the header. Readers only ever *write* regions they
-    have fully decoded, so partially loaded regions read as zeros.
+    ``data`` is the final-shaped synchronized source over a zero-filled
+    destination owned by the reader thread. Region reads are detached and
+    atomic with respect to loader writes. ``axes`` / ``metadata`` carry what
+    is already known from the header.
     """
 
-    data: np.ndarray
+    data: LazySourceArray
     axes: tuple | None
     metadata: dict
 
@@ -104,7 +145,16 @@ def _flat_byte_view(data):
     return flat.view(np.uint8)
 
 
-def _readinto_chunked(fp, data, *, progress, cancel, bytes_offset=0, bytes_total=None):
+def _readinto_chunked(
+    fp,
+    data,
+    *,
+    progress,
+    cancel,
+    bytes_offset=0,
+    bytes_total=None,
+    published_source=None,
+):
     """Fill ``data`` from ``fp`` sequentially, reporting byte progress."""
     view = _flat_byte_view(data)
     total = view.nbytes if bytes_total is None else bytes_total
@@ -112,7 +162,13 @@ def _readinto_chunked(fp, data, *, progress, cancel, bytes_offset=0, bytes_total
     while done < view.nbytes:
         _check_cancel(cancel)
         end = min(done + READ_CHUNK_BYTES, view.nbytes)
-        read = fp.readinto(memoryview(view[done:end]))
+        if published_source is None:
+            read = fp.readinto(memoryview(view[done:end]))
+        else:
+            payload = fp.read(end - done)
+            read = len(payload)
+            if read:
+                published_source.write_bytes(done, payload)
         if not read:
             raise ValueError("file ended before the array data was complete (truncated file?)")
         done += read
@@ -134,11 +190,15 @@ def load_npy_progressive(filepath, *, progress=None, cancel=None, on_streaming_p
         if dtype.hasobject:
             # Match np.load(allow_pickle=False) behaviour for object arrays.
             raise ValueError(f"Object arrays cannot be loaded progressively: {filepath}")
-        data = np.empty(shape, dtype=dtype, order="F" if fortran_order else "C")
+        order = "F" if fortran_order else "C"
+        data = np.empty(shape, dtype=dtype, order=order)
+        published_source = None
         if on_streaming_probe is not None:
+            data.fill(0)
+            published_source = ProgressiveArraySource(data, label=str(filepath))
             on_streaming_probe(
                 StreamingProbe(
-                    data=data,
+                    data=LazySourceArray(published_source, materialize_budget_bytes=None),
                     axes=None,
                     metadata={
                         "source_path": str(filepath),
@@ -148,7 +208,13 @@ def load_npy_progressive(filepath, *, progress=None, cancel=None, on_streaming_p
                     },
                 )
             )
-        _readinto_chunked(fp, data, progress=progress, cancel=cancel)
+        _readinto_chunked(
+            fp,
+            data,
+            progress=progress,
+            cancel=cancel,
+            published_source=published_source,
+        )
     _emit(progress, stage="finalizing", fraction=1.0)
     return data
 
@@ -164,10 +230,13 @@ def load_cfl_progressive(filepath, *, progress=None, cancel=None, on_streaming_p
     mapped = remove_trailing_singletons(mapped)
 
     data = np.empty(mapped.shape, dtype=np.complex64, order="F")
+    published_source = None
     if on_streaming_probe is not None:
+        data.fill(0)
+        published_source = ProgressiveArraySource(data, label=str(filepath))
         on_streaming_probe(
             StreamingProbe(
-                data=data,
+                data=LazySourceArray(published_source, materialize_budget_bytes=None),
                 axes=None,
                 metadata={
                     "source_path": str(filepath),
@@ -185,7 +254,10 @@ def load_cfl_progressive(filepath, *, progress=None, cancel=None, on_streaming_p
     for start in range(0, dst.size, chunk_elements):
         _check_cancel(cancel)
         end = min(start + chunk_elements, dst.size)
-        dst[start:end] = src[start:end]
+        if published_source is None:
+            dst[start:end] = src[start:end]
+        else:
+            published_source.write_flat(start, src[start:end])
         _emit(
             progress,
             stage="reading",
@@ -202,6 +274,7 @@ __all__ = [
     "READ_CHUNK_BYTES",
     "LoadCancelled",
     "LoadProgress",
+    "ProgressiveArraySource",
     "StreamingProbe",
     "load_cfl_progressive",
     "load_npy_progressive",

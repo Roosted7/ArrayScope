@@ -38,21 +38,53 @@ def test_npy_progressive_matches_np_load(tmp_path, order):
     assert events[-1].stage == "finalizing"
 
 
-def test_npy_progressive_streams_into_probe_buffer(tmp_path):
+def test_npy_progressive_publishes_detached_region_reads(tmp_path):
     arr = np.arange(24, dtype=np.int64).reshape(4, 6)
     path = tmp_path / "data.npy"
     np.save(path, arr)
 
     probes = []
-    loaded = load_npy_progressive(path, on_streaming_probe=probes.append)
+    initial = []
+
+    def capture_probe(probe):
+        probes.append(probe)
+        initial.append(probe.data.read_region((slice(None), slice(None))))
+
+    loaded = load_npy_progressive(path, on_streaming_probe=capture_probe)
 
     assert len(probes) == 1
     probe = probes[0]
     assert probe.data.shape == (4, 6)
     assert probe.metadata["detected_format"] == "numpy"
-    # The probe hands out the same memory the reader fills.
-    assert np.shares_memory(probe.data, loaded)
-    np.testing.assert_array_equal(probe.data, arr)
+    assert not np.any(initial[0])
+    assert not np.shares_memory(initial[0], loaded)
+    np.testing.assert_array_equal(np.asarray(probe.data), arr)
+
+
+def test_progressive_source_read_cannot_observe_an_inflight_write():
+    from arrayscope.io.progressive import ProgressiveArraySource
+
+    source = ProgressiveArraySource(np.zeros(4, dtype=np.int32))
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    observed = []
+
+    def read():
+        reader_started.set()
+        observed.append(source.read_region((slice(None),)))
+        reader_finished.set()
+
+    with source.write_transaction() as destination:
+        destination[:2] = 1
+        thread = threading.Thread(target=read)
+        thread.start()
+        assert reader_started.wait(2.0)
+        assert not reader_finished.is_set()
+        destination[2:] = 1
+
+    assert reader_finished.wait(2.0)
+    thread.join()
+    np.testing.assert_array_equal(observed[0], np.ones(4, dtype=np.int32))
 
 
 def test_npy_progressive_rejects_truncated_file(tmp_path):
@@ -99,7 +131,7 @@ def test_cfl_progressive_matches_legacy_loader(tmp_path):
 
     np.testing.assert_array_equal(loaded, arr.reshape(6, 5, 3))
     assert probes[0].data.shape == (6, 5, 3)
-    assert np.shares_memory(probes[0].data, loaded)
+    np.testing.assert_array_equal(np.asarray(probes[0].data), loaded)
     fractions = _fractions(events)
     assert fractions == sorted(fractions)
     assert fractions[-1] == 1.0
@@ -178,7 +210,7 @@ def test_rec_load_path_streams_and_reports_slice_progress(tmp_path):
     assert loaded.metadata["detected_format"] == "rec"
     assert len(probes) == 1
     assert probes[0].data.shape == expected.shape
-    assert np.shares_memory(probes[0].data, loaded.data)
+    np.testing.assert_array_equal(np.asarray(probes[0].data), loaded.data)
     assert probes[0].axes is not None
     fractions = _fractions(events)
     assert fractions == pytest.approx([1 / 3, 2 / 3, 1.0])
@@ -201,6 +233,6 @@ def test_rec_cancel_mid_load_leaves_partial_buffer(tmp_path):
             path, progress=cancel_after_first_slice, cancel=cancel, on_streaming_probe=probes.append
         )
 
-    partial = probes[0].data
+    partial = np.asarray(probes[0].data)
     np.testing.assert_array_equal(partial[:, :, 0], expected[:, :, 0])
     assert np.all(partial[:, :, 2] == 0)

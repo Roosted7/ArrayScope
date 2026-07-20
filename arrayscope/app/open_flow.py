@@ -237,14 +237,12 @@ class FileOpenSession(QtCore.QObject):
         self._last_refresh_fraction = event.fraction
         self._refresh_viewer_data()
 
-    def _refresh_viewer_data(self, *, final=False):
+    def _refresh_viewer_data(self):
         win = self.window
         if win is None:
             return
         try:
-            win.notify_data_changed()
-            if final:
-                win.render(reason="stream-complete", force_autolevel=True)
+            win.notify_data_changed(force_autolevel=True)
         except Exception:
             traceback.print_exc()
 
@@ -274,7 +272,7 @@ class FileOpenSession(QtCore.QObject):
         else:
             self._remove_status_widget()
             self.window.setWindowTitle(self._display_title(loaded.metadata, loading=False))
-            self._refresh_viewer_data(final=True)
+            self._refresh_viewer_data()
             from arrayscope.ui.toasts import show_status_message
 
             show_status_message(self.window, "File fully loaded")
@@ -285,7 +283,7 @@ class FileOpenSession(QtCore.QObject):
             return
         if self.window is not None:
             self._remove_status_widget()
-            self._refresh_viewer_data(final=True)
+            self._refresh_viewer_data()
             from arrayscope.ui.toasts import show_status_message
 
             show_status_message(
