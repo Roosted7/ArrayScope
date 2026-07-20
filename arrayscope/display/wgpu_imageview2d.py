@@ -1423,7 +1423,19 @@ class WgpuImageView2D(ImageViewShell):
             self.image = img
             self.histogramSource = None
             if not callable(histogramPlotData):
+                previous_histogram = self.histogramPlotSource
                 self.histogramPlotSource = histogramPlotData
+                if histogramPlotData is not None and (
+                    previous_histogram is not histogramPlotData
+                    or getattr(self.histogramImageItem, "image", None) is None
+                ):
+                    self._bind_histogram_item(self.histogramImageItem)
+                    self._set_image_item_data(
+                        self.histogramImageItem,
+                        self._histogram_plot_data(None),
+                        self._histogram_levels_for_display(levels),
+                        role="histogram",
+                    )
             self.setHistogramDataBounds(histogramRange)
             self._displayLevels = (level_lo, level_hi)
             self._wgpu_last_levels = (level_lo, level_hi)

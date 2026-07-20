@@ -623,6 +623,42 @@ def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
         view.close()
 
 
+def test_tiled_commit_publishes_histogram_to_shared_widget(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        image = np.linspace(0.0, 8.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        histogram = image[::2, ::2]
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {0: _payload(0, image, source_id=("histogram-widget", 0))}
+
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=histogram,
+            montage_tile_payloads=payloads,
+        )
+
+        assert view._histogram_adapter.bound_item is view.histogramImageItem
+        assert np.array_equal(view.histogramImageItem.image, histogram)
+        assert view.histogram.getLevels() == pytest.approx((0.0, 8.0))
+
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=histogram,
+            montage_tile_payloads=payloads,
+        )
+        assert view.lastImageUploadTiming().histogram_bytes == 0
+    finally:
+        view.close()
+
+
 def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(qt_app, monkeypatch):
     """Dogfood crash 2026-07-19: pool pressure inside one submission evicted a
     snapshotted histogram frontier page; the executor's loud KeyError then
