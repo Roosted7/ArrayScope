@@ -459,6 +459,7 @@ def test_visual_timeline_preserves_physical_draw_geometry():
 
 
 def test_screen_screenshot_helper_must_return_exact_window(qt_app, tmp_path, monkeypatch):
+    import numpy as np
     from pyqtgraph.Qt import QtCore, QtGui
 
     import arrayscope.tools.profile_montage_workflow as workflow
@@ -486,6 +487,17 @@ def test_screen_screenshot_helper_must_return_exact_window(qt_app, tmp_path, mon
     assert win._arrayscope_last_screenshot_capture_kind == "compositor-helper-window"
     assert win._arrayscope_last_screenshot_capture_error == ""
     assert QtGui.QImage(str(path)).size() == geometry.size()
+    frame = np.full((12, 18, 4), 127, dtype=np.uint8)
+    win.img_view.grabPresentedFramebuffer = lambda: frame
+    monkeypatch.setattr(
+        workflow.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("timeline capture called compositor helper"),
+    )
+    timeline_path = tmp_path / "timeline.png"
+
+    assert workflow._save_view_screenshot(win, timeline_path, full_window=False) is True
+    assert win._arrayscope_last_screenshot_capture_kind == "wgpu-offscreen-replay"
 
 
 def test_visual_geometry_summary_projects_physical_bounds_through_live_camera():
@@ -1261,6 +1273,22 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
         profiler_artifact_paths=(),
         qt_platform="xcb",
     )
+    photographed = _base_record(
+        run_id="run",
+        backend="wgpu",
+        data_path=Path("data.nii"),
+        data=np.zeros((2, 3, 4), dtype=np.float32),
+        load_mode="native",
+        montage_axis=2,
+        indices=(0, 1, 2, 3),
+        full_tile_count=4,
+        columns=2,
+        max_tiles=None,
+        profiler_type="plain",
+        profiler_artifact_paths=(),
+        qt_platform="wayland",
+        screenshot_timing_perturbed=True,
+    )
     hidden = {
         **visible,
         **_base_record(
@@ -1282,6 +1310,10 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
 
     assert visible["smoke_only"] is False
     assert visible["pacing_evidence"] is True
+    assert visible["screenshot_timing_perturbed"] is False
+    assert photographed["smoke_only"] is False
+    assert photographed["screenshot_timing_perturbed"] is True
+    assert photographed["pacing_evidence"] is False
     assert visible["xdg_session_type"] == "wayland"
     assert hidden["smoke_only"] is True
     assert hidden["pacing_evidence"] is False

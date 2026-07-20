@@ -123,9 +123,13 @@ portable fallback is explicitly named `wgpu-offscreen-replay`; that replay is
 useful command/pixel evidence but is **not** compositor or full-window truth.
 WGPU draw acknowledgements may be much more frequent than a compositor grab;
 the probe therefore applies `--screenshot-interval-s` to acknowledgement
-captures too. Treat timing from any screenshot-enabled run as perturbed and
-use a trace-only repeat to decide whether a photographed coverage delay belongs
-to the renderer or to capture.
+captures too. Periodic WGPU trajectory samples use the explicitly labelled
+`wgpu-offscreen-replay`; they remain synchronous so each image and its trace
+metadata describe the same scene state. The compositor helper is reserved for
+phase-end exact-window evidence. A replay fences the GPU and can perturb
+settlement, so timing from any screenshot-enabled run is diagnostic: use a
+trace-only repeat to decide whether a photographed coverage delay belongs to
+the renderer or to capture.
 For unattended screen-path acceptance, set
 `ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER` to an executable that accepts one
 destination path and writes the exact composited top-level window there. A

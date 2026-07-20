@@ -242,6 +242,9 @@ def run_profile_montage_workflow(
         reported_columns_small = (
             _default_columns(scroll_grid_size) if columns_small is None else columns_small
         )
+        screenshot_timing_perturbed = bool(
+            screenshot_dir is not None and float(screenshot_interval_s) > 0.0
+        )
         base_large = _base_record(
             run_id=run_id,
             backend=backend,
@@ -259,6 +262,7 @@ def run_profile_montage_workflow(
             qt_platform=str(app.platformName()),
             grid_kind="full",
             source_index_count=tile_count,
+            screenshot_timing_perturbed=screenshot_timing_perturbed,
         )
         base_scroll = _base_record(
             run_id=run_id,
@@ -277,6 +281,7 @@ def run_profile_montage_workflow(
             qt_platform=str(app.platformName()),
             grid_kind="scroll",
             source_index_count=len(scroll_source_indices),
+            screenshot_timing_perturbed=screenshot_timing_perturbed,
         )
         base_large["synthetic_scene"] = synthetic_scene or None
         base_scroll["synthetic_scene"] = synthetic_scene or None
@@ -3010,10 +3015,14 @@ class _VisualTimelineProbe:
         self.capture("interval")
 
     def capture(self, reason: str) -> None:
-        now_ns = time.monotonic_ns()
         self._index += 1
         path = self._directory / f"{self._backend}-visual-{self._index:04d}.png"
-        saved = _save_view_screenshot(self._win, path)
+        # Screen-path WGPU cannot be read from Qt's backing store. Keep the
+        # labelled executor replay synchronous so the pixels, scene rows, and
+        # trace metadata describe the same instant. Its GPU fence is why a
+        # screenshot-enabled run is diagnostic rather than timing truth.
+        saved = _save_view_screenshot(self._win, path, full_window=False)
+        now_ns = time.monotonic_ns()
         screenshot_capture_kind = str(
             getattr(self._win, "_arrayscope_last_screenshot_capture_kind", "unknown")
         )
@@ -5003,11 +5012,11 @@ def _attach_phase_screenshot(
     )
 
 
-def _save_view_screenshot(win, path: Path) -> bool:
+def _save_view_screenshot(win, path: Path, *, full_window: bool = True) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     win._arrayscope_last_screenshot_capture_error = ""
     present_method = getattr(win.img_view, "wgpuPresentMethod", lambda: "")()
-    if str(present_method) == "screen":
+    if str(present_method) == "screen" and full_window:
         helper = os.environ.get("ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER", "").strip()
         if helper:
             desktop_path = path.with_name(f".{path.stem}-desktop{path.suffix}")
@@ -5409,6 +5418,7 @@ def _base_record(
     qt_platform: str,
     grid_kind: str = "full",
     source_index_count: int | None = None,
+    screenshot_timing_perturbed: bool = False,
 ) -> dict[str, object]:
     grid_kind = str(grid_kind)
     capped = grid_kind == "full" and max_tiles is not None and len(indices) < int(full_tile_count)
@@ -5428,7 +5438,8 @@ def _base_record(
         "max_tiles": None if max_tiles is None else int(max_tiles),
         "tile_cap_applied": bool(capped),
         "smoke_only": bool(smoke_only),
-        "pacing_evidence": bool(not smoke_only),
+        "screenshot_timing_perturbed": bool(screenshot_timing_perturbed),
+        "pacing_evidence": bool(not smoke_only and not screenshot_timing_perturbed),
         "data_shape": tuple(int(value) for value in np.shape(data)),
         "data_dtype": str(getattr(getattr(data, "dtype", None), "str", getattr(data, "dtype", ""))),
         "montage_axis": int(montage_axis),
