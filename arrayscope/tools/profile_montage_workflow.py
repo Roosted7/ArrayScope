@@ -3570,6 +3570,9 @@ class _PresentationContinuityProbe:
         self._blackout_observed = False
         self._extent_changed_before_commit = False
         self._changed_extent = None
+        self._continuity_expected = bool(
+            self._predecessor_count > 0 and self._predecessor_semantic_key is not None
+        )
         self._started_at = None
 
     def start(self) -> None:
@@ -3582,14 +3585,16 @@ class _PresentationContinuityProbe:
         self._timer.stop()
 
     def _sample(self) -> None:
-        if self._predecessor_frame is None or self._predecessor_count <= 0:
+        if self._predecessor_count <= 0:
             return
-        getattr(self._win, "_committed_display_frame", None)
         current_identity = _backend_presentation_identity(self._win)
         current_semantic_key = _current_presentation_semantic_key(self._win)
         if current_semantic_key != self._predecessor_semantic_key:
-            self._observe_successor()
-            return
+            # A document/operation transition is not entitled to retain the
+            # old mapping. Keep sampling so the first *physical* successor is
+            # still timed, but do not grade its honest clear as a same-source
+            # continuity failure.
+            self._continuity_expected = False
         self._samples += 1
         count = _backend_visible_tile_count(self._win)
         self._minimum_count = min(self._minimum_count, count)
@@ -3614,8 +3619,10 @@ class _PresentationContinuityProbe:
         self._successor_levels_state = _levels_histogram_state(self._win)
 
     def record(self) -> dict[str, object]:
-        expected = bool(self._predecessor_frame is not None and self._predecessor_count > 0)
-        violation = bool(self._blackout_observed or self._extent_changed_before_commit)
+        expected = bool(self._continuity_expected)
+        violation = bool(
+            expected and (self._blackout_observed or self._extent_changed_before_commit)
+        )
         successor_levels = self._successor_levels_state
         return {
             "presentation_continuity_expected": expected,
@@ -5830,18 +5837,25 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
     )
     predecessor_tiles = int(record.get("presentation_predecessor_tile_count", 0) or 0)
     minimum_retained = int(record.get("presentation_minimum_retained_tile_count", 0) or 0)
+    continuity_expected = bool(
+        record.get("presentation_continuity_expected", predecessor_tiles > 0)
+    )
     required_transition_coverage = min(predecessor_tiles, requested) if predecessor_tiles > 0 else 0
     require(
         "presentation_continuity",
-        bool(record.get("presentation_continuity_ok", False))
-        and minimum_retained >= required_transition_coverage,
+        not continuity_expected
+        or (
+            bool(record.get("presentation_continuity_ok", False))
+            and minimum_retained >= required_transition_coverage
+        ),
         evidence={
+            "expected": continuity_expected,
             "blackout": record.get("presentation_blackout_observed"),
             "minimum_retained": minimum_retained,
             "required_transition_coverage": required_transition_coverage,
             "extent_changed_before_commit": record.get("presentation_extent_changed_before_commit"),
         },
-        target="full predecessor/successor coverage and extent remain through successor acknowledgement",
+        target="same-semantic predecessor/successor coverage and extent remain through successor acknowledgement",
     )
     require(
         "session_viewport_geometry_stable",

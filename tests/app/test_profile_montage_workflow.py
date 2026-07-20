@@ -916,7 +916,9 @@ def _passing_r8_phase_record(*, backend="vispy"):
         "first_visible_histogram_empty": False,
         "first_visible_level_evidence_quality": evidence_quality,
         "presentation_continuity_ok": True,
+        "presentation_continuity_expected": True,
         "presentation_blackout_observed": False,
+        "presentation_predecessor_tile_count": 100,
         "presentation_minimum_retained_tile_count": 100,
         "presentation_extent_changed_before_commit": False,
         "session_viewport_shape_matches": True,
@@ -1407,7 +1409,6 @@ def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camer
     visible_state.visible = False
     image_view._viewport_content_extent = (40, 20)
     probe._sample()
-    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(semantic_key="new"))
     probe.stop()
 
     record = probe.record()
@@ -1417,7 +1418,7 @@ def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camer
     assert record["presentation_continuity_ok"] is False
 
 
-def test_presentation_continuity_probe_accepts_atomic_successor_commit():
+def test_presentation_continuity_probe_times_document_successor_without_committed_frame():
     from arrayscope.tools.profile_montage_workflow import _PresentationContinuityProbe
 
     class FakeTimer:
@@ -1437,19 +1438,20 @@ def test_presentation_continuity_probe_accepts_atomic_successor_commit():
         def stop(self):
             return None
 
-    predecessor = SimpleNamespace(key=SimpleNamespace(semantic_key="old"))
+    visible_state = SimpleNamespace(visible=True, source_array_id="old")
     image_view = SimpleNamespace(
         montageDisplayMode=lambda: "tile_layer",
-        _montage_tile_layer=SimpleNamespace(states={0: SimpleNamespace(visible=True)}),
+        _montage_tile_layer=SimpleNamespace(states={0: visible_state}),
         _viewport_content_extent=(20, 40),
         getLevels=lambda: (-2.0, 8.0),
         getHistogramDataBounds=lambda: (-2.0, 8.0),
     )
     level_source = SimpleNamespace(rank=2, source_count=4, evidence_quality=1)
+    session = SimpleNamespace(semantic_key="old", applied_level_source=level_source)
     win = SimpleNamespace(
         img_view=image_view,
-        _committed_display_frame=predecessor,
-        _frame_session=SimpleNamespace(applied_level_source=level_source),
+        _committed_display_frame=None,
+        _frame_session=session,
         renderer=SimpleNamespace(
             _last_montage_level_decision=None, _montage_refined_level_applied_count=0
         ),
@@ -1457,10 +1459,16 @@ def test_presentation_continuity_probe_accepts_atomic_successor_commit():
     probe = _PresentationContinuityProbe(SimpleNamespace(QTimer=FakeTimer), win)
 
     probe.start()
-    win._committed_display_frame = SimpleNamespace(key=SimpleNamespace(semantic_key="new"))
+    visible_state.visible = False
+    session.semantic_key = "new"
+    probe._sample()
+    visible_state.visible = True
+    visible_state.source_array_id = "new"
     probe.stop()
 
     record = probe.record()
+    assert record["presentation_continuity_expected"] is False
+    assert record["presentation_blackout_observed"] is True
     assert record["presentation_successor_observed"] is True
     assert record["first_visible_tile_ms"] >= 0.0
     assert record["first_visible_display_levels"] == [-2.0, 8.0]
