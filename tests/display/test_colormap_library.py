@@ -173,3 +173,71 @@ def test_import_auto_detects_cyclic(tmp_path):
     np.savetxt(path, table, delimiter=",")
     info = library.import_colormap_file(str(path), name="wrapped")
     assert info.kind == library.CYCLIC
+
+
+@pytest.fixture
+def _isolated_listeners():
+    """Run each listener test against an empty, restored global registry."""
+    saved = list(library._listeners)
+    library._listeners.clear()
+    try:
+        yield
+    finally:
+        library._listeners[:] = saved
+
+
+@pytest.mark.usefixtures("_isolated_listeners")
+def test_remove_library_listener_stops_notifications():
+    calls = []
+
+    def listener():
+        calls.append(1)
+
+    library.add_library_listener(listener)
+    library.refresh_user_colormaps()
+    assert calls == [1]
+
+    library.remove_library_listener(listener)
+    library.refresh_user_colormaps()
+    assert calls == [1]  # no further notification after removal
+
+
+@pytest.mark.usefixtures("_isolated_listeners")
+def test_remove_library_listener_is_idempotent():
+    def listener():
+        pass
+
+    # Removing before it is ever registered is a no-op...
+    library.remove_library_listener(listener)
+    library.add_library_listener(listener)
+    library.remove_library_listener(listener)
+    # ...and removing a second time must not raise.
+    library.remove_library_listener(listener)
+    assert listener not in library._listeners
+
+
+@pytest.mark.usefixtures("_isolated_listeners")
+def test_notify_prunes_listener_bound_to_deleted_widget():
+    # A window that closed without unregistering leaves a listener bound to a
+    # deleted C++ object; invoking it raises RuntimeError. The registry must
+    # self-heal (drop it) so a colormap mutation neither crashes nor keeps
+    # calling the dead wrapper on every future mutation.
+    class _DeletedWidgetListener:
+        def __call__(self):
+            raise RuntimeError("Internal C++ object (ArrayScopeWindow) already deleted.")
+
+    dead = _DeletedWidgetListener()
+    live_calls = []
+
+    def live_listener():
+        live_calls.append(1)
+
+    library.add_library_listener(dead)
+    library.add_library_listener(live_listener)
+
+    library.refresh_user_colormaps()  # must not raise
+    assert dead not in library._listeners  # pruned on first failure
+    assert live_calls == [1]  # a sibling listener still ran
+
+    library.refresh_user_colormaps()
+    assert live_calls == [1, 1]  # and keeps running once the corpse is gone

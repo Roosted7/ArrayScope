@@ -678,6 +678,11 @@ class ArrayScopeWindow(
 
     def closeEvent(self, event):
         self._closing = True
+        # The colormap library registry is process-global; drop this window's
+        # listener so a later mutation never calls back into a dead widget.
+        from arrayscope.display import colormap_library
+
+        colormap_library.remove_library_listener(self._refresh_colormap_options)
         controller = getattr(self, "sync_controller", None)
         if controller is not None:
             controller.shutdown()

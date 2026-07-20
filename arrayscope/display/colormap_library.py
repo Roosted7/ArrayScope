@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 
 import numpy as np
+
+_LOGGER = logging.getLogger(__name__)
 
 SEQUENTIAL = "sequential"
 DIVERGING = "diverging"
@@ -490,10 +493,32 @@ def add_library_listener(callback) -> None:
         _listeners.append(callback)
 
 
+def remove_library_listener(callback) -> None:
+    """Unregister a listener added with :func:`add_library_listener`.
+
+    Idempotent: unregistering a callback that is not (or is no longer)
+    registered is a no-op. Widget-bound listeners MUST call this on teardown
+    (see the main window's ``closeEvent``); the registry is process-global, so
+    a listener that outlives its widget is a leak that turns the next library
+    mutation into a call on a dead Qt object.
+    """
+    with contextlib.suppress(ValueError):
+        _listeners.remove(callback)
+
+
 def _notify() -> None:
     for callback in tuple(_listeners):
-        with contextlib.suppress(Exception):
+        try:
             callback()
+        except RuntimeError:
+            # Listener bound to a Qt widget whose C++ object is gone (a window
+            # closed without unregistering). Drop it so the registry
+            # self-heals instead of retrying the dead wrapper every mutation.
+            remove_library_listener(callback)
+        except Exception:
+            # No repr of the callback in the message: repr of a dead Qt
+            # wrapper raises RuntimeError itself.
+            _LOGGER.exception("colormap library listener failed")
 
 
 def user_colormap_directory() -> str:
