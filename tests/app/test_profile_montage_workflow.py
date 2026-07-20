@@ -255,6 +255,8 @@ def test_visual_sampler_captures_active_presentation_draw_ack():
     reasons = []
     probe = object.__new__(_VisualTimelineProbe)
     probe._win = SimpleNamespace(_arrayscope_active_gesture_id="zoom_out-1")
+    probe._interval_ms = 100
+    probe._last_sample_ns = 0
     probe.capture = lambda reason: reasons.append(reason)
 
     probe._capture_presentation_draw_ack()
@@ -271,6 +273,8 @@ def test_visual_sampler_uses_draw_acks_only_during_wgpu_gesture():
     probe = object.__new__(_VisualTimelineProbe)
     probe._win = SimpleNamespace(_arrayscope_active_gesture_id="index_scroll-1")
     probe._backend = "wgpu"
+    probe._interval_ms = 100
+    probe._last_sample_ns = 0
     probe.capture = lambda reason: reasons.append(reason)
 
     probe._capture_interval()
@@ -282,6 +286,31 @@ def test_visual_sampler_uses_draw_acks_only_during_wgpu_gesture():
     probe._capture_interval()
 
     assert reasons == ["presentation-draw-ack", "interval", "interval"]
+
+
+def test_visual_sampler_throttles_wgpu_draw_ack_screenshots(monkeypatch):
+    from arrayscope.tools.profile_montage_workflow import _VisualTimelineProbe
+
+    reasons = []
+    probe = object.__new__(_VisualTimelineProbe)
+    probe._win = SimpleNamespace(_arrayscope_active_gesture_id="index_scroll-1")
+    probe._interval_ms = 500
+    probe._last_sample_ns = 1_000_000_000
+    probe.capture = lambda reason: reasons.append(reason)
+
+    monkeypatch.setattr(
+        "arrayscope.tools.profile_montage_workflow.time.monotonic_ns",
+        lambda: 1_499_000_000,
+    )
+    probe._capture_presentation_draw_ack()
+    assert reasons == []
+
+    monkeypatch.setattr(
+        "arrayscope.tools.profile_montage_workflow.time.monotonic_ns",
+        lambda: 1_500_000_000,
+    )
+    probe._capture_presentation_draw_ack()
+    assert reasons == ["presentation-draw-ack"]
 
 
 def test_preview_floor_physical_rows_preserve_page_shader_evidence():

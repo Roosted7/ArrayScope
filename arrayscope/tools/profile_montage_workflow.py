@@ -2994,7 +2994,10 @@ class _VisualTimelineProbe:
         self._write_contact_sheet()
 
     def _capture_presentation_draw_ack(self) -> None:
-        if str(getattr(self._win, "_arrayscope_active_gesture_id", "") or ""):
+        if not str(getattr(self._win, "_arrayscope_active_gesture_id", "") or ""):
+            return
+        elapsed_ms = (time.monotonic_ns() - self._last_sample_ns) / 1_000_000.0
+        if elapsed_ms >= self._interval_ms:
             self.capture("presentation-draw-ack")
 
     def _capture_interval(self) -> None:

@@ -121,6 +121,11 @@ Visual-timeline records name their screenshot source. `qt-window-grab` is a
 full Qt-window capture. Native-Wayland WGPU cannot be captured by Qt, so its
 portable fallback is explicitly named `wgpu-offscreen-replay`; that replay is
 useful command/pixel evidence but is **not** compositor or full-window truth.
+WGPU draw acknowledgements may be much more frequent than a compositor grab;
+the probe therefore applies `--screenshot-interval-s` to acknowledgement
+captures too. Treat timing from any screenshot-enabled run as perturbed and
+use a trace-only repeat to decide whether a photographed coverage delay belongs
+to the renderer or to capture.
 For unattended screen-path acceptance, set
 `ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER` to an executable that accepts one
 destination path and writes the exact composited top-level window there. A
