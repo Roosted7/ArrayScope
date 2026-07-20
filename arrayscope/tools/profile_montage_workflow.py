@@ -3547,9 +3547,10 @@ class _PresentationContinuityProbe:
 
     A final screenshot cannot expose a transient clear or a camera move into a
     successor layout. Sampling on event-loop turns pins the actual invariant:
-    while the predecessor remains the committed frame, its backend items and
-    content extent remain unchanged. A clear-and-reappear transition is thus a
-    benchmark failure even when the successor eventually looks correct.
+    while semantic identity and slot topology remain compatible, predecessor
+    items and content extent remain unchanged. Document or topology changes
+    are still photographed and timed, but their honest cold slots are not a
+    retention failure.
     """
 
     def __init__(self, QtCore, win):
@@ -3562,6 +3563,7 @@ class _PresentationContinuityProbe:
         self._predecessor_identity = _backend_presentation_identity(win)
         self._predecessor_semantic_key = _current_presentation_semantic_key(win)
         self._predecessor_extent = _viewport_content_extent(win)
+        self._predecessor_topology = _current_montage_topology(win)
         self._minimum_count = self._predecessor_count
         self._samples = 0
         self._successor_observed = False
@@ -3573,6 +3575,7 @@ class _PresentationContinuityProbe:
         self._continuity_expected = bool(
             self._predecessor_count > 0 and self._predecessor_semantic_key is not None
         )
+        self._topology_changed = False
         self._started_at = None
 
     def start(self) -> None:
@@ -3589,11 +3592,15 @@ class _PresentationContinuityProbe:
             return
         current_identity = _backend_presentation_identity(self._win)
         current_semantic_key = _current_presentation_semantic_key(self._win)
-        if current_semantic_key != self._predecessor_semantic_key:
-            # A document/operation transition is not entitled to retain the
-            # old mapping. Keep sampling so the first *physical* successor is
-            # still timed, but do not grade its honest clear as a same-source
-            # continuity failure.
+        self._topology_changed = bool(
+            self._topology_changed
+            or _current_montage_topology(self._win) != self._predecessor_topology
+        )
+        if current_semantic_key != self._predecessor_semantic_key or self._topology_changed:
+            # A document/operation or slot-topology transition is not entitled
+            # to retain the old mapping. Keep sampling so the first *physical*
+            # successor is still timed, but do not grade honest cold slots as
+            # a compatible-transition continuity failure.
             self._continuity_expected = False
         self._samples += 1
         count = _backend_visible_tile_count(self._win)
@@ -3660,6 +3667,7 @@ class _PresentationContinuityProbe:
             ),
             "presentation_blackout_observed": bool(self._blackout_observed),
             "presentation_extent_changed_before_commit": bool(self._extent_changed_before_commit),
+            "presentation_topology_changed": bool(self._topology_changed),
             "presentation_predecessor_extent": self._predecessor_extent,
             "presentation_changed_extent": self._changed_extent,
             "presentation_continuity_ok": not violation,
@@ -3674,6 +3682,19 @@ def _viewport_content_extent(win) -> tuple[int, int] | None:
         return int(extent[0]), int(extent[1])
     except (TypeError, ValueError, IndexError):
         return None
+
+
+def _current_montage_topology(win) -> tuple | None:
+    plan = getattr(getattr(win, "_frame_session", None), "plan", None)
+    if plan is None:
+        return None
+    return (
+        tuple(getattr(plan, "tile_shape", ()) or ()),
+        int(getattr(plan, "columns", 0) or 0),
+        int(getattr(plan, "rows", 0) or 0),
+        int(getattr(plan, "gap", 0) or 0),
+        len(tuple(getattr(plan, "tiles", ()) or ())),
+    )
 
 
 def _backend_visible_tile_count(win) -> int:
@@ -5854,6 +5875,7 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             "minimum_retained": minimum_retained,
             "required_transition_coverage": required_transition_coverage,
             "extent_changed_before_commit": record.get("presentation_extent_changed_before_commit"),
+            "topology_changed": record.get("presentation_topology_changed"),
         },
         target="same-semantic predecessor/successor coverage and extent remain through successor acknowledgement",
     )

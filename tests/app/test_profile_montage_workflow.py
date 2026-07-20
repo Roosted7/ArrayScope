@@ -1418,7 +1418,7 @@ def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camer
     assert record["presentation_continuity_ok"] is False
 
 
-def test_presentation_continuity_probe_times_document_successor_without_committed_frame():
+def test_presentation_continuity_probe_times_topology_successor_without_committed_frame():
     from arrayscope.tools.profile_montage_workflow import _PresentationContinuityProbe
 
     class FakeTimer:
@@ -1447,7 +1447,11 @@ def test_presentation_continuity_probe_times_document_successor_without_committe
         getHistogramDataBounds=lambda: (-2.0, 8.0),
     )
     level_source = SimpleNamespace(rank=2, source_count=4, evidence_quality=1)
-    session = SimpleNamespace(semantic_key="old", applied_level_source=level_source)
+    session = SimpleNamespace(
+        semantic_key="old",
+        applied_level_source=level_source,
+        plan=SimpleNamespace(tile_shape=(4, 4), columns=1, rows=1, gap=1, tiles=(0,)),
+    )
     win = SimpleNamespace(
         img_view=image_view,
         _committed_display_frame=None,
@@ -1460,7 +1464,9 @@ def test_presentation_continuity_probe_times_document_successor_without_committe
 
     probe.start()
     visible_state.visible = False
-    session.semantic_key = "new"
+    session.plan = SimpleNamespace(
+        tile_shape=(4, 4), columns=2, rows=1, gap=1, tiles=(0, 1)
+    )
     probe._sample()
     visible_state.visible = True
     visible_state.source_array_id = "new"
@@ -1468,6 +1474,7 @@ def test_presentation_continuity_probe_times_document_successor_without_committe
 
     record = probe.record()
     assert record["presentation_continuity_expected"] is False
+    assert record["presentation_topology_changed"] is True
     assert record["presentation_blackout_observed"] is True
     assert record["presentation_successor_observed"] is True
     assert record["first_visible_tile_ms"] >= 0.0
