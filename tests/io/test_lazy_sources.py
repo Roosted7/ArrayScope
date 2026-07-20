@@ -96,7 +96,11 @@ def test_load_path_lazy_nifti_matches_eager_and_carries_axes(tmp_path):
 
 def test_complex_nifti_keeps_imaginary_part_as_complex64(tmp_path):
     nib = pytest.importorskip("nibabel")
-    voxels = (np.arange(24, dtype=np.float32) + 1j * np.arange(24, dtype=np.float32)[::-1]).reshape(2, 3, 4).astype(np.complex64)
+    voxels = (
+        (np.arange(24, dtype=np.float32) + 1j * np.arange(24, dtype=np.float32)[::-1])
+        .reshape(2, 3, 4)
+        .astype(np.complex64)
+    )
     image = nib.Nifti1Image(voxels, np.eye(4))
     image.header.set_data_dtype(np.complex64)
     path = tmp_path / "complex.nii"

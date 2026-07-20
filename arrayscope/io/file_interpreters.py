@@ -827,7 +827,7 @@ def _load_lazy_source(filepath, suffix, *, lazy, lazy_threshold_bytes):
         if lazy is True:
             raise
         return None
-    detected_format = {'.npy': 'numpy', '.nii': 'nifti'}.get(suffix, suffix.lstrip('.'))
+    detected_format = {".npy": "numpy", ".nii": "nifti"}.get(suffix, suffix.lstrip("."))
     return LoadedPath(
         data=source,
         metadata={

@@ -155,7 +155,9 @@ class ScaledArraySource:
         self._inter = float(inter)
         self._out_dtype = np.dtype(out_dtype)
         self._label = str(label) if label is not None else type(array).__name__
-        self._chunk_shape = None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        self._chunk_shape = (
+            None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        )
         self._close = close
         self._closed = False
 
@@ -185,7 +187,9 @@ class ScaledArraySource:
     def label(self) -> str:
         return self._label
 
-    def read_region(self, index_spec: tuple, *, cancellation_token: object | None = None) -> np.ndarray:
+    def read_region(
+        self, index_spec: tuple, *, cancellation_token: object | None = None
+    ) -> np.ndarray:
         del cancellation_token  # single bounded read; the caller checks around it
         raw = read_index_spec(self._array, index_spec)
         # Expand directly into the output dtype: astype makes the one copy we
