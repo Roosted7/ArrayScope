@@ -131,6 +131,23 @@ def test_dirty_resident_payload_reuses_uploaded_source_when_source_id_matches():
     assert len(pool.scalar_texture.updates) == clean_texture_updates
 
 
+def test_active_vispy_tile_owns_successor_commit_slot_at_full_capacity():
+    pool = TextureAtlasPool(FakeGloo(), max_texture_size=2)
+    predecessor = payload(0, 1.0)
+    successor = payload(0, 2.0)
+
+    pool.update_payloads(
+        {0: predecessor},
+        tile_shape=(2, 2),
+        dirty_tiles=None,
+        rgb_already_windowed=False,
+        reserve_count=1,
+    )
+
+    assert pool.payload_resident(successor) is False
+    assert pool.payload_commit_slot_owned(successor) is True
+
+
 def test_atlas_consumes_ordered_upserts_before_active_grid_order():
     """Backend storage mechanics must not replace presentation priority."""
 

@@ -799,6 +799,18 @@ class TextureAtlasPool:
             and self._page_table.lookup(resident_key) is not None
         )
 
+    def payload_commit_slot_owned(self, payload: DisplayTilePayload) -> bool:
+        """Return whether the active tile can replace this payload in place."""
+
+        tile = int(payload.tile_number)
+        resident_key = self.tile_resident_keys.get(tile)
+        return bool(
+            resident_key is not None
+            and resident_key in self.active_resident_keys
+            and tile in self.tile_slots
+            and self._page_table.lookup(resident_key) is not None
+        )
+
     @property
     def capacity(self) -> int:
         return sum(int(page.capacity) for page in self.pages)
@@ -4319,6 +4331,11 @@ class GpuMontageLayer:
         """Return physical residency truth without changing bindings or LRU."""
 
         return self._pool.payload_resident(payload)
+
+    def payload_commit_slot_owned(self, payload: DisplayTilePayload) -> bool:
+        """Return whether an onscreen atlas holder owns this atomic swap."""
+
+        return self._pool.payload_commit_slot_owned(payload)
 
 
 def _visual_textures_ready(visual) -> bool:
