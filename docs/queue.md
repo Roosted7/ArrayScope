@@ -100,9 +100,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `qt_platform` policy owns the platform decision.
 - **Screen-mode follow-ups** (screen LANDED 2026-07-19 behind
   `wgpu_present_method`; Mailbox acquire and the GPU-overlay layer are
-  DONE): measure the screen-vs-bitmap delta at real 4K — bitmap's measured
-  boundary is ~26 ms readback there, the decisive screen case — and decide
-  whether screen becomes the wgpu default on capable Wayland sessions.
+  DONE; the 2026-07-20 dogfood glitches — subsurface soup from native-child
+  sibling/ancestor promotion, hidden overlay chips, resize flicker — are
+  FIXED via the `createWindowContainer` recipe, overlay native promotion,
+  and resize-edge immediate present; evidence: nested-weston compositor
+  captures + WAYLAND_DEBUG subsurface counts): measure the screen-vs-bitmap
+  delta at real 4K — bitmap's measured boundary is ~26 ms readback there,
+  the decisive screen case — and decide whether screen becomes the wgpu
+  default on capable Wayland sessions.
 - **Renderer measurements not yet taken:** NVIDIA/discrete adapter cells for
   Tier 1/4 (PRIME copy changes upload and present arithmetic), real 4K
   swapchain. (The `winId == wl_surface*` per-Qt-minor pin is DONE:

@@ -23,6 +23,18 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- The experimental wgpu screen presentation mode (`wgpu_present_method:
+  screen`, native Wayland) no longer glitches: previously the native canvas
+  child caused Qt to shatter the window into many desynchronized Wayland
+  subsurfaces — showing white/transparent hole-like regions instead of the
+  image, hiding overlays (first-run tips, busy indicator, pixel HUD, ROI
+  info panel), dropping histogram tick labels, and flickering between the
+  old and new size on every window resize. The swapchain now lives in a
+  single embedded window parented to the top-level, floating overlays get
+  their own native windows so they stay visible above the canvas, and a
+  resize presents a correctly-sized frame immediately instead of up to a
+  frame-cap interval later.
+
 - Entering a montage on the PyQtGraph backend no longer shows a multi-second
   black window: the previous plane stays visible as an honest bridge until
   the montage's first tiles commit, and those first tiles now window with a

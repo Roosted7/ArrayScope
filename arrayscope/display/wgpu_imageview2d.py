@@ -775,6 +775,62 @@ class WgpuImageView2D(ImageViewShell):
     def montageTileOverlayCount(self) -> int:
         return len(self._wgpu_montage_tile_overlays)
 
+    def _prepare_display_overlay_widget(self, widget) -> None:
+        # Screen present: the swapchain subsurface composites above every
+        # backing-store pixel of the window, so a plain Qt overlay would be
+        # invisible over the canvas.  Give the overlay its own subsurface
+        # stacked above the canvas: reparent it to the top-level (whose
+        # window is the only native window in the tree — making a DEEP child
+        # native would drag its whole ancestor chain native and re-create
+        # the subsurface soup this recipe exists to avoid) and force its
+        # native window.  Qt still paints and routes input to it; overlay
+        # positions expressed in display-overlay coords go through
+        # ``_place_display_overlay_widget``, which maps into the actual
+        # parent.  Translucent background keeps rounded chip corners
+        # see-through now that the widget no longer shares the parent's
+        # backing store.  Reparenting hides the widget; every attach seam
+        # already shows it afterwards.
+        if widget is None or self._wgpu_present_method != "screen":
+            return
+        # Deferred one event-loop turn: attach seams run during window
+        # construction, when ``self.window()`` may still be the view itself.
+        # Promoting THEN would make the view native, and every later
+        # ancestor insertion would drag the whole chain native — recreating
+        # the subsurface soup (observed with the PixelHud, attached from
+        # the window's __init__).
+        QtCore.QTimer.singleShot(0, self, lambda: self._promote_display_overlay_widget(widget))
+
+    def _promote_display_overlay_widget(self, widget) -> None:
+        try:
+            parent = widget.parentWidget()
+        except RuntimeError:  # C++ side already deleted
+            return
+        top = self.window()
+        if top is None or top is self or not top.isWindow():
+            return
+        visible = widget.isVisible()
+        if parent is not top:
+            # Seams position chips before this deferred promotion runs, in
+            # old-parent coords; keep the on-screen spot across the reparent.
+            pos_in_top = parent.mapTo(top, widget.pos()) if parent is not None else widget.pos()
+            widget.setParent(top)  # hides the widget
+            widget.move(pos_in_top)
+        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_NativeWindow, True)
+        widget.winId()  # force the native window (and its subsurface) NOW
+        if widget.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+            # Widget-level mouse transparency does not carry to the widget's
+            # own native window; without the window-level flag the promoted
+            # chip's surface would swallow pointer events (the cursor-chasing
+            # PixelHud would eat every move).  The flag gives the surface an
+            # empty Wayland input region, so events land on the top-level.
+            handle = widget.windowHandle()
+            if handle is not None:
+                handle.setFlag(QtCore.Qt.WindowType.WindowTransparentForInput, True)
+        if visible:
+            widget.show()
+            widget.raise_()
+
     def setTileTruthOverlayRows(self, rows) -> None:
         # Native glyph quads replace the inherited QLabel layer entirely:
         # Qt widgets cannot composite over a native child in screen-present

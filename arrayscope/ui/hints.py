@@ -22,6 +22,10 @@ class FirstRunHints(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("FirstRunHints")
         self._on_dismiss = on_dismiss
+        # The widget hugs this widget's top-right corner even if a surface
+        # hook later reparents the chip (wgpu screen present moves overlays
+        # to the top-level so they composite above the swapchain).
+        self._anchor = parent
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setHorizontalSpacing(7)
@@ -48,15 +52,19 @@ class FirstRunHints(QtWidgets.QFrame):
         self.deleteLater()
 
     def _reposition(self):
+        anchor = self._anchor
         parent = self.parentWidget()
-        if parent is None:
+        if parent is None or anchor is None:
             return
         self.adjustSize()
-        self.move(max(8, parent.width() - self.width() - 16), 14)
+        pos = QtCore.QPoint(max(8, anchor.width() - self.width() - 16), 14)
+        if parent is not anchor:
+            pos = anchor.mapTo(parent, pos)
+        self.move(pos)
         self.raise_()
 
     def eventFilter(self, obj, event):
-        if obj is self.parentWidget() and event.type() == QtCore.QEvent.Type.Resize:
+        if obj is self._anchor and event.type() == QtCore.QEvent.Type.Resize:
             self._reposition()
         return super().eventFilter(obj, event)
 
@@ -76,6 +84,9 @@ def maybe_show_first_run_hints(window) -> FirstRunHints | None:
         settings.setValue(FirstRunHints.SETTINGS_KEY, True)
 
     hints = FirstRunHints(view, on_dismiss=_persist_dismiss)
+    prepare = getattr(view, "_prepare_display_overlay_widget", None)
+    if callable(prepare):
+        prepare(hints)
     hints.show()
     hints._reposition()
     return hints

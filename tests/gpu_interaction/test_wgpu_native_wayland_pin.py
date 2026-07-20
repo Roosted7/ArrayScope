@@ -9,8 +9,9 @@ this ring-4 gate exists to make that change LOUD instead of a mystery crash
 in a future wgpu backend.
 
 Runs the committed tier-0 probe in a subprocess (its own Qt + wgpu instance;
-a compositor protocol error kills only the child) and asserts both the
-native-child and top-level cases presented every frame successfully.
+a compositor protocol error kills only the child) and asserts the
+native-child, top-level, and window-container (the production screen-canvas
+shape) cases presented every frame successfully.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ def test_qt_winid_is_the_wl_surface_and_presentation_succeeds(tmp_path):
     )
     result = json.loads(out.read_text())
     assert result["qt_platform"] == "wayland"
-    for case in ("native_child", "top_level"):
+    for case in ("native_child", "top_level", "window_container"):
         frames = result["cases"][case]["frames_presented"]
         statuses = result["cases"][case]["statuses"]
         assert frames == 30, f"{case}: only {frames}/30 frames presented ({statuses})"

@@ -909,6 +909,14 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
                 "singleShot",
                 "anti-hang fallback",
             ): 1,
+            # Screen present path: overlay promotion must wait one event-loop
+            # turn so the view's final ancestry decides the native parent.
+            (
+                "arrayscope/display/wgpu_imageview2d.py",
+                "WgpuImageView2D._prepare_display_overlay_widget",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
             # Screen present path: the canvas owns its ondemand draw cadence
             # (Qt cannot deliver paint work to a paint-less native child).
             (

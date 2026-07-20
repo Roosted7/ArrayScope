@@ -1636,6 +1636,33 @@ class ImageViewShell(QtWidgets.QWidget):
 
         return getattr(self, "_display_container", self.graphicsView)
 
+    def _prepare_display_overlay_widget(self, widget) -> None:
+        """Hook: adapt a freshly-attached floating overlay to the surface.
+
+        Backing-store-painted surfaces need nothing (the default).  Backends
+        whose pixels bypass the backing store override this — the wgpu
+        screen-present path promotes each overlay to its own native window
+        (reparented to the top-level) so it composites above the swapchain
+        subsurface.
+        """
+
+        return None
+
+    def _place_display_overlay_widget(self, widget, x, y) -> None:
+        """Move an overlay given in display-overlay coords to its real parent.
+
+        ``_prepare_display_overlay_widget`` may have reparented the widget
+        (wgpu screen present reparents to the top-level), so positions are
+        expressed relative to ``_display_overlay_parent()`` and mapped here.
+        """
+
+        point = QtCore.QPoint(int(x), int(y))
+        reference = self._display_overlay_parent()
+        parent = widget.parentWidget()
+        if parent is not None and parent is not reference:
+            point = reference.mapTo(parent, point)
+        widget.move(point)
+
     def _map_scene_to_display_overlay(self, scene_pos):
         local = self.graphicsView.mapFromScene(scene_pos)
         parent = self._display_overlay_parent()
@@ -1647,6 +1674,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._hud_widget = widget
         if widget is not None:
             widget.setParent(self._display_overlay_parent())
+            self._prepare_display_overlay_widget(widget)
             widget.hide()
 
     def setEvaluationOverlay(self, visible: bool, text: str = ""):
@@ -1655,10 +1683,11 @@ class ImageViewShell(QtWidgets.QWidget):
             overlay.setObjectName("EvaluationOverlay")
             overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             # Styling comes from the application stylesheet (QLabel#EvaluationOverlay).
+            self._prepare_display_overlay_widget(overlay)
             self._evaluation_overlay = overlay
         self._evaluation_overlay.setText(str(text))
         self._evaluation_overlay.adjustSize()
-        self._evaluation_overlay.move(10, 10)
+        self._place_display_overlay_widget(self._evaluation_overlay, 10, 10)
         self._evaluation_overlay.setVisible(bool(visible))
         if visible:
             self._evaluation_overlay.raise_()
@@ -1740,7 +1769,8 @@ class ImageViewShell(QtWidgets.QWidget):
             return
         if self._roi_info_panel is None:
             self._roi_info_panel = MovableInfoPanel(self._display_overlay_parent())
-            self._roi_info_panel.move(12, 44)
+            self._prepare_display_overlay_widget(self._roi_info_panel)
+            self._place_display_overlay_widget(self._roi_info_panel, 12, 44)
         self._roi_info_panel.set_rows(rows)
         self._roi_info_panel.adjustSize()
         self._roi_info_panel.show()
@@ -1754,7 +1784,8 @@ class ImageViewShell(QtWidgets.QWidget):
             return
         if self._roi_info_panel is None:
             self._roi_info_panel = MovableInfoPanel(self._display_overlay_parent())
-            self._roi_info_panel.move(12, 44)
+            self._prepare_display_overlay_widget(self._roi_info_panel)
+            self._place_display_overlay_widget(self._roi_info_panel, 12, 44)
         self._roi_info_panel.setText(text)
         self._roi_info_panel.adjustSize()
         self._roi_info_panel.show()
@@ -1787,6 +1818,12 @@ class ImageViewShell(QtWidgets.QWidget):
         if self._hud_widget is None:
             return
         local = self._map_scene_to_display_overlay(scene_pos)
+        # The HUD may live on the top-level (wgpu screen present); its
+        # follow-cursor positions are display-overlay coords, so remap.
+        hud_parent = self._hud_widget.parentWidget()
+        reference = self._display_overlay_parent()
+        if hud_parent is not None and hud_parent is not reference:
+            local = reference.mapTo(hud_parent, local)
         rows = []
         if self._hud_context_provider is not None:
             try:

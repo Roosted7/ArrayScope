@@ -1,4 +1,4 @@
-"""Paint-less native child driving its own wgpu swapchain (gate-B recipe).
+"""Embedded QWindow driving its own wgpu swapchain (gate-B recipe, v2).
 
 The bitmap present path pays a 4-7 ms/frame GPU->CPU readback through
 rendercanvas.  Gate B measured the native-Wayland screen path at ~0.6 ms
@@ -6,13 +6,25 @@ encode+submit / 0.08 ms present (docs/proposals/wgpu-renderer-experiment.md
 Tier 1; probe `experiments/wgpu_gate_b/probe_native_wayland.py`).  This
 module productionizes that probe:
 
-* the widget is a NATIVE child Qt never paints into (``WA_PaintOnScreen`` +
-  null ``paintEngine``): its ``wl_surface`` belongs to wgpu alone.  Qt
+* the swapchain target is a bare ``QWindow`` embedded through
+  ``QWidget.createWindowContainer``.  Qt never paints it (no backing store
+  is ever created), so its ``wl_surface`` belongs to wgpu alone; Qt
   committing SHM backing-store buffers to the same surface is a fatal
   compositor protocol error (explicit-sync dmabuf-only).
+* the container is the load-bearing choice (2026-07-19 glitch dossier): a
+  native child *widget* (``WA_PaintOnScreen``/``winId()``) makes Qt promote
+  the widget's whole ancestor chain — and, without
+  ``AA_DontCreateNativeWidgetSiblings``, every sibling too — into native
+  windows, shattering the top-level into a soup of desynchronized
+  ``wl_subsurface``s (white/hole regions, hidden overlays, resize
+  old/new-size flicker; confirmed with weston headless + WAYLAND_DEBUG).
+  ``createWindowContainer`` parents the QWindow directly to the top-level
+  window instead: exactly one subsurface, composited above the top-level's
+  Qt-painted pixels.  Overlays that must stay visible above the canvas opt
+  in via ``WgpuImageView2D._prepare_display_overlay_widget``.
 * the wgpu surface is created from the REAL in-process ``wl_display``
-  (``QNativeInterface.QWaylandApplication.display()``) plus
-  ``QWidget.winId()`` as the ``wl_surface*``.  Both are undocumented Qt
+  (``QNativeInterface.QWaylandApplication.display()``) plus the embedded
+  window's ``winId()`` as the ``wl_surface*``.  Both are undocumented Qt
   contracts pinned per Qt minor by
   ``tests/gpu_interaction/test_wgpu_native_wayland_pin.py`` (ring 4).
 * rendercanvas is bypassed entirely: wgpu-py's ``GPUCanvasContext`` accepts
@@ -39,7 +51,7 @@ prefer_pyside6()
 
 import contextlib
 
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 
 def screen_present_unavailable_reason() -> str | None:
@@ -73,14 +85,46 @@ def screen_present_unavailable_reason() -> str | None:
     return None
 
 
+class _ScreenSurfaceWindow(QtGui.QWindow):
+    """Bare window owning the wl_surface the swapchain presents to.
+
+    Qt creates the platform window (and its subsurface) but never attaches a
+    buffer: no backing store exists and nothing ever renders through Qt.
+    Input falls through (``WindowTransparentForInput`` -> empty Wayland input
+    region), so pointer events keep landing on the top-level surface where
+    the transparent interaction ``graphicsView`` receives them.
+    """
+
+    def __init__(self, canvas: WgpuScreenCanvas):
+        super().__init__()
+        self._canvas = canvas
+        self.setSurfaceType(QtGui.QSurface.SurfaceType.RasterSurface)
+        self.setFlags(self.flags() | QtCore.Qt.WindowType.WindowTransparentForInput)
+
+    def exposeEvent(self, event) -> None:  # expose/damage -> redraw
+        if self.isExposed():
+            self._canvas.request_draw()
+
+    def resizeEvent(self, event) -> None:
+        # A subsurface's on-screen footprint IS its latest buffer: until a
+        # new frame is presented the compositor keeps compositing the
+        # old-size buffer against Qt's already-resized window, which reads
+        # as flicker between the old and new sizes (and spill, since
+        # subsurfaces are not clipped to the parent).  This event fires when
+        # the embedded window's real geometry changed, so reconfigure and
+        # present at the new size NOW, bypassing the draw-rate cap.
+        super().resizeEvent(event)
+        self._canvas._on_surface_resized()
+
+
 class WgpuScreenCanvas(QtWidgets.QWidget):
-    """A widget Qt never paints into: its wl_surface belongs to wgpu alone.
+    """A widget hosting the swapchain window Qt never paints into.
 
     Presents rendercanvas's minimal canvas API surface (``request_draw`` /
     ``get_physical_size`` / ``devicePixelRatio``) so ``WgpuImageView2D``
     drives both present methods through one seam.  Draw scheduling is a
-    coalesced zero-timer: Qt cannot deliver paint work for a paint-less
-    widget, so the canvas owns its own on-demand cadence exactly like
+    coalesced zero-timer: Qt cannot deliver paint work for the embedded
+    window, so the canvas owns its own on-demand cadence exactly like
     rendercanvas's ``ondemand`` update mode.
     """
 
@@ -94,11 +138,25 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(
-            QtCore.Qt.WidgetAttribute.WA_PaintOnScreen, True
-        )  # implies WA_NativeWindow
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        # Belt and braces: nothing in this recipe makes a sibling widget
+        # native, but if anything else ever forces one (QWindowContainer
+        # goes native inside scroll areas, for example), this attribute
+        # keeps Qt from shattering the rest of the window into subsurfaces.
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self._surface_window = _ScreenSurfaceWindow(self)
+        container = QtWidgets.QWidget.createWindowContainer(self._surface_window, self)
+        container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        container.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        # Geometry is managed by hand in resizeEvent: a layout would give
+        # this canvas a valid sizeHint derived from the embedded window's
+        # default size, and the surrounding StackAll layout would inflate
+        # the whole main window from it (observed: startup ballooned to
+        # 1960x1680).  The old paint-less canvas had no hint; keep that.
+        self._container = container
+        container.setGeometry(self.rect())
         self._draw_callback = None
         self._draw_scheduled = False
         self._last_draw_started = float("-inf")
@@ -107,12 +165,6 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._configured_format: str | None = None
         self._present_mode: str = ""
         self._present_modes_available: tuple[str, ...] = ()
-
-    # Qt must never attach a paint engine to this window: a single SHM
-    # backing-store commit onto the swapchain's wl_surface kills the
-    # compositor connection (explicit-sync protocol error, gate-B tier 0).
-    def paintEngine(self):
-        return None
 
     # ---- draw scheduling (rendercanvas request_draw seam) -------------------
 
@@ -135,26 +187,27 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._last_draw_started = perf_counter()
         callback()
 
-    def paintEvent(self, event) -> None:  # expose/damage -> redraw, never paint
-        self.request_draw()
-
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.request_draw()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._container.setGeometry(self.rect())
+
+    def _on_surface_resized(self) -> None:
         if self._context is not None:
             self._context.set_physical_size(*self.get_physical_size())
-        self.request_draw()
+        self._invoke_draw()
 
     # ---- physical geometry ---------------------------------------------------
 
     def get_physical_size(self) -> tuple[int, int]:
-        ratio = float(self.devicePixelRatio() or 1.0)
+        window = self._surface_window
+        ratio = float(window.devicePixelRatio() or 1.0)
         return (
-            max(0, round(self.width() * ratio)),
-            max(0, round(self.height() * ratio)),
+            max(0, round(window.width() * ratio)),
+            max(0, round(window.height() * ratio)),
         )
 
     # ---- swapchain context ---------------------------------------------------
@@ -162,24 +215,23 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     def ensure_context(self, device):
         """Lazily create + configure the swapchain context, or return ``None``.
 
-        ``None`` means "not yet": the native window is not created/exposed or
-        has zero pixels.  A show/resize/paint event schedules another draw,
-        so returning ``None`` never strands the frame.  A hard failure is
-        recorded in ``context_error`` and re-raised so the view's draw-error
-        diagnostics surface it.
+        ``None`` means "not yet": the embedded window is not created/exposed
+        or has zero pixels.  A show/resize/expose event schedules another
+        draw, so returning ``None`` never strands the frame.  A hard failure
+        is recorded in ``context_error`` and re-raised so the view's
+        draw-error diagnostics surface it.
         """
 
         if self._context is not None:
             return self._context
-        if not self.isVisible():
+        if not self.isVisible() or not self._surface_window.isExposed():
             return None
         width, height = self.get_physical_size()
         if width < 1 or height < 1:
             return None
-        # Force native-window creation: WA_PaintOnScreen implies
-        # WA_NativeWindow, but the QWindow (and its wl_surface) only exists
-        # once winId() is first resolved.
-        winid = int(self.winId())
+        # The platform window (and its wl_surface) only exists once winId()
+        # is first resolved.
+        winid = int(self._surface_window.winId())
         app = QtWidgets.QApplication.instance()
         from PySide6.QtGui import QNativeInterface
 
@@ -193,7 +245,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
                     "method": "screen",
                     "platform": "wayland",
                     # Qt contract pinned by the ring-4 test: under the wayland
-                    # QPA winId() IS the wl_surface* of this native child.
+                    # QPA winId() IS the wl_surface* of this embedded window.
                     "window": winid,
                     "display": int(iface.display()),
                     "vsync": True,

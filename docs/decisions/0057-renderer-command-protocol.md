@@ -34,12 +34,24 @@
   wgpu view (QLabels replaced — Qt widgets cannot composite over a native
   child), which unblocked the screen-present-mode experiment. Screen
   presentation landed 2026-07-19 behind the `wgpu_present_method` setting
-  (bitmap default, explicit opt-in): a paint-less native child
+  (bitmap default, explicit opt-in): a bare `QWindow` embedded through
+  `QWidget.createWindowContainer`
   (`arrayscope/display/backends/wgpu/screen_canvas.py`) drives its own
   swapchain from the gate-B recipe (QNativeInterface wl_display +
   winId-as-wl_surface, Vulkan-only instance, Mailbox present mode when the
   surface offers it), bypassing rendercanvas and the per-frame bitmap
-  readback. The presentation path is deliberately OUTSIDE the protocol: the
+  readback. The container shape is load-bearing (2026-07-20 glitch fix): a
+  native child *widget* drags its ancestor chain — and without
+  `AA_DontCreateNativeWidgetSiblings` every sibling — into native windows,
+  shattering the top-level into desynchronized wl_subsurfaces (white/hole
+  regions, hidden overlays, resize flicker). The embedded window parents
+  directly to the top-level: exactly one subsurface. Because that
+  subsurface composites above all Qt-painted pixels, floating overlay
+  chips (first-run hints, busy label, pixel HUD, ROI info panel) opt into
+  their own top-level-parented native windows via
+  `_prepare_display_overlay_widget`, and the canvas presents immediately
+  on embedded-window resize (a subsurface's footprint IS its latest
+  buffer, so paced redraws read as old/new-size flicker). The presentation path is deliberately OUTSIDE the protocol: the
   executor still only receives `PresentGeneration` plus a target texture
   view — whether that view is a rendercanvas bitmap target or an acquired
   swapchain texture is view-side plumbing, so the protocol stays free of

@@ -176,12 +176,54 @@ def main():
     top.setWindowTitle("wgpu native-wayland probe (top-level)")
     top.resize(320, 240)
     top.show()
-    app.processEvents()
+    # Present only after the initial xdg_surface configure/ack: committing a
+    # buffer to an unconfigured toplevel is a fatal protocol error on strict
+    # compositors (weston; GNOME happened to win the race, 2026-07-20).
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not (
+        top.windowHandle() is not None and top.windowHandle().isExposed()
+    ):
+        app.processEvents()
+        time.sleep(0.01)
     winid = int(top.winId())
     RESULT["cases"]["top_level"] = {"winid": hex(winid)}
     surface_id = _create_surface(display_ptr, winid)
     RESULT["cases"]["top_level"].update(
         _drive_surface(surface_id, adapter, device, top.width(), top.height())
+    )
+    lib.wgpuSurfaceRelease(surface_id)
+
+    # Case 3: bare QWindow embedded through QWidget.createWindowContainer —
+    # the production shape since the 2026-07-19 subsurface-soup fix
+    # (display/backends/wgpu/screen_canvas.py).  Unlike a native child
+    # WIDGET, the embedded window is parented directly to the top-level
+    # window: exactly one wl_subsurface, no native ancestor chain, and Qt
+    # never attaches a backing-store buffer to it.
+    from PySide6.QtGui import QSurface, QWindow
+
+    holder = QWidget()
+    holder.setWindowTitle("wgpu native-wayland probe (window container)")
+    holder_layout = QVBoxLayout(holder)
+    holder_layout.addWidget(QLabel("Qt label above the canvas"))
+    embedded = QWindow()
+    embedded.setSurfaceType(QSurface.SurfaceType.RasterSurface)
+    container = QWidget.createWindowContainer(embedded, holder)
+    container.setMinimumSize(320, 200)
+    holder_layout.addWidget(container)
+    holder.resize(400, 300)
+    holder.show()
+    # Mirror production (ensure_context waits for exposure): presenting to
+    # the embedded window before the holder's xdg_surface got its initial
+    # configure is a fatal protocol error on strict compositors (weston).
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not embedded.isExposed():
+        app.processEvents()
+        time.sleep(0.01)
+    embedded_winid = int(embedded.winId())
+    RESULT["cases"]["window_container"] = {"winid": hex(embedded_winid)}
+    surface_id = _create_surface(display_ptr, embedded_winid)
+    RESULT["cases"]["window_container"].update(
+        _drive_surface(surface_id, adapter, device, embedded.width(), embedded.height())
     )
     lib.wgpuSurfaceRelease(surface_id)
 
