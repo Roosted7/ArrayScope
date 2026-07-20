@@ -47,6 +47,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         text=True,
         timeout=600,
         cwd=str(ROOT),
+        check=False,
     )
     assert proc.returncode == 0, f"{name} failed:\n{proc.stdout}\n{proc.stderr}"
     frames = sorted((tmp_path / name).glob("frame_*.png"))

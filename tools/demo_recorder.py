@@ -40,6 +40,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import contextlib
+import itertools
+
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
@@ -89,7 +92,12 @@ def _phantom2d(n=384):
 
     y, x = np.mgrid[0:n, 0:n].astype(np.float64) / n
     img = 0.35 * x + 0.15 * y
-    for cx, cy, s, a in ((0.32, 0.4, 0.05, 1.0), (0.7, 0.3, 0.02, 0.8), (0.55, 0.68, 0.09, 0.6), (0.8, 0.8, 0.01, 1.4)):
+    for cx, cy, s, a in (
+        (0.32, 0.4, 0.05, 1.0),
+        (0.7, 0.3, 0.02, 0.8),
+        (0.55, 0.68, 0.09, 0.6),
+        (0.8, 0.8, 0.01, 1.4),
+    ):
         img += a * np.exp(-(((x - cx) ** 2 + (y - cy) ** 2) / (2 * s)))
     rng = np.random.default_rng(7)
     img += rng.normal(scale=0.02, size=img.shape)
@@ -133,7 +141,9 @@ def _draw_cursor(painter, pos, pressed):
     from pyqtgraph.Qt import QtCore, QtGui
 
     scale = CURSOR_SCALE * (0.86 if pressed else 1.0)
-    poly = QtGui.QPolygonF([QtCore.QPointF(pos.x() + x * scale, pos.y() + y * scale) for x, y in _CURSOR_POLY])
+    poly = QtGui.QPolygonF(
+        [QtCore.QPointF(pos.x() + x * scale, pos.y() + y * scale) for x, y in _CURSOR_POLY]
+    )
     painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     # Soft shadow first, then black outline, then white body: visible on any
     # background, and unmistakably larger than a native pointer.
@@ -236,10 +246,8 @@ class Recorder:
 
     def close(self):
         if self.win is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self.win.close()
-            except Exception:
-                pass
             self._pump_events(0.05)
             self.win = None
 
@@ -255,9 +263,7 @@ class Recorder:
         except Exception:
             pass
         overlay = getattr(getattr(win, "img_view", None), "_evaluation_overlay", None)
-        if overlay is not None and overlay.isVisible():
-            return True
-        return False
+        return bool(overlay is not None and overlay.isVisible())
 
     def settle(self, timeout=INTERACTION_SETTLE_HARD_LIMIT_S, quiet_checks=6):
         timeout = bounded_interaction_settle_timeout_s(timeout)
@@ -389,7 +395,9 @@ class Recorder:
                 on_point(self.cursor)
             self.capture()
 
-    def click(self, widget=None, rel=(0.5, 0.5), invoke=None, move_s=0.6, settle_after=True) -> None:
+    def click(
+        self, widget=None, rel=(0.5, 0.5), invoke=None, move_s=0.6, settle_after=True
+    ) -> None:
         """Move to ``widget`` (optional), show a press with a click ripple,
         then trigger the real behavior — ``invoke`` when given, otherwise the
         widget's own ``click()``/``trigger()``."""
@@ -427,7 +435,7 @@ class Recorder:
         # Piecewise-linear sweep through the given image points.
         segments = max(1, len(points) - 1)
         per_segment = max(2, self._frames_for(seconds) // segments)
-        for a, b in zip(points, points[1:]) if segments > 1 else ((points[0], points[0]),):
+        for a, b in itertools.pairwise(points) if segments > 1 else ((points[0], points[0]),):
             for i in range(per_segment):
                 t = _ease((i + 1) / per_segment)
                 x = a[0] + (b[0] - a[0]) * t
@@ -442,7 +450,9 @@ class Recorder:
                     QtCore.Qt.KeyboardModifier.NoModifier,
                 )
                 view.eventFilter(view.graphicsView.viewport(), event)
-                self.cursor = QtCore.QPointF(view.graphicsView.viewport().mapTo(self.win, local.toPoint()))
+                self.cursor = QtCore.QPointF(
+                    view.graphicsView.viewport().mapTo(self.win, local.toPoint())
+                )
                 self.capture()
 
     def zoom_image(self, factor: float, center_xy, seconds=1.2) -> None:
@@ -569,9 +579,13 @@ def s_fft(rec: Recorder):
     rec.settle()
     dock_body = win.operation_dock.widget()
     rec.move_to(dock_body, seconds=0.8)
-    rec.click(dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, False), move_s=0.3)
+    rec.click(
+        dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, False), move_s=0.3
+    )
     rec.hold_until_settled(2.5, tail_s=1.0)
-    rec.click(dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, True), move_s=0.2)
+    rec.click(
+        dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, True), move_s=0.2
+    )
     rec.hold_until_settled(2.5, tail_s=1.6)
 
 
@@ -701,12 +715,14 @@ def run_child(name: str, frames_root: Path, *, fps: int, speed: float) -> None:
 
 
 def _run(cmd: list[str]) -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd[:4])}… failed:\n{proc.stderr[-2000:]}")
 
 
-def encode(name: str, frames_dir: Path, out_dir: Path, formats: set[str], fps: int) -> dict[str, Path]:
+def encode(
+    name: str, frames_dir: Path, out_dir: Path, formats: set[str], fps: int
+) -> dict[str, Path]:
     pattern = str(frames_dir / "frame_%05d.png")
     src = ["-framerate", str(fps), "-i", pattern]
     outputs: dict[str, Path] = {}
@@ -715,19 +731,52 @@ def encode(name: str, frames_dir: Path, out_dir: Path, formats: set[str], fps: i
     if "mp4" in formats:
         out = out_dir / f"{name}.mp4"
         _run(
-            ["ffmpeg", "-y", *src, "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-             "-c:v", "libx264", "-preset", "slow", "-crf", "21", "-pix_fmt", "yuv420p",
-             "-movflags", "+faststart", str(out)]
+            [
+                "ffmpeg",
+                "-y",
+                *src,
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "slow",
+                "-crf",
+                "21",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
         )
         outputs["mp4"] = out
 
     if "avif" in formats:
         out = out_dir / f"{name}.avif"
         _run(
-            ["ffmpeg", "-y", *src,
-             "-vf", f"fps={min(fps, AVIF_FPS)},scale={AVIF_WIDTH}:-2:flags=lanczos",
-             "-c:v", "libaom-av1", "-crf", str(AVIF_CRF), "-b:v", "0",
-             "-cpu-used", "6", "-row-mt", "1", "-f", "avif", "-loop", "0", str(out)]
+            [
+                "ffmpeg",
+                "-y",
+                *src,
+                "-vf",
+                f"fps={min(fps, AVIF_FPS)},scale={AVIF_WIDTH}:-2:flags=lanczos",
+                "-c:v",
+                "libaom-av1",
+                "-crf",
+                str(AVIF_CRF),
+                "-b:v",
+                "0",
+                "-cpu-used",
+                "6",
+                "-row-mt",
+                "1",
+                "-f",
+                "avif",
+                "-loop",
+                "0",
+                str(out),
+            ]
         )
         outputs["avif"] = out
 
@@ -735,11 +784,20 @@ def encode(name: str, frames_dir: Path, out_dir: Path, formats: set[str], fps: i
         out = out_dir / f"{name}.gif"
         palette = frames_dir / "palette.png"
         gif_filters = f"fps={min(fps, GIF_FPS)},scale={GIF_WIDTH}:-1:flags=lanczos"
-        _run(["ffmpeg", "-y", *src, "-vf", f"{gif_filters},palettegen=stats_mode=diff", str(palette)])
         _run(
-            ["ffmpeg", "-y", *src, "-i", str(palette),
-             "-lavfi", f"{gif_filters} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
-             str(out)]
+            ["ffmpeg", "-y", *src, "-vf", f"{gif_filters},palettegen=stats_mode=diff", str(palette)]
+        )
+        _run(
+            [
+                "ffmpeg",
+                "-y",
+                *src,
+                "-i",
+                str(palette),
+                "-lavfi",
+                f"{gif_filters} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
+                str(out),
+            ]
         )
         if shutil.which("gifsicle"):
             _run(["gifsicle", "-O3", f"--lossy={GIF_LOSSY}", str(out), "-o", str(out)])
@@ -757,12 +815,27 @@ def _spawn(name: str, frames_root: Path, fps: int, speed: float) -> tuple[str, b
     env = dict(os.environ)
     env.update({"PYQTGRAPH_QT_LIB": "PySide6", "QT_QPA_PLATFORM": "offscreen"})
     cmd = [
-        sys.executable, str(Path(__file__).resolve()),
-        "--child", name, "--frames", str(frames_root),
-        "--fps", str(fps), "--speed", str(speed),
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--child",
+        name,
+        "--frames",
+        str(frames_root),
+        "--fps",
+        str(fps),
+        "--speed",
+        str(speed),
     ]
     try:
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=900, cwd=str(REPO_ROOT))
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            cwd=str(REPO_ROOT),
+            check=False,
+        )
     except subprocess.TimeoutExpired as exc:
         return name, False, f"demo child process watchdog expired: {exc}"
     return name, proc.returncode == 0, (proc.stdout + proc.stderr).strip()
@@ -772,13 +845,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--child", metavar="SCENARIO", help=argparse.SUPPRESS)
     parser.add_argument("--frames", type=Path, default=DEFAULT_FRAMES_ROOT, help="frame dump root")
-    parser.add_argument("--out", type=Path, default=DEFAULT_MEDIA_OUT, help="encoded media output dir")
+    parser.add_argument(
+        "--out", type=Path, default=DEFAULT_MEDIA_OUT, help="encoded media output dir"
+    )
     parser.add_argument("--only", default=None, help="substring filter on scenario names")
-    parser.add_argument("--formats", default="gif,avif,mp4", help="comma list: gif,avif,mp4 or 'none'")
-    parser.add_argument("--encode-only", action="store_true", help="re-encode existing frame dumps (implies --keep-frames)")
+    parser.add_argument(
+        "--formats", default="gif,avif,mp4", help="comma list: gif,avif,mp4 or 'none'"
+    )
+    parser.add_argument(
+        "--encode-only",
+        action="store_true",
+        help="re-encode existing frame dumps (implies --keep-frames)",
+    )
     parser.add_argument("--fps", type=int, default=RECORD_FPS)
-    parser.add_argument("--speed", type=float, default=1.0, help="divide all durations (fast test runs)")
-    parser.add_argument("--smoke", action="store_true", help="fast tiny run: --speed 6 --fps 8 --formats none")
+    parser.add_argument(
+        "--speed", type=float, default=1.0, help="divide all durations (fast test runs)"
+    )
+    parser.add_argument(
+        "--smoke", action="store_true", help="fast tiny run: --speed 6 --fps 8 --formats none"
+    )
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--keep-frames", action="store_true")
     parser.add_argument("--list", action="store_true")
@@ -816,11 +901,16 @@ def main() -> int:
         args.keep_frames = True
         missing = [n for n in names if not (args.frames / n / "frame_00000.png").exists()]
         if missing:
-            print(f"no frame dumps for {missing} under {args.frames} (record first with --keep-frames)", file=sys.stderr)
+            print(
+                f"no frame dumps for {missing} under {args.frames} (record first with --keep-frames)",
+                file=sys.stderr,
+            )
             return 2
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futures = {pool.submit(_spawn, name, args.frames, args.fps, args.speed): name for name in names}
+            futures = {
+                pool.submit(_spawn, name, args.frames, args.fps, args.speed): name for name in names
+            }
             for future in concurrent.futures.as_completed(futures):
                 name, ok, log = future.result()
                 print(f"[{'ok' if ok else 'FAIL'}] record {name}")
@@ -837,12 +927,16 @@ def main() -> int:
             failures.append((name, str(exc)))
             print(f"[FAIL] encode {name}")
             continue
-        sizes = ", ".join(f"{kind} {path.stat().st_size / 1e6:.2f} MB" for kind, path in sorted(outputs.items()))
+        sizes = ", ".join(
+            f"{kind} {path.stat().st_size / 1e6:.2f} MB" for kind, path in sorted(outputs.items())
+        )
         print(f"[ok] encode {name}: {sizes}")
         if not args.keep_frames:
             shutil.rmtree(args.frames / name, ignore_errors=True)
 
-    print(f"\n{len(names) - len(failures)}/{len(names)} scenarios succeeded in {time.monotonic() - started:.0f}s")
+    print(
+        f"\n{len(names) - len(failures)}/{len(names)} scenarios succeeded in {time.monotonic() - started:.0f}s"
+    )
     for name, log in failures:
         print(f"\n--- {name} ---\n{log[-2000:]}")
     return 1 if failures else 0
