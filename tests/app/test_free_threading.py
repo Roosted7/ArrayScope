@@ -24,14 +24,8 @@ from arrayscope.app.free_threading import (
 
 def test_normalize_falls_back_to_enabled():
     assert normalize_free_threading_choice("enabled") is FreeThreadingChoice.ENABLED
-    assert (
-        normalize_free_threading_choice("force_disabled")
-        is FreeThreadingChoice.FORCE_DISABLED
-    )
-    assert (
-        normalize_free_threading_choice("auto_disabled")
-        is FreeThreadingChoice.AUTO_DISABLED
-    )
+    assert normalize_free_threading_choice("force_disabled") is FreeThreadingChoice.FORCE_DISABLED
+    assert normalize_free_threading_choice("auto_disabled") is FreeThreadingChoice.AUTO_DISABLED
     assert normalize_free_threading_choice("nonsense") is FreeThreadingChoice.ENABLED
     assert normalize_free_threading_choice(None) is FreeThreadingChoice.ENABLED
 
@@ -41,9 +35,7 @@ def test_normalize_falls_back_to_enabled():
 
 def test_inert_on_regular_builds():
     for choice in FreeThreadingChoice:
-        d = resolve_free_threading(
-            choice, environ={}, free_threaded_build=False, cli=True
-        )
+        d = resolve_free_threading(choice, environ={}, free_threaded_build=False, cli=True)
         assert d == FreeThreadingDecision(None, False, "not-a-free-threaded-build")
 
 
@@ -289,9 +281,7 @@ def test_settings_state_round_trips_free_threading():
     state = settings_from_mapping({"python_free_threading": "force_disabled"})
     assert state.python_free_threading is FreeThreadingChoice.FORCE_DISABLED
     assert settings_to_mapping(state)["python_free_threading"] == "force_disabled"
-    assert (
-        settings_from_mapping({}).python_free_threading is FreeThreadingChoice.ENABLED
-    )
+    assert settings_from_mapping({}).python_free_threading is FreeThreadingChoice.ENABLED
     assert (
         settings_from_mapping({"python_free_threading": "junk"}).python_free_threading
         is FreeThreadingChoice.ENABLED

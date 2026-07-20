@@ -54,7 +54,9 @@ class WindowMenuMixin:
                     "montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value
                 ),
                 "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
-                "python_free_threading": self._settings.value("python_free_threading", FreeThreadingChoice.ENABLED.value),
+                "python_free_threading": self._settings.value(
+                    "python_free_threading", FreeThreadingChoice.ENABLED.value
+                ),
             }
         )
 
@@ -614,9 +616,7 @@ class WindowMenuMixin:
         performance_menu.addMenu(menu)
         self._free_threading_menu = menu
         if not free_threading.interpreter_is_free_threaded():
-            info = QtGui.QAction(
-                "Requires a free-threaded Python build (e.g. 3.14t)", self
-            )
+            info = QtGui.QAction("Requires a free-threaded Python build (e.g. 3.14t)", self)
             info.setEnabled(False)
             menu.addAction(info)
             return
@@ -679,9 +679,7 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(python_free_threading=choice)
         self._save_app_settings()
         self._sync_free_threading_actions()
-        show_status_message(
-            self, "Free-threading changes take effect after restarting ArrayScope."
-        )
+        show_status_message(self, "Free-threading changes take effect after restarting ArrayScope.")
 
     def _retheme_presentation_surfaces(self):
         """Restyle pyqtgraph surfaces in every open ArrayScope window.
