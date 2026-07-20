@@ -5,6 +5,7 @@ import dataclasses
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
+from arrayscope.app.free_threading import FreeThreadingChoice
 from arrayscope.app.qt_platform import QtPlatformChoice
 from arrayscope.app.settings_state import (
     AppSettingsState,
@@ -53,6 +54,7 @@ class WindowMenuMixin:
                     "montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value
                 ),
                 "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
+                "python_free_threading": self._settings.value("python_free_threading", FreeThreadingChoice.ENABLED.value),
             }
         )
 
@@ -330,6 +332,7 @@ class WindowMenuMixin:
             )
             budget_menu.addAction(action)
             self._render_budget_actions[mb] = action
+        self._setup_free_threading_menu(performance_menu)
         performance_menu.addSeparator()
         less_memory_action = QtGui.QAction("Use Less Memory", self)
         less_memory_action.setToolTip(
@@ -596,6 +599,89 @@ class WindowMenuMixin:
         self._save_app_settings()
         self._sync_qt_platform_actions()
         show_status_message(self, "Display server changes take effect after restarting ArrayScope.")
+
+    def _setup_free_threading_menu(self, performance_menu):
+        """Performance > Python Free-Threading (free-threaded 3.14t builds).
+
+        The GIL state is fixed at interpreter start, so changes apply on the
+        next launch (arrayscope.app.free_threading applies the policy and,
+        while enabled, supervises the crash-triggered auto-disable).
+        """
+        from arrayscope.app import free_threading
+
+        menu = QtWidgets.QMenu("Python Free-Threading", self)
+        menu.setToolTipsVisible(True)
+        performance_menu.addMenu(menu)
+        self._free_threading_menu = menu
+        if not free_threading.interpreter_is_free_threaded():
+            info = QtGui.QAction(
+                "Requires a free-threaded Python build (e.g. 3.14t)", self
+            )
+            info.setEnabled(False)
+            menu.addAction(info)
+            return
+        state = (
+            "GIL enabled"
+            if free_threading.gil_currently_enabled()
+            else "GIL disabled (free threading)"
+        )
+        active_action = QtGui.QAction(f"Active now: {state}", self)
+        active_action.setEnabled(False)
+        menu.addAction(active_action)
+        menu.addSeparator()
+        self._free_threading_actions = {}
+        self._free_threading_action_group = QtGui.QActionGroup(self)
+        self._free_threading_action_group.setExclusive(True)
+        for choice, label, tip, selectable in (
+            (
+                FreeThreadingChoice.ENABLED,
+                "Enabled (GIL off)",
+                "Run without the GIL; if the app crashes shortly after "
+                "launch, free threading is auto-disabled and the launch "
+                "retried with the GIL enabled.",
+                True,
+            ),
+            (
+                FreeThreadingChoice.FORCE_DISABLED,
+                "Force-disabled (GIL on)",
+                "Always relaunch with the GIL enabled (PYTHON_GIL=1).",
+                True,
+            ),
+            (
+                FreeThreadingChoice.AUTO_DISABLED,
+                "Auto-disabled (crashed shortly after launch)",
+                "Set by the crash supervisor after an early abnormal exit "
+                "of a free-threaded session; select Enabled to try again.",
+                False,
+            ),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tip)
+            action.setEnabled(selectable)
+            self._free_threading_action_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_free_threading_choice(choice)
+            )
+            menu.addAction(action)
+            self._free_threading_actions[choice] = action
+        self._sync_free_threading_actions()
+
+    def _sync_free_threading_actions(self):
+        for choice, action in getattr(self, "_free_threading_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.python_free_threading == choice)
+            action.blockSignals(False)
+
+    def _set_free_threading_choice(self, choice):
+        if self.app_settings.python_free_threading == choice:
+            self._sync_free_threading_actions()
+            return
+        self.app_settings = self._updated_app_settings(python_free_threading=choice)
+        self._save_app_settings()
+        self._sync_free_threading_actions()
+        show_status_message(
+            self, "Free-threading changes take effect after restarting ArrayScope."
+        )
 
     def _retheme_presentation_surfaces(self):
         """Restyle pyqtgraph surfaces in every open ArrayScope window.

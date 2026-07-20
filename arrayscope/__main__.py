@@ -158,6 +158,19 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
 
     args = parser.parse_args()
 
+    # Free-threading policy (free-threaded builds only), after argparse for
+    # the same reason as below and OUTERMOST so the display-server retry
+    # inside the child resolves wayland crashes before an early exit can be
+    # blamed on free threading: by default this relaunches the CLI as a
+    # supervised child with PYTHON_GIL=0 and, if it dies abnormally within
+    # the grace period, persists auto_disabled and retries once with the
+    # GIL enabled; when (force/auto) disabled it re-execs with PYTHON_GIL=1.
+    from arrayscope.app.free_threading import supervise_free_threading_if_needed
+
+    free_threading_rc = supervise_free_threading_if_needed()
+    if free_threading_rc is not None:
+        raise SystemExit(free_threading_rc)
+
     # Display-server policy (Linux/Wayland only), after argparse so --help
     # and usage errors exit here without spawning anything: in "auto" this
     # relaunches the CLI as a supervised child on wayland and retries once

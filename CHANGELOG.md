@@ -38,6 +38,17 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
+- On free-threaded CPython builds (PEP 703, e.g. `python3.14t`) ArrayScope
+  now runs with the GIL disabled by default. **Performance → Python
+  Free-Threading** shows the active state and offers *Force-disabled
+  (GIL on)* for opting back out (applied on the next launch via
+  `PYTHON_GIL=1`). The CLI reuses the early-crash supervision pattern from
+  the display-server fallback: if a free-threaded session dies abnormally
+  shortly after launch, free threading is auto-disabled persistently and
+  the launch retried once with the GIL enabled — and if that retry crashes
+  just as fast, the auto-disable is reverted because the failure is not
+  free-threading-specific. On regular (with-GIL) builds the menu explains
+  the build requirement and the policy is inert.
 - The experimental wgpu renderer can present directly to the screen on
   native Wayland: the `wgpu_present_method` setting drives the display
   through the compositor swapchain instead of a per-frame GPU→CPU bitmap

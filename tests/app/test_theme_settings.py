@@ -130,6 +130,7 @@ def test_settings_round_trip_defaults_and_values():
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
             "qt_platform": "xcb",
+            "python_free_threading": "force_disabled",
         }
     )
     values = settings_state.settings_to_mapping(settings)
@@ -146,6 +147,7 @@ def test_settings_round_trip_defaults_and_values():
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
         "qt_platform": "xcb",
+        "python_free_threading": "force_disabled",
     }
     defaults = settings_state.settings_from_mapping({})
     assert defaults.theme == theme.ThemeChoice.SYSTEM

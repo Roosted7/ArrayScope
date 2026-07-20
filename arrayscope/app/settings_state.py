@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from arrayscope.app.free_threading import FreeThreadingChoice, normalize_free_threading_choice
 from arrayscope.app.qt_platform import QtPlatformChoice, normalize_qt_platform_choice
 from arrayscope.app.theme import ThemeChoice, normalize_theme_choice
 from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_profile_choice
@@ -71,6 +72,9 @@ class AppSettingsState:
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
     qt_platform: QtPlatformChoice = QtPlatformChoice.AUTO
+    # Free-threaded builds (3.14t) only; applied at CLI launch
+    # (arrayscope.app.free_threading; auto_disabled is crash-supervisor-written).
+    python_free_threading: FreeThreadingChoice = FreeThreadingChoice.ENABLED
 
 
 def settings_from_mapping(values) -> AppSettingsState:
@@ -93,6 +97,7 @@ def settings_from_mapping(values) -> AppSettingsState:
             values.get("render_memory_budget_mb", 512)
         ),
         qt_platform=normalize_qt_platform_choice(values.get("qt_platform")),
+        python_free_threading=normalize_free_threading_choice(values.get("python_free_threading")),
     )
 
 
@@ -109,6 +114,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,
+        "python_free_threading": settings.python_free_threading.value,
     }
 
 
