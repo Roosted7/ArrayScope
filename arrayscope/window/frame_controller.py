@@ -1661,6 +1661,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             or getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_payload_upserts", None)
             or getattr(session, "pending_removals", None)
+            or getattr(session, "backend_refresh_pending", False)
             or (session.has_pending_level_update() and session.has_stale_level_presentations())
         )
         if not has_commit_work:

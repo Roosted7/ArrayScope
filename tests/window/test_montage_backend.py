@@ -209,6 +209,34 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     assert calls.count("commit") == 1
 
 
+def test_backend_refresh_obligation_crosses_clean_presentation_gate():
+    from arrayscope.window.frame_controller import FrameControllerMixin
+
+    session = SimpleNamespace(
+        dirty_rects=(),
+        dirty_tiles=(),
+        dirty_payloads=(),
+        pending_payload_upserts=(),
+        pending_removals=(),
+        backend_refresh_pending=True,
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+        final_commit_pending=False,
+        flush_pending=False,
+    )
+    calls = []
+    owner = SimpleNamespace(
+        _frame_session_is_current=lambda candidate: candidate is session,
+        apply_montage_presentation=lambda candidate: calls.append(candidate),
+    )
+
+    FrameControllerMixin.apply_ready_montage_display(owner, session)
+
+    assert calls == [session]
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+
+
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
     import arrayscope.render.level_stats as level_stats
     from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
