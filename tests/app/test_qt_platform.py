@@ -180,6 +180,15 @@ def test_healthy_wayland_run_is_not_retried():
     assert env[SUPERVISED_ENV] == "1"
 
 
+def test_frozen_executable_relaunches_without_interpreter_flags(monkeypatch):
+    # In a PyInstaller bundle sys.executable is the app itself: no -m.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    rc, calls, _ = _run([(0, 300.0)])
+    assert rc == 0
+    args, _env = calls[0]
+    assert args == [sys.executable, "data.npy"]
+
+
 def test_early_abnormal_exit_relaunches_on_xcb():
     rc, calls, logs = _run([(-6, 0.2), (0, 300.0)])  # SIGABRT then healthy
     assert rc == 0

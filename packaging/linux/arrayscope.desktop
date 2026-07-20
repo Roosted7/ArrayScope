@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ArrayScope
+GenericName=Array Viewer
+Comment=Interactive N-dimensional array viewer
+Exec=ArrayScope %F
+Icon=arrayscope
+Terminal=false
+Categories=Science;DataVisualization;Viewer;
+StartupWMClass=ArrayScope
+MimeType=application/x-numpy-array;application/x-numpy-archive;application/x-bart-cfl;application/x-philips-rec;application/x-nifti;application/x-matlab-data;application/dicom;application/x-hdf;

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ArrayScope application icon: 3x3 array heatmap under a magnifier ring.
+     Keep in sync with tools/generate_icons.py (which renders the PNG/ICO set). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect x="0" y="0" width="512" height="512" rx="92" fill="#10141f"/>
+  <g>
+    <rect x="71.7" y="71.7" width="115.5" height="115.5" rx="21" fill="#440154"/>
+    <rect x="210.2" y="71.7" width="115.5" height="115.5" rx="21" fill="#3b528b"/>
+    <rect x="348.7" y="71.7" width="115.5" height="115.5" rx="21" fill="#21918c"/>
+    <rect x="71.7" y="210.2" width="115.5" height="115.5" rx="21" fill="#31688e"/>
+    <rect x="210.2" y="210.2" width="115.5" height="115.5" rx="21" fill="#fde725"/>
+    <rect x="348.7" y="210.2" width="115.5" height="115.5" rx="21" fill="#5ec962"/>
+    <rect x="71.7" y="348.7" width="115.5" height="115.5" rx="21" fill="#21918c"/>
+    <rect x="210.2" y="348.7" width="115.5" height="115.5" rx="21" fill="#90d743"/>
+    <rect x="348.7" y="348.7" width="115.5" height="115.5" rx="21" fill="#440154"/>
+  </g>
+  <circle cx="317" cy="317" r="133" fill="none" stroke="#ebf0f8" stroke-width="28"/>
+  <line x1="411" y1="411" x2="481" y2="481" stroke="#ebf0f8" stroke-width="35" stroke-linecap="round"/>
+</svg>

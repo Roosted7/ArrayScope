@@ -185,7 +185,12 @@ def run_supervised_cli(
     """
     environ = os.environ if environ is None else environ
     log = log if log is not None else (lambda msg: print(msg, file=sys.stderr))
-    args = [sys.executable, "-m", "arrayscope", *argv]
+    if getattr(sys, "frozen", False):
+        # Bundled executable (PyInstaller): the exe IS the CLI; there is no
+        # interpreter that understands -m.
+        args = [sys.executable, *argv]
+    else:
+        args = [sys.executable, "-m", "arrayscope", *argv]
     env = dict(environ)
     env["QT_QPA_PLATFORM"] = "wayland"
     env[SUPERVISED_ENV] = "1"

@@ -32,6 +32,8 @@ Organized by the question you're asking. Stop at the first useful level.
   [scheduling and memory](architecture/scheduling-and-memory.md),
   [interaction and UI](architecture/interaction-and-ui.md).
 - [Invocation](invocation.md) — launch routes and wrappers.
+- [Packaging](../packaging/README.md) — standalone installers (AppImage,
+  Windows setup, macOS DMG) and the release workflow that builds them.
 - [Current state](current-state.md) — maturity snapshot and material risks.
 
 ## "Why is it this way?"

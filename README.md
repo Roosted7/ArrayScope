@@ -115,6 +115,30 @@ When a container contains several datasets, ArrayScope shows a selector and high
 
 ## Installation
 
+### Just want a viewer? (no Python required)
+
+Standalone builds bundle everything — download, run, open files. Grab them from the [releases page](https://github.com/Roosted7/ArrayScope/releases):
+
+- **Windows** — `ArrayScope-Setup-<version>.exe`: a conventional installer (Start Menu entry, optional desktop icon and file associations, uninstaller). A `...-portable.zip` is also available if you prefer no installation at all.
+- **Linux** — `ArrayScope-<version>-x86_64.AppImage`: `chmod +x` and run; no installation, no root.
+- **macOS** — `ArrayScope-<version>-macos-<arch>.dmg` (Apple Silicon and Intel): drag to Applications. The bundle is unsigned for now, so the first launch is right-click → Open.
+
+Launching without a file shows an open dialog; `packaging/` has the build scripts and [packaging/README.md](packaging/README.md) the details.
+
+### Using Python? (integrates with your environment)
+
+Once published on PyPI, any of the standard routes work — pick the one matching how you manage environments:
+
+```bash
+pip install arrayscope        # into the active environment (importable + CLI)
+pipx install arrayscope       # isolated CLI tool on your PATH
+uv tool install arrayscope    # same idea, via uv
+```
+
+The Python install is the full-featured route: `from arrayscope import arrayscope as asc` in scripts and notebooks, plus the `arrayscope` CLI.
+
+### From source
+
 ArrayScope identifies this release-candidate baseline as version `0.8.0`. Until the first PyPI upload is published, install from the dedicated ArrayScope source checkout:
 
 ```bash

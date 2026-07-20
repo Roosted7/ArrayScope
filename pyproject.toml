@@ -48,6 +48,9 @@ arrayscope = "arrayscope.__main__:main"
 vispy = [
     "vispy>=0.14.0",
 ]
+installer = [
+    "pyinstaller>=6.10.0",
+]
 dev = [
     "build>=0.10.0",
     "hypothesis>=6.0.0",
@@ -90,6 +93,9 @@ output = "coverage.xml"
 
 [tool.setuptools.packages.find]
 include = ["arrayscope*"]
+
+[tool.setuptools.package-data]
+arrayscope = ["resources/icons/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "arrayscope._version.__version__"}

@@ -4,6 +4,17 @@ This file records user-visible release changes. Detailed development history and
 
 ## Unreleased
 
+### Added
+
+- Standalone installers for all three platforms, built from a shared
+  PyInstaller bundle (Python fully hidden): a Linux AppImage, a conventional
+  Windows wizard installer (per-user by default, optional desktop icon and
+  file associations, uninstaller) plus a portable zip, and macOS DMGs for
+  Apple Silicon and Intel. Local build scripts live under `packaging/`; a
+  new `installers` GitHub Actions workflow builds all of them on demand and
+  attaches them to published releases. Launching a bundle without arguments
+  opens a file dialog. Python users keep the usual `pip/pipx/uv` routes.
+
 ### Fixed
 
 - Entering a montage on the PyQtGraph backend no longer shows a multi-second

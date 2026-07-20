@@ -1,0 +1,164 @@
+name: Build installers
+
+# Binary bundles for non-Python users: Linux AppImage, Windows installer +
+# portable zip, macOS DMGs. See packaging/README.md.
+#
+# Runs on manual dispatch (artifacts on the run page) and on published
+# releases (artifacts attached to the release, alongside the PyPI upload
+# from pypi-release.yml).
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  linux-appimage:
+    name: Linux AppImage (x86_64)
+    runs-on: ubuntu-latest
+    # ubuntu:22.04 container => glibc 2.35 floor, so the AppImage runs on any
+    # 2022+ distro. (The ubuntu-22.04 runner label starts brownouts 2026-09;
+    # the container path does not depend on it.)
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update -q
+          apt-get install -y --no-install-recommends \
+            software-properties-common ca-certificates curl git binutils file \
+            desktop-file-utils \
+            libgl1 libegl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libdbus-1-3
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get install -y --no-install-recommends python3.12 python3.12-venv
+      - uses: actions/checkout@v5
+      - name: Install package + PyInstaller
+        run: |
+          python3.12 -m venv /opt/venv
+          . /opt/venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install ".[installer]"
+      - name: Build AppImage
+        run: |
+          . /opt/venv/bin/activate
+          bash packaging/linux/build_appimage.sh
+      - name: Smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          . /opt/venv/bin/activate
+          APPIMAGE=(dist/ArrayScope-*.AppImage)
+          "${APPIMAGE[0]}" --appimage-extract-and-run --help
+          python -c "import numpy as np; np.save('smoke.npy', np.random.rand(4, 32, 32))"
+          rc=0
+          timeout 25 "${APPIMAGE[0]}" --appimage-extract-and-run smoke.npy || rc=$?
+          # 124 = still alive after 25 s (the viewer event loop) = pass.
+          if [ "$rc" -ne 124 ]; then echo "viewer exited early (rc=$rc)"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/ArrayScope-*.AppImage
+          if-no-files-found: error
+
+  windows-installer:
+    name: Windows installer + portable zip (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Inno Setup
+        # Not preinstalled on windows-2025 images (actions/runner-images#11644).
+        run: choco install innosetup -y --no-progress
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[installer]"
+      - name: Build installer and portable zip
+        run: powershell -ExecutionPolicy Bypass -File packaging\windows\build_installer.ps1
+      - name: Smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $Exe = "build\pyinstaller\dist\ArrayScope\ArrayScope.exe"
+          $Help = Start-Process -FilePath $Exe -ArgumentList "--help" -Wait -PassThru
+          if ($Help.ExitCode -ne 0) { throw "--help exited $($Help.ExitCode)" }
+          python -c "import numpy as np; np.save('smoke.npy', np.random.rand(4, 32, 32))"
+          $Viewer = Start-Process -FilePath $Exe -ArgumentList "smoke.npy" -PassThru
+          Start-Sleep -Seconds 25
+          if ($Viewer.HasExited) { throw "viewer exited early (rc=$($Viewer.ExitCode))" }
+          Stop-Process -Id $Viewer.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/ArrayScope-Setup-*.exe
+            dist/ArrayScope-*-windows-x86_64-portable.zip
+          if-no-files-found: error
+
+  macos-dmg:
+    name: macOS DMG (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest      # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel    # last Intel image; retired 2027-08
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[installer]"
+      - name: Build DMG
+        run: bash packaging/macos/build_dmg.sh
+      - name: Smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          APP="build/pyinstaller/dist/ArrayScope.app/Contents/MacOS/ArrayScope"
+          "$APP" --help
+          python -c "import numpy as np; np.save('smoke.npy', np.random.rand(4, 32, 32))"
+          "$APP" smoke.npy & VIEWER=$!
+          sleep 25
+          kill -0 "$VIEWER" 2>/dev/null || { echo "viewer exited early"; exit 1; }
+          kill "$VIEWER" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.arch }}
+          path: dist/ArrayScope-*-macos-*.dmg
+          if-no-files-found: error
+
+  attach-to-release:
+    name: Attach artifacts to release
+    if: github.event_name == 'release'
+    needs: [linux-appimage, windows-installer, macos-dmg]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            release-assets/* --clobber --repo "${{ github.repository }}"
