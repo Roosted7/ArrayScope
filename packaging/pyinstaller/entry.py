@@ -20,9 +20,7 @@ from __future__ import annotations
 import multiprocessing
 import sys
 
-SUPPORTED_PATTERNS = (
-    "*.npy *.npz *.h5 *.hdf5 *.mat *.cfl *.rec *.dcm *.nii *.nii.gz *.txt"
-)
+SUPPORTED_PATTERNS = "*.npy *.npz *.h5 *.hdf5 *.mat *.cfl *.rec *.dcm *.nii *.nii.gz *.txt"
 
 
 def _icon_path():

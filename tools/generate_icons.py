@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "arrayscope" / "resources" / "icons"
 SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 
-BACKGROUND = (16, 20, 31, 255)          # deep navy
+BACKGROUND = (16, 20, 31, 255)  # deep navy
 # 3x3 heatmap tiles, viridis-flavoured, brightest around the center — reads
 # as "array with structure" even at 16 px.
 TILE_COLORS = [
@@ -60,8 +60,10 @@ def draw_icon(size):
     ring_radius = canvas * 0.26
     ring_width = max(2 * scale, int(canvas * 0.055))
     bbox = (
-        ring_center[0] - ring_radius, ring_center[1] - ring_radius,
-        ring_center[0] + ring_radius, ring_center[1] + ring_radius,
+        ring_center[0] - ring_radius,
+        ring_center[1] - ring_radius,
+        ring_center[0] + ring_radius,
+        ring_center[1] + ring_radius,
     )
     draw.ellipse(bbox, outline=RING, width=ring_width)
     # Handle: 45° stroke from the ring edge toward the corner
