@@ -515,12 +515,25 @@ class TileLifecycle:
             if rec.target == target:
                 continue
             previous_source = None if rec.target is None else rec.target.source_index
+            source_changed = previous_source is not None and previous_source != target.source_index
+            if source_changed:
+                # A montage slot is reused for a different semantic source.
+                # Any evaluation/load/request state on the record belongs to
+                # the superseded source; its eventual completion is rejected
+                # by the session-generation guards and must not keep the new
+                # source visibly "loading" after retained pixels settle it.
+                if rec.semantic is Semantic.EVALUATING:
+                    rec.semantic = Semantic.PLANNED
+                self._evaluating.discard(tile_number)
+                self._load_cleared(rec)
+                self._request_cleared(rec)
+                self._stage_unbound(rec)
             rec.target = target
             rec.failed_reason = ""
             rec.task_claim = None
             rec.stage_producer_key = None
             _trace_lifecycle(rec, "target_required")
-            if previous_source is not None and previous_source != target.source_index:
+            if source_changed:
                 # A slot may be retargeted hundreds of times during a fast
                 # montage scrub.  Presentable payloads are first-pixel
                 # candidates for the *current* source, not a per-slot history.

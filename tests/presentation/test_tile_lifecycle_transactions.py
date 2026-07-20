@@ -3,7 +3,7 @@ from __future__ import annotations
 from itertools import permutations
 
 from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
-from arrayscope.presentation import TileLifecycle, TilePayloadRef, TilePhase, TileTarget
+from arrayscope.presentation import Semantic, TileLifecycle, TilePayloadRef, TilePhase, TileTarget
 
 
 def _target(tile=0, *, source=10, level=0):
@@ -229,6 +229,30 @@ def test_source_retarget_preserves_physical_truth_but_rejects_stale_pixels():
     assert row.presented_source_id is None
     assert not row.first_pixel_presented
     assert not row.target_settled
+
+
+def test_source_retarget_supersedes_old_evaluation_claims_but_lod_retarget_does_not():
+    lifecycle = TileLifecycle()
+    lifecycle.retarget({0: _target(source=10, level=1)})
+    lifecycle.load_marked(0)
+    lifecycle.evaluation_started(0)
+    lifecycle.evaluation_claimed(0, ("source", 10))
+    lifecycle.task_admitted(0, ("task", 10))
+
+    lifecycle.retarget({0: _target(source=10, level=3)})
+
+    assert lifecycle.evaluating_tiles == frozenset({0})
+    assert lifecycle.loading_tiles == frozenset({0})
+    assert lifecycle.active_request_tiles == frozenset({0})
+
+    lifecycle.retarget({0: _target(source=11, level=3)})
+
+    row = lifecycle.row(0)
+    assert row.semantic is Semantic.PLANNED
+    assert row.task_claim is None
+    assert lifecycle.evaluating_tiles == frozenset()
+    assert lifecycle.loading_tiles == frozenset()
+    assert lifecycle.active_request_tiles == frozenset()
 
 
 def test_retarget_bounds_presentable_history_to_current_and_physical_predecessor():
