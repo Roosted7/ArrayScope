@@ -1852,6 +1852,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
 
     def forced_commit(current, *, force_commit=False):
         assert force_commit is True
+        assert current.backend_refresh_pending is True
         effects._configure_wgpu_evidence_obligation()
         quiet_edge_queued.append(
             service._queue_montage_level_stats_for_payloads(current, {0: object()})
@@ -3194,6 +3195,11 @@ def test_tile_presentation_admission_uses_backend_cost_function():
     )
 
     assert tuple(state.active_payloads(delta)) == (0, 1)
+    assert delta.force_refresh is False
+
+    session.backend_refresh_pending = True
+    _state, refresh_delta = session.build_tile_presentation({})
+    assert refresh_delta.force_refresh is True
 
 
 def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():

@@ -2108,6 +2108,7 @@ class FramePipelineEffects:
             if not applied:
                 self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
                 return
+            session.backend_refresh_pending = False
             renderer._last_montage_commit_outcome = "backend-applied"
             session._atomic_prepared_transaction = None
             self._acknowledge_and_publish(

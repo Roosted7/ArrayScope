@@ -440,6 +440,11 @@ class FrameRuntimeMixin:
         session._wgpu_histogram_evidence_deferred = False
         self._montage_native_deferred_replanned = deferred_generation
         if histogram_deferred:
+            # Evidence was disabled while the gesture was active, so the
+            # already-committed WGPU population has no histogram dispatches.
+            # The quiet-edge commit must cross the backend even when its tile
+            # delta is otherwise empty; only a successful commit clears this.
+            session.backend_refresh_pending = True
             # The wgpu resident-histogram evidence queue is normally pumped
             # from a commit's backend acknowledgement.  A deferral at the
             # fill tail has no further commits — the coverage plan is empty

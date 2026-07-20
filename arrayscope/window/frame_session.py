@@ -656,6 +656,8 @@ class FrameSession:
     show_loading_overlays: bool = False
     defer_side_panels: bool = False
     display_committed: bool = False
+    # One explicit backend pass owed even when semantic payloads are unchanged.
+    backend_refresh_pending: bool = False
     applied_level_source: object | None = None
     user_levels_override: tuple[float, float] | None = None
     pending_level_tiles: deque[RenderedTile] = field(default_factory=deque)
@@ -3188,7 +3190,7 @@ class FrameSession:
                 removals = tuple(tile for tile in removals if int(tile) not in conflicting)
                 self.pending_removals.difference_update(conflicting)
 
-        force_refresh = False
+        force_refresh = bool(self.backend_refresh_pending)
         clear_reason = ""
 
         base_revision = int(getattr(previous_state, "revision", 0))
