@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import perf_counter
 
-from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, tile_numbers
+from arrayscope.display.model.tile_priority import (
+    MontageTilePriorityQueue,
+    TilePriorityContext,
+    tile_numbers,
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +53,9 @@ class TileAdmissionQueue:
         item_cap = None if max_items is None else max(0, int(max_items))
         byte_cap = None if max_bytes is None else max(0, int(max_bytes))
         if (item_cap == 0 or byte_cap == 0) and free_fn is None:
-            return TileAdmissionDecision((), ordered, tuple(dict.fromkeys(int(tile) for tile in tuple(retained or ()))))
+            return TileAdmissionDecision(
+                (), ordered, tuple(dict.fromkeys(int(tile) for tile in tuple(retained or ())))
+            )
         started = perf_counter()
         admitted: list[int] = []
         deferred: list[int] = []
@@ -68,7 +74,12 @@ class TileAdmissionQueue:
             free = free_fn is not None and bool(free_fn(tile))
             item_free_candidate = item_free_fn is not None and bool(item_free_fn(tile))
             item_free = free or item_free_candidate
-            if item_free_candidate and not free and item_free_cap is not None and item_free_admitted >= item_free_cap:
+            if (
+                item_free_candidate
+                and not free
+                and item_free_cap is not None
+                and item_free_admitted >= item_free_cap
+            ):
                 deferred.append(tile)
                 continue
             if not free:
@@ -84,7 +95,11 @@ class TileAdmissionQueue:
                 ):
                     deferred.append(tile)
                     continue
-                if deadline_ms is not None and admitted and (perf_counter() - started) * 1000.0 >= float(deadline_ms):
+                if (
+                    deadline_ms is not None
+                    and admitted
+                    and (perf_counter() - started) * 1000.0 >= float(deadline_ms)
+                ):
                     deferred.append(tile)
                     continue
             admitted.append(tile)
@@ -93,7 +108,9 @@ class TileAdmissionQueue:
                 costed_admitted += 1
             elif item_free and not free:
                 item_free_admitted += 1
-        active = tuple(dict.fromkeys((*tuple(int(tile) for tile in tuple(retained or ())), *admitted)))
+        active = tuple(
+            dict.fromkeys((*tuple(int(tile) for tile in tuple(retained or ())), *admitted))
+        )
         return TileAdmissionDecision(
             admitted=tuple(admitted),
             deferred=tuple(deferred),

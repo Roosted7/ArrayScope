@@ -1,12 +1,16 @@
 import numpy as np
 
 from arrayscope.core.cache_status import CacheStatus
+from arrayscope.core.memory_policy import (
+    MemoryProfileChoice,
+    SystemMemorySnapshot,
+    compute_memory_policy,
+)
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.montage import MontageTile, RenderedTile
-from arrayscope.core.memory_policy import MemoryProfileChoice, compute_memory_policy, SystemMemorySnapshot
 from arrayscope.operations.cache import BoundedArrayCache, _nbytes
-from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.coordinator import OperationCoordinator
+from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, ReverseAxis
 
 
@@ -89,7 +93,9 @@ def test_bounded_cache_counts_rendered_tile_bytes():
 def test_montage_and_single_tiles_share_display_cache_diagnostics():
     data = np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2)
     evaluator = OperationEvaluator(ArrayDocument(data))
-    state = ViewState.from_shape(data.shape).with_montage_axis(2, columns=2, indices=(0, 1), text=":")
+    state = ViewState.from_shape(data.shape).with_montage_axis(
+        2, columns=2, indices=(0, 1), text=":"
+    )
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.operations.evaluator import EvaluationResult
@@ -100,7 +106,9 @@ def test_montage_and_single_tiles_share_display_cache_diagnostics():
         plan.tiles[0],
         montage_axis=2,
         colormap_lut=None,
-        result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
+        result=EvaluationResult(
+            DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)
+        ),
     )
 
     assert evaluator.display_cache_diagnostics().entries == 1
@@ -120,7 +128,9 @@ def test_montage_tile_key_matches_single_slice_display_key():
     evaluator = OperationEvaluator(ArrayDocument(data))
     state = ViewState.from_shape(data.shape).with_image_axes(0, 1).with_slice(2, 3)
 
-    assert evaluator.montage_tile_key(state, montage_axis=2, source_index=3) == evaluator.display_tile_key(state)
+    assert evaluator.montage_tile_key(
+        state, montage_axis=2, source_index=3
+    ) == evaluator.display_tile_key(state)
 
 
 def test_montage_tile_key_batch_matches_scalar_owner_across_plan_tiles():
@@ -136,7 +146,11 @@ def test_montage_tile_key_batch_matches_scalar_owner_across_plan_tiles():
     data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
     evaluator = OperationEvaluator(ArrayDocument(data))
     indices = tuple(range(6))
-    state = ViewState.from_shape(data.shape).with_image_axes(0, 1).with_montage_axis(2, columns=3, indices=indices, text=":")
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=3, indices=indices, text=":")
+    )
     plan = make_montage_plan(state, axis=2, indices=indices, tile_shape=(4, 5), columns=3)
     lut = np.linspace(0.0, 1.0, 12, dtype=np.float32).reshape(4, 3)
 
@@ -177,8 +191,15 @@ def test_montage_tile_key_batch_falls_back_when_tiles_vary_beyond_slices():
 
 def test_apply_memory_policy_resizes_display_and_profile_caches():
     evaluator = OperationEvaluator(ArrayDocument(np.zeros((2, 3), dtype=np.float32)))
-    system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)
-    policy = compute_memory_policy(profile=MemoryProfileChoice.CONSERVATIVE, render_cap_mb=512, input_nbytes=1024, system=system)
+    system = SystemMemorySnapshot(
+        total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0
+    )
+    policy = compute_memory_policy(
+        profile=MemoryProfileChoice.CONSERVATIVE,
+        render_cap_mb=512,
+        input_nbytes=1024,
+        system=system,
+    )
 
     evaluator.apply_memory_policy(policy)
 
@@ -245,7 +266,12 @@ def test_prefetch_fills_cache_without_incrementing_visible_evaluation_count():
 
     evaluator.image(state)
     result = evaluator.prefetch_display_tile_snapshot(evaluator.document, prefetch_state)
-    assert evaluator.store_prefetch_display_tile_result(evaluator.document, prefetch_state, None, result) is True
+    assert (
+        evaluator.store_prefetch_display_tile_result(
+            evaluator.document, prefetch_state, None, result
+        )
+        is True
+    )
     visible_count = evaluator.image_evaluations
     evaluator.image(prefetch_state)
 
@@ -261,7 +287,9 @@ def test_prefetch_store_uses_document_key_not_array_equality():
     state = ViewState.from_shape(data.shape)
     result = evaluator.prefetch_display_tile_snapshot(other_document, state)
 
-    assert evaluator.store_prefetch_display_tile_result(other_document, state, None, result) is False
+    assert (
+        evaluator.store_prefetch_display_tile_result(other_document, state, None, result) is False
+    )
     assert evaluator.display_cache_diagnostics().prefetch_stale == 1
 
 

@@ -1,7 +1,12 @@
 from arrayscope.app.settings_state import AppSettingsState
 from arrayscope.core.compute_policy import ComputeLane, compute_policy_from_settings
 from arrayscope.core.gui_callback_budget import GuiCallbackObservation
-from arrayscope.core.memory_policy import MemoryPolicy, MemoryProfileChoice, SystemMemorySnapshot, compute_memory_policy
+from arrayscope.core.memory_policy import (
+    MemoryPolicy,
+    MemoryProfileChoice,
+    SystemMemorySnapshot,
+    compute_memory_policy,
+)
 from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
 from arrayscope.core.resource_telemetry import CpuSnapshot, ResourceSnapshot
 
@@ -22,14 +27,24 @@ def _memory(available_fraction=0.5) -> MemoryPolicy:
 
 def _snapshot(memory: MemoryPolicy, cpu_percent=25.0) -> ResourceSnapshot:
     return ResourceSnapshot(
-        memory=SystemMemorySnapshot(memory.system_total_bytes, memory.system_available_bytes, memory.process_rss_bytes),
-        cpu=CpuSnapshot(16, process_cpu_percent=20.0, system_cpu_percent=cpu_percent, load_average_1m=2.0, source="test"),
+        memory=SystemMemorySnapshot(
+            memory.system_total_bytes, memory.system_available_bytes, memory.process_rss_bytes
+        ),
+        cpu=CpuSnapshot(
+            16,
+            process_cpu_percent=20.0,
+            system_cpu_percent=cpu_percent,
+            load_average_1m=2.0,
+            source="test",
+        ),
         timestamp_monotonic=0.0,
     )
 
 
 def test_bridge_drain_knob_uses_profile_feedback_defaults():
-    governor = ResourceGovernor(_policy(MemoryProfileChoice.AGGRESSIVE), profile=MemoryProfileChoice.AGGRESSIVE)
+    governor = ResourceGovernor(
+        _policy(MemoryProfileChoice.AGGRESSIVE), profile=MemoryProfileChoice.AGGRESSIVE
+    )
     governor.update_telemetry(_snapshot(_memory()), _memory())
 
     decision = governor.decide_bridge_drain(interactive=False)
@@ -85,7 +100,9 @@ def test_callback_observations_are_kept_without_decision_ring():
 
 
 def test_histogram_workers_park_only_behind_runnable_visible_work():
-    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
+    governor = ResourceGovernor(
+        _policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0
+    )
 
     busy = governor.decide_lane_workers(
         ComputeLane.HISTOGRAM,
@@ -150,7 +167,9 @@ def test_first_lane_decision_starts_at_policy_target_without_damping_from_maximu
 
 
 def test_blocking_semantic_evidence_keeps_one_histogram_worker():
-    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0)
+    governor = ResourceGovernor(
+        _policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0
+    )
 
     decision = governor.decide_lane_workers(
         ComputeLane.HISTOGRAM,

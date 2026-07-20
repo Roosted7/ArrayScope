@@ -14,9 +14,9 @@ re-apply.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
-
 
 _UNSET = object()
 
@@ -82,10 +82,8 @@ class ViewStateBinder:
                 binding.apply(value)
             finally:
                 for widget in blocked:
-                    try:
+                    with contextlib.suppress(RuntimeError):
                         widget.blockSignals(False)
-                    except RuntimeError:
-                        pass
             self._applied[binding.name] = value
             applied += 1
         return applied

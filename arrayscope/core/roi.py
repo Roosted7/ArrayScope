@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Tuple
 
 import numpy as np
 from scipy import ndimage
-
 
 DEFAULT_LINE_WIDTH = 1.0
 DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE = 1.5
@@ -26,11 +25,11 @@ class RoiKind(Enum):
 @dataclass(frozen=True)
 class RoiGeometry:
     kind: RoiKind | str
-    points: Tuple[Tuple[float, float], ...] = ()
-    rect: Tuple[float, float, float, float] | None = None
+    points: tuple[tuple[float, float], ...] = ()
+    rect: tuple[float, float, float, float] | None = None
     line_width: float = DEFAULT_LINE_WIDTH
     closed: bool = False
-    image_axes: Tuple[int, int] = (0, 1)
+    image_axes: tuple[int, int] = (0, 1)
 
     def __post_init__(self):
         kind = self.kind if isinstance(self.kind, RoiKind) else RoiKind(str(self.kind))
@@ -52,7 +51,7 @@ class RoiSelection:
     label: str
     geometry: RoiGeometry
     enabled: bool = True
-    color: Tuple[int, int, int] = (230, 60, 30)
+    color: tuple[int, int, int] = (230, 60, 30)
 
 
 @dataclass(frozen=True)
@@ -145,7 +144,7 @@ def close_polygon(points):
         return ()
     if points[0] == points[-1]:
         return points
-    return points + (points[0],)
+    return (*points, points[0])
 
 
 def simplify_polyline(points, tolerance=DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE):
@@ -186,7 +185,7 @@ def polyline_roi_samples(image_2d, points, width=DEFAULT_LINE_WIDTH):
         return np.asarray([], dtype=float)
 
     segments = []
-    for p0, p1 in zip(points[:-1], points[1:]):
+    for p0, p1 in itertools.pairwise(points):
         segment = _segment_samples(image, p0, p1, width=width)
         if segment.size:
             if segments:
@@ -230,8 +229,12 @@ def roi_values(image_2d, geometry: RoiGeometry):
     raise ValueError(f"unsupported ROI kind: {geometry.kind}")
 
 
-def roi_values_for_region(image_2d, geometry: RoiGeometry, *, offset: tuple[float, float] = (0.0, 0.0)):
-    return roi_values(image_2d, translate_roi_geometry(geometry, -float(offset[0]), -float(offset[1])))
+def roi_values_for_region(
+    image_2d, geometry: RoiGeometry, *, offset: tuple[float, float] = (0.0, 0.0)
+):
+    return roi_values(
+        image_2d, translate_roi_geometry(geometry, -float(offset[0]), -float(offset[1]))
+    )
 
 
 def translate_roi_geometry(geometry: RoiGeometry, dx: float, dy: float) -> RoiGeometry:
@@ -267,7 +270,9 @@ def clamp_roi_geometry_to_rect(
     return translate_roi_geometry(geometry, dx, dy)
 
 
-def _clamp_span_translation(inner_min: float, inner_max: float, outer_min: float, outer_max: float) -> float:
+def _clamp_span_translation(
+    inner_min: float, inner_max: float, outer_min: float, outer_max: float
+) -> float:
     if inner_max < outer_min:
         return outer_min - inner_min
     if inner_min > outer_max:
@@ -289,7 +294,11 @@ def roi_bounding_rect(geometry: RoiGeometry) -> tuple[float, float, float, float
         return None
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
-    pad = max(0.0, float(geometry.line_width) * 0.5) if geometry.kind in (RoiKind.LINE, RoiKind.POLYLINE) else 0.0
+    pad = (
+        max(0.0, float(geometry.line_width) * 0.5)
+        if geometry.kind in (RoiKind.LINE, RoiKind.POLYLINE)
+        else 0.0
+    )
     return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
 
 
@@ -327,10 +336,14 @@ def roi_statistics(values):
     )
 
 
-def geometry_with_simplified_freehand(geometry: RoiGeometry, tolerance=DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE):
+def geometry_with_simplified_freehand(
+    geometry: RoiGeometry, tolerance=DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE
+):
     if geometry.kind != RoiKind.FREEHAND_POLYGON:
         return geometry
-    return replace(geometry, points=close_polygon(simplify_polyline(geometry.points, tolerance)), closed=True)
+    return replace(
+        geometry, points=close_polygon(simplify_polyline(geometry.points, tolerance)), closed=True
+    )
 
 
 def _segment_samples(image, p0, p1, width=DEFAULT_LINE_WIDTH):

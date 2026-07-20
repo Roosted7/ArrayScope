@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-from dataclasses import replace
 from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from arrayscope.display.slice_engine import DisplayImage
@@ -9,11 +8,11 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings, process_events
 
 
-
-
 def _tile_result(tile, value):
     image = np.full((tile.height, tile.width), value, dtype=np.float32)
-    return EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes))
+    return EvaluationResult(
+        DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)
+    )
 
 
 def _backend_residency_snapshot(win, backend):
@@ -94,7 +93,9 @@ def test_rapid_slice_burst_is_coalesced_and_latest(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=np.float32).reshape(4, 5, 8))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win, "render", lambda **kwargs: calls.append((kwargs, win.view_state.slice_indices[2])))
+    monkeypatch.setattr(
+        win, "render", lambda **kwargs: calls.append((kwargs, win.view_state.slice_indices[2]))
+    )
     try:
         win._on_slice_index_changed(2, 1)
         win._on_slice_index_changed(2, 2)
@@ -162,7 +163,7 @@ def test_rapid_scroll_latest_control_state_not_blocked_by_slow_commit(qtbot, mon
         win.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
     if backend == "vispy":
         pytest.importorskip("vispy")
@@ -202,7 +203,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
         win.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
     if backend == "vispy":
         pytest.importorskip("vispy")
@@ -270,6 +271,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
 
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
@@ -283,7 +285,9 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
         qtbot.addWidget(win)
         process_events(qtbot)
-        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
+        )
         win.update_image_view()
         qtbot.waitUntil(
             lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer",
@@ -295,7 +299,9 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
             lambda: scheduled.append(win.img_view.getView().viewRange()),
         )
 
-        assert win.img_view._vispy_canvas_native.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        assert win.img_view._vispy_canvas_native.testAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
         win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
         process_events(qtbot)
 
@@ -344,6 +350,7 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
 
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
@@ -364,9 +371,13 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
         monkeypatch.setattr(
             win.montage_tile_evaluation_controller,
             "start_latest",
-            lambda _fn, **kwargs: len(getattr(win.renderer._frame_session, "active_tile_requests", ())) + 1,
+            lambda _fn, **kwargs: (
+                len(getattr(win.renderer._frame_session, "active_tile_requests", ())) + 1
+            ),
         )
-        win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":"))
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(8)), text=":")
+        )
         win.update_image_view()
         plan = win.renderer._frame_session.plan
         tile_count = len(plan.tiles)

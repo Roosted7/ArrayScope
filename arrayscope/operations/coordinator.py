@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import numpy as np
 
-from arrayscope.operations.cost import OperationCost, PipelineCost, estimate_pipeline_cost, operation_output_dtype
+from arrayscope.operations.cost import (
+    OperationCost,
+    PipelineCost,
+    estimate_pipeline_cost,
+    operation_output_dtype,
+)
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import ArrayDocument, evaluate_shape
 from arrayscope.operations.registry import create_operation
-from arrayscope.operations.stack import delete_step, move_step, reorder_steps, replace_step_operation, set_step_enabled
+from arrayscope.operations.stack import (
+    delete_step,
+    move_step,
+    reorder_steps,
+    replace_step_operation,
+    set_step_enabled,
+)
 
 
 class OperationCoordinator:
@@ -61,7 +72,14 @@ class OperationCoordinator:
         return self.set_document(self._document(steps=steps))
 
     def load_operations(self, operations):
-        return self.set_document(ArrayDocument(self.base_data, operations=tuple(operations), revision=self.document.revision, axes=self.document.base_axes))
+        return self.set_document(
+            ArrayDocument(
+                self.base_data,
+                operations=tuple(operations),
+                revision=self.document.revision,
+                axes=self.document.base_axes,
+            )
+        )
 
     def load_steps(self, steps):
         return self.set_document(self._document(steps=tuple(steps)))
@@ -70,7 +88,9 @@ class OperationCoordinator:
         return self.replace_base_and_clear_steps(data)
 
     def reload_base_data(self, data, *, preserve_steps=True):
-        return self.set_document(self.document.reload_base_data(data, preserve_steps=preserve_steps))
+        return self.set_document(
+            self.document.reload_base_data(data, preserve_steps=preserve_steps)
+        )
 
     def replace_base_and_clear_steps(self, data):
         return self.set_document(self.document.replace_base_and_clear_steps(data))
@@ -125,10 +145,17 @@ class OperationCoordinator:
 
     def _reject_scalar(self, document):
         if len(document.current_shape) < 1:
-            raise ValueError("operation would produce a scalar, which this viewer cannot display yet")
+            raise ValueError(
+                "operation would produce a scalar, which this viewer cannot display yet"
+            )
 
     def _document(self, *, steps):
-        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.document.revision, axes=self.document.base_axes)
+        return ArrayDocument(
+            self.base_data,
+            steps=tuple(steps),
+            revision=self.document.revision,
+            axes=self.document.base_axes,
+        )
 
 
 def _operation_output_dtype(dtype, operation):

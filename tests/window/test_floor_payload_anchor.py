@@ -103,9 +103,7 @@ def _floor_payload_for_exact_reduced_level(session):
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     assert int(demand.desired_level) > 0
     rendered = session.rendered_tiles[1]
-    key = session._lod_page_set_key_for(
-        rendered, demand=demand, level=demand.desired_level
-    )
+    key = session._lod_page_set_key_for(rendered, demand=demand, level=demand.desired_level)
     source_origin_yx = (
         key.plans[0].valid_source_rect_yx[0],
         key.plans[0].valid_source_rect_yx[2],
@@ -134,9 +132,7 @@ def _floor_payload_for_exact_reduced_level(session):
 def test_montage_floor_payload_never_carries_an_anchor():
     session = _session(
         montage_axis=0,
-        source_anchoring=SourceAnchoring(
-            anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY
-        ),
+        source_anchoring=SourceAnchoring(anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY),
     )
     payload = _floor_payload_for_exact_reduced_level(session)
     assert payload.source_anchor is None
@@ -145,9 +141,7 @@ def test_montage_floor_payload_never_carries_an_anchor():
 def test_non_montage_floor_payload_anchor_rect_is_native_plan_extent():
     session = _session(
         montage_axis=None,
-        source_anchoring=SourceAnchoring(
-            anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY
-        ),
+        source_anchoring=SourceAnchoring(anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY),
     )
     payload = _floor_payload_for_exact_reduced_level(session)
     anchor = payload.source_anchor
@@ -174,15 +168,11 @@ def test_preview_quality_floor_payload_never_carries_an_anchor():
 
     session = _session(
         montage_axis=None,
-        source_anchoring=SourceAnchoring(
-            anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY
-        ),
+        source_anchoring=SourceAnchoring(anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY),
     )
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     rendered = session.rendered_tiles[1]
-    key = session._lod_page_set_key_for(
-        rendered, demand=demand, level=demand.desired_level
-    )
+    key = session._lod_page_set_key_for(rendered, demand=demand, level=demand.desired_level)
     source_origin_yx = (
         key.plans[0].valid_source_rect_yx[0],
         key.plans[0].valid_source_rect_yx[2],

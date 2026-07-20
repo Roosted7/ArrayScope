@@ -48,7 +48,8 @@ def test_peek_does_not_touch_recency_or_counters():
     cache.put("a", 1)
     cache.put("b", 2)
     assert cache.peek("a") == 1
-    assert cache.hits == 0 and cache.misses == 0
+    assert cache.hits == 0
+    assert cache.misses == 0
     cache.put("c", 3)  # "a" is still oldest because peek did not refresh
     assert "a" not in cache
 
@@ -59,7 +60,8 @@ def test_peek_many_reads_one_snapshot_without_touching_state():
     cache.put("b", 2)
 
     assert cache.peek_many(("b", "missing", "a")) == {"b": 2, "a": 1}
-    assert cache.hits == 0 and cache.misses == 0
+    assert cache.hits == 0
+    assert cache.misses == 0
 
     cache.put("c", 3)
     cache.put("d", 4)
@@ -72,7 +74,8 @@ def test_resize_evicts_to_new_budget():
         cache.put(index, index)
     cache.resize(max_entries=2)
     assert len(cache) == 2
-    assert cache.peek(3) == 3 and cache.peek(4) == 4
+    assert cache.peek(3) == 3
+    assert cache.peek(4) == 4
 
 
 def test_counters_and_clear():
@@ -86,7 +89,8 @@ def test_counters_and_clear():
     cache.clear_counters()
     assert (cache.hits, cache.misses, cache.evictions) == (0, 0, 0)
     cache.clear()
-    assert len(cache) == 0 and cache.bytes_used == 0
+    assert len(cache) == 0
+    assert cache.bytes_used == 0
 
 
 def test_unbounded_dimensions_do_not_evict():

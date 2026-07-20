@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.core.memory_budget import estimate_display_image_bytes
-from arrayscope.core.memory_policy import apply_policy_hysteresis, compute_memory_policy, input_nbytes_for
+from arrayscope.core.memory_policy import (
+    apply_policy_hysteresis,
+    compute_memory_policy,
+    input_nbytes_for,
+)
 from arrayscope.core.view_state import ChannelMode
 
 
@@ -18,7 +22,9 @@ class RenderResourceMixin:
             indices = view_state.axis_range_indices[axis]
             shape.append(len(indices) if indices is not None else view_state.shape[axis])
         dtypes = self.win.operation_coordinator.operation_dtype_estimates()
-        dtype = dtypes[-1] if dtypes else getattr(self.win.document.base_data, "dtype", np.dtype(float))
+        dtype = (
+            dtypes[-1] if dtypes else getattr(self.win.document.base_data, "dtype", np.dtype(float))
+        )
         rgb = view_state.channel == ChannelMode.COMPLEX
         return estimate_display_image_bytes(tuple(shape), dtype, rgb=rgb, histogram=rgb)
 
@@ -40,7 +46,9 @@ class RenderResourceMixin:
     def _refresh_memory_policy(self, *, active_render: bool = False):
         current = compute_memory_policy(
             profile=getattr(getattr(self.win, "app_settings", None), "memory_profile", "balanced"),
-            render_cap_mb=getattr(getattr(self.win, "app_settings", None), "render_memory_budget_mb", 512),
+            render_cap_mb=getattr(
+                getattr(self.win, "app_settings", None), "render_memory_budget_mb", 512
+            ),
             input_nbytes=input_nbytes_for(getattr(self.win, "base_data", None)),
         )
         policy = apply_policy_hysteresis(
@@ -60,4 +68,3 @@ class RenderResourceMixin:
     def _montage_render_active(self) -> bool:
         session = getattr(self, "_frame_session", None)
         return bool(session is not None and not session.is_complete())
-    

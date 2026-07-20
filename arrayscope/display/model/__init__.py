@@ -16,9 +16,9 @@ from arrayscope.display.model.frame import (
     DisplayTilePayload,
     FrameValueSource,
     PageBackedPresentation,
+    TiledValueSource,
     TilePresentationDelta,
     TilePresentationState,
-    TiledValueSource,
 )
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
@@ -31,12 +31,6 @@ from arrayscope.display.model.presentation_generation import (
     PresentationGenerationSnapshot,
     PresentationGenerationTracker,
 )
-from arrayscope.display.model.tile_priority import (
-    MontageTilePriorityQueue,
-    TilePriorityContext,
-    prioritize_tiles,
-    tile_priority_key,
-)
 from arrayscope.display.model.tile_identity import (
     ArrayPlaneIdentity,
     TileIdentity,
@@ -48,10 +42,16 @@ from arrayscope.display.model.tile_identity import (
     tile_ack_identity,
     tile_truth_record,
 )
+from arrayscope.display.model.tile_priority import (
+    MontageTilePriorityQueue,
+    TilePriorityContext,
+    prioritize_tiles,
+    tile_priority_key,
+)
 
 __all__ = [
-    "CommitKind",
     "ArrayPlaneIdentity",
+    "CommitKind",
     "CommitPlan",
     "CommittedDisplayFrame",
     "DisplayFrameKey",
@@ -60,30 +60,30 @@ __all__ = [
     "DisplayTilePayload",
     "DisplayTiledPresentation",
     "FrameValueSource",
-    "PageBackedPresentation",
-    "MontageLevelStats",
-    "MontageTilePriorityQueue",
-    "MontageLevelTracker",
     "LevelPresentationTarget",
+    "MontageLevelStats",
+    "MontageLevelTracker",
+    "MontageTilePriorityQueue",
+    "PageBackedPresentation",
     "PresentationDecision",
     "PresentationGenerationSnapshot",
     "PresentationGenerationTracker",
     "PresentationInput",
     "RenderRequestContext",
-    "TilePresentationDelta",
     "TileIdentity",
+    "TileLevelStats",
     "TileLodIdentity",
+    "TilePresentationDelta",
     "TilePresentationIdentity",
     "TilePresentationState",
     "TilePriorityContext",
-    "prioritize_tiles",
-    "tile_priority_key",
-    "TileLevelStats",
     "TiledValueSource",
-    "montage_level_key",
     "acknowledged_identity_satisfies_target",
     "array_plane_identities",
     "complex_mapping_identity",
+    "montage_level_key",
+    "prioritize_tiles",
     "tile_ack_identity",
+    "tile_priority_key",
     "tile_truth_record",
 ]

@@ -11,16 +11,21 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.core.compare import CompareDocument
-from arrayscope.core.histograms import HistogramSpec, comparison_histograms
-from arrayscope.core.roi import RoiKind, RoiStatsAccumulator, roi_bounding_rect, roi_values_for_region
 from arrayscope.core.frame_targets import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, WorkItem
+from arrayscope.core.histograms import HistogramSpec, comparison_histograms
+from arrayscope.core.roi import (
+    RoiKind,
+    RoiStatsAccumulator,
+    roi_bounding_rect,
+    roi_values_for_region,
+)
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import Priority, WorkItem
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.operations.tile_regions import TileRegionRequest
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.tile_data_provider import TileDataProvider
-from arrayscope.kernel import Priority
 from arrayscope.window.interaction_mode import InteractionMode
+from arrayscope.window.tile_data_provider import TileDataProvider
 
 
 @dataclass(frozen=True)
@@ -81,7 +86,9 @@ class InspectionWorkflowMixin:
 
     def _on_roi_changed(self, _roi_id, _geometry):
         if hasattr(self, "img_view"):
-            self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections()).select(_roi_id)
+            self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections()).select(
+                _roi_id
+            )
         self._refresh_inspection_dock()
 
     def _on_roi_deleted(self, _roi_id):
@@ -110,7 +117,9 @@ class InspectionWorkflowMixin:
         if not hasattr(self, "inspection_dock"):
             return
         self._inspection_dock_user_visible = True
-        self.layout_manager.set_managed_dock_visible(self.inspection_dock, True, reason="show-inspection")
+        self.layout_manager.set_managed_dock_visible(
+            self.inspection_dock, True, reason="show-inspection"
+        )
         if getattr(self, "_inspection_stale", False):
             self._refresh_inspection_dock()
 
@@ -143,11 +152,12 @@ class InspectionWorkflowMixin:
             return
         if not self._inspection_panel_is_visible():
             self._inspection_stale = True
-            if self._roi_uses_montage_demand(selections):
-                if self._montage_roi_values_pending():
-                    return
+            if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+                return
         self._roi_refresh_reason = reason
-        self._queue_roi_inspection_refresh(selections, panel_visible=self._inspection_panel_is_visible())
+        self._queue_roi_inspection_refresh(
+            selections, panel_visible=self._inspection_panel_is_visible()
+        )
 
     def _queue_roi_inspection_refresh(self, selections, *, panel_visible: bool) -> None:
         self._pending_roi_inspection_refresh = SimpleNamespace(
@@ -209,7 +219,8 @@ class InspectionWorkflowMixin:
             roi_key = self._roi_inspection_key(selections)
             request_key = (destination, roi_key)
             if request_key == getattr(self, "_roi_inspection_request_key", None) and (
-                getattr(self, "_roi_inspection_in_flight", False) or request_key == getattr(self, "_roi_inspection_applied_key", None)
+                getattr(self, "_roi_inspection_in_flight", False)
+                or request_key == getattr(self, "_roi_inspection_applied_key", None)
             ):
                 return
             self._roi_inspection_request_key = request_key
@@ -218,18 +229,25 @@ class InspectionWorkflowMixin:
             work_size = self._roi_inspection_work_size(selections)
             frame_target = FrameTarget(
                 semantic_key=request_key,
-                viewport_key=("roi", tuple(selection.id for selection in selections if selection.enabled)),
+                viewport_key=(
+                    "roi",
+                    tuple(selection.id for selection in selections if selection.enabled),
+                ),
                 presentation_key=("roi-inspection", destination),
                 quality="exact-visible",
             )
-            decision = getattr(self, "_gui_callback_budget_decision", lambda *args, **kwargs: None)("roi_refresh", interactive=False)
+            decision = getattr(self, "_gui_callback_budget_decision", lambda *args, **kwargs: None)(
+                "roi_refresh", interactive=False
+            )
             if decision is not None:
                 controller.set_max_callback_dispatch_per_drain(decision.batch_limit)
                 if hasattr(controller, "set_callback_budget_ms"):
                     controller.set_callback_budget_ms(decision.budget_ms)
             self._roi_inspection_in_flight = True
             controller.start_latest(
-                lambda key=roi_key, selections=selections: self._compute_roi_inspection_snapshot(key, selections),
+                lambda key=roi_key, selections=selections: self._compute_roi_inspection_snapshot(
+                    key, selections
+                ),
                 key=request_key,
                 priority=priority,
                 replace_group="roi-inspection",
@@ -248,9 +266,17 @@ class InspectionWorkflowMixin:
                     reusable_output=False,
                 ),
                 on_done=(
-                    (lambda snapshot, key=request_key: self._apply_roi_inspection_snapshot_if_current(key, snapshot))
+                    (
+                        lambda snapshot, key=request_key: (
+                            self._apply_roi_inspection_snapshot_if_current(key, snapshot)
+                        )
+                    )
                     if panel_visible
-                    else (lambda snapshot, key=request_key: self._apply_hidden_roi_overlay_snapshot_if_current(key, snapshot))
+                    else (
+                        lambda snapshot, key=request_key: (
+                            self._apply_hidden_roi_overlay_snapshot_if_current(key, snapshot)
+                        )
+                    )
                 ),
                 on_stale=lambda: setattr(self, "_inspection_stale", True),
                 on_error=lambda exc: self._finish_roi_inspection_error(),
@@ -262,7 +288,12 @@ class InspectionWorkflowMixin:
                 self._record_ui_work("roi_refresh", self._last_inspection_refresh_ms)
 
     def _apply_empty_inspection_state_if_needed(self, selections) -> None:
-        key = ("empty-roi", tuple((selection.id, selection.enabled, selection.geometry) for selection in selections))
+        key = (
+            "empty-roi",
+            tuple(
+                (selection.id, selection.enabled, selection.geometry) for selection in selections
+            ),
+        )
         self._roi_inspection_request_key = key
         self._roi_inspection_in_flight = False
         if key == getattr(self, "_roi_inspection_applied_key", None):
@@ -285,12 +316,18 @@ class InspectionWorkflowMixin:
             frame = self._committed_tiled_frame()
             scene = None if frame is None else getattr(frame, "scene", None)
             value_source = None if frame is None else getattr(frame, "value_source", None)
-            payloads = {} if value_source is None else dict(getattr(value_source, "payloads", {}) or {})
+            payloads = (
+                {} if value_source is None else dict(getattr(value_source, "payloads", {}) or {})
+            )
             source_key = (
                 "tiled-demand",
                 None if frame is None else getattr(frame, "key", None),
                 tuple(
-                    (int(region.region_id), tuple(float(value) for value in region.bounds), bool(region.resident))
+                    (
+                        int(region.region_id),
+                        tuple(float(value) for value in region.bounds),
+                        bool(region.resident),
+                    )
                     for region in tuple(getattr(scene, "regions", ()) or ())
                 ),
                 tuple(
@@ -298,7 +335,9 @@ class InspectionWorkflowMixin:
                     for key, payload in sorted(payloads.items(), key=lambda item: int(item[0]))
                 ),
             )
-        selection_key = tuple((selection.id, selection.enabled, selection.geometry) for selection in selections)
+        selection_key = tuple(
+            (selection.id, selection.enabled, selection.geometry) for selection in selections
+        )
         return source_key, selection_key
 
     def _roi_inspection_work_size(self, selections) -> int:
@@ -310,7 +349,9 @@ class InspectionWorkflowMixin:
             if bounds is None:
                 continue
             x0, y0, x1, y1 = bounds
-            total += max(1, int(np.ceil(x1) - np.floor(x0))) * max(1, int(np.ceil(y1) - np.floor(y0)))
+            total += max(1, int(np.ceil(x1) - np.floor(x0))) * max(
+                1, int(np.ceil(y1) - np.floor(y0))
+            )
         return int(total)
 
     def _compute_roi_inspection_snapshot(self, key, selections):
@@ -390,8 +431,12 @@ class InspectionWorkflowMixin:
         return frame
 
     def _compute_tiled_roi_inspection_snapshot(self, key, selections):
-        stats_by_roi, hist_inputs = self._committed_tiled_roi_values(selections, collect_histograms=True)
-        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
+        stats_by_roi, hist_inputs = self._committed_tiled_roi_values(
+            selections, collect_histograms=True
+        )
+        return RoiInspectionSnapshot(
+            key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96))
+        )
 
     def _compute_montage_roi_inspection_snapshot(self, key, selections):
         stats_by_roi = OrderedDict()
@@ -419,20 +464,27 @@ class InspectionWorkflowMixin:
                     request,
                     priority=getattr(self, "_roi_inspection_priority", Priority.HIDDEN_ROI),
                 )
-                source = result.histogram_data if result.histogram_data is not None else result.image
+                source = (
+                    result.histogram_data if result.histogram_data is not None else result.image
+                )
                 y_slice, x_slice = region
                 offset = (tile.x0 + int(x_slice.start or 0), tile.y0 + int(y_slice.start or 0))
                 values = roi_values_for_region(source, selection.geometry, offset=offset)
                 accumulator.add_values(values)
                 finite = np.asarray(values).ravel()
                 finite = finite[np.isfinite(finite)]
-                if finite.size and sum(value.size for value in exact_values) + finite.size <= 250_000:
+                if (
+                    finite.size
+                    and sum(value.size for value in exact_values) + finite.size <= 250_000
+                ):
                     exact_values.append(finite.copy())
             stats = accumulator.result()
             stats_by_roi[selection.id] = (selection, stats)
             if exact_values:
                 hist_inputs.append((selection.label, np.concatenate(exact_values)))
-        return RoiInspectionSnapshot(key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96)))
+        return RoiInspectionSnapshot(
+            key, stats_by_roi, comparison_histograms(hist_inputs, HistogramSpec(bins=96))
+        )
 
     def _tile_data_provider(self):
         if not hasattr(self, "operation_evaluator"):
@@ -451,7 +503,14 @@ class InspectionWorkflowMixin:
 
     def _roi_colormap_lut(self):
         try:
-            if getattr(getattr(self.view_state, "channel", None), "value", getattr(self.view_state, "channel", None)) == "phase":
+            if (
+                getattr(
+                    getattr(self.view_state, "channel", None),
+                    "value",
+                    getattr(self.view_state, "channel", None),
+                )
+                == "phase"
+            ):
                 return self._phase_colormap().getLookupTable(0.0, 1.0, 256, alpha=False)
         except Exception:
             return None
@@ -514,9 +573,13 @@ class InspectionWorkflowMixin:
                         rows.append(("analytics", f"min {minimum:.4g} · max {maximum:.4g}"))
         elif target.kind == "profile":
             position = view.profileMarkerPosition()
-            axes_text = ", ".join(f"d{axis}" for axis in tuple(getattr(self, "profile_axes", ()) or ()))
+            axes_text = ", ".join(
+                f"d{axis}" for axis in tuple(getattr(self, "profile_axes", ()) or ())
+            )
             if position is not None:
-                rows.append(("show_chart", f"Profile {axes_text} @ ({position[0]:.0f}, {position[1]:.0f})"))
+                rows.append(
+                    ("show_chart", f"Profile {axes_text} @ ({position[0]:.0f}, {position[1]:.0f})")
+                )
             else:
                 rows.append(("show_chart", f"Profile {axes_text}"))
         return tuple(rows)
@@ -561,7 +624,9 @@ class InspectionWorkflowMixin:
             self,
             icon_name="edit",
             initial=selection.label,
-            on_accept=lambda text, roi_id=str(roi_id): self._update_roi_selection(roi_id, label=text),
+            on_accept=lambda text, roi_id=str(roi_id): self._update_roi_selection(
+                roi_id, label=text
+            ),
         )
         bubble.open_at(global_pos or QtGui.QCursor.pos(), focus_widget=bubble.edit)
 
@@ -578,7 +643,9 @@ class InspectionWorkflowMixin:
             self,
             colors=DEFAULT_ROI_COLORS,
             current=selection.color,
-            on_accept=lambda color, roi_id=str(roi_id): self._update_roi_selection(roi_id, color=color),
+            on_accept=lambda color, roi_id=str(roi_id): self._update_roi_selection(
+                roi_id, color=color
+            ),
         )
         bubble.open_at(global_pos or QtGui.QCursor.pos())
 
@@ -602,12 +669,16 @@ class InspectionWorkflowMixin:
         # marker is gone (e.g. cleared by a clamp failure); showing that as
         # active forced a click to "disable" before one could enable.
         live_button = self.widgets["buttons"]["display"]["live_profile"]
-        marker_visible = hasattr(self, "img_view") and self.img_view.profileMarkerPosition() is not None
+        marker_visible = (
+            hasattr(self, "img_view") and self.img_view.profileMarkerPosition() is not None
+        )
         live = live_button.isChecked() and marker_visible
         profile_action = menu.addAction(material_icon("show_chart"), "Live profile")
         profile_action.setCheckable(True)
         profile_action.setChecked(live)
-        profile_action.triggered.connect(lambda checked=False: self._set_live_profile_from_context(bool(checked), image_point))
+        profile_action.triggered.connect(
+            lambda checked=False: self._set_live_profile_from_context(bool(checked), image_point)
+        )
         menu.addSeparator()
         for label, icon_name, tool in (
             ("Add line ROI", "show_chart", "roi_line"),
@@ -616,7 +687,11 @@ class InspectionWorkflowMixin:
             ("Draw freehand ROI", "edit", "roi_freehand"),
         ):
             action = menu.addAction(material_icon(icon_name), label)
-            action.triggered.connect(lambda checked=False, tool=tool, image_point=image_point: self._add_roi_for_tool_at(tool, image_point))
+            action.triggered.connect(
+                lambda checked=False, tool=tool, image_point=image_point: self._add_roi_for_tool_at(
+                    tool, image_point
+                )
+            )
         menu.addSeparator()
         # Save-viewport entry: clicking the parent saves the default flavor
         # (viewport with overlays); hovering expands the specific options.
@@ -625,12 +700,20 @@ class InspectionWorkflowMixin:
         default_font = default_action.font()
         default_font.setBold(True)
         default_action.setFont(default_font)
-        default_action.triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-with-overlays"))
+        default_action.triggered.connect(
+            lambda _checked=False: self._save_viewport_image("viewport-with-overlays")
+        )
         without_action = save_menu.addAction(material_icon("crop"), "Viewport without overlays")
-        without_action.triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-without-overlays"))
+        without_action.triggered.connect(
+            lambda _checked=False: self._save_viewport_image("viewport-without-overlays")
+        )
         full_action = save_menu.addAction(material_icon("data_array"), "Full content")
-        full_action.triggered.connect(lambda _checked=False: self._save_viewport_image("full-content"))
-        save_menu.menuAction().triggered.connect(lambda _checked=False: self._save_viewport_image("viewport-with-overlays"))
+        full_action.triggered.connect(
+            lambda _checked=False: self._save_viewport_image("full-content")
+        )
+        save_menu.menuAction().triggered.connect(
+            lambda _checked=False: self._save_viewport_image("viewport-with-overlays")
+        )
         menu.addSeparator()
         show_inspection = menu.addAction(material_icon("analytics"), "Show inspection dock")
         show_inspection.triggered.connect(self._show_inspection_dock)
@@ -747,7 +830,9 @@ class InspectionWorkflowMixin:
         if kind == RoiKind.POLYLINE:
             return {"points": ((x - 10, y - 6), (x, y + 8), (x + 10, y - 6))}
         if kind == RoiKind.FREEHAND_POLYGON:
-            return {"points": ((x - 10, y - 10), (x + 10, y - 10), (x + 10, y + 10), (x - 10, y + 10))}
+            return {
+                "points": ((x - 10, y - 10), (x + 10, y - 10), (x + 10, y + 10), (x - 10, y + 10))
+            }
         return {}
 
     def _update_roi_info_overlay(self, stats_by_roi):
@@ -758,7 +843,9 @@ class InspectionWorkflowMixin:
         rows = []
         for _roi_id, (selection, stats) in list(stats_by_roi.items())[:6]:
             kind = selection.geometry.kind.value.replace("_", " ")
-            mean = "" if stats.mean is None or not np.isfinite(stats.mean) else f"µ={stats.mean:.4g}"
+            mean = (
+                "" if stats.mean is None or not np.isfinite(stats.mean) else f"µ={stats.mean:.4g}"
+            )
             rows.append((selection.label, kind, f"n={stats.finite_count}", mean))
         self.img_view.setRoiInfoRows(rows)
 
@@ -803,9 +890,13 @@ class InspectionWorkflowMixin:
                 continue
             accumulator = RoiStatsAccumulator()
             exact_values = []
-            for region, local_region, offset in self._roi_scene_regions(selection.geometry, regions):
+            for region, local_region, offset in self._roi_scene_regions(
+                selection.geometry, regions
+            ):
                 committed = value_source.tile_region(
-                    SimpleNamespace(region_id=int(region.region_id), tile_number=int(region.region_id)),
+                    SimpleNamespace(
+                        region_id=int(region.region_id), tile_number=int(region.region_id)
+                    ),
                     local_region,
                 )
                 if committed is None:
@@ -817,7 +908,10 @@ class InspectionWorkflowMixin:
                 if collect_histograms:
                     finite = np.asarray(values).ravel()
                     finite = finite[np.isfinite(finite)]
-                    if finite.size and sum(value.size for value in exact_values) + finite.size <= 250_000:
+                    if (
+                        finite.size
+                        and sum(value.size for value in exact_values) + finite.size <= 250_000
+                    ):
                         exact_values.append(finite.copy())
             stats = accumulator.result()
             stats_by_roi[selection.id] = (selection, stats)

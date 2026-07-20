@@ -22,7 +22,7 @@ class ImageSurface(Protocol):
     @property
     def widget(self): ...
 
-    def present_tiled(self, presentation: "DisplayTiledPresentation") -> "TileCommitReport": ...
+    def present_tiled(self, presentation: DisplayTiledPresentation) -> TileCommitReport: ...
 
     def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
         """Mark the drawn tiled presentation as semantically superseded.
@@ -61,7 +61,7 @@ class ImageSurface(Protocol):
 
     def interaction_event_owner(self) -> str: ...
 
-    def sync_interaction_state(self, state: "DisplayInteractionState") -> None: ...
+    def sync_interaction_state(self, state: DisplayInteractionState) -> None: ...
 
     def reset_surface(self, reason: str) -> None: ...
 
@@ -83,7 +83,9 @@ def surface_for_view(view) -> ImageSurface:
     elif surface is None:
         detail = ".surface is None"
     else:
-        detail = f".surface is {_qualified_type_name(surface)}, which does not implement ImageSurface"
+        detail = (
+            f".surface is {_qualified_type_name(surface)}, which does not implement ImageSurface"
+        )
     raise TypeError(f"{view_type} does not expose an ImageSurface ({detail})")
 
 

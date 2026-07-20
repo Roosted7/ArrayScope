@@ -30,12 +30,10 @@ def analyze_trace_latency(path: str | Path) -> dict[str, object]:
         if event.get("kind") == "kernel_finish" and event.get("task_seq") is not None
     }
     queue_ms = [
-        (started[seq] - submitted[seq]) / 1_000_000.0
-        for seq in started.keys() & submitted.keys()
+        (started[seq] - submitted[seq]) / 1_000_000.0 for seq in started.keys() & submitted.keys()
     ]
     run_ms = [
-        (finished[seq] - started[seq]) / 1_000_000.0
-        for seq in finished.keys() & started.keys()
+        (finished[seq] - started[seq]) / 1_000_000.0 for seq in finished.keys() & started.keys()
     ]
     drains = [
         float(event.get("elapsed_ms", 0.0) or 0.0)
@@ -43,9 +41,7 @@ def analyze_trace_latency(path: str | Path) -> dict[str, object]:
         if event.get("kind") == "bridge_drain"
     ]
     acknowledgements = sorted(
-        int(event["ts_ns"])
-        for event in events
-        if event.get("kind") == "backend_ack"
+        int(event["ts_ns"]) for event in events if event.get("kind") == "backend_ack"
     )
     input_to_ack_ms = []
     for event in events:

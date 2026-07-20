@@ -8,6 +8,8 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
@@ -17,11 +19,14 @@ from arrayscope.display.pyramid import (
     MaterializedLodPage,
     materialize_source_grid_pages,
 )
-from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.frame_targets import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
 from arrayscope.display.slice_engine import make_image_from_slab, make_shader_image_from_slab
-from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot, stage_document_key
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import Priority, WorkItem
+from arrayscope.operations.evaluator import (
+    EvaluationResult,
+    evaluate_image_snapshot,
+    stage_document_key,
+)
 from arrayscope.operations.slabs import evaluate_slab_from_stage, plan_slab, request_for_image
 from arrayscope.render.effects import rendered_tile_from_evaluation_result
 from arrayscope.render.lod import (
@@ -64,20 +69,44 @@ class _MontagePrefetchWorkerResult:
     preview_pages: tuple[MaterializedLodPage, ...] = ()
 
 
-def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int | None = None) -> tuple[MontagePrefetchDecision, ...]:
+def schedule_near_viewport_montage_prefetch(
+    window, session, *, max_tiles: int | None = None
+) -> tuple[MontagePrefetchDecision, ...]:
     if _interaction_active(window):
         # User interaction owns the GUI thread and the worker lanes.  The
         # walk resumes from the next flush/completion invitation; speculation
         # must never add a millisecond to a scrub or drag.
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_interaction", "viewport interaction active"),))
+        return _record(
+            window,
+            (
+                MontagePrefetchDecision(
+                    None, None, "blocked_interaction", "viewport interaction active"
+                ),
+            ),
+        )
     if _busy(window, session):
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),))
+        return _record(
+            window,
+            (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),),
+        )
     if not window._frame_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_no_stage", "raw montage tiles rely on visible-level commit ordering"),))
+        return _record(
+            window,
+            (
+                MontagePrefetchDecision(
+                    None,
+                    None,
+                    "blocked_no_stage",
+                    "raw montage tiles rely on visible-level commit ordering",
+                ),
+            ),
+        )
     preview_walk_only = False
-    if window.win.operation_evaluator._display_cache.bytes_used > int(window.win.operation_evaluator._display_cache.max_bytes * 0.8):
+    if window.win.operation_evaluator._display_cache.bytes_used > int(
+        window.win.operation_evaluator._display_cache.max_bytes * 0.8
+    ):
         # Background preview walk (ADR 0050): a full display cache used to
         # stop speculation for the rest of the stack.  When the retained
         # preview level is active, keep walking never-visited indices in
@@ -87,20 +116,28 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
         if _preview_cache_active(session):
             preview_walk_only = True
         else:
-            return _record(window, (MontagePrefetchDecision(None, None, "blocked_budget", "display cache is near capacity"),))
+            return _record(
+                window,
+                (
+                    MontagePrefetchDecision(
+                        None, None, "blocked_budget", "display cache is near capacity"
+                    ),
+                ),
+            )
     if max_tiles is None:
         max_tiles = _owner_prefetch_batch_limit(window)
     if _owner_memory_pressure_blocks_prefetch(window):
-        return _record(window, (MontagePrefetchDecision(None, None, "blocked_memory_pressure", "memory pressure"),))
+        return _record(
+            window,
+            (MontagePrefetchDecision(None, None, "blocked_memory_pressure", "memory pressure"),),
+        )
 
     decisions = []
     scheduled = 0
     shader_display = bool(getattr(session, "shader_display", False))
     direction = _montage_prefetch_direction(window)
     candidates = (
-        _candidate_tiles(session, direction=direction)
-        if direction
-        else _candidate_tiles(session)
+        _candidate_tiles(session, direction=direction) if direction else _candidate_tiles(session)
     )
     for tile in candidates:
         if scheduled >= int(max_tiles):
@@ -117,21 +154,44 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             document=session.document,
             shader_display=shader_display,
         )
-        if window.win.operation_evaluator.cached_montage_tile(
-            tile.view_state,
-            montage_axis=session.montage_axis,
-            source_index=tile.source_index,
-            colormap_lut=session.colormap_lut,
-            shader_display=shader_display,
-        ) is not None:
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "hit", tile_key=tile_key))
+        if (
+            window.win.operation_evaluator.cached_montage_tile(
+                tile.view_state,
+                montage_axis=session.montage_axis,
+                source_index=tile.source_index,
+                colormap_lut=session.colormap_lut,
+                shader_display=shader_display,
+            )
+            is not None
+        ):
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index), int(tile.source_index), "hit", tile_key=tile_key
+                )
+            )
             continue
         stage = _stage_for_tile(window, session, tile)
         if stage == "in_flight":
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "waiting_stage_in_flight", "nearby tile waits for shared stage", tile_key=tile_key))
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index),
+                    int(tile.source_index),
+                    "waiting_stage_in_flight",
+                    "nearby tile waits for shared stage",
+                    tile_key=tile_key,
+                )
+            )
             continue
         if stage is None and session.document.enabled_operations:
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "skipped_stage_missing", "would recompute expensive stage per tile", tile_key=tile_key))
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index),
+                    int(tile.source_index),
+                    "skipped_stage_missing",
+                    "would recompute expensive stage per tile",
+                    tile_key=tile_key,
+                )
+            )
             continue
         preview_claim = _claim_walk_preview(session, tile)
 
@@ -157,7 +217,9 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
                         provisional_histogram=True,
                     )
                 else:
-                    display_image = make_image_from_slab(slab, request, colormap_lut=session.colormap_lut)
+                    display_image = make_image_from_slab(
+                        slab, request, colormap_lut=session.colormap_lut
+                    )
                 result = EvaluationResult(
                     value=display_image,
                     eval_ms=(perf_counter() - start) * 1000.0,
@@ -185,7 +247,14 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             )
             return _MontagePrefetchWorkerResult(result, pages)
 
-        def done(worker_result, tile=tile, session_id=session.session_id, session_key=session.key, preview_walk_only=preview_walk_only, preview_claim=preview_claim):
+        def done(
+            worker_result,
+            tile=tile,
+            session_id=session.session_id,
+            session_key=session.key,
+            preview_walk_only=preview_walk_only,
+            preview_claim=preview_claim,
+        ):
             if not window._is_current_frame_session(session_id, session_key):
                 _release_walk_preview_claim(session, preview_claim)
                 window.win.operation_evaluator.note_prefetch_stale()
@@ -274,22 +343,37 @@ def schedule_near_viewport_montage_prefetch(window, session, *, max_tiles: int |
             )
         elif started.reason == "deduped":
             window.win.operation_evaluator.note_prefetch_deduped()
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), "deduped", tile_key=tile_key))
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index), int(tile.source_index), "deduped", tile_key=tile_key
+                )
+            )
         else:
             _release_walk_preview_claim(session, preview_claim)
-            decisions.append(MontagePrefetchDecision(int(tile.montage_index), int(tile.source_index), started.reason, tile_key=tile_key))
+            decisions.append(
+                MontagePrefetchDecision(
+                    int(tile.montage_index),
+                    int(tile.source_index),
+                    started.reason,
+                    tile_key=tile_key,
+                )
+            )
 
     if not decisions:
-        decisions.append(MontagePrefetchDecision(None, None, "blocked_no_tile", "no nearby uncached tile"))
+        decisions.append(
+            MontagePrefetchDecision(None, None, "blocked_no_tile", "no nearby uncached tile")
+        )
     return _record(window, tuple(decisions))
 
 
 def _candidate_tiles(session, *, direction: int = 0):
-    excluded = set(int(tile.montage_index) for tile in getattr(session, "visible_tiles", ()))
+    excluded = {int(tile.montage_index) for tile in getattr(session, "visible_tiles", ())}
     excluded.update(int(index) for index in getattr(session, "rendered_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "loading_tiles", ()))
     excluded.update(int(index) for index in getattr(session, "skipped_tiles", ()))
-    candidates = tuple(tile for tile in tuple(session.plan.tiles) if int(tile.montage_index) not in excluded)
+    candidates = tuple(
+        tile for tile in tuple(session.plan.tiles) if int(tile.montage_index) not in excluded
+    )
     if not candidates:
         return ()
     # Plan order is row-major, which would prefetch from the plan's corner;
@@ -341,11 +425,17 @@ def _montage_prefetch_direction(window) -> int:
 def _stage_for_tile(window, session, tile):
     request = request_for_image(tile.view_state)
     plan = plan_slab(session.document, request)
-    retained = tuple(candidate for candidate in getattr(plan.region_plan, "cache_candidates", ()) if getattr(candidate, "retain", True))
+    retained = tuple(
+        candidate
+        for candidate in getattr(plan.region_plan, "cache_candidates", ())
+        if getattr(candidate, "retain", True)
+    )
     if not retained:
         return None
     candidate = retained[-1]
-    key = window.win.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(session.document), candidate)
+    key = window.win.operation_evaluator.stage_materializer.key_for_candidate(
+        stage_document_key(session.document), candidate
+    )
     cache = window.win.operation_evaluator.stage_cache
     value = cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
     if value is None:
@@ -432,8 +522,7 @@ def _warm_prefetched_tiled_residency(window, session, tile, rendered) -> None:
         levels = tuple(float(value) for value in window.win.img_view.getLevels())
     except (AttributeError, TypeError, ValueError):
         levels = tuple(
-            float(value)
-            for value in getattr(session, "user_levels_override", None) or (0.0, 1.0)
+            float(value) for value in getattr(session, "user_levels_override", None) or (0.0, 1.0)
         )
     warm(
         payloads={tile_number: payload},
@@ -609,9 +698,7 @@ def _admit_walk_preview_result(
             raise ValueError("prefetch returned preview pages without a page claim")
         return False
     supplied = tuple(pages)
-    if tuple(page.key for page in supplied) != tuple(
-        plan.key for plan in claim.claimed_plans
-    ):
+    if tuple(page.key for page in supplied) != tuple(plan.key for plan in claim.claimed_plans):
         raise ValueError("prefetch returned pages outside its claimed canonical plans")
     preview = claim.cache
     if getattr(session, "lod_page_cache", None) is not preview:
@@ -659,6 +746,8 @@ def _wake_current_after_walk_preview_terminal(window) -> None:
     _wake_walk_preview_admission(window, current)
 
 
-def _record(window, decisions: tuple[MontagePrefetchDecision, ...]) -> tuple[MontagePrefetchDecision, ...]:
+def _record(
+    window, decisions: tuple[MontagePrefetchDecision, ...]
+) -> tuple[MontagePrefetchDecision, ...]:
     window._last_montage_prefetch_decisions = decisions
     return decisions

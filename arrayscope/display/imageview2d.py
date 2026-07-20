@@ -3,15 +3,19 @@ from time import perf_counter
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
-from pyqtgraph.Qt import QtCore, QtWidgets
+import contextlib
+
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 from pyqtgraph.graphicsItems.ViewBox import ViewBox
+from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.roi import (
     DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE,
     MIN_FREEHAND_POINTS,
@@ -23,10 +27,14 @@ from arrayscope.core.roi import (
     simplify_polyline,
 )
 from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
-from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
-from arrayscope.display.histogram_controller import HistogramDisplayController, HistogramLevelPreviewController
+from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
+from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+from arrayscope.display.histogram_controller import (
+    HistogramDisplayController,
+    HistogramLevelPreviewController,
+)
 from arrayscope.display.image_upload import ensure_imageitem_array
 from arrayscope.display.interaction import (
     CursorIntent,
@@ -36,18 +44,14 @@ from arrayscope.display.interaction import (
     InteractionTarget,
     PointerPhase,
 )
-from arrayscope.display.levels import finite_bounds
-from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.layers import ViewLayerOwner
-from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
-from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+from arrayscope.display.levels import finite_bounds
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_hit_test import RoiHitIndex
-from arrayscope.display.overlays import MontageTileOverlay, MontageTileOverlayItem
-from arrayscope.display.tile_truth_overlay import TileTruthOverlayLayer
-from arrayscope.display.profile_marker import ProfileMarkerOwner
+from arrayscope.display.overlays import MontageTileOverlayItem
 from arrayscope.display.pointer_interaction import QtPointerInteractionDriver
+from arrayscope.display.profile_marker import ProfileMarkerOwner
 from arrayscope.display.roi_items import (
     MovableInfoPanel,
     default_roi_label,
@@ -55,16 +59,21 @@ from arrayscope.display.roi_items import (
     make_item_passive,
     sync_item_to_roi_geometry,
 )
+from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
+from arrayscope.display.tile_truth_overlay import TileTruthOverlayLayer
 from arrayscope.display.viewport import (
     MIN_VIEWPORT_CONTENT_FRACTION,
     ViewportController,
-    ViewportIntent,
     ViewportPolicy,
     constrain_view_range,
 )
 
 if TYPE_CHECKING:
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
 
 
 class ArrayScopeGraphicsView(pg.GraphicsView):
@@ -158,14 +167,14 @@ class ImageViewShell(QtWidgets.QWidget):
 
     """
     Simplified widget for displaying 2D image data.
-    
+
     Features:
     - 2D image display via ImageItem
     - Zoom/pan via ViewBox
     - Histogram with level controls
     - Auto-ranging and level adjustment
     """
-    
+
     roiCreated = QtCore.Signal(object)
     roiChanged = QtCore.Signal(str, object)
     roiDeleted = QtCore.Signal(str)
@@ -185,7 +194,7 @@ class ImageViewShell(QtWidgets.QWidget):
         super().__init__(parent)
         self.surface = self
         self._surface_teardown_done = False
-        
+
         self.image = None
         self.imageDisp = None
         self.levelMin = None
@@ -193,7 +202,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogramDataBounds = None
         self._displayLevels = None
         self._applying_presentation = False
-        self.displayMode = 'square_pixels'  # Default to square pixels
+        self.displayMode = "square_pixels"  # Default to square pixels
         self.histogramSource = None
         self.histogramPlotSource = None
         self._histogram_adapter = None
@@ -240,11 +249,11 @@ class ImageViewShell(QtWidgets.QWidget):
         self._display_colormap = None
         self._display_colormap_lut = default_gray_lut()
         self._display_colormap_key = _array_content_key(self._display_colormap_lut)
-        
+
         # Create the UI layout
         self.setupUI()
         self.graphicsView.viewport().installEventFilter(self)
-        
+
         # Create view if not provided
         if view is None:
             self.view = ViewBox()
@@ -254,7 +263,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.view.setAspectLocked(True)
         self.view.invertY(True)
         self._layer_owner = ViewLayerOwner(self.view)
-        
+
         # Create image item if not provided
         if imageItem is None:
             self.imageItem = ImageItem(axisOrder="row-major")
@@ -262,13 +271,13 @@ class ImageViewShell(QtWidgets.QWidget):
             self.imageItem = imageItem
         self._layer_owner.add_image_item(self.imageItem)
         self._init_tiled_presentation_backend()
-        
+
         # Setup histogram
         self.histogramImageItem = ImageItem(axisOrder="row-major")
         self._bind_histogram_item(self.histogramImageItem)
         self._histogram_preview_controller = HistogramLevelPreviewController(self)
         self._histogram_display_controller = HistogramDisplayController(self)
-        self.histogram.setLevelMode('mono')  # Force mono mode for scalar values
+        self.histogram.setLevelMode("mono")  # Force mono mode for scalar values
         self.histogram.item.sigLevelsChanged.connect(self._on_histogram_levels_changed)
         finish_signal = getattr(self.histogram.item, "sigLevelChangeFinished", None)
         if finish_signal is not None:
@@ -278,11 +287,11 @@ class ImageViewShell(QtWidgets.QWidget):
         # funnels back through the colormap pipeline via this handler.
         self._applying_display_colormap = False
         self._gradient_edit_handler = None
-        try:
-            self.histogram.gradient.sigGradientChangeFinished.connect(self._on_histogram_gradient_finished)
-        except Exception:
-            pass
-        
+        with contextlib.suppress(Exception):
+            self.histogram.gradient.sigGradientChangeFinished.connect(
+                self._on_histogram_gradient_finished
+            )
+
         # Initialize levels
         self.levelMin = 0.0
         self.levelMax = 1.0
@@ -306,14 +315,22 @@ class ImageViewShell(QtWidgets.QWidget):
         self._profile_vline.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         self._profile_hline.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
         self._profile_handle.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-        self._profile_vline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("vertical"))
-        self._profile_hline.sigPositionChanged.connect(lambda *_args: self._on_profile_marker_changed("horizontal"))
-        self._profile_handle.sigPositionChanged.connect(lambda *_args: self._on_profile_handle_changed("center"))
+        self._profile_vline.sigPositionChanged.connect(
+            lambda *_args: self._on_profile_marker_changed("vertical")
+        )
+        self._profile_hline.sigPositionChanged.connect(
+            lambda *_args: self._on_profile_marker_changed("horizontal")
+        )
+        self._profile_handle.sigPositionChanged.connect(
+            lambda *_args: self._on_profile_handle_changed("center")
+        )
         make_item_passive(self._profile_vline)
         make_item_passive(self._profile_hline)
         make_item_passive(self._profile_handle)
         if self.draws_qgraphics_profile_marker_items:
-            self._layer_owner.add_profile_marker_items(self._profile_vline, self._profile_hline, self._profile_handle)
+            self._layer_owner.add_profile_marker_items(
+                self._profile_vline, self._profile_hline, self._profile_handle
+            )
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -343,10 +360,8 @@ class ImageViewShell(QtWidgets.QWidget):
         histogram = getattr(self, "histogram", None)
         if histogram is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             histogram.setBackground(tokens.canvas)
-        except Exception:
-            pass
         try:
             item = histogram.item
             handle = pg.mkColor(tokens.level_handle)
@@ -386,11 +401,11 @@ class ImageViewShell(QtWidgets.QWidget):
         self.layout = QtWidgets.QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
-        
+
         # Graphics view for image display
         self.graphicsView = ArrayScopeGraphicsView(self)
         self.layout.addWidget(self.graphicsView, 1)  # Give it most of the space
-        
+
         # Histogram widget
         self.histogram = pg.HistogramLUTWidget()
         self.layout.addWidget(self.histogram)
@@ -513,7 +528,9 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_layer_texture_submit_ms=float(timing["tile_layer_texture_submit_ms"]),
             tile_layer_vertex_uploads=int(timing["tile_layer_vertex_uploads"]),
             tile_layer_level_updates=int(timing["tile_layer_level_updates"]),
-            tile_layer_level_update_pending_items=int(timing["tile_layer_level_update_pending_items"]),
+            tile_layer_level_update_pending_items=int(
+                timing["tile_layer_level_update_pending_items"]
+            ),
             tile_layer_estimated_gpu_bytes=int(timing["tile_layer_estimated_gpu_bytes"]),
             tile_layer_cpu_shadow_bytes=int(timing["tile_layer_cpu_shadow_bytes"]),
             tile_layer_page_count=int(timing["tile_layer_page_count"]),
@@ -532,8 +549,12 @@ class ImageViewShell(QtWidgets.QWidget):
             tile_layer_mipmap_available=bool(timing["tile_layer_mipmap_available"]),
             tile_layer_complex_texture_uploads=int(timing["tile_layer_complex_texture_uploads"]),
             tile_layer_shader_uniform_updates=int(timing["tile_layer_shader_uniform_updates"]),
-            tile_layer_lod_level_swaps_zero_upload=int(timing["tile_layer_lod_level_swaps_zero_upload"]),
-            tile_layer_lod_level_swaps_with_upload=int(timing["tile_layer_lod_level_swaps_with_upload"]),
+            tile_layer_lod_level_swaps_zero_upload=int(
+                timing["tile_layer_lod_level_swaps_zero_upload"]
+            ),
+            tile_layer_lod_level_swaps_with_upload=int(
+                timing["tile_layer_lod_level_swaps_with_upload"]
+            ),
             tile_layer_superseded_reclaimed_under_pressure=int(
                 timing["tile_layer_superseded_reclaimed_under_pressure"]
             ),
@@ -552,7 +573,9 @@ class ImageViewShell(QtWidgets.QWidget):
         return self._last_upload_timing
 
     @staticmethod
-    def _merge_upload_timing(previous: ImageUploadTiming, current: ImageUploadTiming) -> ImageUploadTiming:
+    def _merge_upload_timing(
+        previous: ImageUploadTiming, current: ImageUploadTiming
+    ) -> ImageUploadTiming:
         additive_fields = (
             "total_ms",
             "visible_upload_ms",
@@ -697,11 +720,20 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _refresh_histogram_plot(self, *, auto_level: bool = False) -> None:
         start = perf_counter()
-        if self._histogram_display_controller is None or not self._histogram_display_controller.refresh_histogram_plot(auto_level=bool(auto_level)):
+        if (
+            self._histogram_display_controller is None
+            or not self._histogram_display_controller.refresh_histogram_plot(
+                auto_level=bool(auto_level)
+            )
+        ):
             self.histogram.item.imageChanged(autoLevel=bool(auto_level))
         elapsed_ms = (perf_counter() - start) * 1000.0
         self._record_upload_timing("histogram_recompute_ms", elapsed_ms)
-        source = self.histogramPlotSource if self.histogramPlotSource is not None else self.histogramSource
+        source = (
+            self.histogramPlotSource
+            if self.histogramPlotSource is not None
+            else self.histogramSource
+        )
         self._record_gui_callback_observation(
             channel="histogram_refresh",
             work_class="histogram_plot",
@@ -710,7 +742,9 @@ class ImageViewShell(QtWidgets.QWidget):
             byte_count=0 if source is None else int(getattr(np.asarray(source), "nbytes", 0) or 0),
         )
 
-    def _set_image_item_data(self, item, data, levels, *, role: str, emit_histogram_change: bool = True) -> bool:
+    def _set_image_item_data(
+        self, item, data, levels, *, role: str, emit_histogram_change: bool = True
+    ) -> bool:
         previous = getattr(item, "image", None)
         same_object = previous is data
         if not same_object and isinstance(previous, np.ndarray) and isinstance(data, np.ndarray):
@@ -727,19 +761,25 @@ class ImageViewShell(QtWidgets.QWidget):
         if same_object:
             item.setImage(None, autoLevels=False, levels=levels, **image_kwargs)
         else:
-            item.setImage(ensure_imageitem_array(data), autoLevels=False, levels=levels, **image_kwargs)
+            item.setImage(
+                ensure_imageitem_array(data), autoLevels=False, levels=levels, **image_kwargs
+            )
         elapsed = (perf_counter() - start) * 1000.0
         timing = self._upload_timing
         if str(role) == "histogram":
             self._record_upload_timing("histogram_upload_ms", elapsed)
             if timing is not None:
                 timing["histogram_bytes"] = int(timing["histogram_bytes"]) + int(array.nbytes)
-                timing["histogram_pixels"] = int(timing["histogram_pixels"]) + int(np.prod(array.shape[:2]))
+                timing["histogram_pixels"] = int(timing["histogram_pixels"]) + int(
+                    np.prod(array.shape[:2])
+                )
         else:
             self._record_upload_timing("visible_upload_ms", elapsed)
             if timing is not None:
                 timing["visible_bytes"] = int(timing["visible_bytes"]) + int(array.nbytes)
-                timing["visible_pixels"] = int(timing["visible_pixels"]) + int(np.prod(array.shape[:2]))
+                timing["visible_pixels"] = int(timing["visible_pixels"]) + int(
+                    np.prod(array.shape[:2])
+                )
                 timing["fast_same_object"] = bool(timing["fast_same_object"] or same_object)
         adapter = getattr(self, "_histogram_adapter", None)
         if emit_histogram_change and adapter is not None and adapter.is_bound_item(item):
@@ -803,10 +843,12 @@ class ImageViewShell(QtWidgets.QWidget):
         state and delta, not placeholder pixels.
         """
 
-        placeholder, tile_payloads, dirty_tiles, tile_source_ids = self._prepare_tiled_montage_commit(
-            geometry,
-            tile_state=tile_state,
-            tile_delta=tile_delta,
+        placeholder, tile_payloads, dirty_tiles, tile_source_ids = (
+            self._prepare_tiled_montage_commit(
+                geometry,
+                tile_state=tile_state,
+                tile_delta=tile_delta,
+            )
         )
         stats = self._apply_backend_tiled_presentation(
             placeholder,
@@ -868,7 +910,9 @@ class ImageViewShell(QtWidgets.QWidget):
     ) -> None:
         """Backend hook: schedule follow-up work (e.g. residency warming)."""
 
-    def _prepare_tiled_montage_commit(self, geometry, *, tile_state: "TilePresentationState", tile_delta: "TilePresentationDelta"):
+    def _prepare_tiled_montage_commit(
+        self, geometry, *, tile_state: "TilePresentationState", tile_delta: "TilePresentationDelta"
+    ):
         tile_payloads = tile_state.active_payloads(tile_delta)
         dirty_tiles = None if tile_delta.force_refresh else tuple(tile_delta.upserts)
         placeholder = _tiled_montage_placeholder(geometry.display_shape, tile_payloads)
@@ -934,11 +978,17 @@ class ImageViewShell(QtWidgets.QWidget):
         timing["tile_layer_storage_evictions"] = int(stats.storage_evictions)
         timing["tile_layer_texture_uploads"] = int(stats.texture_uploads)
         timing["tile_layer_texture_upload_bytes"] = int(stats.texture_upload_bytes)
-        timing["tile_layer_texture_prepare_ms"] = float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0)
-        timing["tile_layer_texture_submit_ms"] = float(getattr(stats, "texture_submit_ms", 0.0) or 0.0)
+        timing["tile_layer_texture_prepare_ms"] = float(
+            getattr(stats, "texture_prepare_ms", 0.0) or 0.0
+        )
+        timing["tile_layer_texture_submit_ms"] = float(
+            getattr(stats, "texture_submit_ms", 0.0) or 0.0
+        )
         timing["tile_layer_vertex_uploads"] = int(stats.vertex_uploads)
         timing["tile_layer_level_updates"] = int(stats.level_updates)
-        timing["tile_layer_level_update_pending_items"] = int(getattr(stats, "level_update_pending_items", 0))
+        timing["tile_layer_level_update_pending_items"] = int(
+            getattr(stats, "level_update_pending_items", 0)
+        )
         timing["tile_layer_estimated_gpu_bytes"] = int(stats.estimated_gpu_bytes)
         timing["tile_layer_cpu_shadow_bytes"] = int(stats.cpu_shadow_bytes)
         timing["tile_layer_page_count"] = int(stats.page_count)
@@ -957,8 +1007,12 @@ class ImageViewShell(QtWidgets.QWidget):
         timing["tile_layer_mipmap_available"] = bool(stats.mipmap_available)
         timing["tile_layer_complex_texture_uploads"] = int(stats.complex_texture_uploads)
         timing["tile_layer_shader_uniform_updates"] = int(stats.shader_uniform_updates)
-        timing["tile_layer_lod_level_swaps_zero_upload"] = int(getattr(stats, "lod_level_swaps_zero_upload", 0))
-        timing["tile_layer_lod_level_swaps_with_upload"] = int(getattr(stats, "lod_level_swaps_with_upload", 0))
+        timing["tile_layer_lod_level_swaps_zero_upload"] = int(
+            getattr(stats, "lod_level_swaps_zero_upload", 0)
+        )
+        timing["tile_layer_lod_level_swaps_with_upload"] = int(
+            getattr(stats, "lod_level_swaps_with_upload", 0)
+        )
         timing["tile_layer_superseded_reclaimed_under_pressure"] = int(
             getattr(stats, "superseded_reclaimed_under_pressure", 0)
         )
@@ -1074,10 +1128,8 @@ class ImageViewShell(QtWidgets.QWidget):
             display.cancel()
         app = getattr(self, "_interaction_application", None)
         if app is not None:
-            try:
+            with contextlib.suppress(Exception):
                 app.applicationStateChanged.disconnect(self._on_application_state_changed)
-            except Exception:
-                pass
             self._interaction_application = None
         self.clearMontageTileOverlays()
         layer = getattr(self, "_tile_truth_overlay_layer", None)
@@ -1092,7 +1144,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 self.view.autoRange(padding=0)
             finally:
                 self._viewport_applying = False
-            
+
     def _updateImageLevels(self, image=None):
         """Update the min/max levels from the current image data"""
         if image is None:
@@ -1180,7 +1232,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._histogram_preview_controller.cancel()
         if self._histogram_display_controller is not None:
             self._histogram_display_controller.cancel_manual_edit()
-                
+
     def autoLevels(self):
         """Automatically set the histogram levels based on image data"""
         if self.imageDisp is not None:
@@ -1189,7 +1241,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 self._updateImageLevels()
                 bounds = self.getHistogramDataBounds() or (self.levelMin, self.levelMax)
             self._sync_display_levels(bounds[0], bounds[1], update_image=True, emit_user=False)
-                
+
     def setLevels(self, min_level, max_level):
         """Set levels as an explicit user action.
 
@@ -1201,15 +1253,15 @@ class ImageViewShell(QtWidgets.QWidget):
     def _apply_display_levels(self, min_level, max_level, *, emit_user: bool) -> None:
         self._sync_display_levels(min_level, max_level, update_image=True, emit_user=emit_user)
 
-    def _sync_display_levels(self, min_level, max_level, *, update_image: bool, emit_user: bool) -> None:
+    def _sync_display_levels(
+        self, min_level, max_level, *, update_image: bool, emit_user: bool
+    ) -> None:
         start = perf_counter()
         low = float(min_level)
         high = float(max_level)
         previous = self._displayLevels
         same_levels = (
-            previous is not None
-            and float(previous[0]) == low
-            and float(previous[1]) == high
+            previous is not None and float(previous[0]) == low and float(previous[1]) == high
         )
         self._displayLevels = (low, high)
         if self._histogram_preview_controller is not None and self._applying_presentation:
@@ -1234,7 +1286,7 @@ class ImageViewShell(QtWidgets.QWidget):
             self._histogram_preview_controller.finish_from_widget()
             return
         self.userLevelsChanged.emit()
-        
+
     def getLevels(self):
         """Get the current histogram levels"""
         if self._displayLevels is not None:
@@ -1256,7 +1308,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogramDataBounds = (float(low), float(high))
         self.levelMin = float(low)
         self.levelMax = float(high)
-        
+
     def setHistogramRange(self, min_val, max_val):
         """Set the range of the histogram"""
         self.histogram.setHistogramRange(min_val, max_val)
@@ -1268,19 +1320,19 @@ class ImageViewShell(QtWidgets.QWidget):
         if bounds is not None:
             return bounds
         return (float(self.levelMin), float(self.levelMax))
-        
+
     def getProcessedImage(self):
         """Get the processed image data"""
         return self.imageDisp
-        
+
     def getView(self):
         """Get the ViewBox containing the image"""
         return self.view
-        
+
     def getImageItem(self):
         """Get the ImageItem"""
         return self.imageItem
-        
+
     def getHistogramWidget(self):
         """Get the histogram widget"""
         return self.histogram
@@ -1415,7 +1467,9 @@ class ImageViewShell(QtWidgets.QWidget):
         visible = bool(self._profile_marker_requested_visible)
         if visible and self._profile_handle is not None:
             pos = self._profile_handle.pos()
-            visible = _point_inside_view_range(self.view.viewRange(), float(pos.x()), float(pos.y()))
+            visible = _point_inside_view_range(
+                self.view.viewRange(), float(pos.x()), float(pos.y())
+            )
         visible = visible and self.draws_qgraphics_profile_marker_items
         if self._profile_vline is not None:
             self._profile_vline.setVisible(visible)
@@ -1424,7 +1478,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if self._profile_handle is not None:
             self._profile_handle.setVisible(visible)
         self._after_profile_marker_sync()
-        
+
     def clear(self):
         """Clear the displayed image"""
         self.image = None
@@ -1448,7 +1502,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
             return None
         return data[y_i, x_i]
-        
+
     def setColorMap(self, colormap):
         """Set one display colormap for the colorbar and all scalar surfaces."""
 
@@ -1476,7 +1530,7 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def displayColorMapKey(self):
         return self._display_colormap_key
-        
+
     def setDisplayMode(self, mode):
         """Set the display mode.
 
@@ -1484,7 +1538,7 @@ class ImageViewShell(QtWidgets.QWidget):
         - 'square_pixels': force square pixel display (aspect ratio 1.0)
         - 'fit'          : allow non-uniform scaling so the entire image fits viewport
         """
-        if mode not in ('square_pixels', 'fit'):
+        if mode not in ("square_pixels", "fit"):
             raise ValueError(f"Unknown display mode: {mode}")
         self.displayMode = mode
         self._updateAspectRatio()
@@ -1520,9 +1574,7 @@ class ImageViewShell(QtWidgets.QWidget):
         shape (first bad commit 2995d039).
         """
 
-        normalized = (
-            None if extent is None else (max(1, int(extent[0])), max(1, int(extent[1])))
-        )
+        normalized = None if extent is None else (max(1, int(extent[0])), max(1, int(extent[1])))
         changed = normalized != getattr(self, "_viewport_content_extent", None)
         self._viewport_content_extent = normalized
         return bool(changed)
@@ -1565,7 +1617,12 @@ class ImageViewShell(QtWidgets.QWidget):
         if self.image is not None:
             self._viewport_applying = True
             try:
-                self.viewport_controller.one_to_one(self.view, self._viewport_content_shape(), self.graphicsView.viewport().size(), display_rect=self._current_image_viewport_rect())
+                self.viewport_controller.one_to_one(
+                    self.view,
+                    self._viewport_content_shape(),
+                    self.graphicsView.viewport().size(),
+                    display_rect=self._current_image_viewport_rect(),
+                )
             finally:
                 self._viewport_applying = False
             self._enforce_viewport_constraints()
@@ -1835,7 +1892,11 @@ class ImageViewShell(QtWidgets.QWidget):
         )
         roi_id = f"roi-{self._roi_counter + 1}"
         self._roi_counter += 1
-        color = DEFAULT_ROI_COLORS[(self._roi_counter - 1) % len(DEFAULT_ROI_COLORS)] if color is None else tuple(int(value) for value in color[:3])
+        color = (
+            DEFAULT_ROI_COLORS[(self._roi_counter - 1) % len(DEFAULT_ROI_COLORS)]
+            if color is None
+            else tuple(int(value) for value in color[:3])
+        )
         selection = RoiSelection(
             id=roi_id,
             label=label or default_roi_label(kind, self._roi_counter),
@@ -1865,10 +1926,8 @@ class ImageViewShell(QtWidgets.QWidget):
                 continue
             self._add_roi_selection(selection)
             if str(selection.id).startswith("roi-"):
-                try:
+                with contextlib.suppress(Exception):
                     max_counter = max(max_counter, int(str(selection.id).split("-", 1)[1]))
-                except Exception:
-                    pass
         # _roi_counter stores the last assigned roi-N suffix; createRoi adds one.
         self._roi_counter = max(self._roi_counter, max_counter)
         if selected_id is not None:
@@ -1877,7 +1936,11 @@ class ImageViewShell(QtWidgets.QWidget):
     def removeRoi(self, roi_id):
         roi_id = str(roi_id)
         state = self.interaction_controller.state
-        if state.capture is not None and state.capture.kind == "roi" and state.capture.object_id == roi_id:
+        if (
+            state.capture is not None
+            and state.capture.kind == "roi"
+            and state.capture.object_id == roi_id
+        ):
             self._cancel_interaction("target-removed")
         item_selection = self._roi_items.pop(roi_id, None)
         if item_selection is None:
@@ -1887,7 +1950,11 @@ class ImageViewShell(QtWidgets.QWidget):
             self._highlighted_roi_id = None
         if self._interaction_visual_roi_id == roi_id:
             self._interaction_visual_roi_id = None
-        if state.hover is not None and state.hover.kind == "roi" and state.hover.object_id == roi_id:
+        if (
+            state.hover is not None
+            and state.hover.kind == "roi"
+            and state.hover.object_id == roi_id
+        ):
             self.sync_interaction_state(self.interaction_controller.clear_hover())
         item, _selection = item_selection
         if item is not None:
@@ -1918,7 +1985,9 @@ class ImageViewShell(QtWidgets.QWidget):
                 self._backend_roi_emphasis_changed(current_id)
         return True
 
-    def _set_roi_geometry(self, roi_id: str, geometry: RoiGeometry, *, emit: bool, sync_item: bool = True) -> bool:
+    def _set_roi_geometry(
+        self, roi_id: str, geometry: RoiGeometry, *, emit: bool, sync_item: bool = True
+    ) -> bool:
         roi_id = str(roi_id)
         item_selection = self._roi_items.get(str(roi_id))
         if item_selection is None:
@@ -2014,7 +2083,7 @@ class ImageViewShell(QtWidgets.QWidget):
             return
         item, selection = item_selection
         width, rgb = self._roi_visual_style(roi_id, selection.color)
-        item.setPen(pg.mkPen(tuple(rgb) + (255,), width=width))
+        item.setPen(pg.mkPen((*tuple(rgb), 255), width=width))
 
     def _sync_profile_interaction_visuals(self) -> None:
         marker_pen = (
@@ -2058,21 +2127,27 @@ class ImageViewShell(QtWidgets.QWidget):
         rect_width = max(1.0, width * 0.25)
         rect_height = max(1.0, height * 0.25)
         return ((width - rect_width) * 0.5, (height - rect_height) * 0.5, rect_width, rect_height)
-        
+
     def _updateAspectRatio(self):
         """Update the aspect ratio based on display mode"""
         if self.image is None:
             return
-            
-        if self.displayMode == 'square_pixels':
+
+        if self.displayMode == "square_pixels":
             # Square pixels: maintain 1:1 aspect ratio
             self.view.setAspectLocked(True, ratio=1.0)
-        elif self.displayMode == 'fit':
+        elif self.displayMode == "fit":
             # Fit: allow free aspect so the whole image fits inside the view box
             self.view.setAspectLocked(False)
 
-    def _apply_viewport_policy(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
-        display_rect = _viewport_rect_for_shape(image_shape, image_origin) if content_rect is None else content_rect
+    def _apply_viewport_policy(
+        self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None
+    ):
+        display_rect = (
+            _viewport_rect_for_shape(image_shape, image_origin)
+            if content_rect is None
+            else content_rect
+        )
         self._viewport_applying = True
         try:
             self.viewport_controller.apply_after_image(
@@ -2086,10 +2161,16 @@ class ImageViewShell(QtWidgets.QWidget):
             self._viewport_applying = False
         self._enforce_viewport_constraints()
 
-    def _refresh_viewport_content_rect(self, image_shape, content_rect=None, *, image_origin=(0.0, 0.0)) -> None:
+    def _refresh_viewport_content_rect(
+        self, image_shape, content_rect=None, *, image_origin=(0.0, 0.0)
+    ) -> None:
         if self.image is None:
             return
-        display_rect = _viewport_rect_for_shape(image_shape, image_origin) if content_rect is None else content_rect
+        display_rect = (
+            _viewport_rect_for_shape(image_shape, image_origin)
+            if content_rect is None
+            else content_rect
+        )
         self._viewport_applying = True
         try:
             self.viewport_controller.apply_after_image(
@@ -2104,7 +2185,11 @@ class ImageViewShell(QtWidgets.QWidget):
         self._enforce_viewport_constraints()
 
     def _enforce_viewport_constraints(self) -> None:
-        if self._viewport_applying or self._viewport_constraining or self.viewport_controller.is_fit_locked():
+        if (
+            self._viewport_applying
+            or self._viewport_constraining
+            or self.viewport_controller.is_fit_locked()
+        ):
             if not self._viewport_constraining:
                 self._remember_accepted_view_range()
             return
@@ -2235,7 +2320,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if callable(handler):
             try:
                 handler(**kwargs)
-            except Exception as exc:  # noqa: BLE001 - boundary with C++ dispatch
+            except Exception as exc:
                 from arrayscope.app.errors import handle_ui_exception
 
                 handle_ui_exception("viewport-resize", exc)
@@ -2260,7 +2345,9 @@ class ImageViewShell(QtWidgets.QWidget):
     ) -> None:
         if self.image is None:
             return
-        viewport_size = self.graphicsView.viewport().size() if viewport_size is None else viewport_size
+        viewport_size = (
+            self.graphicsView.viewport().size() if viewport_size is None else viewport_size
+        )
         self._viewport_applying = True
         square_pixels = getattr(self, "displayMode", "square_pixels") == "square_pixels"
         blocker = QtCore.QSignalBlocker(self.view) if block_range_signals else None
@@ -2317,11 +2404,7 @@ class ImageViewShell(QtWidgets.QWidget):
         if event_type == QtCore.QEvent.Type.MouseMove:
             buttons = event.buttons()
             return bool(
-                buttons
-                & (
-                    QtCore.Qt.MouseButton.LeftButton
-                    | QtCore.Qt.MouseButton.MiddleButton
-                )
+                buttons & (QtCore.Qt.MouseButton.LeftButton | QtCore.Qt.MouseButton.MiddleButton)
             )
         return False
 
@@ -2362,14 +2445,18 @@ class ImageViewShell(QtWidgets.QWidget):
             if item_selection is None:
                 return False
             _item, selection = item_selection
-            state = self.interaction_controller.begin_capture(target, point, roi_geometry=selection.geometry)
+            state = self.interaction_controller.begin_capture(
+                target, point, roi_geometry=selection.geometry
+            )
             self.sync_interaction_state(state)
             return True
         if target.kind == "profile":
             position = self.profileMarkerPosition()
             if position is None:
                 return False
-            state = self.interaction_controller.begin_capture(target, point, profile_position=position)
+            state = self.interaction_controller.begin_capture(
+                target, point, profile_position=position
+            )
             self.sync_interaction_state(state)
             return True
         return False
@@ -2379,7 +2466,9 @@ class ImageViewShell(QtWidgets.QWidget):
             return
         target = result.target
         if target.kind == "roi" and target.object_id is not None and result.geometry is not None:
-            self._set_roi_geometry(str(target.object_id), result.geometry, emit=True, sync_item=True)
+            self._set_roi_geometry(
+                str(target.object_id), result.geometry, emit=True, sync_item=True
+            )
             return
         if target.kind == "profile" and result.profile_position is not None:
             self._apply_profile_drag_position(result.profile_position)
@@ -2417,7 +2506,10 @@ class ImageViewShell(QtWidgets.QWidget):
         return _viewport_rect_for_shape(self.image.shape[:2], (float(pos.x()), float(pos.y())))
 
     def _handle_context_menu_event(self, event):
-        if event.type() != QtCore.QEvent.Type.MouseButtonPress or event.button() != QtCore.Qt.MouseButton.RightButton:
+        if (
+            event.type() != QtCore.QEvent.Type.MouseButtonPress
+            or event.button() != QtCore.Qt.MouseButton.RightButton
+        ):
             return False
         image_point = self._event_image_point(event)
         self.imageContextMenuRequested.emit(event.globalPos(), image_point)
@@ -2429,7 +2521,10 @@ class ImageViewShell(QtWidgets.QWidget):
         if state.pending_draw_tool is None and not drawing_active:
             return False
         event_type = event.type()
-        if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
+        if (
+            event_type == QtCore.QEvent.Type.MouseButtonPress
+            and event.button() == QtCore.Qt.MouseButton.LeftButton
+        ):
             point = self._event_image_point(event)
             if point is None or not self.interaction_controller.begin_drawing(point):
                 return False
@@ -2440,7 +2535,9 @@ class ImageViewShell(QtWidgets.QWidget):
             point = self._event_image_point(event)
             if point is None:
                 return True
-            if self.interaction_controller.append_drawing_point(point, minimum_distance=self._freehand_spacing):
+            if self.interaction_controller.append_drawing_point(
+                point, minimum_distance=self._freehand_spacing
+            ):
                 state = self.interaction_controller.state
                 self._set_roi_drawing_preview(state.pending_draw_tool, state.drawing_points)
             return True
@@ -2596,9 +2693,8 @@ class ImageView2D(ImageViewShell):
                 levels=levels,
                 histogramRange=histogramRange,
             )
-            skip_histogram_upload = (
-                loading_only
-                or montage_dirty_tiles == ()
+            skip_histogram_upload = loading_only or (
+                montage_dirty_tiles == ()
                 and self._montage_tile_layer_histogram_key == histogram_key
                 and getattr(self.histogramImageItem, "image", None) is not None
             )
@@ -2616,11 +2712,15 @@ class ImageView2D(ImageViewShell):
                 )
             if not loading_only:
                 self._montage_tile_layer_histogram_key = histogram_key
-                self._sync_display_levels(float(levels[0]), float(levels[1]), update_image=False, emit_user=False)
+                self._sync_display_levels(
+                    float(levels[0]), float(levels[1]), update_image=False, emit_user=False
+                )
                 self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
             profile_start = perf_counter()
             self._update_profile_line_bounds()
-            self._record_upload_timing("profile_bounds_ms", (perf_counter() - profile_start) * 1000.0)
+            self._record_upload_timing(
+                "profile_bounds_ms", (perf_counter() - profile_start) * 1000.0
+            )
             self._updateAspectRatio()
             self._apply_viewport_policy(
                 tuple(img.shape[:2]),
@@ -2637,11 +2737,27 @@ class ImageView2D(ImageViewShell):
             self._applying_presentation = applying
             self._finish_upload_timing()
 
-    def _update_montage_tile_layer_items(self, img, *, histogramData, geometry, levels, rgb_already_windowed: bool, montage_dirty_tiles, montage_tile_source_ids, montage_tile_payloads=None, tile_delta=None, tile_residency_budget_bytes: int = 0, frame_plan=None) -> TileLayerUpdateStats:
+    def _update_montage_tile_layer_items(
+        self,
+        img,
+        *,
+        histogramData,
+        geometry,
+        levels,
+        rgb_already_windowed: bool,
+        montage_dirty_tiles,
+        montage_tile_source_ids,
+        montage_tile_payloads=None,
+        tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
+        frame_plan=None,
+    ) -> TileLayerUpdateStats:
         if self._montage_tile_layer is None:
             return TileLayerUpdateStats()
         if montage_tile_payloads is None or tile_delta is None:
-            raise ValueError("typed tile payloads and a TilePresentationDelta are required for tiled presentation commits")
+            raise ValueError(
+                "typed tile payloads and a TilePresentationDelta are required for tiled presentation commits"
+            )
         return self._montage_tile_layer.update_presentation(
             img,
             histogram_data=histogramData,
@@ -2685,7 +2801,9 @@ class ImageView2D(ImageViewShell):
         finally:
             self._finish_upload_timing()
 
-    def _tile_layer_histogram_key(self, histogramData, histogramPlotData, *, levels, histogramRange):
+    def _tile_layer_histogram_key(
+        self, histogramData, histogramPlotData, *, levels, histogramRange
+    ):
         source = histogramPlotData if histogramPlotData is not None else histogramData
         return (
             id(source),
@@ -2696,7 +2814,9 @@ class ImageView2D(ImageViewShell):
         )
 
     def _update_montage_tile_levels(self, levels) -> TileLayerUpdateStats:
-        raise RuntimeError("PyQtGraph tiled level changes must use governed tiled presentation commits")
+        raise RuntimeError(
+            "PyQtGraph tiled level changes must use governed tiled presentation commits"
+        )
 
     def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
         if self._montage_display_mode != "tile_layer":
@@ -2724,8 +2844,12 @@ def _previous_viewport_size_from_resize_event(current_viewport_size, event, *, f
         old_size = event.oldSize()
         new_size = event.size()
         if old_size.isValid() and new_size.isValid():
-            width = float(current_viewport_size.width()) + float(old_size.width() - new_size.width())
-            height = float(current_viewport_size.height()) + float(old_size.height() - new_size.height())
+            width = float(current_viewport_size.width()) + float(
+                old_size.width() - new_size.width()
+            )
+            height = float(current_viewport_size.height()) + float(
+                old_size.height() - new_size.height()
+            )
             if width > 0.0 and height > 0.0:
                 return (width, height)
     except Exception:
@@ -2758,12 +2882,18 @@ def _viewport_rect_for_shape(shape, origin=(0.0, 0.0)) -> tuple[float, float, fl
     return (x0, y0, x0 + float(max(1, width)), y0 + float(max(1, height)))
 
 
-def _viewport_rect_for_geometry(geometry, fallback_shape, fallback_origin=(0.0, 0.0)) -> tuple[float, float, float, float]:
+def _viewport_rect_for_geometry(
+    geometry, fallback_shape, fallback_origin=(0.0, 0.0)
+) -> tuple[float, float, float, float]:
     montage = getattr(geometry, "montage", None)
     if montage is None:
         return _viewport_rect_for_shape(fallback_shape, fallback_origin)
-    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
-    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
+    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(
+        montage.gap
+    )
+    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(
+        montage.gap
+    )
     return _viewport_rect_for_shape((height, width), (0.0, 0.0))
 
 
@@ -2817,7 +2947,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         visible_items = int(getattr(stats, "visible_items", len(payloads)) or 0)
         if visible_items < len(payloads):
             payload_order = tuple(sorted(int(tile) for tile in payloads))
-            presented = frozenset(payload_order[:max(0, visible_items)])
+            presented = frozenset(payload_order[: max(0, visible_items)])
         else:
             presented = frozenset(int(tile) for tile in payloads)
     backend_committed = getattr(stats, "committed_upserts", None)
@@ -2836,17 +2966,26 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
     existing_items = int(getattr(stats, "existing_items_shown", 0) or 0)
     relocated = int(getattr(stats, "relocated_tiles", 0) or 0)
     updated_tiles = tuple(int(tile) for tile in tuple(getattr(stats, "updated_tiles", ()) or ()))
-    pyqtgraph_data_updates = max(0, len(updated_tiles) - rgb_window_tiles) if texture_uploads <= 0 else 0
+    pyqtgraph_data_updates = (
+        max(0, len(updated_tiles) - rgb_window_tiles) if texture_uploads <= 0 else 0
+    )
     report_uploads = texture_uploads if texture_uploads > 0 else pyqtgraph_data_updates
-    pyqtgraph_created_without_update = max(0, items_created - len(updated_tiles)) if texture_uploads <= 0 else items_created
+    pyqtgraph_created_without_update = (
+        max(0, items_created - len(updated_tiles)) if texture_uploads <= 0 else items_created
+    )
     report_upload_bytes = int(getattr(stats, "texture_upload_bytes", 0) or 0)
     if report_upload_bytes <= 0 and updated_tiles:
-        report_upload_bytes = sum(int(getattr(payloads.get(int(tile)), "nbytes", 0) or 0) for tile in updated_tiles)
-    resident = max(0, max(existing_items, relocated))
+        report_upload_bytes = sum(
+            int(getattr(payloads.get(int(tile)), "nbytes", 0) or 0) for tile in updated_tiles
+        )
+    resident = max(0, existing_items, relocated)
     delta_key = (
         None
         if tile_delta is None
-        else (int(getattr(tile_delta, "base_revision", 0)), int(getattr(tile_delta, "target_revision", 0)))
+        else (
+            int(getattr(tile_delta, "base_revision", 0)),
+            int(getattr(tile_delta, "target_revision", 0)),
+        )
     )
     return TileCommitReport(
         presented_tiles=presented,

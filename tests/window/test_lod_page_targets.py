@@ -10,7 +10,6 @@ from __future__ import annotations
 from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot, PageTable
 from arrayscope.render import lod as render_lod
 
-
 CONTENT_KEY = ("src-anchored", ("doc", 7), ("request", "window-free"))
 PAGE_SHAPE = (256, 256)
 
@@ -76,9 +75,7 @@ def test_factor_two_shifted_windows_share_aligned_interior_not_boundaries():
 
 def test_desired_mean_page_identity_stays_separate_from_coarse_resolution():
     target = next(
-        key
-        for key in page_targets((0, 512, 101, 1125))
-        if key_rect(key) == (0, 512, 512, 1024)
+        key for key in page_targets((0, 512, 101, 1125)) if key_rect(key) == (0, 512, 512, 1024)
     )
     coarse = DataChunkKey(
         document_generation=target.document_generation,

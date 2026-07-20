@@ -27,7 +27,9 @@ def histogram(values, spec: HistogramSpec | None = None, value_range=None, *, na
     if finite.size == 0:
         edges = _empty_edges(spec, value_range)
         return HistogramResult(str(name), np.zeros(len(edges) - 1, dtype=float), edges)
-    counts, edges = np.histogram(finite, bins=max(1, int(spec.bins)), range=value_range, density=bool(spec.density))
+    counts, edges = np.histogram(
+        finite, bins=max(1, int(spec.bins)), range=value_range, density=bool(spec.density)
+    )
     return HistogramResult(str(name), counts.astype(float), edges.astype(float))
 
 
@@ -45,7 +47,9 @@ def comparison_histograms(named_value_sets, spec: HistogramSpec | None = None):
                 low -= 0.5
                 high += 0.5
             value_range = (low, high)
-    return tuple(histogram(values, spec, value_range=value_range, name=name) for name, values in prepared)
+    return tuple(
+        histogram(values, spec, value_range=value_range, name=name) for name, values in prepared
+    )
 
 
 def _finite_values(values):

@@ -20,7 +20,9 @@ def test_estimate_display_image_bytes_includes_rgb_and_histogram():
 
 
 def test_montage_tile_grid_memory_estimate_rejects_huge_residency():
-    nbytes = estimate_montage_tile_grid_bytes((4096, 4096), 256, np.float32, histogram=True, columns=16)
+    nbytes = estimate_montage_tile_grid_bytes(
+        (4096, 4096), 256, np.float32, histogram=True, columns=16
+    )
 
     assert nbytes > DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES
 

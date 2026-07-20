@@ -10,7 +10,6 @@ from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.memory_policy import MemoryPolicy, format_memory_policy
 from arrayscope.core.resource_governor import ResourceGovernorDiagnostics, ResourcePressure
 
-
 _TELEMETRY_ONLY_FEEDBACK_CHANNELS = frozenset(
     {
         "montage_cold_commit",
@@ -402,7 +401,9 @@ class WindowRuntimeDiagnostics:
 
 
 def format_runtime_diagnostics(snapshot: WindowRuntimeDiagnostics) -> str:
-    return "\n\n".join(f"{title}\n{text}" for title, text in format_runtime_diagnostics_sections(snapshot).items())
+    return "\n\n".join(
+        f"{title}\n{text}" for title, text in format_runtime_diagnostics_sections(snapshot).items()
+    )
 
 
 def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> dict[str, str]:
@@ -418,7 +419,9 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
                 _cache_line("Display tiles", snapshot.display_cache),
                 _cache_line("Profiles/scalars", snapshot.profile_cache),
                 _stage_cache_line("Stage cache", snapshot.stage_cache),
-                _stage_materialization_line("Stage materialization", snapshot.stage_materialization),
+                _stage_materialization_line(
+                    "Stage materialization", snapshot.stage_materialization
+                ),
             )
         ),
         "Memory": format_memory_policy(snapshot.memory_policy),
@@ -442,14 +445,8 @@ def format_runtime_diagnostics_sections(snapshot: WindowRuntimeDiagnostics) -> d
 
 def _realtime_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
     return (
-        (
-            "Bottleneck: "
-            f"{runtime_bottleneck_text(snapshot)}"
-        ),
-        (
-            "Feedback: "
-            f"{_pressure_summary(snapshot.resource_governor)}"
-        ),
+        (f"Bottleneck: {runtime_bottleneck_text(snapshot)}"),
+        (f"Feedback: {_pressure_summary(snapshot.resource_governor)}"),
         (
             "Renderer:\n"
             f"  image={snapshot.image_rendering_backend_actual} "
@@ -529,7 +526,9 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
         for decision in diagnostics.lane_decisions:
             reason = _compact_reason(decision.reason)
             suffix = "" if not reason else f" ({reason})"
-            lines.append(f"  {decision.lane.value}: {decision.target_workers}/{decision.max_workers}{suffix}")
+            lines.append(
+                f"  {decision.lane.value}: {decision.target_workers}/{decision.max_workers}{suffix}"
+            )
     if diagnostics.feedback_channels:
         lines.append("Channels:")
         inactive = []
@@ -597,7 +596,11 @@ def _pressure_summary(diagnostics: ResourceGovernorDiagnostics | None) -> str:
         return "n/a"
     pressure = diagnostics.pressure
     ui_source = _ui_pressure_source(diagnostics)
-    ui_text = pressure.ui_pressure.value if ui_source is None else f"{pressure.ui_pressure.value}({ui_source})"
+    ui_text = (
+        pressure.ui_pressure.value
+        if ui_source is None
+        else f"{pressure.ui_pressure.value}({ui_source})"
+    )
     return (
         f"ui={ui_text} "
         f"cpu_headroom={pressure.cpu_headroom:.0%} "
@@ -612,7 +615,8 @@ def _ui_pressure_source(diagnostics: ResourceGovernorDiagnostics) -> str | None:
     channels = tuple(
         channel
         for channel in diagnostics.feedback_channels
-        if channel.elapsed_ewma_ms is not None and float(channel.elapsed_ewma_ms) > 0.0
+        if channel.elapsed_ewma_ms is not None
+        and float(channel.elapsed_ewma_ms) > 0.0
         and str(channel.channel) not in _TELEMETRY_ONLY_FEEDBACK_CHANNELS
     )
     if not channels:
@@ -713,7 +717,9 @@ def _compact_field_value(name: str, value) -> str:
     return _short_debug_text(value, limit=48)
 
 
-def _auto_extra_lines(obj, covered: frozenset[str], *, heading: str = "More", width: int = 104) -> tuple[str, ...]:
+def _auto_extra_lines(
+    obj, covered: frozenset[str], *, heading: str = "More", width: int = 104
+) -> tuple[str, ...]:
     """Compact ``name=value`` dump of every dataclass field not curated above.
 
     Guarantee behind the diagnostics dialog contract: a field added to a
@@ -852,7 +858,11 @@ _CANVAS_PRESERVE_COVERED = frozenset(
 
 def _canvas_preserve_lines(canvas_preserve: CanvasPreserveRuntimeDiagnostics) -> tuple[str, ...]:
     events = tuple(canvas_preserve.events)
-    recent_events = ("Recent events:", *(f"  {event}" for event in events)) if events else ("Recent events: n/a",)
+    recent_events = (
+        ("Recent events:", *(f"  {event}" for event in events))
+        if events
+        else ("Recent events: n/a",)
+    )
     return (
         (
             f"Mode: {canvas_preserve.mode} platform={canvas_preserve.platform or 'n/a'} "
@@ -1290,9 +1300,18 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
 
 
 def _operation_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
-    optimization_lines = tuple(f"  {_short_debug_text(summary, limit=140)}" for summary in snapshot.operation_optimization_summaries)
-    transition_lines = tuple(f"  {_short_debug_text(transition, limit=160)}" for transition in snapshot.operation_transition_summaries)
-    candidate_lines = tuple(f"  {_short_debug_text(candidate, limit=160)}" for candidate in snapshot.stage_cache_candidate_summaries)
+    optimization_lines = tuple(
+        f"  {_short_debug_text(summary, limit=140)}"
+        for summary in snapshot.operation_optimization_summaries
+    )
+    transition_lines = tuple(
+        f"  {_short_debug_text(transition, limit=160)}"
+        for transition in snapshot.operation_transition_summaries
+    )
+    candidate_lines = tuple(
+        f"  {_short_debug_text(candidate, limit=160)}"
+        for candidate in snapshot.stage_cache_candidate_summaries
+    )
     warning_lines = tuple(f"Warning: {warning}" for warning in snapshot.pipeline_warnings)
     stage_cache_lines = _stage_cache_operation_lines(snapshot.stage_cache)
     return (
@@ -1350,7 +1369,6 @@ def _stage_materialization_line(name: str, diagnostics) -> str:
     )
 
 
-
 def _montage_prefetch_line(name: str, decisions: tuple[object, ...]) -> str:
     if not decisions:
         return f"{name}: n/a"
@@ -1362,7 +1380,10 @@ def _montage_prefetch_line(name: str, decisions: tuple[object, ...]) -> str:
         reason = getattr(decision, "reason", "") or ""
         tile_text = "n/a" if tile is None else str(int(tile))
         source_text = "n/a" if source is None else str(int(source))
-        parts.append(f"tile={tile_text} source={source_text} decision={label}" + (f" reason={reason}" if reason else ""))
+        parts.append(
+            f"tile={tile_text} source={source_text} decision={label}"
+            + (f" reason={reason}" if reason else "")
+        )
     return f"{name}: " + "; ".join(parts)
 
 

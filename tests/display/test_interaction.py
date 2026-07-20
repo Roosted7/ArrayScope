@@ -124,8 +124,11 @@ def test_hit_test_prioritizes_profile_then_topmost_roi():
         tolerance=0.5,
     )
 
-    assert profile.kind == "profile" and profile.part == "center"
-    assert roi.kind == "roi" and roi.object_id == "top" and roi.part == "outline"
+    assert profile.kind == "profile"
+    assert profile.part == "center"
+    assert roi.kind == "roi"
+    assert roi.object_id == "top"
+    assert roi.part == "outline"
 
 
 def test_rectangle_handle_drag_is_computed_by_shared_controller():
@@ -181,6 +184,12 @@ def test_handle_drag_does_not_translate_roi_to_content_rect():
 def test_profile_drag_parts_constrain_semantic_axes():
     position = (4.0, 7.0)
 
-    assert drag_profile_position(position, InteractionTarget("profile", part="vertical"), delta=(3.0, 9.0)) == (7.0, 7.0)
-    assert drag_profile_position(position, InteractionTarget("profile", part="horizontal"), delta=(3.0, 9.0)) == (4.0, 16.0)
-    assert drag_profile_position(position, InteractionTarget("profile", part="center"), delta=(3.0, 9.0)) == (7.0, 16.0)
+    assert drag_profile_position(
+        position, InteractionTarget("profile", part="vertical"), delta=(3.0, 9.0)
+    ) == (7.0, 7.0)
+    assert drag_profile_position(
+        position, InteractionTarget("profile", part="horizontal"), delta=(3.0, 9.0)
+    ) == (4.0, 16.0)
+    assert drag_profile_position(
+        position, InteractionTarget("profile", part="center"), delta=(3.0, 9.0)
+    ) == (7.0, 16.0)

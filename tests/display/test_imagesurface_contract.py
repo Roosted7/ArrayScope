@@ -5,6 +5,7 @@ contract, not widget internals: a behavior fix in shell logic that only
 reaches one backend must fail here.
 """
 
+import contextlib
 import os
 
 import numpy as np
@@ -26,14 +27,12 @@ def _wgpu_adapter_available() -> bool:
         import wgpu
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-        try:
+        with contextlib.suppress(RuntimeError):  # instance already exists
             # Vulkan-only instance BEFORE the first adapter request: letting
             # the probe create an all-backends instance makes GL adapter
             # enumeration re-init EGL, which SIGABRTs in workers that hold
             # live vispy GL state (gate-B Tier 0; full-suite crash 2026-07-18).
             set_instance_extras(backends=["Vulkan"])
-        except RuntimeError:
-            pass  # instance already exists
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
     except Exception:
@@ -48,9 +47,8 @@ def _live_wayland_session() -> bool:
     invocations — the same opt-in shape as ``tests/gpu_interaction``.
     """
 
-    return (
-        os.environ.get("QT_QPA_PLATFORM") == "wayland"
-        and bool(os.environ.get("WAYLAND_DISPLAY"))
+    return os.environ.get("QT_QPA_PLATFORM") == "wayland" and bool(
+        os.environ.get("WAYLAND_DISPLAY")
     )
 
 
@@ -138,9 +136,7 @@ def test_montage_commit_acknowledges_each_loaded_tile(qt_app, backend):
         geometry = DisplayGeometry(
             view_state=ViewState.from_shape((20, 60)).with_image_axes(0, 1),
             display_shape=(20, 60),
-            montage=MontageGeometry(
-                indices=(0, 1), tile_shape=(20, 30), columns=2, rows=1, gap=0
-            ),
+            montage=MontageGeometry(indices=(0, 1), tile_shape=(20, 30), columns=2, rows=1, gap=0),
             montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
         )
         report = _present_tiled(
@@ -163,7 +159,9 @@ def test_hide_tiled_presentation_deactivates_surface(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
         canvas = np.zeros((10, 12), dtype=np.float32)
-        _present_tiled(view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        _present_tiled(
+            view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0)
+        )
         assert view.montageDisplayMode() != "none"
         view.hide_tiled_presentation("contract-test")
         assert view.montageDisplayMode() == "none"
@@ -176,7 +174,9 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
     view = _shown_view(backend, qt_app)
     try:
         canvas = np.zeros((10, 12), dtype=np.float32)
-        _present_tiled(view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        _present_tiled(
+            view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0)
+        )
         if backend == "pyqtgraph":
             layer = view._montage_tile_layer
             resident_before = len(layer.states)
@@ -193,7 +193,9 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         assert resident_before > 0
         if backend == "pyqtgraph":
             assert len(layer.states) == resident_before
-            assert all(not state.visible and not state.item.isVisible() for state in layer.states.values())
+            assert all(
+                not state.visible and not state.item.isVisible() for state in layer.states.values()
+            )
         elif backend in ("wgpu", "wgpu-screen"):
             # Residency (page-table entries) survives; no tile is drawn.
             assert len(executor.page_table.resident_keys()) == resident_before
@@ -210,7 +212,9 @@ def test_reset_tiled_residency_survives_and_recommits(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
         canvas = np.zeros((10, 12), dtype=np.float32)
-        _present_tiled(view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        _present_tiled(
+            view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0)
+        )
         view.reset_tiled_residency("contract-test")
         report = _present_tiled(
             view,
@@ -287,7 +291,9 @@ def test_viewport_camera_rect_reflects_committed_geometry(qt_app, backend):
     view = _shown_view(backend, qt_app)
     try:
         canvas = np.zeros((16, 24), dtype=np.float32)
-        _present_tiled(view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        _present_tiled(
+            view, canvas, histogramData=canvas, levels=(0.0, 1.0), histogramRange=(0.0, 1.0)
+        )
         geometry = _single_tile_geometry(canvas)
         rect = view._current_image_viewport_rect()
         assert rect is not None

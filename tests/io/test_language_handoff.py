@@ -44,10 +44,7 @@ def wrapper_npy_bytes(arr):
         shape_str = f"({arr.shape[0]},)"
     else:
         shape_str = "(" + ", ".join(str(s) for s in arr.shape) + ")"
-    dict_str = (
-        f"{{'descr': '{_DESCR[arr.dtype]}', 'fortran_order': True, "
-        f"'shape': {shape_str}, }}"
-    )
+    dict_str = f"{{'descr': '{_DESCR[arr.dtype]}', 'fortran_order': True, 'shape': {shape_str}, }}"
     unpadded = 6 + 2 + 2 + len(dict_str) + 1
     pad = (64 - unpadded % 64) % 64
     header = (dict_str + " " * pad + "\n").encode("latin1")
@@ -145,8 +142,7 @@ def test_consume_handoff_file(tmp_path):
     assert consume_handoff_file(path) is False  # already gone: best effort
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="Windows cannot unlink a memory-mapped file")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot unlink a memory-mapped file")
 def test_mmap_survives_consume_on_posix(tmp_path):
     """--mmap --consume: the mapping must stay readable after the unlink."""
     arr = np.arange(1000, dtype=np.float32).reshape(10, 100)

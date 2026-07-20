@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.oracles.framebuffer_reference import assert_frame_matches_cpu_reference
 from tests.ui.helpers import (
     frame_session_settled,
@@ -71,9 +70,7 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_injected_uniform(qtb
 
         session = win.renderer._frame_session
         required = set(session.required_tile_numbers())
-        assert len(required) == COUNT, (
-            f"smoke regime drifted: required tiles {sorted(required)}"
-        )
+        assert len(required) == COUNT, f"smoke regime drifted: required tiles {sorted(required)}"
         # Regime guard (strategy law 3): this smoke covers the native-LOD
         # scalar regime only; entering another regime silently must fail.
         for number in sorted(required):
@@ -86,18 +83,14 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_injected_uniform(qtb
 
         report = assert_frame_matches_cpu_reference(win)
         assert {tile.tile_number for tile in report.tiles} == required
-        assert all(
-            tile.samples >= report.min_samples_per_tile for tile in report.tiles
-        )
+        assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles)
 
         # Fault injection: a wrong levels uniform on the live page visual —
         # CPU-side truth (payloads, UI levels) untouched, so every label
         # stays truthful while the frame is visibly wrong.
         layer = win.img_view._vispy_gpu_montage_layer
         visuals = [
-            visual
-            for visual in layer._visuals_by_page
-            if bool(getattr(visual, "visible", False))
+            visual for visual in layer._visuals_by_page if bool(getattr(visual, "visible", False))
         ]
         assert visuals, "no visible VisPy tile page visual"
         originals = [tuple(visual._levels) for visual in visuals]
@@ -109,7 +102,7 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_injected_uniform(qtb
 
         # Repair: restoring the uniform restores the oracle — the failure
         # above was caused by the injected fault, nothing else.
-        for visual, levels in zip(visuals, originals):
+        for visual, levels in zip(visuals, originals, strict=False):
             visual.set_levels(levels)
         assert_frame_matches_cpu_reference(win)
     finally:

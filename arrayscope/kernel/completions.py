@@ -8,11 +8,13 @@ handlers on its own thread.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any
 
 from arrayscope.kernel.task import TaskOutcome, TaskSpec
 
@@ -39,12 +41,12 @@ class DrainBudget:
     max_ms: float = 8.0
     max_bytes: int = 0  # 0 = unlimited
 
-    def start(self) -> "_DrainState":
+    def start(self) -> _DrainState:
         return _DrainState(self)
 
 
 class _DrainState:
-    __slots__ = ("budget", "items", "bytes", "_t0")
+    __slots__ = ("_t0", "budget", "bytes", "items")
 
     def __init__(self, budget: DrainBudget) -> None:
         self.budget = budget
@@ -91,10 +93,8 @@ class CompletionQueue:
             self._events.append(event)
         notify = self._notify
         if notify is not None:
-            try:
+            with contextlib.suppress(Exception):
                 notify()
-            except Exception:
-                pass
 
     def pop(self) -> CompletionEvent | None:
         with self._lock:

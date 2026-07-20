@@ -1,23 +1,8 @@
 from __future__ import annotations
 
-import math
-import os
-from pathlib import Path
-
 import numpy as np
+from pyqtgraph.Qt import QtWidgets
 
-import pyqtgraph.Qt as Qt
-from pyqtgraph.Qt import QtGui, QtWidgets
-
-from arrayscope.ui.dialogs import SaveRangeDialog
-from arrayscope.operations.recipes import load_recipe, save_recipe
-from arrayscope.operations.registry import operation_entries
-from arrayscope.display.slice_engine import apply_channel
-from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping, settings_to_mapping
-from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
-from arrayscope.export.video import VideoExportWorker, VideoExportDialog, VideoExportSettingsDialog
-from arrayscope.core.view_state import ChannelMode, ScaleMode
-from arrayscope.core.window_levels import choose_window_levels
 from arrayscope.io.numpy_save_qt import save_current_numpy_file
 from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.toasts import show_status_message
@@ -53,13 +38,19 @@ class FileReloadMixin:
 
             if self._selector_class_name is None:
                 from arrayscope.io.file_interpreters import load_file
+
                 new_data = load_file(self._filepath)
             else:
-                from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
+                from arrayscope.io.selectors import (
+                    H5DatasetSelector,
+                    MatDatasetSelector,
+                    NpzDatasetSelector,
+                )
+
                 selector_map = {
-                    'H5DatasetSelector': H5DatasetSelector,
-                    'NpzDatasetSelector': NpzDatasetSelector,
-                    'MatDatasetSelector': MatDatasetSelector,
+                    "H5DatasetSelector": H5DatasetSelector,
+                    "NpzDatasetSelector": NpzDatasetSelector,
+                    "MatDatasetSelector": MatDatasetSelector,
                 }
                 selector_cls = selector_map.get(self._selector_class_name)
                 if selector_cls is None:
@@ -127,10 +118,12 @@ class FileReloadMixin:
         if self.data.ndim != old_ndim:
             # Per-dimension widgets were built for old_ndim and cannot be rebuilt in-place.
             # Open a fresh window with the new data and close this one.
-            win = type(self)(new_data,
-                                filepath=self._filepath,
-                                dataset_path=self._dataset_path,
-                                selector_class_name=self._selector_class_name)
+            win = type(self)(
+                new_data,
+                filepath=self._filepath,
+                dataset_path=self._dataset_path,
+                selector_class_name=self._selector_class_name,
+            )
             win.setWindowTitle(self.windowTitle())
             win.show()
             self.close()
@@ -146,14 +139,14 @@ class FileReloadMixin:
 
         # Reset FFT domain state and dim label styling
         self.domain = [Domain.NATIVE for _ in range(self.data.ndim)]
-        for i, label in enumerate(self.widgets['labels']['dims']):
+        for i, label in enumerate(self.widgets["labels"]["dims"]):
             label.setStyleSheet(self.DIMENSION_LABEL_STYLE)
             if i < self.data.ndim:
-                label.setText(f'[{self.data.shape[i]}]')
+                label.setText(f"[{self.data.shape[i]}]")
 
         # Update spinbox maximums (auto-clamps current value)
         for i in range(self.data.ndim):
-            self.widgets['spins']['slice_indices'][i].setMaximum(self.data.shape[i] - 1)
+            self.widgets["spins"]["slice_indices"][i].setMaximum(self.data.shape[i] - 1)
 
         self._set_view_state(self.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._update_channel_controls()
@@ -198,9 +191,15 @@ class FileReloadMixin:
         box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         box.setWindowTitle("Reload Incompatible With Operations")
         box.setText("The reloaded data is not compatible with the current operation stack.")
-        box.setInformativeText(f"{exc}\n\nClear operations and reload, save a view recipe first, or cancel?")
-        clear_button = box.addButton("Reload and clear operations", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-        save_button = box.addButton("Save view recipe first", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        box.setInformativeText(
+            f"{exc}\n\nClear operations and reload, save a view recipe first, or cancel?"
+        )
+        clear_button = box.addButton(
+            "Reload and clear operations", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        save_button = box.addButton(
+            "Save view recipe first", QtWidgets.QMessageBox.ButtonRole.ActionRole
+        )
         cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(cancel_button)
         box.exec()

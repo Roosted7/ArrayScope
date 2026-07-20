@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import platform as platform_module
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 from arrayscope.core.diagnostics_jsonl import (
     diagnostics_jsonl_line,

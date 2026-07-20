@@ -19,7 +19,6 @@ from arrayscope.core.view_recipe import (
 )
 from arrayscope.display.viewport import ViewportMode
 
-
 VIEW_SESSION_VERSION = 1
 SETTINGS_GROUP = "file_view_sessions"
 
@@ -51,7 +50,9 @@ class FileViewSession:
     version: int = VIEW_SESSION_VERSION
 
 
-def metadata_for_file(path, *, dataset_path=None, selector_class_name=None, data=None) -> dict[str, object]:
+def metadata_for_file(
+    path, *, dataset_path=None, selector_class_name=None, data=None
+) -> dict[str, object]:
     path = Path(path)
     stat = path.stat()
     dtype = None if data is None else str(getattr(data, "dtype", ""))
@@ -70,7 +71,16 @@ def metadata_for_file(path, *, dataset_path=None, selector_class_name=None, data
 
 
 def metadata_matches(saved: dict[str, object], current: dict[str, object]) -> bool:
-    keys = ("path", "dataset_path", "selector_class_name", "shape", "ndim", "dtype", "file_size", "mtime_ns")
+    keys = (
+        "path",
+        "dataset_path",
+        "selector_class_name",
+        "shape",
+        "ndim",
+        "dtype",
+        "file_size",
+        "mtime_ns",
+    )
     return all(saved.get(key) == current.get(key) for key in keys)
 
 
@@ -110,7 +120,9 @@ def session_path_for_filename(config_dir, filename) -> Path:
 def save_session_file(config_dir, session: FileViewSession) -> Path:
     path = session_path_for_metadata(config_dir, session.metadata)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as session_file:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as session_file:
         temporary_path = Path(session_file.name)
         session_file.write(dumps_session(session))
         session_file.write("\n")
@@ -118,8 +130,14 @@ def save_session_file(config_dir, session: FileViewSession) -> Path:
     return path
 
 
-def load_session_file(config_dir, metadata: dict[str, object], base_shape, *, filename=None) -> FileViewSession | None:
-    path = session_path_for_filename(config_dir, filename) if filename else session_path_for_metadata(config_dir, metadata)
+def load_session_file(
+    config_dir, metadata: dict[str, object], base_shape, *, filename=None
+) -> FileViewSession | None:
+    path = (
+        session_path_for_filename(config_dir, filename)
+        if filename
+        else session_path_for_metadata(config_dir, metadata)
+    )
     if not path.exists():
         return None
     session = loads_session(path.read_text(encoding="utf-8"), base_shape)
@@ -171,9 +189,15 @@ def loads_session(text: str, base_shape) -> FileViewSession:
 def viewport_to_mapping(viewport: ViewportSession) -> dict[str, object]:
     return {
         "mode": str(viewport.mode),
-        "view_range": None if viewport.view_range is None else [list(axis) for axis in viewport.view_range],
-        "viewport_shape": None if viewport.viewport_shape is None else [int(value) for value in viewport.viewport_shape],
-        "montage_columns": None if viewport.montage_columns is None else int(viewport.montage_columns),
+        "view_range": None
+        if viewport.view_range is None
+        else [list(axis) for axis in viewport.view_range],
+        "viewport_shape": None
+        if viewport.viewport_shape is None
+        else [int(value) for value in viewport.viewport_shape],
+        "montage_columns": None
+        if viewport.montage_columns is None
+        else int(viewport.montage_columns),
     }
 
 
@@ -252,9 +276,13 @@ def roi_to_mapping(selection: RoiSelection) -> dict[str, object]:
         "enabled": bool(selection.enabled),
         "color": [int(value) for value in tuple(selection.color)[:3]],
         "geometry": {
-            "kind": geometry.kind.value if isinstance(geometry.kind, RoiKind) else str(geometry.kind),
+            "kind": geometry.kind.value
+            if isinstance(geometry.kind, RoiKind)
+            else str(geometry.kind),
             "points": [[float(x), float(y)] for x, y in tuple(geometry.points)],
-            "rect": None if geometry.rect is None else [float(value) for value in tuple(geometry.rect)],
+            "rect": None
+            if geometry.rect is None
+            else [float(value) for value in tuple(geometry.rect)],
             "line_width": float(geometry.line_width),
             "closed": bool(geometry.closed),
             "image_axes": [int(axis) for axis in tuple(geometry.image_axes)],

@@ -42,6 +42,8 @@ PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --
 
 Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. VisPy/OpenGL tests still need separate real-hardware runs before performance or Wayland claims are accepted.
 
+Lint and formatting are ruff, configured in `pyproject.toml` and enforced by the CI `lint` job. Before committing: `ruff check --fix .` and `ruff format .`. The ignore list is deliberate (e.g. `E402` because `prefer_pyside6()` must run before Qt imports, `PLC0415` because lazy imports are load-bearing, `PLW0108` because Qt signal-connect lambdas swallow emitted arguments by design) — do not "fix" code to satisfy an ignored rule.
+
 ## Architecture rules
 
 - `ViewState` and document objects own semantic state; widgets mirror state and emit intent.

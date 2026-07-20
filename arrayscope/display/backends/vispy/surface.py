@@ -8,4 +8,5 @@ class VisPySurface(VisPyImageView2D):
 
     surface_kind = "vispy"
 
+
 __all__ = ["VisPySurface"]

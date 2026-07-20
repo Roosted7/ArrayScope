@@ -10,7 +10,6 @@ from time import perf_counter
 from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.operations.regions import RegionSpec, StageKey, region_contains, region_text
 
-
 _PRIORITY_RANK = {
     "lowest": 0,
     "low": 1,
@@ -69,7 +68,10 @@ class StageCache:
         self._cache = BoundedCache(
             max_bytes=int(max_bytes),
             max_entries=int(max_entries),
-            retention_key=lambda key, value: (self.retention_score(key, value), int(value.last_access_counter)),
+            retention_key=lambda key, value: (
+                self.retention_score(key, value),
+                int(value.last_access_counter),
+            ),
         )
         self._lock = self._cache.lock
         self.candidates_seen = 0

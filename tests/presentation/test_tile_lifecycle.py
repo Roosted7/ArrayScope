@@ -19,7 +19,7 @@ from arrayscope.presentation import (
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def lc() -> TileLifecycle:
     return TileLifecycle()
 
@@ -100,9 +100,7 @@ def test_presented_only_via_acknowledgement(lc):
 def test_stale_report_confirms_nothing(lc):
     _evaluated(lc, 0)
     lc.upsert_emitted(0, source_id="s")
-    lc.commit_acknowledged(
-        emitted_tiles=[0], accepted_tiles=[0], active_scope=[0], stale=True
-    )
+    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0], stale=True)
     assert lc.record(0).presentation is Presentation.EMITTED
     assert 0 not in lc.presented_tiles
 
@@ -266,9 +264,10 @@ def test_identity_gate_falls_back_without_evidence(lc):
 def test_stale_report_confirms_and_parks_nothing(lc):
     _evaluated(lc, 6)
     lc.upsert_emitted(6)
-    assert lc.commit_acknowledged(
-        emitted_tiles=[6], accepted_tiles=[6], active_scope=[], stale=True
-    ) == frozenset()
+    assert (
+        lc.commit_acknowledged(emitted_tiles=[6], accepted_tiles=[6], active_scope=[], stale=True)
+        == frozenset()
+    )
     assert lc.record(6).presentation is not Presentation.PRESENTED
     assert 6 not in lc.parked_tiles
 
@@ -299,9 +298,7 @@ def test_removal_clears_presentation_and_park(lc):
     _evaluated(lc, 9)
     lc.upsert_emitted(9)
     lc.commit_acknowledged(emitted_tiles=[9], accepted_tiles=[9], active_scope=[9])
-    lc.commit_acknowledged(
-        emitted_tiles=[], accepted_tiles=[], active_scope=[], removed_tiles=[9]
-    )
+    lc.commit_acknowledged(emitted_tiles=[], accepted_tiles=[], active_scope=[], removed_tiles=[9])
     rec = lc.record(9)
     assert rec.presentation is Presentation.UNPRESENTED
     assert rec.presented_source_id is None

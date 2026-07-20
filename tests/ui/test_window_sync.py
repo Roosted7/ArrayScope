@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 pytest.importorskip("pytestqt")
@@ -50,10 +49,13 @@ def _enable_all_facets(win):
     win.inspection_dock.sync_button.setChecked(True)
 
 
+_DEFAULT_SETTLE_TIMEOUT_MS = min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+
+
 def _settled(
     qtbot,
     predicate,
-    timeout_ms=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+    timeout_ms=_DEFAULT_SETTLE_TIMEOUT_MS,
 ):
     qtbot.waitUntil(
         lambda: bool(predicate()),
@@ -64,9 +66,13 @@ def _settled(
 def test_sync_buttons_toggle_controller_facets(qtbot, make_window):
     win = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     controller = win.sync_controller
-    assert not any(controller.facet_enabled(facet) for facet in ("levels", "dims", "operations", "rois"))
+    assert not any(
+        controller.facet_enabled(facet) for facet in ("levels", "dims", "operations", "rois")
+    )
     _enable_all_facets(win)
-    assert all(controller.facet_enabled(facet) for facet in ("levels", "dims", "operations", "rois"))
+    assert all(
+        controller.facet_enabled(facet) for facet in ("levels", "dims", "operations", "rois")
+    )
     assert controller.bus.is_running()
     win.display_toolbar.sync_window_action.setChecked(False)
     win.sync_dims_button.setChecked(False)
@@ -117,7 +123,9 @@ def test_burst_of_changes_coalesces_through_trailing_timer(qtbot, make_window):
     _settled(qtbot, lambda: win_b.view_state.slice_indices[2] == 3)
 
 
-def test_sustained_changes_publish_periodically_and_trail_final_value(qtbot, make_window, monkeypatch):
+def test_sustained_changes_publish_periodically_and_trail_final_value(
+    qtbot, make_window, monkeypatch
+):
     # Drives schedule_publish directly with a fake clock. Going through the
     # spinbox cascade is racy here: event processing inside setValue can fire
     # the real trailing QTimer mid-step, re-stamping the fake-clock publish
@@ -137,7 +145,9 @@ def test_sustained_changes_publish_periodically_and_trail_final_value(qtbot, mak
     controller_globals = controller.schedule_publish.__func__.__globals__
     monkeypatch.setitem(controller_globals, "monotonic", lambda: now[0])
     monkeypatch.setattr(controller.bus, "publish", published.append)
-    monkeypatch.setattr(controller, "_build_payload", lambda facet: {"slice_indices": [0, 0, value[0]]})
+    monkeypatch.setattr(
+        controller, "_build_payload", lambda facet: {"slice_indices": [0, 0, value[0]]}
+    )
 
     def _set(new_value):
         value[0] = new_value
@@ -166,7 +176,8 @@ def test_sustained_changes_publish_periodically_and_trail_final_value(qtbot, mak
     now[0] += 0.060
     _set(4)
     timer = controller._publish_timers.get("dims")
-    assert timer is not None and timer.isActive()
+    assert timer is not None
+    assert timer.isActive()
 
     qtbot.waitUntil(lambda: len(_state_values()) == 3, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert _state_values() == [1, 3, 4]
@@ -191,12 +202,14 @@ def test_window_levels_sync_between_windows(qtbot, make_window):
     _settled(
         qtbot,
         lambda: (
-            win_a.sync_controller.bus.role == "broker"
-            and win_a.sync_controller.bus.peer_count >= 1
-        )
-        or (
-            win_b.sync_controller.bus.role == "broker"
-            and win_b.sync_controller.bus.peer_count >= 1
+            (
+                win_a.sync_controller.bus.role == "broker"
+                and win_a.sync_controller.bus.peer_count >= 1
+            )
+            or (
+                win_b.sync_controller.bus.role == "broker"
+                and win_b.sync_controller.bus.peer_count >= 1
+            )
         ),
     )
 
@@ -221,7 +234,7 @@ def test_operations_sync_between_windows(qtbot, make_window):
     _settled(qtbot, lambda: len(win_b.document.steps) == 1)
     operation = win_b.document.steps[0].operation
     assert type(operation).__name__.lower().startswith("mean")
-    assert int(getattr(operation, "axis")) == 2
+    assert int(operation.axis) == 2
 
     win_a.clear_operations()
     _settled(qtbot, lambda: len(win_b.document.steps) == 0)

@@ -98,9 +98,7 @@ def _session(*, dtype, view_state, shader_display: bool, count=2):
             eval_ms=0.0,
             slab_shape=image.shape,
             slab_nbytes=image.nbytes,
-            texture_kind=(
-                TexturePlaneKind.COMPLEX_RG32F if complex_input else None
-            ),
+            texture_kind=(TexturePlaneKind.COMPLEX_RG32F if complex_input else None),
         )
     return session
 

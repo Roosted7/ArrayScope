@@ -1,34 +1,40 @@
 import numpy as np
+
 from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
+import platform
+
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
-import platform
+
 from arrayscope.app.errors import handle_ui_exception
-from arrayscope.operations.coordinator import OperationCoordinator
-from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.core.array_metadata import derived_info_for
-from arrayscope.core.compute_policy import ComputeLane, EvaluationContext, compute_policy_from_settings
+from arrayscope.core.compute_policy import (
+    ComputeLane,
+    EvaluationContext,
+    compute_policy_from_settings,
+)
 from arrayscope.core.gui_callback_budget import default_gui_callback_budget_decision
 from arrayscope.core.gui_gc import configure_gui_gc_latency
 from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
 from arrayscope.core.resource_telemetry import sample_resource_snapshot
-from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.core.roi_store import RoiStore
+from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.kernel import Kernel, Lane, Priority, ThreadWorkerBackend
 from arrayscope.kernel.eval_adapter import KernelEvaluationController
 from arrayscope.kernel.qt_bridge import QtKernelBridge
-from arrayscope.export.workflow import ExportWorkflowMixin
+from arrayscope.operations.coordinator import OperationCoordinator
+from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
 from arrayscope.ui.menus import WindowMenuMixin
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.domain import Domain
-from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.file_reload import FileReloadMixin
+from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
@@ -52,25 +58,35 @@ class ArrayScopeWindow(
     # Styling constants — use pt (point) units so font sizes are DPI-independent
     DIMENSION_LABEL_STYLE = "QLabel { font-size: 9pt; padding: 1px; margin: 2px; }"
     FLIP_ICON_STYLE = "QLabel { font-size: 15pt; padding: 0px; margin: 0px; color: palette(text); }"
-    SHIFT_LABEL_STYLE = "QLabel { font-size: 8pt; padding: 1px 2px; margin: 0px; color: palette(mid); }"
+    SHIFT_LABEL_STYLE = (
+        "QLabel { font-size: 8pt; padding: 1px 2px; margin: 0px; color: palette(mid); }"
+    )
     SHIFT_LABEL_ACTIVE_STYLE = "QLabel { font-size: 8pt; padding: 1px 2px; margin: 0px; font-weight: bold; color: darkMagenta; }"
     BUTTON_STYLE = "QPushButton { font-size: 9pt; padding: 2px; margin: 2px; } QPushButton:disabled { color: palette(mid); }"
     SPINBOX_STYLE = "QSpinBox { font-size: 9pt; } QSpinBox:disabled { color: palette(mid); }"
     RADIO_BUTTON_STYLE = "QRadioButton { font-size: 9pt; }"
     GROUPBOX_BASE_STYLE = "QGroupBox { font-size: 9pt; font-weight: bold; border: 1px solid palette(mid); border-radius: 3px; margin-top: 1.4ex; padding-top: 3pt; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }"
-    
+
     @staticmethod
     def _set_emoji_font(widget):
-        if platform.system() == 'Darwin':
+        if platform.system() == "Darwin":
             font = widget.font()
-            font.setFamily('Apple Color Emoji')
+            font.setFamily("Apple Color Emoji")
             widget.setFont(font)
 
-    def __init__(self, data, complex_dim=None, filepath=None, dataset_path=None, selector_class_name=None, axes=None):
+    def __init__(
+        self,
+        data,
+        complex_dim=None,
+        filepath=None,
+        dataset_path=None,
+        selector_class_name=None,
+        axes=None,
+    ):
         configure_gui_gc_latency()
-        super(ArrayScopeWindow, self).__init__()
+        super().__init__()
         self.renderer = RenderOrchestrator(self)
-        self.resize(600,800)
+        self.resize(600, 800)
         self._settings = Qt.QtCore.QSettings()
         self.app_settings = self._load_app_settings()
         self._apply_theme_choice(self.app_settings.theme, persist=False)
@@ -182,7 +198,11 @@ class ArrayScopeWindow(
         self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
         self.singleton = [e == 1 for e in list(self.data.shape)]
-        initial_channel = ChannelMode.COMPLEX if np.issubdtype(self.data.dtype, np.complexfloating) else ChannelMode.REAL
+        initial_channel = (
+            ChannelMode.COMPLEX
+            if np.issubdtype(self.data.dtype, np.complexfloating)
+            else ChannelMode.REAL
+        )
         self.view_state = ViewState.from_shape(self.data.shape).with_channel(initial_channel)
         self._channel_user_selected = False
         self.current_colormap = None
@@ -200,23 +220,25 @@ class ArrayScopeWindow(
         self._focused_dimension_axis = None
         self._active_slice_axis = None
         self.statusBar()
-        
+
         # If data is real-valued and has size-2 dimensions, arrayscope can combine them as complex (ISMRMD uses this for real/imag parts)
         if np.iscomplexobj(data):
             self.can_combine_as_complex = [False] * data.ndim
         else:
             self.can_combine_as_complex = [data.shape[i] == 2 for i in range(data.ndim)]
-        self.combined_as_complex = [np.iscomplexobj(data) and data.shape[i] == 1 for i in range(data.ndim)]
-        
+        self.combined_as_complex = [
+            np.iscomplexobj(data) and data.shape[i] == 1 for i in range(data.ndim)
+        ]
+
         # Store complex_dim for later use (after widgets are created)
         self._initial_complex_dim = complex_dim
-        
+
         # Line plot mode uses a single selected dimension
         self.line_plot_dimension = self.view_state.line_axis or 0
         self.profile_axes = (self.line_plot_dimension,)
         self.roi_store = RoiStore()
         self.interaction_mode = InteractionMode.CURSOR
-                
+
         self._build_window_ui(data, filepath)
         self._update_array_info_label()
         from arrayscope.sync.controller import WindowSyncController
@@ -227,17 +249,25 @@ class ArrayScopeWindow(
             restored_file_view_session = self._restore_file_view_session_if_available()
         finally:
             self._suspend_progressive_dock_sync = False
-        
-        if complex_dim is not None: # user requested combining as complex
+
+        if complex_dim is not None:  # user requested combining as complex
             if complex_dim < 0 or complex_dim >= data.ndim:
-                show_status_message(self, f"complex_dim={complex_dim} is out of range for {data.ndim}D array. Ignoring.")
+                show_status_message(
+                    self,
+                    f"complex_dim={complex_dim} is out of range for {data.ndim}D array. Ignoring.",
+                )
             elif np.iscomplexobj(data):
-                show_status_message(self, f"Data is already complex. Ignoring complex_dim={complex_dim}.")
+                show_status_message(
+                    self, f"Data is already complex. Ignoring complex_dim={complex_dim}."
+                )
             elif data.shape[complex_dim] != 2:
-                show_status_message(self, f"Dimension {complex_dim} has shape {data.shape[complex_dim]}, not 2. Cannot combine as complex.")
+                show_status_message(
+                    self,
+                    f"Dimension {complex_dim} has shape {data.shape[complex_dim]}, not 2. Cannot combine as complex.",
+                )
             else:
-                self.combineAsComplex(complex_dim) # valid
-        
+                self.combineAsComplex(complex_dim)  # valid
+
         # Initialize dimension controls based on the authoritative view state.
         initial_viewport = None
         if restored_file_view_session:
@@ -265,7 +295,9 @@ class ArrayScopeWindow(
             self._restore_viewport_continuity_shape_after_layout()
 
             def finish_restored_file_session_viewport():
-                apply_restored_viewport = getattr(self, "_apply_viewport_continuity_when_ready", None)
+                apply_restored_viewport = getattr(
+                    self, "_apply_viewport_continuity_when_ready", None
+                )
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
 
@@ -274,7 +306,9 @@ class ArrayScopeWindow(
             Qt.QtCore.QTimer.singleShot(0, self, finish_restored_file_session_viewport)
         # Timer category: UI cosmetic. Qt event-turn barrier. Progressive dock preservation starts after
         # startup layout has settled.
-        Qt.QtCore.QTimer.singleShot(0, self, lambda: setattr(self, "_progressive_preserve_enabled", True))
+        Qt.QtCore.QTimer.singleShot(
+            0, self, lambda: setattr(self, "_progressive_preserve_enabled", True)
+        )
 
         def show_first_run_hints():
             if getattr(self, "_closing", False):
@@ -307,7 +341,9 @@ class ArrayScopeWindow(
         self.compute_policy = compute_policy_from_settings(self.app_settings)
         governor = getattr(self, "resource_governor", None)
         if governor is not None:
-            governor.update_policy(self.compute_policy, profile=getattr(self.app_settings, "memory_profile", None))
+            governor.update_policy(
+                self.compute_policy, profile=getattr(self.app_settings, "memory_profile", None)
+            )
             self._apply_resource_governor_decisions()
             return
         quota_by_lane: dict[Lane, int] = {}
@@ -399,9 +435,8 @@ class ArrayScopeWindow(
                 or session.stage_fan_in.active_requests
                 or session.stage_fan_in.attached_requests
             )
-            backlog = (
-                len(getattr(session, "pending_payload_upserts", ()) or ())
-                + len(getattr(session, "pending_removals", ()) or ())
+            backlog = len(getattr(session, "pending_payload_upserts", ()) or ()) + len(
+                getattr(session, "pending_removals", ()) or ()
             )
             semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
             capabilities = image_view_backend_capabilities(self.img_view)
@@ -414,9 +449,7 @@ class ArrayScopeWindow(
                     or int(semantic_progress.pending_batches) > 0
                 )
             )
-            first_pixel_pending = bool(
-                session.scheduling_policy.verdict.coverage_open
-            )
+            first_pixel_pending = bool(session.scheduling_policy.verdict.coverage_open)
         kernel_visible_busy = bool(self.kernel.diagnostics().visible_backlog)
         return SchedulerBusyState(
             visible_busy=bool(
@@ -436,8 +469,12 @@ class ArrayScopeWindow(
                     lambda: False,
                 )()
             ),
-            stage_busy=getattr(getattr(self, "stage_evaluation_controller", None), "is_busy", lambda: False)(),
-            prefetch_busy=getattr(getattr(self, "prefetch_evaluation_controller", None), "is_busy", lambda: False)(),
+            stage_busy=getattr(
+                getattr(self, "stage_evaluation_controller", None), "is_busy", lambda: False
+            )(),
+            prefetch_busy=getattr(
+                getattr(self, "prefetch_evaluation_controller", None), "is_busy", lambda: False
+            )(),
             result_backlog=backlog,
             stage_ready_or_in_flight=stage_ready,
             semantic_evidence_blocking=semantic_evidence_blocking,
@@ -474,7 +511,9 @@ class ArrayScopeWindow(
         if governor is None:
             return
         if refresh_telemetry:
-            policy = self._refresh_memory_policy(active_render=self._resource_governor_work_active())
+            policy = self._refresh_memory_policy(
+                active_render=self._resource_governor_work_active()
+            )
             governor.update_telemetry(sample_resource_snapshot(), policy)
         interactive = self._interaction_active_now()
         self._governor_interactive_applied = interactive
@@ -497,15 +536,9 @@ class ArrayScopeWindow(
             self.kernel.set_lane_quota(lane, workers)
         if montage_worker_target is not None:
             session = getattr(self, "_frame_session", None)
-            verdict = (
-                None if session is None else session.scheduling_policy.verdict
-            )
-            coverage_open = bool(
-                verdict is not None and verdict.coverage_open
-            )
-            preview_target = (
-                min(1, montage_worker_target) if interactive else montage_worker_target
-            )
+            verdict = None if session is None else session.scheduling_policy.verdict
+            coverage_open = bool(verdict is not None and verdict.coverage_open)
+            preview_target = min(1, montage_worker_target) if interactive else montage_worker_target
             self.kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, preview_target)
             self.kernel.set_lane_quota(
                 Lane.DISPLAY_PREPARATION,
@@ -581,9 +614,13 @@ class ArrayScopeWindow(
     def _on_viewport_interaction_quiet(self) -> None:
         self._viewport_interaction_active = False
         self._note_interaction_state_changed()
-        if getattr(self, "_montage_viewport_update_pending", False) and getattr(self.view_state, "montage_axis", None) is not None:
+        if (
+            getattr(self, "_montage_viewport_update_pending", False)
+            and getattr(self.view_state, "montage_axis", None) is not None
+        ):
             self._montage_viewport_update_pending = False
             self.retarget_montage_viewport()
+
     def resizeEvent(self, event):
         # A top-level resize after the saved shape has settled is new user
         # intent. Release it before QMainWindow relays the resize into child

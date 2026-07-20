@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from arrayscope.gpu.keys import REDUCERS, REDUCER_MEAN, REPRESENTATIONS, DataChunkKey
+from arrayscope.gpu.keys import REDUCER_MEAN, REDUCERS, REPRESENTATIONS, DataChunkKey
 
 #: Display mapping modes for complex-valued chunks. Scalar chunks use
 #: ``"real"`` (imaginary plane is zero by construction).
@@ -85,9 +85,7 @@ class DisplayMapping:
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
-            raise ValueError(
-                f"unknown mapping mode {self.mode!r}; expected one of {MAPPING_MODES}"
-            )
+            raise ValueError(f"unknown mapping mode {self.mode!r}; expected one of {MAPPING_MODES}")
         if self.scale not in MAPPING_SCALES:
             raise ValueError(
                 f"unknown mapping scale {self.scale!r}; expected one of {MAPPING_SCALES}"
@@ -146,9 +144,7 @@ class ContentPlane:
         object.__setattr__(self, "representation", representation)
         reducer = str(self.lod_reducer)
         if reducer not in REDUCERS:
-            raise ValueError(
-                f"unknown plane LOD reducer {reducer!r}; expected one of {REDUCERS}"
-            )
+            raise ValueError(f"unknown plane LOD reducer {reducer!r}; expected one of {REDUCERS}")
         object.__setattr__(self, "lod_reducer", reducer)
 
 
@@ -172,15 +168,9 @@ class TileInstance:
     plane_index: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "dst_rect", tuple(float(v) for v in self.dst_rect)
-        )
-        object.__setattr__(
-            self, "src_origin", tuple(float(v) for v in self.src_origin)
-        )
-        object.__setattr__(
-            self, "src_size", tuple(float(v) for v in self.src_size)
-        )
+        object.__setattr__(self, "dst_rect", tuple(float(v) for v in self.dst_rect))
+        object.__setattr__(self, "src_origin", tuple(float(v) for v in self.src_origin))
+        object.__setattr__(self, "src_size", tuple(float(v) for v in self.src_size))
         if len(self.dst_rect) != 4 or len(self.src_origin) != 2 or len(self.src_size) != 2:
             raise ValueError("malformed tile instance geometry")
         object.__setattr__(self, "lod_level", max(0, int(self.lod_level)))

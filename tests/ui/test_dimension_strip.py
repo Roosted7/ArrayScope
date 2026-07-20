@@ -28,8 +28,8 @@ def test_image_axes_show_full_range_colon(qt_app):
 
 
 def test_dimension_chip_update_state_skips_unchanged_icon_work(qt_app, monkeypatch):
-    from arrayscope.core.view_state import ViewState
     import arrayscope.ui.dimension_strip as dimension_strip
+    from arrayscope.core.view_state import ViewState
 
     calls = []
     original = dimension_strip.set_button_icon
@@ -66,7 +66,10 @@ def test_dimension_strip_wraps_to_allocated_width(qt_app):
     # Two columns at most: max chip width + preferred spacing must fit the
     # 520 px allocation.
     assert strip.maximumWidth() <= 520
-    assert max(strip.chip(axis).geometry().right() for axis in range(6)) <= strip.contentsRect().right()
+    assert (
+        max(strip.chip(axis).geometry().right() for axis in range(6))
+        <= strip.contentsRect().right()
+    )
     assert strip.chip(2).geometry().top() > strip.chip(0).geometry().top()
     strip.close()
 

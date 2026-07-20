@@ -25,12 +25,13 @@ import itertools
 import threading
 import traceback
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from time import monotonic, perf_counter_ns
-from typing import Any, Callable
+from typing import Any
 
-from arrayscope.kernel.completions import CompletionEvent, CompletionQueue
 from arrayscope.core.trace import emit_trace
+from arrayscope.kernel.completions import CompletionEvent, CompletionQueue
 from arrayscope.kernel.task import (
     CancellationToken,
     Lane,
@@ -42,7 +43,6 @@ from arrayscope.kernel.task import (
     WorkItem,
 )
 from arrayscope.operations.cancellation import EvaluationCancelled
-
 
 _QUEUED = "queued"
 _PARKED_DEPS = "parked_deps"
@@ -75,7 +75,7 @@ class TaskHandle:
 
     __slots__ = ("_kernel", "_seq", "key")
 
-    def __init__(self, kernel: "Kernel", seq: int, key: object) -> None:
+    def __init__(self, kernel: Kernel, seq: int, key: object) -> None:
         self._kernel = kernel
         self._seq = seq
         self.key = key
@@ -360,7 +360,7 @@ class Kernel:
                 "kernel_rerank",
                 session_id=session_id,
                 updated_tasks=int(updated),
-                updated_tiles=int(len(updated_tiles)),
+                updated_tiles=len(updated_tiles),
                 ready_updated=int(ready_updated),
                 parked_updated=int(parked_updated),
             )
@@ -379,9 +379,7 @@ class Kernel:
         normalized = None if quota is None else max(0, int(quota))
         with self._lock:
             current = self._lane_quotas.get(lane)
-            if current == normalized and (
-                normalized is not None or lane not in self._lane_quotas
-            ):
+            if current == normalized and (normalized is not None or lane not in self._lane_quotas):
                 return
             if normalized is None:
                 self._lane_quotas.pop(lane, None)
@@ -428,9 +426,7 @@ class Kernel:
                     # review 2026-07-19, finding 4). The Qt bridge closes
                     # before kernel shutdown by design; delivery is the
                     # kernel's contract, draining is the consumer's.
-                    self._deliver_locked(
-                        record, TaskOutcome.CANCELLED, reason="kernel_shutdown"
-                    )
+                    self._deliver_locked(record, TaskOutcome.CANCELLED, reason="kernel_shutdown")
                     queued_cancelled += 1
                 elif record.state == _RUNNING:
                     running_cancelled += 1
@@ -463,10 +459,7 @@ class Kernel:
             self._last_shutdown_diagnostics = diagnostics
         if alive_threads:
             elapsed_ms = (monotonic() - shutdown_started) * 1000.0
-            scopes = tuple(
-                row["scope"] or repr(row["key"])
-                for row in diagnostics
-            )
+            scopes = tuple(row["scope"] or repr(row["key"]) for row in diagnostics)
             emit_trace(
                 "kernel_shutdown",
                 action="timeout",
@@ -642,7 +635,7 @@ class Kernel:
         except EvaluationCancelled:
             self._finish(record, TaskOutcome.CANCELLED)
             return
-        except BaseException as exc:  # noqa: BLE001 - worker boundary
+        except BaseException as exc:
             exc.arrayscope_traceback = "".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
             )
@@ -702,7 +695,9 @@ class Kernel:
     def _deliver_locked(
         self, record: _Record, outcome: TaskOutcome, *, value=None, error=None, reason: str = ""
     ) -> None:
-        event = CompletionEvent(spec=record.spec, outcome=outcome, value=value, error=error, reason=reason)
+        event = CompletionEvent(
+            spec=record.spec, outcome=outcome, value=value, error=error, reason=reason
+        )
         object.__setattr__(event, "_record", record)
         self.completions.put(event)
 
@@ -899,7 +894,9 @@ class Kernel:
         if self._by_key.get(record.spec.key) == record.seq:
             self._by_key.pop(record.spec.key, None)
 
-    def _advance_supersession_locked(self, supersession: Supersession, *, exclude_seq: int | None = None) -> None:
+    def _advance_supersession_locked(
+        self, supersession: Supersession, *, exclude_seq: int | None = None
+    ) -> None:
         current = self._supersession.get(supersession.family, _SENTINEL)
         if current is not _SENTINEL and current == supersession.value:
             return
@@ -945,7 +942,7 @@ class Kernel:
             return
         try:
             handler(*args)
-        except Exception as exc:  # noqa: BLE001 - handler boundary
+        except Exception as exc:
             self._handler_error_hook(context, exc)
 
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 DEFAULT_VISIBLE_RENDER_BUDGET_BYTES = 512 * 1024 * 1024
 DEFAULT_PREFETCH_BUDGET_BYTES = 256 * 1024 * 1024
 DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES = DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
@@ -34,7 +33,9 @@ def estimate_display_image_bytes(shape, dtype, *, rgb=False, histogram=False) ->
     return int(total)
 
 
-def estimate_montage_tile_grid_bytes(tile_shape, tile_count, dtype, *, rgb=False, histogram=True, gap=1, columns=None) -> int:
+def estimate_montage_tile_grid_bytes(
+    tile_shape, tile_count, dtype, *, rgb=False, histogram=True, gap=1, columns=None
+) -> int:
     tile_count = max(0, int(tile_count))
     if tile_count == 0:
         return 0

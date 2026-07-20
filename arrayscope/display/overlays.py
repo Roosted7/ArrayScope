@@ -51,7 +51,9 @@ class MontageTileOverlayItem(QtWidgets.QGraphicsItem):
         self._last_paint_option = option
         self._last_paint_widget = widget
         for overlay in self._overlays:
-            rect = QtCore.QRectF(float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height))
+            rect = QtCore.QRectF(
+                float(overlay.x), float(overlay.y), float(overlay.width), float(overlay.height)
+            )
             if str(overlay.state) == "skipped":
                 brush = QtGui.QColor(130, 70, 20, 95)
                 pen = QtGui.QColor(210, 130, 60, 180)

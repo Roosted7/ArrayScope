@@ -11,7 +11,12 @@ from arrayscope.display.backends import surface_for_view
 from arrayscope.display.backends.base import tiled_presentation_visible
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.model.commit import DisplayTiledPresentation
-from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    TileCommitReport,
+    TilePresentationDelta,
+    TilePresentationState,
+)
 from arrayscope.display.shader_mapping import ShaderMapping
 from arrayscope.display.viewport import ViewportPolicy
 
@@ -26,7 +31,9 @@ class _FakeSurface:
     def present_tiled(self, presentation):
         self.calls.append(("tiled", None, presentation))
         return TileCommitReport(
-            presented_tiles=frozenset(presentation.tile_state.active_payloads(presentation.tile_delta)),
+            presented_tiles=frozenset(
+                presentation.tile_state.active_payloads(presentation.tile_delta)
+            ),
             committed_upserts=frozenset(presentation.tile_delta.upserts),
             removed_tiles=frozenset(presentation.tile_delta.removals),
         )
@@ -43,8 +50,12 @@ class _FakeSurface:
     def set_profile_bounds(self, bounds):
         self.calls.append(("bounds", tuple(bounds), None))
 
-    def apply_camera(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
-        self.calls.append(("camera", tuple(image_shape), viewport_policy, tuple(image_origin), content_rect))
+    def apply_camera(
+        self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None
+    ):
+        self.calls.append(
+            ("camera", tuple(image_shape), viewport_policy, tuple(image_origin), content_rect)
+        )
 
     def map_scene_to_overlay(self, scene_pos):
         self.calls.append(("map_scene", scene_pos, None))
@@ -132,14 +143,16 @@ def test_surface_resolver_uses_shell_owned_surface():
 
 
 def test_surface_resolver_rejects_objects_without_surface_contract():
-    with pytest.raises(TypeError, match="SimpleNamespace.*missing \\.surface"):
+    with pytest.raises(TypeError, match=r"SimpleNamespace.*missing \.surface"):
         surface_for_view(SimpleNamespace())
 
 
 def test_surface_resolver_explains_nonconforming_surface():
     view = SimpleNamespace(surface=object())
 
-    with pytest.raises(TypeError, match=r"\.surface is object, which does not implement ImageSurface"):
+    with pytest.raises(
+        TypeError, match=r"\.surface is object, which does not implement ImageSurface"
+    ):
         surface_for_view(view)
 
 

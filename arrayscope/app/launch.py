@@ -12,6 +12,8 @@ from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
+import contextlib
+
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets
 
@@ -20,6 +22,7 @@ from arrayscope.window import ArrayScopeWindow
 try:
     from IPython import get_ipython
 except ImportError:
+
     def get_ipython():
         return None
 
@@ -91,17 +94,22 @@ def _retain_window_reference(app, win):
         refs = qapp.property("_arrayscope_live_windows")
         if not isinstance(refs, list):
             return
-        try:
+        with contextlib.suppress(ValueError):
             refs.remove(w)
-        except ValueError:
-            pass
         qapp.setProperty("_arrayscope_live_windows", refs)
 
     win.destroyed.connect(_release_reference)
 
 
-def _create_window(data, title="", complex_dim=None, filepath=None,
-                   dataset_path=None, selector_class_name=None, axes=None):
+def _create_window(
+    data,
+    title="",
+    complex_dim=None,
+    filepath=None,
+    dataset_path=None,
+    selector_class_name=None,
+    axes=None,
+):
     _prepare_qt_environment()
 
     app = pg.mkQApp()
@@ -123,8 +131,15 @@ def _create_window(data, title="", complex_dim=None, filepath=None,
     return app, win
 
 
-def _run_window(data, title="", complex_dim=None, filepath=None,
-                dataset_path=None, selector_class_name=None, axes=None):
+def _run_window(
+    data,
+    title="",
+    complex_dim=None,
+    filepath=None,
+    dataset_path=None,
+    selector_class_name=None,
+    axes=None,
+):
     """Open a viewer window in this process and block on the Qt event loop."""
     try:
         app, _win = _create_window(
@@ -139,12 +154,20 @@ def _run_window(data, title="", complex_dim=None, filepath=None,
         return app.exec()
     except BaseException:
         import traceback
+
         traceback.print_exc()
         raise
 
 
-def _show_window_inline(data, title="", complex_dim=None, filepath=None,
-                        dataset_path=None, selector_class_name=None, axes=None):
+def _show_window_inline(
+    data,
+    title="",
+    complex_dim=None,
+    filepath=None,
+    dataset_path=None,
+    selector_class_name=None,
+    axes=None,
+):
     """Open a viewer window in this process without starting app.exec()."""
     app, win = _create_window(
         data,
@@ -161,8 +184,16 @@ def _show_window_inline(data, title="", complex_dim=None, filepath=None,
     return win
 
 
-def arrayscope(data, title="", block=False, complex_dim=None, filepath=None,
-               dataset_path=None, selector_class_name=None, axes=None):
+def arrayscope(
+    data,
+    title="",
+    block=False,
+    complex_dim=None,
+    filepath=None,
+    dataset_path=None,
+    selector_class_name=None,
+    axes=None,
+):
     if not isinstance(data, np.ndarray):
         raise TypeError("data must be a numpy array")
     if data.ndim < 1:

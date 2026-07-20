@@ -1,6 +1,6 @@
 from arrayscope.core.gui_callback_budget import (
-    GuiCallbackBudget,
     WARNING_THRESHOLD_MS,
+    GuiCallbackBudget,
     should_yield_after_item,
 )
 

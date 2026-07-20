@@ -10,7 +10,9 @@ def _target(tile=0, *, source=10, level=0):
     return TileTarget(tile, source, ("semantic", source), lod_level=level)
 
 
-def _payload(source_id, *, quality="exact", source=10, level=0, kind="complex_rg32f", shader=("shader", 1)):
+def _payload(
+    source_id, *, quality="exact", source=10, level=0, kind="complex_rg32f", shader=("shader", 1)
+):
     return TilePayloadRef(
         source_id=source_id,
         quality=quality,

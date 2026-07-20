@@ -10,12 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
-from typing import Optional, Tuple
 
 import numpy as np
 
-
-Levels = Tuple[float, float]
+Levels = tuple[float, float]
 
 
 class LevelMode(str, Enum):
@@ -42,7 +40,7 @@ class LevelSourceRank(IntEnum):
 @dataclass(frozen=True)
 class WindowLevelDecision:
     auto_levels: bool
-    levels: Optional[Levels]
+    levels: Levels | None
 
 
 @dataclass(frozen=True)
@@ -86,11 +84,11 @@ class WindowLevelState:
         )
 
 
-def normalize_levels(levels) -> Optional[Levels]:
+def normalize_levels(levels) -> Levels | None:
     return normalize_bounds(levels)
 
 
-def normalize_bounds(bounds) -> Optional[Levels]:
+def normalize_bounds(bounds) -> Levels | None:
     if bounds is None:
         return None
     try:
@@ -108,7 +106,7 @@ def normalize_bounds(bounds) -> Optional[Levels]:
     return (center - radius, center + radius)
 
 
-def union_bounds(a, b) -> Optional[Levels]:
+def union_bounds(a, b) -> Levels | None:
     a = normalize_bounds(a)
     b = normalize_bounds(b)
     if a is None:
@@ -118,7 +116,7 @@ def union_bounds(a, b) -> Optional[Levels]:
     return (min(a[0], b[0]), max(a[1], b[1]))
 
 
-def relative_levels(previous_levels, previous_bounds, current_bounds) -> Optional[Levels]:
+def relative_levels(previous_levels, previous_bounds, current_bounds) -> Levels | None:
     previous_levels = normalize_bounds(previous_levels)
     previous_bounds = normalize_bounds(previous_bounds)
     current_bounds = normalize_bounds(current_bounds)
@@ -163,17 +161,25 @@ def choose_window_levels(
     return WindowLevelDecision(auto_levels=True, levels=normalize_bounds(default_levels))
 
 
-def state_from_source(source: LevelSource | None, *, mode: str | LevelMode = LevelMode.RELATIVE) -> WindowLevelState | None:
+def state_from_source(
+    source: LevelSource | None, *, mode: str | LevelMode = LevelMode.RELATIVE
+) -> WindowLevelState | None:
     if source is None:
         return None
     levels = normalize_bounds(source.levels)
     histogram = normalize_bounds(source.histogram_range) or levels
     if levels is None or histogram is None:
         return None
-    rank = source.rank if isinstance(source.rank, LevelSourceRank) else LevelSourceRank(int(source.rank))
+    rank = (
+        source.rank
+        if isinstance(source.rank, LevelSourceRank)
+        else LevelSourceRank(int(source.rank))
+    )
     source_mode = getattr(source, "mode", mode) if rank == LevelSourceRank.EXPLICIT_USER else mode
     try:
-        coerced_mode = source_mode if isinstance(source_mode, LevelMode) else LevelMode(str(source_mode))
+        coerced_mode = (
+            source_mode if isinstance(source_mode, LevelMode) else LevelMode(str(source_mode))
+        )
     except ValueError:
         try:
             coerced_mode = mode if isinstance(mode, LevelMode) else LevelMode(str(mode))
@@ -209,7 +215,11 @@ class WindowLevelController:
         mode: str | LevelMode = LevelMode.RELATIVE,
     ) -> WindowLevelState:
         mode = self._coerce_mode(mode)
-        previous_state = previous if isinstance(previous, WindowLevelState) else state_from_source(previous, mode=mode)
+        previous_state = (
+            previous
+            if isinstance(previous, WindowLevelState)
+            else state_from_source(previous, mode=mode)
+        )
         candidate_state = state_from_source(candidate, mode=mode)
 
         if user_levels is not None and not explicit_auto:
@@ -223,19 +233,25 @@ class WindowLevelController:
                         else union_bounds(histogram, candidate_state.histogram_range)
                     )
                 locked = mode == LevelMode.ABSOLUTE
-                source_rank = LevelSourceRank.EXPLICIT_USER if locked else LevelSourceRank.PREVIOUS_COMMITTED
+                source_rank = (
+                    LevelSourceRank.EXPLICIT_USER if locked else LevelSourceRank.PREVIOUS_COMMITTED
+                )
                 source_count = 0
                 expected_count = 0
                 semantic_key = None
                 evidence_quality = 0
                 if candidate_state is not None:
-                    source_rank = LevelSourceRank.EXPLICIT_USER if locked else candidate_state.source_rank
+                    source_rank = (
+                        LevelSourceRank.EXPLICIT_USER if locked else candidate_state.source_rank
+                    )
                     source_count = candidate_state.source_count
                     expected_count = candidate_state.expected_count
                     semantic_key = candidate_state.semantic_key
                     evidence_quality = candidate_state.evidence_quality
                 elif previous_state is not None:
-                    source_rank = LevelSourceRank.EXPLICIT_USER if locked else previous_state.source_rank
+                    source_rank = (
+                        LevelSourceRank.EXPLICIT_USER if locked else previous_state.source_rank
+                    )
                     source_count = previous_state.source_count
                     expected_count = previous_state.expected_count
                     semantic_key = previous_state.semantic_key
@@ -256,7 +272,12 @@ class WindowLevelController:
             if candidate_state is not None:
                 return replace(candidate_state, user_locked=False, mode=mode)
             if previous_state is not None:
-                return replace(previous_state, user_locked=False, source_rank=max(previous_state.source_rank, LevelSourceRank.PREVIOUS_COMMITTED), mode=mode)
+                return replace(
+                    previous_state,
+                    user_locked=False,
+                    source_rank=max(previous_state.source_rank, LevelSourceRank.PREVIOUS_COMMITTED),
+                    mode=mode,
+                )
             return self._fallback_state(mode=mode)
 
         if candidate_state is None:
@@ -270,14 +291,19 @@ class WindowLevelController:
         same_semantic = previous_state.semantic_key == candidate_state.semantic_key
 
         if previous_state.user_locked and same_semantic:
-            histogram = union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or previous_state.histogram_range
+            histogram = (
+                union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+                or previous_state.histogram_range
+            )
             return replace(
                 previous_state,
                 histogram_range=histogram,
                 source_rank=max(previous_state.source_rank, candidate_state.source_rank),
                 source_count=max(previous_state.source_count, candidate_state.source_count),
                 expected_count=max(previous_state.expected_count, candidate_state.expected_count),
-                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                evidence_quality=max(
+                    previous_state.evidence_quality, candidate_state.evidence_quality
+                ),
                 mode=previous_state.mode,
             )
 
@@ -296,7 +322,11 @@ class WindowLevelController:
                     evidence_quality=candidate_state.evidence_quality,
                 )
             if mode == LevelMode.RELATIVE:
-                mapped = relative_levels(previous_state.display_levels, previous_state.histogram_range, candidate_state.histogram_range)
+                mapped = relative_levels(
+                    previous_state.display_levels,
+                    previous_state.histogram_range,
+                    candidate_state.histogram_range,
+                )
                 return WindowLevelState(
                     semantic_key=candidate_state.semantic_key,
                     display_levels=normalize_bounds(mapped) or candidate_state.display_levels,
@@ -314,7 +344,8 @@ class WindowLevelController:
             histogram = (
                 candidate_state.histogram_range
                 if _complete_source(candidate_state)
-                else union_bounds(previous_state.histogram_range, candidate_state.histogram_range) or candidate_state.histogram_range
+                else union_bounds(previous_state.histogram_range, candidate_state.histogram_range)
+                or candidate_state.histogram_range
             )
             return replace(
                 previous_state,
@@ -322,7 +353,9 @@ class WindowLevelController:
                 source_rank=max(previous_state.source_rank, candidate_state.source_rank),
                 source_count=max(previous_state.source_count, candidate_state.source_count),
                 expected_count=max(previous_state.expected_count, candidate_state.expected_count),
-                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                evidence_quality=max(
+                    previous_state.evidence_quality, candidate_state.evidence_quality
+                ),
                 mode=mode,
             )
 
@@ -335,7 +368,9 @@ class WindowLevelController:
             rank = max(previous_state.source_rank, candidate_state.source_rank)
             count = max(previous_state.source_count, candidate_state.source_count)
             expected = max(previous_state.expected_count, candidate_state.expected_count)
-            if _complete_source(candidate_state) and _span(histogram) < _span(previous_state.display_levels):
+            if _complete_source(candidate_state) and _span(histogram) < _span(
+                previous_state.display_levels
+            ):
                 return replace(
                     previous_state,
                     source_rank=rank,
@@ -343,15 +378,23 @@ class WindowLevelController:
                     expected_count=expected,
                     user_locked=False,
                     mode=mode,
-                    evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                    evidence_quality=max(
+                        previous_state.evidence_quality, candidate_state.evidence_quality
+                    ),
                 )
-            if histogram == previous_state.histogram_range and rank == previous_state.source_rank and count == previous_state.source_count:
+            if (
+                histogram == previous_state.histogram_range
+                and rank == previous_state.source_rank
+                and count == previous_state.source_count
+            ):
                 return replace(
                     previous_state,
                     expected_count=expected,
                     user_locked=False,
                     mode=mode,
-                    evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                    evidence_quality=max(
+                        previous_state.evidence_quality, candidate_state.evidence_quality
+                    ),
                 )
             mapped = relative_levels(
                 previous_state.display_levels,
@@ -367,7 +410,9 @@ class WindowLevelController:
                 expected_count=expected,
                 user_locked=False,
                 mode=mode,
-                evidence_quality=max(previous_state.evidence_quality, candidate_state.evidence_quality),
+                evidence_quality=max(
+                    previous_state.evidence_quality, candidate_state.evidence_quality
+                ),
             )
 
         histogram = (

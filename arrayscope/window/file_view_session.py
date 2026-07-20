@@ -22,7 +22,6 @@ from arrayscope.display.viewport import ViewportMode, constrain_view_range
 from arrayscope.ui.toasts import show_revert_action, show_status_action, show_status_message
 from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
 
-
 FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS = 16
 FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS = 12
 
@@ -61,7 +60,9 @@ class FileViewSessionMixin:
             defaults=defaults,
             message_enabled=message_enabled,
         )
-        if tx.viewport_shape is not None and self._viewport_continuity_shape_matches(tx.viewport_shape):
+        if tx.viewport_shape is not None and self._viewport_continuity_shape_matches(
+            tx.viewport_shape
+        ):
             tx.shape_settled = True
         self._viewport_continuity = tx
         return tx
@@ -101,7 +102,13 @@ class FileViewSessionMixin:
 
     def _current_viewport_session(self):
         tx = self._viewport_continuity_transaction()
-        if tx is not None and not tx.released and tx.view_range is not None and not tx.range_applied and tx.viewport is not None:
+        if (
+            tx is not None
+            and not tx.released
+            and tx.view_range is not None
+            and not tx.range_applied
+            and tx.viewport is not None
+        ):
             return tx.viewport
         view = getattr(getattr(self, "img_view", None), "getView", lambda: None)()
         if view is None:
@@ -115,7 +122,10 @@ class FileViewSessionMixin:
         except Exception:
             normalized = None
         controller = getattr(self.img_view, "viewport_controller", None)
-        mode = getattr(getattr(controller, "mode", None), "value", None) or ViewportMode.AUTO_UNTOUCHED.value
+        mode = (
+            getattr(getattr(controller, "mode", None), "value", None)
+            or ViewportMode.AUTO_UNTOUCHED.value
+        )
         montage_columns = None
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is not None:
             plan = getattr(self, "_current_montage_plan", None)
@@ -149,7 +159,9 @@ class FileViewSessionMixin:
                 self,
                 "Saved view disabled for this file.",
                 "Enable",
-                lambda metadata=current_metadata: self._enable_file_view_session_persistence(metadata),
+                lambda metadata=current_metadata: self._enable_file_view_session_persistence(
+                    metadata
+                ),
                 timeout=7000,
             )
             return False
@@ -174,7 +186,9 @@ class FileViewSessionMixin:
         try:
             self.operation_coordinator.load_steps(session.recipe.steps)
             self._set_document(self.operation_coordinator.document)
-            self._set_view_state(session.recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
+            self._set_view_state(
+                session.recipe.view_state.for_shape(self.data.shape, preserve_flags=True)
+            )
             self._apply_display_settings(session.recipe.display)
             self._restore_roi_session(session.rois, selected_id=session.selected_roi_id)
             self._pending_file_session_panels = session.panels
@@ -198,7 +212,9 @@ class FileViewSessionMixin:
             )
         except Exception as exc:
             self._suppress_montage_autofit_revert_message = False
-            QtWidgets.QMessageBox.warning(self, "View Restore Error", f"Failed to restore saved view:\n{exc}")
+            QtWidgets.QMessageBox.warning(
+                self, "View Restore Error", f"Failed to restore saved view:\n{exc}"
+            )
             return False
         finally:
             self._suspend_progressive_dock_sync = previous_suspend_progressive
@@ -237,7 +253,11 @@ class FileViewSessionMixin:
         tx = self._viewport_continuity_transaction()
         if tx is None or tx.released:
             return None
-        if tx.viewport_shape is not None and tx.shape_settled and self._viewport_continuity_shape_matches(tx.viewport_shape):
+        if (
+            tx.viewport_shape is not None
+            and tx.shape_settled
+            and self._viewport_continuity_shape_matches(tx.viewport_shape)
+        ):
             return None
         viewport = None if tx is None else tx.viewport
         return None if viewport is None else viewport.viewport_shape
@@ -268,14 +288,18 @@ class FileViewSessionMixin:
         Qt.QtCore.QTimer.singleShot(
             0,
             self,
-            lambda shape=tuple(viewport_shape), generation=int(tx.generation): self._restore_viewport_continuity_shape_step(
-                shape,
-                attempts=FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS,
-                generation=generation,
+            lambda shape=tuple(viewport_shape), generation=int(tx.generation): (
+                self._restore_viewport_continuity_shape_step(
+                    shape,
+                    attempts=FILE_SESSION_VIEWPORT_RESTORE_ATTEMPTS,
+                    generation=generation,
+                )
             ),
         )
 
-    def _restore_viewport_continuity_shape_step(self, viewport_shape, *, attempts: int, generation: int | None = None) -> None:
+    def _restore_viewport_continuity_shape_step(
+        self, viewport_shape, *, attempts: int, generation: int | None = None
+    ) -> None:
         tx = self._viewport_continuity_transaction()
         if tx is None or (generation is not None and int(tx.generation) != int(generation)):
             return
@@ -300,10 +324,12 @@ class FileViewSessionMixin:
             Qt.QtCore.QTimer.singleShot(
                 FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
                 self,
-                lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: self._restore_viewport_continuity_shape_step(
-                    shape,
-                    attempts=attempts,
-                    generation=generation,
+                lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: (
+                    self._restore_viewport_continuity_shape_step(
+                        shape,
+                        attempts=attempts,
+                        generation=generation,
+                    )
                 ),
             )
             return
@@ -326,10 +352,12 @@ class FileViewSessionMixin:
         Qt.QtCore.QTimer.singleShot(
             FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
             self,
-            lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: self._restore_viewport_continuity_shape_step(
-                shape,
-                attempts=attempts,
-                generation=generation,
+            lambda shape=tuple(viewport_shape), attempts=int(attempts) - 1, generation=generation: (
+                self._restore_viewport_continuity_shape_step(
+                    shape,
+                    attempts=attempts,
+                    generation=generation,
+                )
             ),
         )
 
@@ -338,7 +366,10 @@ class FileViewSessionMixin:
             target_height = max(1, int(viewport_shape[0]))
             target_width = max(1, int(viewport_shape[1]))
             viewport = self.img_view.graphicsView.viewport()
-            return abs(int(viewport.width()) - target_width) <= 1 and abs(int(viewport.height()) - target_height) <= 1
+            return (
+                abs(int(viewport.width()) - target_width) <= 1
+                and abs(int(viewport.height()) - target_height) <= 1
+            )
         except Exception:
             return True
 
@@ -385,13 +416,19 @@ class FileViewSessionMixin:
         }
 
     def _restore_roi_session(self, rois, *, selected_id=None) -> None:
-        selections = tuple(selection for selection in tuple(rois or ()) if isinstance(selection, RoiSelection))
-        if selected_id is not None and str(selected_id) not in {selection.id for selection in selections}:
+        selections = tuple(
+            selection for selection in tuple(rois or ()) if isinstance(selection, RoiSelection)
+        )
+        if selected_id is not None and str(selected_id) not in {
+            selection.id for selection in selections
+        }:
             selected_id = None
         setter = getattr(self.img_view, "setRoiSelections", None)
         if callable(setter):
             setter(selections, selected_id=selected_id)
-        self.roi_store = RoiStore(selections=selections, selected_id=selected_id).replace_all(selections)
+        self.roi_store = RoiStore(selections=selections, selected_id=selected_id).replace_all(
+            selections
+        )
         if selected_id is not None:
             self.roi_store = self.roi_store.select(selected_id)
         if hasattr(self, "inspection_dock"):
@@ -404,7 +441,9 @@ class FileViewSessionMixin:
         if not selections:
             self._file_session_roi_refresh_pending = False
             return
-        if reason != "file-session-restore" and not bool(getattr(self, "_file_session_roi_refresh_pending", False)):
+        if reason != "file-session-restore" and not bool(
+            getattr(self, "_file_session_roi_refresh_pending", False)
+        ):
             return
         schedule_refresh = getattr(self, "_schedule_refresh_inspection_dock", None)
         if callable(schedule_refresh):
@@ -600,7 +639,9 @@ class FileViewSessionMixin:
         self._set_document(self.operation_coordinator.document)
         self._set_view_state(recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
         self._apply_display_settings(recipe.display)
-        self._restore_roi_session(defaults.get("rois", ()), selected_id=defaults.get("selected_roi_id"))
+        self._restore_roi_session(
+            defaults.get("rois", ()), selected_id=defaults.get("selected_roi_id")
+        )
         self._begin_viewport_continuity(
             reason="file-session-restore",
             viewport=defaults.get("viewport"),

@@ -18,8 +18,8 @@ from arrayscope.app.settings_state import (
     settings_from_mapping,
     settings_to_mapping,
 )
-from arrayscope.core.memory_budget import format_bytes
 from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
+from arrayscope.core.memory_budget import format_bytes
 from arrayscope.operations import fft_backend
 from arrayscope.operations.registry import operation_entries
 from arrayscope.ui.diagnostics import DiagnosticsDialog
@@ -34,14 +34,24 @@ class WindowMenuMixin:
             {
                 "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
                 "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
-                "panel_resize_behavior": self._settings.value("panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value),
+                "panel_resize_behavior": self._settings.value(
+                    "panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value
+                ),
                 "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
                 "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
-                "image_rendering_backend": self._settings.value("image_rendering_backend", ImageRenderingBackendChoice.AUTO.value),
-                "wgpu_present_method": self._settings.value("wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value),
-                "memory_profile": self._settings.value("memory_profile", MemoryProfileChoice.BALANCED.value),
+                "image_rendering_backend": self._settings.value(
+                    "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
+                ),
+                "wgpu_present_method": self._settings.value(
+                    "wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value
+                ),
+                "memory_profile": self._settings.value(
+                    "memory_profile", MemoryProfileChoice.BALANCED.value
+                ),
                 "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
-                "montage_quality_policy": self._settings.value("montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value),
+                "montage_quality_policy": self._settings.value(
+                    "montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value
+                ),
                 "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
             }
         )
@@ -67,12 +77,20 @@ class WindowMenuMixin:
         export_derived_action = QtGui.QAction("Export Derived Array", self)
         set_action_icon(export_derived_action, "download")
         export_derived_action.triggered.connect(self.export_derived_array)
-        for action in (save_recipe_action, load_recipe_action, save_view_action, load_view_action, export_derived_action):
+        for action in (
+            save_recipe_action,
+            load_recipe_action,
+            save_view_action,
+            load_view_action,
+            export_derived_action,
+        ):
             file_menu.addAction(action)
         recent_menu = QtWidgets.QMenu("Recent Recipes", self)
         recent_menu.setToolTipsVisible(True)
         file_menu.addMenu(recent_menu)
-        recent_menu.aboutToShow.connect(lambda menu=recent_menu: self.populate_recent_recipes_menu(menu))
+        recent_menu.aboutToShow.connect(
+            lambda menu=recent_menu: self.populate_recent_recipes_menu(menu)
+        )
 
         view_menu = self.menuBar().addMenu("View")
         operation_action = self.layout_manager.make_managed_dock_action(
@@ -106,7 +124,9 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._panel_resize_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, behavior=behavior: self._set_panel_resize_behavior(behavior))
+            action.triggered.connect(
+                lambda checked=False, behavior=behavior: self._set_panel_resize_behavior(behavior)
+            )
             panel_resize_menu.addAction(action)
             self._panel_resize_actions[behavior] = action
         self._panel_resize_menu = panel_resize_menu
@@ -130,7 +150,9 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._theme_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._apply_theme_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._apply_theme_choice(choice)
+            )
             theme_menu.addAction(action)
             self._theme_actions[choice] = action
         self._sync_theme_actions()
@@ -151,7 +173,9 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._memory_profile_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_memory_profile_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_memory_profile_choice(choice)
+            )
             profile_menu.addAction(action)
             self._memory_profile_actions[choice] = action
 
@@ -159,7 +183,9 @@ class WindowMenuMixin:
         # action did not; the setting was unreachable except by editing the
         # config file (2026-07-15 rewiring, together with its scheduler call).
         prefetch_action = QtGui.QAction("Prefetch Nearby Slices", self, checkable=True)
-        prefetch_action.setChecked(bool(getattr(self.app_settings, "prefetch_nearby_slices", False)))
+        prefetch_action.setChecked(
+            bool(getattr(self.app_settings, "prefetch_nearby_slices", False))
+        )
         prefetch_action.toggled.connect(self._set_prefetch_enabled)
         performance_menu.addAction(prefetch_action)
         self._prefetch_nearby_slices_action = prefetch_action
@@ -178,7 +204,9 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._fft_backend_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_fft_backend_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_fft_backend_choice(choice)
+            )
             backend_menu.addAction(action)
             self._fft_backend_actions[choice] = action
 
@@ -197,7 +225,9 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._fft_workers_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_fft_workers_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_fft_workers_choice(choice)
+            )
             workers_menu.addAction(action)
             self._fft_workers_actions[choice] = action
 
@@ -217,7 +247,11 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._image_rendering_backend_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_image_rendering_backend_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_image_rendering_backend_choice(
+                    choice
+                )
+            )
             image_backend_menu.addAction(action)
             self._image_rendering_backend_actions[choice] = action
 
@@ -251,7 +285,9 @@ class WindowMenuMixin:
             action = QtGui.QAction(label, self, checkable=True)
             action.setToolTip(tooltip)
             self._wgpu_present_method_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_wgpu_present_method_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_wgpu_present_method_choice(choice)
+            )
             wgpu_present_menu.addAction(action)
             self._wgpu_present_method_actions[choice] = action
 
@@ -272,7 +308,9 @@ class WindowMenuMixin:
                 "Native only always presents full-resolution textures."
             )
             self._montage_quality_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, choice=choice: self._set_montage_quality_policy_choice(choice))
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_montage_quality_policy_choice(choice)
+            )
             montage_quality_menu.addAction(action)
             self._montage_quality_actions[choice] = action
 
@@ -287,25 +325,35 @@ class WindowMenuMixin:
             action = QtGui.QAction(f"{mb} MiB", self, checkable=True)
             action.setToolTip("Per-render hard cap for visible images and montage tile allocation.")
             self._render_budget_action_group.addAction(action)
-            action.triggered.connect(lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb))
+            action.triggered.connect(
+                lambda checked=False, mb=mb: self._set_render_memory_budget_mb(mb)
+            )
             budget_menu.addAction(action)
             self._render_budget_actions[mb] = action
         performance_menu.addSeparator()
         less_memory_action = QtGui.QAction("Use Less Memory", self)
-        less_memory_action.setToolTip("Switch to Conservative profile and lower the per-render memory budget one step.")
+        less_memory_action.setToolTip(
+            "Switch to Conservative profile and lower the per-render memory budget one step."
+        )
         less_memory_action.triggered.connect(self._use_less_memory)
         performance_menu.addAction(less_memory_action)
         more_memory_action = QtGui.QAction("Use More Memory", self)
-        more_memory_action.setToolTip("Switch to Aggressive profile and raise the per-render memory budget one step.")
+        more_memory_action.setToolTip(
+            "Switch to Aggressive profile and raise the per-render memory budget one step."
+        )
         more_memory_action.triggered.connect(self._use_more_memory)
         performance_menu.addAction(more_memory_action)
         decrease_budget_action = QtGui.QAction("Decrease Render Budget", self)
         decrease_budget_action.setToolTip("Lower the per-render memory budget one preset step.")
-        decrease_budget_action.triggered.connect(lambda checked=False: self._adjust_render_memory_budget(-1))
+        decrease_budget_action.triggered.connect(
+            lambda checked=False: self._adjust_render_memory_budget(-1)
+        )
         performance_menu.addAction(decrease_budget_action)
         increase_budget_action = QtGui.QAction("Increase Render Budget", self)
         increase_budget_action.setToolTip("Raise the per-render memory budget one preset step.")
-        increase_budget_action.triggered.connect(lambda checked=False: self._adjust_render_memory_budget(1))
+        increase_budget_action.triggered.connect(
+            lambda checked=False: self._adjust_render_memory_budget(1)
+        )
         performance_menu.addAction(increase_budget_action)
         self._less_memory_action = less_memory_action
         self._more_memory_action = more_memory_action
@@ -338,7 +386,6 @@ class WindowMenuMixin:
         if callable(setter):
             setter(bool(enabled))
 
-
     def _sync_performance_actions(self):
         if not hasattr(self, "_fft_backend_actions"):
             return
@@ -362,8 +409,7 @@ class WindowMenuMixin:
             # Presentation is a wgpu-backend concern; the submenu greys out
             # (choice preserved) while another backend is selected.
             self._wgpu_present_method_menu.setEnabled(
-                self.app_settings.image_rendering_backend
-                == ImageRenderingBackendChoice.WGPU
+                self.app_settings.image_rendering_backend == ImageRenderingBackendChoice.WGPU
             )
         for choice, action in getattr(self, "_montage_quality_actions", {}).items():
             action.blockSignals(True)
@@ -385,7 +431,9 @@ class WindowMenuMixin:
 
     def _apply_performance_settings(self, persist=True):
         current = getattr(self, "app_settings", AppSettingsState())
-        fft_backend.set_fft_runtime_options(backend=current.fft_backend.value, workers=current.fft_workers.value)
+        fft_backend.set_fft_runtime_options(
+            backend=current.fft_backend.value, workers=current.fft_workers.value
+        )
         resolved = fft_backend.resolve_fft_backend(current.fft_backend.value)
         if current.fft_backend == FFTBackendChoice.PYFFTW and resolved.name != "pyfftw":
             show_status_message(self, "pyFFTW is not installed; using SciPy FFT")
@@ -468,11 +516,15 @@ class WindowMenuMixin:
         self._set_render_memory_budget_mb(target)
 
     def _use_less_memory(self):
-        self.app_settings = self._updated_app_settings(memory_profile=MemoryProfileChoice.CONSERVATIVE)
+        self.app_settings = self._updated_app_settings(
+            memory_profile=MemoryProfileChoice.CONSERVATIVE
+        )
         self._adjust_render_memory_budget(-1)
 
     def _use_more_memory(self):
-        self.app_settings = self._updated_app_settings(memory_profile=MemoryProfileChoice.AGGRESSIVE)
+        self.app_settings = self._updated_app_settings(
+            memory_profile=MemoryProfileChoice.AGGRESSIVE
+        )
         self._adjust_render_memory_budget(1)
 
     def _updated_app_settings(self, **changes):
@@ -543,9 +595,7 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(qt_platform=choice)
         self._save_app_settings()
         self._sync_qt_platform_actions()
-        show_status_message(
-            self, "Display server changes take effect after restarting ArrayScope."
-        )
+        show_status_message(self, "Display server changes take effect after restarting ArrayScope.")
 
     def _retheme_presentation_surfaces(self):
         """Restyle pyqtgraph surfaces in every open ArrayScope window.
@@ -616,7 +666,9 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(panel_resize_behavior=behavior)
         self._save_app_settings()
         self._sync_panel_resize_actions()
-        show_status_message(self, f"Panel resize: {_panel_resize_behavior_label(behavior)}", timeout=2500)
+        show_status_message(
+            self, f"Panel resize: {_panel_resize_behavior_label(behavior)}", timeout=2500
+        )
 
     def _sync_panel_resize_actions(self):
         if not hasattr(self, "_panel_resize_actions"):
@@ -743,7 +795,9 @@ class WindowMenuMixin:
         visible_arrayscope = [
             widget
             for widget in app.topLevelWidgets()
-            if widget is not self and type(widget).__name__ == type(self).__name__ and widget.isVisible()
+            if widget is not self
+            and type(widget).__name__ == type(self).__name__
+            and widget.isVisible()
         ]
         if not visible_arrayscope:
             app.quit()

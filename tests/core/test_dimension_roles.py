@@ -1,13 +1,11 @@
 import ast
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
+
 import arrayscope.core.dimension_roles as dimension_roles
 
 DIMENSION_ROLES_PATH = Path(dimension_roles.__file__)
-
 
 
 DimensionRoles = dimension_roles.DimensionRoles

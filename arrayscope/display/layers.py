@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 
 Z_IMAGE = 0
 Z_BOUNDS = -1000
@@ -96,7 +97,5 @@ class ViewLayerOwner:
             self.view.addItem(item)
 
     def _remove_item(self, item) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.view.removeItem(item)
-        except Exception:
-            pass

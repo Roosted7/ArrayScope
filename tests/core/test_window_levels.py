@@ -1,12 +1,9 @@
 import ast
-import importlib.util
-import sys
 from pathlib import Path
+
 import arrayscope.core.window_levels as window_levels
 
 WINDOW_LEVELS_PATH = Path(window_levels.__file__)
-
-
 
 
 def test_absolute_window_reuses_previous_numeric_levels():
@@ -79,7 +76,9 @@ def test_controller_relative_same_source_remaps_levels_as_statistics_improve():
         semantic_key="same",
     )
 
-    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
+    state = window_levels.WindowLevelController().decide(
+        previous=previous, candidate=candidate, mode="relative"
+    )
 
     assert state.display_levels == (100.0, 300.0)
     assert state.histogram_range == (0.0, 400.0)
@@ -104,7 +103,9 @@ def test_controller_relative_same_source_does_not_downgrade_when_viewport_covera
         semantic_key="same",
     )
 
-    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="relative")
+    state = window_levels.WindowLevelController().decide(
+        previous=previous, candidate=candidate, mode="relative"
+    )
 
     assert state.display_levels == (100.0, 300.0)
     assert state.histogram_range == (0.0, 400.0)
@@ -129,7 +130,9 @@ def test_controller_absolute_partial_source_updates_histogram_without_changing_l
         semantic_key="same",
     )
 
-    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="absolute")
+    state = window_levels.WindowLevelController().decide(
+        previous=previous, candidate=candidate, mode="absolute"
+    )
 
     assert state.display_levels == (25.0, 75.0)
     assert state.histogram_range == (0.0, 400.0)
@@ -152,7 +155,9 @@ def test_controller_absolute_same_source_keeps_numeric_levels_and_updates_histog
         semantic_key="same",
     )
 
-    state = window_levels.WindowLevelController().decide(previous=previous, candidate=candidate, mode="absolute")
+    state = window_levels.WindowLevelController().decide(
+        previous=previous, candidate=candidate, mode="absolute"
+    )
 
     assert state.display_levels == (25.0, 75.0)
     assert state.histogram_range == (0.0, 400.0)

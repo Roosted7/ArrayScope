@@ -18,9 +18,13 @@ def test_latency_feedback_batches_cheap_items():
 
 
 def test_latency_feedback_uses_smaller_interactive_budget():
-    controller = LatencyFeedbackController(LatencyFeedbackTuning(target_idle_ms=8.0, target_interactive_ms=4.0))
+    controller = LatencyFeedbackController(
+        LatencyFeedbackTuning(target_idle_ms=8.0, target_interactive_ms=4.0)
+    )
 
-    assert controller.work_budget_ms("tiles", interactive=True) < controller.work_budget_ms("tiles", interactive=False)
+    assert controller.work_budget_ms("tiles", interactive=True) < controller.work_budget_ms(
+        "tiles", interactive=False
+    )
 
 
 def test_latency_feedback_records_byte_rate_without_commit_intervals():

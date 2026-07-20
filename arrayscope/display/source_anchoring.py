@@ -89,10 +89,7 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
         start: int | None = None
         if axis in windowable:
             indices = view_state.axis_range_indices[axis]
-            if indices is None:
-                start = 0
-            else:
-                start = contiguous_range_start(indices)
+            start = 0 if indices is None else contiguous_range_start(indices)
         anchored_starts.append(start)
         if start is not None:
             windowless = windowless.with_axis_range(axis, None)

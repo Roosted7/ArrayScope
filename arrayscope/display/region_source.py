@@ -10,7 +10,9 @@ from arrayscope.display.model.frame import DisplayTilePayload
 
 
 class DisplayRegionSource(Protocol):
-    def read_region(self, region, *, quality: str, deadline_ns: int | None = None) -> DisplayTilePayload: ...
+    def read_region(
+        self, region, *, quality: str, deadline_ns: int | None = None
+    ) -> DisplayTilePayload: ...
 
 
 class EagerDisplayRegionSource:
@@ -26,17 +28,35 @@ class EagerDisplayRegionSource:
         # revision + operation steps folded into this key.
         self.content_key = content_key
         self.data = np.asarray(display_image.data)
-        self.histogram_data = None if display_image.histogram_data is None else np.asarray(display_image.histogram_data)
-        self.semantic_data = None if getattr(display_image, "semantic_data", None) is None else np.asarray(display_image.semantic_data)
-        self.texture_data = None if getattr(display_image, "texture_data", None) is None else np.asarray(display_image.texture_data)
+        self.histogram_data = (
+            None
+            if display_image.histogram_data is None
+            else np.asarray(display_image.histogram_data)
+        )
+        self.semantic_data = (
+            None
+            if getattr(display_image, "semantic_data", None) is None
+            else np.asarray(display_image.semantic_data)
+        )
+        self.texture_data = (
+            None
+            if getattr(display_image, "texture_data", None) is None
+            else np.asarray(display_image.texture_data)
+        )
 
-    def read_region(self, region, *, quality: str, deadline_ns: int | None = None) -> DisplayTilePayload:
+    def read_region(
+        self, region, *, quality: str, deadline_ns: int | None = None
+    ) -> DisplayTilePayload:
         tile_number = int(region.region_id)
         y_slice, x_slice = region.data_slices
         tile_data = self.data[y_slice, x_slice, ...]
         tile_hist = None if self.histogram_data is None else self.histogram_data[y_slice, x_slice]
-        tile_semantic = None if self.semantic_data is None else self.semantic_data[y_slice, x_slice, ...]
-        tile_texture = None if self.texture_data is None else self.texture_data[y_slice, x_slice, ...]
+        tile_semantic = (
+            None if self.semantic_data is None else self.semantic_data[y_slice, x_slice, ...]
+        )
+        tile_texture = (
+            None if self.texture_data is None else self.texture_data[y_slice, x_slice, ...]
+        )
         source_rect = getattr(region, "source_rect", None)
         if source_rect is not None and self.content_key is not None:
             source_id = (

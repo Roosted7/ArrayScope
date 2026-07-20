@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
-from arrayscope.operations.cost import OperationCost, estimate_operation_cost, estimate_pipeline_cost, operation_output_dtype
+from arrayscope.operations.cost import (
+    OperationCost,
+    estimate_operation_cost,
+    estimate_pipeline_cost,
+    operation_output_dtype,
+)
 from arrayscope.operations.optimizer import format_optimization_steps, optimize_operations
 from arrayscope.operations.regions import (
     AxisRegionKind,
@@ -93,7 +98,9 @@ def build_operation_stages(base_shape, base_dtype, operations) -> tuple[Operatio
     return tuple(stages)
 
 
-def candidate_stage_cache_points(base_shape, base_dtype, operations, final_region) -> tuple[StageCacheCandidate, ...]:
+def candidate_stage_cache_points(
+    base_shape, base_dtype, operations, final_region
+) -> tuple[StageCacheCandidate, ...]:
     stages = build_operation_stages(base_shape, base_dtype, operations)
     current_region = final_region
     candidates = []
@@ -101,9 +108,18 @@ def candidate_stage_cache_points(base_shape, base_dtype, operations, final_regio
         capabilities = stage.capabilities
         if capabilities is None:
             continue
-        candidate_region = expand_region_axes(current_region, tuple(axis for axis in capabilities.expands_request_axes if axis < len(current_region.axes)))
+        candidate_region = expand_region_axes(
+            current_region,
+            tuple(
+                axis
+                for axis in capabilities.expands_request_axes
+                if axis < len(current_region.axes)
+            ),
+        )
         if capabilities.cache_stage:
-            dtype_text = "unknown" if stage.output_dtype is None else str(np.dtype(stage.output_dtype))
+            dtype_text = (
+                "unknown" if stage.output_dtype is None else str(np.dtype(stage.output_dtype))
+            )
             candidates.append(
                 StageCacheCandidate(
                     stage_index=stage.stage_index,
@@ -111,7 +127,9 @@ def candidate_stage_cache_points(base_shape, base_dtype, operations, final_regio
                     region=candidate_region,
                     shape=stage.output_shape,
                     dtype=dtype_text,
-                    estimated_nbytes=region_nbytes(stage.output_shape, stage.output_dtype, candidate_region),
+                    estimated_nbytes=region_nbytes(
+                        stage.output_shape, stage.output_dtype, candidate_region
+                    ),
                     priority=_candidate_priority(capabilities),
                     reason=f"{type(stage.operation).__name__} declares cache_stage",
                     retain=True,
@@ -133,12 +151,16 @@ def candidate_stage_cache_points(base_shape, base_dtype, operations, final_regio
                 priority="highest" if is_last else candidate.priority,
                 reason=candidate.reason,
                 retain=is_last,
-                retain_reason="latest reusable cacheable stage" if is_last else "superseded by later retained cacheable stage",
+                retain_reason="latest reusable cacheable stage"
+                if is_last
+                else "superseded by later retained cacheable stage",
             )
     return tuple(ordered)
 
 
-def candidate_stage_cache_points_from_transitions(stages, operations, transitions) -> tuple[StageCacheCandidate, ...]:
+def candidate_stage_cache_points_from_transitions(
+    stages, operations, transitions
+) -> tuple[StageCacheCandidate, ...]:
     stage_by_index = {stage.stage_index: stage for stage in stages}
     raw = []
     for transition in transitions:
@@ -172,7 +194,9 @@ def candidate_stage_cache_points_from_transitions(stages, operations, transition
                 priority=priority,
                 reason=f"{type(transition.operation).__name__} declares cache_stage",
                 retain=is_last,
-                retain_reason="latest reusable cacheable stage" if is_last else "superseded by later retained cacheable stage",
+                retain_reason="latest reusable cacheable stage"
+                if is_last
+                else "superseded by later retained cacheable stage",
             )
         )
     return tuple(candidates)
@@ -220,7 +244,9 @@ def plan_region_request(document, request) -> RegionPlan:
         required_input_region=current_region,
         stages=stages,
         transitions=transitions,
-        cache_candidates=candidate_stage_cache_points_from_transitions(stages, operations, transitions),
+        cache_candidates=candidate_stage_cache_points_from_transitions(
+            stages, operations, transitions
+        ),
         estimated_peak_bytes=region_peak,
         warnings=tuple(warnings),
         optimization_steps=format_optimization_steps(optimized.steps),
@@ -229,23 +255,37 @@ def plan_region_request(document, request) -> RegionPlan:
     )
 
 
-def estimate_region_plan_peak(base_shape, base_dtype, transitions, required_input_region) -> int | None:
+def estimate_region_plan_peak(
+    base_shape, base_dtype, transitions, required_input_region
+) -> int | None:
     peak = region_nbytes(tuple(int(size) for size in base_shape), base_dtype, required_input_region)
     dtype = None if base_dtype is None else np.dtype(base_dtype)
     for transition in tuple(transitions):
         input_dtype = dtype
         output_dtype = _operation_output_dtype(transition.operation, input_dtype)
-        input_bytes = region_nbytes(transition.input_shape, input_dtype, transition.required_input_region)
-        output_bytes = region_nbytes(transition.output_shape, output_dtype, transition.output_region)
-        capabilities = _operation_capabilities(transition.operation, transition.input_shape, input_dtype)
+        input_bytes = region_nbytes(
+            transition.input_shape, input_dtype, transition.required_input_region
+        )
+        output_bytes = region_nbytes(
+            transition.output_shape, output_dtype, transition.output_region
+        )
+        capabilities = _operation_capabilities(
+            transition.operation, transition.input_shape, input_dtype
+        )
         if capabilities is None:
             stage_peak = _sum_known(input_bytes, output_bytes)
         elif capabilities.kind == OperationKind.VIEW:
             stage_peak = output_bytes
         elif capabilities.kind == OperationKind.TRANSFORM:
-            stage_peak = None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
+            stage_peak = (
+                None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
+            )
         elif capabilities.kind == OperationKind.REDUCTION and capabilities.temp_multiplier > 1.0:
-            stage_peak = None if input_bytes is None or output_bytes is None else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+            stage_peak = (
+                None
+                if input_bytes is None or output_bytes is None
+                else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+            )
         else:
             stage_peak = _sum_known(input_bytes, output_bytes)
         peak = _max_known(peak, stage_peak)
@@ -255,23 +295,29 @@ def estimate_region_plan_peak(base_shape, base_dtype, transitions, required_inpu
 
 def final_region_for_request(shape, request) -> RegionSpec:
     spec = []
-    keep_axes = set(int(axis) for axis in request.keep_axes)
+    keep_axes = {int(axis) for axis in request.keep_axes}
     for axis, size in enumerate(tuple(int(size) for size in shape)):
         if axis in keep_axes:
             spec.append(_axis_item_for_keep_axis(request.view_state, axis))
         else:
             index = int(request.slice_indices[axis])
             if index < 0 or index >= int(size):
-                raise IndexError(f"slice index {index} is out of range for axis {axis} with size {size}")
+                raise IndexError(
+                    f"slice index {index} is out of range for axis {axis} with size {size}"
+                )
             spec.append(index)
     return region_from_index_spec(shape, tuple(spec))
 
 
-def required_input_region_for_operation(operation, input_shape, output_region: RegionSpec) -> RegionSpec:
+def required_input_region_for_operation(
+    operation, input_shape, output_region: RegionSpec
+) -> RegionSpec:
     return operation.required_input_region(tuple(int(size) for size in input_shape), output_region)
 
 
-def apply_operation_to_region(operation, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+def apply_operation_to_region(
+    operation, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+):
     return operation.apply_to_region(
         data,
         input_region=input_region,
@@ -280,11 +326,16 @@ def apply_operation_to_region(operation, data, *, input_region: RegionSpec, outp
     )
 
 
-def expanded_axes_for_transition(output_region: RegionSpec, required_input_region: RegionSpec, operation) -> tuple[int, ...]:
+def expanded_axes_for_transition(
+    output_region: RegionSpec, required_input_region: RegionSpec, operation
+) -> tuple[int, ...]:
     del operation
     expanded = []
     for axis, required_axis in enumerate(required_input_region.axes[: len(output_region.axes)]):
-        if axis_region_kind(required_axis.kind) == AxisRegionKind.ALL and axis_region_kind(output_region.axes[axis].kind) != AxisRegionKind.ALL:
+        if (
+            axis_region_kind(required_axis.kind) == AxisRegionKind.ALL
+            and axis_region_kind(output_region.axes[axis].kind) != AxisRegionKind.ALL
+        ):
             expanded.append(axis)
     return tuple(expanded)
 

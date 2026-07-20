@@ -32,6 +32,7 @@ def panel_body(panel):
 
 def assert_panel_invariants(win, name, expected_location):
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window.panels import PanelLocation
 
     panel = win.panel_manager._panels_by_name[name]
@@ -42,7 +43,10 @@ def assert_panel_invariants(win, name, expected_location):
         assert panel.body is not None
     elif expected_location == PanelLocation.DETACHED:
         assert panel.dialog is not None
-        assert panel.dialog.findChild(type(panel.body)) is panel.body or panel.body.parent() is not None
+        assert (
+            panel.dialog.findChild(type(panel.body)) is panel.body
+            or panel.body.parent() is not None
+        )
         assert not panel.dock.isVisible()
     elif expected_location == PanelLocation.DOCKED:
         assert panel.dialog is None
@@ -89,9 +93,7 @@ def use_pyqtgraph_backend(extra_settings=None):
 
     clear_arrayscope_settings()
     settings = QtCore.QSettings()
-    settings.setValue(
-        "image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value
-    )
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
     for key, value in (extra_settings or {}).items():
         settings.setValue(key, value)
     settings.sync()

@@ -25,10 +25,14 @@ class TileDataProvider:
         self.colormap_lut = colormap_lut
         self.evaluation_context = evaluation_context
 
-    def request_tile_region(self, request: TileRegionRequest, *, priority=None, cancellation_token=None) -> TileRegionResult:
+    def request_tile_region(
+        self, request: TileRegionRequest, *, priority=None, cancellation_token=None
+    ) -> TileRegionResult:
         self.last_request_priority = priority
         _check_cancelled(cancellation_token)
-        cached = _call_cache(self.operation_evaluator, "cached_tile_region_silent", "cached_tile_region", request)
+        cached = _call_cache(
+            self.operation_evaluator, "cached_tile_region_silent", "cached_tile_region", request
+        )
         if cached is not None:
             return TileRegionResult(request, cached[0], cached[1], "region_cache")
 
@@ -36,7 +40,9 @@ class TileDataProvider:
         region = self._normalized_region(request, tile)
         visible = self._from_committed_tiled_payload(request, tile, region)
         if visible is not None:
-            _store_region(self.operation_evaluator, request, (visible.image, visible.histogram_data))
+            _store_region(
+                self.operation_evaluator, request, (visible.image, visible.histogram_data)
+            )
             return visible
 
         _check_cancelled(cancellation_token)
@@ -51,8 +57,12 @@ class TileDataProvider:
                 colormap_lut=self.colormap_lut,
             )
             if payload is not None:
-                result = _slice_payload(request, payload.image, payload.histogram_data, region, "display_cache")
-                _store_region(self.operation_evaluator, request, (result.image, result.histogram_data))
+                result = _slice_payload(
+                    request, payload.image, payload.histogram_data, region, "display_cache"
+                )
+                _store_region(
+                    self.operation_evaluator, request, (result.image, result.histogram_data)
+                )
                 return result
 
         _check_cancelled(cancellation_token)
@@ -63,7 +73,9 @@ class TileDataProvider:
             colormap_lut=self.colormap_lut,
             evaluation_context=self.evaluation_context,
         ).value
-        result = _slice_payload(request, display_image.data, display_image.histogram_data, region, "computed")
+        result = _slice_payload(
+            request, display_image.data, display_image.histogram_data, region, "computed"
+        )
         _store_region(self.operation_evaluator, request, (result.image, result.histogram_data))
         return result
 
@@ -88,7 +100,9 @@ class TileDataProvider:
             return (slice(0, int(shape[y_axis])), slice(0, int(shape[x_axis])))
         return (slice(None), slice(None))
 
-    def _from_committed_tiled_payload(self, request: TileRegionRequest, tile, region: tuple[slice, slice]) -> TileRegionResult | None:
+    def _from_committed_tiled_payload(
+        self, request: TileRegionRequest, tile, region: tuple[slice, slice]
+    ) -> TileRegionResult | None:
         frame = self.committed_frame
         if frame is None or tile is None:
             return None
@@ -109,7 +123,9 @@ class TileDataProvider:
         return TileRegionResult(request, image, histogram, source)
 
 
-def _slice_payload(request, image, histogram_data, region: tuple[slice, slice], source: str) -> TileRegionResult:
+def _slice_payload(
+    request, image, histogram_data, region: tuple[slice, slice], source: str
+) -> TileRegionResult:
     y_slice, x_slice = region
     data = np.asarray(image)[y_slice, x_slice, ...]
     hist = None if histogram_data is None else np.asarray(histogram_data)[y_slice, x_slice]

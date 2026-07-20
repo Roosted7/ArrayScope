@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -28,10 +29,6 @@ from tests.ui.helpers import (
     use_vispy_backend,
     use_wgpu_backend,
 )
-
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
-
 
 
 def _window_settled(win, indices) -> bool:
@@ -49,10 +46,7 @@ def _window_first_pixels_presented(win, indices) -> bool:
     if session is None or session.plan is None:
         return False
     plan_sources = tuple(int(tile.source_index) for tile in session.plan.tiles)
-    return bool(
-        plan_sources == tuple(indices)
-        and session.required_first_pixels_presented()
-    )
+    return bool(plan_sources == tuple(indices) and session.required_first_pixels_presented())
 
 
 def _scroll_to(win, qtbot, indices) -> None:
@@ -85,7 +79,7 @@ def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
         win._set_document(win.operation_coordinator.document)
         win._coerce_channel_for_current_dtype()
 
-        initial = tuple(range(0, 20))
+        initial = tuple(range(20))
         state = win.view_state.with_montage_axis(
             2,
             columns=5,
@@ -94,7 +88,9 @@ def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
         )
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: _window_settled(win, initial), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        qtbot.waitUntil(
+            lambda: _window_settled(win, initial), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
+        )
 
         # Scroll down (new sources appended), then back up (new sources
         # prepended) — both retarget directions of the live repro.

@@ -5,9 +5,10 @@ This module is the canonical owner of lanes, priorities, and work metadata.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import Any, Callable
+from typing import Any
 
 
 class Lane(str, Enum):
@@ -89,9 +90,9 @@ class TaskOutcome(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    STALE = "stale"           # finished, but superseded/scope-cleared
+    STALE = "stale"  # finished, but superseded/scope-cleared
     STALE_REUSED = "stale_reused"  # stale, but an on_reuse handler consumed it
-    DROPPED = "dropped"       # never ran (superseded, cleared, dep failure, deadline)
+    DROPPED = "dropped"  # never ran (superseded, cleared, dep failure, deadline)
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,8 @@ def complete_inline_work(owner, item: WorkItem) -> None:
 
 
 __all__ = [
+    "UNRANKED_SCHEDULING_RANK",
+    "VISIBLE_LANES",
     "CancellationToken",
     "Lane",
     "LaneCounters",
@@ -253,8 +256,6 @@ __all__ = [
     "Supersession",
     "TaskOutcome",
     "TaskSpec",
-    "UNRANKED_SCHEDULING_RANK",
-    "VISIBLE_LANES",
     "WorkItem",
     "complete_inline_work",
 ]

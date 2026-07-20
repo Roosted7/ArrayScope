@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from arrayscope.gpu.page_table import PageResolution, page_key_can_cover
-
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
-from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 from arrayscope.display.model.tile_identity import TileIdentity, TilePresentationIdentity
 from arrayscope.display.pyramid import (
     LodPagePlan,
@@ -21,6 +18,9 @@ from arrayscope.display.pyramid import (
     resolve_materialized_page_targets,
     resolved_materialized_page_set,
 )
+from arrayscope.display.scene import DisplayScene, display_scene_for_geometry
+from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
+from arrayscope.gpu.page_table import PageResolution, page_key_can_cover
 
 
 def array_value_at(data, y_i: int, x_i: int):
@@ -51,9 +51,7 @@ class PayloadSourceAnchor:
     source_rect: tuple[int, int, int, int]
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "source_rect", tuple(int(value) for value in self.source_rect)
-        )
+        object.__setattr__(self, "source_rect", tuple(int(value) for value in self.source_rect))
 
 
 @dataclass(frozen=True)
@@ -101,14 +99,21 @@ class PageBackedPresentation:
         unknown = tuple(
             key
             for key in page_keys
-            if key not in set(keys)
-            and not any(page_key_can_cover(target, key) for target in keys)
+            if key not in set(keys) and not any(page_key_can_cover(target, key) for target in keys)
         )
         if unknown:
             raise ValueError(f"materialized pages do not belong to requested targets: {unknown!r}")
         coverage = tuple(int(value) for value in self.source_coverage_yx)
-        if len(coverage) != 4 or coverage[0] < 0 or coverage[2] < 0 or coverage[1] <= coverage[0] or coverage[3] <= coverage[2]:
-            raise ValueError("page-backed source coverage must be a non-empty native-source rectangle")
+        if (
+            len(coverage) != 4
+            or coverage[0] < 0
+            or coverage[2] < 0
+            or coverage[1] <= coverage[0]
+            or coverage[3] <= coverage[2]
+        ):
+            raise ValueError(
+                "page-backed source coverage must be a non-empty native-source rectangle"
+            )
         _validate_exact_rect_cover(
             coverage,
             tuple(plan.valid_source_rect_yx for plan in plans),
@@ -120,9 +125,7 @@ class PageBackedPresentation:
             raise ValueError(
                 "requested page LOD source shape disagrees with native source coverage"
             )
-        requested_stored_shape = _stored_rect_extent(
-            tuple(plan.stored_rect_yx for plan in plans)
-        )
+        requested_stored_shape = _stored_rect_extent(tuple(plan.stored_rect_yx for plan in plans))
         if tuple(self.requested_lod.texture_shape) != requested_stored_shape:
             raise ValueError(
                 "requested page LOD texture shape disagrees with target stored coverage"
@@ -214,9 +217,7 @@ class PageBackedPresentation:
             raise ValueError("presentation page coordinates fall outside native source coverage")
 
         pages = self.materialized_by_key()
-        actual_pages = tuple(
-            pages[item.actual_key] for item in resolved_page_set.resolutions
-        )
+        actual_pages = tuple(pages[item.actual_key] for item in resolved_page_set.resolutions)
         first_values = np.asarray(actual_pages[0].values)
         component_shape = tuple(first_values.shape[2:])
         if any(
@@ -232,17 +233,11 @@ class PageBackedPresentation:
             dtype=first_values.dtype,
         )
         filled = np.zeros(result.shape[:2], dtype=bool)
-        resolution_by_target = {
-            item.target_key: item for item in resolved_page_set.resolutions
-        }
+        resolution_by_target = {item.target_key: item for item in resolved_page_set.resolutions}
         for plan in self.requested_plans:
             plan_y0, plan_y1, plan_x0, plan_x1 = plan.valid_source_rect_yx
-            output_rows = np.flatnonzero(
-                (y_coordinates >= plan_y0) & (y_coordinates < plan_y1)
-            )
-            output_columns = np.flatnonzero(
-                (x_coordinates >= plan_x0) & (x_coordinates < plan_x1)
-            )
+            output_rows = np.flatnonzero((y_coordinates >= plan_y0) & (y_coordinates < plan_y1))
+            output_columns = np.flatnonzero((x_coordinates >= plan_x0) & (x_coordinates < plan_x1))
             if output_rows.size == 0 or output_columns.size == 0:
                 continue
             resolution = resolution_by_target[plan.key]
@@ -270,9 +265,7 @@ class PageBackedPresentation:
                 or np.any(actual_columns < 0)
                 or np.any(actual_columns >= page_values.shape[1])
             ):
-                raise RuntimeError(
-                    "resolved page mapping falls outside the actual stored values"
-                )
+                raise RuntimeError("resolved page mapping falls outside the actual stored values")
             output_index = np.ix_(output_rows, output_columns)
             if np.any(filled[output_index]):
                 raise RuntimeError("presentation page target cover overlaps")
@@ -314,7 +307,9 @@ class DisplayTilePayload:
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
         if quality not in ("exact", "preview"):
-            raise ValueError(f"display tile payload quality must be 'exact' or 'preview', got {quality!r}")
+            raise ValueError(
+                f"display tile payload quality must be 'exact' or 'preview', got {quality!r}"
+            )
         object.__setattr__(self, "quality", quality)
         image = np.asarray(self.image)
         if image.ndim < 2:
@@ -328,7 +323,9 @@ class DisplayTilePayload:
                 raise ValueError("display tile payload histogram shape must match image shape")
         if quality == "preview":
             if self.semantic_data is not None or self.semantic_histogram_data is not None:
-                raise ValueError("preview display tile payloads must not carry exact semantic planes")
+                raise ValueError(
+                    "preview display tile payloads must not carry exact semantic planes"
+                )
             semantic = None
             semantic_histogram = None
         else:
@@ -346,7 +343,9 @@ class DisplayTilePayload:
                     else self.semantic_histogram_data
                 )
             )
-            semantic_histogram = None if semantic_histogram is None else np.asarray(semantic_histogram)
+            semantic_histogram = (
+                None if semantic_histogram is None else np.asarray(semantic_histogram)
+            )
         source_shape = tuple(int(value) for value in (self.source_shape or image.shape[:2])[:2])
         texture_kind = self.texture_kind
         if texture_kind is None:
@@ -384,21 +383,15 @@ class DisplayTilePayload:
                 raise ValueError("page-backed payload requires requested semantic LOD")
             requested_lod = page_backing.requested_lod
             if tuple(self.lod.source_shape) != tuple(requested_lod.source_shape):
-                raise ValueError(
-                    "payload LOD source shape disagrees with requested page coverage"
-                )
+                raise ValueError("payload LOD source shape disagrees with requested page coverage")
             if tuple(self.lod.texture_shape) != tuple(requested_lod.texture_shape):
-                raise ValueError(
-                    "payload LOD texture shape disagrees with requested page coverage"
-                )
+                raise ValueError("payload LOD texture shape disagrees with requested page coverage")
             if (
                 int(self.lod.level) != int(requested_lod.level)
                 or int(self.lod.factor) != int(requested_lod.factor)
                 or int(self.lod.gutter) != int(requested_lod.gutter)
             ):
-                raise ValueError(
-                    "payload LOD disagrees with the page set's requested semantic LOD"
-                )
+                raise ValueError("payload LOD disagrees with the page set's requested semantic LOD")
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -442,19 +435,16 @@ class DisplayTilePayload:
         if not isinstance(resolved, ResolvedLodPageSet):
             raise ValueError("page-backed payload has no complete actual LOD resolution")
         reductions = {
-            tuple(int(step) for step in reduction)
-            for reduction in resolved.actual_reductions_yx
+            tuple(int(step) for step in reduction) for reduction in resolved.actual_reductions_yx
         }
         if len(reductions) != 1:
             raise ValueError(
-                "page-backed payload has mixed actual LOD reductions: "
-                f"{tuple(sorted(reductions))}"
+                f"page-backed payload has mixed actual LOD reductions: {tuple(sorted(reductions))}"
             )
         reduction = next(iter(reductions))
         if len(reduction) != 2 or reduction[0] != reduction[1]:
             raise ValueError(
-                "page-backed payload has anisotropic actual LOD reduction: "
-                f"{reduction}"
+                f"page-backed payload has anisotropic actual LOD reduction: {reduction}"
             )
         return 1 << int(reduction[0])
 
@@ -494,13 +484,16 @@ def _validate_exact_rect_cover(
 ) -> None:
     """Reject page target gaps/overlaps without allocating a source-sized mask."""
 
-    y_edges = sorted({coverage[0], coverage[1], *(edge for rect in rectangles for edge in rect[:2])})
-    x_edges = sorted({coverage[2], coverage[3], *(edge for rect in rectangles for edge in rect[2:])})
-    for y0, y1 in zip(y_edges, y_edges[1:]):
-        for x0, x1 in zip(x_edges, x_edges[1:]):
+    y_edges = sorted(
+        {coverage[0], coverage[1], *(edge for rect in rectangles for edge in rect[:2])}
+    )
+    x_edges = sorted(
+        {coverage[2], coverage[3], *(edge for rect in rectangles for edge in rect[2:])}
+    )
+    for y0, y1 in itertools.pairwise(y_edges):
+        for x0, x1 in itertools.pairwise(x_edges):
             if not (
-                coverage[0] <= y0 < y1 <= coverage[1]
-                and coverage[2] <= x0 < x1 <= coverage[3]
+                coverage[0] <= y0 < y1 <= coverage[1] and coverage[2] <= x0 < x1 <= coverage[3]
             ):
                 continue
             owners = sum(
@@ -577,9 +570,7 @@ class TileCommitReport:
 
     def __post_init__(self) -> None:
         if self.delta_key is not None:
-            object.__setattr__(
-                self, "delta_key", (int(self.delta_key[0]), int(self.delta_key[1]))
-            )
+            object.__setattr__(self, "delta_key", (int(self.delta_key[0]), int(self.delta_key[1])))
         if self.transaction_generation is not None:
             object.__setattr__(self, "transaction_generation", int(self.transaction_generation))
         if self.presented_identities is not None:
@@ -588,14 +579,18 @@ class TileCommitReport:
                 "presented_identities",
                 {int(tile): identity for tile, identity in dict(self.presented_identities).items()},
             )
-        object.__setattr__(self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles))
+        object.__setattr__(
+            self, "presented_tiles", frozenset(int(tile) for tile in self.presented_tiles)
+        )
         if self.committed_upserts is not None:
             object.__setattr__(
                 self,
                 "committed_upserts",
                 frozenset(int(tile) for tile in self.committed_upserts),
             )
-        object.__setattr__(self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles))
+        object.__setattr__(
+            self, "removed_tiles", frozenset(int(tile) for tile in self.removed_tiles)
+        )
         object.__setattr__(
             self,
             "cold_upsert_tiles",
@@ -621,7 +616,7 @@ class TileCommitReport:
     def cold_count(self) -> int:
         return int(self.texture_uploads + self.pyqtgraph_items_created + self.cpu_windowed_tiles)
 
-    def acknowledges(self, delta: "TilePresentationDelta") -> bool:
+    def acknowledges(self, delta: TilePresentationDelta) -> bool:
         """Whether this report was produced by committing exactly ``delta``."""
 
         if (
@@ -634,14 +629,14 @@ class TileCommitReport:
             return True
         return self.delta_key == (int(delta.base_revision), int(delta.target_revision))
 
-    def accepted_upserts(self, delta: "TilePresentationDelta") -> set[int]:
+    def accepted_upserts(self, delta: TilePresentationDelta) -> set[int]:
         if not self.acknowledges(delta):
             return set()
         if self.committed_upserts is not None:
             return set(self.committed_upserts.intersection(delta.upserts))
         return set(self.presented_tiles.intersection(delta.upserts))
 
-    def accepted_upserts_in_order(self, delta: "TilePresentationDelta") -> tuple[int, ...]:
+    def accepted_upserts_in_order(self, delta: TilePresentationDelta) -> tuple[int, ...]:
         """Accepted membership in the producer's presentation order."""
 
         accepted = self.accepted_upserts(delta)
@@ -677,7 +672,9 @@ class TilePresentationDelta:
     clear_reason: str = ""
 
     def __post_init__(self) -> None:
-        upserts = {int(key): _coerce_tile_payload(value) for key, value in dict(self.upserts).items()}
+        upserts = {
+            int(key): _coerce_tile_payload(value) for key, value in dict(self.upserts).items()
+        }
         for key, payload in upserts.items():
             if int(payload.tile_number) != int(key):
                 raise ValueError("tile delta upsert key must match payload tile_number")
@@ -687,13 +684,14 @@ class TilePresentationDelta:
         active = _unique_int_tuple(self.active_tiles, "active_tiles")
         planned = _unique_int_tuple(self.planned_tiles, "planned_tiles")
         near = _unique_int_tuple(self.near_tiles, "near_tiles")
-        near_sources = {int(key): value for key, value in dict(self.near_tile_source_ids or {}).items()}
+        near_sources = {
+            int(key): value for key, value in dict(self.near_tile_source_ids or {}).items()
+        }
         target_identities = {
             int(key): value for key, value in dict(self.target_identities or {}).items()
         }
         priority_ranks = {
-            int(key): int(value)
-            for key, value in dict(self.priority_ranks or {}).items()
+            int(key): int(value) for key, value in dict(self.priority_ranks or {}).items()
         }
         if any(not isinstance(value, TileIdentity) for value in target_identities.values()):
             raise TypeError("tile delta target identities must be TileIdentity instances")
@@ -704,12 +702,18 @@ class TilePresentationDelta:
         object.__setattr__(self, "histogram_revision", int(self.histogram_revision))
         object.__setattr__(self, "viewport_revision", int(self.viewport_revision))
         object.__setattr__(self, "base_revision", int(self.base_revision))
-        target = int(self.target_revision) if int(self.target_revision) else int(self.base_revision) + (1 if upserts or removals else 0)
+        target = (
+            int(self.target_revision)
+            if int(self.target_revision)
+            else int(self.base_revision) + (1 if upserts or removals else 0)
+        )
         object.__setattr__(self, "target_revision", target)
         if self.transaction_generation is not None:
             object.__setattr__(self, "transaction_generation", int(self.transaction_generation))
         deadline = self.cold_deadline_ms
-        object.__setattr__(self, "cold_deadline_ms", None if deadline is None else max(0.0, float(deadline)))
+        object.__setattr__(
+            self, "cold_deadline_ms", None if deadline is None else max(0.0, float(deadline))
+        )
         object.__setattr__(self, "upserts", upserts)
         object.__setattr__(self, "removals", removals)
         object.__setattr__(self, "active_tiles", active)
@@ -729,14 +733,16 @@ class TilePresentationState:
     revision: int = 0
 
     def __post_init__(self) -> None:
-        typed = {int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()}
+        typed = {
+            int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()
+        }
         for key, payload in typed.items():
             if int(payload.tile_number) != int(key):
                 raise ValueError("tile state payload key must match tile_number")
         object.__setattr__(self, "payloads", typed)
         object.__setattr__(self, "revision", int(self.revision))
 
-    def apply_delta(self, delta: TilePresentationDelta) -> "TilePresentationState":
+    def apply_delta(self, delta: TilePresentationDelta) -> TilePresentationState:
         if not isinstance(delta, TilePresentationDelta):
             raise TypeError("tile presentation state requires a TilePresentationDelta")
         if int(delta.base_revision) != int(self.revision):
@@ -747,19 +753,25 @@ class TilePresentationState:
         payloads.update(delta.upserts)
         return TilePresentationState(payloads, revision=int(delta.target_revision))
 
-    def acknowledge_delta(self, delta: TilePresentationDelta, report: TileCommitReport) -> "TilePresentationState":
+    def acknowledge_delta(
+        self, delta: TilePresentationDelta, report: TileCommitReport
+    ) -> TilePresentationState:
         """Apply only the portion of a proposed delta accepted by the backend."""
 
         if not isinstance(report, TileCommitReport):
             raise TypeError("tile presentation acknowledgement requires a TileCommitReport")
-        if bool(report.stale) or not report.acknowledges(delta) or int(delta.base_revision) != int(self.revision):
+        if (
+            bool(report.stale)
+            or not report.acknowledges(delta)
+            or int(delta.base_revision) != int(self.revision)
+        ):
             return self
         accepted_upserts = {
             int(tile): payload
             for tile, payload in dict(delta.upserts).items()
             if int(tile) in report.accepted_upserts(delta)
         }
-        removals = set(int(tile) for tile in report.removed_tiles)
+        removals = {int(tile) for tile in report.removed_tiles}
         if not accepted_upserts and not removals:
             return self
         acknowledged = replace(
@@ -771,10 +783,18 @@ class TilePresentationState:
         return self.apply_delta(acknowledged)
 
     def active_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
-        return {int(tile): self.payloads[int(tile)] for tile in delta.active_tiles if int(tile) in self.payloads}
+        return {
+            int(tile): self.payloads[int(tile)]
+            for tile in delta.active_tiles
+            if int(tile) in self.payloads
+        }
 
     def near_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
-        return {int(tile): self.payloads[int(tile)] for tile in delta.near_tiles if int(tile) in self.payloads}
+        return {
+            int(tile): self.payloads[int(tile)]
+            for tile in delta.near_tiles
+            if int(tile) in self.payloads
+        }
 
 
 class FrameValueSource:
@@ -790,7 +810,9 @@ class TiledValueSource(FrameValueSource):
     payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        typed = {int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()}
+        typed = {
+            int(key): _coerce_tile_payload(value) for key, value in dict(self.payloads).items()
+        }
         for key, payload in typed.items():
             if int(payload.tile_number) != int(key):
                 raise ValueError("display tile payload key must match tile_number")

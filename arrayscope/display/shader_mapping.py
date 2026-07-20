@@ -115,7 +115,9 @@ def normalize_lut_rgb(lut: np.ndarray | None, *, phase_default: bool = False) ->
             and float(np.nanmax(color)) <= 1.0
             else 255.0
         )
-        color = np.clip(np.asarray(color, dtype=np.float32) * (255.0 / max_value), 0.0, 255.0).astype(np.uint8)
+        color = np.clip(
+            np.asarray(color, dtype=np.float32) * (255.0 / max_value), 0.0, 255.0
+        ).astype(np.uint8)
     return np.ascontiguousarray(color)
 
 
@@ -199,7 +201,9 @@ def apply_scale(data, scale: ShaderScale | str, *, symlog_constant: float = 0.0)
     if scale == ShaderScale.SYMLOG:
         c = float(symlog_constant)
         with np.errstate(divide="ignore", invalid="ignore"):
-            return (np.sign(arr) * np.log10(1.0 + np.abs(arr) / (10.0**c))).astype(np.float32, copy=False)
+            return (np.sign(arr) * np.log10(1.0 + np.abs(arr) / (10.0**c))).astype(
+                np.float32, copy=False
+            )
     raise ValueError(f"unsupported shader scale: {scale!r}")
 
 
@@ -233,7 +237,9 @@ def apply_phase_lut(data, lut: np.ndarray | None = None) -> tuple[np.ndarray, np
     position = (phase + np.pi) / (2.0 * np.pi)
     position = np.nan_to_num(position, nan=0.0, posinf=0.0, neginf=0.0)
     color = _sample_lut_rgb(lut_array, np.clip(position, 0.0, 1.0))
-    return color.astype(np.uint8, copy=False), np.abs(np.asarray(data)).astype(np.float32, copy=False)
+    return color.astype(np.uint8, copy=False), np.abs(np.asarray(data)).astype(
+        np.float32, copy=False
+    )
 
 
 def cpu_display_rgba(data, mapping: ShaderMapping) -> np.ndarray:
@@ -246,15 +252,21 @@ def cpu_display_rgba(data, mapping: ShaderMapping) -> np.ndarray:
             rgb = _sample_lut_rgb(lut, lut_position)
         else:
             color, _magnitude = apply_phase_lut(data, mapping.lut_data)
-            intensity = np.ones_like(scalar, dtype=np.float32) if levels is None else window_intensity(scalar, levels)
-            rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(np.uint8)
-        alpha = np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)
+            intensity = (
+                np.ones_like(scalar, dtype=np.float32)
+                if levels is None
+                else window_intensity(scalar, levels)
+            )
+            rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(
+                np.uint8
+            )
+        alpha = np.full((*rgb.shape[:2], 1), 255, dtype=np.uint8)
         alpha[~np.isfinite(scalar), 0] = 0
         return np.concatenate((rgb, alpha), axis=-1)
     scalar = mapped_scalar(data, mapping)
     levels = mapping.levels or finite_default_levels(scalar)
     intensity = window_intensity(scalar, levels)
-    alpha = np.full(intensity.shape + (1,), 255, dtype=np.uint8)
+    alpha = np.full((*intensity.shape, 1), 255, dtype=np.uint8)
     alpha[~np.isfinite(scalar), 0] = 0
     lut = normalize_lut_rgb(mapping.lut_data, phase_default=False)
     rgb = _sample_lut_rgb(lut, intensity)
@@ -268,7 +280,7 @@ def pack_texture_data(data, texture_kind: TexturePlaneKind | str) -> np.ndarray:
         return np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
     if kind == TexturePlaneKind.COMPLEX_RG32F:
         if np.iscomplexobj(arr):
-            packed = np.empty(arr.shape + (2,), dtype=np.float32)
+            packed = np.empty((*arr.shape, 2), dtype=np.float32)
             packed[..., 0] = np.real(arr).astype(np.float32, copy=False)
             packed[..., 1] = np.imag(arr).astype(np.float32, copy=False)
             return np.ascontiguousarray(packed)
@@ -308,15 +320,15 @@ def default_phase_lut(size: int = 256) -> np.ndarray:
     x = 1.0 - np.abs(h % 2.0 - 1.0)
     rgb = np.zeros((int(size), 3), dtype=np.float32)
     masks = (
-        (0 <= h) & (h < 1),
-        (1 <= h) & (h < 2),
-        (2 <= h) & (h < 3),
-        (3 <= h) & (h < 4),
-        (4 <= h) & (h < 5),
-        (5 <= h) & (h < 6),
+        (h >= 0) & (h < 1),
+        (h >= 1) & (h < 2),
+        (h >= 2) & (h < 3),
+        (h >= 3) & (h < 4),
+        (h >= 4) & (h < 5),
+        (h >= 5) & (h < 6),
     )
     choices = ((c, x, 0), (x, c, 0), (0, c, x), (0, x, c), (x, 0, c), (c, 0, x))
-    for mask, choice in zip(masks, choices):
+    for mask, choice in zip(masks, choices, strict=False):
         for channel, value in enumerate(choice):
             rgb[mask, channel] = value if np.isscalar(value) else value[mask]
     return np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -329,7 +341,7 @@ def _lut_rgb_uint8(lut: np.ndarray | None) -> np.ndarray:
 def _sample_lut_rgb(lut: np.ndarray, position: np.ndarray) -> np.ndarray:
     lut = np.asarray(lut, dtype=np.float32)
     if lut.shape[0] == 1:
-        return np.broadcast_to(lut[0].astype(np.uint8), np.asarray(position).shape + (3,))
+        return np.broadcast_to(lut[0].astype(np.uint8), (*np.asarray(position).shape, 3))
     scaled = np.clip(np.asarray(position, dtype=np.float32), 0.0, 1.0) * float(lut.shape[0] - 1)
     lower = np.floor(scaled).astype(np.int64)
     upper = np.clip(lower + 1, 0, lut.shape[0] - 1)
@@ -347,24 +359,24 @@ def _coerce_enum(enum_type, value):
 
 
 __all__ = [
-    "ShaderDisplayMode",
     "ShaderComponent",
-    "ShaderScale",
+    "ShaderDisplayMode",
     "ShaderMapping",
-    "common_shader_mapping",
+    "ShaderScale",
     "TexturePlaneKind",
-    "default_gray_lut",
-    "normalize_lut_rgb",
-    "shader_mapping_with_lut",
-    "extract_component",
-    "shader_component_uniform",
-    "apply_scale",
-    "mapped_scalar",
-    "window_intensity",
-    "phase_lut_indices",
     "apply_phase_lut",
+    "apply_scale",
+    "common_shader_mapping",
     "cpu_display_rgba",
-    "pack_texture_data",
-    "finite_default_levels",
+    "default_gray_lut",
     "default_phase_lut",
+    "extract_component",
+    "finite_default_levels",
+    "mapped_scalar",
+    "normalize_lut_rgb",
+    "pack_texture_data",
+    "phase_lut_indices",
+    "shader_component_uniform",
+    "shader_mapping_with_lut",
+    "window_intensity",
 ]

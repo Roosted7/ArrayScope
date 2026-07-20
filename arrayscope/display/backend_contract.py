@@ -68,10 +68,14 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
     if capabilities is not None and hasattr(capabilities, "name"):
         return ImageViewBackendCapabilities(
             name=str(getattr(capabilities, "name", "pyqtgraph") or "pyqtgraph"),
-            persistent_tile_residency=bool(getattr(capabilities, "persistent_tile_residency", False)),
+            persistent_tile_residency=bool(
+                getattr(capabilities, "persistent_tile_residency", False)
+            ),
             tile_residency_kind=str(getattr(capabilities, "tile_residency_kind", "none") or "none"),
             shader_windowing=bool(getattr(capabilities, "shader_windowing", False)),
-            native_pointer_interaction=bool(getattr(capabilities, "native_pointer_interaction", True)),
+            native_pointer_interaction=bool(
+                getattr(capabilities, "native_pointer_interaction", True)
+            ),
         )
 
     return ImageViewBackendCapabilities(name="pyqtgraph")

@@ -138,8 +138,7 @@ class ChunkStore:
             if not candidates:
                 self._capacity_denials += 1
                 raise CapacityError(
-                    f"pool {self.pool.pool_id!r} exhausted: "
-                    f"{len(self.table)} resident, all pinned"
+                    f"pool {self.pool.pool_id!r} exhausted: {len(self.table)} resident, all pinned"
                 )
             victim = candidates[0]
             freed = self.table.unbind(victim)

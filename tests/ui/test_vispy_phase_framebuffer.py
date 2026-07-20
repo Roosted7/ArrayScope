@@ -23,14 +23,12 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
     restore_default_backend,
     use_vispy_backend,
 )
-
 
 # PAL-relaxed LUT[0] (== LUT[-1]; the map is cyclic): the stale-draw color
 # for zero-magnitude complex texels.  Verified against
@@ -53,7 +51,8 @@ def _render_rgb(win) -> np.ndarray:
     """Render the live VisPy scene to an offscreen FBO and return HxWx3 ints."""
 
     frame = np.asarray(win.img_view._vispy_canvas.render())
-    assert frame.ndim == 3 and frame.shape[-1] in (3, 4)
+    assert frame.ndim == 3
+    assert frame.shape[-1] in (3, 4)
     return frame[..., :3].astype(np.int16)
 
 
@@ -88,7 +87,7 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
         win._on_channel_clicked("complex")  # phase_color display, PAL-relaxed LUT
         win.render(reason="test-phase-initial")
         _wait_settled(win, qtbot)
-        layer, visual = _live_page_visual(win)
+        _layer, visual = _live_page_visual(win)
         assert float(visual._component_mode) == 2.0  # ShaderComponent.ABS
         assert np.all(np.asarray(visual.mode_data) == 4.0)  # phase_color quads
 
@@ -107,7 +106,13 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
         corrupted = _render_rgb(win)
         corrupted_orange = _orange_pixel_count(corrupted)
         corrupted_bright = _bright_pixel_count(corrupted)
-        assert corrupted_orange > 100 and corrupted_bright > 4 * max(1, healthy_bright), (
+        assert corrupted_orange > 100, (
+            "injected wrong component uniform did not visibly corrupt the "
+            f"framebuffer (orange={corrupted_orange}, bright={corrupted_bright}, "
+            f"healthy bright={healthy_bright}) — the recovery half of this gate "
+            "would be vacuous"
+        )
+        assert corrupted_bright > 4 * max(1, healthy_bright), (
             "injected wrong component uniform did not visibly corrupt the "
             f"framebuffer (orange={corrupted_orange}, bright={corrupted_bright}, "
             f"healthy bright={healthy_bright}) — the recovery half of this gate "
@@ -123,7 +128,9 @@ def test_phase_color_zero_background_never_presents_lut_zero_orange(qtbot):
         _wait_settled(win, qtbot)
 
         def _recovered() -> bool:
-            return float(visual._component_mode) == 2.0 and _orange_pixel_count(_render_rgb(win)) == 0
+            return (
+                float(visual._component_mode) == 2.0 and _orange_pixel_count(_render_rgb(win)) == 0
+            )
 
         qtbot.waitUntil(_recovered, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
         recovered = _render_rgb(win)

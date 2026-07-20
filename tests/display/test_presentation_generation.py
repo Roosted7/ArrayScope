@@ -1,7 +1,11 @@
-from hypothesis import given, strategies as st
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from arrayscope.display.model.level_convergence import ProgressiveTileLevelConvergence, UniformLevelConvergence
+from arrayscope.display.model.level_convergence import (
+    ProgressiveTileLevelConvergence,
+    UniformLevelConvergence,
+)
 from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
 
 
@@ -71,7 +75,11 @@ def test_generation_tracker_snapshot_uses_incremental_stale_state(monkeypatch):
     tracker.begin_target((2.0, 4.0), active_tiles=(0, 1, 2))
     tracker.acknowledge_upserts(tracker.revision, (0,), levels=(2.0, 4.0))
 
-    monkeypatch.setattr(tracker, "stale_tiles", lambda *args, **kwargs: pytest.fail("snapshot should not enumerate stale tiles"))
+    monkeypatch.setattr(
+        tracker,
+        "stale_tiles",
+        lambda *args, **kwargs: pytest.fail("snapshot should not enumerate stale tiles"),
+    )
 
     snapshot = tracker.snapshot()
     assert snapshot.stale_count == 2

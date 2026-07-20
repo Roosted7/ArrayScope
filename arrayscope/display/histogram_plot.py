@@ -12,7 +12,6 @@ from time import perf_counter
 
 import numpy as np
 
-
 MIN_HISTOGRAM_BIN_SCREEN_PX = 5
 DEFAULT_HISTOGRAM_BIN_CAP = 500
 DEFAULT_HISTOGRAM_TARGET_IMAGE_SIZE = 200
@@ -84,7 +83,7 @@ def compute_histogram_plot(request: HistogramPlotRequest) -> HistogramPlotResult
                         visible_bin_width = visible_span / max_visible_bins
                         requested_bins = max(
                             2,
-                            int(ceil(span / max(visible_bin_width, np.finfo(float).eps))),
+                            ceil(span / max(visible_bin_width, np.finfo(float).eps)),
                         )
                         cap = max(2, min(int(request.bin_cap), int(sampled.size)))
                         bins = max(2, min(requested_bins, cap))
@@ -106,14 +105,16 @@ def compute_histogram_plot(request: HistogramPlotRequest) -> HistogramPlotResult
     )
 
 
-def sample_histogram_data(data: np.ndarray, *, target_image_size: int = DEFAULT_HISTOGRAM_TARGET_IMAGE_SIZE) -> np.ndarray:
+def sample_histogram_data(
+    data: np.ndarray, *, target_image_size: int = DEFAULT_HISTOGRAM_TARGET_IMAGE_SIZE
+) -> np.ndarray:
     array = np.asarray(data)
     if np.iscomplexobj(array):
         array = np.abs(array).astype(np.float32, copy=False)
     if array.ndim < 2:
         return array.reshape(-1)
-    step0 = max(1, int(ceil(array.shape[0] / float(target_image_size))))
-    step1 = max(1, int(ceil(array.shape[1] / float(target_image_size))))
+    step0 = max(1, ceil(array.shape[0] / float(target_image_size)))
+    step1 = max(1, ceil(array.shape[1] / float(target_image_size)))
     return array[::step0, ::step1].reshape(-1)
 
 

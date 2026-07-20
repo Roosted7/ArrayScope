@@ -1,17 +1,12 @@
 import ast
-import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import pytest
+
 import arrayscope.core.roi as roi
 
 ROI_PATH = Path(roi.__file__)
-
-
-
 
 
 def test_polyline_sampling_across_horizontal_and_vertical_segments():

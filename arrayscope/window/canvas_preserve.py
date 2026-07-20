@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass
-import logging
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.app.settings_state import PanelResizeBehavior
 from arrayscope.core.runtime_diagnostics import CanvasPreserveRuntimeDiagnostics
-
 
 logger = logging.getLogger(__name__)
 
@@ -107,19 +106,33 @@ class CanvasPreserveController:
         # size; the receiver context drops it with the window.
         Qt.QtCore.QTimer.singleShot(interval_ms, self.window, callback)
 
-    def run(self, transition, *, preserve_canvas: bool, allow_strong: bool = True, transition_name: str = "") -> None:
+    def run(
+        self,
+        transition,
+        *,
+        preserve_canvas: bool,
+        allow_strong: bool = True,
+        transition_name: str = "",
+    ) -> None:
         mode = self._current_mode()
         platform = self._qt_platform_name()
         self._mode = mode.value
         self._platform = platform
         self._last_transition = str(transition_name or "panel")
-        self._strong_available = bool(allow_strong and mode == PanelResizeBehavior.STRONG_WAYLAND and _is_wayland_platform(platform))
+        self._strong_available = bool(
+            allow_strong
+            and mode == PanelResizeBehavior.STRONG_WAYLAND
+            and _is_wayland_platform(platform)
+        )
         if not self._canvas_preserve_enabled(preserve_canvas, mode):
             transition()
             self.layout_manager.refresh_view_geometry()
             self._active = False
             self._last_result = "skipped: off" if mode == PanelResizeBehavior.OFF else "skipped"
-            self._record("skip", f"gen={self._generation} mode={mode.value} transition={self._last_transition}")
+            self._record(
+                "skip",
+                f"gen={self._generation} mode={mode.value} transition={self._last_transition}",
+            )
             return
 
         self._release_strong_preserve_constraints(force=True)
@@ -239,7 +252,9 @@ class CanvasPreserveController:
         self._last_delta = (dx, dy)
         self._final_canvas_size = _size_tuple(current)
         self._final_window_size = _size_tuple(win.size())
-        self._attempts_used = max(self._attempts_used, _CANVAS_PRESERVE_ATTEMPTS - int(attempts) + 1)
+        self._attempts_used = max(
+            self._attempts_used, _CANVAS_PRESERVE_ATTEMPTS - int(attempts) + 1
+        )
         self._record(
             "correct",
             (
@@ -249,11 +264,21 @@ class CanvasPreserveController:
         )
         if abs(dx) <= _CANVAS_PRESERVE_TOLERANCE_PX and abs(dy) <= _CANVAS_PRESERVE_TOLERANCE_PX:
             self.layout_manager.refresh_view_geometry()
-            if self._strong_path_allowed(allow_strong) and start_window_size is not None and win.size() != start_window_size:
+            if (
+                self._strong_path_allowed(allow_strong)
+                and start_window_size is not None
+                and win.size() != start_window_size
+            ):
                 self._poke_window_resize_commit(generation, size_constraints=size_constraints)
                 return
-            if self._current_mode() == PanelResizeBehavior.STRONG_WAYLAND and allow_strong and not _is_wayland_platform(self._platform):
-                self._record("strong_skipped", f"gen={generation} platform={self._platform or 'n/a'}")
+            if (
+                self._current_mode() == PanelResizeBehavior.STRONG_WAYLAND
+                and allow_strong
+                and not _is_wayland_platform(self._platform)
+            ):
+                self._record(
+                    "strong_skipped", f"gen={generation} platform={self._platform or 'n/a'}"
+                )
             self._finish(generation, "settled")
             self._schedule_strong_preserve_release(generation)
             return
@@ -261,19 +286,31 @@ class CanvasPreserveController:
         new_width = max(int(minimum.width()), int(win.width()) + dx)
         new_height = max(int(minimum.height()), int(win.height()) + dy)
         if new_width != win.width() or new_height != win.height():
-            use_strong = self._strong_path_allowed(allow_strong) and attempts == 1 and not strong_used
+            use_strong = (
+                self._strong_path_allowed(allow_strong) and attempts == 1 and not strong_used
+            )
             if use_strong:
                 self._apply_strong_preserve_constraints(
                     Qt.QtCore.QSize(new_width, new_height),
                     generation,
                     restore_constraints=size_constraints,
                 )
-            elif attempts == 1 and self._current_mode() == PanelResizeBehavior.STRONG_WAYLAND and allow_strong:
-                self._record("strong_skipped", f"gen={generation} platform={self._platform or 'n/a'}")
+            elif (
+                attempts == 1
+                and self._current_mode() == PanelResizeBehavior.STRONG_WAYLAND
+                and allow_strong
+            ):
+                self._record(
+                    "strong_skipped", f"gen={generation} platform={self._platform or 'n/a'}"
+                )
             win.resize(new_width, new_height)
             self._record("resize", f"gen={generation} window={new_width}x{new_height}")
             self.layout_manager._restore_visible_dock_extents(dock_extents)
-        next_attempts = attempts if attempts == 1 and self.constraints_active and not strong_used else attempts - 1
+        next_attempts = (
+            attempts
+            if attempts == 1 and self.constraints_active and not strong_used
+            else attempts - 1
+        )
         # Qt layout retry guarded by `generation` and bounded attempt count.
         # This handles compositor-delayed resize application.
         self._single_shot(
@@ -351,7 +388,9 @@ class CanvasPreserveController:
             lambda: self._finish_window_resize_commit_nudge(generation, target_size=target_size),
         )
 
-    def _finish_window_resize_commit_nudge(self, generation: int, *, target_size: Qt.QtCore.QSize) -> None:
+    def _finish_window_resize_commit_nudge(
+        self, generation: int, *, target_size: Qt.QtCore.QSize
+    ) -> None:
         if generation != self._generation or self._strong_preserve_constraints is None:
             return
         self._record("commit_nudge_finish", f"gen={generation} target={_size_text(target_size)}")
@@ -390,9 +429,13 @@ class CanvasPreserveController:
         if generation != self._generation:
             return
         if self._strong_preserve_constraints is None:
-            self._strong_preserve_constraints = restore_constraints or self._capture_window_size_constraints()
+            self._strong_preserve_constraints = (
+                restore_constraints or self._capture_window_size_constraints()
+            )
         self._strong_used = True
-        self._record("strong_apply", f"gen={generation} reason={reason} fixed={_size_text(target_size)}")
+        self._record(
+            "strong_apply", f"gen={generation} reason={reason} fixed={_size_text(target_size)}"
+        )
         self.window.setMinimumSize(target_size)
         self.window.setMaximumSize(target_size)
         handle = self.window.windowHandle()
@@ -410,7 +453,9 @@ class CanvasPreserveController:
             lambda: self._release_strong_preserve_constraints(generation),
         )
 
-    def _release_strong_preserve_constraints(self, generation: int | None = None, *, force: bool = False) -> None:
+    def _release_strong_preserve_constraints(
+        self, generation: int | None = None, *, force: bool = False
+    ) -> None:
         if not force and generation != self._generation:
             return
         constraints = self._strong_preserve_constraints
@@ -441,7 +486,9 @@ class CanvasPreserveController:
         self._last_result = str(result)
         self._final_canvas_size = None if central is None else _size_tuple(central.size())
         self._final_window_size = _size_tuple(self.window.size())
-        self._record("settled" if result == "settled" else "unsettled", f"gen={generation} result={result}")
+        self._record(
+            "settled" if result == "settled" else "unsettled", f"gen={generation} result={result}"
+        )
 
     def _qt_platform_name(self) -> str:
         app = QtWidgets.QApplication.instance()

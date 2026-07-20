@@ -41,7 +41,9 @@ def test_scale_oracle_handles_linear_log_symlog_and_nonfinite_values():
     data = np.array([-10.0, -1.0, 0.0, 1.0, 10.0, np.inf, np.nan], dtype=np.float32)
 
     np.testing.assert_array_equal(apply_scale(data, ShaderScale.LINEAR), data)
-    np.testing.assert_allclose(apply_scale(data, ShaderScale.SYMLOG), np.sign(data) * np.log10(1.0 + np.abs(data)))
+    np.testing.assert_allclose(
+        apply_scale(data, ShaderScale.SYMLOG), np.sign(data) * np.log10(1.0 + np.abs(data))
+    )
     log = apply_scale(data, ShaderScale.LOG)
     assert np.isneginf(log[0])
     assert np.isneginf(log[2])
@@ -93,7 +95,9 @@ def test_rg32f_pack_preserves_real_and_imag_float32_values():
 
 def test_cpu_display_rgba_uses_alpha_zero_for_nan_scalar():
     data = np.array([[0.0, 1.0, np.nan]], dtype=np.float32)
-    mapping = ShaderMapping(component=ShaderComponent.REAL, scale=ShaderScale.LINEAR, levels=(0.0, 1.0))
+    mapping = ShaderMapping(
+        component=ShaderComponent.REAL, scale=ShaderScale.LINEAR, levels=(0.0, 1.0)
+    )
 
     rgba = cpu_display_rgba(data, mapping)
 

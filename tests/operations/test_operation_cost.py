@@ -1,7 +1,11 @@
 import numpy as np
 
 from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
-from arrayscope.operations.cost import estimate_operation_cost, estimate_pipeline_cost, operation_output_dtype
+from arrayscope.operations.cost import (
+    estimate_operation_cost,
+    estimate_pipeline_cost,
+    operation_output_dtype,
+)
 from arrayscope.operations.pipeline import (
     CenteredFFT,
     CenteredIFFT,
@@ -14,7 +18,10 @@ from arrayscope.operations.pipeline import (
 
 
 def test_operation_output_dtype_matches_existing_estimates():
-    assert operation_output_dtype(np.float32, Mean(axis=0)) == np.mean(np.empty((1,), dtype=np.float32)).dtype
+    assert (
+        operation_output_dtype(np.float32, Mean(axis=0))
+        == np.mean(np.empty((1,), dtype=np.float32)).dtype
+    )
     assert operation_output_dtype(np.float32, RootSumSquares(axis=0)) == np.dtype(np.float32)
     assert operation_output_dtype(np.float32, CenteredFFT(axis=0)) == np.dtype(np.complex64)
     assert operation_output_dtype(np.float32, CombineRealImagAxis(axis=0)) == np.dtype(np.complex64)
@@ -57,13 +64,20 @@ def test_complex_conversion_cost_estimates_output_dtype_and_peak():
 
     assert combine.output_shape == (1, 5)
     assert combine.output_dtype == np.dtype(np.complex64)
-    assert combine.estimated_peak_bytes == combine.estimated_input_bytes + combine.estimated_output_bytes
+    assert (
+        combine.estimated_peak_bytes
+        == combine.estimated_input_bytes + combine.estimated_output_bytes
+    )
     assert split.output_shape == (2, 5)
     assert split.output_dtype == np.dtype(np.float32)
 
 
 def test_pipeline_cost_tracks_peak_across_operations():
-    cost = estimate_pipeline_cost((8, 16, 2), np.float32, (Crop(axis=1, start=2, stop=10), CenteredFFT(axis=0), RootSumSquares(axis=2)))
+    cost = estimate_pipeline_cost(
+        (8, 16, 2),
+        np.float32,
+        (Crop(axis=1, start=2, stop=10), CenteredFFT(axis=0), RootSumSquares(axis=2)),
+    )
     fft_cost = cost.operation_costs[1]
 
     assert cost.output_shape == (8, 8)
@@ -101,7 +115,9 @@ def test_crop_cost_reports_fusion_capability():
 
 
 def test_pipeline_cost_optimizes_fft_ifft_pair_by_default():
-    cost = estimate_pipeline_cost((4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1)))
+    cost = estimate_pipeline_cost(
+        (4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1))
+    )
 
     assert cost.warnings == ()
     assert cost.original_operation_count == 2
@@ -112,9 +128,14 @@ def test_pipeline_cost_optimizes_fft_ifft_pair_by_default():
 
 
 def test_pipeline_cost_can_report_unsimplified_transform_warnings():
-    cost = estimate_pipeline_cost((4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1)), optimize=False)
+    cost = estimate_pipeline_cost(
+        (4, 8, 16), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=1)), optimize=False
+    )
 
     assert len(cost.operation_costs) == 2
-    assert cost.warnings == ("CenteredFFT requires full axis 1.", "CenteredIFFT requires full axis 1.")
+    assert cost.warnings == (
+        "CenteredFFT requires full axis 1.",
+        "CenteredIFFT requires full axis 1.",
+    )
     assert cost.original_operation_count == 2
     assert cost.optimized_operation_count == 2

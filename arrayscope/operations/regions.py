@@ -63,12 +63,17 @@ class StageCacheCandidate:
 def region_from_index_spec(shape, spec) -> RegionSpec:
     shape = tuple(int(size) for size in shape)
     axes = []
-    for axis, (size, item) in enumerate(zip(shape, tuple(spec))):
+    for axis, (size, item) in enumerate(zip(shape, tuple(spec), strict=False)):
         if isinstance(item, int):
             axes.append(AxisRegion(AxisRegionKind.POINT, _normalize_index(item, size)))
         elif _is_index_array(item):
             indices = tuple(int(index) for index in np.asarray(item, dtype=np.int64).ravel())
-            axes.append(AxisRegion(AxisRegionKind.INDICES, tuple(_normalize_index(index, size) for index in indices)))
+            axes.append(
+                AxisRegion(
+                    AxisRegionKind.INDICES,
+                    tuple(_normalize_index(index, size) for index in indices),
+                )
+            )
         elif _is_full_slice(item):
             axes.append(AxisRegion(AxisRegionKind.ALL))
         elif isinstance(item, slice):
@@ -133,7 +138,9 @@ def region_text(region: RegionSpec) -> str:
         elif kind == AxisRegionKind.INDICES:
             indices = tuple(int(index) for index in axis.value)
             if len(indices) > 24:
-                parts.append(f"[{indices[0]},{indices[1]},{indices[2]},...; {len(indices)} indices]")
+                parts.append(
+                    f"[{indices[0]},{indices[1]},{indices[2]},...; {len(indices)} indices]"
+                )
             else:
                 parts.append("[" + ",".join(str(index) for index in indices) + "]")
     return "[" + ", ".join(parts) + "]"
@@ -164,7 +171,7 @@ def remove_region_axis(region: RegionSpec, axis: int) -> RegionSpec:
 def region_shape(shape, region: RegionSpec) -> tuple[int, ...]:
     shape = tuple(int(size) for size in shape)
     result = []
-    for size, axis in zip(shape, region.axes):
+    for size, axis in zip(shape, region.axes, strict=False):
         kind = axis_region_kind(axis.kind)
         if kind == AxisRegionKind.POINT:
             continue
@@ -172,7 +179,18 @@ def region_shape(shape, region: RegionSpec) -> tuple[int, ...]:
             result.append(size)
         elif kind == AxisRegionKind.SLICE:
             start, stop, step = axis.value
-            result.append(max(0, len(range(*slice(int(start), None if stop is None else int(stop), int(step)).indices(size)))))
+            result.append(
+                max(
+                    0,
+                    len(
+                        range(
+                            *slice(
+                                int(start), None if stop is None else int(stop), int(step)
+                            ).indices(size)
+                        )
+                    ),
+                )
+            )
         elif kind == AxisRegionKind.INDICES:
             result.append(len(tuple(axis.value)))
     return tuple(result)
@@ -194,15 +212,21 @@ def region_contains(container: RegionSpec, contained: RegionSpec, shape) -> bool
     shape = tuple(int(size) for size in shape)
     return all(
         _axis_contains(container_axis, contained_axis, size)
-        for container_axis, contained_axis, size in zip(container.axes, contained.axes, shape)
+        for container_axis, contained_axis, size in zip(
+            container.axes, contained.axes, shape, strict=False
+        )
     )
 
 
 def apply_subregion(data, *, source_region: RegionSpec, target_region: RegionSpec, shape):
     if not region_contains(source_region, target_region, shape):
-        raise ValueError(f"source region {region_text(source_region)} does not contain target {region_text(target_region)}")
+        raise ValueError(
+            f"source region {region_text(source_region)} does not contain target {region_text(target_region)}"
+        )
     local_axes = []
-    for source_axis, target_axis, size in zip(source_region.axes, target_region.axes, tuple(int(size) for size in shape)):
+    for source_axis, target_axis, size in zip(
+        source_region.axes, target_region.axes, tuple(int(size) for size in shape), strict=False
+    ):
         if axis_region_kind(source_axis.kind) == AxisRegionKind.POINT:
             continue
         local_axes.append(_local_axis_region(source_axis, target_axis, size))
@@ -229,7 +253,9 @@ def apply_region(data, region: RegionSpec):
             result = np.take(result, int(axis_region.value), axis=result_axis)
             continue
         if kind == AxisRegionKind.INDICES:
-            result = np.take(result, np.asarray(axis_region.value, dtype=np.int64), axis=result_axis)
+            result = np.take(
+                result, np.asarray(axis_region.value, dtype=np.int64), axis=result_axis
+            )
         else:
             slicer = [slice(None)] * np.ndim(result)
             slicer[result_axis] = index_spec_from_region(RegionSpec((axis_region,)))[0]
@@ -247,12 +273,18 @@ def take_axis_region(data, axis_region: AxisRegion, axis_size: int, *, axis: int
     if kind == AxisRegionKind.INDICES:
         return np.take(data, np.asarray(axis_region.value, dtype=np.int64), axis=int(axis))
     start, stop, step = axis_region.value
-    indices = np.arange(int(axis_size), dtype=np.int64)[slice(int(start), None if stop is None else int(stop), int(step))]
+    indices = np.arange(int(axis_size), dtype=np.int64)[
+        slice(int(start), None if stop is None else int(stop), int(step))
+    ]
     return np.take(data, indices, axis=int(axis))
 
 
 def axis_in_region_result(region: RegionSpec, original_axis: int) -> int:
-    return sum(1 for axis in range(int(original_axis)) if axis_region_kind(region.axes[axis].kind) != AxisRegionKind.POINT)
+    return sum(
+        1
+        for axis in range(int(original_axis))
+        if axis_region_kind(region.axes[axis].kind) != AxisRegionKind.POINT
+    )
 
 
 def _axis_contains(container: AxisRegion, contained: AxisRegion, size: int) -> bool:
@@ -261,12 +293,17 @@ def _axis_contains(container: AxisRegion, contained: AxisRegion, size: int) -> b
     if isinstance(container_indices, int):
         if isinstance(contained_indices, int):
             return int(container_indices) == int(contained_indices)
-        contained_values = tuple(int(index) for index in np.asarray(contained_indices, dtype=np.int64).ravel())
+        contained_values = tuple(
+            int(index) for index in np.asarray(contained_indices, dtype=np.int64).ravel()
+        )
         return len(contained_values) == 1 and int(container_indices) == contained_values[0]
-    container_set = set(int(index) for index in np.asarray(container_indices, dtype=np.int64).ravel())
+    container_set = {int(index) for index in np.asarray(container_indices, dtype=np.int64).ravel()}
     if isinstance(contained_indices, int):
         return int(contained_indices) in container_set
-    return all(int(index) in container_set for index in np.asarray(contained_indices, dtype=np.int64).ravel())
+    return all(
+        int(index) in container_set
+        for index in np.asarray(contained_indices, dtype=np.int64).ravel()
+    )
 
 
 def _local_axis_region(source_axis: AxisRegion, target_axis: AxisRegion, size: int) -> AxisRegion:
@@ -278,7 +315,9 @@ def _local_axis_region(source_axis: AxisRegion, target_axis: AxisRegion, size: i
     positions = {index: position for position, index in enumerate(source_tuple)}
     if isinstance(target_indices, int):
         return AxisRegion(AxisRegionKind.POINT, positions[int(target_indices)])
-    local = tuple(positions[int(index)] for index in np.asarray(target_indices, dtype=np.int64).ravel())
+    local = tuple(
+        positions[int(index)] for index in np.asarray(target_indices, dtype=np.int64).ravel()
+    )
     return _axis_region_from_indices(local)
 
 
@@ -290,9 +329,13 @@ def _axis_indices(axis_region: AxisRegion, size: int):
     if kind == AxisRegionKind.POINT:
         return _normalize_index(int(axis_region.value), size)
     if kind == AxisRegionKind.INDICES:
-        return np.asarray(tuple(_normalize_index(index, size) for index in axis_region.value), dtype=np.int64)
+        return np.asarray(
+            tuple(_normalize_index(index, size) for index in axis_region.value), dtype=np.int64
+        )
     start, stop, step = axis_region.value
-    return np.arange(size, dtype=np.int64)[slice(int(start), None if stop is None else int(stop), int(step))]
+    return np.arange(size, dtype=np.int64)[
+        slice(int(start), None if stop is None else int(stop), int(step))
+    ]
 
 
 def _axis_region_from_indices(indices) -> AxisRegion:
@@ -320,8 +363,10 @@ def _normalize_index(index: int, size: int) -> int:
 
 
 def _is_full_slice(item) -> bool:
-    return isinstance(item, slice) and item.start is None and item.stop is None and item.step is None
+    return (
+        isinstance(item, slice) and item.start is None and item.stop is None and item.step is None
+    )
 
 
 def _is_index_array(item) -> bool:
-    return isinstance(item, np.ndarray) or isinstance(item, (tuple, list))
+    return isinstance(item, (np.ndarray, tuple, list))

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-
+from dataclasses import dataclass
 
 _ALLOWED_CHARACTERS_RE = re.compile(r"^[0-9\s:;,+\-]*$")
 _REPAIR_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
@@ -133,7 +132,9 @@ def _parse_range_selection(text: str, axis_size: int) -> SliceSelection:
         raise ValueError("selection range is invalid")
     if python is None:
         return matlab
-    if matlab is not None and (len(python.indices) == 0 or (len(python.indices) <= 1 and len(matlab.indices) > 1)):
+    if matlab is not None and (
+        len(python.indices) == 0 or (len(python.indices) <= 1 and len(matlab.indices) > 1)
+    ):
         return matlab
     if not python.indices:
         raise ValueError("selection is empty")
@@ -200,7 +201,9 @@ def _try_matlab_range(text: str, axis_size: int) -> SliceSelection | None:
             current += step
     if not indices:
         return None
-    return SliceSelection("range", tuple(indices), str(text).strip(), "matlab", step=step, explicit_step=True)
+    return SliceSelection(
+        "range", tuple(indices), str(text).strip(), "matlab", step=step, explicit_step=True
+    )
 
 
 def _parse_optional_int(text: str) -> int | None:
@@ -224,7 +227,9 @@ def _resolve_endpoint(value: int, axis_size: int) -> int:
     return value
 
 
-def _bounded_shift(indices: tuple[int, ...], requested_shift: int, axis_size: int) -> tuple[int, ...]:
+def _bounded_shift(
+    indices: tuple[int, ...], requested_shift: int, axis_size: int
+) -> tuple[int, ...]:
     if not indices:
         return ()
     low = min(indices)
@@ -242,7 +247,9 @@ def _format_matlab_range(indices: tuple[int, ...], step: int, explicit_step: boo
     return f"{start}:{stop}"
 
 
-def _format_python_range(indices: tuple[int, ...], step: int, explicit_step: bool, axis_size: int) -> str:
+def _format_python_range(
+    indices: tuple[int, ...], step: int, explicit_step: bool, axis_size: int
+) -> str:
     start = indices[0]
     stop = _python_exclusive_stop(indices[-1], int(step), int(axis_size))
     stop_text = "" if stop is None else str(stop)

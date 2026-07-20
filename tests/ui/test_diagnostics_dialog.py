@@ -1,9 +1,10 @@
 import json
-
-import numpy as np
 from dataclasses import replace
 
-from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
+import numpy as np
+
+from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
+from tests.ui.helpers import process_events as _process_events
 
 
 def _menu(win, text):
@@ -67,7 +68,19 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         }
         dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
         text = dialog.text_edit.toPlainText()
-        for heading in ("Realtime", "Feedback", "Memory", "Caches", "Schedulers", "Render", "Canvas Preserve", "Montage", "Compute", "FFT", "Operations"):
+        for heading in (
+            "Realtime",
+            "Feedback",
+            "Memory",
+            "Caches",
+            "Schedulers",
+            "Render",
+            "Canvas Preserve",
+            "Montage",
+            "Compute",
+            "FFT",
+            "Operations",
+        ):
             assert heading in text
         assert dialog.refresh_button.isCheckable()
         assert dialog.refresh_button.isChecked()
@@ -135,14 +148,19 @@ def test_compact_overview_bottleneck_ignores_stale_ui_pressure_when_idle():
         ResourcePressure,
         ResourcePressureState,
     )
-    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics, runtime_bottleneck_text
+    from arrayscope.core.runtime_diagnostics import (
+        MontageTimingDiagnostics,
+        runtime_bottleneck_text,
+    )
     from tests.core.test_runtime_diagnostics import _snapshot
 
     snapshot = replace(
         _snapshot(),
         montage_timing=MontageTimingDiagnostics(),
         resource_governor=ResourceGovernorDiagnostics(
-            pressure=ResourcePressureState(ResourcePressure.HIGH, 0.5, ResourcePressure.LOW, ResourcePressure.NORMAL, "")
+            pressure=ResourcePressureState(
+                ResourcePressure.HIGH, 0.5, ResourcePressure.LOW, ResourcePressure.NORMAL, ""
+            )
         ),
     )
 
@@ -152,7 +170,10 @@ def test_compact_overview_bottleneck_ignores_stale_ui_pressure_when_idle():
 def test_compact_overview_bottleneck_ignores_stale_rgb_timing_when_idle():
     from dataclasses import replace
 
-    from arrayscope.core.runtime_diagnostics import MontageTimingDiagnostics, runtime_bottleneck_text
+    from arrayscope.core.runtime_diagnostics import (
+        MontageTimingDiagnostics,
+        runtime_bottleneck_text,
+    )
     from tests.core.test_runtime_diagnostics import _snapshot
 
     snapshot = replace(
@@ -172,7 +193,9 @@ def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot)
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = replace(win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.VISPY)
+        win.app_settings = replace(
+            win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.VISPY
+        )
         snapshot = win.collect_runtime_diagnostics()
 
         assert snapshot.image_rendering_backend_selected == "vispy"
@@ -200,7 +223,13 @@ def test_diagnostics_operations_tab_shows_region_planner_details(qtbot):
         dialog.refresh(force_text=True)
         text = dialog.current_text_edit().toPlainText()
 
-        for expected in ("Final region", "Required input", "Expanded axes", "Transitions", "Stage cache candidates"):
+        for expected in (
+            "Final region",
+            "Required input",
+            "Expanded axes",
+            "Transitions",
+            "Stage cache candidates",
+        ):
             assert expected in text
         assert "CenteredFFT" in text
     finally:
@@ -311,7 +340,11 @@ def test_diagnostics_jsonl_logging_writes_start_and_snapshots(qtbot, tmp_path, m
 
     requested_path = tmp_path / "diagnostics-log"
     written_path = tmp_path / "diagnostics-log.jsonl"
-    monkeypatch.setattr(diagnostics_ui, "get_save_file_name", lambda *args, **kwargs: (str(requested_path), "JSON Lines (*.jsonl)"))
+    monkeypatch.setattr(
+        diagnostics_ui,
+        "get_save_file_name",
+        lambda *args, **kwargs: (str(requested_path), "JSON Lines (*.jsonl)"),
+    )
 
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
@@ -375,7 +408,11 @@ def test_diagnostics_jsonl_logging_stops_on_close(qtbot, tmp_path, monkeypatch):
     from arrayscope.window import ArrayScopeWindow
 
     path = tmp_path / "diagnostics.jsonl"
-    monkeypatch.setattr(diagnostics_ui, "get_save_file_name", lambda *args, **kwargs: (str(path), "JSON Lines (*.jsonl)"))
+    monkeypatch.setattr(
+        diagnostics_ui,
+        "get_save_file_name",
+        lambda *args, **kwargs: (str(path), "JSON Lines (*.jsonl)"),
+    )
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:

@@ -73,20 +73,44 @@ def test_zoom_in_rederives_lod_demand(qtbot):
 
         # Hard zoom into ~1.5 tiles: true texels-per-pixel drops below 1,
         # so the demanded level must become finer (smaller) than the fit's.
-        calls = {"plan": 0, "retarget_viewport": 0, "viewport_only": 0, "retarget_mv": 0, "apply_mv": 0, "bridge": 0}
-        bridge = getattr(win.img_view, "viewport_bridge", None) or getattr(win.renderer, "viewport_bridge", None)
+        calls = {
+            "plan": 0,
+            "retarget_viewport": 0,
+            "viewport_only": 0,
+            "retarget_mv": 0,
+            "apply_mv": 0,
+            "bridge": 0,
+        }
+        getattr(win.img_view, "viewport_bridge", None) or getattr(
+            win.renderer, "viewport_bridge", None
+        )
         orig_rmv = win.renderer.retarget_montage_viewport
-        win.renderer.retarget_montage_viewport = lambda *a, **k: (calls.__setitem__("retarget_mv", calls["retarget_mv"] + 1), orig_rmv(*a, **k))[1]
+        win.renderer.retarget_montage_viewport = lambda *a, **k: (
+            calls.__setitem__("retarget_mv", calls["retarget_mv"] + 1),
+            orig_rmv(*a, **k),
+        )[1]
         orig_amv = win.renderer.apply_montage_viewport_retarget
-        win.renderer.apply_montage_viewport_retarget = lambda *a, **k: (calls.__setitem__("apply_mv", calls["apply_mv"] + 1), orig_amv(*a, **k))[1]
+        win.renderer.apply_montage_viewport_retarget = lambda *a, **k: (
+            calls.__setitem__("apply_mv", calls["apply_mv"] + 1),
+            orig_amv(*a, **k),
+        )[1]
         renderer = win.renderer
         orig_plan = renderer._montage_viewport_plan
-        renderer._montage_viewport_plan = lambda *a, **k: (calls.__setitem__("plan", calls["plan"] + 1), orig_plan(*a, **k))[1]
+        renderer._montage_viewport_plan = lambda *a, **k: (
+            calls.__setitem__("plan", calls["plan"] + 1),
+            orig_plan(*a, **k),
+        )[1]
         orig_only = renderer._try_update_montage_viewport_only
-        renderer._try_update_montage_viewport_only = lambda *a, **k: (calls.__setitem__("viewport_only", calls["viewport_only"] + 1), orig_only(*a, **k))[1]
+        renderer._try_update_montage_viewport_only = lambda *a, **k: (
+            calls.__setitem__("viewport_only", calls["viewport_only"] + 1),
+            orig_only(*a, **k),
+        )[1]
         session_now = win.renderer._frame_session
         orig_rv = session_now.retarget_viewport
-        session_now.retarget_viewport = lambda *a, **k: (calls.__setitem__("retarget_viewport", calls["retarget_viewport"] + 1), orig_rv(*a, **k))[1]
+        session_now.retarget_viewport = lambda *a, **k: (
+            calls.__setitem__("retarget_viewport", calls["retarget_viewport"] + 1),
+            orig_rv(*a, **k),
+        )[1]
 
         view = win.img_view.getView()
         (x0, x1), (y0, y1) = view.viewRange()
@@ -118,20 +142,32 @@ def test_zoom_in_rederives_lod_demand(qtbot):
             print("manual handler call:", manual)
             frame = getattr(win, "_committed_display_frame", None)
             vs = getattr(frame, "value_source", None)
-            print("bridge inputs: frame=", type(frame).__name__ if frame is not None else None,
-                  "value_source=", type(vs).__name__ if vs is not None else None,
-                  "has_payloads=", hasattr(vs, "payloads"),
-                  "commit_active=", getattr(win.renderer, "_montage_presentation_commit_active", None),
-                  "montage_axis=", getattr(win.view_state, "montage_axis", None))
+            print(
+                "bridge inputs: frame=",
+                type(frame).__name__ if frame is not None else None,
+                "value_source=",
+                type(vs).__name__ if vs is not None else None,
+                "has_payloads=",
+                hasattr(vs, "payloads"),
+                "commit_active=",
+                getattr(win.renderer, "_montage_presentation_commit_active", None),
+                "montage_axis=",
+                getattr(win.view_state, "montage_axis", None),
+            )
             print("view object id stable:", id(win.img_view.getView()))
             current = win.renderer._frame_session
             view = win.img_view.getView()
             print("camera:", view.viewRange())
             print("session.view_range:", current.view_range)
             print("calls:", calls)
-            print("session desired:", current.lod_policy_decision.demand.desired_level,
-                  "wanted:", _demand_for_current_camera(win).desired_level,
-                  "session_id:", current.session_id)
+            print(
+                "session desired:",
+                current.lod_policy_decision.demand.desired_level,
+                "wanted:",
+                _demand_for_current_camera(win).desired_level,
+                "session_id:",
+                current.session_id,
+            )
             raise
         current = win.renderer._frame_session
         assert int(current.lod_policy_decision.demand.desired_level) < fit_desired, (

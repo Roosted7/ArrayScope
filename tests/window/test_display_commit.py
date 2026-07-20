@@ -7,15 +7,21 @@ import pytest
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
-from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.lod import LodInfo
-from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.commit import DisplayCommitter
-from arrayscope.display.model.frame import DisplayFrameKey, DisplayTilePayload, TileCommitReport, TilePresentationDelta, TilePresentationState, TiledValueSource
+from arrayscope.display.frame_planner import FramePlanner
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.commit import DisplayTiledPresentation
-
+from arrayscope.display.model.frame import (
+    DisplayFrameKey,
+    DisplayTilePayload,
+    TileCommitReport,
+    TiledValueSource,
+    TilePresentationDelta,
+    TilePresentationState,
+)
+from arrayscope.display.shader_mapping import TexturePlaneKind
+from arrayscope.display.viewport import ViewportPolicy
 
 _AUTO_REPORT = object()
 
@@ -48,7 +54,11 @@ def test_commit_report_acceptance_preserves_delta_upsert_order():
 
 
 def _presentation():
-    state = ViewState.from_shape((2, 2, 1)).with_image_axes(0, 1).with_montage_axis(2, columns=1, indices=(0,))
+    state = (
+        ViewState.from_shape((2, 2, 1))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=1, indices=(0,))
+    )
     geometry = DisplayGeometry(
         state,
         (2, 2),
@@ -111,7 +121,9 @@ class _FakeImageView:
         }
         if self.report is _AUTO_REPORT:
             return TileCommitReport(
-                presented_tiles=frozenset(presentation.tile_state.active_payloads(presentation.tile_delta)),
+                presented_tiles=frozenset(
+                    presentation.tile_state.active_payloads(presentation.tile_delta)
+                ),
                 committed_upserts=frozenset(presentation.tile_delta.upserts),
                 removed_tiles=frozenset(presentation.tile_delta.removals),
             )
@@ -130,7 +142,9 @@ class _FakeImageView:
     def set_profile_bounds(self, bounds):
         self.bounds = bounds
 
-    def apply_camera(self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None):
+    def apply_camera(
+        self, image_shape, viewport_policy, *, image_origin=(0.0, 0.0), content_rect=None
+    ):
         self.camera = (tuple(image_shape), viewport_policy, tuple(image_origin), content_rect)
 
     def map_scene_to_overlay(self, scene_pos):
@@ -140,7 +154,10 @@ class _FakeImageView:
         return None
 
     def presentation_diagnostics(self):
-        return {"backend": self.capabilities.name, "interaction_event_owner": self.interaction_event_owner()}
+        return {
+            "backend": self.capabilities.name,
+            "interaction_event_owner": self.interaction_event_owner(),
+        }
 
     def interaction_event_owner(self):
         return "fake"
@@ -230,7 +247,9 @@ def test_tiled_value_source_reads_exact_semantic_data_not_lod_texture():
     source = TiledValueSource({0: payload})
 
     value = source.value_at(SimpleNamespace(tile_number=0, local_y=3, local_x=2))
-    region, hist, kind = source.tile_region(SimpleNamespace(montage_index=0), (slice(2, 4), slice(1, 3)))
+    region, hist, kind = source.tile_region(
+        SimpleNamespace(montage_index=0), (slice(2, 4), slice(1, 3))
+    )
 
     assert value == semantic[3, 2]
     np.testing.assert_array_equal(region, semantic[2:4, 1:3])
@@ -296,7 +315,9 @@ def test_single_plane_commits_with_internal_tile_geometry():
     assert frame.scene.layout.value == "single"
     assert frame.scene.resident_region_ids == (0, 1, 2, 3)
     assert frame.value_source.value_at(SimpleNamespace(tile_number=3, local_y=1, local_x=1)) == 15.0
-    region, hist, kind = frame.value_source.tile_region(SimpleNamespace(region_id=3), (slice(0, 2), slice(0, 2)))
+    region, hist, kind = frame.value_source.tile_region(
+        SimpleNamespace(region_id=3), (slice(0, 2), slice(0, 2))
+    )
     np.testing.assert_array_equal(region, image[2:4, 2:4])
     np.testing.assert_array_equal(hist, image[2:4, 2:4])
     assert kind == "committed_tile_payload"
@@ -315,7 +336,9 @@ def test_eager_region_source_matches_existing_display_image_slices():
     )
     image = np.arange(16, dtype=np.float32).reshape(4, 4)
     hist = image + 100.0
-    source = EagerDisplayRegionSource(DisplayImage(image, histogram_data=hist), source_key=("source",))
+    source = EagerDisplayRegionSource(
+        DisplayImage(image, histogram_data=hist), source_key=("source",)
+    )
 
     payload = source.read_region(frame_plan.regions[3], quality="exact-visible", deadline_ns=123)
 

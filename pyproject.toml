@@ -93,3 +93,62 @@ include = ["arrayscope*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "arrayscope._version.__version__"}
+
+[tool.ruff]
+line-length = 100
+extend-exclude = [".claude", ".worktrees", "dist", "build"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade (target py310 from requires-python)
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "ISC",  # implicit string concatenation
+    "PIE",  # misc lints
+    "PT",   # pytest style
+    "RUF",  # ruff-specific
+    "NPY",  # numpy-specific
+    "PERF", # performance
+    "PLC",  # pylint conventions
+    "PLE",  # pylint errors
+    "PLW",  # pylint warnings
+]
+ignore = [
+    # Import order after runtime setup is load-bearing here: prefer_pyside6()
+    # and env-var setup must run before pyqtgraph.Qt / vispy / wgpu imports.
+    "E402",
+    # The formatter wraps what it can; residual long lines are strings/URLs.
+    "E501",
+    # Conflicts with the formatter (implicit concat on one line).
+    "ISC001",
+    # Lazy imports are deliberate (Qt/backend import cost, optional deps).
+    "PLC0415",
+    # `lambda: self.foo()` in Qt signal connects deliberately swallows the
+    # signal's emitted arguments; replacing with a bare reference changes slots.
+    "PLW0108",
+    # Module-level singletons use `global` by design.
+    "PLW0603",
+    # Reassigning the loop variable for normalization is idiomatic here.
+    "PLW2901",
+    # pytest.raises without match= is acceptable.
+    "PT011",
+    # try/except inside loops is often unavoidable (per-item error isolation).
+    "PERF203",
+    # Real typography (×, –, →) in strings and docstrings is intentional.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Re-export hubs.
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["arrayscope"]
+
+[tool.ruff.format]
+docstring-code-format = true

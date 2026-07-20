@@ -1,10 +1,8 @@
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
-import arrayscope.core.axis_utils as axis_utils
 
+import arrayscope.core.axis_utils as axis_utils
 
 AXIS_UTILS_PATH = Path(__file__).parents[2] / "arrayscope" / "core" / "axis_utils.py"
 

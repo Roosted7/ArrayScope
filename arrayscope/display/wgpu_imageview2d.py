@@ -42,10 +42,12 @@ from arrayscope.core.trace import emit_trace
 
 prefer_pyside6()
 
-from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
-import pyqtgraph as pg
+import contextlib
+import itertools
 
-from arrayscope.core.trace import emit_trace
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
 from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.glyph_atlas import GlyphAtlas
@@ -73,6 +75,7 @@ from arrayscope.display.tile_truth_overlay import (
     tile_truth_overlay_text,
 )
 from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
+from arrayscope.gpu.chunk_summary import chunk_key_frontier
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     ContentPlane,
@@ -84,14 +87,13 @@ from arrayscope.gpu.command_protocol import (
     GenerateLodPages,
     OverlayPrimitive,
     PresentGeneration,
-    SetOverlayCamera,
     SetDisplayMapping,
+    SetOverlayCamera,
     TileInstance,
     UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
 )
-from arrayscope.gpu.chunk_summary import chunk_key_frontier
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN,
@@ -132,7 +134,7 @@ _WGPU_REP_TEXEL_BYTES = {
 
 def _wgpu_rgba(color, alpha: float = 1.0):
     rgb = tuple(int(value) for value in tuple(color or (255, 255, 0))[:3])
-    return tuple(float(value) / 255.0 for value in rgb) + (float(alpha),)
+    return (*tuple(float(value) / 255.0 for value in rgb), float(alpha))
 
 
 #: Native tile-truth label styling — mirrors ``tile_truth_overlay._label_style``
@@ -196,12 +198,10 @@ def _shared_wgpu_device():
         import wgpu
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-        try:
+        with contextlib.suppress(RuntimeError):
             # Vulkan-only instance: the GL backend's EGL re-init is fatal under
             # Wayland (gate-B Tier 0).  Harmless if the instance already exists.
             set_instance_extras(backends=["Vulkan"])
-        except RuntimeError:
-            pass
         adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
         _SHARED_WGPU_DEVICE = adapter.request_device_sync()
     return _SHARED_WGPU_DEVICE
@@ -283,7 +283,9 @@ class WgpuImageView2D(ImageViewShell):
         self.graphicsView.setBackground(None)
         self.graphicsView.setStyleSheet("background: transparent; border: 0px;")
         self.graphicsView.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.graphicsView.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.graphicsView.viewport().setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True
+        )
         self.graphicsView.viewport().setStyleSheet("background: transparent;")
         self._display_stack.addWidget(self.graphicsView)
         self.layout.addWidget(self._display_container, 1)
@@ -509,18 +511,18 @@ class WgpuImageView2D(ImageViewShell):
 
     def _request_wgpu_canvas_draw(self, *, count_presentation: bool = False) -> None:
         if count_presentation:
-            self._wgpu_tile_presentation_request_count = int(
-                getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0
-            ) + 1
+            self._wgpu_tile_presentation_request_count = (
+                int(getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0) + 1
+            )
         canvas = getattr(self, "_wgpu_canvas", None)
         if canvas is None:
             return
         if bool(getattr(self, "_wgpu_canvas_update_pending", False)) and not count_presentation:
             return
         self._wgpu_canvas_update_pending = True
-        self._wgpu_canvas_update_request_count = int(
-            getattr(self, "_wgpu_canvas_update_request_count", 0) or 0
-        ) + 1
+        self._wgpu_canvas_update_request_count = (
+            int(getattr(self, "_wgpu_canvas_update_request_count", 0) or 0) + 1
+        )
         # Camera-only descriptor draws have no payload-commit edge, but they
         # are still physical presentation work. Publish them through the same
         # draw-ack signal as tile commits so observers can sample the frame at
@@ -744,9 +746,7 @@ class WgpuImageView2D(ImageViewShell):
     def _set_roi_drawing_preview(self, tool, points) -> None:
         if tool is not None:
             self.sync_interaction_state(self.interaction_controller.clear_hover())
-        normalized = tuple(
-            (float(point[0]), float(point[1])) for point in tuple(points or ())
-        )
+        normalized = tuple((float(point[0]), float(point[1])) for point in tuple(points or ()))
         if tool is None or len(normalized) < 2:
             normalized = ()
         if normalized == self._wgpu_roi_drawing_points:
@@ -850,7 +850,7 @@ class WgpuImageView2D(ImageViewShell):
                 continue
             width, rgb = self._roi_visual_style(roi_id, selection.color)
             color = _wgpu_rgba(rgb)
-            for start, end in zip(points, points[1:]):
+            for start, end in itertools.pairwise(points):
                 primitives.append(OverlayPrimitive("line", start, end, color, width))
             highlighted, interactive = self._roi_visual_emphasis(roi_id)
             handle_size = 12.0 if highlighted or interactive else 10.0
@@ -874,6 +874,7 @@ class WgpuImageView2D(ImageViewShell):
             for start, end in zip(
                 self._wgpu_roi_drawing_points,
                 self._wgpu_roi_drawing_points[1:],
+                strict=False,
             ):
                 primitives.append(OverlayPrimitive("line", start, end, color, 2.5))
 
@@ -891,12 +892,8 @@ class WgpuImageView2D(ImageViewShell):
                 line_width = 2.5 if hovered else 1.5
                 primitives.extend(
                     (
-                        OverlayPrimitive(
-                            "line", (x, y0), (x, y1), color, line_width, anchor
-                        ),
-                        OverlayPrimitive(
-                            "line", (x0, y), (x1, y), color, line_width, anchor
-                        ),
+                        OverlayPrimitive("line", (x, y0), (x, y1), color, line_width, anchor),
+                        OverlayPrimitive("line", (x0, y), (x1, y), color, line_width, anchor),
                         OverlayPrimitive(
                             "handle_quad",
                             anchor,
@@ -939,16 +936,14 @@ class WgpuImageView2D(ImageViewShell):
         dpr = float(canvas.devicePixelRatio() or 1.0)
         self._wgpu_text_dpr = dpr
         try:
-            target_w, target_h = (
-                max(1, int(value)) for value in canvas.get_physical_size()
-            )
+            target_w, target_h = (max(1, int(value)) for value in canvas.get_physical_size())
         except Exception:
             return ()
         x0, y0, x1, y1 = camera.world_rect
         pixels_per_world_x = target_w / (x1 - x0)
         pixels_per_world_y = target_h / (y1 - y0)
         atlas = self._wgpu_glyph_atlas
-        font_px = max(1, int(round(_TRUTH_LABEL_FONT_PX * dpr)))
+        font_px = max(1, round(_TRUTH_LABEL_FONT_PX * dpr))
 
         labels = []
         visible_rows = []
@@ -959,10 +954,7 @@ class WgpuImageView2D(ImageViewShell):
             x, y, width, height = (float(value) for value in tile_rect)
             # Same readability rule as TileTruthOverlayLayer.reposition
             # (16x12 logical px), expressed in physical pixels.
-            if (
-                width * pixels_per_world_x < 16.0 * dpr
-                or height * pixels_per_world_y < 12.0 * dpr
-            ):
+            if width * pixels_per_world_x < 16.0 * dpr or height * pixels_per_world_y < 12.0 * dpr:
                 continue
             anchor = (
                 x + width if camera.x_inverted else x,
@@ -1055,7 +1047,9 @@ class WgpuImageView2D(ImageViewShell):
         applying = self._applying_presentation
         self._applying_presentation = True
         try:
-            payloads = {int(tile): payload for tile, payload in dict(montage_tile_payloads or {}).items()}
+            payloads = {
+                int(tile): payload for tile, payload in dict(montage_tile_payloads or {}).items()
+            }
             if not payloads:
                 # Loading-only commit: nothing drawable yet; clear stale tiles.
                 self._clear_wgpu_tiles()
@@ -1075,9 +1069,7 @@ class WgpuImageView2D(ImageViewShell):
                 scale,
                 symlog_constant,
                 phase_color,
-            ) = self._wgpu_commit_plan(
-                payloads, source_mapping, rgb_already_windowed
-            )
+            ) = self._wgpu_commit_plan(payloads, source_mapping, rgb_already_windowed)
             layout = tile_layout_map(geometry, frame_plan=frame_plan)
             missing = sorted(set(payloads) - set(layout))
             if missing:
@@ -1106,8 +1098,7 @@ class WgpuImageView2D(ImageViewShell):
                 for lod_level, source_shape in lod_geometry.values()
             )
             pages_needed = sum(
-                -(-int(texture.shape[0]) // PAGE)
-                * -(-int(texture.shape[1]) // PAGE)
+                -(-int(texture.shape[0]) // PAGE) * -(-int(texture.shape[1]) // PAGE)
                 for texture in textures.values()
             )
             executor = self._ensure_wgpu_executor(
@@ -1153,9 +1144,7 @@ class WgpuImageView2D(ImageViewShell):
                 )
                 resident_plane_keys = tuple(
                     key
-                    for key in resident_by_plane.get(
-                        (plane_identity, "live", representation), ()
-                    )
+                    for key in resident_by_plane.get((plane_identity, "live", representation), ())
                     if key.lod.is_native or key.lod.reducer == lod_reducer
                 )
                 resident_lods = (int(key.lod.level) for key in resident_plane_keys)
@@ -1244,8 +1233,7 @@ class WgpuImageView2D(ImageViewShell):
                             for key in resident_by_plane[
                                 (info["plane_identity"], "live", representation)
                             ]
-                            if key.lod.is_native
-                            or key.lod.reducer == info["lod_reducer"]
+                            if key.lod.is_native or key.lod.reducer == info["lod_reducer"]
                         )
                     )
                     if histogram_capable
@@ -1304,14 +1292,10 @@ class WgpuImageView2D(ImageViewShell):
                 SetDisplayMapping(self._wgpu_mapping_state),
             ]
             if overlay_geometry_dirty:
-                submission_commands.append(
-                    UpdateOverlayGeometry(self._wgpu_overlay_geometry)
-                )
+                submission_commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
             if camera is not None:
                 submission_commands.append(camera)
-            submission_commands.append(
-                UpdateTileInstances(self._wgpu_camera_tiles(camera))
-            )
+            submission_commands.append(UpdateTileInstances(self._wgpu_camera_tiles(camera)))
             histogram_indices = []
             for _tile, _source_index, _evidence_key, frontier_keys in histogram_specs:
                 histogram_indices.append(len(submission_commands))
@@ -1337,7 +1321,7 @@ class WgpuImageView2D(ImageViewShell):
                 self._wgpu_overlay_geometry_dirty = False
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
-            for command_index, spec in zip(histogram_indices, histogram_specs):
+            for command_index, spec in zip(histogram_indices, histogram_specs, strict=False):
                 tile, source_index, evidence_key, frontier_keys = spec
                 missing = tuple(report.histogram_missing.get(command_index, ()))
                 if missing:
@@ -1376,9 +1360,7 @@ class WgpuImageView2D(ImageViewShell):
                     for key in committed_tiles[tile]["page_keys"]
                 )
             )
-            presented_identities = {
-                tile: committed_tiles[tile]["identity"] for tile in presented
-            }
+            presented_identities = {tile: committed_tiles[tile]["identity"] for tile in presented}
 
             # Shared shell bookkeeping (placeholder image, histogram bounds,
             # display levels) mirrors the VisPy backend's minimal set.
@@ -1424,9 +1406,7 @@ class WgpuImageView2D(ImageViewShell):
                 texture_uploads=uploads,
                 texture_upload_bytes=uploads * PAGE * PAGE * texel_bytes,
                 page_count=resident_pages,
-                active_pages=sum(
-                    len(info["page_keys"]) for info in committed_tiles.values()
-                ),
+                active_pages=sum(len(info["page_keys"]) for info in committed_tiles.values()),
                 estimated_gpu_bytes=resident_pages * PAGE * PAGE * texel_bytes,
                 budget_bytes=int(tile_residency_budget_bytes or 0),
                 shader_uniform_updates=1,
@@ -1452,22 +1432,17 @@ class WgpuImageView2D(ImageViewShell):
         unique = {kind.value for kind in kinds.values()}
         if len(unique) != 1:
             raise NotImplementedError(
-                "wgpu backend requires one texture representation per commit; "
-                f"got {sorted(unique)}"
+                f"wgpu backend requires one texture representation per commit; got {sorted(unique)}"
             )
         kind = next(iter(kinds.values()))
         representation = _WGPU_REP_BY_KIND[kind]
         if kind == TexturePlaneKind.RGB8 and not rgb_already_windowed:
             representation = RGB_WINDOWED_RGBA32F
-        display_mode = getattr(
-            getattr(source_mapping, "display_mode", None), "value", None
-        )
+        display_mode = getattr(getattr(source_mapping, "display_mode", None), "value", None)
         scale = getattr(getattr(source_mapping, "scale", None), "value", None)
         if scale is None:
             scale = ShaderScale.LINEAR.value
-        symlog_constant = float(
-            getattr(source_mapping, "symlog_constant", 0.0) or 0.0
-        )
+        symlog_constant = float(getattr(source_mapping, "symlog_constant", 0.0) or 0.0)
         if representation == SCALAR_R32F:
             if display_mode not in (None, ShaderDisplayMode.SCALAR.value):
                 raise NotImplementedError(
@@ -1484,9 +1459,7 @@ class WgpuImageView2D(ImageViewShell):
                 raise NotImplementedError(
                     f"wgpu backend cannot render complex display mode {display_mode!r}"
                 )
-            component = getattr(
-                getattr(source_mapping, "component", None), "value", None
-            )
+            component = getattr(getattr(source_mapping, "component", None), "value", None)
             if component is None:
                 component = ShaderComponent.REAL.value
             if component not in _WGPU_COMPONENT_MODES:
@@ -1529,8 +1502,7 @@ class WgpuImageView2D(ImageViewShell):
                 )
             if rgb_already_windowed and texture.dtype != np.uint8:
                 raise NotImplementedError(
-                    f"wgpu display-ready RGB tile {tile} must be uint8; "
-                    f"got {texture.dtype}"
+                    f"wgpu display-ready RGB tile {tile} must be uint8; got {texture.dtype}"
                 )
         return representation, "real", scale, symlog_constant, False
 
@@ -1541,18 +1513,14 @@ class WgpuImageView2D(ImageViewShell):
             scalar = getattr(payload, "histogram_data", None)
             if scalar is None:
                 rgb = np.asarray(texture, dtype=np.float32)[..., :3]
-                scalar = (
-                    0.2126 * rgb[..., 0]
-                    + 0.7152 * rgb[..., 1]
-                    + 0.0722 * rgb[..., 2]
-                )
+                scalar = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
             scalar = np.asarray(scalar, dtype=np.float32)
             if scalar.shape != base.shape[:2]:
                 raise ValueError(
                     "wgpu windowable RGB scalar plane must match the RGB tile; "
                     f"got {scalar.shape} versus {base.shape[:2]}"
                 )
-            packed = np.empty(base.shape[:2] + (4,), np.float32)
+            packed = np.empty((*base.shape[:2], 4), np.float32)
             packed[..., :3] = base.astype(np.float32) / 255.0
             packed[..., 3] = scalar
             return np.ascontiguousarray(packed)
@@ -1582,9 +1550,7 @@ class WgpuImageView2D(ImageViewShell):
         return page
 
     def _wgpu_resolve_lut_bytes(self, shader_mapping) -> bytes | None:
-        display_mode = getattr(
-            getattr(shader_mapping, "display_mode", None), "value", None
-        )
+        display_mode = getattr(getattr(shader_mapping, "display_mode", None), "value", None)
         if display_mode == ShaderDisplayMode.PHASE_COLOR.value:
             explicit = getattr(shader_mapping, "lut_data", None)
             if explicit is not None:
@@ -1652,9 +1618,7 @@ class WgpuImageView2D(ImageViewShell):
     def reset_tiled_residency(self, reason: str) -> None:
         executor = self._wgpu_executor
         if executor is not None:
-            evictions = tuple(
-                EvictChunk(key) for key in executor.page_table.resident_keys()
-            )
+            evictions = tuple(EvictChunk(key) for key in executor.page_table.resident_keys())
             self._submit_wgpu((*evictions, UpdateTileInstances(())))
             self._request_wgpu_canvas_draw()
         self._wgpu_committed = None
@@ -1695,8 +1659,7 @@ class WgpuImageView2D(ImageViewShell):
             for tile, payload in payloads.items()
         }
         lod_geometry = {
-            tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile])
-            for tile in payloads
+            tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile]) for tile in payloads
         }
         pages_needed = sum(
             _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
@@ -1710,25 +1673,23 @@ class WgpuImageView2D(ImageViewShell):
             grid_h = -(-int(texture.shape[0]) // PAGE)
             grid_w = -(-int(texture.shape[1]) // PAGE)
             plane_identity = _wgpu_payload_plane_identity(payloads[tile])
-            for chunk_y in range(grid_h):
-                for chunk_x in range(grid_w):
-                    commands.append(
-                        EnsureChunkResident(
-                            plane_chunk_key(
-                                plane_identity,
-                                "live",
-                                lod_level,
-                                chunk_x,
-                                chunk_y,
-                                dtype=_WGPU_REP_DTYPES[representation],
-                                representation=representation,
-                                plane_shape=source_shape,
-                            ),
-                            self._wgpu_page_block(
-                                texture, chunk_y, chunk_x, representation
-                            ),
-                        )
-                    )
+            commands.extend(
+                EnsureChunkResident(
+                    plane_chunk_key(
+                        plane_identity,
+                        "live",
+                        lod_level,
+                        chunk_x,
+                        chunk_y,
+                        dtype=_WGPU_REP_DTYPES[representation],
+                        representation=representation,
+                        plane_shape=source_shape,
+                    ),
+                    self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
+                )
+                for chunk_y in range(grid_h)
+                for chunk_x in range(grid_w)
+            )
         report = self._submit_wgpu(tuple(commands))
         return report
 
@@ -1760,8 +1721,7 @@ class WgpuImageView2D(ImageViewShell):
         )
         representation = _WGPU_REP_BY_KIND[kind]
         if kind == TexturePlaneKind.RGB8 and (
-            texture_data.dtype != np.uint8
-            or getattr(payload, "histogram_data", None) is not None
+            texture_data.dtype != np.uint8 or getattr(payload, "histogram_data", None) is not None
         ):
             representation = RGB_WINDOWED_RGBA32F
         texture = self._wgpu_payload_texture(payload, representation)
@@ -1972,17 +1932,14 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
             "wgpu_last_draw_error": str(getattr(self, "_wgpu_last_draw_error", "") or ""),
             "wgpu_histogram_evidence_pending": len(
-                set(self._wgpu_histogram_evidence)
-                - set(self._wgpu_histogram_evidence_ready)
+                set(self._wgpu_histogram_evidence) - set(self._wgpu_histogram_evidence_ready)
             ),
             "wgpu_present_method": self.wgpuPresentMethod(),
             "wgpu_present_method_requested": str(
                 getattr(self, "_wgpu_present_method_requested", "bitmap")
             ),
             "wgpu_present_method_fallback_reason": self.wgpuPresentMethodFallbackReason(),
-            "wgpu_screen_present_mode": str(
-                getattr(self._wgpu_canvas, "present_mode", "") or ""
-            ),
+            "wgpu_screen_present_mode": str(getattr(self._wgpu_canvas, "present_mode", "") or ""),
             "wgpu_screen_presents": int(getattr(self, "_wgpu_screen_presents", 0) or 0),
             "wgpu_screen_acquire_ms_last": float(
                 getattr(self, "_wgpu_screen_acquire_ms_last", 0.0) or 0.0
@@ -2015,16 +1972,12 @@ class WgpuImageView2D(ImageViewShell):
         if canvas is not None:
             teardown = getattr(canvas, "teardown", None)
             if callable(teardown):  # screen path: release the swapchain first
-                try:
+                with contextlib.suppress(Exception):
                     teardown()
-                except Exception:
-                    pass
                 self._wgpu_context = None
                 self._wgpu_context_format = None
-            try:
+            with contextlib.suppress(Exception):
                 canvas.close()
-            except Exception:
-                pass
         super().teardown_surface()
 
 
@@ -2050,14 +2003,9 @@ def _wgpu_payload_lod_reducer(payload, *, representation: str, mapping_mode: str
     """Canonical derived-value family for one live executor plane."""
 
     backing = getattr(payload, "page_backing", None)
-    reducers = {
-        str(plan.reducer)
-        for plan in tuple(getattr(backing, "requested_plans", ()) or ())
-    }
+    reducers = {str(plan.reducer) for plan in tuple(getattr(backing, "requested_plans", ()) or ())}
     if len(reducers) > 1:
-        raise ValueError(
-            f"wgpu payload mixes LOD reducer families: {tuple(sorted(reducers))}"
-        )
+        raise ValueError(f"wgpu payload mixes LOD reducer families: {tuple(sorted(reducers))}")
     if reducers:
         reducer = next(iter(reducers))
         if reducer != "native":
@@ -2097,26 +2045,23 @@ def _wgpu_plan_lod_page_generation(
     child_extent = PAGE << child_level
     y0, x0 = (int(value) for value in destination.chunk_origin)
     h, w = (int(value) for value in destination.chunk_shape)
-    child_keys = []
-    for child_y in range(y0 // child_extent, -(-(y0 + h) // child_extent)):
-        for child_x in range(x0 // child_extent, -(-(x0 + w) // child_extent)):
-            child_keys.append(
-                plane_chunk_key(
-                    destination.document_generation,
-                    destination.operation_key,
-                    child_level,
-                    child_x,
-                    child_y,
-                    dtype=destination.dtype,
-                    representation=destination.representation,
-                    plane_shape=plane_shape,
-                    reducer=REDUCER_MEAN,
-                )
-            )
-    if not 1 <= len(child_keys) <= 4:
-        raise ValueError(
-            "wgpu canonical parent must cover one to four immediate child pages"
+    child_keys = [
+        plane_chunk_key(
+            destination.document_generation,
+            destination.operation_key,
+            child_level,
+            child_x,
+            child_y,
+            dtype=destination.dtype,
+            representation=destination.representation,
+            plane_shape=plane_shape,
+            reducer=REDUCER_MEAN,
         )
+        for child_y in range(y0 // child_extent, -(-(y0 + h) // child_extent))
+        for child_x in range(x0 // child_extent, -(-(x0 + w) // child_extent))
+    ]
+    if not 1 <= len(child_keys) <= 4:
+        raise ValueError("wgpu canonical parent must cover one to four immediate child pages")
     for child in child_keys:
         if child in available:
             continue
@@ -2165,8 +2110,7 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
         rung_level = 0
         factor = 1
         source_shape = tuple(
-            int(value)
-            for value in (getattr(payload, "source_shape", None) or texture_shape)[:2]
+            int(value) for value in (getattr(payload, "source_shape", None) or texture_shape)[:2]
         )
         declared_texture_shape = texture_shape
     else:
@@ -2195,8 +2139,7 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
     level = factor.bit_length() - 1
     expected_texture_shape = tuple(-(-extent // factor) for extent in source_shape)
     requested_shape_mismatch = (
-        getattr(payload, "page_backing", None) is None
-        and declared_texture_shape != texture_shape
+        getattr(payload, "page_backing", None) is None and declared_texture_shape != texture_shape
     )
     if requested_shape_mismatch or texture_shape != expected_texture_shape:
         raise ValueError(
@@ -2223,11 +2166,15 @@ def _wgpu_payload_kind(payload) -> TexturePlaneKind:
 
     kind = getattr(payload, "texture_kind", None)
     if kind is not None:
-        return kind if isinstance(kind, TexturePlaneKind) else TexturePlaneKind(
-            getattr(kind, "value", kind)
+        return (
+            kind
+            if isinstance(kind, TexturePlaneKind)
+            else TexturePlaneKind(getattr(kind, "value", kind))
         )
     texture = np.asarray(
-        payload.texture_data if getattr(payload, "texture_data", None) is not None else payload.image
+        payload.texture_data
+        if getattr(payload, "texture_data", None) is not None
+        else payload.image
     )
     if np.iscomplexobj(texture) or (texture.ndim == 3 and texture.shape[-1] == 2):
         return TexturePlaneKind.COMPLEX_RG32F

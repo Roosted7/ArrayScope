@@ -71,7 +71,9 @@ def test_publish_reaches_other_participants_but_not_self(qtbot, make_bus):
 
     from_a = state_message("dims", "window-a", 1, {"shape": [4], "slice_indices": [1]})
     client_a.publish(from_a)
-    qtbot.waitUntil(lambda: bool(at_broker and at_b), timeout=min(2000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+    qtbot.waitUntil(
+        lambda: bool(at_broker and at_b), timeout=min(2000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+    )
     assert at_broker == [from_a]
     assert at_b == [from_a]
     assert at_a == []
@@ -112,7 +114,9 @@ def test_broker_exit_triggers_reelection_and_messages_flow_again(qtbot, make_bus
         lambda: new_broker.peer_count >= 1,
         timeout=min(2000, INTERACTION_SETTLE_HARD_LIMIT_MS),
     )
-    message = state_message("levels", "window-x", 5, {"levels": [0.0, 2.0], "window_mode": "absolute"})
+    message = state_message(
+        "levels", "window-x", 5, {"levels": [0.0, 2.0], "window_mode": "absolute"}
+    )
     new_broker.publish(message)
     qtbot.waitUntil(
         lambda: at_survivor == [message],

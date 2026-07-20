@@ -1,16 +1,10 @@
-import time
-
 import numpy as np
-import pytest
 
 from tests.ui.helpers import (
-    assert_panel_invariants as _assert_panel_invariants,
-    assert_size_close as _assert_size_close,
     clear_arrayscope_settings as _clear_arrayscope_settings,
-    panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
-    view_action as _view_action,
-    wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
 
@@ -125,11 +119,15 @@ def test_empty_tiled_slice_text_clears_to_midpoint_scalar(qtbot):
 
 def test_invalid_slice_text_restores_state_and_shows_status(qtbot, monkeypatch):
     _clear_arrayscope_settings()
-    from arrayscope.window import ArrayScopeWindow
     import arrayscope.window.state_sync as state_sync
+    from arrayscope.window import ArrayScopeWindow
 
     messages = []
-    monkeypatch.setattr(state_sync, "show_status_message", lambda _window, message, **_kwargs: messages.append(str(message)))
+    monkeypatch.setattr(
+        state_sync,
+        "show_status_message",
+        lambda _window, message, **_kwargs: messages.append(str(message)),
+    )
 
     win = ArrayScopeWindow(np.arange(2 * 3 * 5, dtype=float).reshape(2, 3, 5))
     qtbot.addWidget(win)

@@ -1,17 +1,12 @@
-import time
-
 import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
-    assert_panel_invariants as _assert_panel_invariants,
-    assert_size_close as _assert_size_close,
     clear_arrayscope_settings as _clear_arrayscope_settings,
-    panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
-    view_action as _view_action,
-    wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
 
@@ -44,6 +39,7 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
+
         def fail_render(*args, **kwargs):
             raise AssertionError("Fit/1:1 must not render")
 
@@ -62,6 +58,7 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
 def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.display.viewport import ViewportMode
     from arrayscope.window import ArrayScopeWindow
 
@@ -79,7 +76,9 @@ def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
         assert label is not None
         assert "Fit mode is enabled" in label.text()
         qtbot.waitUntil(
-            lambda: win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusMessageLabel") is None,
+            lambda: (
+                win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusMessageLabel") is None
+            ),
             timeout=min(2000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
     finally:
@@ -116,6 +115,7 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
 
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
 
@@ -131,14 +131,18 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
         assert win.img_view.surface.capabilities.name == "vispy"
         y_dim, x_dim = win.view_state.image_axes
 
-        win._set_view_state(win.view_state.with_axis_flipped(y_dim, True).with_axis_flipped(x_dim, True))
+        win._set_view_state(
+            win.view_state.with_axis_flipped(y_dim, True).with_axis_flipped(x_dim, True)
+        )
         win.apply_axis_flips()
         _process_events(qtbot)
         assert win.img_view.getView().state["xInverted"] is True
         assert win.img_view.getView().state["yInverted"] is False
         assert win.img_view._vispy_view.camera.flip == (True, False, False)
 
-        win._set_view_state(win.view_state.with_axis_flipped(y_dim, False).with_axis_flipped(x_dim, False))
+        win._set_view_state(
+            win.view_state.with_axis_flipped(y_dim, False).with_axis_flipped(x_dim, False)
+        )
         win.apply_axis_flips()
         _process_events(qtbot)
         assert win.img_view.getView().state["xInverted"] is False
@@ -159,8 +163,18 @@ def test_dimension_axis_flip_is_view_transform_only(qtbot, monkeypatch):
     try:
         _process_events(qtbot, count=20)
         y_axis = int(win.view_state.image_axes[0])
-        monkeypatch.setattr(win, "render", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("flip must not render synchronously")))
-        monkeypatch.setattr(win, "request_render", lambda **kwargs: (_ for _ in ()).throw(AssertionError("flip must not request render")))
+        monkeypatch.setattr(
+            win,
+            "render",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("flip must not render synchronously")
+            ),
+        )
+        monkeypatch.setattr(
+            win,
+            "request_render",
+            lambda **kwargs: (_ for _ in ()).throw(AssertionError("flip must not request render")),
+        )
 
         win.set_dimension_role("y", y_axis)
 

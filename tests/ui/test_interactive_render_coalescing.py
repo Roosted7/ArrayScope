@@ -1,10 +1,8 @@
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
-from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
-
-
+from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
+from tests.ui.helpers import process_events as _process_events
 
 
 def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeypatch):
@@ -14,7 +12,9 @@ def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeyp
     win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win, "render", lambda **kwargs: calls.append((kwargs, win.view_state.slice_indices[2])))
+    monkeypatch.setattr(
+        win, "render", lambda **kwargs: calls.append((kwargs, win.view_state.slice_indices[2]))
+    )
     try:
         _process_events(qtbot, count=2)
         win._on_slice_index_changed(2, 3)
@@ -32,6 +32,7 @@ def test_slice_text_updates_immediately_while_render_is_coalesced(qtbot, monkeyp
     finally:
         win.close()
 
+
 def test_rapid_slice_burst_renders_only_latest_state(qtbot, monkeypatch):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
@@ -39,7 +40,11 @@ def test_rapid_slice_burst_renders_only_latest_state(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win, "render", lambda **kwargs: calls.append((kwargs["reason"], win.view_state.slice_indices[2])))
+    monkeypatch.setattr(
+        win,
+        "render",
+        lambda **kwargs: calls.append((kwargs["reason"], win.view_state.slice_indices[2])),
+    )
     try:
         _process_events(qtbot, count=2)
         win._on_slice_index_changed(2, 1)
@@ -92,7 +97,9 @@ def test_coalescer_throttles_without_starving_continuous_bursts(qtbot, monkeypat
     win = ArrayScopeWindow(np.arange(4 * 5 * 12, dtype=float).reshape(4, 5, 12))
     qtbot.addWidget(win)
     calls = []
-    monkeypatch.setattr(win, "render", lambda **kwargs: calls.append(win.view_state.slice_indices[2]))
+    monkeypatch.setattr(
+        win, "render", lambda **kwargs: calls.append(win.view_state.slice_indices[2])
+    )
     try:
         _process_events(qtbot, count=2)
         for index in range(1, 8):
@@ -118,7 +125,9 @@ def test_interactive_slice_preserves_visible_work_and_cancels_side_work(qtbot, m
         return lambda group: cleared.append((controller_name, group))
 
     monkeypatch.setattr(win.visible_evaluation_controller, "clear_group", record_clear("visible"))
-    monkeypatch.setattr(win.montage_tile_evaluation_controller, "clear_group", record_clear("montage"))
+    monkeypatch.setattr(
+        win.montage_tile_evaluation_controller, "clear_group", record_clear("montage")
+    )
     monkeypatch.setattr(win.profile_evaluation_controller, "clear_group", record_clear("profile"))
     monkeypatch.setattr(win.roi_evaluation_controller, "clear_group", record_clear("roi"))
     monkeypatch.setattr(win.pixel_evaluation_controller, "clear_group", record_clear("pixel"))
@@ -140,17 +149,29 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
     win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
     qtbot.addWidget(win)
     calls = {"operation": 0, "inspection": 0, "profile": 0}
-    monkeypatch.setattr(win, "_update_operation_dock", lambda: calls.__setitem__("operation", calls["operation"] + 1))
-    monkeypatch.setattr(win, "_refresh_inspection_dock", lambda: calls.__setitem__("inspection", calls["inspection"] + 1))
-    monkeypatch.setattr(win, "update_line_plot", lambda: calls.__setitem__("profile", calls["profile"] + 1))
+    monkeypatch.setattr(
+        win,
+        "_update_operation_dock",
+        lambda: calls.__setitem__("operation", calls["operation"] + 1),
+    )
+    monkeypatch.setattr(
+        win,
+        "_refresh_inspection_dock",
+        lambda: calls.__setitem__("inspection", calls["inspection"] + 1),
+    )
+    monkeypatch.setattr(
+        win, "update_line_plot", lambda: calls.__setitem__("profile", calls["profile"] + 1)
+    )
     try:
         _process_events(qtbot, count=2)
         win.render_coordinator._quiet_interval_ms = 5000
         calls.update({"operation": 0, "inspection": 0, "profile": 0})
         win._on_slice_index_changed(2, 1)
         qtbot.waitUntil(
-            lambda: win._deferred_side_panel_refresh_pending
-            and not win.render_coordinator.has_pending_render,
+            lambda: (
+                win._deferred_side_panel_refresh_pending
+                and not win.render_coordinator.has_pending_render
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
@@ -226,8 +247,16 @@ def test_direct_render_still_refreshes_side_panels(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     calls = {"operation": 0, "inspection": 0}
-    monkeypatch.setattr(win, "_update_operation_dock", lambda: calls.__setitem__("operation", calls["operation"] + 1))
-    monkeypatch.setattr(win, "_refresh_inspection_dock", lambda: calls.__setitem__("inspection", calls["inspection"] + 1))
+    monkeypatch.setattr(
+        win,
+        "_update_operation_dock",
+        lambda: calls.__setitem__("operation", calls["operation"] + 1),
+    )
+    monkeypatch.setattr(
+        win,
+        "_refresh_inspection_dock",
+        lambda: calls.__setitem__("inspection", calls["inspection"] + 1),
+    )
     try:
         _process_events(qtbot, count=2)
         calls.update({"operation": 0, "inspection": 0})
@@ -423,7 +452,9 @@ def test_cached_frame_render_skips_memory_policy_resample(qtbot, monkeypatch):
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         refreshes = []
-        monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs))
+        monkeypatch.setattr(
+            win.renderer, "_refresh_memory_policy", lambda **kwargs: refreshes.append(kwargs)
+        )
 
         win.render(reason="cached-frame")
 

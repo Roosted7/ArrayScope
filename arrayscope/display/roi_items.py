@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
@@ -21,8 +23,8 @@ def point_distance(a, b) -> float:
 
 def item_for_roi(selection):
     geometry = selection.geometry
-    pen = pg.mkPen(selection.color + (220,), width=2)
-    hover_pen = pg.mkPen(selection.color + (255,), width=3)
+    pen = pg.mkPen((*selection.color, 220), width=2)
+    hover_pen = pg.mkPen((*selection.color, 255), width=3)
     if geometry.kind == RoiKind.LINE:
         return pg.LineSegmentROI(geometry.points[:2], pen=pen, hoverPen=hover_pen, movable=False)
     if geometry.kind == RoiKind.RECTANGLE:
@@ -48,10 +50,8 @@ def make_item_passive(item) -> None:
     ):
         method = getattr(item, name, None)
         if callable(method):
-            try:
+            with contextlib.suppress(Exception):
                 method(value)
-            except Exception:
-                pass
 
 
 def sync_item_to_roi_geometry(item, geometry: RoiGeometry) -> None:

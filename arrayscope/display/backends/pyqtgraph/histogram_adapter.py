@@ -7,10 +7,10 @@ they do not patch HistogramLUTItem state directly.
 
 from __future__ import annotations
 
+import warnings
+import weakref
 from dataclasses import dataclass
 from time import perf_counter
-import weakref
-import warnings
 
 import pyqtgraph as pg
 
@@ -54,7 +54,9 @@ class PyQtGraphHistogramAdapter:
     def bind_image_item(self, item) -> HistogramBindingFacts:
         start = perf_counter()
         if item is None or self._bound_item is item:
-            return HistogramBindingFacts(elapsed_ms=(perf_counter() - start) * 1000.0, item_changed=False)
+            return HistogramBindingFacts(
+                elapsed_ms=(perf_counter() - start) * 1000.0, item_changed=False
+            )
 
         public_calls = 0
         private_calls = 0
@@ -98,7 +100,9 @@ class PyQtGraphHistogramAdapter:
         for _ in range(32):
             try:
                 with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*Failed to disconnect.*", category=RuntimeWarning)
+                    warnings.filterwarnings(
+                        "ignore", message=".*Failed to disconnect.*", category=RuntimeWarning
+                    )
                     signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 break

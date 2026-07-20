@@ -29,10 +29,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from arrayscope.gpu import DataChunkKey
-
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     apply_plane,
     committed_value,
@@ -42,7 +40,6 @@ from tests.ui.helpers import (
     restore_default_backend,
     use_vispy_backend,
 )
-
 
 CHUNK = 256  # == display.frame_planner.ANCHORED_CHUNK_SHAPE[1]; asserted below
 # Four chunks wide so the shifted window keeps interior chunks strictly
@@ -137,7 +134,11 @@ def test_window_shift_live_pixels_stay_correct(qtbot):
         _wait_for_window(win, qtbot, START_B)
 
         # Interior probe points, well inside chunk boundaries on both axes.
-        probes = ((CHUNK // 2, CHUNK // 2), (EXTENT // 2 + 7, CHUNK + 11), (EXTENT - CHUNK, 2 * CHUNK - 1))
+        probes = (
+            (CHUNK // 2, CHUNK // 2),
+            (EXTENT // 2 + 7, CHUNK + 11),
+            (EXTENT - CHUNK, 2 * CHUNK - 1),
+        )
         for view_x, view_y in probes:
             qtbot.waitUntil(
                 lambda x=view_x, y=view_y: committed_value(win, x, y) is not None,
@@ -224,8 +225,7 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
         # logical-page upload without misclassifying the fast path as a full
         # native re-upload.
         assert len(native_uploads) <= total / 2, (
-            f"shift re-uploaded {len(native_uploads)} of {total} chunks — "
-            "fast path did not engage"
+            f"shift re-uploaded {len(native_uploads)} of {total} chunks — fast path did not engage"
         )
         window_area = EXTENT * data.shape[0]
         native_area = sum(h * w for h, w in native_uploads)
@@ -235,8 +235,7 @@ def test_window_shift_live_uploads_only_boundary_strips(qtbot, upload_log):
             f"(boundary strips bound: {boundary_area_bound}); uploads: {uploads}"
         )
         assert native_area < window_area / 2, (
-            f"shift re-uploaded {native_area} of {window_area} window px — "
-            "fast path did not engage"
+            f"shift re-uploaded {native_area} of {window_area} window px — fast path did not engage"
         )
     finally:
         win.close()
@@ -383,8 +382,7 @@ def test_fixed_index_scroll_back_live_is_upload_free(qtbot, upload_log):
 
         native_uploads = [shape for shape in uploads if shape[0] >= CHUNK]
         assert not native_uploads, (
-            f"scroll-back re-uploaded native planes: {native_uploads} "
-            f"(all uploads: {uploads})"
+            f"scroll-back re-uploaded native planes: {native_uploads} (all uploads: {uploads})"
         )
 
         # Pixel truth on the revisited plane.
@@ -427,7 +425,8 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
 
         session = win.renderer._frame_session
         viewport_h, viewport_w = (int(value) for value in session.viewport_shape)
-        assert viewport_h > 0 and viewport_w > 0
+        assert viewport_h > 0
+        assert viewport_w > 0
         # 3.0 source texels per screen pixel on BOTH axes: desired factor 2
         # on both (isotropic — anisotropic reductions fall back to classic).
         view = win.img_view.getView()
@@ -441,11 +440,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         _apply_window(win, shifted_start, reason="test-window-shift-zoomed-out")
 
         def reduced_chunks() -> set:
-            return {
-                key
-                for key in _resident_chunks(pool)
-                if int(key.lod.factor) > 1
-            }
+            return {key for key in _resident_chunks(pool) if int(key.lod.factor) > 1}
 
         def factor_two_converged() -> bool:
             current = win.renderer._frame_session
@@ -463,9 +458,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
         chunks = {key for key in reduced_chunks() if int(key.lod.factor) == 2}
         # Factor-2 keys are the exact canonical page-plan keys. Boundary
         # pages may be clipped while interior pages stay globally aligned.
-        assert {
-            (key.lod.factor, key.lod.level, key.lod.gutter) for key in chunks
-        } == {(2, 1, 0)}
+        assert {(key.lod.factor, key.lod.level, key.lod.gutter) for key in chunks} == {(2, 1, 0)}
         payload = win.renderer._frame_session.display_tile_payloads[0]
         assert payload.page_backing is not None
         assert payload.page_backing.source_coverage_yx == (
@@ -474,9 +467,7 @@ def test_zoomed_out_reduced_target_presents_via_chunked_residency(qtbot):
             shifted_start,
             shifted_start + EXTENT,
         )
-        expected_keys = {
-            plan.key for plan in payload.page_backing.requested_plans
-        }
+        expected_keys = {plan.key for plan in payload.page_backing.requested_plans}
         assert chunks == expected_keys
         # Uniform plane-pixel pages: the reduced chunks live in the same
         # 256^2 shape class as native chunks.

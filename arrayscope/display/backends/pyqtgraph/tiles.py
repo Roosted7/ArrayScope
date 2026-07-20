@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from math import ceil
 from time import perf_counter
-from typing import Callable, Mapping
 
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 from pyqtgraph.Qt import QtGui
 
+from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.model.presentation_generation import levels_match
@@ -30,11 +32,8 @@ from arrayscope.display.shader_mapping import (
     mapped_scalar,
 )
 from arrayscope.display.tile_layout import tile_layout_map
-from arrayscope.gpu.keys import DataChunkKey, REDUCER_PHASE_VECTOR
+from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
-
-from arrayscope.display.image_upload import rgb_display_for_levels
-
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 
@@ -87,9 +86,7 @@ def _resolve_page_backed_payload(
     resolved = resolved_page_set.resolutions
     # Assembly is target-aligned even when several targets share one coarse
     # actual page. Storage stays deduplicated in ``resolved_page_set``.
-    resolved_pages = tuple(
-        pages_by_key[resolution.actual_key] for resolution in resolved
-    )
+    resolved_pages = tuple(pages_by_key[resolution.actual_key] for resolution in resolved)
 
     y0, y1, x0, x1 = backing.source_coverage_yx
     sample = resolved_pages[0].values
@@ -198,9 +195,7 @@ def _map_complex_cpu_payload(
 
     mapping = payload.shader_mapping
     if mapping is None:
-        raise ValueError(
-            "PyQtGraph cannot safely present complex values without a shader mapping"
-        )
+        raise ValueError("PyQtGraph cannot safely present complex values without a shader mapping")
     if levels is not None:
         mapping = replace(mapping, levels=levels)
     if mapping.display_mode != ShaderDisplayMode.PHASE_COLOR:
@@ -228,9 +223,7 @@ def _map_complex_cpu_payload(
         )
     backing = payload.page_backing
     plans = tuple(getattr(backing, "requested_plans", ()) or ())
-    phase_vector = bool(
-        plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans)
-    )
+    phase_vector = bool(plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans))
     if phase_vector:
         # Match VisPy's phase-vector shader mode exactly: page magnitude is
         # circular-resultant coherence in [0, 1], not native amplitude, and
@@ -298,12 +291,12 @@ def _payload_direct_dims(region, tile_data, payload):
     scale_y = float(src_h) / float(img_h)
     world_w = min(int(region.width), src_w)
     world_h = min(int(region.height), src_h)
-    crop_w = min(img_w, int(ceil(world_w / scale_x)))
-    crop_h = min(img_h, int(ceil(world_h / scale_y)))
+    crop_w = min(img_w, ceil(world_w / scale_x))
+    crop_h = min(img_h, ceil(world_h / scale_y))
     return world_w, world_h, crop_w, crop_h, scale_x, scale_y
 
 
-def _apply_item_lod_scale(state: "TileLayerItemState", scale_x: float, scale_y: float) -> None:
+def _apply_item_lod_scale(state: TileLayerItemState, scale_x: float, scale_y: float) -> None:
     """Set the item transform mapping image pixels onto native texels.
 
     Idempotent: only touches the QGraphicsItem transform when the scale
@@ -356,7 +349,9 @@ def _payload_rgb_already_windowed(
     if getattr(payload, "histogram_data", None) is None:
         return True
     payload_levels = getattr(payload, "rgb_windowed_levels", None)
-    return bool(levels is not None and payload_levels is not None and levels_match(payload_levels, levels))
+    return bool(
+        levels is not None and payload_levels is not None and levels_match(payload_levels, levels)
+    )
 
 
 @dataclass
@@ -448,9 +443,7 @@ class MontageTileLayer:
             if values.ndim >= 3 and values.shape[-1] in (3, 4):
                 kind = TexturePlaneKind.RGB8
                 mapping_mode = "cpu_rgb"
-            elif np.iscomplexobj(values) or (
-                values.ndim >= 3 and values.shape[-1] == 2
-            ):
+            elif np.iscomplexobj(values) or (values.ndim >= 3 and values.shape[-1] == 2):
                 kind = TexturePlaneKind.COMPLEX_RG32F
                 mapping_mode = "complex_array"
             else:
@@ -497,9 +490,7 @@ class MontageTileLayer:
                     state.page_candidate_missing
                 )
             if state.page_fallback_reason is not None:
-                rows[int(tile_number)]["physical_page_fallback_reason"] = (
-                    state.page_fallback_reason
-                )
+                rows[int(tile_number)]["physical_page_fallback_reason"] = state.page_fallback_reason
         return rows
 
     def set_lookup_table(self, lut) -> None:
@@ -571,16 +562,20 @@ class MontageTileLayer:
         layout = tile_layout_map(geometry, frame_plan=frame_plan)
         if not layout:
             return TileLayerUpdateStats()
-        requested_active = {
-            int(tile)
-            for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
-            if int(tile) in tile_payloads
-        } if tile_delta is not None else set()
+        requested_active = (
+            {
+                int(tile)
+                for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())
+                if int(tile) in tile_payloads
+            }
+            if tile_delta is not None
+            else set()
+        )
         target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
         requested_upserts = (
-            set(int(tile) for tile in tile_payloads)
+            {int(tile) for tile in tile_payloads}
             if tile_delta is None
-            else set(int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {}))
+            else {int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})}
         )
         drawable_payloads: dict[int, DisplayTilePayload] = {}
         page_assemblies: dict[int, _PageAssembly] = {}
@@ -607,7 +602,8 @@ class MontageTileLayer:
         active = {
             int(tile)
             for tile in requested_active
-            if int(tile) in self._states and bool(getattr(self._states[int(tile)], "visible", False))
+            if int(tile) in self._states
+            and bool(getattr(self._states[int(tile)], "visible", False))
             and acknowledged_identity_satisfies_target(
                 self._states[int(tile)].acknowledged_identity,
                 target_identities.get(int(tile)),
@@ -619,7 +615,9 @@ class MontageTileLayer:
                 self._hide_tile(int(tile))
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
-        cold_deadline_ms = None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
+        cold_deadline_ms = (
+            None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
+        )
         # Level-only re-windowing refreshes already-resident pixels.  The cold
         # budget is a feedback value that collapses to its floor when the
         # commit pipeline's fixed cost dominates, which throttled level
@@ -627,7 +625,9 @@ class MontageTileLayer:
         # 272-tile montage: ~45 s to settle after a level drag).  Refinement
         # gets its own floor so each commit makes real progress while staying
         # within roughly one frame of UI-thread work.
-        level_rewindow_deadline_ms = None if cold_deadline_ms is None else max(8.0, float(cold_deadline_ms))
+        level_rewindow_deadline_ms = (
+            None if cold_deadline_ms is None else max(8.0, float(cold_deadline_ms))
+        )
         cold_start = perf_counter()
         cold_tiles_committed = 0
         update_start = perf_counter()
@@ -655,7 +655,8 @@ class MontageTileLayer:
         level_update_pending_items = sum(
             1
             for tile in requested_active
-            if int(tile) in self._states and not levels_match(self._states[int(tile)].levels, levels)
+            if int(tile) in self._states
+            and not levels_match(self._states[int(tile)].levels, levels)
         )
         level_update_scope = tuple(tile_order) if requested_upserts else requested_active
         level_update_tiles = tuple(
@@ -708,7 +709,9 @@ class MontageTileLayer:
             region = layout.get(int(tile_number))
             if region is None:
                 continue
-            source_index = int(region.source_index) if region.source_index is not None else int(tile_number)
+            source_index = (
+                int(region.source_index) if region.source_index is not None else int(tile_number)
+            )
             state_value = "loaded"
             if states and tile_number < len(states):
                 state_value = str(getattr(states[tile_number], "value", states[tile_number]))
@@ -727,7 +730,9 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 self._hide_tile(tile_number)
                 continue
-            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(region, tile_data, payload)
+            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(
+                region, tile_data, payload
+            )
             if width <= 0 or height <= 0:
                 self._hide_tile(tile_number)
                 continue
@@ -735,7 +740,11 @@ class MontageTileLayer:
                 tile_data = tile_data[:crop_h, :crop_w, ...]
             # Histogram/level planes stay native-resolution regardless of the
             # display LOD (ADR 0050 semantic identity): crop in world texels.
-            tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
+            tile_hist = (
+                None
+                if payload.histogram_data is None
+                else np.asarray(payload.histogram_data)[:height, :width]
+            )
 
             world_x = int(region.x)
             world_y = int(region.y)
@@ -799,7 +808,11 @@ class MontageTileLayer:
                 dirty = False
             levels_changed = item_state is None or not levels_match(item_state.levels, levels)
             is_rgb_tile = self._is_rgb_image(tile_data)
-            missing_display = item_state is not None and getattr(item_state.item, "image", None) is None and is_rgb_tile
+            missing_display = (
+                item_state is not None
+                and getattr(item_state.item, "image", None) is None
+                and is_rgb_tile
+            )
             needs_source_rewindow = (
                 item_state is not None
                 and levels_changed
@@ -902,7 +915,9 @@ class MontageTileLayer:
                     rgb_already_windowed=payload_rgb_already_windowed,
                 )
                 item_state.world_rect = world_rect
-                item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
+                item_state.acknowledged_identity = (
+                    getattr(payload, "tile_identity", None) or payload.source_id
+                )
                 assembly = page_assemblies.get(int(tile_number), _PageAssembly(payload))
                 item_state.page_resolutions = assembly.resolutions
                 item_state.page_candidate_missing = assembly.missing
@@ -1037,7 +1052,9 @@ class MontageTileLayer:
         for state in tuple(self._states.values()):
             if not state.visible:
                 continue
-            updated, windowed = self._update_tile_levels(state, levels, image=image_array, histogram_data=hist_array)
+            updated, windowed = self._update_tile_levels(
+                state, levels, image=image_array, histogram_data=hist_array
+            )
             processed += 1
             items_updated += int(updated)
             rgb_window_tiles += int(windowed)
@@ -1084,9 +1101,7 @@ class MontageTileLayer:
         if not payloads:
             resident_items = self._resident_count()
             visible_items = sum(
-                1
-                for state in self._states.values()
-                if _state_is_physically_visible(state)
+                1 for state in self._states.values() if _state_is_physically_visible(state)
             )
             return TileLayerUpdateStats(
                 resident_items=int(resident_items),
@@ -1123,13 +1138,19 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 items_skipped += 1
                 continue
-            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(region, tile_data, payload)
+            width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(
+                region, tile_data, payload
+            )
             if width <= 0 or height <= 0:
                 items_skipped += 1
                 continue
             if crop_w != int(tile_data.shape[1]) or crop_h != int(tile_data.shape[0]):
                 tile_data = tile_data[:crop_h, :crop_w, ...]
-            tile_hist = None if payload.histogram_data is None else np.asarray(payload.histogram_data)[:height, :width]
+            tile_hist = (
+                None
+                if payload.histogram_data is None
+                else np.asarray(payload.histogram_data)[:height, :width]
+            )
             base_source_id = near_source_ids.get(int(tile_number), payload.source_id)
             payload_rgb_already_windowed = _payload_rgb_already_windowed(
                 payload,
@@ -1148,11 +1169,11 @@ class MontageTileLayer:
                 rgb_already_windowed=payload_rgb_already_windowed,
             ):
                 item_state = self._take_resident_direct_state(
-                int(tile_number),
-                source_id=source_id,
-                histogram_id=hist_id,
-                local_rect=local_rect,
-                rgb_already_windowed=payload_rgb_already_windowed,
+                    int(tile_number),
+                    source_id=source_id,
+                    histogram_id=hist_id,
+                    local_rect=local_rect,
+                    rgb_already_windowed=payload_rgb_already_windowed,
                 )
             if item_state is None:
                 item_state = self._pop_direct_reuse_pool() if self._direct_reuse_pool else None
@@ -1160,7 +1181,9 @@ class MontageTileLayer:
                 if item_state is None:
                     item_state = TileLayerItemState(
                         tile_number=int(tile_number),
-                        source_index=int(getattr(region, "source_index", tile_number) or tile_number),
+                        source_index=int(
+                            getattr(region, "source_index", tile_number) or tile_number
+                        ),
                         item=ImageItem(axisOrder="row-major"),
                         local_rect=(-1, -1, -1, -1),
                         world_rect=(-1, -1, -1, -1),
@@ -1209,12 +1232,14 @@ class MontageTileLayer:
                 rgb_window_tiles += int(windowed)
                 image_replacements += int(
                     updated
-                    and not item_state.source_array_id == 0
+                    and item_state.source_array_id != 0
                     and not _direct_base_source_matches(previous_source_id, source_id)
                 )
                 if updated:
                     updated_tiles.append(int(tile_number))
-                item_state.acknowledged_identity = getattr(payload, "tile_identity", None) or payload.source_id
+                item_state.acknowledged_identity = (
+                    getattr(payload, "tile_identity", None) or payload.source_id
+                )
                 item_state.page_resolutions = assembly.resolutions
                 item_state.page_candidate_missing = assembly.missing
                 item_state.physical_lod = getattr(assembly.payload, "lod", None)
@@ -1290,9 +1315,11 @@ class MontageTileLayer:
         backing = getattr(payload, "page_backing", None)
         for state in self._states.values():
             if (
-                state.acknowledged_identity != identity
-                and not acknowledged_identity_satisfies_target(
-                    state.acknowledged_identity, identity
+                (
+                    state.acknowledged_identity != identity
+                    and not acknowledged_identity_satisfies_target(
+                        state.acknowledged_identity, identity
+                    )
                 )
                 or getattr(state.item, "image", None) is None
                 or self._states.get(int(state.tile_number)) is not state
@@ -1317,8 +1344,7 @@ class MontageTileLayer:
             if missing:
                 if (
                     state.page_candidate_missing == missing
-                    and state.page_fallback_reason
-                    == "incomplete-page-coverage-native"
+                    and state.page_fallback_reason == "incomplete-page-coverage-native"
                 ):
                     return True
                 continue
@@ -1385,7 +1411,9 @@ class MontageTileLayer:
         self._add_to_direct_reuse_pool(state)
         self._touch_resident_state(state)
 
-    def _displace_tile_slot_resident(self, tile_number: int, replacement: TileLayerItemState) -> None:
+    def _displace_tile_slot_resident(
+        self, tile_number: int, replacement: TileLayerItemState
+    ) -> None:
         existing = self._states.get(int(tile_number))
         if existing is None or existing is replacement:
             return
@@ -1404,10 +1432,8 @@ class MontageTileLayer:
             return
         self._unregister_source_state(state)
         self._remove_from_direct_reuse_pool(state)
-        try:
+        with contextlib.suppress(Exception):
             self.layer_owner.remove_tile_item(int(tile_number))
-        except Exception:
-            pass
         self._resident_bytes -= int(getattr(state, "resident_nbytes", 0) or 0)
         self._rgb_source_cache_bytes -= int(getattr(state, "source_cache_nbytes", 0) or 0)
         state.resident_nbytes = 0
@@ -1449,8 +1475,12 @@ class MontageTileLayer:
                 windowed = True
             state.display_cache = display
             upload_start = perf_counter()
-            self._set_image_item_data(state.item, display, (0, 255), role="visible", emit_histogram_change=False)
-            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
+            self._set_image_item_data(
+                state.item, display, (0, 255), role="visible", emit_histogram_change=False
+            )
+            self._record_upload_timing(
+                "tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0
+            )
         else:
             state.rgb_base = None
             state.hist_source = None
@@ -1464,7 +1494,9 @@ class MontageTileLayer:
                 role="visible",
                 emit_histogram_change=False,
             )
-            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
+            self._record_upload_timing(
+                "tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0
+            )
         state.source_index = int(source_index)
         state.source_array_id = source_array_id
         state.histogram_array_id = histogram_array_id
@@ -1486,7 +1518,9 @@ class MontageTileLayer:
         histogram_data=None,
     ) -> tuple[bool, bool]:
         if state.rgb_base is None and state.hist_source is None and state.display_cache is not None:
-            rebuilt = self._set_tile_data_from_current_source(state, levels, image=image, histogram_data=histogram_data)
+            rebuilt = self._set_tile_data_from_current_source(
+                state, levels, image=image, histogram_data=histogram_data
+            )
             if rebuilt is not None:
                 return rebuilt
         if state.rgb_base is not None and state.hist_source is not None:
@@ -1499,8 +1533,12 @@ class MontageTileLayer:
             self._touch_rgb_source_cache(state)
             state.levels = levels
             upload_start = perf_counter()
-            self._set_image_item_data(state.item, display, (0, 255), role="visible", emit_histogram_change=False)
-            self._record_upload_timing("tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0)
+            self._set_image_item_data(
+                state.item, display, (0, 255), role="visible", emit_histogram_change=False
+            )
+            self._record_upload_timing(
+                "tile_layer_upload_ms", (perf_counter() - upload_start) * 1000.0
+            )
             return True, True
         if state.display_cache is not None:
             if state.rgb_already_windowed:
@@ -1634,7 +1672,9 @@ class MontageTileLayer:
         self._direct_reuse_pool.clear()
         self._direct_reuse_pool_ids.clear()
         self._rgb_source_cache_bytes = 0
-        self._resident_bytes = sum(int(getattr(state, "resident_nbytes", 0) or 0) for state in self._states.values())
+        self._resident_bytes = sum(
+            int(getattr(state, "resident_nbytes", 0) or 0) for state in self._states.values()
+        )
 
     def _resident_count(self) -> int:
         return len(self._states)
@@ -1666,10 +1706,8 @@ class MontageTileLayer:
                 return
             self._states.pop(tile_number, None)
         self._remove_from_direct_reuse_pool(state)
-        try:
+        with contextlib.suppress(Exception):
             self.layer_owner.remove_tile_item(tile_number)
-        except Exception:
-            pass
         self._resident_bytes -= int(getattr(state, "resident_nbytes", 0) or 0)
         self._rgb_source_cache_bytes -= int(getattr(state, "source_cache_nbytes", 0) or 0)
         state.resident_nbytes = 0
@@ -1784,11 +1822,7 @@ def _direct_state_key(
 
 
 def _direct_base_source_id(source_id: object) -> object:
-    if (
-        isinstance(source_id, tuple)
-        and len(source_id) >= 2
-        and source_id[1] == "pyqtgraph_display"
-    ):
+    if isinstance(source_id, tuple) and len(source_id) >= 2 and source_id[1] == "pyqtgraph_display":
         return _direct_payload_semantic_source_token(source_id)
     return _canonical_direct_base_source_id(source_id)
 
@@ -1796,13 +1830,25 @@ def _direct_base_source_id(source_id: object) -> object:
 def _canonical_direct_base_source_id(base_source_id: object) -> object:
     if isinstance(base_source_id, tuple) and "texture_kind" in base_source_id:
         base_source_id = base_source_id[: base_source_id.index("texture_kind")]
-    if isinstance(base_source_id, tuple) and len(base_source_id) >= 3 and base_source_id[0] == "montage-tile":
+    if (
+        isinstance(base_source_id, tuple)
+        and len(base_source_id) >= 3
+        and base_source_id[0] == "montage-tile"
+    ):
         return ("montage-tile", base_source_id[1], int(base_source_id[2]))
-    if isinstance(base_source_id, tuple) and len(base_source_id) >= 8 and base_source_id[0] == "display_tile":
+    if (
+        isinstance(base_source_id, tuple)
+        and len(base_source_id) >= 8
+        and base_source_id[0] == "display_tile"
+    ):
         request_key = base_source_id[5]
         slice_indices = _display_tile_slice_indices(request_key)
         if slice_indices:
-            return ("display-tile-semantic", base_source_id[1], tuple(int(value) for value in slice_indices))
+            return (
+                "display-tile-semantic",
+                base_source_id[1],
+                tuple(int(value) for value in slice_indices),
+            )
     if (
         isinstance(base_source_id, tuple)
         and len(base_source_id) >= 2
@@ -1854,7 +1900,9 @@ def _display_tile_slice_indices(request_key: object) -> tuple[int, ...] | None:
     return None
 
 
-def _direct_payload_source_id(base_source_id: object, payload: DisplayTilePayload) -> tuple[object, ...]:
+def _direct_payload_source_id(
+    base_source_id: object, payload: DisplayTilePayload
+) -> tuple[object, ...]:
     image = payload.semantic_data if payload.semantic_data is not None else payload.image
     histogram = (
         payload.semantic_histogram_data
@@ -1926,7 +1974,9 @@ def _direct_tile_order(
             and (
                 int(tile) not in state_map
                 or not bool(getattr(state_map[int(tile)], "visible", False))
-                or _direct_tile_geometry_changed(state_map[int(tile)], layout, int(tile), tile_payloads[int(tile)])
+                or _direct_tile_geometry_changed(
+                    state_map[int(tile)], layout, int(tile), tile_payloads[int(tile)]
+                )
                 or _direct_tile_binding_stale(
                     state_map.get(int(tile)),
                     layout,
@@ -1973,7 +2023,9 @@ def _direct_tile_binding_stale(
     tile_data = np.asarray(payload.image)
     if tile_data.ndim < 2:
         return False
-    width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(region, tile_data, payload)
+    width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(
+        region, tile_data, payload
+    )
     if width <= 0 or height <= 0:
         return False
     base_source_id = (
@@ -2015,7 +2067,9 @@ def _direct_preclaim_specs(
         tile_data = np.asarray(payload.image)
         if tile_data.ndim < 2:
             continue
-        width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(region, tile_data, payload)
+        width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(
+            region, tile_data, payload
+        )
         if width <= 0 or height <= 0:
             continue
         base_source_id = (
@@ -2051,7 +2105,12 @@ def _direct_cold_hole_count(
     return cold
 
 
-def _direct_tile_geometry_changed(state: TileLayerItemState, layout: dict[int, object], tile_number: int, payload: DisplayTilePayload) -> bool:
+def _direct_tile_geometry_changed(
+    state: TileLayerItemState,
+    layout: dict[int, object],
+    tile_number: int,
+    payload: DisplayTilePayload,
+) -> bool:
     data = np.asarray(payload.image)
     if data.ndim < 2:
         return False

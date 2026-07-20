@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
-
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
-from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe, load_view_recipe as load_view_recipe_file, save_view_recipe as save_view_recipe_file
-from arrayscope.display.colormap_policy import default_colormap_name
 from arrayscope.core.memory_budget import DEFAULT_VISIBLE_RENDER_BUDGET_BYTES, format_bytes
+from arrayscope.core.view_recipe import DisplaySettings, ViewRecipe
+from arrayscope.core.view_recipe import load_view_recipe as load_view_recipe_file
+from arrayscope.core.view_recipe import save_view_recipe as save_view_recipe_file
+from arrayscope.display.colormap_policy import default_colormap_name
 from arrayscope.io.numpy_save import save_derived_array
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
@@ -27,43 +28,43 @@ class OperationActionsMixin:
             return
         if event.button() == Qt.QtCore.Qt.MouseButton.RightButton:
             return
-    
+
         p = QtGui.QPalette()
-        
+
         # If already transformed, any click returns to native
         if self.domain[dim] == Domain.FOURIER:
             # From FFT domain, go back to native (undo)
             self.domain[dim] = Domain.NATIVE
-            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('black'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("black"))
             label.setStyleSheet("font-weight: normal;")
             self._apply_ifft(dim)  # Undo the FFT by applying IFFT
         elif self.domain[dim] == Domain.INV_FOURIER:
             # From IFFT domain, go back to native (undo)
             self.domain[dim] = Domain.NATIVE
-            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('black'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("black"))
             label.setStyleSheet("font-weight: normal;")
             self._apply_fft(dim)  # Undo the IFFT by applying FFT
         elif event.button() == Qt.QtCore.Qt.MouseButton.RightButton:
             # Right click from native: apply IFFT
             self.domain[dim] = Domain.INV_FOURIER
-            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('green'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("green"))
             label.setStyleSheet("font-weight: bold; color: green;")
             self._apply_ifft(dim)
         else:
             # Left click from native: apply FFT
             self.domain[dim] = Domain.FOURIER
-            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor('blue'))
+            p.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("blue"))
             label.setStyleSheet("font-weight: bold; color: blue;")
             self._apply_fft(dim)
 
         label.setPalette(p)
         self.update_image_view()
         self.update_line_plot()
-        
+
     def _apply_fft(self, dim):
         """Apply forward FFT along specified dimension."""
         self._append_operation("centered_fft", dim)
-        
+
     def _apply_ifft(self, dim):
         """Apply inverse FFT along specified dimension."""
         self._append_operation("centered_ifft", dim)
@@ -76,20 +77,33 @@ class OperationActionsMixin:
         profile_action = menu.addAction("Use as profile axis")
         set_action_icon(profile_action, "show_chart")
         profile_action.setEnabled(not self.singleton[dim])
-        profile_action.triggered.connect(lambda checked=False, dim=dim: self.set_profile_axis_from_menu(dim))
+        profile_action.triggered.connect(
+            lambda checked=False, dim=dim: self.set_profile_axis_from_menu(dim)
+        )
         live_profile_action = menu.addAction("Live profile from this axis")
         set_action_icon(live_profile_action, "monitor_heart")
         live_profile_action.setCheckable(True)
-        live_profile_action.setChecked(self.widgets["buttons"]["display"]["live_profile"].isChecked() and dim in getattr(self, "profile_axes", ()))
+        live_profile_action.setChecked(
+            self.widgets["buttons"]["display"]["live_profile"].isChecked()
+            and dim in getattr(self, "profile_axes", ())
+        )
         live_profile_action.setEnabled(not self.singleton[dim])
-        live_profile_action.triggered.connect(lambda checked=False, dim=dim: self._set_live_profile_for_axis_from_menu(dim, bool(checked)))
+        live_profile_action.triggered.connect(
+            lambda checked=False, dim=dim: self._set_live_profile_for_axis_from_menu(
+                dim, bool(checked)
+            )
+        )
         menu.addSeparator()
         for entry in operation_entries():
             action = menu.addAction(entry.label)
             set_action_icon(action, _operation_icon_name(entry.id))
             action.setData(entry.id)
             action.setEnabled(self._operation_entry_enabled(entry, dim))
-            action.triggered.connect(lambda checked=False, operation_id=entry.id, dim=dim: self.request_operation(operation_id, dim))
+            action.triggered.connect(
+                lambda checked=False, operation_id=entry.id, dim=dim: self.request_operation(
+                    operation_id, dim
+                )
+            )
 
         menu.exec(widget.mapToGlobal(pos))
 
@@ -106,7 +120,9 @@ class OperationActionsMixin:
     def set_profile_axis_from_menu(self, dim):
         self.set_profile_axes_exactly((dim,))
         self._profile_dock_user_visible = True
-        self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="profile-axis-menu")
+        self.layout_manager.set_managed_dock_visible(
+            self.profile_dock, True, reason="profile-axis-menu"
+        )
         self._schedule_view_geometry_refresh()
 
     def _show_operation_context_menu_for_axis(self, dim):
@@ -134,12 +150,16 @@ class OperationActionsMixin:
             parameters = self._collect_operation_parameters(operation_id, dim)
             if parameters is None:
                 return
-            self.operation_coordinator.append_operation(operation_id, axis=dim, parameters=parameters)
+            self.operation_coordinator.append_operation(
+                operation_id, axis=dim, parameters=parameters
+            )
             if dim is not None:
                 self._last_operation_axis = int(dim)
             self._set_document(self.operation_coordinator.document)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Failed to apply operation:\n{e}")
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Failed to apply operation:\n{e}"
+            )
             return
 
         self.render(reason="operation", force_autolevel=True)
@@ -166,7 +186,10 @@ class OperationActionsMixin:
         form.addRow("Stop", stop_spin)
         form.addRow("Output length", preview)
         layout.addLayout(form)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
         layout.addWidget(buttons)
         dialog.setLayout(layout)
 
@@ -189,7 +212,9 @@ class OperationActionsMixin:
             return self.open_command_palette()
         entries = tuple(operation_entries())
         labels = [entry.label for entry in entries]
-        label, ok = QtWidgets.QInputDialog.getItem(self, "Add Operation", "Operation", labels, 0, False)
+        label, ok = QtWidgets.QInputDialog.getItem(
+            self, "Add Operation", "Operation", labels, 0, False
+        )
         if not ok:
             return None
         entry = entries[labels.index(label)]
@@ -200,7 +225,13 @@ class OperationActionsMixin:
 
     def open_command_palette(self):
         commands = [
-            PaletteCommand(entry.id, entry.label, kind="operation", requires_axis=entry.requires_axis, icon=_operation_icon_name(entry.id))
+            PaletteCommand(
+                entry.id,
+                entry.label,
+                kind="operation",
+                requires_axis=entry.requires_axis,
+                icon=_operation_icon_name(entry.id),
+            )
             for entry in operation_entries()
         ]
         commands.extend(
@@ -224,7 +255,9 @@ class OperationActionsMixin:
             ]
         )
         default_axis = self._default_operation_axis()
-        dialog = CommandPaletteDialog(commands, axis_choices=self._axis_choices(), default_axis=default_axis, parent=self)
+        dialog = CommandPaletteDialog(
+            commands, axis_choices=self._axis_choices(), default_axis=default_axis, parent=self
+        )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return None
         command, axis = dialog.selected()
@@ -286,7 +319,9 @@ class OperationActionsMixin:
                 if axis == default:
                     default_index = index
                     break
-        label, ok = QtWidgets.QInputDialog.getItem(self, entry.label, "Axis", labels, default_index, False)
+        label, ok = QtWidgets.QInputDialog.getItem(
+            self, entry.label, "Axis", labels, default_index, False
+        )
         if not ok:
             return None
         return choices[labels.index(label)][1]
@@ -316,7 +351,11 @@ class OperationActionsMixin:
         if last_axis is not None:
             candidates.append(last_axis)
         display_axes = set(self.view_state.display_axes())
-        candidates.extend(axis for axis, size in enumerate(self.data.shape) if size != 1 and axis not in display_axes)
+        candidates.extend(
+            axis
+            for axis, size in enumerate(self.data.shape)
+            if size != 1 and axis not in display_axes
+        )
         if self.view_state.line_axis is not None:
             candidates.append(self.view_state.line_axis)
         if self.view_state.image_axes is not None:
@@ -350,7 +389,9 @@ class OperationActionsMixin:
             self.operation_coordinator.move(index, direction)
             self._set_document(self.operation_coordinator.document)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation:\n{e}")
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Cannot reorder operation:\n{e}"
+            )
             return
         self.render(reason="operation-move", force_autolevel=True)
 
@@ -359,7 +400,9 @@ class OperationActionsMixin:
             self.operation_coordinator.reorder(order)
             self._set_document(self.operation_coordinator.document)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot reorder operation stack:\n{e}")
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Cannot reorder operation stack:\n{e}"
+            )
             self._update_operation_dock()
             return False
         self.render(reason="operation-reorder", force_autolevel=True)
@@ -440,7 +483,9 @@ class OperationActionsMixin:
         for path in paths:
             action = menu.addAction(os.path.basename(path))
             action.setToolTip(path)
-            action.triggered.connect(lambda _checked=False, path=path: self.load_operation_recipe_from_path(path))
+            action.triggered.connect(
+                lambda _checked=False, path=path: self.load_operation_recipe_from_path(path)
+            )
 
     def materialize_current_array(self):
         if not self._confirm_expensive_full_array("Materialize", self.data.shape, self.data.dtype):
@@ -459,7 +504,9 @@ class OperationActionsMixin:
         self.evaluation_controller.start(
             evaluate,
             on_done=done,
-            on_error=lambda exc: QtWidgets.QMessageBox.warning(self, "Materialize Error", f"Failed to materialize:\n{exc}"),
+            on_error=lambda exc: QtWidgets.QMessageBox.warning(
+                self, "Materialize Error", f"Failed to materialize:\n{exc}"
+            ),
             on_slow=lambda: show_status_message(self, "Materializing derived array..."),
         )
 
@@ -528,9 +575,13 @@ class OperationActionsMixin:
         axis = int(axis)
         if axis == int(getattr(operation, "axis", -1)):
             return
-        parameters = {parameter.name: getattr(operation, parameter.name) for parameter in entry.parameters}
+        parameters = {
+            parameter.name: getattr(operation, parameter.name) for parameter in entry.parameters
+        }
         try:
-            self.operation_coordinator.replace_operation(index, operation_id, axis=axis, parameters=parameters)
+            self.operation_coordinator.replace_operation(
+                index, operation_id, axis=axis, parameters=parameters
+            )
             self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot change dimension:\n{e}")
@@ -554,7 +605,13 @@ class OperationActionsMixin:
 
         def evaluate_and_save():
             data = document.materialize()
-            return save_derived_array(file_path, data, recipe_json=recipe_json, view_recipe_json=view_recipe_json, sidecar=True)
+            return save_derived_array(
+                file_path,
+                data,
+                recipe_json=recipe_json,
+                view_recipe_json=view_recipe_json,
+                sidecar=True,
+            )
 
         def done(written):
             show_status_message(self, f"Exported derived array to {written[0]}")
@@ -562,7 +619,9 @@ class OperationActionsMixin:
         self.evaluation_controller.start(
             evaluate_and_save,
             on_done=done,
-            on_error=lambda exc: QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export derived array:\n{exc}"),
+            on_error=lambda exc: QtWidgets.QMessageBox.warning(
+                self, "Export Error", f"Failed to export derived array:\n{exc}"
+            ),
             on_slow=lambda: show_status_message(self, "Exporting derived array..."),
         )
         return None
@@ -576,7 +635,11 @@ class OperationActionsMixin:
         )
         output_bytes = cost.estimated_output_bytes or 0
         peak_bytes = cost.estimated_peak_bytes or output_bytes
-        budget_bytes = self._visible_render_budget_bytes() if hasattr(self, "_visible_render_budget_bytes") else DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
+        budget_bytes = (
+            self._visible_render_budget_bytes()
+            if hasattr(self, "_visible_render_budget_bytes")
+            else DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
+        )
         should_warn = (
             output_bytes > LARGE_MATERIALIZE_BYTES
             or peak_bytes > budget_bytes
@@ -586,12 +649,21 @@ class OperationActionsMixin:
             return True
         expensive_text = ""
         if cost.operation_costs and enabled_operations:
-            paired = tuple(zip(enabled_operations, cost.operation_costs))
-            operation, operation_cost = max(paired, key=lambda item: item[1].estimated_peak_bytes or 0)
-            axis_text = "" if not operation_cost.requires_full_axis else f" axis {operation_cost.requires_full_axis[0]}"
+            paired = tuple(zip(enabled_operations, cost.operation_costs, strict=False))
+            operation, operation_cost = max(
+                paired, key=lambda item: item[1].estimated_peak_bytes or 0
+            )
+            axis_text = (
+                ""
+                if not operation_cost.requires_full_axis
+                else f" axis {operation_cost.requires_full_axis[0]}"
+            )
             expensive_text = f" due to {type(operation).__name__}{axis_text}"
         worker_text = ""
-        if any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in enabled_operations):
+        if any(
+            type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"}
+            for operation in enabled_operations
+        ):
             _backend_choice, workers_choice = fft_backend.get_fft_runtime_options()
             worker_text = f" FFT workers: {workers_choice.value}."
         message = (
@@ -639,7 +711,9 @@ class OperationActionsMixin:
             self._set_view_state(recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
             self._apply_display_settings(recipe.display)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "View Recipe Error", f"Failed to load view recipe:\n{e}")
+            QtWidgets.QMessageBox.warning(
+                self, "View Recipe Error", f"Failed to load view recipe:\n{e}"
+            )
             return None
         self.render(
             reason="view-recipe-load",
@@ -648,7 +722,11 @@ class OperationActionsMixin:
         return file_path
 
     def _current_view_recipe(self):
-        return ViewRecipe(view_state=self.view_state, display=self._current_display_settings(), steps=self.document.steps)
+        return ViewRecipe(
+            view_state=self.view_state,
+            display=self._current_display_settings(),
+            steps=self.document.steps,
+        )
 
     def _current_view_recipe_json(self):
         from arrayscope.core.view_recipe import dumps_view_recipe
@@ -667,18 +745,28 @@ class OperationActionsMixin:
             aspect_mode=getattr(self.img_view, "displayMode", "square_pixels"),
             window_mode=self._current_window_mode(),
             levels=levels,
-            colormap=getattr(self, "current_colormap", None) if bool(getattr(self, "_colormap_user_selected", False)) else None,
+            colormap=getattr(self, "current_colormap", None)
+            if bool(getattr(self, "_colormap_user_selected", False))
+            else None,
             profile_visible=hasattr(self, "profile_dock") and self.profile_dock.isVisible(),
             live_profile=self.widgets["buttons"]["display"]["live_profile"].isChecked(),
         )
 
     def _apply_display_settings(self, settings):
-        self._set_view_state(self.view_state.with_channel(settings.channel).with_scale(settings.scale))
+        self._set_view_state(
+            self.view_state.with_channel(settings.channel).with_scale(settings.scale)
+        )
         self._coerce_channel_for_current_dtype()
-        aspect_mode = settings.aspect_mode if settings.aspect_mode in {"square_pixels", "fit"} else "fit"
+        aspect_mode = (
+            settings.aspect_mode if settings.aspect_mode in {"square_pixels", "fit"} else "fit"
+        )
         self.img_view.setDisplayMode(aspect_mode)
-        self.widgets["buttons"]["display"]["window_relative"].setChecked(settings.window_mode != "absolute")
-        self.widgets["buttons"]["display"]["window_absolute"].setChecked(settings.window_mode == "absolute")
+        self.widgets["buttons"]["display"]["window_relative"].setChecked(
+            settings.window_mode != "absolute"
+        )
+        self.widgets["buttons"]["display"]["window_absolute"].setChecked(
+            settings.window_mode == "absolute"
+        )
         self.widgets["buttons"]["display"]["live_profile"].setChecked(settings.live_profile)
         saved_colormap = None if settings.colormap is None else str(settings.colormap)
         if saved_colormap is None or saved_colormap == default_colormap_name(settings.channel):
@@ -697,7 +785,9 @@ class OperationActionsMixin:
         if settings.profile_visible:
             self._profile_dock_user_visible = True
             if not bool(getattr(self, "_suspend_progressive_dock_sync", False)):
-                self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="view-recipe")
+                self.layout_manager.set_managed_dock_visible(
+                    self.profile_dock, True, reason="view-recipe"
+                )
 
 
 def _operation_icon_name(operation_id):

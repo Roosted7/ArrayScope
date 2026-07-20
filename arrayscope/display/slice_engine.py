@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Tuple
 
 import numpy as np
 
@@ -16,17 +15,19 @@ from arrayscope.display.shader_mapping import (
     ShaderMapping,
     ShaderScale,
     TexturePlaneKind,
-    apply_scale as apply_shader_scale,
     apply_phase_lut,
     extract_component,
+)
+from arrayscope.display.shader_mapping import (
+    apply_scale as apply_shader_scale,
 )
 
 
 @dataclass(frozen=True)
 class DisplayImage:
     data: np.ndarray
-    histogram_data: Optional[np.ndarray] = None
-    default_levels: Optional[Tuple[float, float]] = None
+    histogram_data: np.ndarray | None = None
+    default_levels: tuple[float, float] | None = None
     rgb_already_windowed: bool = False
     shader_mapping: ShaderMapping | None = None
     texture_kind: TexturePlaneKind | None = None
@@ -133,7 +134,9 @@ def make_image_from_slab(slab, request, colormap_lut=None):
 
     image_data = np.asarray(slab)
     present_axes = _present_axes_for_slab(state, state.image_axes)
-    image_data = _apply_display_axis_ranges(image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ()))
+    image_data = _apply_display_axis_ranges(
+        image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ())
+    )
     image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
     image_data = _ensure_image_rank(image_data)
 
@@ -176,7 +179,9 @@ def make_image_from_slab(slab, request, colormap_lut=None):
     )
 
 
-def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional_histogram: bool = False):
+def make_shader_image_from_slab(
+    slab, request, colormap_lut=None, *, provisional_histogram: bool = False
+):
     """Create a shader-capable display image from an evaluated image slab."""
     state = request.view_state
     if state.image_axes is None:
@@ -184,7 +189,9 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional
 
     image_data = np.asarray(slab)
     present_axes = _present_axes_for_slab(state, state.image_axes)
-    image_data = _apply_display_axis_ranges(image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ()))
+    image_data = _apply_display_axis_ranges(
+        image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ())
+    )
     image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
     image_data = _ensure_image_rank(image_data)
 
@@ -238,9 +245,13 @@ def make_shader_image_from_slab(slab, request, colormap_lut=None, *, provisional
     )
     if provisional_histogram:
         histogram_data = None
-        level_data = _sample_shader_level_data(component, ShaderComponent.REAL, mapping.scale, symlog_constant=mapping.symlog_constant)
+        level_data = _sample_shader_level_data(
+            component, ShaderComponent.REAL, mapping.scale, symlog_constant=mapping.symlog_constant
+        )
     else:
-        histogram_data = apply_shader_scale(component, mapping.scale, symlog_constant=mapping.symlog_constant)
+        histogram_data = apply_shader_scale(
+            component, mapping.scale, symlog_constant=mapping.symlog_constant
+        )
         level_data = None
     component = np.ascontiguousarray(np.asarray(component, dtype=np.float32))
     return DisplayImage(
@@ -315,7 +326,9 @@ def make_line_from_slab(slab, request):
 
     line_data = np.asarray(slab)
     present_axes = _present_axes_for_slab(state, (state.line_axis,))
-    line_data = _apply_display_axis_ranges(line_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ()))
+    line_data = _apply_display_axis_ranges(
+        line_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ())
+    )
     channel = _channel_mode(state.channel)
     if channel != ChannelMode.COMPLEX:
         line_data = apply_channel(line_data, channel)
@@ -435,7 +448,9 @@ def _spatial_level_sample(arr: np.ndarray, *, limit: int) -> np.ndarray:
         int(limit),
     )
     trailing_shape = tuple(values.shape[2:])
-    return values.reshape(int(values.shape[0]) * int(values.shape[1]), *trailing_shape)[flat_indices]
+    return values.reshape(int(values.shape[0]) * int(values.shape[1]), *trailing_shape)[
+        flat_indices
+    ]
 
 
 @lru_cache(maxsize=128)
@@ -540,5 +555,7 @@ def _validated_state_for_data(data, state):
         axis_range_text=state.axis_range_text,
     )
     if tuple(data.shape) != state.shape:
-        raise ValueError(f"data shape {tuple(data.shape)} does not match view state shape {state.shape}")
+        raise ValueError(
+            f"data shape {tuple(data.shape)} does not match view state shape {state.shape}"
+        )
     return state

@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
+from arrayscope.core.compute_policy import ComputeLane, EvaluationContext
 from arrayscope.operations import dim_ops, fft_backend
 from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT
-from arrayscope.core.compute_policy import ComputeLane, EvaluationContext
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec
 
 
@@ -12,8 +12,12 @@ def test_scipy_backend_matches_numpy_convention_for_centered_fft_and_ifft():
     scipy_backend = fft_backend.ScipyFFTBackend()
     numpy_backend = fft_backend.NumpyFFTBackend()
 
-    np.testing.assert_allclose(scipy_backend.centered_fft(data, 1, workers=1), numpy_backend.centered_fft(data, 1))
-    np.testing.assert_allclose(scipy_backend.centered_ifft(data, 1, workers=1), numpy_backend.centered_ifft(data, 1))
+    np.testing.assert_allclose(
+        scipy_backend.centered_fft(data, 1, workers=1), numpy_backend.centered_fft(data, 1)
+    )
+    np.testing.assert_allclose(
+        scipy_backend.centered_ifft(data, 1, workers=1), numpy_backend.centered_ifft(data, 1)
+    )
 
 
 def test_centered_fft_ifft_round_trip_preserves_existing_viewer_convention():
@@ -51,13 +55,19 @@ def test_pyfftw_backend_available_in_conda_environment():
     data = np.arange(4 * 4, dtype=np.float32).reshape(4, 4)
     backend = fft_backend.resolve_fft_backend("pyfftw")
 
-    np.testing.assert_allclose(backend.centered_fft(data, 0, workers=1), fft_backend.NumpyFFTBackend().centered_fft(data, 0), atol=1e-6)
+    np.testing.assert_allclose(
+        backend.centered_fft(data, 0, workers=1),
+        fft_backend.NumpyFFTBackend().centered_fft(data, 0),
+        atol=1e-6,
+    )
 
 
 def test_dim_ops_uses_runtime_options():
     fft_backend.set_fft_runtime_options(backend="numpy", workers="1")
     data = np.arange(3 * 4, dtype=np.float32).reshape(3, 4)
-    np.testing.assert_allclose(dim_ops.centered_fft(data, 0), fft_backend.NumpyFFTBackend().centered_fft(data, 0))
+    np.testing.assert_allclose(
+        dim_ops.centered_fft(data, 0), fft_backend.NumpyFFTBackend().centered_fft(data, 0)
+    )
 
 
 def test_fft_operations_honor_evaluation_context_workers(monkeypatch):
@@ -73,6 +83,8 @@ def test_fft_operations_honor_evaluation_context_workers(monkeypatch):
     region = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.ALL)))
     context = EvaluationContext(ComputeLane.MONTAGE_TILE, None, 1, None)
 
-    CenteredFFT(axis=1).apply_to_region(data, input_region=region, output_region=region, evaluation_context=context)
+    CenteredFFT(axis=1).apply_to_region(
+        data, input_region=region, output_region=region, evaluation_context=context
+    )
 
     assert calls == [1]

@@ -12,9 +12,9 @@ backgrounds, overlays, level handles).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace as dataclasses_replace
+from dataclasses import dataclass
+from dataclasses import replace as dataclasses_replace
 from enum import Enum
-from typing import Optional
 
 
 class ThemeChoice(str, Enum):
@@ -29,7 +29,7 @@ class ThemeResult:
     requested: ThemeChoice
     applied: ThemeChoice
     backend: str
-    warning: Optional[str] = None
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,10 +39,10 @@ class ThemeTokens:
     name: str
     is_dark: bool
     # Chrome surfaces
-    window: str          # main window / toolbar background
-    surface: str         # docks, cards, chips
-    surface_alt: str     # hover / alternate rows
-    base: str            # inputs, lists, tables
+    window: str  # main window / toolbar background
+    surface: str  # docks, cards, chips
+    surface_alt: str  # hover / alternate rows
+    base: str  # inputs, lists, tables
     # Text tiers
     text: str
     text_muted: str
@@ -54,17 +54,17 @@ class ThemeTokens:
     accent_hover: str
     accent_text: str
     # Data surfaces (pyqtgraph)
-    canvas: str          # image letterbox + plot background
-    plot_text: str       # axis text / foreground
+    canvas: str  # image letterbox + plot background
+    plot_text: str  # axis text / foreground
     plot_grid: str
     histogram_fill: str  # histogram body fill
-    level_handle: str    # window/level region lines
+    level_handle: str  # window/level region lines
     # Feedback
     success: str
     warning_color: str
     error: str
     # Floating chips (HUD, toasts, evaluation overlay)
-    overlay_bg: str      # rgba() string
+    overlay_bg: str  # rgba() string
     overlay_text: str
 
 
@@ -205,9 +205,7 @@ def _tokens_from_native_palette(app) -> ThemeTokens:
             surface_alt=surface_alt.name(),
             base=name(role.Base),
             text=name(role.WindowText),
-            text_muted=palette.color(
-                QtGui.QPalette.ColorGroup.Disabled, role.WindowText
-            ).name(),
+            text_muted=palette.color(QtGui.QPalette.ColorGroup.Disabled, role.WindowText).name(),
             border=border.name(),
             border_strong=border_strong.name(),
             accent=name(role.Highlight),
@@ -332,9 +330,17 @@ def _arrow_asset_paths(tokens: ThemeTokens):
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.setBrush(color)
                 if direction == "up":
-                    points = (QtCore.QPointF(1.2, 5.6), QtCore.QPointF(6.8, 5.6), QtCore.QPointF(4.0, 2.4))
+                    points = (
+                        QtCore.QPointF(1.2, 5.6),
+                        QtCore.QPointF(6.8, 5.6),
+                        QtCore.QPointF(4.0, 2.4),
+                    )
                 else:
-                    points = (QtCore.QPointF(1.2, 2.4), QtCore.QPointF(6.8, 2.4), QtCore.QPointF(4.0, 5.6))
+                    points = (
+                        QtCore.QPointF(1.2, 2.4),
+                        QtCore.QPointF(6.8, 2.4),
+                        QtCore.QPointF(4.0, 5.6),
+                    )
                 painter.drawPolygon(QtGui.QPolygonF(points))
                 painter.end()
                 if not pixmap.save(path, "PNG"):
@@ -376,27 +382,29 @@ QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{
     background: {tokens.border};
 }}
 QAbstractSpinBox::up-arrow {{
-    image: url({paths['up']});
+    image: url({paths["up"]});
     width: 8px;
     height: 8px;
 }}
 QAbstractSpinBox::down-arrow {{
-    image: url({paths['down']});
+    image: url({paths["down"]});
     width: 8px;
     height: 8px;
 }}
 QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{
-    image: url({paths['up_muted']});
+    image: url({paths["up_muted"]});
 }}
 QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{
-    image: url({paths['down_muted']});
+    image: url({paths["down_muted"]});
 }}
 """
 
 
 def build_stylesheet(tokens: ThemeTokens) -> str:
     t = tokens
-    return _spin_stepper_stylesheet(tokens) + f"""
+    return (
+        _spin_stepper_stylesheet(tokens)
+        + f"""
 /* ---------- global chrome ---------- */
 QMainWindow, QDialog {{
     background: {t.window};
@@ -800,3 +808,4 @@ QToolButton#OperationAxisButton:hover {{
 QSplitter::handle {{ background: {t.border}; }}
 QSplitter::handle:hover {{ background: {t.accent}; }}
 """
+    )

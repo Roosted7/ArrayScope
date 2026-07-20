@@ -8,6 +8,7 @@ from typing import Literal
 
 import numpy as np
 
+from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.planner import apply_operation_to_region, plan_region_request
 from arrayscope.operations.regions import (
@@ -18,7 +19,6 @@ from arrayscope.operations.regions import (
     region_contains,
     region_shape,
 )
-from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.source_read import read_base_region
 from arrayscope.operations.stage_cache import StageValue
 
@@ -47,12 +47,24 @@ class SlabPlan:
 
 def request_for_image(view_state) -> SlabRequest:
     keep_axes = tuple(view_state.image_axes or ())
-    return SlabRequest("image", view_state, keep_axes, tuple(view_state.slice_indices), _ranged_keep_axes(view_state, keep_axes))
+    return SlabRequest(
+        "image",
+        view_state,
+        keep_axes,
+        tuple(view_state.slice_indices),
+        _ranged_keep_axes(view_state, keep_axes),
+    )
 
 
 def request_for_line(view_state) -> SlabRequest:
     keep_axes = () if view_state.line_axis is None else (int(view_state.line_axis),)
-    return SlabRequest("line", view_state, keep_axes, tuple(view_state.slice_indices), _ranged_keep_axes(view_state, keep_axes))
+    return SlabRequest(
+        "line",
+        view_state,
+        keep_axes,
+        tuple(view_state.slice_indices),
+        _ranged_keep_axes(view_state, keep_axes),
+    )
 
 
 def request_for_scalar(view_state, index) -> SlabRequest:
@@ -81,7 +93,11 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     region_plan = plan_region_request(document, request)
     base_shape = region_shape(np.shape(document.base_data), region_plan.required_input_region)
     dtype = getattr(document.base_data, "dtype", None)
-    estimated = None if dtype is None else int(np.prod(base_shape, dtype=np.int64)) * np.dtype(dtype).itemsize
+    estimated = (
+        None
+        if dtype is None
+        else int(np.prod(base_shape, dtype=np.int64)) * np.dtype(dtype).itemsize
+    )
     output_shape = region_shape(document.current_shape, region_plan.final_region)
     return SlabPlan(
         base_index=index_spec_from_region(region_plan.required_input_region),
@@ -94,7 +110,15 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     )
 
 
-def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
+def evaluate_slab(
+    document: ArrayDocument,
+    request: SlabRequest,
+    *,
+    stage_cache=None,
+    document_key=None,
+    cancellation_token=None,
+    evaluation_context=None,
+):
     plan = plan_slab(document, request)
     return evaluate_slab_from_plan(
         document,
@@ -107,12 +131,33 @@ def evaluate_slab(document: ArrayDocument, request: SlabRequest, *, stage_cache=
     )
 
 
-def evaluate_slab_from_plan(document: ArrayDocument, _request: SlabRequest, plan: SlabPlan, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None):
+def evaluate_slab_from_plan(
+    document: ArrayDocument,
+    _request: SlabRequest,
+    plan: SlabPlan,
+    *,
+    stage_cache=None,
+    document_key=None,
+    cancellation_token=None,
+    evaluation_context=None,
+):
     region_plan = plan.region_plan
     _check_cancelled(cancellation_token)
     if stage_cache is not None and region_plan.cache_candidates:
-        return _evaluate_slab_with_stage_cache(document, region_plan, stage_cache, document_key, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
-    data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
+        return _evaluate_slab_with_stage_cache(
+            document,
+            region_plan,
+            stage_cache,
+            document_key,
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+        )
+    data = read_base_region(
+        document.base_data,
+        region_plan.required_input_region,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
     _check_cancelled(cancellation_token)
     for transition in region_plan.transitions:
         _check_cancelled(cancellation_token)
@@ -137,7 +182,9 @@ def stage_key_for_candidate(document_key, candidate: StageCacheCandidate) -> Sta
     )
 
 
-def claim_or_reuse_stage(stage_cache, key: StageKey, candidate: StageCacheCandidate, shape, *, cancellation_token=None):
+def claim_or_reuse_stage(
+    stage_cache, key: StageKey, candidate: StageCacheCandidate, shape, *, cancellation_token=None
+):
     """Deduplicate concurrent computations of the same reusable stage.
 
     The stage cache only shares work once a value has been stored; two
@@ -154,7 +201,9 @@ def claim_or_reuse_stage(stage_cache, key: StageKey, candidate: StageCacheCandid
     """
     if stage_cache is None or not hasattr(stage_cache, "begin_compute"):
         return False, None
-    getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+    getter = (
+        stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+    )
     while True:
         _check_cancelled(cancellation_token)
         value = getter(key)
@@ -175,9 +224,22 @@ def claim_or_reuse_stage(stage_cache, key: StageKey, candidate: StageCacheCandid
             return False, None
 
 
-def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate: StageCacheCandidate, *, stage_cache=None, document_key=None, cancellation_token=None, evaluation_context=None) -> StageValue:
+def materialize_stage_candidate(
+    document: ArrayDocument,
+    region_plan,
+    candidate: StageCacheCandidate,
+    *,
+    stage_cache=None,
+    document_key=None,
+    cancellation_token=None,
+    evaluation_context=None,
+) -> StageValue:
     document_key = _default_stage_document_key(document) if document_key is None else document_key
-    candidate = StageCacheCandidate(**candidate.__dict__) if not isinstance(candidate, StageCacheCandidate) else candidate
+    candidate = (
+        StageCacheCandidate(**candidate.__dict__)
+        if not isinstance(candidate, StageCacheCandidate)
+        else candidate
+    )
     _check_cancelled(cancellation_token)
     key = None if stage_cache is None else stage_key_for_candidate(document_key, candidate)
     claimed = False
@@ -189,14 +251,25 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
             return reused
     value = None
     try:
-        data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
+        data = read_base_region(
+            document.base_data,
+            region_plan.required_input_region,
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+        )
         current_region = region_plan.required_input_region
         _check_cancelled(cancellation_token)
         for transition in region_plan.transitions:
             if int(transition.stage_index) > int(candidate.stage_index):
                 break
-            output_region = candidate.region if int(transition.stage_index) == int(candidate.stage_index) else transition.output_region
-            input_region = transition.operation.required_input_region(transition.input_shape, output_region)
+            output_region = (
+                candidate.region
+                if int(transition.stage_index) == int(candidate.stage_index)
+                else transition.output_region
+            )
+            input_region = transition.operation.required_input_region(
+                transition.input_shape, output_region
+            )
             operation_input = apply_subregion(
                 data,
                 source_region=current_region,
@@ -233,7 +306,16 @@ def materialize_stage_candidate(document: ArrayDocument, region_plan, candidate:
             stage_cache.finish_compute(key, value)
 
 
-def evaluate_slab_from_stage(document: ArrayDocument, _request: SlabRequest, plan: SlabPlan, stage_value: StageValue, candidate: StageCacheCandidate, *, cancellation_token=None, evaluation_context=None):
+def evaluate_slab_from_stage(
+    document: ArrayDocument,
+    _request: SlabRequest,
+    plan: SlabPlan,
+    stage_value: StageValue,
+    candidate: StageCacheCandidate,
+    *,
+    cancellation_token=None,
+    evaluation_context=None,
+):
     region_plan = plan.region_plan
     data = stage_value.data
     current_region = stage_value.region
@@ -241,7 +323,9 @@ def evaluate_slab_from_stage(document: ArrayDocument, _request: SlabRequest, pla
     for transition in region_plan.transitions:
         if int(transition.stage_index) <= int(candidate.stage_index):
             continue
-        input_region = transition.operation.required_input_region(transition.input_shape, transition.output_region)
+        input_region = transition.operation.required_input_region(
+            transition.input_shape, transition.output_region
+        )
         operation_input = apply_subregion(
             data,
             source_region=current_region,
@@ -269,7 +353,15 @@ def evaluate_slab_from_stage(document: ArrayDocument, _request: SlabRequest, pla
     return data
 
 
-def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_cache, document_key, *, cancellation_token=None, evaluation_context=None):
+def _evaluate_slab_with_stage_cache(
+    document: ArrayDocument,
+    region_plan,
+    stage_cache,
+    document_key,
+    *,
+    cancellation_token=None,
+    evaluation_context=None,
+):
     document_key = _default_stage_document_key(document) if document_key is None else document_key
     candidates = tuple(region_plan.cache_candidates)
     candidate_by_stage = {int(candidate.stage_index): candidate for candidate in candidates}
@@ -285,13 +377,19 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
     for candidate in _lookup_candidates(candidates):
         _check_cancelled(cancellation_token)
         key = stage_key_for_candidate(document_key, candidate)
-        value = stage_cache.get_containing(key) if hasattr(stage_cache, "get_containing") else stage_cache.get(key)
+        value = (
+            stage_cache.get_containing(key)
+            if hasattr(stage_cache, "get_containing")
+            else stage_cache.get(key)
+        )
         if value is None:
             continue
         shape = stage_shape_by_index.get(int(candidate.stage_index), candidate.shape)
         if not region_contains(value.region, candidate.region, shape):
             continue
-        data = apply_subregion(value.data, source_region=value.region, target_region=candidate.region, shape=shape)
+        data = apply_subregion(
+            value.data, source_region=value.region, target_region=candidate.region, shape=shape
+        )
         current_region = candidate.region
         hit_stage = int(candidate.stage_index)
         break
@@ -302,20 +400,36 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
     if data is None and store_stage_indices:
         store_candidate = candidate_by_stage.get(int(next(iter(store_stage_indices))))
         if store_candidate is not None:
-            stage_shape = stage_shape_by_index.get(int(store_candidate.stage_index), store_candidate.shape)
+            stage_shape = stage_shape_by_index.get(
+                int(store_candidate.stage_index), store_candidate.shape
+            )
             store_key = stage_key_for_candidate(document_key, store_candidate)
             claimed_store, reused = claim_or_reuse_stage(
-                stage_cache, store_key, store_candidate, stage_shape, cancellation_token=cancellation_token
+                stage_cache,
+                store_key,
+                store_candidate,
+                stage_shape,
+                cancellation_token=cancellation_token,
             )
             if reused is not None:
-                data = apply_subregion(reused.data, source_region=reused.region, target_region=store_candidate.region, shape=stage_shape)
+                data = apply_subregion(
+                    reused.data,
+                    source_region=reused.region,
+                    target_region=store_candidate.region,
+                    shape=stage_shape,
+                )
                 current_region = store_candidate.region
                 hit_stage = int(store_candidate.stage_index)
 
     try:
         if data is None:
             _check_cancelled(cancellation_token)
-            data = read_base_region(document.base_data, region_plan.required_input_region, cancellation_token=cancellation_token, evaluation_context=evaluation_context)
+            data = read_base_region(
+                document.base_data,
+                region_plan.required_input_region,
+                cancellation_token=cancellation_token,
+                evaluation_context=evaluation_context,
+            )
             current_region = region_plan.required_input_region
             hit_stage = 0
             _check_cancelled(cancellation_token)
@@ -330,7 +444,9 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
                 if candidate is not None and int(candidate.stage_index) in store_stage_indices
                 else transition.output_region
             )
-            input_region = transition.operation.required_input_region(transition.input_shape, output_region)
+            input_region = transition.operation.required_input_region(
+                transition.input_shape, output_region
+            )
             operation_input = apply_subregion(
                 data,
                 source_region=current_region,
@@ -359,7 +475,10 @@ def _evaluate_slab_with_stage_cache(document: ArrayDocument, region_plan, stage_
                     visible_reuse=bool(getattr(candidate, "visible_reuse", True)),
                     prefetch_only=bool(getattr(candidate, "prefetch_only", False)),
                 )
-                if store_key is not None and stage_key_for_candidate(document_key, candidate) == store_key:
+                if (
+                    store_key is not None
+                    and stage_key_for_candidate(document_key, candidate) == store_key
+                ):
                     stored_stage_value = value
                 stage_cache.put(stage_key_for_candidate(document_key, candidate), value)
 
@@ -408,7 +527,9 @@ def _candidate_summary(candidate: StageCacheCandidate) -> str:
 
 def _lookup_candidates(candidates):
     retained = [candidate for candidate in tuple(candidates) if getattr(candidate, "retain", True)]
-    non_retained = [candidate for candidate in tuple(candidates) if not getattr(candidate, "retain", True)]
+    non_retained = [
+        candidate for candidate in tuple(candidates) if not getattr(candidate, "retain", True)
+    ]
     return tuple(reversed(retained)) + tuple(reversed(non_retained))
 
 
@@ -446,7 +567,14 @@ def _candidate_retention_score(candidate: StageCacheCandidate) -> float:
     retain_bonus = 750.0 if getattr(candidate, "retain", True) else 0.0
     visible_bonus = 500.0 if getattr(candidate, "visible_reuse", True) else 0.0
     prefetch_penalty = 600.0 if getattr(candidate, "prefetch_only", False) else 0.0
-    return priority + retain_bonus + visible_bonus + _candidate_recompute_cost(candidate) - prefetch_penalty - byte_penalty
+    return (
+        priority
+        + retain_bonus
+        + visible_bonus
+        + _candidate_recompute_cost(candidate)
+        - prefetch_penalty
+        - byte_penalty
+    )
 
 
 def _candidate_recompute_cost(candidate: StageCacheCandidate) -> float:
@@ -461,8 +589,9 @@ def _candidate_recompute_cost(candidate: StageCacheCandidate) -> float:
 
 def _ranged_keep_axes(view_state, keep_axes):
     axis_ranges = getattr(view_state, "axis_range_indices", ())
-    ranged = []
-    for axis in keep_axes:
-        if axis < len(axis_ranges) and axis_ranges[int(axis)] is not None:
-            ranged.append(int(axis))
+    ranged = [
+        int(axis)
+        for axis in keep_axes
+        if axis < len(axis_ranges) and axis_ranges[int(axis)] is not None
+    ]
     return tuple(ranged)

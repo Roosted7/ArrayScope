@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
 
-
 COLORMAP_SHORTCUTS = {
     Qt.QtCore.Qt.Key.Key_1: "gray",
     Qt.QtCore.Qt.Key.Key_2: "viridis",

@@ -87,7 +87,7 @@ class TileIdentity:
             self.semantic_generation,
         )
 
-    def compatible_fallback_for(self, target: "TileIdentity") -> bool:
+    def compatible_fallback_for(self, target: TileIdentity) -> bool:
         """Whether this is an explicitly safe lower-quality target fallback."""
 
         if not isinstance(target, TileIdentity) or self.semantic_key != target.semantic_key:
@@ -98,7 +98,7 @@ class TileIdentity:
             or int(self.lod.factor) > int(target.lod.factor)
         )
 
-    def satisfies_target(self, target: "TileIdentity") -> bool:
+    def satisfies_target(self, target: TileIdentity) -> bool:
         """Whether this payload is exact target quality or a safe fallback."""
 
         if not isinstance(target, TileIdentity) or self.semantic_key != target.semantic_key:
@@ -129,9 +129,13 @@ def array_plane_identities(data) -> tuple[ArrayPlaneIdentity | None, ArrayPlaneI
 
     values = np.asarray(data)
     if np.iscomplexobj(values):
-        return _array_plane_identity(values.real, "real"), _array_plane_identity(values.imag, "imag")
+        return _array_plane_identity(values.real, "real"), _array_plane_identity(
+            values.imag, "imag"
+        )
     if values.ndim >= 3 and values.shape[-1] == 2 and np.issubdtype(values.dtype, np.floating):
-        return _array_plane_identity(values[..., 0], "real"), _array_plane_identity(values[..., 1], "imag")
+        return _array_plane_identity(values[..., 0], "real"), _array_plane_identity(
+            values[..., 1], "imag"
+        )
     return _array_plane_identity(values, "real"), None
 
 
@@ -217,11 +221,11 @@ def tile_truth_record(*, tile_number: int, target, acknowledged, payload=None) -
         "lod": None
         if lod is None
         else {"level": int(lod.level), "factor": int(lod.factor), "gutter": int(lod.gutter)},
-        "levels_generation": None
-        if presentation is None
-        else int(presentation.levels_generation),
+        "levels_generation": None if presentation is None else int(presentation.levels_generation),
         "drawable": acknowledged_identity_satisfies_target(acknowledged, target),
-        "placeholder": bool(target is not None and not acknowledged_identity_satisfies_target(acknowledged, target)),
+        "placeholder": bool(
+            target is not None and not acknowledged_identity_satisfies_target(acknowledged, target)
+        ),
     }
 
 
@@ -261,8 +265,8 @@ __all__ = [
     "TileIdentity",
     "TileLodIdentity",
     "TilePresentationIdentity",
-    "array_plane_identities",
     "acknowledged_identity_satisfies_target",
+    "array_plane_identities",
     "complex_mapping_identity",
     "plane_identity_record",
     "tile_ack_identity",

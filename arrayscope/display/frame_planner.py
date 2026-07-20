@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from math import ceil
-from typing import Iterable
 
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.montage import MontageTileState, make_montage_plan
 from arrayscope.display.scene import DisplayLayout
-
 
 DEFAULT_INTERNAL_TILE_SHAPE = (1024, 1024)
 
@@ -67,12 +65,26 @@ class FramePlan:
     _active_region_ids: tuple[int, ...] = field(init=False, repr=False)
     _planned_region_ids: tuple[int, ...] = field(init=False, repr=False)
     _near_region_ids: tuple[int, ...] = field(init=False, repr=False)
-    scene_region_signature: tuple[tuple[int, int | None, tuple[float, float, float, float]], ...] = field(init=False, repr=False)
+    scene_region_signature: tuple[
+        tuple[int, int | None, tuple[float, float, float, float]], ...
+    ] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_active_region_ids", tuple(region.region_id for region in self.regions if region.active))
-        object.__setattr__(self, "_planned_region_ids", tuple(region.region_id for region in self.regions if region.planned))
-        object.__setattr__(self, "_near_region_ids", tuple(region.region_id for region in self.regions if region.near))
+        object.__setattr__(
+            self,
+            "_active_region_ids",
+            tuple(region.region_id for region in self.regions if region.active),
+        )
+        object.__setattr__(
+            self,
+            "_planned_region_ids",
+            tuple(region.region_id for region in self.regions if region.planned),
+        )
+        object.__setattr__(
+            self,
+            "_near_region_ids",
+            tuple(region.region_id for region in self.regions if region.near),
+        )
         object.__setattr__(
             self,
             "scene_region_signature",
@@ -163,8 +175,12 @@ class FramePlanner:
             content_key = source_anchoring.content_key
         if content_key is not None:
             tile_shape = (
-                min(int(display_shape[0]), ANCHORED_CHUNK_SHAPE[0]) if anchored_starts[0] is None else ANCHORED_CHUNK_SHAPE[0],
-                min(int(display_shape[1]), ANCHORED_CHUNK_SHAPE[1]) if anchored_starts[1] is None else ANCHORED_CHUNK_SHAPE[1],
+                min(int(display_shape[0]), ANCHORED_CHUNK_SHAPE[0])
+                if anchored_starts[0] is None
+                else ANCHORED_CHUNK_SHAPE[0],
+                min(int(display_shape[1]), ANCHORED_CHUNK_SHAPE[1])
+                if anchored_starts[1] is None
+                else ANCHORED_CHUNK_SHAPE[1],
             )
         else:
             tile_shape = self._single_tile_shape(display_shape)
@@ -417,4 +433,4 @@ def _rects_intersect(left: tuple[int, int, int, int], right: tuple[int, int, int
     return left_x1 > right_x0 and left_x0 < right_x1 and left_y1 > right_y0 and left_y0 < right_y1
 
 
-__all__ = ["FramePlanner", "FramePlan", "FrameRegion"]
+__all__ = ["FramePlan", "FramePlanner", "FrameRegion"]

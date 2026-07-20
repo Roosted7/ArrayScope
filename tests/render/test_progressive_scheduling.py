@@ -22,10 +22,7 @@ def _targets(*sources: int) -> dict[int, TileTarget]:
 
 def _present(lifecycle: TileLifecycle, targets: dict[int, TileTarget]) -> None:
     lifecycle.backend_presented_snapshot(
-        {
-            tile: target.semantic_source_id
-            for tile, target in targets.items()
-        }
+        {tile: target.semantic_source_id for tile, target in targets.items()}
     )
     lifecycle.presentation_confirmed(tuple(targets))
 
@@ -49,7 +46,9 @@ def test_coverage_closes_once_from_lifecycle_first_pixel_truth():
     assert policy.verdict.phase is SchedulingPhase.REFINE
     assert replans == ["refine"]
 
-    assert policy.observe(lifecycle, on_refinement_replan=lambda: replans.append("duplicate")) is False
+    assert (
+        policy.observe(lifecycle, on_refinement_replan=lambda: replans.append("duplicate")) is False
+    )
     assert replans == ["refine"]
 
 

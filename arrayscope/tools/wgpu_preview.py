@@ -82,8 +82,9 @@ def main(argv=None) -> int:
     h, w = plane.shape
     grid_h, grid_w = -(-h // PAGE), -(-w // PAGE)
 
-    executor = WgpuPlaneExecutor((grid_h * PAGE, grid_w * PAGE), max_lod=1,
-                                 pool_layers=grid_w * grid_h * 2 + 8)
+    executor = WgpuPlaneExecutor(
+        (grid_h * PAGE, grid_w * PAGE), max_lod=1, pool_layers=grid_w * grid_h * 2 + 8
+    )
 
     # Residency: pad to page multiples, L1 (2x2 mean, pinned) then L0.
     padded = np.zeros((grid_h * PAGE, grid_w * PAGE), np.complex64 if is_complex else np.float32)
@@ -115,16 +116,18 @@ def main(argv=None) -> int:
             block = l1[cy * PAGE : (cy + 1) * PAGE, cx * PAGE : (cx + 1) * PAGE]
             page[: block.shape[0], : block.shape[1]] = block
             commands.append(
-                EnsureChunkResident(plane_chunk_key("preview", "identity", 1, cx, cy), page, pinned=True)
-            )
-    for cy in range(grid_h):
-        for cx in range(grid_w):
-            commands.append(
                 EnsureChunkResident(
-                    plane_chunk_key("preview", "identity", 0, cx, cy),
-                    stacked[cy * PAGE : (cy + 1) * PAGE, cx * PAGE : (cx + 1) * PAGE],
+                    plane_chunk_key("preview", "identity", 1, cx, cy), page, pinned=True
                 )
             )
+    commands.extend(
+        EnsureChunkResident(
+            plane_chunk_key("preview", "identity", 0, cx, cy),
+            stacked[cy * PAGE : (cy + 1) * PAGE, cx * PAGE : (cx + 1) * PAGE],
+        )
+        for cy in range(grid_h)
+        for cx in range(grid_w)
+    )
     t0 = time.perf_counter()
     report = executor.submit(FrameSubmission(0, commands))
     report.wait_completed()
@@ -135,17 +138,25 @@ def main(argv=None) -> int:
 
     # View state (mutated by keys; every change is a protocol submission).
     finite = np.abs(plane[np.isfinite(plane)]) if is_complex else plane[np.isfinite(plane)]
-    lo, hi = (0.0, float(np.percentile(finite, 99.5))) if is_complex else (
-        float(np.percentile(finite, 0.5)),
-        float(np.percentile(finite, 99.5)),
+    lo, hi = (
+        (0.0, float(np.percentile(finite, 99.5)))
+        if is_complex
+        else (
+            float(np.percentile(finite, 0.5)),
+            float(np.percentile(finite, 99.5)),
+        )
     )
     # A smooth non-gray LUT (toggled with 'v') to demonstrate that LUT swaps
     # are pure mapping state — zero uploads, like mode/levels changes.
     ramp = np.arange(256)
-    color_lut = np.stack(
-        [ramp, (ramp * ramp) // 255, np.sqrt(ramp / 255.0) * 255, np.full(256, 255)],
-        axis=-1,
-    ).astype(np.uint8).tobytes()
+    color_lut = (
+        np.stack(
+            [ramp, (ramp * ramp) // 255, np.sqrt(ramp / 255.0) * 255, np.full(256, 255)],
+            axis=-1,
+        )
+        .astype(np.uint8)
+        .tobytes()
+    )
 
     state = {
         "mode": "magnitude" if is_complex else "real",

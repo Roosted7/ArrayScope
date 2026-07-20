@@ -270,7 +270,6 @@ def test_trace_verify_rejects_phase2_kernel_submit_while_coverage_is_open(tmp_pa
     assert verify_trace(path)["ok"]
 
 
-
 def test_trace_verify_rejects_empty_and_lifecycle_free_traces(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace
 
@@ -371,7 +370,9 @@ def test_trace_verify_flags_acknowledgement_churn_livelock(tmp_path):
     result = verify_trace(path)
     assert not result["ok"]
     churn = [v for v in result["violations"] if v["invariant"] == "no_acknowledgement_churn"]
-    assert churn and churn[0]["tile"] == 2 and churn[0]["identical_acks"] == 30
+    assert churn
+    assert churn[0]["tile"] == 2
+    assert churn[0]["identical_acks"] == 30
 
     # The same trace passes with the check disabled or a higher limit.
     assert verify_trace(path, max_identical_acks=0)["ok"]
@@ -539,8 +540,7 @@ def _retained_edges(path):
     return [
         event
         for event in (json.loads(line) for line in path.read_text().splitlines())
-        if event.get("kind") == "lifecycle"
-        and event.get("edge") == "target_satisfied_retained"
+        if event.get("kind") == "lifecycle" and event.get("edge") == "target_satisfied_retained"
     ]
 
 
@@ -562,9 +562,7 @@ def test_lifecycle_emits_retained_satisfaction_for_finer_fallback_ack(tmp_path):
     from arrayscope.tools.trace_verify import verify_trace
 
     lc = TileLifecycle()
-    fallback = TilePayloadRef(
-        source_id="p0", quality="fallback", lod_level=0, source_index=5
-    )
+    fallback = TilePayloadRef(source_id="p0", quality="fallback", lod_level=0, source_index=5)
 
     def drive():
         lc.retarget(
@@ -578,7 +576,8 @@ def test_lifecycle_emits_retained_satisfaction_for_finer_fallback_ack(tmp_path):
 
     assert lc.record(0).target_settled
     edges = _retained_edges(path)
-    assert edges and edges[0]["tile"] == 0
+    assert edges
+    assert edges[0]["tile"] == 0
     result = verify_trace(path, expect_targets=1)
     assert result["ok"], result["violations"]
 
@@ -629,9 +628,7 @@ def test_lifecycle_reaffirms_retained_satisfaction_across_compatible_retarget(tm
     from arrayscope.tools.trace_verify import verify_trace
 
     lc = TileLifecycle()
-    fallback = TilePayloadRef(
-        source_id="p0", quality="fallback", lod_level=0, source_index=5
-    )
+    fallback = TilePayloadRef(source_id="p0", quality="fallback", lod_level=0, source_index=5)
 
     def drive():
         lc.retarget(
@@ -682,7 +679,8 @@ def test_lifecycle_commit_path_reaffirmation_is_idempotent_per_requirement(tmp_p
     path = _drive_lifecycle_trace(tmp_path, drive)
 
     edges = _retained_edges(path)
-    assert len(edges) == 1 and edges[0]["tile"] == 1
+    assert len(edges) == 1
+    assert edges[0]["tile"] == 1
 
 
 def test_trace_verify_retained_edge_quality_matches_lifecycle_settlement(tmp_path):

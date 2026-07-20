@@ -37,6 +37,8 @@ from arrayscope.core.trace import emit_trace
 
 prefer_pyside6()
 
+import contextlib
+
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 
@@ -92,7 +94,9 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_PaintOnScreen, True)  # implies WA_NativeWindow
+        self.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_PaintOnScreen, True
+        )  # implies WA_NativeWindow
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self._draw_callback = None
@@ -120,7 +124,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._draw_scheduled = True
         interval = 1000.0 / float(self.max_draws_per_second or 30.0)
         elapsed_ms = (perf_counter() - self._last_draw_started) * 1000.0
-        delay_ms = 0 if elapsed_ms >= interval else int(round(interval - elapsed_ms))
+        delay_ms = 0 if elapsed_ms >= interval else round(interval - elapsed_ms)
         QtCore.QTimer.singleShot(delay_ms, self, self._invoke_draw)
 
     def _invoke_draw(self) -> None:
@@ -149,8 +153,8 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     def get_physical_size(self) -> tuple[int, int]:
         ratio = float(self.devicePixelRatio() or 1.0)
         return (
-            max(0, int(round(self.width() * ratio))),
-            max(0, int(round(self.height() * ratio))),
+            max(0, round(self.width() * ratio)),
+            max(0, round(self.height() * ratio)),
         )
 
     # ---- swapchain context ---------------------------------------------------
@@ -263,14 +267,10 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         context, self._context = self._context, None
         self._draw_callback = None
         if context is not None:
-            try:
+            with contextlib.suppress(Exception):
                 context.unconfigure()
-            except Exception:
-                pass
             # Release the wgpu surface NOW, while Qt's wl_display connection
             # is still alive.  Leaving it to interpreter-exit GC releases the
             # surface after the display connection is gone and dumps core.
-            try:
+            with contextlib.suppress(Exception):
                 context._release()
-            except Exception:
-                pass

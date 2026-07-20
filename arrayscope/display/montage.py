@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from collections.abc import Sequence
-from enum import Enum
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -113,7 +113,9 @@ class MontagePlan:
             return None
         return self.tiles[tile_number]
 
-    def display_rect_for_tiles(self, tiles: Sequence[MontageTile]) -> tuple[int, int, int, int] | None:
+    def display_rect_for_tiles(
+        self, tiles: Sequence[MontageTile]
+    ) -> tuple[int, int, int, int] | None:
         tiles = tuple(tiles)
         if not tiles:
             return None
@@ -148,7 +150,9 @@ class MontagePlan:
         return tuple(visible)
 
 
-def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, viewport_shape=None, gap=1):
+def make_montage_plan(
+    view_state, *, axis, indices, tile_shape, columns=None, viewport_shape=None, gap=1
+):
     indices = tuple(int(index) for index in indices)
     count = len(indices)
     tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
@@ -168,7 +172,11 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
         col = montage_index % columns
         x0 = col * (tile_shape[1] + gap)
         y0 = row * (tile_shape[0] + gap)
-        tile_state = view_state.with_montage_axis(None) if axis is None else view_state.tile_state_for_slice(axis, source_index)
+        tile_state = (
+            view_state.with_montage_axis(None)
+            if axis is None
+            else view_state.tile_state_for_slice(axis, source_index)
+        )
         tiles.append(
             MontageTile(
                 montage_index=montage_index,
@@ -182,7 +190,15 @@ def make_montage_plan(view_state, *, axis, indices, tile_shape, columns=None, vi
                 view_state=tile_state,
             )
         )
-    return MontagePlan(None if axis is None else int(axis), tile_shape, (rows, columns), columns, rows, gap, tuple(tiles))
+    return MontagePlan(
+        None if axis is None else int(axis),
+        tile_shape,
+        (rows, columns),
+        columns,
+        rows,
+        gap,
+        tuple(tiles),
+    )
 
 
 @dataclass(frozen=True)
@@ -220,11 +236,15 @@ class RenderedTilePayload:
             and self.semantic_histogram_data is not self.semantic_data
         ):
             total += int(self.semantic_histogram_data.nbytes)
-        if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
+        if (
+            isinstance(self.level_data, np.ndarray)
+            and self.level_data is not self.image
+            and self.level_data is not self.histogram_data
+        ):
             total += int(self.level_data.nbytes)
         return total
 
-    def bind(self, tile: MontageTile) -> "RenderedTile":
+    def bind(self, tile: MontageTile) -> RenderedTile:
         return RenderedTile(
             tile=tile,
             image=self.image,
@@ -280,7 +300,11 @@ class RenderedTile:
             and self.semantic_histogram_data is not self.semantic_data
         ):
             total += int(self.semantic_histogram_data.nbytes)
-        if isinstance(self.level_data, np.ndarray) and self.level_data is not self.image and self.level_data is not self.histogram_data:
+        if (
+            isinstance(self.level_data, np.ndarray)
+            and self.level_data is not self.image
+            and self.level_data is not self.histogram_data
+        ):
             total += int(self.level_data.nbytes)
         return total
 
@@ -303,7 +327,9 @@ class RenderedTile:
         )
 
 
-def montage_rect_for_viewport(plan: MontagePlan, *, view_range=None, viewport_shape=None) -> tuple[int, int, int, int]:
+def montage_rect_for_viewport(
+    plan: MontagePlan, *, view_range=None, viewport_shape=None
+) -> tuple[int, int, int, int]:
     full_height, full_width = plan.display_shape
     if full_height <= 0 or full_width <= 0:
         return (0, 0, 1, 1)
@@ -319,7 +345,12 @@ def montage_rect_for_viewport(plan: MontagePlan, *, view_range=None, viewport_sh
         rect = (0, 0, max(1, int(full_width)), max(1, int(full_height)))
         return _expand_rect_to_tile_bounds(plan, rect)
     rect = _rect_for_view_range(view_range, plan, viewport_shape)
-    rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or (0, 0, min(1, full_width), min(1, full_height))
+    rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or (
+        0,
+        0,
+        min(1, full_width),
+        min(1, full_height),
+    )
     return _expand_rect_to_tile_bounds(plan, rect)
 
 
@@ -327,7 +358,12 @@ def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int,
     full_height, full_width = plan.display_shape
     selected = []
     for tile in plan.tiles:
-        tile_rect = (int(tile.x0), int(tile.y0), int(tile.x0 + tile.width), int(tile.y0 + tile.height))
+        tile_rect = (
+            int(tile.x0),
+            int(tile.y0),
+            int(tile.x0 + tile.width),
+            int(tile.y0 + tile.height),
+        )
         if _intersect_rect(tile_rect, rect) is not None:
             selected.append(tile_rect)
     if not selected:
@@ -359,7 +395,9 @@ def tile_status_at_global_point(
     )
 
 
-def _rect_for_view_range(view_range, plan: MontagePlan, viewport_shape) -> tuple[int, int, int, int]:
+def _rect_for_view_range(
+    view_range, plan: MontagePlan, viewport_shape
+) -> tuple[int, int, int, int]:
     x_range, y_range = view_range
     x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
     y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
@@ -400,15 +438,15 @@ def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):
     stride_height = max(tile_height + gap, 1)
     estimate = math.sqrt(max(1.0, count * viewport_aspect * stride_height / stride_width))
     candidates = {1, count}
-    center = int(round(estimate))
+    center = round(estimate)
     for value in range(center - 8, center + 9):
         if 1 <= value <= count:
             candidates.add(value)
     row_estimate = math.sqrt(max(1.0, count * stride_width / (viewport_aspect * stride_height)))
-    row_center = int(round(row_estimate))
+    row_center = round(row_estimate)
     for rows in range(row_center - 8, row_center + 9):
         if rows > 0:
-            columns = int(math.ceil(count / rows))
+            columns = math.ceil(count / rows)
             if 1 <= columns <= count:
                 candidates.add(columns)
 
@@ -416,14 +454,18 @@ def optimal_montage_columns(count, tile_shape, viewport_shape, gap=1):
     best_score = (-1.0, -float("inf"), -float("inf"))
     viewport_area = max(viewport_width * viewport_height, 1)
     for columns in candidates:
-        rows = int(math.ceil(count / columns))
+        rows = math.ceil(count / columns)
         total_width = columns * tile_width + gap * (columns - 1)
         total_height = rows * tile_height + gap * (rows - 1)
         scale = min(viewport_width / max(total_width, 1), viewport_height / max(total_height, 1))
         used_area = (total_width * scale) * (total_height * scale)
         used_fraction = min(used_area / viewport_area, 1.0)
         layout_aspect = total_width / max(total_height, 1)
-        aspect_error = abs(np.log(layout_aspect / viewport_aspect)) if layout_aspect > 0 and viewport_aspect > 0 else float("inf")
+        aspect_error = (
+            abs(np.log(layout_aspect / viewport_aspect))
+            if layout_aspect > 0 and viewport_aspect > 0
+            else float("inf")
+        )
         score = (round(float(used_fraction), 12), round(float(-aspect_error), 12), float(scale))
         if score > best_score:
             best_columns = columns

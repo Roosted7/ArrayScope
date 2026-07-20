@@ -7,14 +7,18 @@ do not own ROI/profile drag semantics.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import hypot
-from typing import Iterable
 
-from arrayscope.core.roi import RoiGeometry, RoiKind, clamp_roi_geometry_to_rect, translate_roi_geometry
+from arrayscope.core.roi import (
+    RoiGeometry,
+    RoiKind,
+    clamp_roi_geometry_to_rect,
+    translate_roi_geometry,
+)
 from arrayscope.display.overlay_hit_test import RoiHit, hit_test_roi
-
 
 ALLOWED_INSPECTION_TOOLS = frozenset(
     {"cursor", "profile", "roi_line", "roi_rectangle", "roi_polyline", "roi_freehand"}
@@ -93,7 +97,10 @@ class DisplayInteractionState:
     def cursor_intent(self) -> CursorIntent:
         if self.phase is PointerPhase.DRAGGING:
             return CursorIntent.CLOSED_HAND
-        if self.pending_draw_tool is not None or self.phase in {PointerPhase.DRAWING_ARMED, PointerPhase.DRAWING}:
+        if self.pending_draw_tool is not None or self.phase in {
+            PointerPhase.DRAWING_ARMED,
+            PointerPhase.DRAWING,
+        }:
             return CursorIntent.CROSSHAIR
         target = self.hover
         if target is None:
@@ -135,7 +142,9 @@ class DisplayInteractionController:
         normalized = None if point is None else (float(point[0]), float(point[1]))
         return self._replace(pointer=normalized)
 
-    def set_hover(self, target: InteractionTarget | None, *, point: tuple[float, float] | None = None) -> DisplayInteractionState:
+    def set_hover(
+        self, target: InteractionTarget | None, *, point: tuple[float, float] | None = None
+    ) -> DisplayInteractionState:
         normalized = None if point is None else (float(point[0]), float(point[1]))
         updates = {"hover": target}
         if point is not None:
@@ -175,7 +184,9 @@ class DisplayInteractionController:
         )
         return True
 
-    def append_drawing_point(self, point: tuple[float, float], *, minimum_distance: float = 0.0) -> bool:
+    def append_drawing_point(
+        self, point: tuple[float, float], *, minimum_distance: float = 0.0
+    ) -> bool:
         if self._state.phase is not PointerPhase.DRAWING:
             return False
         normalized = (float(point[0]), float(point[1]))
@@ -183,7 +194,7 @@ class DisplayInteractionController:
         if points and _point_distance(points[-1], normalized) < max(0.0, float(minimum_distance)):
             self._replace(pointer=normalized)
             return False
-        self._replace(pointer=normalized, drawing_points=points + (normalized,))
+        self._replace(pointer=normalized, drawing_points=(*points, normalized))
         return True
 
     def finish_drawing(self) -> DrawingResult | None:
@@ -219,7 +230,11 @@ class DisplayInteractionController:
         profile_position: tuple[float, float] | None = None,
     ) -> DisplayInteractionState:
         normalized = (float(point[0]), float(point[1]))
-        profile = None if profile_position is None else (float(profile_position[0]), float(profile_position[1]))
+        profile = (
+            None
+            if profile_position is None
+            else (float(profile_position[0]), float(profile_position[1]))
+        )
         return self._replace(
             phase=PointerPhase.DRAGGING,
             pointer=normalized,
@@ -241,7 +256,11 @@ class DisplayInteractionController:
         roi_constraint_rect: tuple[float, float, float, float] | None = None,
     ) -> DragResult | None:
         state = self._state
-        if state.phase is not PointerPhase.DRAGGING or state.capture is None or state.drag_origin is None:
+        if (
+            state.phase is not PointerPhase.DRAGGING
+            or state.capture is None
+            or state.drag_origin is None
+        ):
             return None
         normalized = (float(point[0]), float(point[1]))
         dx = normalized[0] - state.drag_origin[0]
@@ -292,7 +311,10 @@ class DisplayInteractionController:
             target=state.capture,
             origin=state.drag_origin,
             point=state.drag_point,
-            delta=(state.drag_point[0] - state.drag_origin[0], state.drag_point[1] - state.drag_origin[1]),
+            delta=(
+                state.drag_point[0] - state.drag_origin[0],
+                state.drag_point[1] - state.drag_origin[1],
+            ),
             initial_geometry=state.drag_initial_geometry,
             geometry=state.drag_geometry,
             initial_profile_position=state.drag_initial_profile_position,
@@ -404,7 +426,11 @@ def drag_roi_geometry(
     if index is None or index < 0 or index >= len(points):
         return geometry
     points[int(index)] = (float(point[0]), float(point[1]))
-    if geometry.kind == RoiKind.FREEHAND_POLYGON and len(points) > 1 and geometry.points[0] == geometry.points[-1]:
+    if (
+        geometry.kind == RoiKind.FREEHAND_POLYGON
+        and len(points) > 1
+        and geometry.points[0] == geometry.points[-1]
+    ):
         if int(index) == 0:
             points[-1] = points[0]
         elif int(index) == len(points) - 1:

@@ -27,11 +27,10 @@ import json
 import sys
 import time
 
+import wgpu
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QNativeInterface
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
-
-import wgpu
 from wgpu.backends.wgpu_native import _helpers
 from wgpu.backends.wgpu_native._ffi import ffi, lib
 from wgpu.backends.wgpu_native.extras import set_instance_extras
@@ -84,7 +83,6 @@ def _drive_surface(surface_id, adapter, device, width, height, frames=30):
             lib.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal,
         ):
             break
-        view_desc = ffi.new("WGPUTextureViewDescriptor *")
         view = lib.wgpuTextureCreateView(st.texture, ffi.NULL)
         enc = lib.wgpuDeviceCreateCommandEncoder(device._internal, ffi.NULL)
         color = ffi.new("WGPURenderPassColorAttachment *")

@@ -4,8 +4,8 @@ import numpy as np
 
 from arrayscope.core.memory_policy import (
     GiB,
-    MiB,
     MemoryProfileChoice,
+    MiB,
     SystemMemorySnapshot,
     apply_policy_hysteresis,
     compute_memory_policy,
@@ -32,7 +32,9 @@ class _BrokenPsutil:
 
 
 def _system(available=8 * GiB, total=16 * GiB):
-    return SystemMemorySnapshot(total_bytes=total, available_bytes=available, process_rss_bytes=256 * MiB)
+    return SystemMemorySnapshot(
+        total_bytes=total, available_bytes=available, process_rss_bytes=256 * MiB
+    )
 
 
 def test_sample_system_memory_uses_psutil_values():
@@ -55,36 +57,52 @@ def test_sample_system_memory_fallback_is_deterministic():
 
 
 def test_balanced_policy_uses_render_cap_for_visible_and_single_tile():
-    policy = compute_memory_policy(profile="balanced", render_cap_mb=512, input_nbytes=1 * GiB, system=_system())
+    policy = compute_memory_policy(
+        profile="balanced", render_cap_mb=512, input_nbytes=1 * GiB, system=_system()
+    )
 
     assert policy.visible_render_budget_bytes == 512 * MiB
     assert policy.single_tile_budget_bytes == 512 * MiB
 
 
 def test_conservative_policy_has_smaller_budgets_than_balanced():
-    conservative = compute_memory_policy(profile="conservative", render_cap_mb=2048, input_nbytes=1 * GiB, system=_system())
-    balanced = compute_memory_policy(profile="balanced", render_cap_mb=2048, input_nbytes=1 * GiB, system=_system())
+    conservative = compute_memory_policy(
+        profile="conservative", render_cap_mb=2048, input_nbytes=1 * GiB, system=_system()
+    )
+    balanced = compute_memory_policy(
+        profile="balanced", render_cap_mb=2048, input_nbytes=1 * GiB, system=_system()
+    )
 
     assert conservative.visible_render_budget_bytes < balanced.visible_render_budget_bytes
     assert conservative.display_cache_budget_bytes < balanced.display_cache_budget_bytes
 
 
 def test_aggressive_policy_has_larger_cache_budgets_than_balanced():
-    aggressive = compute_memory_policy(profile="aggressive", render_cap_mb=4096, input_nbytes=1 * GiB, system=_system())
-    balanced = compute_memory_policy(profile="balanced", render_cap_mb=4096, input_nbytes=1 * GiB, system=_system())
+    aggressive = compute_memory_policy(
+        profile="aggressive", render_cap_mb=4096, input_nbytes=1 * GiB, system=_system()
+    )
+    balanced = compute_memory_policy(
+        profile="balanced", render_cap_mb=4096, input_nbytes=1 * GiB, system=_system()
+    )
 
     assert aggressive.display_cache_budget_bytes > balanced.display_cache_budget_bytes
 
 
 def test_custom_policy_uses_render_cap_as_visible_budget():
-    policy = compute_memory_policy(profile="custom", render_cap_mb=1024, input_nbytes=1 * GiB, system=_system())
+    policy = compute_memory_policy(
+        profile="custom", render_cap_mb=1024, input_nbytes=1 * GiB, system=_system()
+    )
 
     assert policy.visible_render_budget_bytes == 1024 * MiB
 
 
 def test_policy_hysteresis_keeps_cache_budgets_for_small_available_memory_change():
-    previous = compute_memory_policy(profile="balanced", render_cap_mb=1024, input_nbytes=1, system=_system(available=8 * GiB))
-    current = compute_memory_policy(profile="balanced", render_cap_mb=1024, input_nbytes=1, system=_system(available=7 * GiB))
+    previous = compute_memory_policy(
+        profile="balanced", render_cap_mb=1024, input_nbytes=1, system=_system(available=8 * GiB)
+    )
+    current = compute_memory_policy(
+        profile="balanced", render_cap_mb=1024, input_nbytes=1, system=_system(available=7 * GiB)
+    )
 
     policy = apply_policy_hysteresis(previous, current)
 
@@ -93,8 +111,12 @@ def test_policy_hysteresis_keeps_cache_budgets_for_small_available_memory_change
 
 
 def test_policy_hysteresis_does_not_shrink_active_render_budgets():
-    previous = compute_memory_policy(profile="balanced", render_cap_mb=2048, input_nbytes=1, system=_system(available=8 * GiB))
-    current = compute_memory_policy(profile="balanced", render_cap_mb=2048, input_nbytes=1, system=_system(available=1 * GiB))
+    previous = compute_memory_policy(
+        profile="balanced", render_cap_mb=2048, input_nbytes=1, system=_system(available=8 * GiB)
+    )
+    current = compute_memory_policy(
+        profile="balanced", render_cap_mb=2048, input_nbytes=1, system=_system(available=1 * GiB)
+    )
 
     policy = apply_policy_hysteresis(previous, current, active_render=True)
 
@@ -104,13 +126,20 @@ def test_policy_hysteresis_does_not_shrink_active_render_budgets():
 
 def test_prefetch_thresholds_are_not_larger_than_prefetch_budget():
     for profile in MemoryProfileChoice:
-        policy = compute_memory_policy(profile=profile, render_cap_mb=1024, input_nbytes=1 * GiB, system=_system())
+        policy = compute_memory_policy(
+            profile=profile, render_cap_mb=1024, input_nbytes=1 * GiB, system=_system()
+        )
         assert policy.operation_prefetch_peak_budget_bytes <= policy.prefetch_budget_bytes
         assert policy.fft_prefetch_peak_budget_bytes <= policy.prefetch_budget_bytes
 
 
 def test_format_memory_policy_includes_profile_and_budget_names():
-    policy = compute_memory_policy(profile="balanced", render_cap_mb=512, input_nbytes=input_nbytes_for(np.zeros((4, 4))), system=_system())
+    policy = compute_memory_policy(
+        profile="balanced",
+        render_cap_mb=512,
+        input_nbytes=input_nbytes_for(np.zeros((4, 4))),
+        system=_system(),
+    )
 
     text = format_memory_policy(policy)
 

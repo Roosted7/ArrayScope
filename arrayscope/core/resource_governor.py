@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum
 from math import ceil
 from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
-from arrayscope.core.gui_callback_budget import GuiCallbackObservation, WARNING_THRESHOLD_MS
+from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackObservation
 from arrayscope.core.latency_feedback import LatencyFeedbackController, LatencyFeedbackTuning
-from arrayscope.core.memory_policy import MemoryPolicy, MemoryProfileChoice, normalize_memory_profile_choice
+from arrayscope.core.memory_policy import (
+    MemoryPolicy,
+    MemoryProfileChoice,
+    normalize_memory_profile_choice,
+)
 from arrayscope.core.resource_telemetry import ResourceSnapshot
 
 
@@ -137,14 +141,24 @@ class ResourceGovernor:
     _memory_policy: MemoryPolicy | None = None
     _telemetry: ResourceSnapshot | None = None
     _pressure: ResourcePressureState = field(
-        default_factory=lambda: ResourcePressureState(ResourcePressure.NORMAL, 0.5, ResourcePressure.NORMAL, ResourcePressure.NORMAL, "initial")
+        default_factory=lambda: ResourcePressureState(
+            ResourcePressure.NORMAL,
+            0.5,
+            ResourcePressure.NORMAL,
+            ResourcePressure.NORMAL,
+            "initial",
+        )
     )
     _lane_targets: dict[ComputeLane, int] = field(default_factory=dict)
     _last_lane_update_monotonic: dict[ComputeLane, float] = field(default_factory=dict)
     _lane_decisions: dict[ComputeLane, LaneWorkerDecision] = field(default_factory=dict)
     _feedback_outlier_streak: dict[str, int] = field(default_factory=dict)
-    _recent_ui_work_observations: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=4096))
-    _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(default_factory=lambda: deque(maxlen=32))
+    _recent_ui_work_observations: deque[GuiCallbackObservation] = field(
+        default_factory=lambda: deque(maxlen=4096)
+    )
+    _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(
+        default_factory=lambda: deque(maxlen=32)
+    )
     _ui_observation_epoch: int = 0
     _ui_observation_epoch_active: int = 0
     _ui_observation_epoch_count: int = 0
@@ -158,7 +172,9 @@ class ResourceGovernor:
         for lane in ComputeLane:
             self._lane_targets[lane] = self.compute_policy.workers_for_lane(lane)
 
-    def update_policy(self, compute_policy: ComputePolicy, *, profile: MemoryProfileChoice | str | None = None) -> None:
+    def update_policy(
+        self, compute_policy: ComputePolicy, *, profile: MemoryProfileChoice | str | None = None
+    ) -> None:
         self.compute_policy = compute_policy
         if profile is not None:
             new_profile = normalize_memory_profile_choice(profile)
@@ -167,7 +183,9 @@ class ResourceGovernor:
                 self._apply_latency_tuning()
         for lane in ComputeLane:
             target = self._lane_targets.get(lane, self.compute_policy.workers_for_lane(lane))
-            self._lane_targets[lane] = _clamp_int(target, 1, self.compute_policy.workers_for_lane(lane))
+            self._lane_targets[lane] = _clamp_int(
+                target, 1, self.compute_policy.workers_for_lane(lane)
+            )
 
     def _apply_latency_tuning(self) -> None:
         tuning = _PROFILE_TUNING[normalize_memory_profile_choice(self.profile)]
@@ -198,7 +216,9 @@ class ResourceGovernor:
         count = max(1, int(item_count))
         byte_count = max(0, int(byte_count))
         feedback_elapsed_ms = self._feedback_elapsed_ms(channel, elapsed_ms)
-        self.latency_feedback.observe(channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
+        self.latency_feedback.observe(
+            channel, feedback_elapsed_ms, count=count, byte_count=byte_count
+        )
         observation = GuiCallbackObservation(
             channel=str(channel),
             work_class=str(work_class or ""),
@@ -229,7 +249,9 @@ class ResourceGovernor:
         count = max(1, int(observation.processed_items))
         byte_count = max(0, int(observation.processed_bytes))
         feedback_elapsed_ms = self._feedback_elapsed_ms(observation.channel, observation.elapsed_ms)
-        self.latency_feedback.observe(observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count)
+        self.latency_feedback.observe(
+            observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count
+        )
         self._pressure = self._pressure_with_ui(observation.channel)
 
     def begin_ui_observation_epoch(self) -> int:
@@ -254,11 +276,12 @@ class ResourceGovernor:
             return
         self._ui_observation_epoch_count += 1
         self._ui_observation_epoch_max_ms = max(
-            float(self._ui_observation_epoch_max_ms),
-            max(0.0, float(elapsed_ms)),
+            float(self._ui_observation_epoch_max_ms), 0.0, float(elapsed_ms)
         )
 
-    def decide_lane_workers(self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState) -> LaneWorkerDecision:
+    def decide_lane_workers(
+        self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState
+    ) -> LaneWorkerDecision:
         lane = ComputeLane(lane)
         max_workers = max(1, int(self.compute_policy.workers_for_lane(lane)))
         min_workers = 1
@@ -279,7 +302,10 @@ class ResourceGovernor:
                 desired = min(desired, max(1, desired - 1))
                 reasons.append("UI result backlog")
             elif self._channel_pressure("montage_tile_result") == ResourcePressure.HIGH:
-                desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - self.max_worker_step))
+                desired = min(
+                    desired,
+                    max(1, self._lane_targets.get(lane, max_workers) - self.max_worker_step),
+                )
                 reasons.append("high tile-result fan-in pressure")
         elif lane == ComputeLane.PREFETCH:
             if interactive or busy_state.visible_busy or busy_state.montage_busy:
@@ -290,18 +316,19 @@ class ResourceGovernor:
             if busy_state.semantic_evidence_blocking:
                 desired = min(desired, 1)
                 reasons.append("semantic level evidence blocks first presentation")
-            elif (
-                busy_state.visible_busy
-                or busy_state.montage_busy
-                or busy_state.stage_busy
-            ):
+            elif busy_state.visible_busy or busy_state.montage_busy or busy_state.stage_busy:
                 min_workers = 0
                 desired = 0
                 reasons.append("histogram parked behind runnable user-visible rendering")
             else:
                 desired = min(desired, max_workers)
         elif lane in {ComputeLane.PROFILE, ComputeLane.ROI, ComputeLane.PIXEL}:
-            if interactive or busy_state.visible_busy or busy_state.montage_busy or busy_state.stage_busy:
+            if (
+                interactive
+                or busy_state.visible_busy
+                or busy_state.montage_busy
+                or busy_state.stage_busy
+            ):
                 min_workers = 0
                 desired = 0
                 reasons.append("inspection parked behind visible rendering")
@@ -309,7 +336,11 @@ class ResourceGovernor:
                 desired = min(desired, max_workers)
         elif lane in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
             desired = min(desired, max_workers)
-        if desired > 0 and pressure.cpu_headroom < 0.15 and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}:
+        if (
+            desired > 0
+            and pressure.cpu_headroom < 0.15
+            and lane not in {ComputeLane.VISIBLE, ComputeLane.STAGE}
+        ):
             desired = min(desired, max(1, self._lane_targets.get(lane, max_workers) - 1))
             reasons.append("low CPU headroom")
         clamped_desired = _clamp_int(desired, min_workers, max_workers)
@@ -318,7 +349,9 @@ class ResourceGovernor:
             if lane == ComputeLane.MONTAGE_TILE and interactive
             else self._damped_lane_target(lane, clamped_desired)
         )
-        decision = LaneWorkerDecision(lane, target, min_workers, max_workers, ", ".join(reasons) or "profile baseline")
+        decision = LaneWorkerDecision(
+            lane, target, min_workers, max_workers, ", ".join(reasons) or "profile baseline"
+        )
         self._lane_decisions[lane] = decision
         return decision
 
@@ -331,7 +364,9 @@ class ResourceGovernor:
         """Return the shared presentation-commit knob: item and byte bounds."""
 
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-        return self._decide_budget("montage_present_total", interactive=interactive, byte_cap=byte_cap)
+        return self._decide_budget(
+            "montage_present_total", interactive=interactive, byte_cap=byte_cap
+        )
 
     def _decide_budget(self, channel: str, *, interactive: bool, byte_cap: int) -> UiWorkDecision:
         channel = str(channel)
@@ -345,7 +380,9 @@ class ResourceGovernor:
             f"budget={budget:.2f}ms interactive={bool(interactive)}",
         )
         if byte_cap > 0 and snapshot.last_count > 0 and snapshot.last_byte_count > 0:
-            bytes_per_item = int(ceil(float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))))
+            bytes_per_item = ceil(
+                float(snapshot.last_byte_count) / max(1.0, float(snapshot.last_count))
+            )
             byte_cap = max(int(byte_cap), int(bytes_per_item * max(1, batch)))
         interval = 0
         reason = "interactive feedback target" if interactive else "feedback target"
@@ -363,7 +400,14 @@ class ResourceGovernor:
         return decision
 
     def diagnostics(self, *, channels: tuple[str, ...] = ()) -> ResourceGovernorDiagnostics:
-        channel_names = tuple(dict.fromkeys((*channels, *tuple(snapshot.channel for snapshot in self.latency_feedback.snapshots()))))
+        channel_names = tuple(
+            dict.fromkeys(
+                (
+                    *channels,
+                    *tuple(snapshot.channel for snapshot in self.latency_feedback.snapshots()),
+                )
+            )
+        )
         feedback_channels = []
         for channel in channel_names:
             snapshot = self.latency_feedback.channel_snapshot(channel)
@@ -376,7 +420,9 @@ class ResourceGovernor:
                     elapsed_ewma_ms=snapshot.elapsed_ewma_ms,
                     per_item_ewma_ms=snapshot.per_item_ewma_ms,
                     per_byte_ewma_ms=snapshot.per_byte_ewma_ms,
-                    budget_ms=float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+                    budget_ms=float(
+                        self.latency_feedback.work_budget_ms(channel, interactive=False)
+                    ),
                     batch_limit=int(self.latency_feedback.batch_limit(channel, interactive=False)),
                     interval_ms=0,
                 )
@@ -385,7 +431,9 @@ class ResourceGovernor:
         cpu = None if telemetry is None else telemetry.cpu
         return ResourceGovernorDiagnostics(
             pressure=self._pressure,
-            lane_decisions=tuple(self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions),
+            lane_decisions=tuple(
+                self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions
+            ),
             feedback_channels=tuple(feedback_channels),
             recent_ui_work_observations=tuple(self._recent_ui_work_observations),
             recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),
@@ -395,8 +443,12 @@ class ResourceGovernor:
             load_average_1m=None if cpu is None else cpu.load_average_1m,
         )
 
-    def _compute_pressure(self, snapshot: ResourceSnapshot, memory_policy: MemoryPolicy) -> ResourcePressureState:
-        available_fraction = float(memory_policy.system_available_bytes) / max(1.0, float(memory_policy.system_total_bytes))
+    def _compute_pressure(
+        self, snapshot: ResourceSnapshot, memory_policy: MemoryPolicy
+    ) -> ResourcePressureState:
+        available_fraction = float(memory_policy.system_available_bytes) / max(
+            1.0, float(memory_policy.system_total_bytes)
+        )
         if available_fraction < 0.08:
             memory = ResourcePressure.HIGH
         elif available_fraction < 0.15:
@@ -412,7 +464,13 @@ class ResourceGovernor:
             headroom = _clamp_float(1.0 - system_cpu / 100.0, 0.0, 1.0)
         ui = self._ui_pressure_from_channels()
         cache = ResourcePressure.NORMAL
-        return ResourcePressureState(ui, headroom, memory, cache, f"available={available_fraction:.0%}, cpu_headroom={headroom:.0%}")
+        return ResourcePressureState(
+            ui,
+            headroom,
+            memory,
+            cache,
+            f"available={available_fraction:.0%}, cpu_headroom={headroom:.0%}",
+        )
 
     def _feedback_elapsed_ms(self, channel: str, elapsed_ms: float) -> float:
         elapsed = max(0.0, float(elapsed_ms))
@@ -495,7 +553,9 @@ class ResourceGovernor:
             self._lane_targets[lane] = 0
             self._last_lane_update_monotonic[lane] = monotonic()
             return 0
-        current = max(0, int(self._lane_targets.get(lane, self.compute_policy.workers_for_lane(lane))))
+        current = max(
+            0, int(self._lane_targets.get(lane, self.compute_policy.workers_for_lane(lane)))
+        )
         now = monotonic()
         last = float(self._last_lane_update_monotonic.get(lane, 0.0))
         if current == 0:

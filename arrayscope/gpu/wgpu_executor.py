@@ -40,6 +40,7 @@ Residency bookkeeping reuses :class:`arrayscope.gpu.page_table.PageTable`
 
 from __future__ import annotations
 
+import contextlib
 import struct
 from dataclasses import dataclass, field
 
@@ -56,8 +57,8 @@ from arrayscope.gpu.command_protocol import (
     GenerateLodPages,
     OverlayPrimitive,
     PresentGeneration,
-    SetOverlayCamera,
     SetDisplayMapping,
+    SetOverlayCamera,
     UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
@@ -669,9 +670,7 @@ def _reduce_wgsl(*, value_type: str, load_suffix: str, storage_format: str) -> s
 
     zero = "0.0" if value_type == "f32" else "vec2<f32>(0.0)"
     stored = (
-        "vec4<f32>(mean, 0.0, 0.0, 0.0)"
-        if value_type == "f32"
-        else "vec4<f32>(mean, 0.0, 0.0)"
+        "vec4<f32>(mean, 0.0, 0.0, 0.0)" if value_type == "f32" else "vec4<f32>(mean, 0.0, 0.0)"
     )
     return f"""
 struct Args {{
@@ -732,9 +731,7 @@ fn reduce(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
 
 _REDUCE_WGSL = {
-    SCALAR_R32F: _reduce_wgsl(
-        value_type="f32", load_suffix="r", storage_format="r32float"
-    ),
+    SCALAR_R32F: _reduce_wgsl(value_type="f32", load_suffix="r", storage_format="r32float"),
     COMPLEX_RG32F: _reduce_wgsl(
         value_type="vec2<f32>", load_suffix="rg", storage_format="rg32float"
     ),
@@ -800,12 +797,10 @@ class _DeferredHistogramReadback:
                 indices = tuple(int(index) for index in self.timestamp_indices)
                 elapsed_ticks = sum(
                     max(0, int(timestamps[stop]) - int(timestamps[start]))
-                    for start, stop in zip(indices[::2], indices[1::2])
+                    for start, stop in zip(indices[::2], indices[1::2], strict=False)
                 )
                 self._gpu_elapsed_ms = (
-                    float(elapsed_ticks)
-                    * float(self.timestamp_period_ns or 1.0)
-                    / 1_000_000.0
+                    float(elapsed_ticks) * float(self.timestamp_period_ns or 1.0) / 1_000_000.0
                 )
         return self._resolved
 
@@ -842,12 +837,12 @@ class WgpuPlaneExecutor:
         if device is None:
             from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-            try:
-                # Vulkan-only instance: the GL backend's EGL re-init is fatal
-                # under Wayland (gate-B Tier 0). Harmless if already set.
+            # Vulkan-only instance: the GL backend's EGL re-init is fatal
+            # under Wayland (gate-B Tier 0). Harmless if already set; a
+            # RuntimeError means the instance already exists (e.g. shared
+            # with a canvas).
+            with contextlib.suppress(RuntimeError):
                 set_instance_extras(backends=["Vulkan"])
-            except RuntimeError:
-                pass  # instance already exists (e.g. shared with a canvas)
             adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
             device = adapter.request_device_sync()
         self.device = device
@@ -1023,11 +1018,42 @@ class WgpuPlaneExecutor:
             bind = self.device.create_bind_group(
                 layout=pipe.get_bind_group_layout(0),
                 entries=[
-                    {"binding": 0, "resource": {"buffer": self._mapping_buf, "offset": 0, "size": 32}},
-                    {"binding": 1, "resource": {"buffer": self._table_buf, "offset": 0, "size": self._table_buf.size}},
-                    {"binding": 2, "resource": {"buffer": self._lod_info_buf, "offset": 0, "size": self._lod_info_buf.size}},
-                    {"binding": 3, "resource": {"buffer": self._planes_buf, "offset": 0, "size": self._planes_buf.size}},
-                    {"binding": 4, "resource": {"buffer": self._tiles_buf, "offset": 0, "size": self._tiles_buf.size}},
+                    {
+                        "binding": 0,
+                        "resource": {"buffer": self._mapping_buf, "offset": 0, "size": 32},
+                    },
+                    {
+                        "binding": 1,
+                        "resource": {
+                            "buffer": self._table_buf,
+                            "offset": 0,
+                            "size": self._table_buf.size,
+                        },
+                    },
+                    {
+                        "binding": 2,
+                        "resource": {
+                            "buffer": self._lod_info_buf,
+                            "offset": 0,
+                            "size": self._lod_info_buf.size,
+                        },
+                    },
+                    {
+                        "binding": 3,
+                        "resource": {
+                            "buffer": self._planes_buf,
+                            "offset": 0,
+                            "size": self._planes_buf.size,
+                        },
+                    },
+                    {
+                        "binding": 4,
+                        "resource": {
+                            "buffer": self._tiles_buf,
+                            "offset": 0,
+                            "size": self._tiles_buf.size,
+                        },
+                    },
                     {"binding": 5, "resource": self._pools[SCALAR_R32F].view},
                     {"binding": 6, "resource": self._pools[COMPLEX_RG32F].view},
                     {"binding": 7, "resource": self._pools[RGB8].view},
@@ -1241,18 +1267,14 @@ class WgpuPlaneExecutor:
                 lod_rows.append((base, gw, gh, 0))
                 base += gw * gh
             self._plane_grids.append(grids)
-            plane_rows.append(
-                (_REP_INDEX[plane.representation], plane.max_lod, lod_base, 0)
-            )
+            plane_rows.append((_REP_INDEX[plane.representation], plane.max_lod, lod_base, 0))
             family = (
                 plane.document_generation,
                 plane.operation_key,
                 plane.representation,
             )
             family_indices.setdefault((*family, None), []).append(plane_index)
-            family_indices.setdefault((*family, plane.lod_reducer), []).append(
-                plane_index
-            )
+            family_indices.setdefault((*family, plane.lod_reducer), []).append(plane_index)
         self._plane_family_indices = {
             family: tuple(indices) for family, indices in family_indices.items()
         }
@@ -1335,7 +1357,7 @@ class WgpuPlaneExecutor:
             return data, PAGE * 4
         if rep == COMPLEX_RG32F:
             if np.iscomplexobj(data):
-                packed = np.empty(data.shape + (2,), np.float32)
+                packed = np.empty((*data.shape, 2), np.float32)
                 packed[..., 0] = data.real
                 packed[..., 1] = data.imag
                 data = packed
@@ -1349,10 +1371,14 @@ class WgpuPlaneExecutor:
                 raise ValueError(f"complex payload must be ({PAGE},{PAGE}[,2]), got {data.shape}")
             return data, PAGE * 8
         if rep == RGB8:
-            if data.dtype != np.uint8 or data.ndim != 3 or data.shape[:2] != (PAGE, PAGE) or data.shape[2] not in (3, 4):
+            if (
+                data.dtype != np.uint8
+                or data.ndim != 3
+                or data.shape[:2] != (PAGE, PAGE)
+                or data.shape[2] not in (3, 4)
+            ):
                 raise ValueError(
-                    f"rgb8 payload must be uint8 ({PAGE},{PAGE},3|4), got "
-                    f"{data.dtype} {data.shape}"
+                    f"rgb8 payload must be uint8 ({PAGE},{PAGE},3|4), got {data.dtype} {data.shape}"
                 )
             if data.shape[2] == 3:
                 rgba = np.empty((PAGE, PAGE, 4), np.uint8)
@@ -1364,8 +1390,7 @@ class WgpuPlaneExecutor:
             data = np.ascontiguousarray(data, dtype=np.float32)
             if data.shape != (PAGE, PAGE, 4):
                 raise ValueError(
-                    f"rgb_windowed_rgba32f payload must be "
-                    f"({PAGE},{PAGE},4), got {data.shape}"
+                    f"rgb_windowed_rgba32f payload must be ({PAGE},{PAGE},4), got {data.shape}"
                 )
             return data, PAGE * 16
         raise ValueError(f"unknown chunk representation {rep!r}")  # pragma: no cover
@@ -1378,8 +1403,7 @@ class WgpuPlaneExecutor:
         pool = self._pools[cmd.key.representation]
         if pool.layer_count == 0:
             raise RuntimeError(
-                f"no layer budget configured for representation "
-                f"{cmd.key.representation!r}"
+                f"no layer budget configured for representation {cmd.key.representation!r}"
             )
         if not pool.free_layers:
             self._evict_one_unpinned(cmd.key.representation)
@@ -1390,9 +1414,7 @@ class WgpuPlaneExecutor:
             {"bytes_per_row": bytes_per_row, "rows_per_image": PAGE},
             (PAGE, PAGE, 1),
         )
-        slot = PageSlot(
-            pool_id=_POOL_IDS[cmd.key.representation], page_index=layer, slot_index=0
-        )
+        slot = PageSlot(pool_id=_POOL_IDS[cmd.key.representation], page_index=layer, slot_index=0)
         self.page_table.bind(cmd.key, slot, nbytes=payload.nbytes, pinned=cmd.pinned)
         for flat in self._flat_indices(cmd.key):
             self._flat_table[flat] = layer
@@ -1411,9 +1433,7 @@ class WgpuPlaneExecutor:
             int(destination.lod.level),
             int(destination.lod.level),
         ):
-            raise ValueError(
-                "wgpu LOD generation requires one isotropic 2-D destination"
-            )
+            raise ValueError("wgpu LOD generation requires one isotropic 2-D destination")
         if destination.lod.level <= 0:
             raise ValueError("wgpu LOD generation destination must be reduced")
         if destination.lod.reducer != REDUCER_MEAN:
@@ -1471,9 +1491,7 @@ class WgpuPlaneExecutor:
             raise ValueError("wgpu LOD generation requires resident children")
         pool = self._pools[representation]
         if pool.layer_count == 0:
-            raise RuntimeError(
-                f"no layer budget configured for representation {representation!r}"
-            )
+            raise RuntimeError(f"no layer budget configured for representation {representation!r}")
         self.page_table.replace_pin_set(
             _LOD_GENERATION_PIN_OWNER, tuple(key for key, _slot in present)
         )
@@ -1568,11 +1586,7 @@ class WgpuPlaneExecutor:
         # coverage, LOD sources) stay hard, so genuine exhaustion still
         # raises loudly below.
         for key in sorted(
-            (
-                key
-                for key in self._histogram_shield_pins
-                if key.representation == representation
-            ),
+            (key for key in self._histogram_shield_pins if key.representation == representation),
             key=self.page_table.last_use,
         ):
             self._histogram_shield_pins.discard(key)
@@ -1637,9 +1651,7 @@ class WgpuPlaneExecutor:
     ) -> tuple[object, tuple[float, float] | None, tuple[DataChunkKey, ...]]:
         wgpu, d = self._wgpu, self.device
         if cmd.bins > MAX_HISTOGRAM_BINS:
-            raise ValueError(
-                f"executor supports up to {MAX_HISTOGRAM_BINS} histogram bins"
-            )
+            raise ValueError(f"executor supports up to {MAX_HISTOGRAM_BINS} histogram bins")
         entries = []
         missing: list[DataChunkKey] = []
         for key in cmd.keys:
@@ -1718,7 +1730,10 @@ class WgpuPlaneExecutor:
                 {"binding": 2, "resource": self._pools[SCALAR_R32F].view},
                 {"binding": 3, "resource": self._pools[COMPLEX_RG32F].view},
                 {"binding": 4, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
-                {"binding": 5, "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n}},
+                {
+                    "binding": 5,
+                    "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n},
+                },
                 {"binding": 6, "resource": {"buffer": bounds, "offset": 0, "size": 8}},
             ],
         )
@@ -1726,7 +1741,10 @@ class WgpuPlaneExecutor:
             layout=self._merge_pipe.get_bind_group_layout(0),
             entries=[
                 {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
-                {"binding": 1, "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n}},
+                {
+                    "binding": 1,
+                    "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n},
+                },
                 {"binding": 2, "resource": {"buffer": final, "offset": 0, "size": 4 * cmd.bins}},
             ],
         )
@@ -1743,9 +1761,7 @@ class WgpuPlaneExecutor:
             )
             from wgpu.backends.wgpu_native._api import libf
 
-            timestamp_period_ns = float(
-                libf.wgpuQueueGetTimestampPeriod(d.queue._internal)
-            )
+            timestamp_period_ns = float(libf.wgpuQueueGetTimestampPeriod(d.queue._internal))
         if dynamic_bounds:
             bounds_bind1 = d.create_bind_group(
                 layout=self._bounds_partial_pipe.get_bind_group_layout(0),
@@ -1816,17 +1832,21 @@ class WgpuPlaneExecutor:
             )
         d.queue.submit([enc.finish()])
         if dynamic_bounds:
-            return _DeferredHistogramReadback(
-                d,
-                final,
-                bounds,
-                cmd.bins,
-                timestamp_buffer=timestamp_buffer,
-                timestamp_query_set=timestamp_query_set,
-                timestamp_period_ns=timestamp_period_ns,
-                timestamp_indices=timestamp_indices,
-                on_resolve=self._note_histogram_readback_resolve,
-            ), None, tuple(missing)
+            return (
+                _DeferredHistogramReadback(
+                    d,
+                    final,
+                    bounds,
+                    cmd.bins,
+                    timestamp_buffer=timestamp_buffer,
+                    timestamp_query_set=timestamp_query_set,
+                    timestamp_period_ns=timestamp_period_ns,
+                    timestamp_indices=timestamp_indices,
+                    on_resolve=self._note_histogram_readback_resolve,
+                ),
+                None,
+                tuple(missing),
+            )
         self._note_histogram_readback_resolve()
         counts = np.frombuffer(d.queue.read_buffer(final), np.uint32).copy()
         return counts, (float(cmd.lo), float(cmd.hi)), tuple(missing)
@@ -1971,9 +1991,7 @@ class WgpuPlaneExecutor:
         ):
             return
         self._histogram_shield_pins.add(key)
-        self.page_table.replace_pin_set(
-            _HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins
-        )
+        self.page_table.replace_pin_set(_HISTOGRAM_SHIELD_PIN_OWNER, self._histogram_shield_pins)
 
     # ---- audit oracles ------------------------------------------------------
 

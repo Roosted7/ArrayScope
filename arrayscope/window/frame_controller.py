@@ -7,7 +7,6 @@ region payloads; backends differ only in physical presentation mechanics.
 
 from __future__ import annotations
 
-
 from dataclasses import replace
 from time import perf_counter, thread_time
 
@@ -16,51 +15,57 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
-from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.frame_targets import FrameTarget
+from arrayscope.core.memory_budget import estimate_display_image_bytes, format_bytes
 from arrayscope.core.trace import emit_trace
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
+from arrayscope.display.backend_contract import image_view_backend_capabilities
+from arrayscope.display.backends.base import surface_for_view, tiled_presentation_visible
 from arrayscope.display.frame_planner import FramePlanner
+from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
+from arrayscope.display.model.montage_levels import (
+    MontageLevelStats,
+)
 from arrayscope.display.montage import (
     MontageTileState,
     RenderedTile,
     make_montage_plan,
 )
-from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.backends.base import surface_for_view, tiled_presentation_visible
+from arrayscope.display.planning import fallback_level_source, normalize_bounds
+from arrayscope.display.pyramid import preview_level_for_tile_shape
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import WorkItem
+from arrayscope.kernel import complete_inline_work as _complete_inline_work
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
+from arrayscope.render import lod as render_lod
+from arrayscope.render.level_stats import LevelStatsService
 from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.display_presenter import tile_residency_budget_bytes
-from arrayscope.display.model.montage_levels import (
-    MontageLevelStats,
-)
-from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
-from arrayscope.display.pyramid import preview_level_for_tile_shape
-from arrayscope.window.montage_payload_cache import (
-    payload_lod_matches as _payload_lod_matches,
-    payload_compatible_with_tile as _payload_compatible_with_tile,
-    previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
-    RetainedTiledPayloadStore,
-)
 from arrayscope.window import frame_effects as montage_commit
+from arrayscope.window.display_presenter import tile_residency_budget_bytes
 from arrayscope.window.frame_effects import FramePipelineEffects
-from arrayscope.render.level_stats import LevelStatsService
-from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.frame_runtime import (
     FrameRuntimeMixin,
-    _montage_autofit_scope_grew,
-    _montage_autofit_signature,
-    _should_auto_fit_montage_view,
-    _viewport_controller_auto_active_for_range,
 )
+from arrayscope.window.frame_session import FrameSession, plan_presentation_transition
+from arrayscope.window.montage_payload_cache import (
+    RetainedTiledPayloadStore,
+)
+from arrayscope.window.montage_payload_cache import (
+    payload_compatible_with_tile as _payload_compatible_with_tile,
+)
+from arrayscope.window.montage_payload_cache import (
+    payload_lod_matches as _payload_lod_matches,
+)
+from arrayscope.window.montage_payload_cache import (
+    previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
+)
+from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
     frame_session_key,
-    montage_priority_focus as _montage_priority_focus,
     montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
@@ -69,15 +74,16 @@ from arrayscope.window.montage_viewport import (
     retarget_montage_viewport_plan,
     square_montage_fit_view_range,
 )
-from arrayscope.render import lod as render_lod
-from arrayscope.window.frame_session import FrameSession, plan_presentation_transition
+from arrayscope.window.montage_viewport import (
+    montage_priority_focus as _montage_priority_focus,
+)
 from arrayscope.window.render_contract import (
     session_token_is_current as _session_token_is_current,
 )
-from arrayscope.display.planning import fallback_level_source, normalize_bounds
-
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
+
+
 class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     def _interactive_frame_cache_hit(self) -> bool:
         view_state = getattr(self.win, "view_state", None)
@@ -174,7 +180,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
 
     def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
         axis = view_state.montage_axis
-        all_indices = (0,) if axis is None else tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        all_indices = (
+            (0,)
+            if axis is None
+            else tuple(view_state.montage_indices or tuple(range(int(view_state.shape[axis]))))
+        )
         viewport_size = self.win.img_view.graphicsView.viewport().size()
         viewport_shape = (max(1, viewport_size.height()), max(1, viewport_size.width()))
         tile_shape = self._montage_tile_shape(view_state)
@@ -207,13 +217,17 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             and getattr(current_session, "montage_axis", None) == axis
             and getattr(current_session, "display_committed", False)
         )
-        current_range = view_range if view_range is not None else (
-            pending_restore_range
-            if pending_restore_range is not None
+        current_range = (
+            view_range
+            if view_range is not None
             else (
-                self._current_montage_global_view_range()
-                if getattr(self.win.img_view, "image", None) is not None and camera_on_montage
-                else None
+                pending_restore_range
+                if pending_restore_range is not None
+                else (
+                    self._current_montage_global_view_range()
+                    if getattr(self.win.img_view, "image", None) is not None and camera_on_montage
+                    else None
+                )
             )
         )
         columns = self._effective_montage_columns(
@@ -246,21 +260,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # tests/ui/test_lod_demand_freshness.py).
         camera_on_this_layout = bool(
             camera_on_montage
-            and getattr(getattr(current_session, "plan", None), "geometry", None)
-            == plan.geometry
+            and getattr(getattr(current_session, "plan", None), "geometry", None) == plan.geometry
         )
         if (
             view_range is None
             and pending_restore_range is None
             and planning_intent.auto_like
             and not camera_on_this_layout
-        ):
-            current_range = _initial_montage_planning_view_range(
-                plan,
-                viewport_shape,
-                viewport_controller,
-            )
-        elif current_range is None:
+        ) or current_range is None:
             current_range = _initial_montage_planning_view_range(
                 plan,
                 viewport_shape,
@@ -292,7 +299,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     ) -> int | None:
         if not all_indices:
             return None
-        viewport_controller = getattr(getattr(self.win, "img_view", None), "viewport_controller", None)
+        viewport_controller = getattr(
+            getattr(self.win, "img_view", None), "viewport_controller", None
+        )
         requested_columns = getattr(view_state, "montage_columns", None)
         if requested_columns is None and restored_columns is not None:
             try:
@@ -309,7 +318,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             auto_active=intent.auto_active,
         )
 
-    def _on_image_viewport_resized(self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None) -> None:
+    def _on_image_viewport_resized(
+        self, *, previous_viewport_size=None, base_view_range=None, resize_focus=None
+    ) -> None:
         if getattr(self.win, "_closing", False):
             return
         continuity_shape = getattr(self.win, "_viewport_continuity_shape_target", lambda: None)()
@@ -319,13 +330,19 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             # A genuine top-level user resize releases the transaction in the
             # window's resizeEvent before this callback, so an extant target is
             # still authoritative and must be restored instead of reflowed.
-            restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)
+            restore_viewport_shape = getattr(
+                self.win, "_restore_viewport_continuity_shape_after_layout", None
+            )
             if callable(restore_viewport_shape):
                 restore_viewport_shape()
             return
-        active_continuity_range = getattr(self.win, "_active_viewport_continuity_range", lambda: None)()
+        active_continuity_range = getattr(
+            self.win, "_active_viewport_continuity_range", lambda: None
+        )()
         if active_continuity_range is not None:
-            restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)
+            restore_viewport_shape = getattr(
+                self.win, "_restore_viewport_continuity_shape_after_layout", None
+            )
             if callable(restore_viewport_shape):
                 restore_viewport_shape()
             self._set_montage_view_range(active_continuity_range)
@@ -334,7 +351,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._montage_live_layout_reflow = True
         self.win._montage_viewport_update_pending = False
         viewport_plan = self._retarget_montage_resize_camera(
-            previous_viewport_size=_montage_viewport_shape_from_qt_size_tuple(previous_viewport_size),
+            previous_viewport_size=_montage_viewport_shape_from_qt_size_tuple(
+                previous_viewport_size
+            ),
             base_view_range=base_view_range,
             resize_focus=resize_focus,
         )
@@ -475,13 +494,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             user_levels = None
         force_auto = bool(
             force_autolevel
-            or (getattr(self.win, '_force_autolevel', False) and user_levels is None)
+            or (getattr(self.win, "_force_autolevel", False) and user_levels is None)
         )
-        if getattr(self.win, '_force_autolevel', False):
+        if getattr(self.win, "_force_autolevel", False):
             self.win._force_autolevel = False
         window_mode = self._current_window_mode()
         previous_frame = self._previous_display_frame_for_policy(force_auto=force_auto)
-        pending_auto_level_source = getattr(self, "_pending_auto_level_source", None) if force_auto else None
+        pending_auto_level_source = (
+            getattr(self, "_pending_auto_level_source", None) if force_auto else None
+        )
         carried_user_level_source = None
         if not force_auto:
             candidate_user_source = getattr(self, "_explicit_user_level_source", None)
@@ -636,13 +657,19 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             stage_plan = montage_commit.build_stage_fan_in_plan(self, document, missing_tiles)
         self._last_montage_stage_plan_ms = (perf_counter() - stage_plan_start) * 1000.0
         session_setup_start = perf_counter()
-        session_key = frame_session_key(_document_key(document), view_state, viewport_plan, colormap_lut)
+        session_key = frame_session_key(
+            _document_key(document), view_state, viewport_plan, colormap_lut
+        )
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan = self._montage_frame_planner().plan(
             target=FrameTarget(
                 semantic_key=session_key,
                 viewport_key=current_range,
-                presentation_key=(str(window_mode), normalize_bounds(user_levels), bool(force_auto)),
+                presentation_key=(
+                    str(window_mode),
+                    normalize_bounds(user_levels),
+                    bool(force_auto),
+                ),
                 quality="exact-visible",
             ),
             view_state=view_state,
@@ -656,7 +683,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         session_id = int(getattr(self, "_frame_session_id", 0)) + 1
         self._frame_session_id = session_id
         lod_preview_level = (
-            preview_level_for_tile_shape(plan.tile_shape, min_level=render_lod.PREVIEW_FLOOR_MIN_LEVEL)
+            preview_level_for_tile_shape(
+                plan.tile_shape, min_level=render_lod.PREVIEW_FLOOR_MIN_LEVEL
+            )
             if lod_policy_mode == LOD_POLICY_RESIDENT
             else 0
         )
@@ -683,7 +712,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             window_mode=window_mode,
             force_auto=force_auto,
             visible_tiles=tuple(display_tiles),
-            rendered_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
+            rendered_tiles={
+                int(rendered.tile.montage_index): rendered for rendered in cached_tiles
+            },
             loading_tiles=set(),
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             shader_display=bool(shader_display),
@@ -717,8 +748,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             ),
         )
         stage_planning_deferred = bool(
-            defer_stage_planning
-            or (missing_tiles and not native_target_required)
+            defer_stage_planning or (missing_tiles and not native_target_required)
         )
         session.stage_planning_deferred = stage_planning_deferred
         session.stage_planning_async = False
@@ -775,9 +805,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         emit_trace(
             "presentation_transition_retention",
             session_id=int(session.session_id),
-            predecessor_session_id=int(
-                getattr(dying_session, "session_id", 0) or 0
-            ),
+            predecessor_session_id=int(getattr(dying_session, "session_id", 0) or 0),
             retained=bool(retain_stale_pixels),
             reason=str(transition.reason),
             detail=str(transition.detail),
@@ -859,7 +887,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         visible_complete = self._settle_montage_visible_plan_if_complete(session)
         self.win.prefetch_evaluation_controller.cancel_prefetch()
         if not visible_complete:
-            self.win.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
+            self.win.operation_evaluator.last_status = CacheStatusSnapshot(
+                CacheStatus.COMPUTING, "Evaluating image frame"
+            )
         if defer_side_panels or _viewport_interaction_active(self):
             self.win._deferred_side_panel_refresh_pending = True
         else:
@@ -974,17 +1004,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         if session_key == session.key and viewport_changed:
             if self._try_update_montage_viewport_only():
-                self._frame_session_reuses = (
-                    int(getattr(self, "_frame_session_reuses", 0) or 0) + 1
-                )
+                self._frame_session_reuses = int(getattr(self, "_frame_session_reuses", 0) or 0) + 1
                 return True
             return _reject("viewport-retarget")
         if session_key == session.key:
             # Same identity: refresh the generation stamp, commit genuine
             # dirt, and let the standing machinery converge without rebirth.
-            self._frame_session_reuses = (
-                int(getattr(self, "_frame_session_reuses", 0) or 0) + 1
-            )
+            self._frame_session_reuses = int(getattr(self, "_frame_session_reuses", 0) or 0) + 1
             session.render_generation = self._capture_render_generation()
             self._montage_viewport_update_token = None
             self._ensure_montage_watchdog()
@@ -1036,7 +1062,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             target=FrameTarget(
                 semantic_key=session_key,
                 viewport_key=current_range,
-                presentation_key=(str(window_mode), normalize_bounds(user_levels), bool(force_auto)),
+                presentation_key=(
+                    str(window_mode),
+                    normalize_bounds(user_levels),
+                    bool(force_auto),
+                ),
                 quality="exact-visible",
             ),
             view_state=view_state,
@@ -1070,9 +1100,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             frame_plan=frame_plan,
             all_indices=all_indices,
             new_source_ids=new_source_ids,
-            cached_tiles={
-                int(rendered.tile.montage_index): rendered for rendered in cached_tiles
-            },
+            cached_tiles={int(rendered.tile.montage_index): rendered for rendered in cached_tiles},
             visible_tiles=tuple(display_tiles),
         )
         self._last_montage_retarget_model_ms = (perf_counter() - model_start) * 1000.0
@@ -1089,9 +1117,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 session.document,
                 missing_tiles,
             )
-            self._last_montage_retarget_hot_call_cpu_ms = (thread_time() - hot_call_cpu_start) * 1000.0
+            self._last_montage_retarget_hot_call_cpu_ms = (
+                thread_time() - hot_call_cpu_start
+            ) * 1000.0
             hot_predicate_cpu_start = thread_time()
-            has_existing_stage = montage_commit.stage_fan_in_plan_has_existing_sources(hot_stage_plan)
+            has_existing_stage = montage_commit.stage_fan_in_plan_has_existing_sources(
+                hot_stage_plan
+            )
             self._last_montage_retarget_hot_predicate_cpu_ms = (
                 thread_time() - hot_predicate_cpu_start
             ) * 1000.0
@@ -1120,14 +1152,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         session.retained_stage_decision = (
             hot_stage_plan["retained_stage_decision"] or "deferred-retarget"
         )
-        session.repeated_expensive_stage_per_tile = bool(hot_stage_plan["repeated_expensive_stage_per_tile"])
+        session.repeated_expensive_stage_per_tile = bool(
+            hot_stage_plan["repeated_expensive_stage_per_tile"]
+        )
         if session.stage_planning_deferred:
             self._montage_stage_plans_deferred = (
                 int(getattr(self, "_montage_stage_plans_deferred", 0) or 0) + 1
             )
-        self._frame_session_retargets = (
-            int(getattr(self, "_frame_session_retargets", 0) or 0) + 1
-        )
+        self._frame_session_retargets = int(getattr(self, "_frame_session_retargets", 0) or 0) + 1
         self._montage_cached_tiles_last_session = int(stats["hits"])
         self._montage_missing_tiles_last_session = len(missing_tiles)
         self._montage_viewport_update_token = None
@@ -1156,9 +1188,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         try:
             self.commit_frame_session_presentation(session)
         finally:
-            self._last_montage_initial_commit_ms = (
-                perf_counter() - initial_commit_start
-            ) * 1000.0
+            self._last_montage_initial_commit_ms = (perf_counter() - initial_commit_start) * 1000.0
         if session.defer_side_panels or _viewport_interaction_active(self):
             self.win._deferred_side_panel_refresh_pending = True
         else:
@@ -1240,7 +1270,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 ):
                     missing_tiles.append(tile)
                 else:
-                    cached_tiles.append(_rendered_tile_from_previous_payload(tile, previous_payload))
+                    cached_tiles.append(
+                        _rendered_tile_from_previous_payload(tile, previous_payload)
+                    )
             else:
                 cached_tiles.append(_rendered_tile_from_cached_display(tile, cached))
         self._last_montage_display_cache_lookup_ms = total_lookup_ms
@@ -1314,7 +1346,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             target=FrameTarget(
                 semantic_key=session.key,
                 viewport_key=viewport_plan.view_range,
-                presentation_key=(str(session.window_mode), normalize_bounds(getattr(session, "user_levels_override", None)), bool(getattr(session, "force_auto", False))),
+                presentation_key=(
+                    str(session.window_mode),
+                    normalize_bounds(getattr(session, "user_levels_override", None)),
+                    bool(getattr(session, "force_auto", False)),
+                ),
                 quality="exact-visible",
             ),
             view_state=view_state,
@@ -1378,7 +1414,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             cached_tiles.extend(display_cached)
             missing_tiles.extend(display_missing)
             processed_additions += 1
-            byte_count = sum(montage_commit.rendered_tile_nbytes(rendered) for rendered in display_cached)
+            byte_count = sum(
+                montage_commit.rendered_tile_nbytes(rendered) for rendered in display_cached
+            )
             budget.record_item(byte_count=byte_count)
             if budget.should_yield():
                 break
@@ -1419,7 +1457,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return True
 
         if _viewport_interaction_active(self):
-            stage_plan = montage_commit.hot_cached_stage_fan_in_plan(self, session.document, missing_tiles)
+            stage_plan = montage_commit.hot_cached_stage_fan_in_plan(
+                self, session.document, missing_tiles
+            )
             if montage_commit.stage_fan_in_plan_has_existing_sources(stage_plan):
                 montage_commit.merge_stage_fan_in_plan(session, stage_plan)
             session.stage_planning_deferred = True
@@ -1460,9 +1500,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                     session.invalidate_tile_states()
         pruned = len(stale)
         if pruned > 0:
-            self._last_montage_pruned_tile_work = int(getattr(self, "_last_montage_pruned_tile_work", 0) or 0) + int(pruned)
+            self._last_montage_pruned_tile_work = int(
+                getattr(self, "_last_montage_pruned_tile_work", 0) or 0
+            ) + int(pruned)
 
-    def _warn_montage_tiles_skipped(self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape) -> None:
+    def _warn_montage_tiles_skipped(
+        self, *, skipped_count: int, tile_bytes: int, budget_bytes: int, tile_shape
+    ) -> None:
         message = (
             f"Montage skipped {int(skipped_count)} tile(s) because each tile would allocate "
             f"{format_bytes(int(tile_bytes))}, over the visible render budget of {format_bytes(int(budget_bytes))}. "
@@ -1470,7 +1514,12 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             "or increase Performance > Render Memory Budget."
         )
         show_status_message(self.win, message, timeout=8000)
-        warning_key = (int(skipped_count), int(tile_bytes), int(budget_bytes), tuple(int(size) for size in tile_shape))
+        warning_key = (
+            int(skipped_count),
+            int(tile_bytes),
+            int(budget_bytes),
+            tuple(int(size) for size in tile_shape),
+        )
         if getattr(self, "_last_montage_skip_warning_key", None) == warning_key:
             return
         self._last_montage_skip_warning_key = warning_key
@@ -1498,11 +1547,16 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         viewport_controller = getattr(self.win.img_view, "viewport_controller", None)
         current_range = viewport_plan.view_range
         intent = montage_viewport_intent(viewport_controller, current_range)
-        camera_focus = focus if focus is not None else (None if current_range is None else _montage_priority_focus(self, current_range))
+        camera_focus = (
+            focus
+            if focus is not None
+            else (None if current_range is None else _montage_priority_focus(self, current_range))
+        )
         reflow = retarget_montage_viewport_plan(
             getattr(session, "plan", None),
             viewport_plan,
-            previous_viewport_shape or getattr(session, "viewport_shape", viewport_plan.viewport_shape),
+            previous_viewport_shape
+            or getattr(session, "viewport_shape", viewport_plan.viewport_shape),
             fit_locked=intent.fit_locked,
             auto_active=intent.auto_active,
             skip_remap=skip_remap,
@@ -1513,11 +1567,17 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if reflow.view_range_to_apply is not None:
             self._set_montage_view_range(reflow.view_range_to_apply)
         if skip_remap:
-            complete_continuity = getattr(self.win, "_complete_viewport_continuity_if_settled", None)
+            complete_continuity = getattr(
+                self.win, "_complete_viewport_continuity_if_settled", None
+            )
             if callable(complete_continuity):
                 complete_continuity()
         view_range = reflow.viewport_plan.view_range
-        priority_focus = focus if focus is not None else (None if view_range is None else _montage_priority_focus(self, view_range))
+        priority_focus = (
+            focus
+            if focus is not None
+            else (None if view_range is None else _montage_priority_focus(self, view_range))
+        )
         return replace(
             reflow.viewport_plan,
             priority_focus=priority_focus,
@@ -1536,7 +1596,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         remapped_selections = remap_montage_roi_selections(previous_plan, next_plan, selections)
         updates = [
             (previous, current.geometry)
-            for previous, current in zip(selections, remapped_selections)
+            for previous, current in zip(selections, remapped_selections, strict=False)
             if current.geometry != previous.geometry
         ]
         if not updates:
@@ -1601,10 +1661,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             or getattr(session, "dirty_payloads", None)
             or getattr(session, "pending_payload_upserts", None)
             or getattr(session, "pending_removals", None)
-            or (
-                session.has_pending_level_update()
-                and session.has_stale_level_presentations()
-            )
+            or (session.has_pending_level_update() and session.has_stale_level_presentations())
         )
         if not has_commit_work:
             return
@@ -1641,7 +1698,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return False
         session.show_loading_overlays = False
         self._stop_frame_session_slow_overlay()
-        self.win.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.READY, "Image frame ready")
+        self.win.operation_evaluator.last_status = CacheStatusSnapshot(
+            CacheStatus.READY, "Image frame ready"
+        )
         self.win.img_view.setImageStale(False)
         self.win.img_view.setEvaluationOverlay(False)
         if hasattr(self.win.img_view, "clearMontageTileOverlays"):
@@ -1651,11 +1710,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     def _sync_committed_montage_geometry(self, geometry, *, semantic_commit: bool = True) -> None:
         self.display_geometry = geometry
         frame = getattr(self.win, "_committed_display_frame", None)
-        if (
-            bool(semantic_commit)
-            and frame is not None
-            and frame.geometry != geometry
-        ):
+        if bool(semantic_commit) and frame is not None and frame.geometry != geometry:
             self._set_committed_display_frame(replace(frame, geometry=geometry, scene=None))
         refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
         if callable(refresh_hover):
@@ -1699,9 +1754,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         applied_rank = int(getattr(applied, "rank", 0) or 0)
         if int(stats.rank) > applied_rank:
             return True
-        if int(getattr(stats, "evidence_quality", 0) or 0) > int(getattr(applied, "evidence_quality", 0) or 0):
+        if int(getattr(stats, "evidence_quality", 0) or 0) > int(
+            getattr(applied, "evidence_quality", 0) or 0
+        ):
             return True
-        if (
+        if (  # noqa: SIM103
             bool(getattr(session, "shader_display", False))
             and not bool(getattr(session, "first_pass_histogram_published", False))
             and len(getattr(stats, "source_indices", ()) or ())
@@ -1748,8 +1805,12 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         primary_indices = view_state.axis_range_indices[primary_axis]
         secondary_indices = view_state.axis_range_indices[secondary_axis]
         return (
-            len(primary_indices) if primary_indices is not None else int(view_state.shape[primary_axis]),
-            len(secondary_indices) if secondary_indices is not None else int(view_state.shape[secondary_axis]),
+            len(primary_indices)
+            if primary_indices is not None
+            else int(view_state.shape[primary_axis]),
+            len(secondary_indices)
+            if secondary_indices is not None
+            else int(view_state.shape[secondary_axis]),
         )
 
     def _current_montage_global_view_range(self):
@@ -1775,14 +1836,18 @@ def _montage_viewport_shape_from_qt_size_tuple(size):
         return None
     try:
         width, height = size
-        return (max(1, int(round(float(height)))), max(1, int(round(float(width)))))
+        return (max(1, round(float(height))), max(1, round(float(width))))
     except Exception:
         return None
 
 
 def _montage_full_view_range(montage):
-    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
-    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
+    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(
+        montage.gap
+    )
+    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(
+        montage.gap
+    )
     return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
 
 
@@ -1814,8 +1879,10 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         if getattr(payload, "semantic_histogram_data", None) is None
         else np.asarray(payload.semantic_histogram_data)
     )
-    histogram = semantic_histogram if semantic_histogram is not None else (
-        None if payload.histogram_data is None else np.asarray(payload.histogram_data)
+    histogram = (
+        semantic_histogram
+        if semantic_histogram is not None
+        else (None if payload.histogram_data is None else np.asarray(payload.histogram_data))
     )
     slab_shape = tuple(getattr(payload, "source_shape", None) or image.shape)
     return RenderedTile(
@@ -1843,7 +1910,11 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
     if hasattr(cached, "payload"):
         return cached.payload().bind(tile)
     image = np.asarray(cached.data)
-    histogram = None if getattr(cached, "histogram_data", None) is None else np.asarray(cached.histogram_data)
+    histogram = (
+        None
+        if getattr(cached, "histogram_data", None) is None
+        else np.asarray(cached.histogram_data)
+    )
     return RenderedTile(
         tile=tile,
         image=image,
@@ -1924,9 +1995,14 @@ def _shared_preview_candidate_tiles(session):
 
 
 def _preview_tile_shape(session, demand) -> tuple[int, int]:
-    factor_x, factor_y = factor_xy_for_level(demand, render_effects.preview_evaluation_level(session, demand))
+    factor_x, factor_y = factor_xy_for_level(
+        demand, render_effects.preview_evaluation_level(session, demand)
+    )
     tile_h, tile_w = (max(1, int(value)) for value in tuple(session.plan.tile_shape)[:2])
-    return (max(1, int(np.ceil(tile_h / max(1, factor_y)))), max(1, int(np.ceil(tile_w / max(1, factor_x)))))
+    return (
+        max(1, int(np.ceil(tile_h / max(1, factor_y)))),
+        max(1, int(np.ceil(tile_w / max(1, factor_x)))),
+    )
 
 
 def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:
@@ -1948,13 +2024,15 @@ def _latency_feedback(window):
 def _interactive_active(window) -> bool:
     coordinator = getattr(window.win, "render_coordinator", None)
     return bool(
-        coordinator is not None and getattr(coordinator, "interactive_active", False)
+        (coordinator is not None and getattr(coordinator, "interactive_active", False))
         or _viewport_interaction_active(window)
     )
 
 
 def _should_defer_montage_side_panels(window, session) -> bool:
-    return bool(getattr(session, "defer_side_panels", False) or _viewport_interaction_active(window))
+    return bool(
+        getattr(session, "defer_side_panels", False) or _viewport_interaction_active(window)
+    )
 
 
 def _viewport_interaction_active(window) -> bool:

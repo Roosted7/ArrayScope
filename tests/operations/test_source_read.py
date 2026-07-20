@@ -11,13 +11,18 @@ from arrayscope.core.array_source import (
     SourceReadRefused,
 )
 from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.core.view_state import ViewState
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Crop
 from arrayscope.operations.regions import apply_region, region_from_index_spec
-from arrayscope.operations.slabs import evaluate_slab, request_for_image, request_for_line, request_for_scalar
+from arrayscope.operations.slabs import (
+    evaluate_slab,
+    request_for_image,
+    request_for_line,
+    request_for_scalar,
+)
 from arrayscope.operations.source_read import read_base_region, source_read_budget_bytes
 from arrayscope.operations.stage_cache import StageCache
-from arrayscope.core.view_state import ViewState
 
 
 class _Token:
@@ -87,14 +92,17 @@ class _Policy:
 
 
 class _Context:
-    def __init__(self, lane, policy=_Policy()):
+    def __init__(self, lane, policy=None):
         self.lane = lane
-        self.memory_policy = policy
+        self.memory_policy = _Policy() if policy is None else policy
 
 
 def test_source_read_budget_is_lane_aware():
     assert source_read_budget_bytes(None) == DEFAULT_SOURCE_READ_BUDGET_BYTES
-    assert source_read_budget_bytes(_Context(ComputeLane.VISIBLE)) == _Policy.visible_render_budget_bytes
+    assert (
+        source_read_budget_bytes(_Context(ComputeLane.VISIBLE))
+        == _Policy.visible_render_budget_bytes
+    )
     assert source_read_budget_bytes(_Context(ComputeLane.PREFETCH)) == _Policy.prefetch_budget_bytes
 
 
@@ -103,13 +111,18 @@ def test_source_read_budget_floors_at_module_default():
         visible_render_budget_bytes = 1024
         prefetch_budget_bytes = 1024
 
-    assert source_read_budget_bytes(_Context(ComputeLane.VISIBLE, SmallPolicy())) == DEFAULT_SOURCE_READ_BUDGET_BYTES
+    assert (
+        source_read_budget_bytes(_Context(ComputeLane.VISIBLE, SmallPolicy()))
+        == DEFAULT_SOURCE_READ_BUDGET_BYTES
+    )
 
 
 def test_evaluate_slab_image_line_scalar_match_eager_document():
     data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
     eager = ArrayDocument(data, operations=(Crop(axis=2, start=1, stop=5), CenteredFFT(axis=1)))
-    lazy = ArrayDocument(_lazy(data), operations=(Crop(axis=2, start=1, stop=5), CenteredFFT(axis=1)))
+    lazy = ArrayDocument(
+        _lazy(data), operations=(Crop(axis=2, start=1, stop=5), CenteredFFT(axis=1))
+    )
     state = ViewState.from_shape(eager.current_shape)
 
     for request_factory in (request_for_image, request_for_line):

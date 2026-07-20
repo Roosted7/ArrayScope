@@ -48,7 +48,10 @@ class _CapturingKernel:
         return task
 
 
-def _session(data, *, session_id=1, selected=tuple(range(20)), level_key=None):
+_DEFAULT_SELECTED = tuple(range(20))
+
+
+def _session(data, *, session_id=1, selected=_DEFAULT_SELECTED, level_key=None):
     document = ArrayDocument(np.asarray(data))
     state = ViewState.from_shape(document.current_shape).with_montage_axis(
         2,
@@ -75,7 +78,10 @@ def _session(data, *, session_id=1, selected=tuple(range(20)), level_key=None):
         montage_axis=2,
         colormap_lut=None,
         viewport_shape=(640, 384),
-        view_range=((0.0, float(document.current_shape[1])), (0.0, float(document.current_shape[0]))),
+        view_range=(
+            (0.0, float(document.current_shape[1])),
+            (0.0, float(document.current_shape[0])),
+        ),
         output_dtype=document.base_data.dtype,
         rgb=False,
         window_mode=None,
@@ -177,7 +183,10 @@ def test_semantic_owner_rejects_superseded_generation_results():
     old_value = old_task["fn"](_Token())
     old_task["on_done"](old_value)
 
-    assert service._montage_level_tracker().summary_for(successor.level_key).rank == LevelSourceRank.NONE
+    assert (
+        service._montage_level_tracker().summary_for(successor.level_key).rank
+        == LevelSourceRank.NONE
+    )
     assert predecessor.semantic_level_evidence_progress.inflight_generation is None
     assert publications == []
 

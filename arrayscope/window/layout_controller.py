@@ -40,14 +40,19 @@ class WindowLayoutManager:
             win.restoreState(state)
         self._hide_managed_docks_after_state_restore()
         self._reset_session_dock_visibility_preferences()
-        viewport = initial_viewport if initial_viewport is not None else self._saved_viewport_session()
+        viewport = (
+            initial_viewport if initial_viewport is not None else self._saved_viewport_session()
+        )
         if viewport is not None:
             self._begin_settings_viewport_continuity(viewport)
             self._restore_viewport_continuity_shape()
         if not win.profile_dock.isVisible() and win.data.ndim == 1:
-            self.set_managed_dock_visible(win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False)
+            self.set_managed_dock_visible(
+                win.profile_dock, True, reason="restore-one-dimensional", preserve_canvas=False
+            )
         if not defer_progressive_docks:
             self.sync_progressive_docks(preserve_canvas=False)
+
             # Qt event-turn barrier. Dock sizes are applied after Qt has
             # accepted restored visibility/state, then the viewport shape is
             # restored again as the final size owner.
@@ -78,7 +83,9 @@ class WindowLayoutManager:
     def _hide_managed_docks_after_state_restore(self):
         for dock in self._managed_docks():
             if dock is not None:
-                self.set_managed_dock_visible(dock, False, reason="restore-hidden", preserve_canvas=False, raise_dock=False)
+                self.set_managed_dock_visible(
+                    dock, False, reason="restore-hidden", preserve_canvas=False, raise_dock=False
+                )
 
     def reset_layout(self):
         win = self.window
@@ -88,17 +95,27 @@ class WindowLayoutManager:
         for dock in self._managed_docks():
             if dock is not None:
                 self._state_for(dock).user_visible = None
-        self.set_managed_dock_visible(win.profile_dock, False, reason="reset", preserve_canvas=False)
+        self.set_managed_dock_visible(
+            win.profile_dock, False, reason="reset", preserve_canvas=False
+        )
         if hasattr(win, "inspection_dock"):
             self.redock_managed_panel(win.inspection_dock, reason="reset", preserve_canvas=False)
-            self.set_managed_dock_visible(win.inspection_dock, False, reason="reset", preserve_canvas=False)
+            self.set_managed_dock_visible(
+                win.inspection_dock, False, reason="reset", preserve_canvas=False
+            )
         if win.data.ndim == 1:
-            self.set_managed_dock_visible(win.profile_dock, True, reason="reset-one-dimensional", preserve_canvas=False)
+            self.set_managed_dock_visible(
+                win.profile_dock, True, reason="reset-one-dimensional", preserve_canvas=False
+            )
         self.redock_managed_panel(win.operation_dock, reason="reset", preserve_canvas=False)
         if win.document.steps:
-            self.set_managed_dock_visible(win.operation_dock, True, reason="reset-operations", preserve_canvas=False)
+            self.set_managed_dock_visible(
+                win.operation_dock, True, reason="reset-operations", preserve_canvas=False
+            )
         else:
-            self.set_managed_dock_visible(win.operation_dock, False, reason="reset-operations", preserve_canvas=False)
+            self.set_managed_dock_visible(
+                win.operation_dock, False, reason="reset-operations", preserve_canvas=False
+            )
         self._add_dock_to_panel_area(win.profile_dock)
         # Timer category: UI cosmetic. Qt event-turn barrier. Default dock resize depends on the redocked
         # widgets being present in the main window layout.
@@ -126,7 +143,9 @@ class WindowLayoutManager:
         win = self.window
         if bool(getattr(win, "_suspend_progressive_dock_sync", False)):
             return
-        preserve_canvas = bool(preserve_canvas) and bool(getattr(win, "_progressive_preserve_enabled", True))
+        preserve_canvas = bool(preserve_canvas) and bool(
+            getattr(win, "_progressive_preserve_enabled", True)
+        )
         changed = False
         if hasattr(win, "operation_dock"):
             has_steps = bool(win.document.steps)
@@ -140,20 +159,28 @@ class WindowLayoutManager:
             user_visible = getattr(win, "_operation_dock_user_visible", None)
             if has_steps and user_visible is not False:
                 changed = changed or not win.operation_dock.isVisible()
-                self.set_dock_visible_later(win.operation_dock, True, preserve_canvas=preserve_canvas)
+                self.set_dock_visible_later(
+                    win.operation_dock, True, preserve_canvas=preserve_canvas
+                )
             elif not has_steps and user_visible is not True:
                 changed = changed or win.operation_dock.isVisible()
-                self.set_dock_visible_later(win.operation_dock, False, preserve_canvas=preserve_canvas)
+                self.set_dock_visible_later(
+                    win.operation_dock, False, preserve_canvas=preserve_canvas
+                )
         if hasattr(win, "profile_dock"):
             live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
             user_visible = getattr(win, "_profile_dock_user_visible", None)
-            should_show_profile = (win.data.ndim == 1 or live_profile or user_visible is True) and user_visible is not False
+            should_show_profile = (
+                win.data.ndim == 1 or live_profile or user_visible is True
+            ) and user_visible is not False
             if should_show_profile:
                 changed = changed or not win.profile_dock.isVisible()
                 self.set_dock_visible_later(win.profile_dock, True, preserve_canvas=preserve_canvas)
             elif user_visible is not True:
                 changed = changed or win.profile_dock.isVisible()
-                self.set_dock_visible_later(win.profile_dock, False, preserve_canvas=preserve_canvas)
+                self.set_dock_visible_later(
+                    win.profile_dock, False, preserve_canvas=preserve_canvas
+                )
         if changed:
             self.schedule_view_geometry_refresh()
 
@@ -171,42 +198,61 @@ class WindowLayoutManager:
         Qt.QtCore.QTimer.singleShot(
             0,
             self.window,
-            lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas, generation=generation: self.apply_queued_dock_visibility(
-                dock,
-                visible,
-                preserve_canvas=preserve_canvas,
-                generation=generation,
+            lambda dock=dock, visible=visible, preserve_canvas=preserve_canvas, generation=generation: (
+                self.apply_queued_dock_visibility(
+                    dock,
+                    visible,
+                    preserve_canvas=preserve_canvas,
+                    generation=generation,
+                )
             ),
         )
 
-    def apply_queued_dock_visibility(self, dock, visible, *, preserve_canvas=True, generation: int | None = None):
+    def apply_queued_dock_visibility(
+        self, dock, visible, *, preserve_canvas=True, generation: int | None = None
+    ):
         win = self.window
         if not self._window_alive():
             return
-        if generation is not None and int(self._dock_visibility_generations.get(dock, 0)) != int(generation):
+        if generation is not None and int(self._dock_visibility_generations.get(dock, 0)) != int(
+            generation
+        ):
             return
         if not visible:
-            if dock is getattr(win, "operation_dock", None) and win.document.steps:
-                if getattr(win, "_operation_dock_user_visible", None) is not False:
-                    return
+            if (
+                dock is getattr(win, "operation_dock", None)
+                and win.document.steps
+                and getattr(win, "_operation_dock_user_visible", None) is not False
+            ):
+                return
             if dock is getattr(win, "profile_dock", None):
                 live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
                 user_visible = getattr(win, "_profile_dock_user_visible", None)
-                if (win.data.ndim == 1 or live_profile or user_visible is True) and user_visible is not False:
+                if (
+                    win.data.ndim == 1 or live_profile or user_visible is True
+                ) and user_visible is not False:
                     return
-            if dock is getattr(win, "inspection_dock", None):
-                if getattr(win, "_inspection_dock_user_visible", None) is True:
-                    return
-        self.set_managed_dock_visible(dock, bool(visible), reason="progressive", preserve_canvas=preserve_canvas)
+            if (
+                dock is getattr(win, "inspection_dock", None)
+                and getattr(win, "_inspection_dock_user_visible", None) is True
+            ):
+                return
+        self.set_managed_dock_visible(
+            dock, bool(visible), reason="progressive", preserve_canvas=preserve_canvas
+        )
 
     def set_dock_visible_preserving_canvas(self, dock, visible):
         return self.set_managed_dock_visible(dock, visible, reason="preserve-canvas")
 
-    def set_managed_dock_visible(self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True):
+    def set_managed_dock_visible(
+        self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True
+    ):
         win = self.window
         if not self._window_alive():
             return
-        self._dock_visibility_generations[dock] = int(self._dock_visibility_generations.get(dock, 0)) + 1
+        self._dock_visibility_generations[dock] = (
+            int(self._dock_visibility_generations.get(dock, 0)) + 1
+        )
         panel_manager = getattr(win, "panel_manager", None)
         panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
         if panel is not None and panel.location == PanelLocation.DETACHED:
@@ -218,13 +264,22 @@ class WindowLayoutManager:
                 panel_manager.hide_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
             self.schedule_view_geometry_refresh()
             return
-        if panel is not None and visible and Qt.QtWidgets.QDockWidget.widget(dock) is not panel.body:
+        if (
+            panel is not None
+            and visible
+            and Qt.QtWidgets.QDockWidget.widget(dock) is not panel.body
+        ):
+
             def transition():
-                panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+                panel_manager.redock_panel(
+                    panel.name, reason=reason, preserve_canvas=preserve_canvas
+                )
                 if raise_dock:
                     dock.raise_()
 
-            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas, transition_name="redock")
+            self.run_panel_transition_preserving_canvas(
+                transition, preserve_canvas=preserve_canvas, transition_name="redock"
+            )
             self.schedule_view_geometry_refresh()
             return
         currently_visible = dock.isVisible() if win.isVisible() else not dock.isHidden()
@@ -256,9 +311,15 @@ class WindowLayoutManager:
             transition_name="show-docked" if visible else "hide-docked",
         )
         self.schedule_view_geometry_refresh()
-        restore_viewport_shape = getattr(win, "_restore_viewport_continuity_shape_after_layout", None)
+        restore_viewport_shape = getattr(
+            win, "_restore_viewport_continuity_shape_after_layout", None
+        )
         restore_shape = getattr(win, "_viewport_continuity_shape_target", lambda: None)
-        if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
+        if (
+            callable(restore_viewport_shape)
+            and callable(restore_shape)
+            and restore_shape() is not None
+        ):
             # Timer category: UI cosmetic. Qt event-turn barrier. A restored file viewport shape follows the
             # dock visibility transition that changed the central viewport.
             Qt.QtCore.QTimer.singleShot(0, self.window, restore_viewport_shape)
@@ -327,8 +388,11 @@ class WindowLayoutManager:
             return
         was_docked = panel.location == PanelLocation.DOCKED
         if was_docked:
+
             def transition():
-                panel_manager.detach_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+                panel_manager.detach_panel(
+                    panel.name, reason=reason, preserve_canvas=preserve_canvas
+                )
                 self._activate_main_window_layout()
 
             self.run_panel_transition_preserving_canvas(
@@ -347,10 +411,15 @@ class WindowLayoutManager:
         if panel is None:
             return
         if panel.location != PanelLocation.DOCKED:
-            def transition():
-                panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
 
-            self.run_panel_transition_preserving_canvas(transition, preserve_canvas=preserve_canvas, transition_name="redock")
+            def transition():
+                panel_manager.redock_panel(
+                    panel.name, reason=reason, preserve_canvas=preserve_canvas
+                )
+
+            self.run_panel_transition_preserving_canvas(
+                transition, preserve_canvas=preserve_canvas, transition_name="redock"
+            )
         else:
             panel_manager.redock_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
         self.schedule_view_geometry_refresh()
@@ -401,7 +470,11 @@ class WindowLayoutManager:
                 if self._is_horizontal_dock_area(area)
                 else Qt.QtCore.Qt.Orientation.Vertical
             )
-            size = dock.width() if orientation == Qt.QtCore.Qt.Orientation.Horizontal else dock.height()
+            size = (
+                dock.width()
+                if orientation == Qt.QtCore.Qt.Orientation.Horizontal
+                else dock.height()
+            )
             if size > 0:
                 extents.append((dock, int(size), orientation))
         return tuple(extents)
@@ -464,7 +537,8 @@ class WindowLayoutManager:
             current is not None
             and not current.released
             and current.viewport_shape is not None
-            and tuple(current.viewport_shape) == tuple(max(1, int(value)) for value in tuple(viewport_shape)[:2])
+            and tuple(current.viewport_shape)
+            == tuple(max(1, int(value)) for value in tuple(viewport_shape)[:2])
         ):
             return
         begin(
@@ -474,7 +548,9 @@ class WindowLayoutManager:
         )
 
     def _restore_viewport_continuity_shape(self) -> None:
-        restore_viewport_shape = getattr(self.window, "_restore_viewport_continuity_shape_after_layout", None)
+        restore_viewport_shape = getattr(
+            self.window, "_restore_viewport_continuity_shape_after_layout", None
+        )
         if callable(restore_viewport_shape):
             restore_viewport_shape()
 
@@ -483,7 +559,10 @@ class WindowLayoutManager:
             target_height = max(1, int(viewport_shape[0]))
             target_width = max(1, int(viewport_shape[1]))
             size = self.window.img_view.graphicsView.viewport().size()
-            return abs(int(size.height()) - target_height) <= 1 and abs(int(size.width()) - target_width) <= 1
+            return (
+                abs(int(size.height()) - target_height) <= 1
+                and abs(int(size.width()) - target_width) <= 1
+            )
         except Exception:
             return True
 
@@ -550,7 +629,9 @@ class WindowLayoutManager:
         minimum = Qt.QtCore.QSize(320, 240)
         central = self.window.centralWidget()
         if central is not None:
-            minimum = minimum.expandedTo(central.minimumSizeHint()).expandedTo(central.minimumSize())
+            minimum = minimum.expandedTo(central.minimumSizeHint()).expandedTo(
+                central.minimumSize()
+            )
         return minimum
 
     def _current_viewport_session(self) -> ViewportSession | None:
@@ -561,8 +642,16 @@ class WindowLayoutManager:
 
     def _restore_visible_dock_extents(self, dock_extents) -> None:
         for orientation in (Qt.QtCore.Qt.Orientation.Horizontal, Qt.QtCore.Qt.Orientation.Vertical):
-            docks = [dock for dock, _size, item_orientation in dock_extents if item_orientation == orientation and dock.isVisible()]
-            sizes = [size for dock, size, item_orientation in dock_extents if item_orientation == orientation and dock.isVisible()]
+            docks = [
+                dock
+                for dock, _size, item_orientation in dock_extents
+                if item_orientation == orientation and dock.isVisible()
+            ]
+            sizes = [
+                size
+                for dock, size, item_orientation in dock_extents
+                if item_orientation == orientation and dock.isVisible()
+            ]
             if not docks:
                 continue
             try:
@@ -601,14 +690,22 @@ class WindowLayoutManager:
         hint = dock.sizeHint().expandedTo(dock.minimumSizeHint()).expandedTo(dock.minimumSize())
         body = Qt.QtWidgets.QDockWidget.widget(dock)
         if body is not None:
-            hint = hint.expandedTo(body.sizeHint()).expandedTo(body.minimumSizeHint()).expandedTo(body.minimumSize())
+            hint = (
+                hint.expandedTo(body.sizeHint())
+                .expandedTo(body.minimumSizeHint())
+                .expandedTo(body.minimumSize())
+            )
         if self._is_horizontal_dock_area(area):
             return max(220, int(hint.width()))
         return max(140, int(hint.height()))
 
     def _dock_separator_extent(self):
         try:
-            return int(self.window.style().pixelMetric(Qt.QtWidgets.QStyle.PixelMetric.PM_DockWidgetSeparatorExtent))
+            return int(
+                self.window.style().pixelMetric(
+                    Qt.QtWidgets.QStyle.PixelMetric.PM_DockWidgetSeparatorExtent
+                )
+            )
         except Exception:
             return 6
 
@@ -632,10 +729,22 @@ class WindowLayoutManager:
         win = self.window
         try:
             if win.profile_dock.isVisible():
-                win.resizeDocks([win.profile_dock], [max(140, int(win.height() * 0.23))], Qt.QtCore.Qt.Orientation.Vertical)
+                win.resizeDocks(
+                    [win.profile_dock],
+                    [max(140, int(win.height() * 0.23))],
+                    Qt.QtCore.Qt.Orientation.Vertical,
+                )
             if win.operation_dock.isVisible():
-                win.resizeDocks([win.operation_dock], [max(220, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
+                win.resizeDocks(
+                    [win.operation_dock],
+                    [max(220, int(win.width() * 0.24))],
+                    Qt.QtCore.Qt.Orientation.Horizontal,
+                )
             if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible():
-                win.resizeDocks([win.inspection_dock], [max(240, int(win.width() * 0.24))], Qt.QtCore.Qt.Orientation.Horizontal)
+                win.resizeDocks(
+                    [win.inspection_dock],
+                    [max(240, int(win.width() * 0.24))],
+                    Qt.QtCore.Qt.Orientation.Horizontal,
+                )
         except Exception as exc:
             handle_ui_exception("resize default docks", exc)

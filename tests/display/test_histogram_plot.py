@@ -15,7 +15,9 @@ def _request(data, **kwargs):
 
 
 def test_histogram_plot_ignores_nonfinite_values():
-    result = compute_histogram_plot(_request([0.0, 1.0, np.nan, np.inf], histogram_bounds=(0.0, 1.0), bin_cap=8))
+    result = compute_histogram_plot(
+        _request([0.0, 1.0, np.nan, np.inf], histogram_bounds=(0.0, 1.0), bin_cap=8)
+    )
 
     assert result.has_data
     assert int(np.sum(result.y)) == 2

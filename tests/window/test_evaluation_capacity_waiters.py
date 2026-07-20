@@ -22,9 +22,7 @@ def _drain_until(
     from pyqtgraph.Qt import QtCore, QtWidgets
 
     app = QtWidgets.QApplication.instance()
-    deadline = time.monotonic() + bounded_interaction_settle_timeout_s(
-        timeout_s
-    )
+    deadline = time.monotonic() + bounded_interaction_settle_timeout_s(timeout_s)
     while time.monotonic() < deadline:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
         if predicate():

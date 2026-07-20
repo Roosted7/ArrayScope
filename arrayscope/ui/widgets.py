@@ -8,7 +8,6 @@ prefer_pyside6()
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-
 # Kept as a named constant for callers/tests; the visual styling itself now
 # lives in the application stylesheet (arrayscope.app.theme.build_stylesheet),
 # so per-widget stylesheets no longer override the active theme.
@@ -147,7 +146,9 @@ class RangeSlider(QtWidgets.QWidget):
         groove_rect = self._groove_rect()
         span = max(self._maximum - self._minimum, 1)
         ratio = (value - self._minimum) / span
-        return QtCore.QPointF(groove_rect.left() + groove_rect.width() * ratio, groove_rect.center().y())
+        return QtCore.QPointF(
+            groove_rect.left() + groove_rect.width() * ratio, groove_rect.center().y()
+        )
 
     def _handle_rect(self, value):
         center = self._handle_center(value)
@@ -181,7 +182,7 @@ class RangeSlider(QtWidgets.QWidget):
         groove_rect = self._groove_rect()
         clamped_x = min(max(position_x, groove_rect.left()), groove_rect.right())
         ratio = (clamped_x - groove_rect.left()) / max(groove_rect.width(), 1.0)
-        return int(round(self._minimum + ratio * (self._maximum - self._minimum)))
+        return round(self._minimum + ratio * (self._maximum - self._minimum))
 
     def _move_active_handle(self, position_x):
         value = self._value_from_position(position_x)

@@ -1,14 +1,11 @@
 import ast
-import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import pytest
+
 import arrayscope.core.view_state as view_state_module
 
 VIEW_STATE_PATH = Path(view_state_module.__file__)
-
 
 
 ChannelMode = view_state_module.ChannelMode
@@ -183,7 +180,11 @@ def test_with_image_axis_keeps_axes_distinct():
 
 
 def test_with_image_axis_swaps_existing_other_role_without_using_montage_axis():
-    state = ViewState.from_shape((3, 4, 5)).with_image_axes(1, 2).with_montage_axis(0, indices=(0, 1), text=":")
+    state = (
+        ViewState.from_shape((3, 4, 5))
+        .with_image_axes(1, 2)
+        .with_montage_axis(0, indices=(0, 1), text=":")
+    )
 
     moved_y = state.with_image_axis("y", 2)
     moved_x = moved_y.with_image_axis("x", 2)
@@ -204,7 +205,9 @@ def test_transposed_image_axes_swaps_axes_without_touching_flags():
 
 
 def test_montage_axis_validates_and_migrates_with_shape():
-    state = ViewState.from_shape((3, 4, 5)).with_montage_axis(2, columns=3, indices=(0, 2, 4), text="0:5:2")
+    state = ViewState.from_shape((3, 4, 5)).with_montage_axis(
+        2, columns=3, indices=(0, 2, 4), text="0:5:2"
+    )
 
     assert state.montage_axis == 2
     assert state.montage_columns == 3

@@ -1,13 +1,4 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
-import numpy as np
 import arrayscope.display.montage as montage
-
-
-
 
 
 def test_optimal_montage_columns_match_viewport_shape():
@@ -30,7 +21,9 @@ def test_montage_plan_display_shape_matches_grid():
 
     state = ViewState.from_shape((2, 3, 5)).with_montage_axis(2, indices=(0, 1, 2, 3, 4), text=":")
 
-    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2, 3, 4), tile_shape=(2, 3), columns=2, gap=1)
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=(0, 1, 2, 3, 4), tile_shape=(2, 3), columns=2, gap=1
+    )
 
     assert plan.grid_shape == (3, 2)
     assert plan.display_shape == (8, 7)
@@ -40,7 +33,9 @@ def test_montage_plan_visible_tiles_intersect_view_range():
     from arrayscope.core.view_state import ViewState
 
     state = ViewState.from_shape((2, 3, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
-    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1)
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1
+    )
 
     visible = plan.tiles_intersecting(((4.0, 8.0), (0.0, 2.0)), margin_tiles=0)
 
@@ -54,7 +49,9 @@ def test_montage_plan_empty_view_range_does_not_fallback_to_tile_zero():
     from arrayscope.core.view_state import ViewState
 
     state = ViewState.from_shape((2, 3, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
-    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1)
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(2, 3), columns=3, gap=1
+    )
 
     visible = plan.tiles_intersecting(((10_000.0, 10_100.0), (10_000.0, 10_100.0)), margin_tiles=0)
 
@@ -76,7 +73,9 @@ def test_montage_plan_tile_at_returns_source_tile_and_ignores_gap():
     from arrayscope.core.view_state import ViewState
 
     state = ViewState.from_shape((2, 3, 9)).with_montage_axis(2, indices=tuple(range(9)), text=":")
-    plan = montage.make_montage_plan(state, axis=2, indices=tuple(range(9)), tile_shape=(2, 3), columns=3, gap=1)
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=tuple(range(9)), tile_shape=(2, 3), columns=3, gap=1
+    )
 
     tile = plan.tile_at(4, 4)
 
@@ -89,10 +88,25 @@ def test_montage_tile_status_at_global_point_distinguishes_tile_and_gap():
     from arrayscope.core.view_state import ViewState
 
     state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
-    plan = montage.make_montage_plan(state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3, gap=1)
-    states = (montage.MontageTileState.LOADED, montage.MontageTileState.LOADING, montage.MontageTileState.SKIPPED)
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3, gap=1
+    )
+    states = (
+        montage.MontageTileState.LOADED,
+        montage.MontageTileState.LOADING,
+        montage.MontageTileState.SKIPPED,
+    )
 
-    assert montage.tile_status_at_global_point(plan, states, 1, 1).state == montage.MontageTileState.LOADED
-    assert montage.tile_status_at_global_point(plan, states, 4, 1).state == montage.MontageTileState.LOADING
-    assert montage.tile_status_at_global_point(plan, states, 7, 1).state == montage.MontageTileState.SKIPPED
+    assert (
+        montage.tile_status_at_global_point(plan, states, 1, 1).state
+        == montage.MontageTileState.LOADED
+    )
+    assert (
+        montage.tile_status_at_global_point(plan, states, 4, 1).state
+        == montage.MontageTileState.LOADING
+    )
+    assert (
+        montage.tile_status_at_global_point(plan, states, 7, 1).state
+        == montage.MontageTileState.SKIPPED
+    )
     assert montage.tile_status_at_global_point(plan, states, 2, 1) is None

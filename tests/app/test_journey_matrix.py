@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
 
 from arrayscope.tools.journey_matrix import evaluate_gesture
 
@@ -99,7 +99,11 @@ def _artifacts(tmp_path):
             "applied_level": 1,
         },
     ]
-    return [start, *commits, end], timeline, {"gesture_id": "cold_fill-1", "start": start, "end": end}
+    return (
+        [start, *commits, end],
+        timeline,
+        {"gesture_id": "cold_fill-1", "start": start, "end": end},
+    )
 
 
 def _evaluate(trace, timeline, interval, *, backend="vispy"):
@@ -171,9 +175,7 @@ def test_wgpu_descriptor_only_missed_redraw_keeps_freshness_red(tmp_path):
 def test_matrix_declares_every_backend_journey_cell():
     from arrayscope.tools.journey_matrix import BACKENDS, JOURNEYS, MIN_COMMITS
 
-    assert set(MIN_COMMITS) == {
-        (backend, journey) for backend in BACKENDS for journey in JOURNEYS
-    }
+    assert set(MIN_COMMITS) == {(backend, journey) for backend in BACKENDS for journey in JOURNEYS}
     assert MIN_COMMITS[("pyqtgraph", "cold_fill")] >= 2
 
 
@@ -200,7 +202,7 @@ def test_matrix_uses_checked_in_profile_session_fixture():
 
 @pytest.mark.parametrize(
     ("stderr", "reason"),
-    (
+    [
         (
             "NotImplementedError: wgpu backend renders complex payloads as a single tile only",
             "complex_montage",
@@ -217,7 +219,7 @@ def test_matrix_uses_checked_in_profile_session_fixture():
             "NotImplementedError: wgpu RGB tile 0 payload does not fit rgb8 cleanly",
             "float_rgb",
         ),
-    ),
+    ],
 )
 def test_wgpu_recorded_loud_rejections_classify_as_unsupported(stderr, reason):
     from arrayscope.tools.journey_matrix import _wgpu_unsupported_reason
@@ -276,7 +278,7 @@ def test_bounded_priority_commit_oracle_fault_injection(tmp_path):
     assert not result["presentation"]["priority_ordered"]
 
 
-@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
 def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
@@ -299,7 +301,7 @@ def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
     ]
 
 
-@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
 def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
@@ -315,7 +317,7 @@ def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
     assert result["presentation"]["cap_exemptions"] == []
 
 
-@pytest.mark.parametrize("backend", ("vispy", "wgpu"))
+@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
 def test_gpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path, backend):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [
@@ -534,9 +536,7 @@ def test_wgpu_cold_level_red_is_unsupported_only_with_identical_reference_red():
     assert not rows[0]["ok"]
     assert rows[1]["status"] == "unsupported"
     assert rows[1]["ok"]
-    assert rows[1]["unsupported_reasons"] == [
-        "reference_vispy_cold_level_convergence_standing_red"
-    ]
+    assert rows[1]["unsupported_reasons"] == ["reference_vispy_cold_level_convergence_standing_red"]
 
 
 def test_wgpu_cold_level_red_stays_failed_if_reference_has_another_oracle_red():

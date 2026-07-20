@@ -1,17 +1,13 @@
 import time
 
 import numpy as np
-import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
-    assert_panel_invariants as _assert_panel_invariants,
-    assert_size_close as _assert_size_close,
     clear_arrayscope_settings as _clear_arrayscope_settings,
-    panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
-    view_action as _view_action,
-    wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
 
@@ -26,6 +22,7 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
     from dataclasses import replace as dataclass_replace
 
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -47,9 +44,15 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
         # Force a fresh session so the budget decision is actually re-evaluated.
         win.renderer._frame_session = None
         tiny_policy = dataclass_replace(win.renderer._memory_policy(), single_tile_budget_bytes=1)
-        monkeypatch.setattr(win.renderer, "_refresh_memory_policy", lambda *args, **kwargs: tiny_policy)
+        monkeypatch.setattr(
+            win.renderer, "_refresh_memory_policy", lambda *args, **kwargs: tiny_policy
+        )
         monkeypatch.setattr(win.renderer, "_memory_policy", lambda *args, **kwargs: tiny_policy)
-        monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, _title, message: warnings.append(message),
+        )
 
         win.update_image_view()
         _process_events(qtbot, count=10)
@@ -71,7 +74,9 @@ def test_visible_render_cancels_prefetch_queue(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        started = win.prefetch_evaluation_controller.start_prefetch(lambda: time.sleep(0.05), key="prefetch")
+        started = win.prefetch_evaluation_controller.start_prefetch(
+            lambda: time.sleep(0.05), key="prefetch"
+        )
         assert started.scheduled
         win.operation_evaluator.clear_cache()
         win.update_image_view()
@@ -91,7 +96,9 @@ def test_prefetch_never_runs_during_montage(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         state = win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":")
         before = win.operation_evaluator.display_cache_diagnostics()
@@ -116,8 +123,14 @@ def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
         _process_events(qtbot)
         montage_workers = win.montage_tile_evaluation_controller.diagnostics().max_workers
         assert 1 <= montage_workers <= win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
-        assert win.stage_evaluation_controller.diagnostics().max_workers == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
-        assert win.histogram_evaluation_controller.diagnostics().max_workers == win.compute_policy.workers_for_lane(ComputeLane.HISTOGRAM)
+        assert (
+            win.stage_evaluation_controller.diagnostics().max_workers
+            == win.compute_policy.workers_for_lane(ComputeLane.STAGE)
+        )
+        assert (
+            win.histogram_evaluation_controller.diagnostics().max_workers
+            == win.compute_policy.workers_for_lane(ComputeLane.HISTOGRAM)
+        )
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.MONTAGE_TILE) == 1
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.STAGE) >= 1
         assert win.compute_policy.fft_workers_for_lane(ComputeLane.HISTOGRAM) == 1
@@ -140,14 +153,20 @@ def test_histogram_background_work_uses_histogram_priority_not_prefetch(qtbot, m
         histogram_calls.append(kwargs)
         return 1
 
-    monkeypatch.setattr(win.histogram_evaluation_controller, "start_active_plus_latest", start_histogram)
+    monkeypatch.setattr(
+        win.histogram_evaluation_controller, "start_active_plus_latest", start_histogram
+    )
     monkeypatch.setattr(
         win.prefetch_evaluation_controller,
         "start_prefetch",
-        lambda *args, **kwargs: prefetch_calls.append(kwargs) or WorkStart(False, "wrong-controller"),
+        lambda *args, **kwargs: (
+            prefetch_calls.append(kwargs) or WorkStart(False, "wrong-controller")
+        ),
     )
     try:
-        result = win._submit_histogram_background_task(lambda: "hist", on_done=lambda _value: None, key=("histogram_plot", "source"))
+        result = win._submit_histogram_background_task(
+            lambda: "hist", on_done=lambda _value: None, key=("histogram_plot", "source")
+        )
 
         assert result.scheduled
         assert histogram_calls
@@ -178,7 +197,9 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         win.operation_evaluator.clear_cache()
-        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
+        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change(
+            "test-cold-start"
+        )
         win.renderer._frame_session = None
         frame = getattr(win, "_committed_display_frame", None)
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)

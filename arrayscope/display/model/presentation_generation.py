@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from math import isclose
 
-
 LEVEL_REL_TOL = 1e-12
 LEVEL_ABS_TOL = 1e-9
 
@@ -111,7 +110,7 @@ class PresentationGenerationTracker:
     def stale_tiles(self, priority_order=None) -> tuple[int, ...]:
         if self.target_levels is None:
             return ()
-        stale = set(int(tile) for tile in self.stale_active_tiles)
+        stale = {int(tile) for tile in self.stale_active_tiles}
         if priority_order is None:
             return tuple(sorted(stale))
         ordered = []
@@ -176,13 +175,16 @@ class PresentationGenerationTracker:
         return self._tile_matches_target_value(int(tile))
 
     def _tile_matches_target_value(self, tile: int) -> bool:
-        return (
-            levels_match(self.tile_values.get(int(tile)), self.target_levels)
-            and self.tile_revisions.get(int(tile)) == int(self.revision)
-        )
+        return levels_match(
+            self.tile_values.get(int(tile)), self.target_levels
+        ) and self.tile_revisions.get(int(tile)) == int(self.revision)
 
     def value_counts(self, tile_ids=None) -> dict[tuple[float, float], int]:
-        scope = self.active_tiles if tile_ids is None else frozenset(int(tile) for tile in tuple(tile_ids or ()))
+        scope = (
+            self.active_tiles
+            if tile_ids is None
+            else frozenset(int(tile) for tile in tuple(tile_ids or ()))
+        )
         counts: dict[tuple[float, float], int] = {}
         for tile in scope:
             value = self.tile_values.get(int(tile))
@@ -190,7 +192,9 @@ class PresentationGenerationTracker:
                 counts[value] = int(counts.get(value, 0)) + 1
         return counts
 
-    def snapshot(self, *, pending_upserts=(), active_tile_count: int | None = None) -> PresentationGenerationSnapshot:
+    def snapshot(
+        self, *, pending_upserts=(), active_tile_count: int | None = None
+    ) -> PresentationGenerationSnapshot:
         stale_count = 0 if self.target_levels is None else len(self.stale_active_tiles)
         pending_count = stale_count
         if self.target_levels is not None:
@@ -207,7 +211,9 @@ class PresentationGenerationTracker:
             stale_count=int(stale_count),
             pending_count=int(pending_count),
             settled=stale_count == 0 and pending_count == 0,
-            active_tile_count=len(self.active_tiles) if active_tile_count is None else max(0, int(active_tile_count)),
+            active_tile_count=len(self.active_tiles)
+            if active_tile_count is None
+            else max(0, int(active_tile_count)),
             active_presented_tile_count=len(self.active_tiles),
         )
 

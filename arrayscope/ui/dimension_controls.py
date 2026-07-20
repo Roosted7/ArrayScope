@@ -15,11 +15,11 @@ from arrayscope.ui.toasts import show_status_message
 
 class DimensionControlMixin:
     def update_shift_indicators(self):
-        for shift_label in self.widgets['labels']['shift']:
-            shift_label.setText('')
-            _set_tooltip_if_changed(shift_label, '')
+        for shift_label in self.widgets["labels"]["shift"]:
+            shift_label.setText("")
+            _set_tooltip_if_changed(shift_label, "")
             _set_cursor_if_changed(shift_label, Qt.QtCore.Qt.CursorShape.ArrowCursor)
-    
+
     def flipAxisClicked(self, event, dim):
         """Handle click on flip axis icon"""
         image_axes = self._image_axes()
@@ -29,40 +29,82 @@ class DimensionControlMixin:
         self.update_flip_icons()
         self.apply_axis_flips()
         self._notify_sync("dims")
-        
+
     def update_flip_icons(self):
         state = getattr(self, "_flip_icon_state", None)
         if state is None:
             state = {}
             self._flip_icon_state = state
         image_axes = self._image_axes()
-        for i, flip_label in enumerate(self.widgets['labels']['flip']):
+        for i, flip_label in enumerate(self.widgets["labels"]["flip"]):
             if i in image_axes:
                 # In line plot mode, only show horizontal flip icon for the plot dimension
                 if self.is_line_plot_mode():
                     if i == self.view_state.line_axis:
                         if self._axis_flipped(i):
-                            _set_flip_label_state(flip_label, state, "arrow_back", "Flip X axis", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
+                            _set_flip_label_state(
+                                flip_label,
+                                state,
+                                "arrow_back",
+                                "Flip X axis",
+                                Qt.QtCore.Qt.CursorShape.SizeHorCursor,
+                            )
                         else:
-                            _set_flip_label_state(flip_label, state, "arrow_forward", "Flip X axis", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
+                            _set_flip_label_state(
+                                flip_label,
+                                state,
+                                "arrow_forward",
+                                "Flip X axis",
+                                Qt.QtCore.Qt.CursorShape.SizeHorCursor,
+                            )
                     else:
-                        _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
+                        _set_flip_label_state(
+                            flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor
+                        )
                 # In image view mode, show vertical flip for primary, horizontal for secondary
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
                     if self._axis_flipped(i):
-                        _set_flip_label_state(flip_label, state, "arrow_downward", "Flip Y", Qt.QtCore.Qt.CursorShape.SizeVerCursor)
+                        _set_flip_label_state(
+                            flip_label,
+                            state,
+                            "arrow_downward",
+                            "Flip Y",
+                            Qt.QtCore.Qt.CursorShape.SizeVerCursor,
+                        )
                     else:
-                        _set_flip_label_state(flip_label, state, "arrow_upward", "Flip Y", Qt.QtCore.Qt.CursorShape.SizeVerCursor)
+                        _set_flip_label_state(
+                            flip_label,
+                            state,
+                            "arrow_upward",
+                            "Flip Y",
+                            Qt.QtCore.Qt.CursorShape.SizeVerCursor,
+                        )
                 elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
                     if self._axis_flipped(i):
-                        _set_flip_label_state(flip_label, state, "arrow_back", "Flip X", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
+                        _set_flip_label_state(
+                            flip_label,
+                            state,
+                            "arrow_back",
+                            "Flip X",
+                            Qt.QtCore.Qt.CursorShape.SizeHorCursor,
+                        )
                     else:
-                        _set_flip_label_state(flip_label, state, "arrow_forward", "Flip X", Qt.QtCore.Qt.CursorShape.SizeHorCursor)
+                        _set_flip_label_state(
+                            flip_label,
+                            state,
+                            "arrow_forward",
+                            "Flip X",
+                            Qt.QtCore.Qt.CursorShape.SizeHorCursor,
+                        )
                 else:
-                    _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
+                    _set_flip_label_state(
+                        flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor
+                    )
             else:
-                _set_flip_label_state(flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor)
-    
+                _set_flip_label_state(
+                    flip_label, state, None, "", Qt.QtCore.Qt.CursorShape.ArrowCursor
+                )
+
     def apply_axis_flips(self):
         if self.is_line_plot_mode():
             plot_view = self.plot_widget.getViewBox()
@@ -72,7 +114,7 @@ class DimensionControlMixin:
         else:
             if self.view_state.image_axes is None:
                 return
-            
+
             view = self.img_view.getView()
             y_dim, x_dim = self.view_state.image_axes
             view.invertY(not self._axis_flipped(y_dim))
@@ -103,8 +145,8 @@ class DimensionControlMixin:
             state = {}
             self._complex_indicator_state = state
         for i in range(self.data.ndim):
-            indicator = self.widgets['labels']['complex'][i]
-            
+            indicator = self.widgets["labels"]["complex"][i]
+
             if self.combined_as_complex[i]:
                 _set_complex_indicator_state(
                     indicator,
@@ -138,13 +180,13 @@ class DimensionControlMixin:
         """Keep channel options in sync with the current array dtype."""
         self._refresh_colormap_options()
         is_complex = self._current_is_complex()
-        channel_buttons = self.widgets['buttons']['channel']
+        channel_buttons = self.widgets["buttons"]["channel"]
         enabled_channels = {
-            'complex': is_complex,
-            'real': True,
-            'abs': True,
-            'imag': is_complex,
-            'angle': is_complex,
+            "complex": is_complex,
+            "real": True,
+            "abs": True,
+            "imag": is_complex,
+            "angle": is_complex,
         }
 
         for name, button in channel_buttons.items():
@@ -157,27 +199,27 @@ class DimensionControlMixin:
             channel_buttons[checked_channel].setChecked(True)
         if hasattr(self, "display_toolbar"):
             self.display_toolbar.set_current(channel=checked_channel)
-    
+
     def complexOrRealClicked(self, event, dim):
         if self.can_combine_as_complex[dim] and not self.combined_as_complex[dim]:
             self._append_operation("combine_real_imag", dim)
         elif self.combined_as_complex[dim]:
             self._append_operation("split_complex", dim)
-    
+
     def combineAsComplex(self, dim):
         """Combine a size-2 real dimension into complex as an operation."""
         if not self.can_combine_as_complex[dim] or self.combined_as_complex[dim]:
             return
 
         self._append_operation("combine_real_imag", dim)
-    
+
     def splitToReal(self, dim):
         """Split a singleton complex dimension back to real/imag as an operation."""
         if not self.combined_as_complex[dim]:
             return
 
         self._append_operation("split_complex", dim)
-    
+
     def set_profile_axis(self, axis):
         self.set_profile_axes_exactly((axis,))
         self.render(reason="profile-axis")
@@ -185,7 +227,9 @@ class DimensionControlMixin:
     def set_profile_axes_exactly(self, axes):
         previous = self.view_state
         axes = tuple(int(axis) for axis in axes)
-        axes = tuple(axis for axis in axes if 0 <= axis < self.data.ndim and not self.singleton[axis])
+        axes = tuple(
+            axis for axis in axes if 0 <= axis < self.data.ndim and not self.singleton[axis]
+        )
         if not axes and self.view_state.line_axis is not None:
             axes = (self.view_state.line_axis,)
         if not axes:
@@ -211,11 +255,16 @@ class DimensionControlMixin:
                 # dock and restores the remembered profile state; a click on
                 # an axis already in that state must not toggle it off.
                 self._profile_dock_user_visible = True
-                self.layout_manager.set_managed_dock_visible(profile_dock, True, reason="badge-click")
+                self.layout_manager.set_managed_dock_visible(
+                    profile_dock, True, reason="badge-click"
+                )
                 if axis in current:
                     if hasattr(self, "dimension_strip"):
                         self.dimension_strip.update_state(
-                            self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes
+                            self.data.shape,
+                            self.view_state,
+                            self.profile_axes,
+                            axes=self.document.current_axes,
                         )
                     return
             if axis in current and len(current) > 1:
@@ -234,10 +283,18 @@ class DimensionControlMixin:
             axis = int(axis)
             role_index = 0 if role == "y" else 1
             if self.view_state.image_axes[role_index] == axis:
-                self._set_view_state(self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis)))
+                self._set_view_state(
+                    self.view_state.with_axis_flipped(axis, not self._axis_flipped(axis))
+                )
                 self.update_flip_icons()
                 if hasattr(self, "dimension_strip"):
-                    self.dimension_strip.update_axis_state(axis, self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
+                    self.dimension_strip.update_axis_state(
+                        axis,
+                        self.data.shape,
+                        self.view_state,
+                        self.profile_axes,
+                        axes=self.document.current_axes,
+                    )
                 self.apply_axis_flips()
                 self._notify_sync("dims")
                 return
@@ -246,20 +303,34 @@ class DimensionControlMixin:
             if previous.montage_axis == axis:
                 state = state.with_montage_axis(None)
                 if previous.montage_indices:
-                    state = state.with_axis_range(axis, indices=previous.montage_indices, text=previous.montage_text)
+                    state = state.with_axis_range(
+                        axis, indices=previous.montage_indices, text=previous.montage_text
+                    )
             state = state.with_image_axis(role, axis)
             new_image_axes = set(state.image_axes or ())
-            demoted_axes = tuple(old_axis for old_axis in tuple(previous.image_axes or ()) if old_axis not in new_image_axes)
+            demoted_axes = tuple(
+                old_axis
+                for old_axis in tuple(previous.image_axes or ())
+                if old_axis not in new_image_axes
+            )
             for demoted_axis in demoted_axes:
                 range_indices = previous.axis_range_indices[demoted_axis]
                 range_text = previous.axis_range_text[demoted_axis]
                 state = state.with_axis_range(demoted_axis, None)
                 if range_indices is not None and state.montage_axis is None:
-                    state = state.with_montage_axis(demoted_axis, indices=range_indices, text=range_text)
+                    state = state.with_montage_axis(
+                        demoted_axis, indices=range_indices, text=range_text
+                    )
                 else:
-                    state = state.with_slice(demoted_axis, center_index(self.data.shape[demoted_axis]))
+                    state = state.with_slice(
+                        demoted_axis, center_index(self.data.shape[demoted_axis])
+                    )
                     if range_indices is not None:
-                        show_status_message(self, "Could not preserve the previous image-axis crop as a montage.", timeout=2000)
+                        show_status_message(
+                            self,
+                            "Could not preserve the previous image-axis crop as a montage.",
+                            timeout=2000,
+                        )
             self._set_view_state(state)
         elif role == "m":
             if self.view_state.image_axes is None or int(axis) in self.view_state.image_axes:
@@ -285,10 +356,10 @@ class DimensionControlMixin:
         """Update button and spinbox states based on current mode"""
         if self.is_line_plot_mode():
             # Line plot mode: single dimension selection, all other spinboxes enabled
-            for i, w in enumerate(self.widgets['spins']['slice_indices']):
-                bPrim = self.widgets['buttons']['primary'][i]
-                bSecondary = self.widgets['buttons']['secondary'][i]
-                bProfile = self.widgets['buttons']['profile'][i]
+            for i, w in enumerate(self.widgets["spins"]["slice_indices"]):
+                bPrim = self.widgets["buttons"]["primary"][i]
+                bSecondary = self.widgets["buttons"]["secondary"][i]
+                bProfile = self.widgets["buttons"]["profile"][i]
                 if i >= self.data.ndim:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
@@ -298,7 +369,7 @@ class DimensionControlMixin:
                     bSecondary.setChecked(False)
                     bProfile.setChecked(False)
                     continue
-                
+
                 if self.singleton[i]:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
@@ -328,10 +399,10 @@ class DimensionControlMixin:
         else:
             image_axes = self._image_axes()
             montage_axis = self.view_state.montage_axis
-            for i, w in enumerate(self.widgets['spins']['slice_indices']):
-                bPrim = self.widgets['buttons']['primary'][i]
-                bSecondary = self.widgets['buttons']['secondary'][i]
-                bProfile = self.widgets['buttons']['profile'][i]
+            for i, w in enumerate(self.widgets["spins"]["slice_indices"]):
+                bPrim = self.widgets["buttons"]["primary"][i]
+                bSecondary = self.widgets["buttons"]["secondary"][i]
+                bProfile = self.widgets["buttons"]["profile"][i]
                 if i >= self.data.ndim:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
@@ -341,7 +412,7 @@ class DimensionControlMixin:
                     bSecondary.setChecked(False)
                     bProfile.setChecked(False)
                     continue
-                if self.singleton[i] == True:
+                if self.singleton[i]:
                     w.setEnabled(False)
                     bPrim.setEnabled(False)
                     bSecondary.setEnabled(False)
@@ -349,10 +420,16 @@ class DimensionControlMixin:
                     bProfile.setChecked(False)
                 elif i in image_axes or i == montage_axis:
                     w.setEnabled(False)
-                    if self.view_state.image_axes is not None and i == self.view_state.image_axes[0]:
+                    if (
+                        self.view_state.image_axes is not None
+                        and i == self.view_state.image_axes[0]
+                    ):
                         bPrim.setChecked(True)
                         bSecondary.setChecked(False)
-                    elif self.view_state.image_axes is not None and i == self.view_state.image_axes[1]:
+                    elif (
+                        self.view_state.image_axes is not None
+                        and i == self.view_state.image_axes[1]
+                    ):
                         bPrim.setChecked(False)
                         bSecondary.setChecked(True)
                     else:
@@ -370,31 +447,36 @@ class DimensionControlMixin:
                     bPrim.setChecked(False)
                     bSecondary.setChecked(False)
                     bProfile.setChecked(i in self.profile_axes)
-                    
+
             if self.view_state.image_axes is not None:
-                self.widgets['buttons']['primary'][self.view_state.image_axes[0]].setChecked(True)
-                self.widgets['buttons']['secondary'][self.view_state.image_axes[1]].setChecked(True)
-        
+                self.widgets["buttons"]["primary"][self.view_state.image_axes[0]].setChecked(True)
+                self.widgets["buttons"]["secondary"][self.view_state.image_axes[1]].setChecked(True)
+
         self.update_flip_icons()
         self.update_shift_indicators()
         if hasattr(self, "dimension_strip"):
-            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
+            self.dimension_strip.update_state(
+                self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes
+            )
             for container in getattr(self, "dim_containers", []):
                 container.hide()
-    
+
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
         key = event.key()
         modifiers = event.modifiers()
-        
+
         # Check for 'T' key to transpose view (swap X and Y dimensions)
-        if key == Qt.QtCore.Qt.Key.Key_T and modifiers == Qt.QtCore.Qt.KeyboardModifier.NoModifier:
+        if key == Qt.QtCore.Qt.Key.Key_T and modifiers == Qt.QtCore.Qt.KeyboardModifier.NoModifier:  # noqa: SIM102
             if not self.is_line_plot_mode() and self.view_state.image_axes is not None:
                 self.transposeView(event)
                 event.accept()
                 return
 
-        if key == Qt.QtCore.Qt.Key.Key_K and modifiers == Qt.QtCore.Qt.KeyboardModifier.ControlModifier:
+        if (
+            key == Qt.QtCore.Qt.Key.Key_K
+            and modifiers == Qt.QtCore.Qt.KeyboardModifier.ControlModifier
+        ):
             self.open_command_palette()
             event.accept()
             return
@@ -417,7 +499,7 @@ class DimensionControlMixin:
                 event.accept()
                 return
             if key == Qt.QtCore.Qt.Key.Key_L:
-                live = self.widgets['buttons']['display']['live_profile']
+                live = self.widgets["buttons"]["display"]["live_profile"]
                 live.setChecked(not live.isChecked())
                 event.accept()
                 return
@@ -439,7 +521,7 @@ class DimensionControlMixin:
                 self.step_active_slice(10 if key == Qt.QtCore.Qt.Key.Key_PageUp else -10)
                 event.accept()
                 return
-        
+
         # Check CTRL+number for colormap changes
         if modifiers == Qt.QtCore.Qt.KeyboardModifier.ControlModifier:
             colormap_name = colormap_name_for_key(key)
@@ -447,7 +529,7 @@ class DimensionControlMixin:
                 self.setColormap(colormap_name)
                 event.accept()
                 return
-                
+
         # Pass event to parent if not handled
         super().keyPressEvent(event)
 
@@ -480,7 +562,7 @@ class DimensionControlMixin:
             positions, colors = colormap.getStops(mode=pg.ColorMap.BYTE)
             stops = tuple(
                 (float(position), (int(color[0]), int(color[1]), int(color[2])))
-                for position, color in zip(positions, colors)
+                for position, color in zip(positions, colors, strict=False)
             )
         except Exception:
             return
@@ -512,7 +594,12 @@ class DimensionControlMixin:
 
     def step_active_slice(self, delta):
         axis = getattr(self, "_focused_dimension_axis", None)
-        if axis is None or axis >= self.data.ndim or axis in self.view_state.display_axes() or self.data.shape[axis] == 1:
+        if (
+            axis is None
+            or axis >= self.data.ndim
+            or axis in self.view_state.display_axes()
+            or self.data.shape[axis] == 1
+        ):
             axis = getattr(self, "_active_slice_axis", None)
         if axis is None or axis in self.view_state.display_axes() or self.data.shape[axis] == 1:
             for candidate in self.view_state.non_display_axes():
@@ -527,7 +614,7 @@ class DimensionControlMixin:
         current = self.view_state.slice_indices[axis]
         new_value = max(0, min(self.data.shape[axis] - 1, current + int(delta)))
         self._on_slice_index_changed(axis, new_value)
-    
+
     def setColormap(self, colormap_name):
         """Set the colormap for the image view"""
         try:
@@ -535,7 +622,7 @@ class DimensionControlMixin:
         except Exception as e:
             handle_ui_exception("set colormap", e)
             show_status_message(self, f"Failed to set colormap {colormap_name}: {e}", timeout=3000)
-    
+
     def eventFilter(self, obj, event):
         if (
             hasattr(self, "img_view")
@@ -543,11 +630,13 @@ class DimensionControlMixin:
             and event.type() == Qt.QtCore.QEvent.Type.Leave
         ):
             self._clear_image_hover_state()
-        if obj == self.tab_widget.tabBar():
-            if event.type() == Qt.QtCore.QEvent.Type.MouseButtonDblClick:
-                self.profile_dock.toggle_style()
-                event.accept()
-                return True
+        if (
+            obj == self.tab_widget.tabBar()
+            and event.type() == Qt.QtCore.QEvent.Type.MouseButtonDblClick
+        ):
+            self.profile_dock.toggle_style()
+            event.accept()
+            return True
         return super().eventFilter(obj, event)
 
 
@@ -559,17 +648,22 @@ def _same_view_except_axis_flips(previous, current) -> bool:
         and tuple(getattr(previous, "shape", ())) == tuple(getattr(current, "shape", ()))
         and getattr(previous, "image_axes", None) == getattr(current, "image_axes", None)
         and getattr(previous, "line_axis", None) == getattr(current, "line_axis", None)
-        and tuple(getattr(previous, "slice_indices", ())) == tuple(getattr(current, "slice_indices", ()))
+        and tuple(getattr(previous, "slice_indices", ()))
+        == tuple(getattr(current, "slice_indices", ()))
         and getattr(previous, "channel", None) == getattr(current, "channel", None)
         and getattr(previous, "scale", None) == getattr(current, "scale", None)
-        and tuple(getattr(previous, "axis_fftshifted", ())) == tuple(getattr(current, "axis_fftshifted", ()))
+        and tuple(getattr(previous, "axis_fftshifted", ()))
+        == tuple(getattr(current, "axis_fftshifted", ()))
         and getattr(previous, "montage_axis", None) == getattr(current, "montage_axis", None)
         and getattr(previous, "montage_columns", None) == getattr(current, "montage_columns", None)
         and getattr(previous, "montage_indices", None) == getattr(current, "montage_indices", None)
         and getattr(previous, "montage_text", None) == getattr(current, "montage_text", None)
-        and tuple(getattr(previous, "axis_range_indices", ())) == tuple(getattr(current, "axis_range_indices", ()))
-        and tuple(getattr(previous, "axis_range_text", ())) == tuple(getattr(current, "axis_range_text", ()))
-        and tuple(getattr(previous, "axis_flipped", ())) != tuple(getattr(current, "axis_flipped", ()))
+        and tuple(getattr(previous, "axis_range_indices", ()))
+        == tuple(getattr(current, "axis_range_indices", ()))
+        and tuple(getattr(previous, "axis_range_text", ()))
+        == tuple(getattr(current, "axis_range_text", ()))
+        and tuple(getattr(previous, "axis_flipped", ()))
+        != tuple(getattr(current, "axis_flipped", ()))
     )
 
 
@@ -586,8 +680,15 @@ def _set_flip_label_state(label, state, icon_name, tooltip: str, cursor_shape) -
     state[label] = key
 
 
-def _set_complex_indicator_state(label, state, icon_name, style: str, cursor_shape, tooltip: str) -> None:
-    key = (None if icon_name is None else str(icon_name), str(style or ""), cursor_shape, str(tooltip or ""))
+def _set_complex_indicator_state(
+    label, state, icon_name, style: str, cursor_shape, tooltip: str
+) -> None:
+    key = (
+        None if icon_name is None else str(icon_name),
+        str(style or ""),
+        cursor_shape,
+        str(tooltip or ""),
+    )
     if state.get(label) == key:
         return
     if icon_name is None:

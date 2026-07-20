@@ -8,6 +8,8 @@ from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
+import contextlib
+
 import pyqtgraph.Qt as Qt
 
 
@@ -141,10 +143,8 @@ class RenderCoordinator(Qt.QtCore.QObject):
     def _notify_interaction_state_changed(self) -> None:
         notify = getattr(self._window, "_note_interaction_state_changed", None)
         if callable(notify):
-            try:
+            with contextlib.suppress(Exception):
                 notify()
-            except Exception:
-                pass
 
     def _interactive_cache_hit(self) -> bool:
         predicate = getattr(self._window, "_interactive_frame_cache_hit", None)
@@ -226,7 +226,10 @@ class RenderCoordinator(Qt.QtCore.QObject):
             if self._presentation_draw_pending():
                 request = self._pending_request
                 reason = "" if request is None else request.reason
-                if self._interactive_cache_hit() or not self._interactive_render_supersedes_presentation(reason):
+                if (
+                    self._interactive_cache_hit()
+                    or not self._interactive_render_supersedes_presentation(reason)
+                ):
                     self._quiet_timer.start(self._busy_retry_ms)
                     return
             self.immediate_cache_flushes += 1

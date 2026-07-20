@@ -22,22 +22,24 @@ Design rules (ADR 0053):
   or process backend must not require kernel changes).
 """
 
+from arrayscope.kernel.completions import CompletionEvent, CompletionQueue, DrainBudget
+from arrayscope.kernel.scheduler import Kernel, TaskHandle
 from arrayscope.kernel.task import (
+    UNRANKED_SCHEDULING_RANK,
+    VISIBLE_LANES,
     Lane,
     Priority,
     Supersession,
     TaskOutcome,
     TaskSpec,
-    UNRANKED_SCHEDULING_RANK,
-    VISIBLE_LANES,
     WorkItem,
     complete_inline_work,
 )
-from arrayscope.kernel.completions import CompletionEvent, CompletionQueue, DrainBudget
-from arrayscope.kernel.scheduler import Kernel, TaskHandle
 from arrayscope.kernel.workers import InlineWorkerBackend, ThreadWorkerBackend, WorkerBackend
 
 __all__ = [
+    "UNRANKED_SCHEDULING_RANK",
+    "VISIBLE_LANES",
     "CompletionEvent",
     "CompletionQueue",
     "DrainBudget",
@@ -49,10 +51,8 @@ __all__ = [
     "TaskHandle",
     "TaskOutcome",
     "TaskSpec",
-    "UNRANKED_SCHEDULING_RANK",
     "ThreadWorkerBackend",
-    "VISIBLE_LANES",
-    "WorkerBackend",
     "WorkItem",
+    "WorkerBackend",
     "complete_inline_work",
 ]

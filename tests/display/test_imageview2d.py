@@ -94,7 +94,11 @@ def _present_tiled(
     tile_residency_budget_bytes=0,
     frame_plan=None,
 ):
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.viewport import ViewportPolicy
 
     if geometry is None:
@@ -125,12 +129,15 @@ def _present_tiled(
             payloads = dict(cache[cache_key])
         else:
             previous = dict(cache.get(cache_key, {}))
-            rebuild_tiles = None if montage_dirty_tiles is None else {int(tile) for tile in montage_dirty_tiles}
+            rebuild_tiles = (
+                None if montage_dirty_tiles is None else {int(tile) for tile in montage_dirty_tiles}
+            )
             payloads = previous if previous and rebuild_tiles is not None else {}
             serials = getattr(view, "_test_tiled_payload_serials", None)
             if serials is None:
                 serials = {}
                 view._test_tiled_payload_serials = serials
+
             def next_source_id(tile_number: int, source_index: int):
                 key = (cache_key, int(tile_number))
                 serials[key] = int(serials.get(key, 0)) + 1
@@ -143,7 +150,11 @@ def _present_tiled(
             tile_w = int(montage.tile_width)
             gap = int(montage.gap)
             for tile_number, source_index in enumerate(tuple(montage.indices)):
-                if rebuild_tiles is not None and int(tile_number) not in rebuild_tiles and int(tile_number) in payloads:
+                if (
+                    rebuild_tiles is not None
+                    and int(tile_number) not in rebuild_tiles
+                    and int(tile_number) in payloads
+                ):
                     continue
                 state = geometry.montage_tile_states[tile_number]
                 if str(getattr(state, "value", state)).lower() != "loaded":
@@ -153,7 +164,12 @@ def _present_tiled(
                 column = tile_number % int(montage.columns)
                 y0 = row * (tile_h + gap) - int(geometry.montage_origin_y)
                 x0 = column * (tile_w + gap) - int(geometry.montage_origin_x)
-                if y0 < 0 or x0 < 0 or y0 + tile_h > source.shape[0] or x0 + tile_w > source.shape[1]:
+                if (
+                    y0 < 0
+                    or x0 < 0
+                    or y0 + tile_h > source.shape[0]
+                    or x0 + tile_w > source.shape[1]
+                ):
                     payloads.pop(int(tile_number), None)
                     continue
                 image = source[y0 : y0 + tile_h, x0 : x0 + tile_w]
@@ -172,7 +188,11 @@ def _present_tiled(
         elif montage_dirty_tiles == ():
             upserts = {}
         else:
-            upserts = {int(tile): payloads[int(tile)] for tile in montage_dirty_tiles if int(tile) in payloads}
+            upserts = {
+                int(tile): payloads[int(tile)]
+                for tile in montage_dirty_tiles
+                if int(tile) in payloads
+            }
         revision = 1 if upserts else 2
         tile_delta = TilePresentationDelta(
             structure_revision=revision,
@@ -292,8 +312,10 @@ def test_evaluation_overlay_and_stale_opacity(qt_app):
 
 
 def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D, MontageTileOverlay
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.overlays import MontageTileOverlay
 
     view = ImageView2D()
     _seed_displayed_image(view, np.zeros((8, 8), dtype=float))
@@ -316,8 +338,9 @@ def test_montage_tile_overlays_reuse_single_graphics_item(qt_app):
 
 
 def test_tile_truth_overlay_shows_backend_neutral_rows(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -389,7 +412,8 @@ def test_image_presentation_keeps_levels_and_histogram_range_separate(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    _present_tiled(view,
+    _present_tiled(
+        view,
         np.zeros((4, 4), dtype=float),
         histogramData=np.zeros((4, 4), dtype=float),
         levels=(2.0, 8.0),
@@ -399,7 +423,8 @@ def test_image_presentation_keeps_levels_and_histogram_range_separate(qt_app):
     assert tuple(float(value) for value in view.getLevels()) == (2.0, 8.0)
     assert view.getHistogramDataBounds() == (0.0, 10.0)
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         np.full((4, 4), 1000.0, dtype=float),
         histogramData=np.full((4, 4), 1000.0, dtype=float),
         levels=(2.0, 8.0),
@@ -465,10 +490,7 @@ def test_pyqtgraph_tile_commit_report_counts_distinct_updated_tiles():
     from arrayscope.display.imageview2d import _tile_commit_report, _tile_layer_distinct_work_items
     from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 
-    payloads = {
-        index: SimpleNamespace(nbytes=1024)
-        for index in range(3)
-    }
+    payloads = {index: SimpleNamespace(nbytes=1024) for index in range(3)}
     stats = TileLayerUpdateStats(
         visible_items=3,
         presented_tiles=(0, 1, 2),
@@ -497,7 +519,7 @@ def test_large_histogram_refresh_uses_background_submitter(qt_app):
         submitted.append((fn, on_done, key))
         return SimpleNamespace(scheduled=True)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -509,7 +531,10 @@ def test_large_histogram_refresh_uses_background_submitter(qt_app):
 
 
 def test_histogram_result_cache_reuses_completed_signature_with_current_generation(qt_app):
-    from arrayscope.display.histogram_controller import HistogramPlotResult, histogram_plot_request_for_view
+    from arrayscope.display.histogram_controller import (
+        HistogramPlotResult,
+        histogram_plot_request_for_view,
+    )
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
@@ -567,7 +592,7 @@ def test_large_histogram_auto_level_applies_bounds_before_refinement(qt_app, mon
 
     monkeypatch.setattr(histogram_controller, "compute_histogram_plot", fail_sync_compute)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(5.0, 15.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(5.0, 15.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -590,7 +615,7 @@ def test_large_histogram_refinement_coalesces_matching_background_request(qt_app
         submitted.append((fn, on_done, key))
         return SimpleNamespace(scheduled=True)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -612,7 +637,7 @@ def test_large_histogram_refinement_replaces_pending_changed_request(qt_app):
         submitted.append((fn, on_done, key))
         return SimpleNamespace(scheduled=True)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -645,7 +670,7 @@ def test_large_histogram_stale_result_after_newer_range_does_not_update_plot(qt_
         submitted.append((fn, on_done, key))
         return SimpleNamespace(scheduled=True)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -655,7 +680,13 @@ def test_large_histogram_stale_result_after_newer_range_does_not_update_plot(qt_
     stale_result = submitted[0][0]()
     view.setHistogramDataBounds((0.0, 2.0))
     assert controller.refresh_histogram_plot(auto_level=False) is True
-    monkeypatch.setattr(view.histogram.item.plot, "setData", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale histogram result applied")))
+    monkeypatch.setattr(
+        view.histogram.item.plot,
+        "setData",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale histogram result applied")
+        ),
+    )
 
     submitted[0][1](stale_result)
     qt_app.processEvents()
@@ -675,7 +706,7 @@ def test_large_histogram_close_ignores_late_result_and_clears_pending(qt_app, mo
         submitted.append((fn, on_done, key))
         return SimpleNamespace(scheduled=True)
 
-    _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
     _clear_histogram_jobs(view)
     view.setBackgroundTaskSubmitter(submit)
     submitted.clear()
@@ -685,7 +716,13 @@ def test_large_histogram_close_ignores_late_result_and_clears_pending(qt_app, mo
     view.setHistogramDataBounds((0.0, 2.0))
     assert controller.refresh_histogram_plot(auto_level=False) is True
     result = submitted[0][0]()
-    monkeypatch.setattr(view.histogram.item.plot, "setData", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("late histogram result applied after close")))
+    monkeypatch.setattr(
+        view.histogram.item.plot,
+        "setData",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("late histogram result applied after close")
+        ),
+    )
 
     view.close()
     submitted[0][1](result)
@@ -700,19 +737,36 @@ def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeyp
 
     view = ImageView2D()
     data = np.ones((4, 4), dtype=float)
-    _present_tiled(view,data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+    _present_tiled(
+        view,
+        data,
+        histogramData=data,
+        histogramPlotData=np.arange(16, dtype=float),
+        levels=(0.0, 2.0),
+        histogramRange=(0.0, 2.0),
+    )
     calls = []
     monkeypatch.setattr(view.histogram, "setImageItem", lambda item: calls.append(item))
 
-    _present_tiled(view,data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
-    _present_tiled(view,data, histogramData=data, histogramPlotData=np.arange(16, dtype=float), levels=(0.0, 2.0), histogramRange=(0.0, 2.0))
+    _present_tiled(
+        view,
+        data,
+        histogramData=data,
+        histogramPlotData=np.arange(16, dtype=float),
+        levels=(0.0, 2.0),
+        histogramRange=(0.0, 2.0),
+    )
+    _present_tiled(
+        view,
+        data,
+        histogramData=data,
+        histogramPlotData=np.arange(16, dtype=float),
+        levels=(0.0, 2.0),
+        histogramRange=(0.0, 2.0),
+    )
 
     assert calls == []
     view.close()
-
-
-
-
 
 
 def test_tiled_single_tile_patch_without_histogram_plot_skips_payload_histogram_aggregation(qt_app):
@@ -733,7 +787,9 @@ def test_tiled_single_tile_patch_without_histogram_plot_skips_payload_histogram_
 
         single_hist = np.full((2, 2), 42.0, dtype=np.float32)
         payloads = {
-            0: DisplayTilePayload(0, 0, np.zeros((2, 2), dtype=np.float32), single_hist, ("single", 0)),
+            0: DisplayTilePayload(
+                0, 0, np.zeros((2, 2), dtype=np.float32), single_hist, ("single", 0)
+            ),
         }
         _present_tiled(
             view,
@@ -758,7 +814,11 @@ def test_typed_tiled_single_plane_uses_real_pyqtgraph_items(qt_app):
     from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
     from arrayscope.display.frame_planner import FramePlanner
     from arrayscope.display.imageview2d import ImageView2D
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.viewport import ViewportPolicy
 
     state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
@@ -824,12 +884,18 @@ def test_tiled_presentation_does_not_budget_ready_payload_visibility(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=3, indices=(0, 1, 2), text=":"
+        ),
         display_shape=(2, 8),
         montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 3,
@@ -874,12 +940,18 @@ def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app)
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -914,8 +986,7 @@ def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app)
         histogramRange=(0.0, 3.0),
     )
     before_images = {
-        tile: state.item.image
-        for tile, state in view._montage_tile_layer.states.items()
+        tile: state.item.image for tile, state in view._montage_tile_layer.states.items()
     }
     level_delta = TilePresentationDelta(
         structure_revision=1,
@@ -952,17 +1023,22 @@ def test_scalar_tiled_level_delta_acknowledges_without_image_replacement(qt_app)
     view.close()
 
 
-
 def test_first_typed_tiled_commit_applies_payload_pixels_and_levels_before_autolevel(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -1007,26 +1083,31 @@ def test_pyqtgraph_tiled_retarget_updates_shifted_active_payloads(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     shifted_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(1, 2), text="1:3"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=2, indices=(1, 2), text="1:3"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(1, 2), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
-    images = {
-        index: np.full((2, 2), float(index + 1), dtype=np.float32)
-        for index in range(3)
-    }
+    images = {index: np.full((2, 2), float(index + 1), dtype=np.float32) for index in range(3)}
     first_payloads = {
         0: DisplayTilePayload(0, 0, images[0], None, ("payload", 0)),
         1: DisplayTilePayload(1, 1, images[1], None, ("payload", 1)),
@@ -1096,26 +1177,31 @@ def test_pyqtgraph_tiled_retarget_shuffles_lower_range_without_overwrite(qt_app)
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(1, 2), text="1:3"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=2, indices=(1, 2), text="1:3"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(1, 2), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     shifted_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
-    images = {
-        index: np.full((2, 2), float(index + 1), dtype=np.float32)
-        for index in range(3)
-    }
+    images = {index: np.full((2, 2), float(index + 1), dtype=np.float32) for index in range(3)}
     first_payloads = {
         0: DisplayTilePayload(0, 1, images[1], None, ("payload", 1)),
         1: DisplayTilePayload(1, 2, images[2], None, ("payload", 2)),
@@ -1185,26 +1271,39 @@ def test_pyqtgraph_tiled_retarget_reuses_residents_for_cyclic_reorder(qt_app, mo
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=3, indices=(0, 1, 2), text=":"
+        ),
         display_shape=(2, 8),
         montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1),
-        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+        montage_tile_states=(
+            MontageTileState.LOADED,
+            MontageTileState.LOADED,
+            MontageTileState.LOADED,
+        ),
     )
     reordered_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(2, 0, 1), text="2,0,1"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=3, indices=(2, 0, 1), text="2,0,1"
+        ),
         display_shape=(2, 8),
         montage=MontageGeometry(indices=(2, 0, 1), tile_shape=(2, 2), columns=3, rows=1, gap=1),
-        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+        montage_tile_states=(
+            MontageTileState.LOADED,
+            MontageTileState.LOADED,
+            MontageTileState.LOADED,
+        ),
     )
-    images = {
-        index: np.full((2, 2), float(index + 1), dtype=np.float32)
-        for index in range(3)
-    }
+    images = {index: np.full((2, 2), float(index + 1), dtype=np.float32) for index in range(3)}
     first_payloads = {
         tile: DisplayTilePayload(tile, tile, images[tile], None, ("payload", tile))
         for tile in range(3)
@@ -1288,20 +1387,23 @@ def test_pyqtgraph_tiled_active_delta_repairs_resident_retarget_without_explicit
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(
+            2, columns=4, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
     )
     view = ImageView2D()
-    images = {
-        index: np.full((2, 2), float(index), dtype=np.float32)
-        for index in range(4)
-    }
+    images = {index: np.full((2, 2), float(index), dtype=np.float32) for index in range(4)}
     initial_payloads = {
         index: DisplayTilePayload(index, index, images[index], None, ("source", index))
         for index in range(4)
@@ -1363,26 +1465,31 @@ def test_pyqtgraph_fast_scroll_budget_keeps_old_slots_visible(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(
+            2, columns=4, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
     )
     jumped_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(3, 4, 5, 6), text="3:7"),
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(
+            2, columns=4, indices=(3, 4, 5, 6), text="3:7"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
     )
-    images = {
-        index: np.full((2, 2), float(index + 1), dtype=np.float32)
-        for index in range(7)
-    }
+    images = {index: np.full((2, 2), float(index + 1), dtype=np.float32) for index in range(7)}
     first_payloads = {
         tile: DisplayTilePayload(tile, tile, images[tile], None, ("payload", tile))
         for tile in range(4)
@@ -1410,10 +1517,7 @@ def test_pyqtgraph_fast_scroll_budget_keeps_old_slots_visible(qt_app):
             levels=(0.0, 7.0),
             histogramRange=(0.0, 7.0),
         )
-        original_items = {
-            tile: view._montage_tile_layer.states[tile].item
-            for tile in range(4)
-        }
+        original_items = {tile: view._montage_tile_layer.states[tile].item for tile in range(4)}
 
         report = view.setTiledPresentation(
             geometry=jumped_geometry,
@@ -1456,19 +1560,27 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
     from arrayscope.display.shader_mapping import TexturePlaneKind
 
     view = ImageView2D()
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(
+            2, columns=4, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
     )
     jumped_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(2, columns=4, indices=(3, 4, 5, 6), text="3:7"),
+        view_state=ViewState.from_shape((2, 2, 7)).with_montage_axis(
+            2, columns=4, indices=(3, 4, 5, 6), text="3:7"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
@@ -1513,10 +1625,7 @@ def test_pyqtgraph_complex_fast_scroll_budget_keeps_presentable_slots(qt_app):
             histogramRange=(0.0, 7.0),
             rgb_already_windowed=False,
         )
-        original_items = {
-            tile: view._montage_tile_layer.states[tile].item
-            for tile in range(4)
-        }
+        original_items = {tile: view._montage_tile_layer.states[tile].item for tile in range(4)}
 
         report = view.setTiledPresentation(
             geometry=jumped_geometry,
@@ -1561,13 +1670,19 @@ def test_pyqtgraph_rgb8_preview_tile_stays_windowed_after_zoom_without_exact_pay
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
     from arrayscope.display.shader_mapping import TexturePlaneKind
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((8, 8, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        view_state=ViewState.from_shape((8, 8, 1)).with_montage_axis(
+            2, columns=1, indices=(0,), text=":"
+        ),
         display_shape=(8, 8),
         montage=MontageGeometry(indices=(0,), tile_shape=(8, 8), columns=1, rows=1, gap=0),
         montage_tile_states=(MontageTileState.LOADED,),
@@ -1654,12 +1769,18 @@ def test_pyqtgraph_clean_typed_tiled_commit_stays_noop(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -1721,12 +1842,18 @@ def test_pyqtgraph_level_redraw_is_bounded_by_commit_deadline(qt_app, monkeypatc
     from arrayscope.display.backends.pyqtgraph import tiles as pyqtgraph_tiles
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
+        view_state=ViewState.from_shape((2, 2, 3)).with_montage_axis(
+            2, columns=3, indices=(0, 1, 2), text=":"
+        ),
         display_shape=(2, 8),
         montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 3,
@@ -1809,8 +1936,12 @@ def test_pyqtgraph_clean_typed_tiled_relayout_moves_existing_items(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     payloads = {
@@ -1824,13 +1955,17 @@ def test_pyqtgraph_clean_typed_tiled_relayout_moves_existing_items(qt_app):
         for index in range(4)
     }
     first_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(
+            2, columns=4, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(2, 11),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=4, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
     )
     relaid_geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(
+            2, columns=2, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(5, 5),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 4,
@@ -1891,12 +2026,18 @@ def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, mo
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -1930,7 +2071,9 @@ def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, mo
         )
         original_item = view._montage_tile_layer.states[1].item
         removed = []
-        monkeypatch.setattr(view._layer_owner, "remove_tile_item", lambda tile: removed.append(int(tile)))
+        monkeypatch.setattr(
+            view._layer_owner, "remove_tile_item", lambda tile: removed.append(int(tile))
+        )
 
         report = view.setTiledPresentation(
             geometry=geometry,
@@ -1955,8 +2098,12 @@ def test_pyqtgraph_budgeted_tiled_payload_keeps_existing_item_visible(qt_app, mo
         assert report.presented_tiles == frozenset({0, 1})
         assert report.committed_upserts == frozenset({0})
         assert 1 in view._montage_tile_layer.states
-        np.testing.assert_array_equal(view._montage_tile_layer.states[0].item.image, second_payloads[0].image)
-        np.testing.assert_array_equal(view._montage_tile_layer.states[1].item.image, first_payloads[1].image)
+        np.testing.assert_array_equal(
+            view._montage_tile_layer.states[0].item.image, second_payloads[0].image
+        )
+        np.testing.assert_array_equal(
+            view._montage_tile_layer.states[1].item.image, first_payloads[1].image
+        )
         assert view._montage_tile_layer.states[1].item is original_item
         assert view._montage_tile_layer.states[1].visible is True
         assert removed == []
@@ -1968,12 +2115,18 @@ def test_pyqtgraph_hidden_tile_reactivates_from_resident_pool_without_upload(qt_
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -2065,12 +2218,14 @@ def test_pyqtgraph_warm_residency_prepares_invisible_item_without_committing(qt_
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
-    from arrayscope.display.montage import MontageTileState
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+    from arrayscope.display.montage import MontageTileState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -2122,9 +2277,7 @@ def test_pyqtgraph_warm_residency_keeps_every_successor_holder_across_batches(qt
             2, columns=3, indices=(0, 1, 2), text=":"
         ),
         display_shape=(2, 8),
-        montage=MontageGeometry(
-            indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1
-        ),
+        montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 2), columns=3, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 3,
     )
     payloads = {
@@ -2175,9 +2328,13 @@ def test_pyqtgraph_resident_pixels_without_physical_identity_are_reacknowledged(
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
-    from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.model.tile_identity import TileIdentity
+    from arrayscope.display.montage import MontageTileState
     from arrayscope.display.shader_mapping import TexturePlaneKind
 
     view = ImageView2D()
@@ -2186,9 +2343,7 @@ def test_pyqtgraph_resident_pixels_without_physical_identity_are_reacknowledged(
             2, columns=1, indices=(0,), text=":"
         ),
         display_shape=(2, 2),
-        montage=MontageGeometry(
-            indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0
-        ),
+        montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
         montage_tile_states=(MontageTileState.LOADED,),
     )
     image = np.arange(4, dtype=np.float32).reshape(2, 2)
@@ -2259,18 +2414,26 @@ def test_pyqtgraph_residency_budget_evicts_inactive_fifo_without_evicting_active
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
     from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TilePresentationDelta,
+        TilePresentationState,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((4, 4, 3)).with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":"),
+        view_state=ViewState.from_shape((4, 4, 3)).with_montage_axis(
+            2, columns=3, indices=(0, 1, 2), text=":"
+        ),
         display_shape=(4, 14),
         montage=MontageGeometry(indices=(0, 1, 2), tile_shape=(4, 4), columns=3, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,) * 3,
     )
     payloads = {
-        index: DisplayTilePayload(index, index, np.full((4, 4), float(index), dtype=np.float32), None, ("budget", index))
+        index: DisplayTilePayload(
+            index, index, np.full((4, 4), float(index), dtype=np.float32), None, ("budget", index)
+        )
         for index in range(3)
     }
     try:
@@ -2324,7 +2487,6 @@ def test_pyqtgraph_residency_budget_evicts_inactive_fifo_without_evicting_active
         view.close()
 
 
-
 def test_tile_layer_items_use_world_positions_when_display_origin_shifted(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -2333,16 +2495,24 @@ def test_tile_layer_items_use_world_positions_when_display_origin_shifted(qt_app
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":"),
+        view_state=ViewState.from_shape((2, 2, 4)).with_montage_axis(
+            2, columns=2, indices=(0, 1, 2, 3), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=1),
         montage_origin_x=0,
         montage_origin_y=3,
-        montage_tile_states=(MontageTileState.UNLOADED, MontageTileState.UNLOADED, MontageTileState.LOADED, MontageTileState.LOADED),
+        montage_tile_states=(
+            MontageTileState.UNLOADED,
+            MontageTileState.UNLOADED,
+            MontageTileState.LOADED,
+            MontageTileState.LOADED,
+        ),
     )
     canvas = np.arange(10, dtype=float).reshape(2, 5)
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=canvas.copy(),
         histogramPlotData=None,
@@ -2363,19 +2533,35 @@ def test_graphics_layer_z_order_places_tools_above_tiles(qt_app):
     from arrayscope.core.roi import RoiKind
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-    from arrayscope.display.imageview2d import ImageView2D, MontageTileOverlay
-    from arrayscope.display.layers import Z_MONTAGE_LOADING_OVERLAY, Z_PROFILE_MARKER, Z_ROI, Z_TILE_IMAGE
+    from arrayscope.display.imageview2d import ImageView2D
+    from arrayscope.display.layers import (
+        Z_MONTAGE_LOADING_OVERLAY,
+        Z_PROFILE_MARKER,
+        Z_ROI,
+        Z_TILE_IMAGE,
+    )
     from arrayscope.display.montage import MontageTileState
+    from arrayscope.display.overlays import MontageTileOverlay
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(
+            2, columns=1, indices=(0,), text=":"
+        ),
         display_shape=(2, 2),
         montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,),
     )
     canvas = np.zeros((2, 2), dtype=float)
-    _present_tiled(view,canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=canvas,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+    )
     roi = view.createRoi(RoiKind.RECTANGLE, rect=(0, 0, 1, 1))
     view.setProfileMarker(0, 0, visible=True)
     view.setMontageTileOverlays((MontageTileOverlay(0, 0, 1, 1, "loading", "Loading"),))
@@ -2398,13 +2584,23 @@ def test_inactive_tile_layer_items_are_hidden_residents(qt_app):
 
     view = ImageView2D()
     geometry_loaded = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     canvas = np.zeros((2, 5), dtype=float)
-    _present_tiled(view,canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry_loaded, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=canvas,
+        histogramPlotData=None,
+        geometry=geometry_loaded,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+    )
     removed_item = view._montage_tile_layer.states[1].item
     geometry_one = DisplayGeometry(
         view_state=geometry_loaded.view_state,
@@ -2413,7 +2609,15 @@ def test_inactive_tile_layer_items_are_hidden_residents(qt_app):
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.UNLOADED),
     )
 
-    _present_tiled(view,canvas, histogramData=canvas, histogramPlotData=None, geometry=geometry_one, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=canvas,
+        histogramPlotData=None,
+        geometry=geometry_one,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+    )
 
     assert view._montage_tile_layer.states[1].item is removed_item
     assert removed_item.isVisible() is False
@@ -2429,7 +2633,9 @@ def test_tile_layer_clean_commit_skips_tile_and_histogram_uploads(qt_app, monkey
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
@@ -2438,7 +2644,8 @@ def test_tile_layer_clean_commit_skips_tile_and_histogram_uploads(qt_app, monkey
     hist = canvas.copy()
     plot = np.arange(16, dtype=np.float32)
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=plot,
@@ -2449,10 +2656,15 @@ def test_tile_layer_clean_commit_skips_tile_and_histogram_uploads(qt_app, monkey
 
     calls = []
     for state in view._montage_tile_layer.states.values():
-        monkeypatch.setattr(state.item, "setImage", lambda *args, **kwargs: calls.append((args, kwargs)))
-    monkeypatch.setattr(view.histogramImageItem, "setImage", lambda *args, **kwargs: calls.append((args, kwargs)))
+        monkeypatch.setattr(
+            state.item, "setImage", lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+    monkeypatch.setattr(
+        view.histogramImageItem, "setImage", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=plot,
@@ -2480,21 +2692,36 @@ def test_tile_layer_dirty_commit_updates_only_dirty_tile(qt_app, monkeypatch):
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     canvas = np.arange(10, dtype=np.float32).reshape(2, 5)
     hist = canvas.copy()
-    _present_tiled(view,canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 9.0), histogramRange=(0.0, 9.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 9.0),
+        histogramRange=(0.0, 9.0),
+    )
 
     calls = []
     for tile_number, state in view._montage_tile_layer.states.items():
-        monkeypatch.setattr(state.item, "setImage", lambda *args, tile_number=tile_number, **kwargs: calls.append(tile_number))
+        monkeypatch.setattr(
+            state.item,
+            "setImage",
+            lambda *args, tile_number=tile_number, **kwargs: calls.append(tile_number),
+        )
 
     canvas[:, 3:5] = 99
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=None,
@@ -2518,20 +2745,31 @@ def test_rgb_tile_layer_clean_commit_does_not_rewindow(qt_app):
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
     hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
-    _present_tiled(view,canvas, histogramData=hist, histogramPlotData=None, geometry=geometry, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+    )
 
     for state in view._montage_tile_layer.states.values():
         assert state.rgb_base is not None
         assert state.rgb_base.dtype == np.float32
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=None,
@@ -2550,8 +2788,6 @@ def test_rgb_tile_layer_clean_commit_does_not_rewindow(qt_app):
     view.close()
 
 
-
-
 def test_tile_layer_requires_typed_payloads(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -2560,7 +2796,9 @@ def test_tile_layer_requires_typed_payloads(qt_app):
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(
+            2, columns=1, indices=(0,), text=":"
+        ),
         display_shape=(2, 2),
         montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=0),
         montage_tile_states=(MontageTileState.LOADED,),
@@ -2581,8 +2819,6 @@ def test_tile_layer_requires_typed_payloads(qt_app):
     view.close()
 
 
-
-
 def test_tile_layer_inactive_tile_is_hidden_without_scene_removal(qt_app):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -2591,14 +2827,24 @@ def test_tile_layer_inactive_tile_is_hidden_without_scene_removal(qt_app):
 
     view = ImageView2D()
     loaded = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(2, columns=2, indices=(0, 1), text=":"),
+        view_state=ViewState.from_shape((2, 2, 2)).with_montage_axis(
+            2, columns=2, indices=(0, 1), text=":"
+        ),
         display_shape=(2, 5),
         montage=MontageGeometry(indices=(0, 1), tile_shape=(2, 2), columns=2, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADED),
     )
     canvas = np.full((2, 5, 3), 200, dtype=np.uint8)
     hist = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(2, 5)
-    _present_tiled(view,canvas, histogramData=hist, histogramPlotData=None, geometry=loaded, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=loaded,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+    )
     assert view._montage_tile_layer.states[1].rgb_base is not None
     removed_item = view._montage_tile_layer.states[1].item
 
@@ -2608,7 +2854,16 @@ def test_tile_layer_inactive_tile_is_hidden_without_scene_removal(qt_app):
         montage=loaded.montage,
         montage_tile_states=(MontageTileState.LOADED, MontageTileState.UNLOADED),
     )
-    _present_tiled(view,canvas, histogramData=hist, histogramPlotData=None, geometry=hidden, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), montage_dirty_tiles=())
+    _present_tiled(
+        view,
+        canvas,
+        histogramData=hist,
+        histogramPlotData=None,
+        geometry=hidden,
+        levels=(0.0, 1.0),
+        histogramRange=(0.0, 1.0),
+        montage_dirty_tiles=(),
+    )
     assert view._montage_tile_layer.states[1].item is removed_item
     assert removed_item.isVisible() is False
     assert removed_item.scene() is not None
@@ -2623,14 +2878,17 @@ def test_display_ready_rgb_tile_layer_level_change_keeps_uint8_item_levels(qt_ap
 
     view = ImageView2D()
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(2, columns=1, indices=(0,), text=":"),
+        view_state=ViewState.from_shape((2, 2, 1)).with_montage_axis(
+            2, columns=1, indices=(0,), text=":"
+        ),
         display_shape=(2, 2),
         montage=MontageGeometry(indices=(0,), tile_shape=(2, 2), columns=1, rows=1, gap=1),
         montage_tile_states=(MontageTileState.LOADED,),
     )
     canvas = np.full((2, 2, 3), 128, dtype=np.uint8)
     hist = np.linspace(0.0, 1.0, 4, dtype=np.float32).reshape(2, 2)
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=None,
@@ -2640,7 +2898,8 @@ def test_display_ready_rgb_tile_layer_level_change_keeps_uint8_item_levels(qt_ap
         rgb_already_windowed=True,
     )
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         canvas,
         histogramData=hist,
         histogramPlotData=None,
@@ -2657,14 +2916,15 @@ def test_display_ready_rgb_tile_layer_level_change_keeps_uint8_item_levels(qt_ap
     view.close()
 
 
-
 def test_scalar_histogram_level_drag_routes_through_tiled_level_handler(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     _seed_displayed_image(view, np.arange(16, dtype=float).reshape(4, 4), levels=(0.0, 15.0))
     applied = []
-    view.setLevelPresentationChangeHandler(lambda levels, final: applied.append((tuple(levels), bool(final))))
+    view.setLevelPresentationChangeHandler(
+        lambda levels, final: applied.append((tuple(levels), bool(final)))
+    )
 
     view.histogram.setLevels(2.0, 8.0)
     view._on_histogram_levels_changed()
@@ -2680,10 +2940,19 @@ def test_value_at_display_mapping_ignores_mismatched_histogram_source(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
-    _seed_displayed_image(view, np.ones((4, 4), dtype=float), histogramData=np.ones((4, 4), dtype=float), levels=(0.0, 2.0))
+    _seed_displayed_image(
+        view,
+        np.ones((4, 4), dtype=float),
+        histogramData=np.ones((4, 4), dtype=float),
+        levels=(0.0, 2.0),
+    )
     view.histogramSource = np.ones((8, 8), dtype=float)
 
-    value = view.valueAtDisplayMapping(ViewPointMapping(view_x=0, view_y=0, display_x=0, display_y=0, local_x=0, local_y=0, array_index=(0, 0)))
+    value = view.valueAtDisplayMapping(
+        ViewPointMapping(
+            view_x=0, view_y=0, display_x=0, display_y=0, local_x=0, local_y=0, array_index=(0, 0)
+        )
+    )
 
     assert value is None
     view.close()
@@ -2828,7 +3097,7 @@ def test_imageview_inspection_tool_validation(qt_app):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -2844,7 +3113,12 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     changed = []
     view.roiChanged.connect(lambda roi_id, geometry: changed.append((roi_id, geometry)))
 
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (4.0, 5.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonPress,
+        (4.0, 5.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert _send_viewport_mouse(
         view,
         QtCore.QEvent.Type.MouseMove,
@@ -2856,13 +3130,20 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     assert view.interactionState().capture.object_id == selection.id
     assert changed[-1][1].rect == pytest.approx((4.0, 5.0, 4.0, 5.0), abs=0.06)
 
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (6.0, 7.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonRelease,
+        (6.0, 7.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert view.interactionState().phase is PointerPhase.IDLE
-    assert dict((roi.id, roi) for roi in view.roiSelections())[selection.id].geometry.rect == pytest.approx((4.0, 5.0, 4.0, 5.0), abs=0.06)
+    assert {roi.id: roi for roi in view.roiSelections()}[
+        selection.id
+    ].geometry.rect == pytest.approx((4.0, 5.0, 4.0, 5.0), abs=0.06)
     view.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -2878,7 +3159,12 @@ def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     changed = []
     view.roiChanged.connect(lambda roi_id, geometry: changed.append((roi_id, geometry)))
 
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (21.0, 3.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonPress,
+        (21.0, 3.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert view.interactionState().phase is PointerPhase.DRAGGING
     assert view.interactionState().capture.object_id == selection.id
 
@@ -2890,13 +3176,20 @@ def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     )
 
     assert changed[-1][1].rect == pytest.approx((7.0, 2.0, 2.0, 3.0), abs=0.06)
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (9.0, 3.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonRelease,
+        (9.0, 3.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert view.interactionState().phase is PointerPhase.IDLE
-    assert dict((roi.id, roi) for roi in view.roiSelections())[selection.id].geometry.rect == pytest.approx((7.0, 2.0, 2.0, 3.0), abs=0.06)
+    assert {roi.id: roi for roi in view.roiSelections()}[
+        selection.id
+    ].geometry.rect == pytest.approx((7.0, 2.0, 2.0, 3.0), abs=0.06)
     view.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 
@@ -2918,7 +3211,7 @@ def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -2933,7 +3226,12 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     moved = []
     view.set_profile_marker_callback(lambda x, y: moved.append((x, y)))
 
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonPress, (5.0, 8.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonPress,
+        (5.0, 8.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert _send_viewport_mouse(
         view,
         QtCore.QEvent.Type.MouseMove,
@@ -2949,7 +3247,12 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     assert len(moved) == 1
     assert moved[-1] == pytest.approx((8.0, 6.0), abs=0.06)
 
-    assert _send_viewport_mouse(view, QtCore.QEvent.Type.MouseButtonRelease, (8.0, 8.0), button=QtCore.Qt.MouseButton.LeftButton)
+    assert _send_viewport_mouse(
+        view,
+        QtCore.QEvent.Type.MouseButtonRelease,
+        (8.0, 8.0),
+        button=QtCore.Qt.MouseButton.LeftButton,
+    )
     assert view.interactionState().phase is PointerPhase.IDLE
     assert view.profileMarkerPosition() == pytest.approx((8.0, 6.0), abs=0.06)
     assert len(moved) == 1
@@ -2958,12 +3261,12 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
 
 @pytest.mark.parametrize(
     ("action", "reason"),
-    (
+    [
         ("mode-change", "tool-change"),
         ("surface-reset", "surface-reset"),
         ("target-removal", "target-removed"),
         ("window-deactivate", "window-deactivate"),
-    ),
+    ],
 )
 def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
     from pyqtgraph.Qt import QtCore
@@ -2977,7 +3280,9 @@ def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
         _seed_displayed_image(view, np.zeros((20, 20), dtype=float))
         selection = view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
         assert view._begin_pointer_capture(
-            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+            InteractionTarget(
+                "roi", object_id=selection.id, part="body", geometry_kind="rectangle"
+            ),
             (4.0, 5.0),
         )
         assert view.interactionState().phase is PointerPhase.DRAGGING
@@ -3017,7 +3322,7 @@ def test_pointer_capture_is_cancelled_by_close(qt_app):
     assert view.interactionState().capture is None
 
 
-@pytest.mark.parametrize("phase", ("armed", "drawing"))
+@pytest.mark.parametrize("phase", ["armed", "drawing"])
 def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
     from pyqtgraph.Qt import QtCore
 
@@ -3052,7 +3357,7 @@ def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
         view.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_pointer_hit_testing_ignores_margin_outside_committed_frame(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -3095,14 +3400,18 @@ def test_pyqtgraph_roi_and_profile_visuals_mirror_interaction_state(qt_app):
         base_width = item.pen.widthF()
 
         state = view.interaction_controller.set_hover(
-            InteractionTarget("roi", object_id=selection.id, part="body", geometry_kind="rectangle"),
+            InteractionTarget(
+                "roi", object_id=selection.id, part="body", geometry_kind="rectangle"
+            ),
             point=(4.0, 5.0),
         )
         view.sync_interaction_state(state)
         assert item.pen.widthF() > base_width
 
         view.setProfileMarker(5.0, 6.0, visible=True)
-        state = view.interaction_controller.set_hover(InteractionTarget("profile", part="center"), point=(5.0, 6.0))
+        state = view.interaction_controller.set_hover(
+            InteractionTarget("profile", part="center"), point=(5.0, 6.0)
+        )
         view.sync_interaction_state(state)
         assert view._interaction_visual_profile_part == "center"
     finally:
@@ -3132,7 +3441,9 @@ def test_imageview_resets_view_range_when_shape_changes(qt_app):
     _seed_displayed_image(view, np.zeros((8, 10), dtype=float))
     view.getView().setRange(xRange=(2, 5), yRange=(1, 6), padding=0)
 
-    _seed_displayed_image(view, np.ones((4, 5), dtype=float), viewport_policy=ViewportPolicy.RESET_FOR_NEW_SHAPE)
+    _seed_displayed_image(
+        view, np.ones((4, 5), dtype=float), viewport_policy=ViewportPolicy.RESET_FOR_NEW_SHAPE
+    )
     after = view.getView().viewRange()
 
     assert after != [[2.0, 5.0], [1.0, 6.0]]
@@ -3274,7 +3585,6 @@ def test_imageview_prevents_vertical_panning_content_fully_out_of_view(qt_app):
         view.close()
 
 
-
 def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
     from arrayscope.display.imageview2d import ImageView2D
 
@@ -3282,13 +3592,15 @@ def test_programmatic_presentation_does_not_emit_user_level_signal(qt_app):
     user_calls = []
     view.userLevelsChanged.connect(lambda: user_calls.append(True))
 
-    _present_tiled(view,
+    _present_tiled(
+        view,
         np.zeros((4, 4), dtype=float),
         histogramData=np.zeros((4, 4), dtype=float),
         levels=(2.0, 8.0),
         histogramRange=(0.0, 10.0),
     )
-    _present_tiled(view,
+    _present_tiled(
+        view,
         np.ones((4, 4), dtype=float),
         histogramData=np.ones((4, 4), dtype=float),
         levels=(1.0, 9.0),
@@ -3315,8 +3627,9 @@ def test_explicit_set_levels_emits_user_level_signal(qt_app):
 
 
 def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
@@ -3341,14 +3654,15 @@ def test_histogram_drag_preview_emits_user_level_once_on_finish(qt_app):
 
 
 def test_histogram_finish_does_not_repeat_an_already_applied_preview(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
     applied = []
-    view._apply_histogram_preview_levels = (
-        lambda levels, *, final=False: applied.append((tuple(float(value) for value in levels), bool(final)))
+    view._apply_histogram_preview_levels = lambda levels, *, final=False: applied.append(
+        (tuple(float(value) for value in levels), bool(final))
     )
 
     with QtCore.QSignalBlocker(view.histogram.item):
@@ -3361,8 +3675,9 @@ def test_histogram_finish_does_not_repeat_an_already_applied_preview(qt_app):
 
 
 def test_histogram_finish_reapplies_target_after_programmatic_level_change(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     _seed_displayed_image(view, np.zeros((4, 4), dtype=float), levels=(0.0, 1.0))
@@ -3402,7 +3717,9 @@ def test_adaptive_histogram_uses_coarser_bins_when_zoomed_out(qt_app):
         view.show()
         qt_app.processEvents()
         data = np.linspace(0.0, 100.0, 10_000, dtype=float).reshape(100, 100)
-        _present_tiled(view,data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0))
+        _present_tiled(
+            view, data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0)
+        )
         view.histogram.item.vb.setYRange(0.0, 100.0, padding=0)
         view._refresh_histogram_plot(auto_level=False)
 
@@ -3423,7 +3740,9 @@ def test_adaptive_histogram_increases_detail_when_zoomed_in(qt_app):
         view.show()
         qt_app.processEvents()
         data = np.linspace(0.0, 100.0, 10_000, dtype=float).reshape(100, 100)
-        _present_tiled(view,data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0))
+        _present_tiled(
+            view, data, histogramData=data, levels=(10.0, 90.0), histogramRange=(0.0, 100.0)
+        )
 
         view.histogram.item.vb.setYRange(0.0, 100.0, padding=0)
         view._refresh_histogram_plot(auto_level=False)
@@ -3446,7 +3765,7 @@ def test_adaptive_histogram_falls_back_for_degenerate_bounds(qt_app):
     view = ImageView2D()
     try:
         data = np.zeros((8, 8), dtype=float)
-        _present_tiled(view,data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
+        _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
 
         histogram = adaptive_histogram_for_view(
             view.histogramImageItem,
@@ -3474,14 +3793,16 @@ def test_adaptive_histogram_auto_level_refresh_updates_display_levels(qt_app):
         view._histogram_display_controller.refresh_histogram_plot(auto_level=True)
 
         assert tuple(float(value) for value in view.getLevels()) == (0.0, 15.0)
-        assert applied and applied[-1] == (0.0, 15.0)
+        assert applied
+        assert applied[-1] == (0.0, 15.0)
     finally:
         view.close()
 
 
 def test_histogram_native_double_click_between_limits_requests_auto_window(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore, QtTest
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -3496,7 +3817,9 @@ def test_histogram_native_double_click_between_limits_requests_auto_window(qt_ap
         graphics_view = view.histogram.item.vb.scene().views()[0]
         viewport_pos = graphics_view.mapFromScene(scene_pos)
 
-        QtTest.QTest.mouseDClick(graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=viewport_pos)
+        QtTest.QTest.mouseDClick(
+            graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=viewport_pos
+        )
         qt_app.processEvents()
 
         assert calls == [True]
@@ -3505,8 +3828,9 @@ def test_histogram_native_double_click_between_limits_requests_auto_window(qt_ap
 
 
 def test_histogram_release_pair_between_limits_requests_auto_window(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore, QtTest
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
 
@@ -3559,8 +3883,9 @@ def test_histogram_release_pair_between_limits_requests_auto_window(qt_app):
 
 
 def test_histogram_span_edit_waits_for_double_click_window(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore, QtTest, QtWidgets
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -3581,8 +3906,9 @@ def test_histogram_span_edit_waits_for_double_click_window(qt_app):
 
 
 def test_histogram_native_double_click_in_lut_area_requests_auto_window(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore, QtTest
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -3596,7 +3922,9 @@ def test_histogram_native_double_click_in_lut_area_requests_auto_window(qt_app):
         graphics_view = view.histogram.item.vb.scene().views()[0]
         pos = graphics_view.viewport().rect().center()
 
-        QtTest.QTest.mouseDClick(graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=pos)
+        QtTest.QTest.mouseDClick(
+            graphics_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=pos
+        )
         qt_app.processEvents()
 
         assert calls == [True]
@@ -3605,8 +3933,9 @@ def test_histogram_native_double_click_in_lut_area_requests_auto_window(qt_app):
 
 
 def test_histogram_viewport_double_click_filter_requests_auto_window(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore, QtGui
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -3685,8 +4014,9 @@ def test_histogram_limit_popup_escape_restores_without_user_signal(qt_app):
 
 
 def test_histogram_span_popup_keeps_clicked_value_anchored(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
     try:
@@ -3707,7 +4037,6 @@ def _axis_overlap(view_range, content_range) -> float:
     view_start, view_end = sorted((float(view_range[0]), float(view_range[1])))
     content_start, content_end = sorted((float(content_range[0]), float(content_range[1])))
     return max(0.0, min(view_end, content_end) - max(view_start, content_start))
-
 
 
 def test_close_cancels_queued_histogram_refresh(qt_app, monkeypatch):

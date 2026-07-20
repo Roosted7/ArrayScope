@@ -41,9 +41,17 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
 
     for entry in operation_entries():
         operation = samples[entry.id]
-        op_shape = (4, 5, 2) if entry.id == "combine_real_imag" else (4, 5, 1) if entry.id == "split_complex" else shape
+        op_shape = (
+            (4, 5, 2)
+            if entry.id == "combine_real_imag"
+            else (4, 5, 1)
+            if entry.id == "split_complex"
+            else shape
+        )
         op_dtype = np.dtype(np.complex64) if entry.id == "split_complex" else dtype
-        assert operation.output_dtype(op_dtype) is None or isinstance(np.dtype(operation.output_dtype(op_dtype)), np.dtype)
+        assert operation.output_dtype(op_dtype) is None or isinstance(
+            np.dtype(operation.output_dtype(op_dtype)), np.dtype
+        )
         capabilities = operation.capabilities(op_shape, op_dtype)
         assert isinstance(capabilities.kind, OperationKind)
 
@@ -59,7 +67,10 @@ def test_fft_declares_blocking_expanded_axis_and_stage_cache():
     assert CenteredIFFT(axis=1).capabilities((4, 8, 16), np.float32).cache_stage is True
 
 
-@pytest.mark.parametrize("operation", [Mean(axis=1), Sum(axis=1), Maximum(axis=1), Minimum(axis=1), RootSumSquares(axis=1)])
+@pytest.mark.parametrize(
+    "operation",
+    [Mean(axis=1), Sum(axis=1), Maximum(axis=1), Minimum(axis=1), RootSumSquares(axis=1)],
+)
 def test_reductions_declare_blocking_and_expanded_axis(operation):
     capabilities = operation.capabilities((4, 8, 16), np.float32)
 
@@ -68,7 +79,9 @@ def test_reductions_declare_blocking_and_expanded_axis(operation):
     assert capabilities.expands_request_axes == (1,)
 
 
-@pytest.mark.parametrize("operation", [Crop(axis=1, start=1, stop=4), ReverseAxis(axis=1), FFTShift(axis=1)])
+@pytest.mark.parametrize(
+    "operation", [Crop(axis=1, start=1, stop=4), ReverseAxis(axis=1), FFTShift(axis=1)]
+)
 def test_view_operations_are_fusible_without_blocking_axes(operation):
     capabilities = operation.capabilities((4, 8, 16), np.float32)
 
@@ -84,7 +97,7 @@ def test_complex_conversion_dtype_declarations_match_current_behavior():
 
 
 def test_capabilities_validate_axes_through_existing_shape_rules():
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="out of bounds"):
         CenteredFFT(axis=4).capabilities((4, 8, 16), np.float32)
 
 
@@ -92,7 +105,7 @@ def test_capabilities_validate_axes_through_existing_shape_rules():
 
 
 @pytest.mark.parametrize(
-    "operation, commutes",
+    ("operation", "commutes"),
     [
         (Conjugate(), True),
         (CenteredFFT(axis=2), False),
@@ -130,12 +143,20 @@ def test_pipeline_commutes_for_display_lod_requires_every_stage_to_commute():
 
     shape = (4, 8, 16)
     assert pipeline_commutes_for_display_lod((Conjugate(),), shape, np.complex64) is True
-    assert pipeline_commutes_for_display_lod((Conjugate(), Conjugate()), shape, np.complex64) is True
+    assert (
+        pipeline_commutes_for_display_lod((Conjugate(), Conjugate()), shape, np.complex64) is True
+    )
     # One non-commuting stage poisons the whole pipeline.
-    assert pipeline_commutes_for_display_lod((Conjugate(), CenteredFFT(axis=2)), shape, np.complex64) is False
+    assert (
+        pipeline_commutes_for_display_lod((Conjugate(), CenteredFFT(axis=2)), shape, np.complex64)
+        is False
+    )
     assert pipeline_commutes_for_display_lod((CenteredFFT(axis=2),), shape, np.float32) is False
     # Shape-changing steps are rejected even when otherwise cheap.
-    assert pipeline_commutes_for_display_lod((Crop(axis=1, start=1, stop=4),), shape, np.float32) is False
+    assert (
+        pipeline_commutes_for_display_lod((Crop(axis=1, start=1, stop=4),), shape, np.float32)
+        is False
+    )
     # Capability-less callables are conservatively non-commuting.
     assert pipeline_commutes_for_display_lod((object(),), shape, np.float32) is False
     assert pipeline_commutes_for_display_lod((), shape, np.float32) is True
@@ -151,12 +172,15 @@ def test_fft_pipeline_is_reduced_input_suitable_without_lod_commuting():
     operations = (CenteredFFT(axis=1),)
 
     assert pipeline_commutes_for_display_lod(operations, shape, np.float32) is False
-    assert pipeline_supports_reduced_display_lod(
-        operations,
-        shape,
-        np.float32,
-        display_axes=(0, 1),
-    ) is True
+    assert (
+        pipeline_supports_reduced_display_lod(
+            operations,
+            shape,
+            np.float32,
+            display_axes=(0, 1),
+        )
+        is True
+    )
 
 
 def test_pipeline_windowable_display_axes_raw_and_elementwise_chains():
@@ -192,9 +216,10 @@ def test_pipeline_windowable_display_axes_is_conservative():
 
     shape = (4, 8, 16)
     # Shape-changing steps disqualify everything (axis identity drifts).
-    assert pipeline_windowable_display_axes(
-        (Mean(axis=0),), shape, np.float32, display_axes=(1, 2)
-    ) == ()
+    assert (
+        pipeline_windowable_display_axes((Mean(axis=0),), shape, np.float32, display_axes=(1, 2))
+        == ()
+    )
     # Coordinate-remapping view steps on a display axis are excluded in v1
     # even though required_input_region could window them.
     assert pipeline_windowable_display_axes(
@@ -204,9 +229,9 @@ def test_pipeline_windowable_display_axes_is_conservative():
         (FFTShift(axis=2),), shape, np.float32, display_axes=(1, 2)
     ) == (1,)
     # Capability-less objects poison the chain.
-    assert pipeline_windowable_display_axes(
-        (object(),), shape, np.float32, display_axes=(1, 2)
-    ) == ()
+    assert (
+        pipeline_windowable_display_axes((object(),), shape, np.float32, display_axes=(1, 2)) == ()
+    )
 
 
 def test_operation_execution_class_covers_the_endpoint_table():
@@ -214,16 +239,36 @@ def test_operation_execution_class_covers_the_endpoint_table():
 
     shape = (4, 8, 16)
     # Coordinate metadata: moving/relabelling samples, never copying values.
-    assert operation_execution_class(Crop(axis=1, start=1, stop=4), shape, np.float32) is OperationClass.COORDINATE_METADATA
-    assert operation_execution_class(ReverseAxis(axis=0), shape, np.float32) is OperationClass.COORDINATE_METADATA
-    assert operation_execution_class(FFTShift(axis=2), shape, np.float32) is OperationClass.COORDINATE_METADATA
-    assert operation_execution_class(SplitComplexAxis(axis=0), (1, 8, 16), np.complex64) is OperationClass.COORDINATE_METADATA
+    assert (
+        operation_execution_class(Crop(axis=1, start=1, stop=4), shape, np.float32)
+        is OperationClass.COORDINATE_METADATA
+    )
+    assert (
+        operation_execution_class(ReverseAxis(axis=0), shape, np.float32)
+        is OperationClass.COORDINATE_METADATA
+    )
+    assert (
+        operation_execution_class(FFTShift(axis=2), shape, np.float32)
+        is OperationClass.COORDINATE_METADATA
+    )
+    assert (
+        operation_execution_class(SplitComplexAxis(axis=0), (1, 8, 16), np.complex64)
+        is OperationClass.COORDINATE_METADATA
+    )
     # Cheap pointwise value maps sample-time work.
-    assert operation_execution_class(Conjugate(), shape, np.complex64) is OperationClass.SHADER_ON_READ
+    assert (
+        operation_execution_class(Conjugate(), shape, np.complex64) is OperationClass.SHADER_ON_READ
+    )
     # Reductions return small results.
     assert operation_execution_class(Mean(axis=0), shape, np.float32) is OperationClass.REDUCTION
-    assert operation_execution_class(RootSumSquares(axis=0), shape, np.float32) is OperationClass.REDUCTION
+    assert (
+        operation_execution_class(RootSumSquares(axis=0), shape, np.float32)
+        is OperationClass.REDUCTION
+    )
     # Whole-axis transforms are cost-model territory.
-    assert operation_execution_class(CenteredFFT(axis=1), shape, np.complex64) is OperationClass.GLOBAL_TRANSFORM
+    assert (
+        operation_execution_class(CenteredFFT(axis=1), shape, np.complex64)
+        is OperationClass.GLOBAL_TRANSFORM
+    )
     # Anything undeclared stays opaque CPU materialization.
     assert operation_execution_class(object(), shape, np.float32) is OperationClass.OPAQUE

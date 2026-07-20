@@ -2,20 +2,22 @@
 """
 Command-line interface for arrayscope.
 """
+
 import argparse
 import atexit
-import numpy as np
 from pathlib import Path
-from arrayscope.app.launch import arrayscope
-from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector, MatDatasetSelector
-from arrayscope.io.file_interpreters import consume_handoff_file, data_file_suffix, load_path
-from arrayscope.core.trace import close_trace, configure_trace
 
+from arrayscope.app.launch import arrayscope
+from arrayscope.core.trace import close_trace, configure_trace
+from arrayscope.io.file_interpreters import consume_handoff_file, data_file_suffix, load_path
+from arrayscope.io.selectors import H5DatasetSelector, MatDatasetSelector, NpzDatasetSelector
 
 _CLI_WINDOWS = []
 
 
-def _open_array_window(*, data, title, block, filepath, dataset_path=None, selector_class_name=None, axes=None):
+def _open_array_window(
+    *, data, title, block, filepath, dataset_path=None, selector_class_name=None, axes=None
+):
     if block:
         return arrayscope(
             data=data,
@@ -47,17 +49,23 @@ def _run_cli_event_loop():
 
 
 def _selector_for_suffix(filepath, suffix):
-    if suffix in ['.h5', '.hdf5']:
+    if suffix in [".h5", ".hdf5"]:
         return H5DatasetSelector(filepath)
-    if suffix == '.npz':
+    if suffix == ".npz":
         return NpzDatasetSelector(filepath)
-    if suffix == '.mat':
+    if suffix == ".mat":
         return MatDatasetSelector(filepath)
     return None
 
 
-def _open_loaded_file(filepath: Path, *, block: bool, mmap: bool = False,
-                      consume: bool = False, title: str = None) -> bool:
+def _open_loaded_file(
+    filepath: Path,
+    *,
+    block: bool,
+    mmap: bool = False,
+    consume: bool = False,
+    title: str | None = None,
+) -> bool:
     loaded = load_path(filepath, mmap=mmap)
     if consume:
         # Loaded (or mapped) — the handoff file can go. On POSIX unlinking a
@@ -66,12 +74,17 @@ def _open_loaded_file(filepath: Path, *, block: bool, mmap: bool = False,
         consume_handoff_file(filepath)
     if title is None:
         title = filepath.name or str(filepath)
-        detected_format = loaded.metadata.get('detected_format')
+        detected_format = loaded.metadata.get("detected_format")
         if detected_format:
-            suffix = ", lazy" if loaded.metadata.get('lazy') else ""
+            suffix = ", lazy" if loaded.metadata.get("lazy") else ""
             title = f"{title} [{detected_format}{suffix}]"
-    _open_array_window(data=loaded.data, title=title, block=block, filepath=filepath,
-                       axes=getattr(loaded, "axes", None))
+    _open_array_window(
+        data=loaded.data,
+        title=title,
+        block=block,
+        filepath=filepath,
+        axes=getattr(loaded, "axes", None),
+    )
     return not block
 
 
@@ -104,8 +117,8 @@ def _open_selector_file(filepath: Path, selector, *, block: bool) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog='arrayscope',
-        description='Interactive N-dimensional array viewer',
+        prog="arrayscope",
+        description="Interactive N-dimensional array viewer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -120,19 +133,28 @@ Examples:
   arrayscope --mmap --consume handoff.npy  # Language-wrapper handoff (Julia/MATLAB)
 
 For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatically appear.
-        """
+        """,
     )
-    parser.add_argument('files', type=str, nargs='+',
-                        help='Path(s) to data files or DICOM directories')
-    parser.add_argument('--title', type=str, default=None,
-                        help='Window title override for single-dataset files')
-    parser.add_argument('--mmap', action='store_true',
-                        help='Memory-map .npy files (copy-on-write) instead of an eager read')
-    parser.add_argument('--consume', action='store_true',
-                        help='Delete the input file once loaded (for temporary handoff files '
-                             'written by the Julia/MATLAB wrappers; best effort)')
-    parser.add_argument('--trace', default=None,
-                        help='Write structured render/kernel/presentation events to JSONL')
+    parser.add_argument(
+        "files", type=str, nargs="+", help="Path(s) to data files or DICOM directories"
+    )
+    parser.add_argument(
+        "--title", type=str, default=None, help="Window title override for single-dataset files"
+    )
+    parser.add_argument(
+        "--mmap",
+        action="store_true",
+        help="Memory-map .npy files (copy-on-write) instead of an eager read",
+    )
+    parser.add_argument(
+        "--consume",
+        action="store_true",
+        help="Delete the input file once loaded (for temporary handoff files "
+        "written by the Julia/MATLAB wrappers; best effort)",
+    )
+    parser.add_argument(
+        "--trace", default=None, help="Write structured render/kernel/presentation events to JSONL"
+    )
 
     args = parser.parse_args()
 
@@ -152,42 +174,58 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
     if args.trace:
         configure_trace(args.trace)
         atexit.register(close_trace)
-    
+
     block_each = len(args.files) == 1
     needs_event_loop = False
 
     for file_arg in args.files:
         filepath = Path(file_arg)
-        
+
         if not filepath.exists():
             print(f"Error: File not found: {filepath}")
             continue
-        
+
         try:
             suffix = data_file_suffix(filepath)
             # Single-dataset formats and DICOM directories are handled by file_interpreters.load_path
-            if filepath.is_dir() or suffix in ['.npy', '.rec', '.cfl', '.dcm', '.nii', '.nii.gz', '.txt']:
-                needs_event_loop = _open_loaded_file(
-                    filepath,
-                    block=block_each,
-                    mmap=args.mmap,
-                    consume=args.consume,
-                    title=args.title,
-                ) or needs_event_loop
+            if filepath.is_dir() or suffix in [
+                ".npy",
+                ".rec",
+                ".cfl",
+                ".dcm",
+                ".nii",
+                ".nii.gz",
+                ".txt",
+            ]:
+                needs_event_loop = (
+                    _open_loaded_file(
+                        filepath,
+                        block=block_each,
+                        mmap=args.mmap,
+                        consume=args.consume,
+                        title=args.title,
+                    )
+                    or needs_event_loop
+                )
                 continue
-            
+
             # Multi-dataset formats - use selectors
             selector = _selector_for_suffix(filepath, suffix)
             if selector is None:
-                print(f"Unsupported file type: {suffix}. Supported types: directories with DICOM .dcm files, .h5, .hdf5, .npy, .npz, .mat, .REC, .cfl, .dcm, .nii, .nii.gz, .txt")
+                print(
+                    f"Unsupported file type: {suffix}. Supported types: directories with DICOM .dcm files, .h5, .hdf5, .npy, .npz, .mat, .REC, .cfl, .dcm, .nii, .nii.gz, .txt"
+                )
                 continue
-            
+
             # Select and view dataset (shows GUI if multiple datasets)
-            needs_event_loop = _open_selector_file(filepath, selector, block=block_each) or needs_event_loop
-            
+            needs_event_loop = (
+                _open_selector_file(filepath, selector, block=block_each) or needs_event_loop
+            )
+
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
             import traceback
+
             traceback.print_exc()
             continue
 
@@ -195,5 +233,5 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
         _run_cli_event_loop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

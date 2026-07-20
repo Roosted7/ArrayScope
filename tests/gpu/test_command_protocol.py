@@ -32,7 +32,9 @@ def test_display_mapping_rejects_empty_levels_window():
 
 
 def test_tile_instance_normalizes_and_clamps():
-    tile = TileInstance(dst_rect=(0, 0, 1, 1), src_origin=(10, 20), src_size=(256, 128), lod_level=-3)
+    tile = TileInstance(
+        dst_rect=(0, 0, 1, 1), src_origin=(10, 20), src_size=(256, 128), lod_level=-3
+    )
     assert tile.dst_rect == (0.0, 0.0, 1.0, 1.0)
     assert tile.src_origin == (10.0, 20.0)
     assert tile.lod_level == 0
@@ -52,7 +54,8 @@ def test_histogram_command_dynamic_bounds_and_mapping_are_validated():
     command = DispatchHistogram(
         keys=(), lo=None, hi=None, mode="real", scale="symlog", symlog_constant=2.0
     )
-    assert command.lo is None and command.hi is None
+    assert command.lo is None
+    assert command.hi is None
     with pytest.raises(ValueError, match="both be set or both be omitted"):
         DispatchHistogram(keys=(), lo=None, hi=1.0)
     with pytest.raises(ValueError, match="mapping mode"):
@@ -72,11 +75,7 @@ def test_content_plane_validates_shape_and_representation():
 
 
 def test_lod_generation_command_freezes_and_validates_page_keys():
-    sources = [
-        plane_chunk_key("doc", "op", 0, cx, cy)
-        for cy in range(2)
-        for cx in range(2)
-    ]
+    sources = [plane_chunk_key("doc", "op", 0, cx, cy) for cy in range(2) for cx in range(2)]
     destination = plane_chunk_key("doc", "op", 1, 0, 0)
     command = GenerateLodPages(sources, destination)
     assert command.source_keys == tuple(sources)

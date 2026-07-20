@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from math import prod
 
 import numpy as np
 
 from arrayscope.gpu.keys import DataChunkKey
-
 
 DEFAULT_HISTOGRAM_BINS = 64
 DEFAULT_REPRESENTATIVE_SAMPLE_LIMIT = 512
@@ -19,10 +19,7 @@ def chunk_summary_storage_nbytes(bins: int = DEFAULT_HISTOGRAM_BINS) -> int:
     """Accounted array storage for one summary (counts + bin edges)."""
 
     bins = max(1, int(bins))
-    return int(
-        bins * np.dtype(np.float64).itemsize
-        + (bins + 1) * np.dtype(np.float32).itemsize
-    )
+    return int(bins * np.dtype(np.float64).itemsize + (bins + 1) * np.dtype(np.float32).itemsize)
 
 
 @dataclass(frozen=True)
@@ -51,9 +48,7 @@ class ChunkHistogramSummary:
         edges.setflags(write=False)
         object.__setattr__(self, "counts", counts)
         object.__setattr__(self, "bin_edges", edges)
-        object.__setattr__(
-            self, "stored_finite_count", max(0, int(self.stored_finite_count))
-        )
+        object.__setattr__(self, "stored_finite_count", max(0, int(self.stored_finite_count)))
         object.__setattr__(self, "source_weight", max(0.0, float(self.source_weight)))
         if self.bounds is not None:
             low, high = (float(self.bounds[0]), float(self.bounds[1]))
@@ -228,9 +223,7 @@ def aggregate_chunk_summaries(
     sample_limit = max(1, int(sample_limit))
     frontier = chunk_summary_frontier(summaries)
     populated = tuple(
-        item
-        for item in frontier
-        if item.bounds is not None and item.source_weight > 0.0
+        item for item in frontier if item.bounds is not None and item.source_weight > 0.0
     )
     if not populated:
         edges = np.linspace(0.0, 1.0, bins + 1, dtype=np.float32)
@@ -320,20 +313,16 @@ def _coarse_first_key_for_key(key: DataChunkKey) -> tuple[object, ...]:
 
 def _strictly_finer(candidate: DataChunkKey, parent: DataChunkKey) -> bool:
     child = tuple(
-        int(candidate.lod.reduction[axis])
-        if axis < len(candidate.lod.reduction)
-        else 0
+        int(candidate.lod.reduction[axis]) if axis < len(candidate.lod.reduction) else 0
         for axis in range(candidate.rank)
     )
     coarse = tuple(
-        int(parent.lod.reduction[axis])
-        if axis < len(parent.lod.reduction)
-        else 0
+        int(parent.lod.reduction[axis]) if axis < len(parent.lod.reduction) else 0
         for axis in range(parent.rank)
     )
     return bool(
         len(child) == len(coarse)
-        and all(fine <= broad for fine, broad in zip(child, coarse))
+        and all(fine <= broad for fine, broad in zip(child, coarse, strict=False))
         and child != coarse
     )
 
@@ -373,16 +362,12 @@ def _rect_fully_covered(parent, children) -> bool:
     )
     if not clipped:
         return False
-    y_edges = sorted(
-        {parent[0], parent[1], *(value for rect in clipped for value in rect[:2])}
-    )
-    x_edges = sorted(
-        {parent[2], parent[3], *(value for rect in clipped for value in rect[2:])}
-    )
-    for y0, y1 in zip(y_edges, y_edges[1:]):
+    y_edges = sorted({parent[0], parent[1], *(value for rect in clipped for value in rect[:2])})
+    x_edges = sorted({parent[2], parent[3], *(value for rect in clipped for value in rect[2:])})
+    for y0, y1 in itertools.pairwise(y_edges):
         if y0 < parent[0] or y1 > parent[1] or y1 <= y0:
             continue
-        for x0, x1 in zip(x_edges, x_edges[1:]):
+        for x0, x1 in itertools.pairwise(x_edges):
             if x0 < parent[2] or x1 > parent[3] or x1 <= x0:
                 continue
             if not any(
@@ -393,9 +378,7 @@ def _rect_fully_covered(parent, children) -> bool:
     return True
 
 
-def _representative_sample(
-    counts: np.ndarray, edges: np.ndarray, *, limit: int
-) -> np.ndarray:
+def _representative_sample(counts: np.ndarray, edges: np.ndarray, *, limit: int) -> np.ndarray:
     total = float(np.sum(counts, dtype=np.float64))
     if total <= 0.0:
         return np.asarray((), dtype=np.float32)
@@ -405,8 +388,7 @@ def _representative_sample(
     indices = np.searchsorted(cumulative, positions, side="left")
     indices = np.clip(indices, 0, counts.size - 1)
     centers = (
-        np.asarray(edges[:-1], dtype=np.float64)
-        + np.asarray(edges[1:], dtype=np.float64)
+        np.asarray(edges[:-1], dtype=np.float64) + np.asarray(edges[1:], dtype=np.float64)
     ) * 0.5
     return np.asarray(centers[indices], dtype=np.float32)
 
@@ -434,9 +416,7 @@ def _rebin_counts(counts, source_edges, target_edges) -> np.ndarray:
         np.asarray(counts, dtype=np.float64)[:, np.newaxis] * (overlap / widths),
         axis=0,
     )
-    lost = float(
-        np.sum(counts, dtype=np.float64) - np.sum(transferred, dtype=np.float64)
-    )
+    lost = float(np.sum(counts, dtype=np.float64) - np.sum(transferred, dtype=np.float64))
     if abs(lost) > np.finfo(np.float64).eps * max(1.0, float(np.sum(counts))):
         # Float32 edge roundoff can leave an endpoint-sized sliver. Preserve
         # mass in the nearest edge bin instead of silently losing evidence.
@@ -445,12 +425,12 @@ def _rebin_counts(counts, source_edges, target_edges) -> np.ndarray:
 
 
 __all__ = [
+    "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "ChunkHistogramAggregate",
     "ChunkHistogramSummary",
-    "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "aggregate_chunk_summaries",
-    "chunk_summary_frontier",
     "chunk_key_frontier",
+    "chunk_summary_frontier",
     "chunk_summary_storage_nbytes",
     "representative_sample_from_histogram",
     "summarize_chunk",

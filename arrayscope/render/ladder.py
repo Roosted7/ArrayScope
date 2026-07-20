@@ -138,7 +138,9 @@ class LodLadder:
         steps: list[RungStep] = []
 
         presented = state.presented_level
-        presented_preview = str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
+        presented_preview = (
+            str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
+        )
         resident = frozenset(int(level) for level in state.resident_levels)
         ready = None if state.ready_level is None else int(state.ready_level)
         ready_preview = str(state.ready_quality or "") in {"preview", "fallback"}
@@ -167,8 +169,10 @@ class LodLadder:
         # pipelines; non-commuting but reduced-input-suitable transforms use
         # the shared transform-preview path outside this ladder.
         preview_target_has_finer_followup = desired < max(0, int(policy.preview_level))
-        cheap_pre_native = bool(state.allow_preview) and preview_target_has_finer_followup and (
-            policy.reduced_input_available or state.floor_available
+        cheap_pre_native = (
+            bool(state.allow_preview)
+            and preview_target_has_finer_followup
+            and (policy.reduced_input_available or state.floor_available)
         )
 
         # 1) FLOOR — only while the tile has nothing committable at all.
@@ -216,13 +220,13 @@ class LodLadder:
         # memory/eviction policy; the ladder must keep camera-only zooms from
         # churning materialization and presentation.
         ready_satisfies_display_demand = bool(
-            ready is not None
-            and not ready_preview
-            and ready == desired
+            ready is not None and not ready_preview and ready == desired
         )
-        desired_resident = ready_satisfies_display_demand or (
-            desired in resident and not presented_preview
-        ) or (presented == desired and not presented_preview)
+        desired_resident = (
+            ready_satisfies_display_demand
+            or (desired in resident and not presented_preview)
+            or (presented == desired and not presented_preview)
+        )
         if presented is not None and int(presented) <= desired and not presented_preview:
             desired_resident = True
         if not desired_resident and (desired > 0 or desired < finest_available()):
@@ -245,11 +249,7 @@ class LodLadder:
                     rung=Rung.DESIRED,
                     level=desired,
                     reduce_from_native=not policy.reduced_input_available,
-                    lane=(
-                        Lane.DISPLAY_PREPARATION
-                        if has_first_pixel
-                        else Lane.DISPLAY_PREVIEW
-                    ),
+                    lane=(Lane.DISPLAY_PREPARATION if has_first_pixel else Lane.DISPLAY_PREVIEW),
                     priority=(
                         Priority.VISIBLE_IMAGE
                         if presented is None or presented not in acceptable
@@ -303,7 +303,10 @@ class LodLadder:
     # ------------------------------------------------------------- helpers
 
     def _native_only_plan(self, state: TileLodState) -> tuple[RungStep, ...]:
-        ready_native = state.ready_level == 0 and str(state.ready_quality or "") not in {"preview", "fallback"}
+        ready_native = state.ready_level == 0 and str(state.ready_quality or "") not in {
+            "preview",
+            "fallback",
+        }
         if state.presented_level == 0 or 0 in set(state.resident_levels) or ready_native:
             return ()
         return (

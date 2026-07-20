@@ -5,7 +5,6 @@ from pathlib import Path
 
 import arrayscope
 
-
 ROOT = Path(__file__).parents[2]
 
 # Handler types that can swallow a dead internal import.  ImportError and
@@ -33,7 +32,7 @@ def test_every_arrayscope_module_imports():
     for module_name in modules:
         try:
             importlib.import_module(module_name)
-        except BaseException as exc:  # noqa: BLE001 - the guard reports every broken module
+        except BaseException as exc:
             failures.append(f"{module_name}: {type(exc).__name__}: {exc}")
     assert failures == []
 
@@ -43,8 +42,7 @@ def _handler_swallows_imports(handler: ast.ExceptHandler) -> bool:
         return True
     types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
     return any(
-        isinstance(node, ast.Name) and node.id in _SWALLOWING_HANDLER_NAMES
-        for node in types
+        isinstance(node, ast.Name) and node.id in _SWALLOWING_HANDLER_NAMES for node in types
     )
 
 
@@ -62,15 +60,19 @@ def swallowed_internal_imports(root: Path) -> list[str]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Try):
                 continue
-            internal_imports = []
-            for statement in node.body:
-                for child in ast.walk(statement):
-                    if isinstance(child, ast.ImportFrom) and str(child.module or "").startswith("arrayscope"):
-                        internal_imports.append(child)
-                    elif isinstance(child, ast.Import) and any(
-                        alias.name.startswith("arrayscope") for alias in child.names
-                    ):
-                        internal_imports.append(child)
+            internal_imports = [
+                child
+                for statement in node.body
+                for child in ast.walk(statement)
+                if (
+                    isinstance(child, ast.ImportFrom)
+                    and str(child.module or "").startswith("arrayscope")
+                )
+                or (
+                    isinstance(child, ast.Import)
+                    and any(alias.name.startswith("arrayscope") for alias in child.names)
+                )
+            ]
             if not internal_imports:
                 continue
             for handler in node.handlers:
@@ -83,8 +85,10 @@ def swallowed_internal_imports(root: Path) -> list[str]:
                 )
                 if reported_or_raised:
                     continue
-                for imported in internal_imports:
-                    offenders.append(f"{path.relative_to(root.parent)}:{imported.lineno}")
+                offenders.extend(
+                    f"{path.relative_to(root.parent)}:{imported.lineno}"
+                    for imported in internal_imports
+                )
     return offenders
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.ui.icons import material_icon
@@ -48,7 +47,8 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         layout.addLayout(axis_row)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -72,12 +72,16 @@ class CommandPaletteDialog(QtWidgets.QDialog):
     def _refresh(self, text):
         words = tuple(part.lower() for part in text.split() if part)
         self._filtered = tuple(
-            command for command in self._commands if all(word in command.label.lower() or word in command.id.lower() for word in words)
+            command
+            for command in self._commands
+            if all(word in command.label.lower() or word in command.id.lower() for word in words)
         )
         self.list_widget.clear()
         for command in self._filtered:
             prefix = "op" if command.kind == "operation" else "cmd"
-            item = QtWidgets.QListWidgetItem(material_icon(command.icon), f"{prefix}: {command.label}")
+            item = QtWidgets.QListWidgetItem(
+                material_icon(command.icon), f"{prefix}: {command.label}"
+            )
             self.list_widget.addItem(item)
         if self._filtered:
             self.list_widget.setCurrentRow(0)

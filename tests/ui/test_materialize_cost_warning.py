@@ -1,15 +1,21 @@
 import numpy as np
 
-from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
+from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
+from tests.ui.helpers import process_events as _process_events
 
 
 def test_large_fft_pipeline_warning_mentions_estimated_peak_bytes(qtbot, monkeypatch):
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     _clear_arrayscope_settings()
     messages = []
-    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: messages.append(args[2]) or QtWidgets.QMessageBox.StandardButton.No)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: messages.append(args[2]) or QtWidgets.QMessageBox.StandardButton.No,
+    )
     win = ArrayScopeWindow(np.zeros((8, 16), dtype=np.float32))
     qtbot.addWidget(win)
     try:
@@ -24,11 +30,16 @@ def test_large_fft_pipeline_warning_mentions_estimated_peak_bytes(qtbot, monkeyp
 
 def test_disabled_fft_step_does_not_trigger_fft_warning(qtbot, monkeypatch):
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.operations.pipeline import CenteredFFT, OperationStep
     from arrayscope.window import ArrayScopeWindow
 
     _clear_arrayscope_settings()
-    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected warning")))
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected warning")),
+    )
     win = ArrayScopeWindow(np.zeros((8, 16), dtype=np.float32))
     qtbot.addWidget(win)
     try:
@@ -41,11 +52,16 @@ def test_disabled_fft_step_does_not_trigger_fft_warning(qtbot, monkeypatch):
 
 def test_large_reduction_pipeline_warning_uses_cost_model(qtbot, monkeypatch):
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     _clear_arrayscope_settings()
     messages = []
-    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: messages.append(args[2]) or QtWidgets.QMessageBox.StandardButton.No)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: messages.append(args[2]) or QtWidgets.QMessageBox.StandardButton.No,
+    )
     win = ArrayScopeWindow(np.zeros((8, 16), dtype=np.float32))
     qtbot.addWidget(win)
     try:

@@ -14,17 +14,19 @@ from arrayscope.core.window_levels import (
     WindowLevelState,
     normalize_bounds,
 )
-from arrayscope.display.shader_mapping import common_shader_mapping
-from arrayscope.display.model.frame import CommittedDisplayFrame
 from arrayscope.display.model.commit import (
     CommitKind,
     DisplayTiledPresentation,
     PresentationDecision,
     PresentationInput,
 )
+from arrayscope.display.model.frame import CommittedDisplayFrame
+from arrayscope.display.shader_mapping import common_shader_mapping
 
 
-def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallback=(0.0, 1.0)) -> LevelSource:
+def fallback_level_source(
+    previous_frame: CommittedDisplayFrame | None, *, fallback=(0.0, 1.0)
+) -> LevelSource:
     if previous_frame is not None:
         levels = normalize_bounds(previous_frame.levels)
         histogram_range = normalize_bounds(previous_frame.histogram_range)
@@ -45,7 +47,9 @@ def fallback_level_source(previous_frame: CommittedDisplayFrame | None, *, fallb
                 evidence_quality=0,
             )
     fallback_bounds = normalize_bounds(fallback) or (0.0, 1.0)
-    return LevelSource(levels=fallback_bounds, histogram_range=fallback_bounds, rank=LevelSourceRank.FALLBACK)
+    return LevelSource(
+        levels=fallback_bounds, histogram_range=fallback_bounds, rank=LevelSourceRank.FALLBACK
+    )
 
 
 def decide_presentation(input: PresentationInput) -> PresentationDecision:
@@ -127,8 +131,7 @@ def _presentation_for_payload(payload, *, levels, histogram_range):
         tile_residency_budget_bytes=int(payload.tile_residency_budget_bytes),
         histogram_plot_data=payload.histogram_plot_data,
         shader_mapping=common_shader_mapping(
-            getattr(tile, "shader_mapping", None)
-            for tile in payload.tile_state.payloads.values()
+            getattr(tile, "shader_mapping", None) for tile in payload.tile_state.payloads.values()
         ),
     )
 
@@ -141,7 +144,11 @@ def _valid_source(source) -> LevelSource | None:
     if levels is None or histogram is None:
         return None
     try:
-        rank = source.rank if isinstance(source.rank, LevelSourceRank) else LevelSourceRank(int(source.rank))
+        rank = (
+            source.rank
+            if isinstance(source.rank, LevelSourceRank)
+            else LevelSourceRank(int(source.rank))
+        )
     except Exception:
         return None
     return LevelSource(
@@ -161,7 +168,7 @@ __all__ = [
     "LevelSourceRank",
     "WindowLevelController",
     "WindowLevelState",
-    "normalize_bounds",
-    "fallback_level_source",
     "decide_presentation",
+    "fallback_level_source",
+    "normalize_bounds",
 ]

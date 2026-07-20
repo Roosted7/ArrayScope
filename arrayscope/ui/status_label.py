@@ -17,7 +17,9 @@ class ElideLabel(QtWidgets.QLabel):
 
     def __init__(self, text="", parent=None):
         super().__init__(str(text), parent)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred
+        )
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
@@ -26,7 +28,9 @@ class ElideLabel(QtWidgets.QLabel):
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         metrics = self.fontMetrics()
-        text = metrics.elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, max(8, self.width()))
+        text = metrics.elidedText(
+            self.text(), QtCore.Qt.TextElideMode.ElideRight, max(8, self.width())
+        )
         painter.drawText(self.rect(), self.alignment() | QtCore.Qt.AlignmentFlag.AlignVCenter, text)
 
 
@@ -39,7 +43,9 @@ class PixelStatusLabel(QtWidgets.QLabel):
         self._slice_text = ""
         self.setMinimumWidth(0)
         self.setMaximumWidth(420)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred
+        )
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()

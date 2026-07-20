@@ -7,7 +7,6 @@ from enum import Enum
 
 from arrayscope.core.memory_budget import format_bytes
 
-
 MiB = 1024 * 1024
 GiB = 1024 * MiB
 DEFAULT_RENDER_CAP_MB = 512
@@ -112,33 +111,49 @@ def compute_memory_policy(
 
     if profile == MemoryProfileChoice.CONSERVATIVE:
         visible = _clamp(min(available * 0.05, total * 0.02), 128 * MiB, min(render_cap, 1 * GiB))
-        display_cache = _clamp(min(available * 0.08, max(256 * MiB, input_nbytes or visible)), 256 * MiB, 2 * GiB)
+        display_cache = _clamp(
+            min(available * 0.08, max(256 * MiB, input_nbytes or visible)), 256 * MiB, 2 * GiB
+        )
         profile_cache = _clamp(min(available * 0.02, 128 * MiB), 32 * MiB, 256 * MiB)
-        stage_cache = _clamp(min(available * 0.15, max(input_nbytes or 0, 256 * MiB)), 256 * MiB, 4 * GiB)
+        stage_cache = _clamp(
+            min(available * 0.15, max(input_nbytes or 0, 256 * MiB)), 256 * MiB, 4 * GiB
+        )
         prefetch = min(128 * MiB, stage_cache * 0.05, max(1, visible // 2))
         operation_prefetch_peak = min(32 * MiB, max(1, visible // 10), prefetch)
         fft_prefetch_peak = min(16 * MiB, operation_prefetch_peak)
     elif profile == MemoryProfileChoice.AGGRESSIVE:
         visible = _clamp(min(available * 0.18, total * 0.08), 256 * MiB, min(render_cap, 4 * GiB))
-        display_cache = _clamp(min(available * 0.25, max(2 * visible, 2 * (input_nbytes or 0))), 512 * MiB, 8 * GiB)
+        display_cache = _clamp(
+            min(available * 0.25, max(2 * visible, 2 * (input_nbytes or 0))), 512 * MiB, 8 * GiB
+        )
         profile_cache = _clamp(min(available * 0.05, 512 * MiB), 128 * MiB, 1 * GiB)
-        stage_cache = _clamp(min(available * 0.45, max(3 * (input_nbytes or 0), 1 * GiB)), 512 * MiB, 16 * GiB)
+        stage_cache = _clamp(
+            min(available * 0.45, max(3 * (input_nbytes or 0), 1 * GiB)), 512 * MiB, 16 * GiB
+        )
         prefetch = min(512 * MiB, stage_cache * 0.15, visible)
         operation_prefetch_peak = min(128 * MiB, max(1, visible // 6), prefetch)
         fft_prefetch_peak = min(64 * MiB, operation_prefetch_peak)
     elif profile == MemoryProfileChoice.CUSTOM:
         visible = render_cap
-        display_cache = _clamp(min(available * 0.15, max(render_cap, input_nbytes or 0)), 256 * MiB, 4 * GiB)
+        display_cache = _clamp(
+            min(available * 0.15, max(render_cap, input_nbytes or 0)), 256 * MiB, 4 * GiB
+        )
         profile_cache = _clamp(min(available * 0.03, 256 * MiB), 64 * MiB, 512 * MiB)
-        stage_cache = _clamp(min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB)
+        stage_cache = _clamp(
+            min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB
+        )
         prefetch = min(256 * MiB, stage_cache * 0.10, max(1, render_cap // 2))
         operation_prefetch_peak = min(64 * MiB, max(1, render_cap // 8), prefetch)
         fft_prefetch_peak = min(32 * MiB, operation_prefetch_peak)
     else:
         visible = _clamp(min(available * 0.10, total * 0.04), 128 * MiB, min(render_cap, 2 * GiB))
-        display_cache = _clamp(min(available * 0.15, max(visible, input_nbytes or 0)), 256 * MiB, 4 * GiB)
+        display_cache = _clamp(
+            min(available * 0.15, max(visible, input_nbytes or 0)), 256 * MiB, 4 * GiB
+        )
         profile_cache = _clamp(min(available * 0.03, 256 * MiB), 64 * MiB, 512 * MiB)
-        stage_cache = _clamp(min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB)
+        stage_cache = _clamp(
+            min(available * 0.30, max(2 * (input_nbytes or 0), 512 * MiB)), 256 * MiB, 8 * GiB
+        )
         prefetch = min(256 * MiB, stage_cache * 0.10, visible)
         operation_prefetch_peak = min(64 * MiB, max(1, visible // 8), prefetch)
         fft_prefetch_peak = min(32 * MiB, operation_prefetch_peak)
@@ -187,7 +202,9 @@ def apply_policy_hysteresis(
             updates[name] = max(getattr(previous, name), getattr(current, name))
 
     old_available = max(1, int(previous.system_available_bytes))
-    change_fraction = abs(int(current.system_available_bytes) - old_available) / float(old_available)
+    change_fraction = abs(int(current.system_available_bytes) - old_available) / float(
+        old_available
+    )
     if change_fraction < 0.20:
         for name in (
             "display_cache_budget_bytes",

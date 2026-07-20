@@ -18,7 +18,12 @@ class ProfileMarkerOwner:
 
     def current_bounds(self, image_shape) -> tuple[float, float, float, float]:
         height, width = image_shape[:2]
-        x0, y0, x1, y1 = self.bounds_rect or (0.0, 0.0, float(max(0, width - 1)), float(max(0, height - 1)))
+        x0, y0, x1, y1 = self.bounds_rect or (
+            0.0,
+            0.0,
+            float(max(0, width - 1)),
+            float(max(0, height - 1)),
+        )
         x0, x1 = min(x0, x1), max(x0, x1)
         y0, y1 = min(y0, y1), max(y0, y1)
         return (float(x0), float(y0), float(x1), float(y1))

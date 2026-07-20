@@ -28,7 +28,7 @@ class CompareDocument:
     def with_layer(self, data, label=None):
         index = len(self.layers) + 1
         layer = ArrayLayer(f"layer-{index}", str(label or f"Layer {index}"), data)
-        return CompareDocument(self.layers + (layer,), self.active_layer_id)
+        return CompareDocument((*self.layers, layer), self.active_layer_id)
 
 
 def compatible_roi_shape(layer_data, reference_shape):

@@ -55,14 +55,22 @@ class StageMaterializationManager:
         self._cancelled = 0
         self._failed = 0
         self._refused = 0
-        self._last = StageMaterializationDiagnostics(budget_bytes=int(getattr(stage_cache, "max_bytes", 0)))
+        self._last = StageMaterializationDiagnostics(
+            budget_bytes=int(getattr(stage_cache, "max_bytes", 0))
+        )
 
     def key_for_candidate(self, document_key, candidate: StageCacheCandidate) -> StageKey:
         return stage_key_for_candidate(document_key, candidate)
 
-    def request_stage(self, document_key, candidate: StageCacheCandidate) -> StageMaterializationResult:
+    def request_stage(
+        self, document_key, candidate: StageCacheCandidate
+    ) -> StageMaterializationResult:
         key = self.key_for_candidate(document_key, candidate)
-        value = self.stage_cache.get_containing(key) if hasattr(self.stage_cache, "get_containing") else self.stage_cache.get(key)
+        value = (
+            self.stage_cache.get_containing(key)
+            if hasattr(self.stage_cache, "get_containing")
+            else self.stage_cache.get(key)
+        )
         if value is not None:
             self._record("hit", candidate, key, "stage already cached")
             return StageMaterializationResult("hit", key, value=value)
@@ -78,7 +86,9 @@ class StageMaterializationManager:
             self._attached += 1
             self._record("in-flight", candidate, key, "tiles wait for shared stage")
             return StageMaterializationResult("attached", key, request=self._in_flight[key])
-        request = StageMaterializationRequest(key=key, candidate=candidate, document_key=document_key)
+        request = StageMaterializationRequest(
+            key=key, candidate=candidate, document_key=document_key
+        )
         self._in_flight[key] = request
         self._scheduled += 1
         self._record("scheduled", candidate, key, "tiles wait for shared stage")
@@ -124,10 +134,14 @@ class StageMaterializationManager:
             refused=int(self._refused),
         )
 
-    def _record(self, decision: str, candidate: StageCacheCandidate, key: StageKey, consequence: str) -> None:
+    def _record(
+        self, decision: str, candidate: StageCacheCandidate, key: StageKey, consequence: str
+    ) -> None:
         self._last = StageMaterializationDiagnostics(
             decision=str(decision),
-            candidate_bytes=None if candidate.estimated_nbytes is None else int(candidate.estimated_nbytes),
+            candidate_bytes=None
+            if candidate.estimated_nbytes is None
+            else int(candidate.estimated_nbytes),
             budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
             consequence=str(consequence),
             key_summary=self._key_text(key),
@@ -156,8 +170,14 @@ class StageMaterializationManager:
         )
 
     def _candidate_text(self, candidate: StageCacheCandidate) -> str:
-        nbytes = "unknown" if candidate.estimated_nbytes is None else format_bytes(int(candidate.estimated_nbytes))
-        return f"stage={candidate.stage_index}, region={region_text(candidate.region)}, bytes={nbytes}"
+        nbytes = (
+            "unknown"
+            if candidate.estimated_nbytes is None
+            else format_bytes(int(candidate.estimated_nbytes))
+        )
+        return (
+            f"stage={candidate.stage_index}, region={region_text(candidate.region)}, bytes={nbytes}"
+        )
 
     def _key_text(self, key: StageKey) -> str:
         return f"stage={len(tuple(key.operation_prefix))}, region={region_text(key.region)}, dtype={key.dtype}, shape={tuple(key.shape)}"

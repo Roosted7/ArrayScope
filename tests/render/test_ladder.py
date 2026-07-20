@@ -17,7 +17,9 @@ def demand(level: int, acceptable=None) -> LodDemand:
         desired_level=level,
         desired_factor=2**level,
         desired_factor_xy=(2**level, 2**level),
-        acceptable_levels=tuple(acceptable) if acceptable is not None else (max(0, level - 1), level, level + 1),
+        acceptable_levels=tuple(acceptable)
+        if acceptable is not None
+        else (max(0, level - 1), level, level + 1),
         source_texels_per_pixel_xy=(float(2**level), float(2**level)),
         reason="test demand",
     )
@@ -128,7 +130,9 @@ def test_native_demand_ends_exact_without_duplicate_step():
 
 def test_exact_requested_appends_native_rung():
     ladder = LodLadder()
-    state = TileLodState(tile_number=0, presented_level=2, resident_levels=(2,), exact_requested=True)
+    state = TileLodState(
+        tile_number=0, presented_level=2, resident_levels=(2,), exact_requested=True
+    )
     steps = ladder.plan_tile(state, demand(2))
     assert rungs(steps) == [(Rung.EXACT, 0)]
     assert steps[0].lane == Lane.VISIBLE_MATERIALIZATION

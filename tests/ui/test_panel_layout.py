@@ -1,15 +1,24 @@
-import time
-
 import numpy as np
-import pytest
 
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
+)
+from tests.ui.helpers import (
     assert_size_close as _assert_size_close,
+)
+from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
+)
+from tests.ui.helpers import (
     panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
+)
+from tests.ui.helpers import (
     view_action as _view_action,
+)
+from tests.ui.helpers import (
     wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
@@ -54,6 +63,7 @@ def _view_submenu_action(win, submenu_text, action_text):
 def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -101,6 +111,7 @@ def test_canvas_preserve_controller_records_diagnostics(qtbot):
 def test_panel_preserve_transaction_does_not_move_window_position(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -154,6 +165,7 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
 def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior
     from arrayscope.window import ArrayScopeWindow
 
@@ -194,6 +206,7 @@ def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
 def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -224,6 +237,7 @@ def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
 def test_strong_wayland_skips_strong_path_off_wayland(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.app.settings_state import AppSettingsState, PanelResizeBehavior
     from arrayscope.window import ArrayScopeWindow
 
@@ -305,6 +319,7 @@ def test_view_menu_panel_resize_behavior_persists(qtbot):
 def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_close(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore, QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
@@ -315,9 +330,13 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_clos
         win._show_inspection_dock()
         _process_events(qtbot, count=12)
         assert win.inspection_dock.isVisible()
-        assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+        assert (
+            win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+        )
 
-        close_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
+        close_button = win.inspection_dock.findChild(
+            QtWidgets.QToolButton, "ManagedDockCloseButton"
+        )
         assert close_button is not None
         close_button.click()
         _process_events(qtbot, count=12)
@@ -334,6 +353,7 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_clos
 def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapshot(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
@@ -346,7 +366,9 @@ def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapsho
         before = win.img_view.size()
         before_window = win.size()
 
-        close_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
+        close_button = win.inspection_dock.findChild(
+            QtWidgets.QToolButton, "ManagedDockCloseButton"
+        )
         assert close_button is not None
         close_button.click()
         _process_events(qtbot, count=30)
@@ -364,6 +386,7 @@ def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapsho
 def test_profile_dock_defaults_bottom_when_opened_from_view_menu(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
@@ -406,8 +429,9 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
 def test_docks_have_size_grips_and_managed_detach(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
-    from arrayscope.window.panels import PanelLocation
+
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
@@ -415,7 +439,9 @@ def test_docks_have_size_grips_and_managed_detach(qtbot):
         for dock in (win.inspection_dock, win.profile_dock, win.operation_dock):
             assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
             assert dock.findChildren(QtWidgets.QSizeGrip)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
     finally:
         win.close()
@@ -517,8 +543,12 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
     try:
         _process_events(qtbot, count=20)
         win.resize(920, 620)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
-        win.layout_manager.set_managed_dock_visible(win.operation_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
+        win.layout_manager.set_managed_dock_visible(
+            win.operation_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=40)
         viewport_size = win.img_view.graphicsView.viewport().size()
         saved_viewport_shape = (int(viewport_size.height()), int(viewport_size.width()))
@@ -585,8 +615,8 @@ def test_operation_dock_manual_close_is_not_persistent_across_launches(qtbot):
 
 def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
@@ -595,7 +625,9 @@ def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
         action = _view_action(win, "Inspection")
         action.trigger()
         _process_events(qtbot, count=15)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
 
@@ -612,15 +644,19 @@ def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
 
 def test_reset_layout_redocks_managed_docks(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
 
@@ -634,8 +670,8 @@ def test_reset_layout_redocks_managed_docks(qtbot):
 
 def test_closing_detached_dialog_unchecks_view_action(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
@@ -644,7 +680,9 @@ def test_closing_detached_dialog_unchecks_view_action(qtbot):
         action = _view_action(win, "Inspection")
         action.trigger()
         _process_events(qtbot, count=15)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
 
         dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
@@ -660,26 +698,33 @@ def test_closing_detached_dialog_unchecks_view_action(qtbot):
         action.trigger()
         _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
-        assert win.inspection_dock.findChild(type(win.inspection_dock.stats_table)) is win.inspection_dock.stats_table
+        assert (
+            win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
+            is win.inspection_dock.stats_table
+        )
     finally:
         win.close()
 
 
 def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
 
         from pyqtgraph.Qt import QtWidgets
 
-        detach_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockDetachButton")
+        detach_button = win.inspection_dock.findChild(
+            QtWidgets.QToolButton, "ManagedDockDetachButton"
+        )
         assert detach_button is not None
         detach_button.click()
         _process_events(qtbot, count=15)
@@ -687,15 +732,23 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
 
         dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
         assert dialog is not None
-        assert dialog.findChild(type(win.inspection_dock.stats_table)) is win.inspection_dock.stats_table
+        assert (
+            dialog.findChild(type(win.inspection_dock.stats_table))
+            is win.inspection_dock.stats_table
+        )
         redock_button = dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         assert redock_button is not None
         redock_button.click()
         _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
-        assert win.inspection_dock.findChild(type(win.inspection_dock.stats_table)) is win.inspection_dock.stats_table
+        assert (
+            win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
+            is win.inspection_dock.stats_table
+        )
 
-        close_button = win.inspection_dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
+        close_button = win.inspection_dock.findChild(
+            QtWidgets.QToolButton, "ManagedDockCloseButton"
+        )
         assert close_button is not None
         close_button.click()
         _process_events(qtbot, count=15)
@@ -708,21 +761,28 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
 def test_managed_dock_title_drag_detaches_panel(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore, QtTest
-    from arrayscope.window.panels import PanelLocation
+
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
 
         title_bar = win.inspection_dock.titleBarWidget()
         assert title_bar is not None
-        QtTest.QTest.mousePress(title_bar, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(10, 10))
+        QtTest.QTest.mousePress(
+            title_bar, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(10, 10)
+        )
         QtTest.QTest.mouseMove(title_bar, QtCore.QPoint(80, 10))
-        QtTest.QTest.mouseRelease(title_bar, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(80, 10))
+        QtTest.QTest.mouseRelease(
+            title_bar, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(80, 10)
+        )
         _process_events(qtbot, count=15)
 
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
@@ -733,8 +793,9 @@ def test_managed_dock_title_drag_detaches_panel(qtbot):
 def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
-    from arrayscope.window.panels import PanelLocation
+
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
@@ -747,7 +808,9 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
         body = _panel_body(panel)
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
 
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DETACHED)
@@ -762,7 +825,9 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
 
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=15)
         redock_button = panel.dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         redock_button.click()
@@ -785,8 +850,8 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
 
 def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
@@ -797,7 +862,9 @@ def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
         _process_events(qtbot, count=15)
         panel = win.panel_manager.panel_for_dock(win.inspection_dock)
         body = _panel_body(panel)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=15)
         assert panel.dialog is not None
 
@@ -810,15 +877,18 @@ def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
         _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
-        assert win.inspection_dock.findChild(type(win.inspection_dock.stats_table)) is win.inspection_dock.stats_table
+        assert (
+            win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
+            is win.inspection_dock.stats_table
+        )
     finally:
         win.close()
 
 
 def test_reset_layout_after_detached_hidden_panel_has_no_stale_dialog(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
@@ -829,7 +899,9 @@ def test_reset_layout_after_detached_hidden_panel_has_no_stale_dialog(qtbot):
         _process_events(qtbot, count=15)
         panel = win.panel_manager.panel_for_dock(win.inspection_dock)
         body = _panel_body(panel)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=15)
         action.trigger()
         _process_events(qtbot, count=15)
@@ -848,8 +920,9 @@ def test_reset_layout_after_detached_hidden_panel_has_no_stale_dialog(qtbot):
 def test_managed_title_close_is_authoritative_hide_path(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
-    from arrayscope.window.panels import PanelLocation
+
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)

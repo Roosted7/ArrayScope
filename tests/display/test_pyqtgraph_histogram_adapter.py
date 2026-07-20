@@ -11,7 +11,9 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 
 def test_installed_pyqtgraph_histogram_lut_api_shape(qt_app):
-    from arrayscope.display.backends.pyqtgraph.histogram_adapter import installed_histogram_lut_api_facts
+    from arrayscope.display.backends.pyqtgraph.histogram_adapter import (
+        installed_histogram_lut_api_facts,
+    )
 
     facts = installed_histogram_lut_api_facts()
 
@@ -23,7 +25,9 @@ def test_installed_pyqtgraph_histogram_lut_api_shape(qt_app):
     assert facts.item_has_image_changed is True
 
 
-def test_histogram_adapter_new_binding_connects_once_and_disconnects_auto_recompute(qt_app, monkeypatch):
+def test_histogram_adapter_new_binding_connects_once_and_disconnects_auto_recompute(
+    qt_app, monkeypatch
+):
     import pyqtgraph as pg
     from pyqtgraph.graphicsItems.ImageItem import ImageItem
 

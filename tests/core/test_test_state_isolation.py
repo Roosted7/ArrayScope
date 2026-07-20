@@ -3,7 +3,6 @@ import types
 
 import arrayscope
 
-
 _PROBE_NAME = "arrayscope._test_identity_probe"
 
 

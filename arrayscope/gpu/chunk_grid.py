@@ -60,7 +60,7 @@ class ChunkGrid:
 
         return tuple(
             0 if extent == 0 else (extent + chunk - 1) // chunk
-            for extent, chunk in zip(self.array_shape, self.chunk_shape)
+            for extent, chunk in zip(self.array_shape, self.chunk_shape, strict=False)
         )
 
     def chunk_count(self) -> int:
@@ -73,11 +73,14 @@ class ChunkGrid:
         """Origin of the unique chunk containing ``index``."""
 
         self._check_rank(index)
-        for axis, (value, extent) in enumerate(zip(index, self.array_shape)):
+        for axis, (value, extent) in enumerate(zip(index, self.array_shape, strict=False)):
             if not 0 <= int(value) < extent:
-                raise IndexError(f"index {index} outside array shape {self.array_shape} on axis {axis}")
+                raise IndexError(
+                    f"index {index} outside array shape {self.array_shape} on axis {axis}"
+                )
         return tuple(
-            (int(value) // chunk) * chunk for value, chunk in zip(index, self.chunk_shape)
+            (int(value) // chunk) * chunk
+            for value, chunk in zip(index, self.chunk_shape, strict=False)
         )
 
     def shape_at(self, origin: tuple[int, ...]) -> tuple[int, ...]:
@@ -85,7 +88,7 @@ class ChunkGrid:
 
         self._check_rank(origin)
         shape = []
-        for value, chunk, extent in zip(origin, self.chunk_shape, self.array_shape):
+        for value, chunk, extent in zip(origin, self.chunk_shape, self.array_shape, strict=False):
             value = int(value)
             if value % chunk or not 0 <= value < max(extent, 1):
                 raise IndexError(f"{origin} is not a chunk origin of this grid")
@@ -97,17 +100,19 @@ class ChunkGrid:
 
         axes = [
             range(0, extent, chunk)
-            for extent, chunk in zip(self.array_shape, self.chunk_shape)
+            for extent, chunk in zip(self.array_shape, self.chunk_shape, strict=False)
         ]
         return tuple(product(*axes)) if all(self.array_shape) else ()
 
-    def origins_for_window(self, window: tuple[tuple[int, int], ...]) -> tuple[tuple[int, ...], ...]:
+    def origins_for_window(
+        self, window: tuple[tuple[int, int], ...]
+    ) -> tuple[tuple[int, ...], ...]:
         """Origins of every chunk intersecting the half-open ``window``."""
 
         self._check_rank(window)
         axes = []
         for axis, ((start, stop), chunk, extent) in enumerate(
-            zip(window, self.chunk_shape, self.array_shape)
+            zip(window, self.chunk_shape, self.array_shape, strict=False)
         ):
             start, stop = int(start), int(stop)
             if start < 0 or stop > extent:

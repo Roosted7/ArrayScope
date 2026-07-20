@@ -37,9 +37,7 @@ class PixelHud(QtWidgets.QFrame):
         """rows: sequence of (icon_name | None, text); PixelHud.SEPARATOR
         renders a thin horizontal rule instead of a text row."""
         rows = tuple(
-            (icon, str(text))
-            for icon, text in rows
-            if (icon, text) == self.SEPARATOR or str(text)
+            (icon, str(text)) for icon, text in rows if (icon, text) == self.SEPARATOR or str(text)
         )
         if rows == self._rows_key:
             return
@@ -70,7 +68,9 @@ class PixelHud(QtWidgets.QFrame):
                 continue
             separator.setVisible(False)
             if icon_name:
-                icon_label.setPixmap(material_icon(icon_name).pixmap(self._ICON_SIZE, self._ICON_SIZE))
+                icon_label.setPixmap(
+                    material_icon(icon_name).pixmap(self._ICON_SIZE, self._ICON_SIZE)
+                )
             else:
                 icon_label.clear()
             text_label.setText(text)
@@ -81,7 +81,9 @@ class PixelHud(QtWidgets.QFrame):
         self.set_rows(((None, str(text)),))
 
     def text(self) -> str:
-        return "\n".join(label.text() for _icon, label, _sep in self._row_widgets if label.isVisible())
+        return "\n".join(
+            label.text() for _icon, label, _sep in self._row_widgets if label.isVisible()
+        )
 
     def show_rows_near(self, rows, pos) -> None:
         self.set_rows(rows)

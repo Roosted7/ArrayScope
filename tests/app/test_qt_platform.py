@@ -69,17 +69,24 @@ def test_forced_modes_export_platform():
 
 
 def test_auto_cli_supervises_and_auto_embedded_uses_qt_fallback_list():
-    d = resolve_qt_platform(QtPlatformChoice.AUTO, environ=dict(WAYLAND_ENV), platform="linux", cli=True)
-    assert d.supervise and d.qt_qpa_platform == "wayland"
-    d = resolve_qt_platform(QtPlatformChoice.AUTO, environ=dict(WAYLAND_ENV), platform="linux", cli=False)
-    assert not d.supervise and d.qt_qpa_platform == "wayland;xcb"
+    d = resolve_qt_platform(
+        QtPlatformChoice.AUTO, environ=dict(WAYLAND_ENV), platform="linux", cli=True
+    )
+    assert d.supervise
+    assert d.qt_qpa_platform == "wayland"
+    d = resolve_qt_platform(
+        QtPlatformChoice.AUTO, environ=dict(WAYLAND_ENV), platform="linux", cli=False
+    )
+    assert not d.supervise
+    assert d.qt_qpa_platform == "wayland;xcb"
 
 
 def test_explicit_env_always_wins():
     env = dict(WAYLAND_ENV, QT_QPA_PLATFORM="xcb")
     for choice in QtPlatformChoice:
         d = resolve_qt_platform(choice, environ=env, platform="linux", cli=True)
-        assert d.qt_qpa_platform is None and not d.supervise
+        assert d.qt_qpa_platform is None
+        assert not d.supervise
         assert d.reason == "env-override:xcb"
 
 
@@ -163,7 +170,9 @@ def _run(results, argv=("data.npy",)):
 
 def test_healthy_wayland_run_is_not_retried():
     rc, calls, logs = _run([(0, 300.0)])
-    assert rc == 0 and len(calls) == 1 and logs == []
+    assert rc == 0
+    assert len(calls) == 1
+    assert logs == []
     args, env = calls[0]
     assert args[:3] == [sys.executable, "-m", "arrayscope"]
     assert args[3:] == ["data.npy"]
@@ -173,26 +182,31 @@ def test_healthy_wayland_run_is_not_retried():
 
 def test_early_abnormal_exit_relaunches_on_xcb():
     rc, calls, logs = _run([(-6, 0.2), (0, 300.0)])  # SIGABRT then healthy
-    assert rc == 0 and len(calls) == 2
+    assert rc == 0
+    assert len(calls) == 2
     assert calls[1][1]["QT_QPA_PLATFORM"] == "xcb"
     assert calls[1][1]["QT_X11_NO_MITSHM"] == "1"
-    assert len(logs) == 1 and "xcb" in logs[0]
+    assert len(logs) == 1
+    assert "xcb" in logs[0]
 
 
 def test_late_crash_is_not_retried():
     rc, calls, _ = _run([(-11, 500.0)])
-    assert rc == -11 and len(calls) == 1
+    assert rc == -11
+    assert len(calls) == 1
 
 
 def test_early_clean_exit_is_not_retried():
     # Fast clean exits are normal CLI behavior (bad file prints and returns).
     rc, calls, _ = _run([(0, 0.05)])
-    assert rc == 0 and len(calls) == 1
+    assert rc == 0
+    assert len(calls) == 1
 
 
 def test_failed_xcb_retry_returns_its_code():
     rc, calls, _ = _run([(-6, 0.1), (3, 0.1)])
-    assert rc == 3 and len(calls) == 2
+    assert rc == 3
+    assert len(calls) == 2
 
 
 # ---- CLI entry hook --------------------------------------------------------
@@ -227,9 +241,7 @@ def test_supervise_hook_is_noop_when_qapplication_exists(monkeypatch):
 
 def test_supervise_hook_applies_forced_choice_in_process(no_existing_qapp):
     env = dict(WAYLAND_ENV)
-    rc = supervise_cli_if_needed(
-        [], environ=env, platform="linux", choice=QtPlatformChoice.XCB
-    )
+    rc = supervise_cli_if_needed([], environ=env, platform="linux", choice=QtPlatformChoice.XCB)
     assert rc is None
     assert env["QT_QPA_PLATFORM"] == "xcb"
 
@@ -247,7 +259,8 @@ def test_supervise_hook_runs_supervisor_for_auto(no_existing_qapp):
         monotonic=clock,
         log=lambda _msg: None,
     )
-    assert rc == 0 and len(runner.calls) == 1
+    assert rc == 0
+    assert len(runner.calls) == 1
     assert env.get("QT_QPA_PLATFORM") is None  # parent env untouched
 
 

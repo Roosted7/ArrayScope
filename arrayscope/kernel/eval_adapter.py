@@ -12,7 +12,12 @@ from collections import defaultdict
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.app.qt_binding import prefer_pyside6
-from arrayscope.core.frame_targets import FrameProgress, FrameTarget, SchedulerDiagnostics, WorkStart
+from arrayscope.core.frame_targets import (
+    FrameProgress,
+    FrameTarget,
+    SchedulerDiagnostics,
+    WorkStart,
+)
 from arrayscope.kernel.qt_bridge import QtKernelBridge
 from arrayscope.kernel.scheduler import Kernel
 from arrayscope.kernel.task import Lane, Priority, Supersession, TaskSpec, WorkItem
@@ -21,7 +26,6 @@ from arrayscope.kernel.workers import ThreadWorkerBackend
 prefer_pyside6()
 
 import pyqtgraph.Qt as Qt
-
 
 _UNSET = object()
 
@@ -118,10 +122,14 @@ class KernelEvaluationController(Qt.QtCore.QObject):
     def clear_group(self, replace_group: str):
         replace_group = str(replace_group)
         groups = {replace_group}
-        groups.update(group for group in self._known_groups if group.startswith(f"{replace_group}:"))
+        groups.update(
+            group for group in self._known_groups if group.startswith(f"{replace_group}:")
+        )
         for group in groups:
             self.advance_group(group)
-            self._frame_progress[group] = FrameProgress(presented=self._frame_progress[group].presented)
+            self._frame_progress[group] = FrameProgress(
+                presented=self._frame_progress[group].presented
+            )
         self.kernel.clear_scope(self._scope(replace_group))
 
     def advance_group(self, replace_group: str) -> int:
@@ -397,8 +405,16 @@ class KernelEvaluationController(Qt.QtCore.QObject):
             name=self.name,
             max_workers=int(self._max_workers or getattr(diag, "workers", 0) or 0),
             pending=len(self._pending_generations) + len(self._pending_prefetch),
-            running=int(lane_values.get("started", 0)) - int(lane_values.get("completed", 0)) - int(lane_values.get("failed", 0)) - int(lane_values.get("cancelled", 0)) - int(lane_values.get("stale", 0)),
-            queued=int(getattr(diag, "queued", 0) + getattr(diag, "parked_deps", 0) + getattr(diag, "parked_quota", 0)),
+            running=int(lane_values.get("started", 0))
+            - int(lane_values.get("completed", 0))
+            - int(lane_values.get("failed", 0))
+            - int(lane_values.get("cancelled", 0))
+            - int(lane_values.get("stale", 0)),
+            queued=int(
+                getattr(diag, "queued", 0)
+                + getattr(diag, "parked_deps", 0)
+                + getattr(diag, "parked_quota", 0)
+            ),
             started=int(lane_values.get("started", 0)),
             cancelled=int(lane_values.get("cancelled", 0)),
             stale=int(lane_values.get("stale", 0)) + int(lane_values.get("dropped", 0)),
@@ -412,7 +428,8 @@ class KernelEvaluationController(Qt.QtCore.QObject):
             prefetch_cost_blocked=int(self._prefetch_cost_blocked_count),
             active_preserved=int(self._active_preserved_count),
             queued_collapsed=int(self._queued_collapsed_count),
-            stale_reused=int(lane_values.get("stale_reused", 0)) + int(self._manual_stale_reused_count),
+            stale_reused=int(lane_values.get("stale_reused", 0))
+            + int(self._manual_stale_reused_count),
             fallback_event_polls=int(self.bridge.fallback_event_polls),
             fallback_idle_polls=int(self.bridge.fallback_idle_polls),
             presented_target=progress.presented,
@@ -481,9 +498,15 @@ class KernelEvaluationController(Qt.QtCore.QObject):
 
         self.kernel.submit(
             spec,
-            on_done=lambda value, generation=generation, on_done=on_done: self._done(generation, value, on_done),
-            on_error=lambda exc, generation=generation, on_error=on_error: self._error(generation, exc, on_error),
-            on_stale=lambda generation=generation, on_stale=on_stale: self._stale(generation, on_stale),
+            on_done=lambda value, generation=generation, on_done=on_done: self._done(
+                generation, value, on_done
+            ),
+            on_error=lambda exc, generation=generation, on_error=on_error: self._error(
+                generation, exc, on_error
+            ),
+            on_stale=lambda generation=generation, on_stale=on_stale: self._stale(
+                generation, on_stale
+            ),
             on_reuse=(
                 None
                 if on_reuse_stale is None
@@ -536,7 +559,9 @@ class KernelEvaluationController(Qt.QtCore.QObject):
             scope=self._scope(replace_group),
             deps=tuple(getattr(work_item, "dependency_keys", ()) or ()),
             supersession=supersession,
-            deadline_ns=int(getattr(work_item, "deadline_ns", getattr(frame_target, "deadline_ns", 0)) or 0),
+            deadline_ns=int(
+                getattr(work_item, "deadline_ns", getattr(frame_target, "deadline_ns", 0)) or 0
+            ),
             estimated_cpu_ms=float(getattr(work_item, "estimated_cpu_ms", 0.0) or 0.0),
             estimated_bytes=int(estimated_bytes or 0),
             expected_value=float(getattr(work_item, "expected_value", 0.0) or 0.0),
@@ -603,7 +628,9 @@ class KernelEvaluationController(Qt.QtCore.QObject):
                 queued_latest=target,
             )
 
-    def _note_progress_finished(self, group: str, target: FrameTarget | None, *, presented: bool) -> None:
+    def _note_progress_finished(
+        self, group: str, target: FrameTarget | None, *, presented: bool
+    ) -> None:
         current = self._frame_progress.get(group, FrameProgress())
         active = None if current.active == target else current.active
         queued = None if current.queued_latest == target else current.queued_latest

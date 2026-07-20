@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -18,7 +18,9 @@ from arrayscope.tools.presentation_settlement import (
 )
 
 
-def capture_release_diagnostics(path, *, backend: str = "pyqtgraph", interval_ms: int = 500) -> Path:
+def capture_release_diagnostics(
+    path, *, backend: str = "pyqtgraph", interval_ms: int = 500
+) -> Path:
     """Capture a small real-window diagnostics JSONL trace for RC evidence."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -60,7 +62,9 @@ def capture_release_diagnostics(path, *, backend: str = "pyqtgraph", interval_ms
             phase="initial image",
         )
 
-        logger.start(win.collect_runtime_diagnostics(), app_version=__version__, interval_ms=interval_ms)
+        logger.start(
+            win.collect_runtime_diagnostics(), app_version=__version__, interval_ms=interval_ms
+        )
 
         # Exercise a real image-target change.  Re-requesting the identical
         # cached target can legitimately coalesce to no new pixels and is not
@@ -77,7 +81,9 @@ def capture_release_diagnostics(path, *, backend: str = "pyqtgraph", interval_ms
         )
         logger.write_snapshot(win.collect_runtime_diagnostics())
 
-        state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(data.shape[2])), text=":")
+        state = win.view_state.with_montage_axis(
+            2, columns=3, indices=tuple(range(data.shape[2])), text=":"
+        )
         win._set_view_state(state)
         win.render(reason="release-diagnostics-montage")
         _wait_for_capture_presentation(
@@ -164,7 +170,9 @@ def _wait_for_capture_presentation(
     return target
 
 
-def _wait_until(app, QtCore, predicate, *, timeout_s: float, description: str = "condition") -> None:
+def _wait_until(
+    app, QtCore, predicate, *, timeout_s: float, description: str = "condition"
+) -> None:
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -179,13 +187,17 @@ def _wait_until(app, QtCore, predicate, *, timeout_s: float, description: str = 
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Capture deterministic ArrayScope RC diagnostics JSONL")
+    parser = argparse.ArgumentParser(
+        description="Capture deterministic ArrayScope RC diagnostics JSONL"
+    )
     parser.add_argument("--jsonl", required=True, help="Path for the diagnostics JSONL artifact")
     parser.add_argument("--backend", default="pyqtgraph", choices=("pyqtgraph", "vispy"))
     parser.add_argument("--interval-ms", type=int, default=500)
     args = parser.parse_args(argv)
 
-    path = capture_release_diagnostics(args.jsonl, backend=args.backend, interval_ms=args.interval_ms)
+    path = capture_release_diagnostics(
+        args.jsonl, backend=args.backend, interval_ms=args.interval_ms
+    )
     print(path)
     return 0
 

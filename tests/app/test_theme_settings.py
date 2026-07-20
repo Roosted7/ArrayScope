@@ -3,7 +3,6 @@ import sys
 import types
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[2]
 PACKAGE = types.ModuleType("arrayscope")
 PACKAGE.__path__ = [str(ROOT / "arrayscope")]
@@ -12,24 +11,66 @@ sys.modules.setdefault("arrayscope", PACKAGE)
 
 MODULE_PATHS = {
     "axis_utils": ("arrayscope.core.axis_utils", ROOT / "arrayscope" / "core" / "axis_utils.py"),
-    "cache_status": ("arrayscope.core.cache_status", ROOT / "arrayscope" / "core" / "cache_status.py"),
-    "dimension_roles": ("arrayscope.core.dimension_roles", ROOT / "arrayscope" / "core" / "dimension_roles.py"),
+    "cache_status": (
+        "arrayscope.core.cache_status",
+        ROOT / "arrayscope" / "core" / "cache_status.py",
+    ),
+    "dimension_roles": (
+        "arrayscope.core.dimension_roles",
+        ROOT / "arrayscope" / "core" / "dimension_roles.py",
+    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
-    "window_levels": ("arrayscope.core.window_levels", ROOT / "arrayscope" / "core" / "window_levels.py"),
-    "memory_budget": ("arrayscope.core.memory_budget", ROOT / "arrayscope" / "core" / "memory_budget.py"),
-    "memory_policy": ("arrayscope.core.memory_policy", ROOT / "arrayscope" / "core" / "memory_policy.py"),
+    "window_levels": (
+        "arrayscope.core.window_levels",
+        ROOT / "arrayscope" / "core" / "window_levels.py",
+    ),
+    "memory_budget": (
+        "arrayscope.core.memory_budget",
+        ROOT / "arrayscope" / "core" / "memory_budget.py",
+    ),
+    "memory_policy": (
+        "arrayscope.core.memory_policy",
+        ROOT / "arrayscope" / "core" / "memory_policy.py",
+    ),
     "dim_ops": ("arrayscope.operations.dim_ops", ROOT / "arrayscope" / "operations" / "dim_ops.py"),
-    "operation_pipeline": ("arrayscope.operations.pipeline", ROOT / "arrayscope" / "operations" / "pipeline.py"),
-    "operation_stack": ("arrayscope.operations.stack", ROOT / "arrayscope" / "operations" / "stack.py"),
-    "operation_evaluator": ("arrayscope.operations.evaluator", ROOT / "arrayscope" / "operations" / "evaluator.py"),
-    "operation_registry": ("arrayscope.operations.registry", ROOT / "arrayscope" / "operations" / "registry.py"),
-    "operation_recipes": ("arrayscope.operations.recipes", ROOT / "arrayscope" / "operations" / "recipes.py"),
-    "operation_coordinator": ("arrayscope.operations.coordinator", ROOT / "arrayscope" / "operations" / "coordinator.py"),
-    "slice_engine": ("arrayscope.display.slice_engine", ROOT / "arrayscope" / "display" / "slice_engine.py"),
+    "operation_pipeline": (
+        "arrayscope.operations.pipeline",
+        ROOT / "arrayscope" / "operations" / "pipeline.py",
+    ),
+    "operation_stack": (
+        "arrayscope.operations.stack",
+        ROOT / "arrayscope" / "operations" / "stack.py",
+    ),
+    "operation_evaluator": (
+        "arrayscope.operations.evaluator",
+        ROOT / "arrayscope" / "operations" / "evaluator.py",
+    ),
+    "operation_registry": (
+        "arrayscope.operations.registry",
+        ROOT / "arrayscope" / "operations" / "registry.py",
+    ),
+    "operation_recipes": (
+        "arrayscope.operations.recipes",
+        ROOT / "arrayscope" / "operations" / "recipes.py",
+    ),
+    "operation_coordinator": (
+        "arrayscope.operations.coordinator",
+        ROOT / "arrayscope" / "operations" / "coordinator.py",
+    ),
+    "slice_engine": (
+        "arrayscope.display.slice_engine",
+        ROOT / "arrayscope" / "display" / "slice_engine.py",
+    ),
     "profile": ("arrayscope.profiles.model", ROOT / "arrayscope" / "profiles" / "model.py"),
-    "profile_coordinator": ("arrayscope.profiles.coordinator", ROOT / "arrayscope" / "profiles" / "coordinator.py"),
+    "profile_coordinator": (
+        "arrayscope.profiles.coordinator",
+        ROOT / "arrayscope" / "profiles" / "coordinator.py",
+    ),
     "theme": ("arrayscope.app.theme", ROOT / "arrayscope" / "app" / "theme.py"),
-    "settings_state": ("arrayscope.app.settings_state", ROOT / "arrayscope" / "app" / "settings_state.py"),
+    "settings_state": (
+        "arrayscope.app.settings_state",
+        ROOT / "arrayscope" / "app" / "settings_state.py",
+    ),
 }
 
 
@@ -131,19 +172,41 @@ def test_settings_round_trip_defaults_and_values():
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
     unknown_quality = settings_state.settings_from_mapping({"montage_quality_policy": "unknown"})
-    assert unknown_quality.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
+    assert (
+        unknown_quality.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
+    )
 
 
 def test_performance_settings_normalize_unknowns_and_clamp_budget():
-    unknown = settings_state.settings_from_mapping({"fft_backend": "unknown", "fft_workers": "many", "image_rendering_backend": "nope"})
+    unknown = settings_state.settings_from_mapping(
+        {"fft_backend": "unknown", "fft_workers": "many", "image_rendering_backend": "nope"}
+    )
     assert unknown.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert unknown.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert unknown.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
-    assert settings_state.settings_from_mapping({"memory_profile": "bad"}).memory_profile == settings_state.MemoryProfileChoice.BALANCED
+    assert (
+        settings_state.settings_from_mapping({"memory_profile": "bad"}).memory_profile
+        == settings_state.MemoryProfileChoice.BALANCED
+    )
 
-    assert settings_state.settings_from_mapping({"render_memory_budget_mb": "bad"}).render_memory_budget_mb == 512
-    assert settings_state.settings_from_mapping({"render_memory_budget_mb": 64}).render_memory_budget_mb == 128
-    assert settings_state.settings_from_mapping({"render_memory_budget_mb": 9000}).render_memory_budget_mb == 8192
+    assert (
+        settings_state.settings_from_mapping(
+            {"render_memory_budget_mb": "bad"}
+        ).render_memory_budget_mb
+        == 512
+    )
+    assert (
+        settings_state.settings_from_mapping(
+            {"render_memory_budget_mb": 64}
+        ).render_memory_budget_mb
+        == 128
+    )
+    assert (
+        settings_state.settings_from_mapping(
+            {"render_memory_budget_mb": 9000}
+        ).render_memory_budget_mb
+        == 8192
+    )
 
 
 def test_panel_resize_behavior_accepts_strong_wayland():

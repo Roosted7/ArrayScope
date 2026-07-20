@@ -1,6 +1,7 @@
 import numpy as np
 
-from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings, process_events as _process_events
+from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
+from tests.ui.helpers import process_events as _process_events
 
 
 def _menu(win, text):
@@ -63,15 +64,18 @@ def test_selecting_fft_workers_updates_settings(qtbot):
         assert win.compute_policy.fft_workers_tile == 1
         montage_workers = win.montage_tile_evaluation_controller.diagnostics().max_workers
         assert 1 <= montage_workers <= win.compute_policy.montage_tile_workers
-        assert win.stage_evaluation_controller.diagnostics().max_workers == win.compute_policy.stage_workers
+        assert (
+            win.stage_evaluation_controller.diagnostics().max_workers
+            == win.compute_policy.stage_workers
+        )
     finally:
         win.close()
 
 
 def test_render_memory_budget_persists_through_settings(qtbot):
     _clear_arrayscope_settings()
-    from arrayscope.window import ArrayScopeWindow
     from arrayscope.app.settings_state import MemoryProfileChoice
+    from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
@@ -184,7 +188,8 @@ def test_montage_quality_policy_menu_defaults_and_switches(qtbot):
         _process_events(qtbot)
         assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.NATIVE_ONLY
         assert win._settings.value("montage_quality_policy") == "native-only"
-        assert native.isChecked() and not resident.isChecked()
+        assert native.isChecked()
+        assert not resident.isChecked()
 
         resident.trigger()
         _process_events(qtbot)
@@ -198,7 +203,6 @@ def test_montage_quality_policy_change_applies_to_next_montage_session(qtbot):
     """A policy switch must take effect without an application restart."""
 
     _clear_arrayscope_settings()
-    from arrayscope.app.settings_state import MontageQualityPolicyChoice
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((3, 4, 5), dtype=np.float32))
@@ -253,7 +257,9 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         )
         # Bitmap is the default and the menu reflects it.
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.BITMAP
-        assert bitmap.isChecked() and not auto.isChecked() and not screen.isChecked()
+        assert bitmap.isChecked()
+        assert not auto.isChecked()
+        assert not screen.isChecked()
         # Greyed out until the wgpu backend is selected.
         assert not win._wgpu_present_method_menu.isEnabled()
 
@@ -270,7 +276,8 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         _process_events(qtbot)
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.AUTO
         assert win._settings.value("wgpu_present_method") == "auto"
-        assert auto.isChecked() and not bitmap.isChecked()
+        assert auto.isChecked()
+        assert not bitmap.isChecked()
 
         screen.trigger()
         _process_events(qtbot)
@@ -278,9 +285,7 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         assert win._settings.value("wgpu_present_method") == "screen"
 
         # Switching the backend away greys the submenu but keeps the choice.
-        _submenu_action(
-            win, "Performance", "Image Rendering Backend", "PyQtGraph stable"
-        ).trigger()
+        _submenu_action(win, "Performance", "Image Rendering Backend", "PyQtGraph stable").trigger()
         _process_events(qtbot)
         assert not win._wgpu_present_method_menu.isEnabled()
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN

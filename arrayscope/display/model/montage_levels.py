@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
-import math
-from typing import Iterable
 
 import numpy as np
 
 from arrayscope.core.window_levels import LevelSource, LevelSourceRank, normalize_bounds
-
 
 PROVISIONAL_TILE_SAMPLE_LIMIT = 512
 REFINED_TILE_SAMPLE_LIMIT = 8192
@@ -37,7 +36,9 @@ class LevelEvidenceQuality(IntEnum):
 MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH = 16
 
 
-def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=None) -> tuple[object, ...]:
+def montage_level_key(
+    document_key, view_state, all_indices=None, colormap_lut=None
+) -> tuple[object, ...]:
     """Identity for semantic montage levels, independent of coverage and presentation.
 
     ``all_indices`` describes the currently requested coverage population, not
@@ -50,8 +51,14 @@ def montage_level_key(document_key, view_state, all_indices=None, colormap_lut=N
     """
 
     axis = view_state.montage_axis
-    selected_indices = None if view_state.montage_indices is None else tuple(int(index) for index in view_state.montage_indices)
-    scope_state = view_state.with_montage_axis(axis, columns=None, indices=selected_indices, text=None)
+    selected_indices = (
+        None
+        if view_state.montage_indices is None
+        else tuple(int(index) for index in view_state.montage_indices)
+    )
+    scope_state = view_state.with_montage_axis(
+        axis, columns=None, indices=selected_indices, text=None
+    )
     return (
         "montage_levels",
         document_key,
@@ -113,7 +120,9 @@ class MontageLevelTracker:
         self._revisions: dict[object, int] = {}
         self._aggregate_cache: dict[object, tuple[int, frozenset[int], MontageLevelStats]] = {}
         self._summary_cache: dict[object, tuple[int, frozenset[int], MontageLevelStats]] = {}
-        self._sample_accumulators: dict[object, tuple[frozenset[int], frozenset[int], np.ndarray | None]] = {}
+        self._sample_accumulators: dict[
+            object, tuple[frozenset[int], frozenset[int], np.ndarray | None]
+        ] = {}
 
     def ensure(self, key: object, expected_indices: Iterable[int]) -> MontageLevelStats:
         expected = self.ensure_expected(key, expected_indices)
@@ -209,7 +218,9 @@ class MontageLevelTracker:
     def source_stats(self, key: object, source_index: int) -> TileLevelStats | None:
         return self._tiles.get(key, {}).get(int(source_index))
 
-    def has_source_quality(self, key: object, source_index: int, quality: LevelEvidenceQuality | int | str) -> bool:
+    def has_source_quality(
+        self, key: object, source_index: int, quality: LevelEvidenceQuality | int | str
+    ) -> bool:
         stats = self.source_stats(key, source_index)
         if stats is None:
             return False
@@ -269,7 +280,11 @@ class MontageLevelTracker:
         if summary is None or not summary.source_indices:
             return None
         cached = self._sample_accumulators.get(key)
-        if cached is None or cached[0] != summary.expected_indices or cached[1] != summary.source_indices:
+        if (
+            cached is None
+            or cached[0] != summary.expected_indices
+            or cached[1] != summary.source_indices
+        ):
             return None
         sample = cached[2]
         if sample is None or np.asarray(sample).size == 0:
@@ -343,12 +358,16 @@ class MontageLevelTracker:
             )
             if rank == LevelSourceRank.MONTAGE_COMPLETE and refined:
                 rank = LevelSourceRank.MONTAGE_SAMPLED_FULL
-            stats = MontageLevelStats(bounds, sources, expected, rank, None, refined, evidence_quality)
+            stats = MontageLevelStats(
+                bounds, sources, expected, rank, None, refined, evidence_quality
+            )
         self._summary_cache[key] = (revision, expected, stats)
         return stats
 
     def as_dict(self) -> dict[object, MontageLevelStats]:
-        return {key: self._stats_for_expected(key, expected) for key, expected in self._expected.items()}
+        return {
+            key: self._stats_for_expected(key, expected) for key, expected in self._expected.items()
+        }
 
     def _stats_for_expected(self, key: object, expected: frozenset[int]) -> MontageLevelStats:
         revision = int(self._revisions.get(key, 0))
@@ -385,7 +404,9 @@ class MontageLevelTracker:
         self._aggregate_cache.pop(key, None)
         self._summary_cache.pop(key, None)
 
-    def _append_tile_sample(self, key: object, expected: frozenset[int], tile_stats: TileLevelStats) -> None:
+    def _append_tile_sample(
+        self, key: object, expected: frozenset[int], tile_stats: TileLevelStats
+    ) -> None:
         previous = self._sample_accumulators.get(key)
         if previous is None:
             self._sample_accumulators[key] = (
@@ -408,17 +429,23 @@ class MontageLevelTracker:
             merged = _merge_incremental_samples(previous_sample, sample, AGGREGATE_SAMPLE_LIMIT)
         self._sample_accumulators[key] = (expected, frozenset((*previous_sources, source)), merged)
 
-    def _sample_for_expected(self, key: object, expected: frozenset[int], sources: frozenset[int]) -> np.ndarray | None:
+    def _sample_for_expected(
+        self, key: object, expected: frozenset[int], sources: frozenset[int]
+    ) -> np.ndarray | None:
         cached = self._sample_accumulators.get(key)
         if cached is not None and cached[0] == expected and cached[1] == sources:
             return cached[2]
         by_source = self._tiles.get(key, {})
-        selected = tuple(by_source[index].sample for index in sorted(expected) if index in by_source)
+        selected = tuple(
+            by_source[index].sample for index in sorted(expected) if index in by_source
+        )
         sample = _aggregate_samples(selected, AGGREGATE_SAMPLE_LIMIT)
         self._sample_accumulators[key] = (expected, sources, sample)
         return sample
 
-    def _rank_for(self, source_indices: Iterable[int], expected_indices: Iterable[int]) -> LevelSourceRank:
+    def _rank_for(
+        self, source_indices: Iterable[int], expected_indices: Iterable[int]
+    ) -> LevelSourceRank:
         sources = frozenset(int(index) for index in source_indices)
         expected = frozenset(int(index) for index in expected_indices)
         if not sources:
@@ -444,7 +471,9 @@ def _sample_tile_stats(
     limit = REFINED_TILE_SAMPLE_LIMIT if refined else PROVISIONAL_TILE_SAMPLE_LIMIT
     if sample.size > int(limit):
         sample = _sparse_even_random_sample(sample, limit=int(limit))
-    requested_quality = None if evidence_quality is None else _coerce_evidence_quality(evidence_quality)
+    requested_quality = (
+        None if evidence_quality is None else _coerce_evidence_quality(evidence_quality)
+    )
     allow_exact_promotion = requested_quality != LevelEvidenceQuality.ROUGH_PREVIEW
     is_refined = bool(
         refined
@@ -606,7 +635,7 @@ def _aggregate_samples(samples: tuple[np.ndarray, ...], limit: int) -> np.ndarra
     total = sum(int(sample.size) for sample in non_empty)
     if total <= limit:
         return np.concatenate(non_empty)
-    step = max(1, int(math.ceil(total / limit)))
+    step = max(1, math.ceil(total / limit))
     selected = []
     offset = 0
     for sample in non_empty:
@@ -633,7 +662,9 @@ def aggregate_histogram_samples(samples: tuple[np.ndarray, ...]) -> np.ndarray |
     return _aggregate_samples(tuple(samples or ()), AGGREGATE_SAMPLE_LIMIT)
 
 
-def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit: int) -> np.ndarray:
+def _merge_incremental_samples(
+    existing: np.ndarray, addition: np.ndarray, limit: int
+) -> np.ndarray:
     """Merge a new tile sample without revisiting every previous tile sample."""
 
     existing = np.asarray(existing, dtype=np.float32).reshape(-1)
@@ -646,13 +677,15 @@ def _merge_incremental_samples(existing: np.ndarray, addition: np.ndarray, limit
     total = int(existing.size + addition.size)
     if total <= limit:
         return np.concatenate((existing, addition)).astype(np.float32, copy=False)
-    keep_existing = min(existing.size, max(1, int(round(limit * (existing.size / total)))))
+    keep_existing = min(existing.size, max(1, round(limit * (existing.size / total))))
     keep_addition = max(0, limit - keep_existing)
     existing_indices = np.linspace(0, existing.size - 1, keep_existing, dtype=np.int64)
     if keep_addition <= 0:
         return existing[existing_indices].astype(np.float32, copy=False)
     addition_indices = np.linspace(0, addition.size - 1, keep_addition, dtype=np.int64)
-    return np.concatenate((existing[existing_indices], addition[addition_indices])).astype(np.float32, copy=False)
+    return np.concatenate((existing[existing_indices], addition[addition_indices])).astype(
+        np.float32, copy=False
+    )
 
 
 def _coerce_evidence_quality(value) -> LevelEvidenceQuality:
@@ -684,13 +717,9 @@ def _tile_stats_is_improvement(candidate: TileLevelStats, previous: TileLevelSta
     if previous_bounds is None:
         return True
     contains_previous = bool(
-        candidate_bounds[0] <= previous_bounds[0]
-        and candidate_bounds[1] >= previous_bounds[1]
+        candidate_bounds[0] <= previous_bounds[0] and candidate_bounds[1] >= previous_bounds[1]
     )
     return bool(
         contains_previous
-        and (
-            candidate_bounds != previous_bounds
-            or candidate.sample_count > previous.sample_count
-        )
+        and (candidate_bounds != previous_bounds or candidate.sample_count > previous.sample_count)
     )

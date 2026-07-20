@@ -8,4 +8,5 @@ class WgpuSurface(WgpuImageView2D):
 
     surface_kind = "wgpu"
 
+
 __all__ = ["WgpuSurface"]

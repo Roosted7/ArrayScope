@@ -47,7 +47,9 @@ def _select(dialog, name):
 def test_rename_moves_instead_of_duplicating(qtbot):
     from arrayscope.display import colormap_library as library
 
-    library.save_user_colormap("imported", library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255))))
+    library.save_user_colormap(
+        "imported", library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255)))
+    )
     win = _window(qtbot)
     dialog = _designer(qtbot, win)
     try:

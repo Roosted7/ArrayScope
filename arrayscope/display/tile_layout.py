@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -32,20 +32,20 @@ def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion,
         regions = []
         for region in tuple(getattr(frame_plan, "regions", ()) or ()):
             x0, y0, x1, y1 = tuple(float(value) for value in getattr(region, "bounds", ()))
-            width = max(0, int(round(x1 - x0 + 1.0)))
-            height = max(0, int(round(y1 - y0 + 1.0)))
+            width = max(0, round(x1 - x0 + 1.0))
+            height = max(0, round(y1 - y0 + 1.0))
             if width < 1 or height < 1:
                 continue
             regions.append(
                 TileLayoutRegion(
-                    tile_number=int(getattr(region, "region_id")),
+                    tile_number=int(region.region_id),
                     source_index=(
                         None
                         if getattr(region, "source_index", None) is None
-                        else int(getattr(region, "source_index"))
+                        else int(region.source_index)
                     ),
-                    x=int(round(x0)),
-                    y=int(round(y0)),
+                    x=round(x0),
+                    y=round(y0),
                     width=width,
                     height=height,
                 )
@@ -77,7 +77,10 @@ def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion,
 
 
 def tile_layout_map(geometry, *, frame_plan=None) -> dict[int, TileLayoutRegion]:
-    return {int(region.tile_number): region for region in tile_layout_regions(geometry, frame_plan=frame_plan)}
+    return {
+        int(region.tile_number): region
+        for region in tile_layout_regions(geometry, frame_plan=frame_plan)
+    }
 
 
 def tile_layout_shape(geometry, *, frame_plan=None) -> tuple[int, int]:

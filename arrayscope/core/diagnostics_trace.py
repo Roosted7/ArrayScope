@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-import json
 from pathlib import Path
 from statistics import median
-from typing import Iterable
-
 
 _TIMING_PATHS = (
     ("render_timing", "last_render_sync_ms"),
@@ -163,7 +162,9 @@ def summarize_diagnostics_trace(
     )
 
 
-def format_trace_summary_markdown(summary: DiagnosticsTraceSummary, *, timing_limit: int = 8) -> str:
+def format_trace_summary_markdown(
+    summary: DiagnosticsTraceSummary, *, timing_limit: int = 8
+) -> str:
     """Format a compact, review-friendly Markdown trace summary."""
 
     lines = [
@@ -209,9 +210,13 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, object]]:
             try:
                 value = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid diagnostics JSONL at {path}:{line_number}: {exc}") from exc
+                raise ValueError(
+                    f"invalid diagnostics JSONL at {path}:{line_number}: {exc}"
+                ) from exc
             if not isinstance(value, dict):
-                raise ValueError(f"diagnostics JSONL record at {path}:{line_number} is not an object")
+                raise ValueError(
+                    f"diagnostics JSONL record at {path}:{line_number} is not an object"
+                )
             yield value
 
 
@@ -253,7 +258,12 @@ def main(argv: list[str] | None = None) -> int:
     for index, path in enumerate(args.paths):
         if index:
             print()
-        print(format_trace_summary_markdown(summarize_diagnostics_trace(path, stall_threshold_ms=args.stall_ms)), end="")
+        print(
+            format_trace_summary_markdown(
+                summarize_diagnostics_trace(path, stall_threshold_ms=args.stall_ms)
+            ),
+            end="",
+        )
     return 0
 
 

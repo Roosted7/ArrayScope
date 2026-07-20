@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Iterable, Literal
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
 from arrayscope.core.view_state import ViewState
 
@@ -39,6 +40,7 @@ class MontageGeometry:
     @property
     def tile_width(self) -> int:
         return self.tile_shape[1]
+
 
 @dataclass(frozen=True)
 class ViewPointMapping:
@@ -93,19 +95,26 @@ class DisplayGeometry:
         object.__setattr__(self, "montage_tile_states", tuple(self.montage_tile_states or ()))
 
     def view_point_to_display_point(self, x: float, y: float) -> tuple[int, int] | None:
-        view_x = int(math.floor(float(x)))
-        view_y = int(math.floor(float(y)))
+        view_x = math.floor(float(x))
+        view_y = math.floor(float(y))
         display_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
         display_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
-        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
+        if (
+            display_x < 0
+            or display_y < 0
+            or display_x >= self.display_shape[1]
+            or display_y >= self.display_shape[0]
+        ):
             return None
         return display_x, display_y
 
-    def view_point_to_tile_point(self, x: float, y: float, *, require_loaded: bool = True) -> MontagePointStatus | None:
+    def view_point_to_tile_point(
+        self, x: float, y: float, *, require_loaded: bool = True
+    ) -> MontagePointStatus | None:
         if self.montage is None:
             return None
-        view_x = int(math.floor(float(x)))
-        view_y = int(math.floor(float(y)))
+        view_x = math.floor(float(x))
+        view_y = math.floor(float(y))
         mapped = self._map_montage_point(view_x, view_y)
         if mapped is None:
             if self._point_inside_montage_bounds(view_x, view_y):
@@ -141,17 +150,28 @@ class DisplayGeometry:
             source_index=montage_index,
             local_x=local_x,
             local_y=local_y,
-            message="" if kind == "loaded" else "tile loading..." if kind in {"loading", "unloaded"} else "tile skipped by memory budget",
+            message=""
+            if kind == "loaded"
+            else "tile loading..."
+            if kind in {"loading", "unloaded"}
+            else "tile skipped by memory budget",
         )
 
-    def view_point_to_array_index(self, x: float, y: float, *, require_loaded: bool = True) -> ViewPointMapping | None:
+    def view_point_to_array_index(
+        self, x: float, y: float, *, require_loaded: bool = True
+    ) -> ViewPointMapping | None:
         if self.view_state.image_axes is None:
             return None
-        view_x = int(math.floor(float(x)))
-        view_y = int(math.floor(float(y)))
+        view_x = math.floor(float(x))
+        view_y = math.floor(float(y))
         display_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
         display_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
-        if display_x < 0 or display_y < 0 or display_x >= self.display_shape[1] or display_y >= self.display_shape[0]:
+        if (
+            display_x < 0
+            or display_y < 0
+            or display_x >= self.display_shape[1]
+            or display_y >= self.display_shape[0]
+        ):
             return None
         local_x = view_x
         local_y = view_y
@@ -163,7 +183,11 @@ class DisplayGeometry:
 
         if self.montage is not None:
             status = self.view_point_to_tile_point(view_x, view_y, require_loaded=require_loaded)
-            if status is None or status.kind in {"gap", "outside"} or (require_loaded and status.kind != "loaded"):
+            if (
+                status is None
+                or status.kind in {"gap", "outside"}
+                or (require_loaded and status.kind != "loaded")
+            ):
                 return None
             tile_number = status.tile_number
             montage_index = status.source_index
@@ -198,13 +222,17 @@ class DisplayGeometry:
             montage_index=montage_index,
         )
 
-    def view_point_to_profile_states(self, x: float, y: float, profile_axes: Iterable[int], *, require_loaded: bool = False) -> tuple[ViewState, ...]:
+    def view_point_to_profile_states(
+        self, x: float, y: float, profile_axes: Iterable[int], *, require_loaded: bool = False
+    ) -> tuple[ViewState, ...]:
         mapping = self.view_point_to_array_index(x, y, require_loaded=require_loaded)
         if mapping is None or self.view_state.image_axes is None:
             return ()
         view_state = self.view_state
         if mapping.montage_axis is not None and mapping.montage_index is not None:
-            view_state = view_state.with_slice(mapping.montage_axis, mapping.montage_index).with_montage_axis(None)
+            view_state = view_state.with_slice(
+                mapping.montage_axis, mapping.montage_index
+            ).with_montage_axis(None)
         primary_axis, secondary_axis = view_state.image_axes
         states = []
         for axis in profile_axes:
@@ -213,17 +241,21 @@ class DisplayGeometry:
                 continue
             profile_state = view_state.with_line_axis(axis)
             if axis != primary_axis:
-                profile_state = profile_state.with_slice(primary_axis, mapping.array_index[primary_axis]).with_axis_range(primary_axis, None)
+                profile_state = profile_state.with_slice(
+                    primary_axis, mapping.array_index[primary_axis]
+                ).with_axis_range(primary_axis, None)
             if axis != secondary_axis:
-                profile_state = profile_state.with_slice(secondary_axis, mapping.array_index[secondary_axis]).with_axis_range(secondary_axis, None)
+                profile_state = profile_state.with_slice(
+                    secondary_axis, mapping.array_index[secondary_axis]
+                ).with_axis_range(secondary_axis, None)
             states.append(profile_state)
         return tuple(states)
 
     def clamp_view_point(self, x: float, y: float) -> tuple[int, int] | None:
         if self.view_state.image_axes is None:
             return None
-        point_x = int(math.floor(float(x)))
-        point_y = int(math.floor(float(y)))
+        point_x = math.floor(float(x))
+        point_y = math.floor(float(y))
         if self.montage is not None:
             return self._clamp_to_montage_tile(point_x, point_y)
         primary_axis, secondary_axis = self.view_state.image_axes
@@ -231,7 +263,9 @@ class DisplayGeometry:
         height = self._display_axis_size(self.view_state, primary_axis)
         return (max(0, min(point_x, width - 1)), max(0, min(point_y, height - 1)))
 
-    def context_for_view_point(self, x: float, y: float, *, require_loaded: bool = True) -> DisplayPointContext | None:
+    def context_for_view_point(
+        self, x: float, y: float, *, require_loaded: bool = True
+    ) -> DisplayPointContext | None:
         mapping = self.view_point_to_array_index(x, y, require_loaded=require_loaded)
         if mapping is None:
             return None
@@ -260,7 +294,12 @@ class DisplayGeometry:
             return None
         local_x = x - column * stride_x
         local_y = y - row * stride_y
-        if local_x < 0 or local_x >= geometry.tile_width or local_y < 0 or local_y >= geometry.tile_height:
+        if (
+            local_x < 0
+            or local_x >= geometry.tile_width
+            or local_y < 0
+            or local_y >= geometry.tile_height
+        ):
             return None
         tile_number = row * geometry.columns + column
         if tile_number >= len(geometry.indices):
@@ -271,8 +310,12 @@ class DisplayGeometry:
         geometry = self.montage
         if geometry is None:
             return False
-        full_width = geometry.columns * geometry.tile_width + max(0, geometry.columns - 1) * geometry.gap
-        full_height = geometry.rows * geometry.tile_height + max(0, geometry.rows - 1) * geometry.gap
+        full_width = (
+            geometry.columns * geometry.tile_width + max(0, geometry.columns - 1) * geometry.gap
+        )
+        full_height = (
+            geometry.rows * geometry.tile_height + max(0, geometry.rows - 1) * geometry.gap
+        )
         return 0 <= int(x) < full_width and 0 <= int(y) < full_height
 
     def _clamp_to_montage_tile(self, x: int, y: int) -> tuple[int, int] | None:
@@ -294,7 +337,9 @@ class DisplayGeometry:
                 best_distance = distance
         return best
 
-    def _local_point_to_axis_indices(self, view_state: ViewState, local_x: int, local_y: int) -> tuple[int, int] | None:
+    def _local_point_to_axis_indices(
+        self, view_state: ViewState, local_x: int, local_y: int
+    ) -> tuple[int, int] | None:
         primary_axis, secondary_axis = view_state.image_axes
         actual_y = self._display_index_to_axis_index(view_state, primary_axis, local_y)
         actual_x = self._display_index_to_axis_index(view_state, secondary_axis, local_x)
@@ -310,7 +355,9 @@ class DisplayGeometry:
         return int(view_state.shape[int(axis)])
 
     @staticmethod
-    def _display_index_to_axis_index(view_state: ViewState, axis: int, display_index: int) -> int | None:
+    def _display_index_to_axis_index(
+        view_state: ViewState, axis: int, display_index: int
+    ) -> int | None:
         axis = int(axis)
         display_index = int(display_index)
         indices = view_state.axis_range_indices[axis]
@@ -323,7 +370,9 @@ class DisplayGeometry:
         return int(indices[display_index])
 
 
-def display_geometry_coordinates_equal(left: DisplayGeometry | None, right: DisplayGeometry | None) -> bool:
+def display_geometry_coordinates_equal(
+    left: DisplayGeometry | None, right: DisplayGeometry | None
+) -> bool:
     """Return True when two display geometries map coordinates the same way."""
 
     if left is None or right is None:

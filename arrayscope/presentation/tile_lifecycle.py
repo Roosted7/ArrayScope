@@ -32,9 +32,9 @@ Structural rules (ADR 0051):
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Iterable, Iterator, Mapping
 
 from arrayscope.core.trace import emit_trace, trace_enabled
 from arrayscope.display.model.tile_identity import TileIdentity
@@ -103,14 +103,9 @@ def _quality_lod_satisfies_target(
 
     payload_level = max(0, int(payload_level))
     target_level = max(0, int(target_level))
-    quality = (
-        "fallback"
-        if str(quality or "exact") == "preview"
-        else str(quality or "exact")
-    )
+    quality = "fallback" if str(quality or "exact") == "preview" else str(quality or "exact")
     return bool(
-        payload_level <= target_level
-        and (quality == "exact" or payload_level < target_level)
+        payload_level <= target_level and (quality == "exact" or payload_level < target_level)
     )
 
 
@@ -145,7 +140,7 @@ class TilePayloadRef:
     def acknowledged_identity(self) -> object:
         return self.identity if self.identity is not None else self.source_id
 
-    def satisfies_target(self, target: "TileTarget") -> bool:
+    def satisfies_target(self, target: TileTarget) -> bool:
         if self.identity is not None or target.identity is not None:
             return bool(
                 self.identity is not None
@@ -322,7 +317,10 @@ class TileRecord:
             return None
         candidates = (
             ref
-            for ref in (payload_ref_from_display_payload(value) for value in self.presentable_payloads.values())
+            for ref in (
+                payload_ref_from_display_payload(value)
+                for value in self.presentable_payloads.values()
+            )
             if ref.satisfies_target(self.target)
         )
         return min(candidates, key=lambda ref: (ref.lod_level, repr(ref.source_id)), default=None)
@@ -333,10 +331,18 @@ class TileRecord:
             return None
         candidates = (
             ref
-            for ref in (payload_ref_from_display_payload(value) for value in self.presentable_payloads.values())
-            if ref.source_index == self.target.source_index and not ref.satisfies_target(self.target)
+            for ref in (
+                payload_ref_from_display_payload(value)
+                for value in self.presentable_payloads.values()
+            )
+            if ref.source_index == self.target.source_index
+            and not ref.satisfies_target(self.target)
         )
-        return min(candidates, key=lambda ref: (0 if ref.quality == "exact" else 1, ref.lod_level), default=None)
+        return min(
+            candidates,
+            key=lambda ref: (0 if ref.quality == "exact" else 1, ref.lod_level),
+            default=None,
+        )
 
     @property
     def target_payload_satisfies(self) -> bool:
@@ -382,11 +388,7 @@ class TileRecord:
                 0 if self.presented_level is None else int(self.presented_level),
                 int(self.target.source_index),
             )
-        quality = str(
-            self.presented_quality
-            or getattr(payload, "quality", "exact")
-            or "exact"
-        )
+        quality = str(self.presented_quality or getattr(payload, "quality", "exact") or "exact")
         if quality == "preview":
             quality = "fallback"
         lod = getattr(payload, "lod", None)
@@ -596,7 +598,9 @@ class TileLifecycle:
         rec.stage_producer_key = stage_producer_key
         _trace_lifecycle(rec, "task_requested", stage_key=stage_key)
 
-    def task_admitted(self, tile_number: int, task_key, *, stage_key=None, stage_producer_key=None) -> None:
+    def task_admitted(
+        self, tile_number: int, task_key, *, stage_key=None, stage_producer_key=None
+    ) -> None:
         if task_key is None and stage_key is None:
             return
         rec = self.record(tile_number)
@@ -609,7 +613,11 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.task_claim = None
         rec.stage_producer_key = None
-        rec.failed_reason = str(reason or "") if reason and reason not in {"stale", "dropped", "cancelled", "completed"} else ""
+        rec.failed_reason = (
+            str(reason or "")
+            if reason and reason not in {"stale", "dropped", "cancelled", "completed"}
+            else ""
+        )
         _trace_lifecycle(rec, "task_released", reason=str(reason or ""))
 
     def stage_waiting(self, tile_number: int, stage_key, producer_key) -> None:
@@ -640,7 +648,10 @@ class TileLifecycle:
         *,
         backend_payloads: Mapping[int, object] | None = None,
     ) -> tuple[int, ...]:
-        accepted_refs = {int(tile): _coerce_payload_ref(payload) for tile, payload in dict(accepted_payloads).items()}
+        accepted_refs = {
+            int(tile): _coerce_payload_ref(payload)
+            for tile, payload in dict(accepted_payloads).items()
+        }
         backend_refs = {
             int(tile): _coerce_payload_ref(payload)
             for tile, payload in dict(backend_payloads or accepted_payloads).items()
@@ -648,10 +659,14 @@ class TileLifecycle:
         metadata_accepted = {
             tile
             for tile, ref in accepted_refs.items()
-            if _payload_refs_match(self.record(tile)._payload_for_identity(self.record(tile).emitted_source_id), ref)
+            if _payload_refs_match(
+                self.record(tile)._payload_for_identity(self.record(tile).emitted_source_id), ref
+            )
         }
         merged_backend = dict(self.backend_presented_identities)
-        merged_backend.update({tile: ref.acknowledged_identity for tile, ref in backend_refs.items()})
+        merged_backend.update(
+            {tile: ref.acknowledged_identity for tile, ref in backend_refs.items()}
+        )
         confirmed = self.commit_acknowledged(
             emitted_tiles=tuple(accepted_refs),
             accepted_tiles=tuple(metadata_accepted),
@@ -676,7 +691,9 @@ class TileLifecycle:
             )
         return tuple(sorted(confirmed))
 
-    def presentation_changes(self, *, max_items: int | None = None) -> tuple[TilePresentationCommand, ...]:
+    def presentation_changes(
+        self, *, max_items: int | None = None
+    ) -> tuple[TilePresentationCommand, ...]:
         commands: list[TilePresentationCommand] = []
         for tile_number, rec in sorted(self._records.items()):
             if not rec.active or rec.presentation is Presentation.EMITTED:
@@ -708,8 +725,7 @@ class TileLifecycle:
         if not required:
             return True
         return all(
-            (record := self._records.get(tile_number)) is not None
-            and record.first_pixel_presented
+            (record := self._records.get(tile_number)) is not None and record.first_pixel_presented
             for tile_number in required
         )
 
@@ -741,7 +757,9 @@ class TileLifecycle:
             first_pixels_presented=self.visible_first_pixels_presented(),
             visible_target_settled=self.visible_target_settled(),
             orphan_running=sum(1 for rec in rows if rec.request_active and rec.task_claim is None),
-            parked_without_producer=sum(1 for rec in rows if rec.stage_key is not None and rec.stage_producer_key is None),
+            parked_without_producer=sum(
+                1 for rec in rows if rec.stage_key is not None and rec.stage_producer_key is None
+            ),
         )
 
     def peek(self, tile_number: int) -> TileRecord | None:
@@ -753,7 +771,9 @@ class TileLifecycle:
     def __iter__(self) -> Iterator[TileRecord]:
         return iter(self._records.values())
 
-    def feedback_signature(self, tile_numbers: Iterable[int] = ()) -> tuple[tuple[object, ...], ...]:
+    def feedback_signature(
+        self, tile_numbers: Iterable[int] = ()
+    ) -> tuple[tuple[object, ...], ...]:
         """Compact lifecycle-owned work signature for feedback reuse.
 
         The governor should reset learned pacing when the presentation work
@@ -868,7 +888,9 @@ class TileLifecycle:
         ref = rec.target_payload or rec.fallback_payload
         return None if ref is None else ref.payload
 
-    def best_presentable(self, tile_number: int, semantic_source=None, target_level: int | None = None):
+    def best_presentable(
+        self, tile_number: int, semantic_source=None, target_level: int | None = None
+    ):
         """Return the best safe fallback payload for this tile, or ``None``.
 
         Ordering is exact before preview, then finer/equal LOD before coarser
@@ -884,7 +906,10 @@ class TileLifecycle:
         candidates = []
         for payload in rec.presentable_payloads.values():
             source_id = getattr(payload, "source_id", None)
-            if semantic_source is not None and _payload_base_source_id(source_id) != semantic_source:
+            if (
+                semantic_source is not None
+                and _payload_base_source_id(source_id) != semantic_source
+            ):
                 continue
             quality = str(getattr(payload, "quality", "exact") or "exact")
             lod = getattr(payload, "lod", None)
@@ -1063,7 +1088,9 @@ class TileLifecycle:
         for index in tuple(self._active_requests):
             self._request_cleared(self._records[index])
 
-    def preview_claimed(self, tile_number: int, rung: int, level: int, semantic_key: object) -> bool:
+    def preview_claimed(
+        self, tile_number: int, rung: int, level: int, semantic_key: object
+    ) -> bool:
         rec = self.record(tile_number)
         rung = int(rung)
         level = int(level)
@@ -1073,11 +1100,12 @@ class TileLifecycle:
         rec.preview_claims[rung] = claim
         return True
 
-    def preview_claim_matches(self, tile_number: int, rung: int, level: int, semantic_key: object) -> bool:
+    def preview_claim_matches(
+        self, tile_number: int, rung: int, level: int, semantic_key: object
+    ) -> bool:
         rec = self._records.get(int(tile_number))
         return bool(
-            rec is not None
-            and rec.preview_claims.get(int(rung)) == (int(level), semantic_key)
+            rec is not None and rec.preview_claims.get(int(rung)) == (int(level), semantic_key)
         )
 
     def preview_released(
@@ -1184,9 +1212,7 @@ class TileLifecycle:
 
     @property
     def stage_blocked_tiles(self) -> frozenset[int]:
-        return frozenset(
-            index for waiting in self._stage_blocked.values() for index in waiting
-        )
+        return frozenset(index for waiting in self._stage_blocked.values() for index in waiting)
 
     # -- residency axis ----------------------------------------------------
 
@@ -1291,7 +1317,10 @@ class TileLifecycle:
         for rec in self._records.values():
             for entry in rec.levels.values():
                 request = entry.request
-                if entry.phase not in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING) or request is None:
+                if (
+                    entry.phase not in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING)
+                    or request is None
+                ):
                     continue
                 identity = id(request)
                 if identity in seen:
@@ -1307,9 +1336,7 @@ class TileLifecycle:
         for rec in self._records.values():
             for level_key, entry in tuple(rec.levels.items()):
                 if entry.phase in (LevelPhase.CLAIMED, LevelPhase.MATERIALIZING):
-                    effects.append(
-                        ReleaseClaim(rec.tile_number, level_key, entry.owner)
-                    )
+                    effects.append(ReleaseClaim(rec.tile_number, level_key, entry.owner))
                     entry.phase = LevelPhase.RELEASED
                     self._level_revision += 1
         return tuple(effects)
@@ -1623,9 +1650,7 @@ class TileLifecycle:
                 if not waiting:
                     self._stage_blocked.pop(key, None)
 
-    def _release_owned(
-        self, rec: TileRecord, owner: ClaimOwner
-    ) -> tuple[ReleaseClaim, ...]:
+    def _release_owned(self, rec: TileRecord, owner: ClaimOwner) -> tuple[ReleaseClaim, ...]:
         effects: list[ReleaseClaim] = []
         for level_key, entry in tuple(rec.levels.items()):
             if entry.owner is owner and entry.phase in (
@@ -1648,9 +1673,9 @@ class TileLifecycle:
             for level_key, entry in rec.levels.items():
                 if entry.request is not request:
                     continue
-                if (
-                    not include_released
-                    and entry.phase in (LevelPhase.RESIDENT, LevelPhase.RELEASED)
+                if not include_released and entry.phase in (
+                    LevelPhase.RESIDENT,
+                    LevelPhase.RELEASED,
                 ):
                     continue
                 entries.append((rec, level_key, entry))
@@ -1709,7 +1734,9 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
         lod_level=policy_lod_level,
         source_index=int(getattr(payload, "source_index", -1)),
         texture_kind=None if texture_kind is None else getattr(texture_kind, "value", texture_kind),
-        shader_mapping_key=None if shader_mapping is None else getattr(shader_mapping, "identity_key", shader_mapping),
+        shader_mapping_key=None
+        if shader_mapping is None
+        else getattr(shader_mapping, "identity_key", shader_mapping),
         identity=getattr(payload, "tile_identity", None),
         payload=payload,
     )

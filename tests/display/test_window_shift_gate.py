@@ -16,10 +16,11 @@ from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE, FramePlanner
 from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.source_anchoring import source_anchoring_for_view
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
-
 from tests.display.vispy_test_utils import FakeDisplayImage, FakeGloo
 
-TARGET = FrameTarget(semantic_key="gate", viewport_key=None, presentation_key=None, quality="exact-visible")
+TARGET = FrameTarget(
+    semantic_key="gate", viewport_key=None, presentation_key=None, quality="exact-visible"
+)
 CHUNK = ANCHORED_CHUNK_SHAPE[1]
 
 
@@ -137,11 +138,7 @@ def test_fft_along_shifted_axis_reuploads_everything():
 
 
 def scrolled_state(shape, index):
-    return (
-        ViewState.from_shape(shape)
-        .with_image_axes(1, 2)
-        .with_slice(0, index)
-    )
+    return ViewState.from_shape(shape).with_image_axes(1, 2).with_slice(0, index)
 
 
 def payloads_for_plane(document, data, index, *, extent):
@@ -208,8 +205,12 @@ def test_non_windowable_chain_still_gets_scroll_back_residency():
     assert anchoring.anchored_starts == (None, None)
     assert anchoring.any_anchored is False
 
-    _anchor_a, plane_a = payloads_for_plane(document, data.real.astype(np.float32), 0, extent=extent)
-    _anchor_b, plane_b = payloads_for_plane(document, data.real.astype(np.float32), 1, extent=extent)
+    _anchor_a, plane_a = payloads_for_plane(
+        document, data.real.astype(np.float32), 0, extent=extent
+    )
+    _anchor_b, plane_b = payloads_for_plane(
+        document, data.real.astype(np.float32), 1, extent=extent
+    )
     pool = TextureAtlasPool(FakeGloo(), budget_bytes=64 * 1024 * 1024)
     tile_shape = (CHUNK, CHUNK)
     commit(pool, plane_a, tile_shape)

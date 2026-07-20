@@ -10,16 +10,24 @@ def _plan():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
-    state = ViewState.from_shape((10, 10, 9)).with_montage_axis(2, indices=tuple(range(9)), text=":")
-    return make_montage_plan(state, axis=2, indices=tuple(range(9)), tile_shape=(10, 10), columns=3, gap=1)
+    state = ViewState.from_shape((10, 10, 9)).with_montage_axis(
+        2, indices=tuple(range(9)), text=":"
+    )
+    return make_montage_plan(
+        state, axis=2, indices=tuple(range(9)), tile_shape=(10, 10), columns=3, gap=1
+    )
 
 
 def _plan_with_columns(columns):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
-    state = ViewState.from_shape((10, 10, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
-    return make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(10, 10), columns=columns, gap=1)
+    state = ViewState.from_shape((10, 10, 6)).with_montage_axis(
+        2, indices=tuple(range(6)), text=":"
+    )
+    return make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(10, 10), columns=columns, gap=1
+    )
 
 
 def test_montage_tile_priority_orders_from_viewport_center_outward():
@@ -41,9 +49,7 @@ def test_montage_tile_priority_normalizes_by_viewport_aspect():
     plan = _plan()
     ordered = prioritize_tiles(
         plan.tiles,
-        context=TilePriorityContext.from_tiles(
-            view_range=((10, 20), (0, 32)), focus=(15, 16)
-        ),
+        context=TilePriorityContext.from_tiles(view_range=((10, 20), (0, 32)), focus=(15, 16)),
     )
     first_indices = [tile.montage_index for tile in ordered[:3]]
 
@@ -253,12 +259,19 @@ def test_repeated_manual_resize_preserves_units_per_viewport_pixel():
             view_range,
             viewport_shape,
             next_shape,
-            focus=((view_range[0][0] + view_range[0][1]) * 0.5, (view_range[1][0] + view_range[1][1]) * 0.5),
+            focus=(
+                (view_range[0][0] + view_range[0][1]) * 0.5,
+                (view_range[1][0] + view_range[1][1]) * 0.5,
+            ),
         )
         viewport_shape = next_shape
         assert view_range is not None
-        assert (view_range[0][1] - view_range[0][0]) / viewport_shape[1] == pytest.approx(initial_x_units)
-        assert (view_range[1][1] - view_range[1][0]) / viewport_shape[0] == pytest.approx(initial_y_units)
+        assert (view_range[0][1] - view_range[0][0]) / viewport_shape[1] == pytest.approx(
+            initial_x_units
+        )
+        assert (view_range[1][1] - view_range[1][0]) / viewport_shape[0] == pytest.approx(
+            initial_y_units
+        )
 
 
 def test_remap_montage_view_range_anchors_to_nearest_tile_when_focus_is_outside_tiles():
@@ -298,10 +311,18 @@ def test_remap_montage_view_range_does_not_follow_scrolled_source_window():
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.montage_viewport import remap_montage_view_range
 
-    first_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, indices=(0, 1, 2, 3), text="0:4")
-    next_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, indices=(4, 5, 6, 7), text="4:8")
-    first = make_montage_plan(first_state, axis=2, indices=(0, 1, 2, 3), tile_shape=(10, 10), columns=2, gap=1)
-    next_plan = make_montage_plan(next_state, axis=2, indices=(4, 5, 6, 7), tile_shape=(10, 10), columns=2, gap=1)
+    first_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, indices=(0, 1, 2, 3), text="0:4"
+    )
+    next_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, indices=(4, 5, 6, 7), text="4:8"
+    )
+    first = make_montage_plan(
+        first_state, axis=2, indices=(0, 1, 2, 3), tile_shape=(10, 10), columns=2, gap=1
+    )
+    next_plan = make_montage_plan(
+        next_state, axis=2, indices=(4, 5, 6, 7), tile_shape=(10, 10), columns=2, gap=1
+    )
 
     remapped = remap_montage_view_range(
         first,
@@ -316,7 +337,10 @@ def test_remap_montage_view_range_does_not_follow_scrolled_source_window():
 
 
 def test_retarget_montage_viewport_plan_preserves_manual_screen_zoom_on_resize():
-    from arrayscope.window.montage_viewport import MontageViewportPlan, retarget_montage_viewport_plan
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        retarget_montage_viewport_plan,
+    )
 
     plan = _plan_with_columns(3)
     current_range = ((5.0, 25.0), (-10.0, 30.0))
@@ -345,7 +369,10 @@ def test_retarget_montage_viewport_plan_preserves_manual_screen_zoom_on_resize()
 
 
 def test_retarget_montage_viewport_plan_preserves_manual_layout_zoom():
-    from arrayscope.window.montage_viewport import MontageViewportPlan, retarget_montage_viewport_plan
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        retarget_montage_viewport_plan,
+    )
 
     previous = _plan_with_columns(2)
     next_plan = _plan_with_columns(3)
@@ -513,10 +540,18 @@ def test_remap_montage_roi_geometry_keeps_position_for_scrolled_sources():
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
-    first_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, indices=(0, 1, 2, 3), text="0:4")
-    next_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, indices=(4, 5, 6, 7), text="4:8")
-    first = make_montage_plan(first_state, axis=2, indices=(0, 1, 2, 3), tile_shape=(10, 10), columns=2, gap=1)
-    next_plan = make_montage_plan(next_state, axis=2, indices=(4, 5, 6, 7), tile_shape=(10, 10), columns=2, gap=1)
+    first_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, indices=(0, 1, 2, 3), text="0:4"
+    )
+    next_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, indices=(4, 5, 6, 7), text="4:8"
+    )
+    first = make_montage_plan(
+        first_state, axis=2, indices=(0, 1, 2, 3), tile_shape=(10, 10), columns=2, gap=1
+    )
+    next_plan = make_montage_plan(
+        next_state, axis=2, indices=(4, 5, 6, 7), tile_shape=(10, 10), columns=2, gap=1
+    )
     geometry = RoiGeometry(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
 
     assert remap_montage_roi_geometry(first, next_plan, geometry) is None
@@ -578,7 +613,9 @@ def test_montage_layout_reflow_updates_roi_mirror_geometry():
     selection = RoiSelection(
         "roi-1",
         "ROI 1",
-        RoiGeometry(RoiKind.RECTANGLE, rect=(previous_tile.x0 + 2.0, previous_tile.y0 + 3.0, 4.0, 5.0)),
+        RoiGeometry(
+            RoiKind.RECTANGLE, rect=(previous_tile.x0 + 2.0, previous_tile.y0 + 3.0, 4.0, 5.0)
+        ),
     )
     selections = {"roi-1": selection}
     changed = []
@@ -586,7 +623,9 @@ def test_montage_layout_reflow_updates_roi_mirror_geometry():
     def set_geometry(roi_id, geometry, *, emit, sync_item):
         changed.append((roi_id, geometry, emit, sync_item))
         current = selections[str(roi_id)]
-        selections[str(roi_id)] = RoiSelection(current.id, current.label, geometry, current.enabled, current.color)
+        selections[str(roi_id)] = RoiSelection(
+            current.id, current.label, geometry, current.enabled, current.color
+        )
 
     img_view = SimpleNamespace(
         roiSelections=lambda: tuple(selections.values()),
@@ -609,8 +648,13 @@ def test_committed_tiled_roi_stats_follow_remapped_layout_geometry():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry
     from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import (
+        CommittedDisplayFrame,
+        DisplayFrameKey,
+        DisplayTilePayload,
+        TiledValueSource,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey, DisplayTilePayload, TiledValueSource
     from arrayscope.window.inspection import InspectionWorkflowMixin
     from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
@@ -677,7 +721,7 @@ def test_square_montage_fit_view_range_follows_viewport_aspect():
 
 
 def test_montage_autofit_rescues_manual_view_when_new_layout_is_largely_outside():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -703,7 +747,7 @@ def test_montage_autofit_rescues_manual_view_when_new_layout_is_largely_outside(
 
 
 def test_montage_autofit_promotes_view_close_to_regular_fit():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class NearAutoController:
         def is_auto_active(self):
@@ -722,7 +766,7 @@ def test_montage_autofit_promotes_view_close_to_regular_fit():
 
 
 def test_montage_autofit_allows_empty_auto_like_view():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class AutoController:
         def is_auto_active(self):
@@ -738,7 +782,7 @@ def test_montage_autofit_allows_empty_auto_like_view():
 
 
 def test_montage_autofit_rejects_far_zoomed_out_manual_view():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -754,7 +798,7 @@ def test_montage_autofit_rejects_far_zoomed_out_manual_view():
 
 
 def test_montage_autofit_allows_exact_near_full_manual_alignment():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class ManualController:
         def is_near_auto(self, _view_range):
@@ -775,7 +819,10 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
     from types import SimpleNamespace
 
     from arrayscope.window.frame_controller import FrameControllerMixin
-    from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        square_montage_fit_view_range,
+    )
 
     class ManualController:
         def is_fit_locked(self):
@@ -805,9 +852,13 @@ def test_retarget_layout_reflow_keeps_far_zoomed_out_manual_range_manual():
     window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(
+        window, session, viewport_plan
+    )
 
-    assert retargeted.view_range != square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
+    assert retargeted.view_range != square_montage_fit_view_range(
+        next_plan, viewport_plan.viewport_shape
+    )
     assert applied != [square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)]
 
 
@@ -851,7 +902,9 @@ def test_released_viewport_continuity_does_not_skip_manual_resize_reflow():
     window.win = window
     session = SimpleNamespace(plan=plan, viewport_shape=(50, 100))
 
-    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(
+        window, session, viewport_plan
+    )
 
     assert retargeted.view_range == ((2.5, 12.5), (0.0, 20.0))
     assert applied == [((2.5, 12.5), (0.0, 20.0))]
@@ -861,7 +914,10 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     from types import SimpleNamespace
 
     from arrayscope.window.frame_controller import FrameControllerMixin
-    from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        square_montage_fit_view_range,
+    )
 
     class AutoController:
         def __init__(self):
@@ -895,7 +951,9 @@ def test_retarget_layout_reflow_refits_when_near_previous_auto_range():
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
     expected = square_montage_fit_view_range(next_plan, viewport_plan.viewport_shape)
 
-    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(
+        window, session, viewport_plan
+    )
 
     assert retargeted.view_range == expected
     assert applied == [expected]
@@ -906,7 +964,10 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
     from types import SimpleNamespace
 
     from arrayscope.window.frame_controller import FrameControllerMixin
-    from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        square_montage_fit_view_range,
+    )
 
     class AutoController:
         def __init__(self):
@@ -940,7 +1001,9 @@ def test_retarget_layout_reflow_refits_only_when_near_next_auto_range():
     window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(
+        window, session, viewport_plan
+    )
 
     assert retargeted.view_range == expected
     assert applied == []
@@ -951,7 +1014,10 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
     from types import SimpleNamespace
 
     from arrayscope.window.frame_controller import FrameControllerMixin
-    from arrayscope.window.montage_viewport import MontageViewportPlan, square_montage_fit_view_range
+    from arrayscope.window.montage_viewport import (
+        MontageViewportPlan,
+        square_montage_fit_view_range,
+    )
 
     class AutoController:
         def __init__(self):
@@ -988,7 +1054,9 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
     window.win = window
     session = SimpleNamespace(plan=previous, viewport_shape=(50, 100))
 
-    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(window, session, viewport_plan)
+    retargeted = FrameControllerMixin._retargeted_montage_viewport_plan(
+        window, session, viewport_plan
+    )
 
     assert retargeted.view_range == expected
     assert applied == [expected]
@@ -996,7 +1064,7 @@ def test_retarget_layout_reflow_refits_when_auto_active_even_if_far_from_next_au
 
 
 def test_montage_autofit_allows_auto_active_even_when_visible_fraction_is_high():
-    from arrayscope.window.frame_controller import _should_auto_fit_montage_view
+    from arrayscope.window.frame_runtime import _should_auto_fit_montage_view
 
     class AutoController:
         def is_auto_active(self):
@@ -1062,7 +1130,10 @@ def test_active_viewport_continuity_skips_autofit_helper():
 
 
 def test_montage_autofit_signature_ignores_layout_only_reflow():
-    from arrayscope.window.frame_controller import _montage_autofit_scope_grew, _montage_autofit_signature
+    from arrayscope.window.frame_runtime import (
+        _montage_autofit_scope_grew,
+        _montage_autofit_signature,
+    )
 
     previous = _plan_with_columns(2).geometry
     next_geometry = _plan_with_columns(3).geometry
@@ -1140,8 +1211,12 @@ def test_frame_session_key_excludes_effective_columns():
     from arrayscope.window.montage_viewport import MontageViewportPlan, frame_session_key
 
     state = ViewState.from_shape((10, 10, 12)).with_image_axes(0, 1).with_montage_axis(2, columns=2)
-    left = make_montage_plan(state, axis=2, indices=tuple(range(12)), tile_shape=(10, 10), columns=2)
-    right = make_montage_plan(state, axis=2, indices=tuple(range(12)), tile_shape=(10, 10), columns=4)
+    left = make_montage_plan(
+        state, axis=2, indices=tuple(range(12)), tile_shape=(10, 10), columns=2
+    )
+    right = make_montage_plan(
+        state, axis=2, indices=tuple(range(12)), tile_shape=(10, 10), columns=4
+    )
 
     def plan(montage_plan):
         return MontageViewportPlan(
@@ -1155,4 +1230,6 @@ def test_frame_session_key_excludes_effective_columns():
             persistent_tile_residency=False,
         )
 
-    assert frame_session_key("doc", state, plan(left), None) == frame_session_key("doc", state, plan(right), None)
+    assert frame_session_key("doc", state, plan(left), None) == frame_session_key(
+        "doc", state, plan(right), None
+    )

@@ -5,7 +5,6 @@ import sys
 
 import pytest
 
-
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("pyqtgraph") is None,
     reason="pyqtgraph is not installed",

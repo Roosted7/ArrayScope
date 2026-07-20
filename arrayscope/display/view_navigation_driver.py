@@ -5,7 +5,12 @@ from __future__ import annotations
 from pyqtgraph.Qt import QtCore
 
 from arrayscope.display.interaction import point_inside_rect
-from arrayscope.display.view_navigation import PanGesture, begin_pan, pan_view_range, wheel_zoom_view_range
+from arrayscope.display.view_navigation import (
+    PanGesture,
+    begin_pan,
+    pan_view_range,
+    wheel_zoom_view_range,
+)
 
 
 class QtViewNavigationDriver:
@@ -51,7 +56,9 @@ class QtViewNavigationDriver:
             return True
         if event_type == QtCore.QEvent.Type.MouseMove and self._pan is not None:
             buttons = event.buttons()
-            if not bool(buttons & (QtCore.Qt.MouseButton.LeftButton | QtCore.Qt.MouseButton.MiddleButton)):
+            if not bool(
+                buttons & (QtCore.Qt.MouseButton.LeftButton | QtCore.Qt.MouseButton.MiddleButton)
+            ):
                 self._pan = None
                 return False
             position = owner._event_position(event)

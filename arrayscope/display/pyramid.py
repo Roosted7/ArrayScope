@@ -8,12 +8,14 @@ looks levels up.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from threading import RLock
 
 import numpy as np
 
 from arrayscope.core.bounded_cache import BoundedCache
+from arrayscope.gpu.chunk_summary import ChunkHistogramSummary, summarize_chunk
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN,
@@ -27,9 +29,7 @@ from arrayscope.gpu.keys import (
     ChunkLod,
     DataChunkKey,
 )
-from arrayscope.gpu.chunk_summary import ChunkHistogramSummary, summarize_chunk
 from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable
-
 
 ALGO_VERSION = 1
 """Reduction algorithm version; part of every pyramid cache key."""
@@ -96,7 +96,7 @@ class LodPagePlan:
     source_samples_per_stored_sample_yx: tuple[int, int]
     reduction_yx: tuple[int, int]
     stored_page_shape: tuple[int, int]
-    draw_blocks: tuple["SourceGridDrawBlock", ...]
+    draw_blocks: tuple[SourceGridDrawBlock, ...]
     source_y_bins: tuple[tuple[int, int], ...]
     source_x_bins: tuple[tuple[int, int], ...]
     reducer: str
@@ -128,7 +128,9 @@ class LodPagePlan:
             raise ValueError("DataChunkKey geometry disagrees with page source footprint")
         if tuple(self.key.lod.reduction) != reduction or self.key.lod.reducer != str(self.reducer):
             raise ValueError("DataChunkKey LOD family disagrees with page route")
-        if self.key.operation_key != _route_operation_key(_unwrap_route_operation_key(self.key.operation_key)):
+        if self.key.operation_key != _route_operation_key(
+            _unwrap_route_operation_key(self.key.operation_key)
+        ):
             raise ValueError("DataChunkKey operation identity lacks canonical route lineage")
         stored_shape = (stored_rect[1] - stored_rect[0], stored_rect[3] - stored_rect[2])
         if stored_shape[0] > page_shape[0] or stored_shape[1] > page_shape[1]:
@@ -176,9 +178,7 @@ class LodPagePlan:
         """
 
         return tuple(
-            (y0, y1, x0, x1)
-            for y0, y1 in self.source_y_bins
-            for x0, x1 in self.source_x_bins
+            (y0, y1, x0, x1) for y0, y1 in self.source_y_bins for x0, x1 in self.source_x_bins
         )
 
     def stored_index_for_source(self, y_i: int, x_i: int) -> tuple[int, int] | None:
@@ -310,10 +310,7 @@ class ResolvedLodPageSet:
     def actual_levels(self) -> tuple[int, ...]:
         """Physical scalar level of every target-aligned binding."""
 
-        return tuple(
-            max(reduction, default=0)
-            for reduction in self.actual_reductions_yx
-        )
+        return tuple(max(reduction, default=0) for reduction in self.actual_reductions_yx)
 
     @property
     def target_actual_levels(self) -> tuple[tuple[DataChunkKey, int], ...]:
@@ -386,7 +383,9 @@ def resolved_materialized_page_set(
         return None
     resolved = tuple(item for item in resolutions if item is not None)
     pages_by_key = {page.key: page for page in materialized}
-    actual_pages = tuple(pages_by_key[key] for key in dict.fromkeys(item.actual_key for item in resolved))
+    actual_pages = tuple(
+        pages_by_key[key] for key in dict.fromkeys(item.actual_key for item in resolved)
+    )
     return ResolvedLodPageSet(requested, resolved, actual_pages)
 
 
@@ -468,7 +467,10 @@ def plan_source_grid_pages(
                         nominal_x + source_page_w,
                     ),
                     stored_rect_yx=(stored_y0, stored_y1, stored_x0, stored_x1),
-                    stored_page_origin_yx=(nominal_y // source_scale_y, nominal_x // source_scale_x),
+                    stored_page_origin_yx=(
+                        nominal_y // source_scale_y,
+                        nominal_x // source_scale_x,
+                    ),
                     source_samples_per_stored_sample_yx=(source_scale_y, source_scale_x),
                     reduction_yx=reduction,
                     stored_page_shape=(stored_h, stored_w),
@@ -592,9 +594,7 @@ def partition_source_grid_pages(
                 source_rect_yx=source_rect,
                 values=np.ascontiguousarray(values[row_slice, column_slice]),
                 draw_source_rects=tuple(tuple(int(value) for value in rect) for rect in page_rects),
-                draw_blocks=_source_grid_draw_blocks(
-                    rect_grid[row_slice, column_slice]
-                ),
+                draw_blocks=_source_grid_draw_blocks(rect_grid[row_slice, column_slice]),
             )
         )
     return tuple(pages)
@@ -605,7 +605,9 @@ def _source_grid_draw_blocks(rect_grid: np.ndarray) -> tuple[SourceGridDrawBlock
 
     rows, columns = rect_grid.shape[:2]
     y_spans = tuple((int(rect_grid[row, 0, 0]), int(rect_grid[row, 0, 1])) for row in range(rows))
-    x_spans = tuple((int(rect_grid[0, column, 2]), int(rect_grid[0, column, 3])) for column in range(columns))
+    x_spans = tuple(
+        (int(rect_grid[0, column, 2]), int(rect_grid[0, column, 3])) for column in range(columns)
+    )
     return _source_grid_draw_blocks_from_axes(y_spans, x_spans)
 
 
@@ -677,16 +679,13 @@ def reduce_source_grid_mean(
     factor_x, factor_y = (1 << level_x, 1 << level_y)
     input_factor_x, input_factor_y = (1 << input_level_x, 1 << input_level_y)
     source_y, source_x = (int(source_origin_yx[0]), int(source_origin_yx[1]))
-    valid_y0, valid_y1, valid_x0, valid_x1 = (
-        int(value) for value in valid_source_rect_yx
-    )
+    valid_y0, valid_y1, valid_x0, valid_x1 = (int(value) for value in valid_source_rect_yx)
     if valid_y1 <= valid_y0 or valid_x1 <= valid_x0:
         raise ValueError("valid source rectangle must be non-empty")
     input_y1 = source_y + int(values.shape[0]) * input_factor_y
     input_x1 = source_x + int(values.shape[1]) * input_factor_x
     if not (
-        source_y <= valid_y0 < valid_y1 <= input_y1
-        and source_x <= valid_x0 < valid_x1 <= input_x1
+        source_y <= valid_y0 < valid_y1 <= input_y1 and source_x <= valid_x0 < valid_x1 <= input_x1
     ):
         raise ValueError("valid source rectangle lies outside the input sample coverage")
     if (input_level_x or input_level_y) and (
@@ -786,7 +785,7 @@ def _validated_axis_bins(
         raise ValueError(f"{name} do not cover the planned source footprint")
     if any(a >= b for a, b in normalized):
         raise ValueError(f"{name} must contain non-empty spans")
-    if any(left[1] != right[0] for left, right in zip(normalized, normalized[1:])):
+    if any(left[1] != right[0] for left, right in itertools.pairwise(normalized)):
         raise ValueError(f"{name} must be a contiguous partition")
     return normalized
 
@@ -801,7 +800,9 @@ def materialize_lod_page(
 
     source = np.asarray(array)
     if source.ndim < 2 or source.ndim > 3:
-        raise ValueError("LOD page materialization requires 2D data plus at most one component axis")
+        raise ValueError(
+            "LOD page materialization requires 2D data plus at most one component axis"
+        )
     source_y, source_x = (int(source_origin_yx[0]), int(source_origin_yx[1]))
     source_stop_y = source_y + int(source.shape[0])
     source_stop_x = source_x + int(source.shape[1])
@@ -962,19 +963,16 @@ def reduce_source_grid(
     x_bins = _source_grid_axis_rects(valid_rect[2], valid_rect[3], factor_x)
     trailing_shape = () if str(reducer) not in (REDUCER_NATIVE, REDUCER_MEAN) else source.shape[2:]
     values = np.empty((len(y_bins), len(x_bins), *trailing_shape), dtype=output_dtype)
-    by_rect: dict[tuple[int, int, int, int], object] = {}
-    for page in materialized:
+    by_rect: dict[tuple[int, int, int, int], object] = {
+        rect: value
+        for page in materialized
         for rect, value in zip(
             page.plan.sample_source_rects_yx,
             page.values.reshape((-1, *trailing_shape)),
             strict=True,
-        ):
-            by_rect[rect] = value
-    rects = tuple(
-        (y0, y1, x0, x1)
-        for y0, y1 in y_bins
-        for x0, x1 in x_bins
-    )
+        )
+    }
+    rects = tuple((y0, y1, x0, x1) for y0, y1 in y_bins for x0, x1 in x_bins)
     for index, rect in enumerate(rects):
         row, column = divmod(index, len(x_bins))
         values[row, column] = by_rect[rect]
@@ -1083,11 +1081,7 @@ def _validate_materialized_representation(
 
     representation = str(representation)
     if representation == RGB8:
-        if (
-            values.dtype != np.dtype(np.uint8)
-            or values.ndim != 3
-            or values.shape[-1] not in (3, 4)
-        ):
+        if values.dtype != np.dtype(np.uint8) or values.ndim != 3 or values.shape[-1] not in (3, 4):
             raise ValueError("rgb8 materialized pages require uint8 RGB(A) component values")
         return
     if representation == COMPLEX_RG32F:
@@ -1159,8 +1153,7 @@ def _reduction_vector_xy(value, *, name: str) -> tuple[int, int]:
 
 def _rect_contains(outer, inner) -> bool:
     return bool(
-        outer[0] <= inner[0] < inner[1] <= outer[1]
-        and outer[2] <= inner[2] < inner[3] <= outer[3]
+        outer[0] <= inner[0] < inner[1] <= outer[1] and outer[2] <= inner[2] < inner[3] <= outer[3]
     )
 
 
@@ -1271,9 +1264,7 @@ class LodPageCache:
         self._resolver_revision = -1
         self._resolver_table = PageTable()
         self._resolver_pages_by_key: dict[DataChunkKey, MaterializedLodPage] = {}
-        self._resolution_memo: dict[
-            tuple[DataChunkKey, ...], ResolvedLodPageSet | None
-        ] = {}
+        self._resolution_memo: dict[tuple[DataChunkKey, ...], ResolvedLodPageSet | None] = {}
         self._resolution_memo_revision = -1
 
     @property
@@ -1336,8 +1327,7 @@ class LodPageCache:
         else:
             resolved = tuple(item for item in resolutions if item is not None)
             actual_pages = tuple(
-                pages_by_key[key]
-                for key in dict.fromkeys(item.actual_key for item in resolved)
+                pages_by_key[key] for key in dict.fromkeys(item.actual_key for item in resolved)
             )
             result = ResolvedLodPageSet(requested, resolved, actual_pages)
         with self._lock:
@@ -1513,7 +1503,9 @@ class LodPageCache:
 
         with self._lock:
             self._active_claim_owners.discard(owner)
-            released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
+            released = tuple(
+                key for key, claimed_owner in self._claims.items() if claimed_owner == owner
+            )
             for key in released:
                 self._claims.pop(key, None)
             self._owner_requested_keys.pop(owner, None)
@@ -1526,7 +1518,9 @@ class LodPageCache:
                 # inside its numeric kernel. Keep exact claim ownership until
                 # that worker reaches its terminal finally block.
                 return ()
-            released = tuple(key for key, claimed_owner in self._claims.items() if claimed_owner == owner)
+            released = tuple(
+                key for key, claimed_owner in self._claims.items() if claimed_owner == owner
+            )
             for key in released:
                 self._claims.pop(key, None)
             self._owner_requested_keys.pop(owner, None)
@@ -1612,7 +1606,8 @@ class LodPageCache:
 
     def resident_lod_reducer_counts(self) -> dict[tuple[tuple[int, ...], str], int]:
         counts: dict[tuple[tuple[int, ...], str], int] = {}
-        for key, _page in self._cache.items():
+        # BoundedCache is not a dict: it has .items() but no __iter__/keys().
+        for key, _page in self._cache.items():  # noqa: PERF102
             family = (tuple(key.lod.reduction), str(key.lod.reducer))
             counts[family] = counts.get(family, 0) + 1
         return counts
@@ -1639,13 +1634,13 @@ __all__ = [
     "SourceGridPage",
     "SourceGridPageIdentity",
     "SourceGridReduction",
+    "materialize_lod_page",
+    "materialize_source_grid_pages",
     "partition_source_grid_pages",
     "plan_source_grid_pages",
     "reduce_box_mean",
     "reduce_source_grid",
     "reduce_source_grid_mean",
-    "materialize_lod_page",
-    "materialize_source_grid_pages",
     "reduction_xy_to_yx",
     "reduction_yx_to_xy",
     "resolve_materialized_page_targets",
@@ -1653,7 +1648,9 @@ __all__ = [
 ]
 
 
-def preview_level_for_tile_shape(tile_shape, *, target_edge: int = 48, min_level: int = 2, max_level: int = 6) -> int:
+def preview_level_for_tile_shape(
+    tile_shape, *, target_edge: int = 48, min_level: int = 2, max_level: int = 6
+) -> int:
     """Retained-preview level for one tile shape (ADR 0050).
 
     Coarse enough that a whole stack stays a few megabytes, fine enough to

@@ -1,18 +1,12 @@
-import time
-
 import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.ui.helpers import (
-    assert_panel_invariants as _assert_panel_invariants,
-    assert_size_close as _assert_size_close,
     clear_arrayscope_settings,
-    panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
-    view_action as _view_action,
-    wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
 
@@ -164,6 +158,7 @@ def test_absolute_display_restore_queues_exact_levels(qtbot):
 def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.ui.widgets import TOOL_BUTTON_STYLE
     from arrayscope.window import ArrayScopeWindow
 
@@ -191,7 +186,9 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
     render_calls = []
     try:
         _process_events(qtbot, count=20)
-        win._set_view_state(ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":"))
+        win._set_view_state(
+            ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":")
+        )
         win.render(reason="test-montage", force_autolevel=False)
         _process_events(qtbot, count=30)
         requested_range = ((3.0, 11.0), (4.0, 12.0))
@@ -206,8 +203,8 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
         monkeypatch.setattr(
             win,
             "render",
-            lambda *, reason="state", force_autolevel=False, defer_side_panels=False: render_calls.append(
-                (reason, force_autolevel, defer_side_panels)
+            lambda *, reason="state", force_autolevel=False, defer_side_panels=False: (
+                render_calls.append((reason, force_autolevel, defer_side_panels))
             ),
         )
 
@@ -245,7 +242,9 @@ def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monke
             pipeline = None if session is None else getattr(session, "pipeline", None)
             observed.append(
                 pipeline is not None
-                and callable(getattr(getattr(pipeline, "effects", None), "request_presentation", None))
+                and callable(
+                    getattr(getattr(pipeline, "effects", None), "request_presentation", None)
+                )
             )
             return original(level_key, expected_indices=expected_indices)
 
@@ -269,6 +268,7 @@ def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monke
 def test_main_canvas_remains_embedded_in_window(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.arange(6 * 7, dtype=float).reshape(6, 7))
@@ -296,7 +296,11 @@ def test_hover_reads_display_without_scalar_evaluation(qtbot, monkeypatch):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        monkeypatch.setattr(win.pixel_evaluation_controller, "start", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")))
+        monkeypatch.setattr(
+            win.pixel_evaluation_controller,
+            "start",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")),
+        )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win.getPixel(scene_pos)
         _process_events(qtbot, count=5)
@@ -319,7 +323,11 @@ def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypa
         _process_events(qtbot, count=20)
         win.request_operation("reverse", 0)
         _process_events(qtbot, count=30)
-        monkeypatch.setattr(win.pixel_evaluation_controller, "start", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")))
+        monkeypatch.setattr(
+            win.pixel_evaluation_controller,
+            "start",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scalar eval scheduled")),
+        )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win.getPixel(scene_pos)
         _process_events(qtbot, count=5)
@@ -344,8 +352,10 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 6.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 6.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
@@ -421,8 +431,10 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 19.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 19.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.operation_evaluator.clear_cache()
@@ -434,7 +446,10 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         _process_events(qtbot, count=30)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (
+            100.0,
+            119.0,
+        )
     finally:
         win.close()
 
@@ -453,11 +468,16 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 19.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 19.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: not win.montage_tile_evaluation_controller.is_busy(),
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
         _process_events(qtbot, count=5)
@@ -469,8 +489,10 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
 
         qtbot.waitUntil(
             lambda: (
-                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
-                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+                tuple(round(float(value), 6) for value in win.img_view.getLevels())
+                == (205.0, 215.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (200.0, 219.0)
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
@@ -492,11 +514,16 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         _process_events(qtbot, count=20)
-        qtbot.waitUntil(lambda: not win.montage_tile_evaluation_controller.is_busy(), timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: not win.montage_tile_evaluation_controller.is_busy(),
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         # Drop warm tile state (evaluator cache and resident payloads from the
         # startup render of the middle slice) so slice 1 starts uncached.
         win.operation_evaluator.clear_cache()
-        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change("test-cold-start")
+        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change(
+            "test-cold-start"
+        )
         frame = getattr(win, "_committed_display_frame", None)
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
         if isinstance(payloads, dict):
@@ -509,8 +536,10 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win.render_coordinator.flush_now()
         qtbot.waitUntil(
             lambda: (
-                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+                tuple(round(float(value), 6) for value in win.img_view.getLevels())
+                == (105.0, 115.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (100.0, 119.0)
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
@@ -519,8 +548,10 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win.render_coordinator.flush_now()
         qtbot.waitUntil(
             lambda: (
-                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (205.0, 215.0)
-                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (200.0, 219.0)
+                tuple(round(float(value), 6) for value in win.img_view.getLevels())
+                == (205.0, 215.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (200.0, 219.0)
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
@@ -532,8 +563,10 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         win.render_coordinator.flush_now()
         qtbot.waitUntil(
             lambda: (
-                tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
-                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+                tuple(round(float(value), 6) for value in win.img_view.getLevels())
+                == (105.0, 115.0)
+                and tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (100.0, 119.0)
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
@@ -555,8 +588,10 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 19.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 19.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
@@ -569,7 +604,10 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
         _process_events(qtbot, count=30)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
-        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (100.0, 119.0)
+        assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (
+            100.0,
+            119.0,
+        )
     finally:
         win.close()
 
@@ -588,8 +626,10 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 19.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 19.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
@@ -629,8 +669,10 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
-            lambda: tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
-            == (0.0, 19.0),
+            lambda: (
+                tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
+                == (0.0, 19.0)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
@@ -648,7 +690,9 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         monkeypatch.setattr(
             win,
             "render",
-            lambda *args, **kwargs: (render_calls.append(kwargs), original_render(*args, **kwargs))[1],
+            lambda *args, **kwargs: (render_calls.append(kwargs), original_render(*args, **kwargs))[
+                1
+            ],
         )
 
         win.auto_window_levels()
@@ -693,7 +737,9 @@ def test_reload_clears_stale_hover_focus(qtbot, monkeypatch):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        win._set_view_state(ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":"))
+        win._set_view_state(
+            ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":")
+        )
         win.render(reason="test-montage", force_autolevel=False)
         _process_events(qtbot, count=30)
 

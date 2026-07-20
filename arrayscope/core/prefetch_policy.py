@@ -36,9 +36,9 @@ def prefetch_deltas(direction: int, depth: int) -> tuple[int, ...]:
 
     depth = max(1, int(depth))
     if direction > 0:
-        return tuple(range(1, depth + 1)) + (-1,)
+        return (*tuple(range(1, depth + 1)), -1)
     if direction < 0:
-        return tuple(range(-1, -depth - 1, -1)) + (1,)
+        return (*tuple(range(-1, -depth - 1, -1)), 1)
     return tuple(delta for radius in range(1, depth + 1) for delta in (-radius, radius))
 
 

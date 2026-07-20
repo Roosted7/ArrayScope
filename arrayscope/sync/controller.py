@@ -49,7 +49,6 @@ from arrayscope.sync.messages import (
 )
 from arrayscope.ui.toasts import show_status_message
 
-
 PUBLISH_COALESCE_MS = 120
 
 
@@ -63,8 +62,8 @@ class WindowSyncController(Qt.QtCore.QObject):
         self.bus = bus if bus is not None else SyncBus(server_name=server_name, parent=self)
         self.bus.messageReceived.connect(self._on_message)
         self.bus.peerCountChanged.connect(self._on_peer_count_changed)
-        self._enabled = {facet: False for facet in FACETS}
-        self._revisions = {facet: 0 for facet in FACETS}
+        self._enabled = dict.fromkeys(FACETS, False)
+        self._revisions = dict.fromkeys(FACETS, 0)
         self._last_applied = {}  # facet -> (origin, revision)
         self._last_payload = {}  # facet -> last payload sent or applied
         self._applying = set()
@@ -292,7 +291,9 @@ class WindowSyncController(Qt.QtCore.QObject):
             img_view.userLevelsChanged.connect(lambda: self.schedule_publish(FACET_LEVELS))
             img_view.autoWindowRequested.connect(lambda: self.schedule_publish(FACET_LEVELS))
             img_view.roiCreated.connect(lambda _selection: self.schedule_publish(FACET_ROIS))
-            img_view.roiChanged.connect(lambda _roi_id, _geometry: self.schedule_publish(FACET_ROIS))
+            img_view.roiChanged.connect(
+                lambda _roi_id, _geometry: self.schedule_publish(FACET_ROIS)
+            )
             img_view.roiDeleted.connect(lambda _roi_id: self.schedule_publish(FACET_ROIS))
         toolbar = getattr(win, "display_toolbar", None)
         if toolbar is not None:

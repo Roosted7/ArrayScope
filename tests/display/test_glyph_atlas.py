@@ -49,9 +49,11 @@ def test_layout_text_places_lines_and_skips_spaces(qt_app):
     line_step = atlas.line_height("monospace", 9)
     first_line = [p for p in layout.placements if p.y == 0.0]
     second_line = [p for p in layout.placements if p.y == pytest.approx(line_step)]
-    assert len(first_line) == 4 and len(second_line) == 1
+    assert len(first_line) == 4
+    assert len(second_line) == 1
     xs = [p.x for p in first_line]
-    assert xs == sorted(xs) and len(set(xs)) == 4
+    assert xs == sorted(xs)
+    assert len(set(xs)) == 4
     space_gap = xs[2] - xs[1]
     glyph_gap = xs[1] - xs[0]
     assert space_gap > glyph_gap, "the space must advance the pen"
@@ -86,9 +88,7 @@ def test_atlas_overflow_evicts_loudly_and_rebakes(qt_app, tmp_path):
             atlas.glyph("monospace", 9, char)
         assert atlas.evictions >= 1
         events = [
-            event
-            for event in TRACE.snapshot()
-            if event.get("kind") == "wgpu_glyph_atlas_evicted"
+            event for event in TRACE.snapshot() if event.get("kind") == "wgpu_glyph_atlas_evicted"
         ]
         assert events, "eviction must be loud on the trace bus"
         assert atlas.size == 16, "eviction must never exceed the bound"

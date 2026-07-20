@@ -19,7 +19,8 @@ def test_sync_applies_only_changed_values_with_signals_blocked():
     widget = _Widget()
 
     def apply(value):
-        assert widget.blocked and widget.blocked[-1] is True
+        assert widget.blocked
+        assert widget.blocked[-1] is True
         widget.value = value
 
     binder.bind("value", read=lambda win: win.state, apply=apply, widgets=(widget,))
@@ -88,7 +89,9 @@ def test_dead_widget_does_not_break_sync():
 def test_on_demand_bindings_run_only_when_named():
     binder = ViewStateBinder()
     applied = []
-    binder.bind("full", read=lambda win: win.state, apply=lambda value: applied.append(("full", value)))
+    binder.bind(
+        "full", read=lambda win: win.state, apply=lambda value: applied.append(("full", value))
+    )
     binder.bind(
         "fast",
         read=lambda win: win.state,

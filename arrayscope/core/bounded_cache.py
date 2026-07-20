@@ -12,8 +12,8 @@ the entry whose ``retention_key(key, value)`` sorts smallest is evicted first.
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable
 from threading import RLock
-from typing import Callable
 
 
 class BoundedCache:
@@ -65,11 +65,7 @@ class BoundedCache:
 
         requested = tuple(keys or ())
         with self.lock:
-            return {
-                key: self._items[key][0]
-                for key in requested
-                if key in self._items
-            }
+            return {key: self._items[key][0] for key in requested if key in self._items}
 
     def note_hit(self) -> None:
         with self.lock:

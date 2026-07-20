@@ -67,7 +67,11 @@ def test_open_memmap_source_npy_matches_eager(tmp_path):
 def test_open_memmap_source_cfl_matches_eager_loader(tmp_path):
     from arrayscope.io.file_interpreters import BartLoader
 
-    data = (np.arange(3 * 4 * 2) + 1j * np.arange(3 * 4 * 2)[::-1]).reshape(3, 4, 2).astype(np.complex64)
+    data = (
+        (np.arange(3 * 4 * 2) + 1j * np.arange(3 * 4 * 2)[::-1])
+        .reshape(3, 4, 2)
+        .astype(np.complex64)
+    )
     cfl_path = _write_cfl(tmp_path, data)
 
     eager = BartLoader(cfl_path).load()

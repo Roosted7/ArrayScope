@@ -7,13 +7,13 @@ import numpy as np
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backends.vispy.tiles import TextureAtlasPool
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.image_upload import rgb_display_for_levels
+from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
+    TiledValueSource,
     TilePresentationDelta,
     TilePresentationState,
-    TiledValueSource,
 )
 from arrayscope.display.model.tile_identity import (
     TileIdentity,
@@ -24,7 +24,6 @@ from arrayscope.display.model.tile_identity import (
     tile_truth_record,
 )
 from arrayscope.display.montage import MontageTileState, make_montage_plan
-from arrayscope.display.tile_truth_overlay import tile_truth_overlay_text
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
@@ -34,6 +33,7 @@ from arrayscope.display.shader_mapping import (
     pack_texture_data,
 )
 from arrayscope.display.slice_engine import complex_to_rgb
+from arrayscope.display.tile_truth_overlay import tile_truth_overlay_text
 from arrayscope.render.lod import texture_source_for_rendered
 from arrayscope.window.frame_session import FrameSession
 
@@ -70,7 +70,10 @@ def _adversarial_complex_planes() -> tuple[tuple[str, np.ndarray], ...]:
     magnitude_ramp = np.linspace(0.25, 4.0, 16, dtype=np.float32).reshape(4, 4)
     signature = (600.0 + yy * 10.0 + xx) + 1j * (-600.0 - yy * 10.0 - xx)
     return (
-        ("constant-magnitude-phase-ramp", np.asarray(2.0 * np.exp(1j * phase_ramp), dtype=np.complex64)),
+        (
+            "constant-magnitude-phase-ramp",
+            np.asarray(2.0 * np.exp(1j * phase_ramp), dtype=np.complex64),
+        ),
         (
             "constant-phase-magnitude-ramp",
             np.asarray(magnitude_ramp * np.exp(1j * np.float32(np.pi / 4.0)), dtype=np.complex64),
@@ -241,18 +244,11 @@ def _adversarial_delta(payloads: dict[int, DisplayTilePayload]) -> TilePresentat
 
 def _transition_fixture(*, shader_display: bool):
     kind = TexturePlaneKind.COMPLEX_RG32F if shader_display else TexturePlaneKind.RGB8
-    first = {
-        tile: _payload(tile, tile, shader_display=shader_display)
-        for tile in range(4)
-    }
+    first = {tile: _payload(tile, tile, shader_display=shader_display) for tile in range(4)}
     successors = {
-        tile: _payload(tile, tile + 3, shader_display=shader_display)
-        for tile in range(4)
+        tile: _payload(tile, tile + 3, shader_display=shader_display) for tile in range(4)
     }
-    targets = {
-        tile: replace(_target(tile + 3), texture_kind=kind)
-        for tile in range(4)
-    }
+    targets = {tile: replace(_target(tile + 3), texture_kind=kind) for tile in range(4)}
     mixed = dict(first)
     mixed[0] = successors[0]
     return first, successors, targets, mixed
@@ -410,10 +406,14 @@ def test_vispy_adversarial_complex_fixture_uploads_cpu_reference_planes():
         tile: payload.tile_identity for tile, payload in payloads.items()
     }
     assert len(pool.scalar_texture.updates) == len(payloads)
-    for (uploaded, _offset, copy), payload in zip(pool.scalar_texture.updates, payloads.values(), strict=True):
+    for (uploaded, _offset, copy), payload in zip(
+        pool.scalar_texture.updates, payloads.values(), strict=True
+    ):
         assert copy
         assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
-        np.testing.assert_array_equal(uploaded, pack_texture_data(payload.semantic_data, payload.texture_kind))
+        np.testing.assert_array_equal(
+            uploaded, pack_texture_data(payload.semantic_data, payload.texture_kind)
+        )
         reference = cpu_display_rgba(
             payload.semantic_data,
             replace(payload.shader_mapping, levels=(0.0, 900.0)),
@@ -466,10 +466,7 @@ def _assert_truth_record(
     overlay = tile_truth_overlay_text(rows)
     assert "slot 0  DRAW" in overlay
     assert "src 3 -> 3" in overlay
-    assert (
-        f"tex {expected_texture_kind.value} -> {expected_texture_kind.value}"
-        in overlay
-    )
+    assert f"tex {expected_texture_kind.value} -> {expected_texture_kind.value}" in overlay
     assert "planes r 0x" in overlay
     assert "complex  phase_color/abs/mapped" in overlay
     assert "lod 0 -> 0" in overlay
@@ -504,7 +501,9 @@ def test_pyqtgraph_complex_semantic_transition_hides_unacknowledged_tiles(qt_app
 
         assert report.presented_tiles == frozenset({0})
         assert report.presented_identities == {0: successors[0].tile_identity}
-        assert tuple(tile for tile, state in view._montage_tile_layer.states.items() if state.visible) == (0,)
+        assert tuple(
+            tile for tile, state in view._montage_tile_layer.states.items() if state.visible
+        ) == (0,)
         physical = view.tileTruthPhysicalRows()
         assert physical[0]["physical_texture_kind"] == "rgb8"
         assert physical[0]["physical_mapping_mode"] == "cpu_rgb"

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import time
+from dataclasses import dataclass
 
 from arrayscope.core.memory_policy import SystemMemorySnapshot, sample_system_memory
 
@@ -28,7 +28,9 @@ class ResourceSnapshot:
     timestamp_monotonic: float
 
 
-def sample_resource_snapshot(*, psutil_module=None, cpu_count: int | None = None) -> ResourceSnapshot:
+def sample_resource_snapshot(
+    *, psutil_module=None, cpu_count: int | None = None
+) -> ResourceSnapshot:
     memory = sample_system_memory(psutil_module=psutil_module)
     logical_count = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
     warnings: list[str] = []

@@ -115,7 +115,7 @@ class PageTable:
                 continue
             delta = tuple(
                 int(actual) - int(wanted)
-                for actual, wanted in zip(actual_reduction, target_reduction)
+                for actual, wanted in zip(actual_reduction, target_reduction, strict=False)
             )
             rank = (
                 sum(delta),
@@ -127,6 +127,7 @@ class PageTable:
                     for target_start, actual_start in zip(
                         target.chunk_origin,
                         key.chunk_origin,
+                        strict=False,
                     )
                 ),
                 -int(entry.last_use),
@@ -329,7 +330,7 @@ def _page_resolution(
         slot=entry.slot,
         scale=tuple(
             target_step / actual_step
-            for target_step, actual_step in zip(target_scale, actual_scale)
+            for target_step, actual_step in zip(target_scale, actual_scale, strict=False)
         ),
         offset=tuple(
             (float(target_start) - float(actual_start)) / actual_step
@@ -337,6 +338,7 @@ def _page_resolution(
                 target.chunk_origin,
                 actual.chunk_origin,
                 actual_scale,
+                strict=False,
             )
         ),
         binding_generation=int(entry.generation),
@@ -360,7 +362,9 @@ def page_key_can_cover(
         return False
     target_reduction = _reduction_vector(target)
     actual_reduction = _reduction_vector(actual)
-    if any(value < wanted for value, wanted in zip(actual_reduction, target_reduction)):
+    if any(
+        value < wanted for value, wanted in zip(actual_reduction, target_reduction, strict=False)
+    ):
         return False
     if not require_coverage:
         return True
@@ -371,6 +375,7 @@ def page_key_can_cover(
             actual.stop,
             target.chunk_origin,
             target.stop,
+            strict=False,
         )
     )
 

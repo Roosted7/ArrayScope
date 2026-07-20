@@ -59,8 +59,9 @@ def test_viewport_controller_preserves_user_camera_on_first_preserve_commit():
 
 
 def test_image_view_reports_montage_resize_as_parent_owned(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     parent = QtWidgets.QMainWindow()
     view = ImageView2D()
@@ -74,8 +75,9 @@ def test_image_view_reports_montage_resize_as_parent_owned(qt_app):
 
 
 def test_image_view_keeps_non_montage_resize_locally_owned(qt_app):
-    from arrayscope.display.imageview2d import ImageView2D
     from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.display.imageview2d import ImageView2D
 
     parent = QtWidgets.QMainWindow()
     view = ImageView2D()
@@ -103,11 +105,15 @@ def test_viewport_controller_one_to_one_uses_viewport_pixels():
 def test_viewport_controller_preserve_ignores_origin_only_changes():
     controller = ViewportController()
     view = FakeViewBox()
-    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 0, 9, 7))
+    controller.apply_after_image(
+        view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 0, 9, 7)
+    )
     view.setRange(xRange=(20, 30), yRange=(40, 50), padding=0)
     controller.note_user_range_changed()
 
-    controller.apply_after_image(view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 100, 9, 107))
+    controller.apply_after_image(
+        view, (8, 10), _size(100, 80), policy=ViewportPolicy.PRESERVE, display_rect=(0, 100, 9, 107)
+    )
 
     assert view.fit_count == 0
     assert view.viewRange() == [[20, 30], [40, 50]]
@@ -380,8 +386,12 @@ def test_constrain_view_range_caps_zoom_out_to_minimum_content_fraction():
         (0.0, 0.0, 100.0, 40.0),
     )
 
-    assert constrained[0][1] - constrained[0][0] == pytest.approx(100.0 / MIN_VIEWPORT_CONTENT_FRACTION)
-    assert constrained[1][1] - constrained[1][0] == pytest.approx(40.0 / MIN_VIEWPORT_CONTENT_FRACTION)
+    assert constrained[0][1] - constrained[0][0] == pytest.approx(
+        100.0 / MIN_VIEWPORT_CONTENT_FRACTION
+    )
+    assert constrained[1][1] - constrained[1][0] == pytest.approx(
+        40.0 / MIN_VIEWPORT_CONTENT_FRACTION
+    )
     assert (constrained[0][0] + constrained[0][1]) * 0.5 == pytest.approx(130.0)
     assert (constrained[1][0] + constrained[1][1]) * 0.5 == pytest.approx(50.0)
 

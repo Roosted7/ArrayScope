@@ -19,10 +19,8 @@ pytestmark = pytest.mark.gpu_interaction
 MAX_INTERACTION_GAP_MS = 50.0
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
-def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
-    backend, tmp_path
-):
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path):
     """V1: a tile touching the viewport boundary remains a render obligation."""
 
     import numpy as np
@@ -37,7 +35,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
 
     from arrayscope.app.launch import _create_window
     from arrayscope.display.backend_contract import image_view_backend_capabilities
-    from tests.gpu_interaction.conftest import Harness, TILE
+    from tests.gpu_interaction.conftest import TILE, Harness
 
     trace_path = tmp_path / f"v1-boundary-{backend}.trace.jsonl"
     app = pg.mkQApp()
@@ -63,9 +61,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
         initial = tuple(range(36))
         shifted = tuple(range(1, 37))
         win._set_view_state(
-            win.view_state.with_montage_axis(
-                2, columns=6, indices=initial, text="0:36"
-            )
+            win.view_state.with_montage_axis(2, columns=6, indices=initial, text="0:36")
         )
         win.render(reason="gpu-harness-v1-initial")
         assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), h.settlement_diagnostics()
@@ -85,18 +81,13 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
         assert int(boundary_tile.montage_index) in h.session.required_tile_numbers()
 
         win._set_view_state(
-            win.view_state.with_montage_axis(
-                2, columns=6, indices=shifted, text="1:37"
-            )
+            win.view_state.with_montage_axis(2, columns=6, indices=shifted, text="1:37")
         )
         win.render(reason="gpu-harness-v1-one-index-boundary")
         assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
         assert h.session.required_target_settled()
         assert not h.session.required_target_unsettled_tiles()
-        assert not (
-            h.session.lifecycle.parked_tiles
-            & set(h.session.required_tile_numbers())
-        )
+        assert not (h.session.lifecycle.parked_tiles & set(h.session.required_tile_numbers()))
         boundary_row = h.session.lifecycle.row(int(boundary_tile.montage_index))
         assert boundary_row.target_settled
 
@@ -113,27 +104,26 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
         payload_means = {
             int(tile): float(
                 np.asarray(
-                    payload.texture_data
-                    if payload.texture_data is not None
-                    else payload.image
+                    payload.texture_data if payload.texture_data is not None else payload.image
                 ).mean()
             )
             for tile, payload in h.session.display_tile_payloads.items()
         }
-        assert all(
-            abs(payload_means[index] - shifted[index]) < 0.01
-            for index in range(36)
-        ), payload_means
+        assert all(abs(payload_means[index] - shifted[index]) < 0.01 for index in range(36)), (
+            payload_means
+        )
         means = h.tile_pixel_modes()
         low, high = (float(value) for value in win.img_view.getLevels())
         expected = [
-            255.0 * min(1.0, max(0.0, (float(value) - low) / (high - low)))
-            for value in shifted
+            255.0 * min(1.0, max(0.0, (float(value) - low) / (high - low))) for value in shifted
         ]
-        assert all(
-            means[index] > means[index - 1] + 1.0 for index in range(1, 36)
-        ), f"shifted physical ramp: {[round(value, 1) for value in means]}"
-        assert max(abs(actual - wanted) for actual, wanted in zip(means, expected)) <= 12.0, means
+        assert all(means[index] > means[index - 1] + 1.0 for index in range(1, 36)), (
+            f"shifted physical ramp: {[round(value, 1) for value in means]}"
+        )
+        assert (
+            max(abs(actual - wanted) for actual, wanted in zip(means, expected, strict=False))
+            <= 12.0
+        ), means
         h.assert_lifecycle_settled()
     finally:
         win.close()
@@ -155,7 +145,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(
     assert verification["required_targets"] == 36
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     """V2: final cold-scroll targets paint from viewport focus outward."""
 
@@ -172,7 +162,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     from arrayscope.app.launch import _create_window
     from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.model.tile_priority import prioritize_tiles
-    from tests.gpu_interaction.conftest import Harness, TILE
+    from tests.gpu_interaction.conftest import TILE, Harness
 
     trace_path = tmp_path / f"v2-center-out-{backend}.trace.jsonl"
     app = pg.mkQApp()
@@ -197,9 +187,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
             pytest.skip(f"{backend} backend unavailable in this Qt environment")
         h = Harness(app, win)
         win._set_view_state(
-            win.view_state.with_montage_axis(
-                2, columns=6, indices=tuple(range(36)), text="0:36"
-            )
+            win.view_state.with_montage_axis(2, columns=6, indices=tuple(range(36)), text="0:36")
         )
         win.render(reason="gpu-harness-v2-initial")
         assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
@@ -230,18 +218,16 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
         )
         means = h.tile_means()
         expected_values = [
-            means[0] + (means[-1] - means[0]) * offset / 35.0
-            for offset in range(36)
+            means[0] + (means[-1] - means[0]) * offset / 35.0 for offset in range(36)
         ]
-        assert all(
-            means[index] >= means[index - 1] - 1.0
-            for index in range(1, 36)
-        ), means
+        assert all(means[index] >= means[index - 1] - 1.0 for index in range(1, 36)), means
         assert means[-1] - means[0] >= 100.0, means
-        assert max(
-            abs(actual - wanted)
-            for actual, wanted in zip(means, expected_values)
-        ) <= 12.0, means
+        assert (
+            max(
+                abs(actual - wanted) for actual, wanted in zip(means, expected_values, strict=False)
+            )
+            <= 12.0
+        ), means
         h.assert_lifecycle_settled()
     finally:
         win.close()
@@ -286,15 +272,13 @@ def test_view_fits_montage_when_enabled_after_settle():
     fixture) fits correctly, but enabling it after the single-frame view has
     fully settled must still fit the montage content."""
 
-    from tests.gpu_interaction.conftest import Harness, synthetic_montage_data
     from arrayscope.app.qt_binding import prefer_pyside6
+    from tests.gpu_interaction.conftest import Harness, synthetic_montage_data
 
     prefer_pyside6()
     from arrayscope.app.launch import _create_window
 
-    app, win = _create_window(
-        synthetic_montage_data(), title="gpu-harness-late-montage"
-    )
+    app, win = _create_window(synthetic_montage_data(), title="gpu-harness-late-montage")
     try:
         h = Harness(app, win)
         h.pump(3.0)  # let the single-frame view settle completely
@@ -304,7 +288,11 @@ def test_view_fits_montage_when_enabled_after_settle():
         (x0, x1), (y0, y1) = h.session.view_range
         height, width = h.session.plan.display_shape
         span_x, span_y = x1 - x0, y1 - y0
-        assert span_x <= width * 1.5 and span_y <= height * 1.5, (
+        assert span_x <= width * 1.5, (
+            f"fit shows {span_x:.0f}x{span_y:.0f} data units for a "
+            f"{width}x{height} montage (wrongly scaled on montage enable)"
+        )
+        assert span_y <= height * 1.5, (
             f"fit shows {span_x:.0f}x{span_y:.0f} data units for a "
             f"{width}x{height} montage (wrongly scaled on montage enable)"
         )
@@ -353,7 +341,9 @@ def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_wind
     )
     for x_range, y_range in ranges:
         view.setRange(xRange=x_range, yRange=y_range, padding=0)
-        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), f"never settled after zoom range {x_range}/{y_range}"
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), (
+            f"never settled after zoom range {x_range}/{y_range}"
+        )
         h.assert_vispy_visual_mapping_matches_pool()
         h.assert_lifecycle_settled()
 
@@ -380,7 +370,9 @@ def test_index_scrub_and_return_shows_no_stale_content_or_wedged_claims(montage_
 
     for text in ("9:27", "18:36", "0:18", ":"):
         select(text)
-        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), f"never settled after scrub to {text!r}"
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), (
+            f"never settled after scrub to {text!r}"
+        )
 
     h.fit_view()
     h.assert_tile_identity_ramp()
@@ -438,9 +430,7 @@ def test_idle_stays_settled_after_interaction(montage_window):
     assert h.wait_settled()
     h.pump(1.0)
     s = h.session
-    assert not s.dirty_payloads, (
-        f"idle dirty queue never drains: {sorted(s.dirty_payloads)}"
-    )
+    assert not s.dirty_payloads, f"idle dirty queue never drains: {sorted(s.dirty_payloads)}"
     assert not s.pending_payload_upserts, (
         f"idle upsert queue never drains: {sorted(s.pending_payload_upserts)}"
     )

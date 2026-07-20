@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
-from typing import Mapping
 
 from arrayscope.display.geometry import DisplayGeometry
 
@@ -54,11 +54,27 @@ class DisplayScene:
     def __post_init__(self) -> None:
         regions = tuple(self.regions)
         object.__setattr__(self, "regions", regions)
-        object.__setattr__(self, "_region_by_id", {int(region.region_id): region for region in regions})
-        object.__setattr__(self, "_active_region_ids", tuple(region.region_id for region in regions if region.active))
-        object.__setattr__(self, "_planned_region_ids", tuple(region.region_id for region in regions if region.planned))
-        object.__setattr__(self, "_near_region_ids", tuple(region.region_id for region in regions if region.near))
-        object.__setattr__(self, "_resident_region_ids", tuple(region.region_id for region in regions if region.resident))
+        object.__setattr__(
+            self, "_region_by_id", {int(region.region_id): region for region in regions}
+        )
+        object.__setattr__(
+            self,
+            "_active_region_ids",
+            tuple(region.region_id for region in regions if region.active),
+        )
+        object.__setattr__(
+            self,
+            "_planned_region_ids",
+            tuple(region.region_id for region in regions if region.planned),
+        )
+        object.__setattr__(
+            self, "_near_region_ids", tuple(region.region_id for region in regions if region.near)
+        )
+        object.__setattr__(
+            self,
+            "_resident_region_ids",
+            tuple(region.region_id for region in regions if region.resident),
+        )
 
     @property
     def active_region_ids(self) -> tuple[int, ...]:
@@ -231,7 +247,11 @@ def _scene_for_frame_plan(
     if not regions:
         return display_scene_for_geometry(geometry, payloads=payloads, frame_plan=None)
     layout = getattr(frame_plan, "layout", None)
-    layout = layout if isinstance(layout, DisplayLayout) else DisplayLayout(str(getattr(layout, "value", layout or "single")))
+    layout = (
+        layout
+        if isinstance(layout, DisplayLayout)
+        else DisplayLayout(str(getattr(layout, "value", layout or "single")))
+    )
     return DisplayScene(
         geometry=geometry,
         layout=layout,
@@ -249,10 +269,10 @@ def _frame_plan_regions_cached(
     near: tuple[int, ...],
     resident: tuple[int, ...],
 ) -> tuple[DisplayRegion, ...]:
-    active_ids = set(int(value) for value in active)
-    planned_ids = set(int(value) for value in planned)
-    near_ids = set(int(value) for value in near)
-    resident_ids = set(int(value) for value in resident)
+    active_ids = {int(value) for value in active}
+    planned_ids = {int(value) for value in planned}
+    near_ids = {int(value) for value in near}
+    resident_ids = {int(value) for value in resident}
     return tuple(
         DisplayRegion(
             region_id=int(region_id),

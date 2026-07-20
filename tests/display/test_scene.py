@@ -4,13 +4,21 @@ import numpy as np
 
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
-from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.scene import DisplayLayout, display_scene_for_geometry, display_scene_for_presentation
-from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.model.commit import DisplayTiledPresentation
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    TilePresentationDelta,
+    TilePresentationState,
+)
+from arrayscope.display.scene import (
+    DisplayLayout,
+    display_scene_for_geometry,
+    display_scene_for_presentation,
+)
+from arrayscope.display.viewport import ViewportPolicy
 
 
 def test_frame_geometry_is_one_tile_scene_without_payloads():
@@ -27,7 +35,11 @@ def test_frame_geometry_is_one_tile_scene_without_payloads():
 
 
 def _montage_geometry():
-    state = ViewState.from_shape((3, 4, 3)).with_image_axes(0, 1).with_montage_axis(2, columns=2, indices=(0, 1, 2))
+    state = (
+        ViewState.from_shape((3, 4, 3))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=2, indices=(0, 1, 2))
+    )
     return DisplayGeometry(
         state,
         (7, 9),

@@ -24,7 +24,10 @@ class QtPointerInteractionDriver:
     def handle_event(self, event) -> bool:
         event_type = event.type()
         state = self._controller.state
-        if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
+        if (
+            event_type == QtCore.QEvent.Type.MouseButtonPress
+            and event.button() == QtCore.Qt.MouseButton.LeftButton
+        ):
             point = self._owner._event_overlay_point(event)
             target = self.target_at(point)
             if point is None or target is None:
@@ -51,7 +54,10 @@ class QtPointerInteractionDriver:
                 notify_drag(event)
             event.accept()
             return True
-        if event_type == QtCore.QEvent.Type.MouseButtonRelease and event.button() == QtCore.Qt.MouseButton.LeftButton:
+        if (
+            event_type == QtCore.QEvent.Type.MouseButtonRelease
+            and event.button() == QtCore.Qt.MouseButton.LeftButton
+        ):
             if state.phase is not PointerPhase.DRAGGING:
                 return False
             result = self._controller.end_capture()
@@ -82,7 +88,9 @@ class QtPointerInteractionDriver:
         if state.pending_draw_tool is not None or state.phase is PointerPhase.DRAWING:
             return None
         profile_position = self._owner.profileMarkerPosition()
-        profile_bounds = self._owner._current_profile_bounds() if profile_position is not None else None
+        profile_bounds = (
+            self._owner._current_profile_bounds() if profile_position is not None else None
+        )
         tolerance = self._hit_tolerance()
         roi_candidates = self._owner.roiHitCandidates(point, tolerance=tolerance)
         target = hit_test_display_overlays(
@@ -109,7 +117,9 @@ class QtPointerInteractionDriver:
             x_range, y_range = self._owner.view.viewRange()
             viewport = self._owner.graphicsView.viewport()
             x_per_pixel = abs(float(x_range[1]) - float(x_range[0])) / max(1, int(viewport.width()))
-            y_per_pixel = abs(float(y_range[1]) - float(y_range[0])) / max(1, int(viewport.height()))
+            y_per_pixel = abs(float(y_range[1]) - float(y_range[0])) / max(
+                1, int(viewport.height())
+            )
             return max(x_per_pixel, y_per_pixel) * 8.0
         except Exception:
             return 2.0
@@ -121,6 +131,7 @@ class QtPointerInteractionDriver:
         except Exception:
             buttons = QtWidgets.QApplication.mouseButtons()
         return bool(buttons & QtCore.Qt.MouseButton.LeftButton)
+
 
 def _target_roi_outside_rect(target: InteractionTarget, roi_candidates, rect) -> bool:
     if target.kind != "roi" or target.object_id is None or rect is None:
@@ -136,10 +147,7 @@ def _target_roi_outside_rect(target: InteractionTarget, roi_candidates, rect) ->
         gx0, gy0, gx1, gy1 = (float(value) for value in bounds)
         rx0, ry0, rx1, ry1 = (float(value) for value in rect)
         return (
-            gx0 < min(rx0, rx1)
-            or gx1 > max(rx0, rx1)
-            or gy0 < min(ry0, ry1)
-            or gy1 > max(ry0, ry1)
+            gx0 < min(rx0, rx1) or gx1 > max(rx0, rx1) or gy0 < min(ry0, ry1) or gy1 > max(ry0, ry1)
         )
     return False
 

@@ -1,19 +1,21 @@
-import importlib.util
-import sys
-from pathlib import Path
 import arrayscope.core.cache_status as cache_status
-
-
 
 
 def test_cache_status_for_hit_miss_and_error():
     assert cache_status.cache_status_for_hit(True).status == cache_status.CacheStatus.CACHED
     assert cache_status.cache_status_for_hit(False).status == cache_status.CacheStatus.COMPUTING
-    assert cache_status.cache_status_for_hit(False, has_error=True).status == cache_status.CacheStatus.ERROR
+    assert (
+        cache_status.cache_status_for_hit(False, has_error=True).status
+        == cache_status.CacheStatus.ERROR
+    )
     assert cache_status.cache_status_ready().status == cache_status.CacheStatus.READY
-    assert cache_status.cache_status_error(ValueError("bad")).status == cache_status.CacheStatus.ERROR
+    assert (
+        cache_status.cache_status_error(ValueError("bad")).status == cache_status.CacheStatus.ERROR
+    )
     assert cache_status.cache_status_prefetching().status == cache_status.CacheStatus.PREFETCHING
-    assert cache_status.cache_status_stale_ignored().status == cache_status.CacheStatus.STALE_IGNORED
+    assert (
+        cache_status.cache_status_stale_ignored().status == cache_status.CacheStatus.STALE_IGNORED
+    )
 
 
 def test_cache_diagnostics_snapshot_defaults_and_values():

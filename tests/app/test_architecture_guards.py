@@ -1,4 +1,5 @@
 import ast
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -7,9 +8,7 @@ import pytest
 
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_MS,
-    INTERACTION_SETTLE_HARD_LIMIT_S,
 )
-
 
 ROOT = Path(__file__).parents[2]
 
@@ -67,10 +66,7 @@ def _has_direct_deadline_literal(node):
     return (
         isinstance(node, ast.BinOp)
         and isinstance(node.op, ast.Add)
-        and (
-            _literal_number_expression(node.left)
-            or _literal_number_expression(node.right)
-        )
+        and (_literal_number_expression(node.left) or _literal_number_expression(node.right))
     )
 
 
@@ -95,11 +91,7 @@ def _canonical_interaction_budget_bindings(tree):
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
-            shadowed.update(
-                label
-                for target in targets
-                for label in _assigned_labels(target)
-            )
+            shadowed.update(label for target in targets for label in _assigned_labels(target))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             shadowed.add(node.name)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -133,11 +125,14 @@ def _interaction_budget_unit(node, *, budgets, helpers):
         units = {
             unit
             for argument in node.args
-            if (unit := _interaction_budget_unit(
-                argument,
-                budgets=budgets,
-                helpers=helpers,
-            )) is not None
+            if (
+                unit := _interaction_budget_unit(
+                    argument,
+                    budgets=budgets,
+                    helpers=helpers,
+                )
+            )
+            is not None
         }
         return next(iter(units)) if len(units) == 1 else None
     return None
@@ -166,10 +161,7 @@ def _module_capped_budget_names(tree, *, budgets, helpers):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
         names = {
-            label
-            for target in targets
-            for label in _assigned_labels(target)
-            if label.isupper()
+            label for target in targets for label in _assigned_labels(target) if label.isupper()
         }
         for name in names:
             assignments.setdefault(name, []).append(node.value)
@@ -266,9 +258,8 @@ def _interaction_timeout_offenders(tree, rel):
             for name in labels:
                 upper = name.upper()
                 timeout_label = "timeout" in name.lower()
-                interaction_budget_label = (
-                    ("INTERACTION" in upper or "SETTLE" in upper)
-                    and ("BUDGET" in upper or "LIMIT" in upper)
+                interaction_budget_label = ("INTERACTION" in upper or "SETTLE" in upper) and (
+                    "BUDGET" in upper or "LIMIT" in upper
                 )
                 if (
                     (timeout_label or interaction_budget_label)
@@ -300,7 +291,9 @@ def _interaction_timeout_offenders(tree, rel):
                     offenders.append(f"{rel}:{node.lineno}:uncapped {name}")
         if isinstance(node, ast.FunctionDef) and _interaction_wait_name(node.name):
             positional = (*node.args.posonlyargs, *node.args.args)
-            defaults = (None,) * (len(positional) - len(node.args.defaults)) + tuple(node.args.defaults)
+            defaults = (None,) * (len(positional) - len(node.args.defaults)) + tuple(
+                node.args.defaults
+            )
             for argument, default in zip(positional, defaults, strict=True):
                 if (
                     default is not None
@@ -364,7 +357,7 @@ def _interaction_timeout_offenders(tree, rel):
                 offenders.append(
                     f"{rel}:{node.lineno}:{function_name} {keyword.arg} is not globally capped"
                 )
-        if function_name in {"waitUntil", "waitExposed"} and len(node.args) >= 2:
+        if function_name in {"waitUntil", "waitExposed"} and len(node.args) >= 2:  # noqa: SIM102
             if not _is_global_capped_interaction_budget(
                 node.args[1],
                 budgets=budgets,
@@ -484,11 +477,11 @@ def settle(timeout=25.0):
 
 @pytest.mark.parametrize(
     "expression",
-    (
+    [
         "INTERACTION_SETTLE_HARD_LIMIT_MS * 100",
         "max(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)",
         "interaction_settle_timeout_ms(3.0) + 100000",
-    ),
+    ],
 )
 def test_interaction_timeout_guard_rejects_caps_wrapped_by_widening_operations(
     expression,
@@ -523,9 +516,7 @@ _wait_until(timeout_s=INTERACTION_SETTLE_HARD_LIMIT_MS)
     )
 
     offenders = _interaction_timeout_offenders(tree, Path("tools/probe.py"))
-    assert offenders == [
-        "tools/probe.py:7:_wait_until timeout_s is not globally capped"
-    ]
+    assert offenders == ["tools/probe.py:7:_wait_until timeout_s is not globally capped"]
 
 
 def test_interaction_timeout_guard_covers_settled_wrappers_and_ui_watchdogs():
@@ -655,7 +646,10 @@ def test_standard_dock_widget_has_no_close_event_lifecycle_override():
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "StandardDockWidget":
-            assert all(not isinstance(child, ast.FunctionDef) or child.name != "closeEvent" for child in node.body)
+            assert all(
+                not isinstance(child, ast.FunctionDef) or child.name != "closeEvent"
+                for child in node.body
+            )
             return
     raise AssertionError("StandardDockWidget class not found")
 
@@ -728,8 +722,11 @@ def test_montage_stall_probe_is_evidence_only():
 
 
 def test_frame_renderer_stays_below_r2_line_count_gate():
+    # Baseline re-set 2026-07-19: adopting the ruff formatter rewrapped long
+    # lines (1961 -> 2039 physical lines) with zero logic growth. The gate
+    # keeps bounding real growth from that baseline.
     path = ROOT / "arrayscope" / "window" / "frame_controller.py"
-    assert len(path.read_text().splitlines()) < 2000
+    assert len(path.read_text().splitlines()) < 2100
 
 
 def test_montage_commits_flow_through_pipeline_effects_and_shared_surface():
@@ -836,7 +833,9 @@ def test_lod_admission_has_no_effects_side_pending_maps_or_shared_floor_markers(
                 assert token not in text, f"{token} found in {path.relative_to(ROOT)}"
             for token in ("_pending_previews", "_pending_materializations", "_pending_evaluations"):
                 for prefix in ("self.", "effects.", "session."):
-                    assert f"{prefix}{token}" not in text, f"{token} found in {path.relative_to(ROOT)}"
+                    assert f"{prefix}{token}" not in text, (
+                        f"{token} found in {path.relative_to(ROOT)}"
+                    )
 
 
 def test_tile_lifecycle_is_the_only_per_region_transaction_owner():
@@ -862,55 +861,275 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
 
     allowed = Counter(
         {
-            ("arrayscope/display/histogram_controller.py", "HistogramLevelPreviewController.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/display/histogram_controller.py", "HistogramDisplayController.__init__", "QTimer", "UI cosmetic"): 2,
-            ("arrayscope/display/imageview2d.py", "ImageViewShell.eventFilter", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action.PaintProbe.eventFilter", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/display/rendering_benchmarks.py", "_measure_presented_action", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D.setupUI", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D._on_vispy_draw", "singleShot", "anti-hang fallback"): 1,
-            ("arrayscope/display/wgpu_imageview2d.py", "WgpuImageView2D._on_wgpu_draw", "singleShot", "anti-hang fallback"): 1,
+            (
+                "arrayscope/display/histogram_controller.py",
+                "HistogramLevelPreviewController.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/histogram_controller.py",
+                "HistogramDisplayController.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 2,
+            (
+                "arrayscope/display/imageview2d.py",
+                "ImageViewShell.eventFilter",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/rendering_benchmarks.py",
+                "_measure_presented_action.PaintProbe.eventFilter",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/rendering_benchmarks.py",
+                "_measure_presented_action",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/vispy_imageview2d.py",
+                "VisPyImageView2D.setupUI",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/vispy_imageview2d.py",
+                "VisPyImageView2D._on_vispy_draw",
+                "singleShot",
+                "anti-hang fallback",
+            ): 1,
+            (
+                "arrayscope/display/wgpu_imageview2d.py",
+                "WgpuImageView2D._on_wgpu_draw",
+                "singleShot",
+                "anti-hang fallback",
+            ): 1,
             # Screen present path: the canvas owns its ondemand draw cadence
             # (Qt cannot deliver paint work to a paint-less native child).
-            ("arrayscope/display/backends/wgpu/screen_canvas.py", "WgpuScreenCanvas.request_draw", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/display/vispy_imageview2d.py", "VisPyImageView2D._request_vispy_camera_sync", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/kernel/eval_adapter.py", "KernelEvaluationController._submit", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/kernel/qt_bridge.py", "QtKernelBridge.__init__", "QTimer", "anti-hang fallback"): 1,
-            ("arrayscope/sync/bus.py", "SyncBus._schedule_retry", "QTimer", "anti-hang fallback"): 1,
-            ("arrayscope/sync/controller.py", "WindowSyncController.schedule_publish", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/g6_histogram_benchmark.py", "_HeartbeatProbe.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_montage_workflow.py", "_EventLoopProbe.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_montage_workflow.py", "_VisualTimelineProbe.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_montage_workflow.py", "_PresentationContinuityProbe.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_montage_workflow.py", "_glide_view_range", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_montage_workflow.py", "_fast_scroll_60fps", "QTimer", "UI cosmetic"): 2,
-            ("arrayscope/tools/profile_montage_workflow.py", "_wait_for_target_lod", "QTimer", "anti-hang fallback"): 2,
+            (
+                "arrayscope/display/backends/wgpu/screen_canvas.py",
+                "WgpuScreenCanvas.request_draw",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/display/vispy_imageview2d.py",
+                "VisPyImageView2D._request_vispy_camera_sync",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/kernel/eval_adapter.py",
+                "KernelEvaluationController._submit",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/kernel/qt_bridge.py",
+                "QtKernelBridge.__init__",
+                "QTimer",
+                "anti-hang fallback",
+            ): 1,
+            (
+                "arrayscope/sync/bus.py",
+                "SyncBus._schedule_retry",
+                "QTimer",
+                "anti-hang fallback",
+            ): 1,
+            (
+                "arrayscope/sync/controller.py",
+                "WindowSyncController.schedule_publish",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/g6_histogram_benchmark.py",
+                "_HeartbeatProbe.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_EventLoopProbe.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_VisualTimelineProbe.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_PresentationContinuityProbe.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_glide_view_range",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_fast_scroll_60fps",
+                "QTimer",
+                "UI cosmetic",
+            ): 2,
+            (
+                "arrayscope/tools/profile_montage_workflow.py",
+                "_wait_for_target_lod",
+                "QTimer",
+                "anti-hang fallback",
+            ): 2,
             ("arrayscope/tools/profile_scroll_input.py", "main", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/tools/profile_scroll_input.py", "main.on_tick", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/ui/diagnostics.py", "DiagnosticsDialog.__init__", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/ui/dimension_strip.py", "DimensionStrip._schedule_relayout", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/ui/display_controls.py", "DisplayControlBuildMixin._create_button_groups_and_profile_timer", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/ui/menus.py", "WindowMenuMixin.closeEvent", "singleShot", "UI cosmetic"): 1,
+            (
+                "arrayscope/tools/profile_scroll_input.py",
+                "main.on_tick",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/ui/diagnostics.py",
+                "DiagnosticsDialog.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/ui/dimension_strip.py",
+                "DimensionStrip._schedule_relayout",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/ui/display_controls.py",
+                "DisplayControlBuildMixin._create_button_groups_and_profile_timer",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/ui/menus.py",
+                "WindowMenuMixin.closeEvent",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
             ("arrayscope/ui/toasts.py", "show_status_message", "QTimer", "UI cosmetic"): 1,
             ("arrayscope/ui/toasts.py", "show_status_action", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/window/canvas_preserve.py", "CanvasPreserveController._single_shot", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/display_presenter.py", "DisplayPresentationMixin._schedule_frame_viewport_update", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/window/display_presenter.py", "DisplayPresentationMixin._schedule_interactive_montage_viewport_update", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_shape_restore", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._restore_viewport_continuity_shape_step", "singleShot", "UI cosmetic"): 2,
-            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_when_ready", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/file_view_session.py", "FileViewSessionMixin._schedule_viewport_continuity_retarget", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.restore_window_settings", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.reset_layout", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.schedule_view_geometry_refresh", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.set_dock_visible_later", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/layout_controller.py", "WindowLayoutManager.set_managed_dock_visible", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/main.py", "ArrayScopeWindow.__init__", "singleShot", "UI cosmetic"): 3,
-            ("arrayscope/window/main.py", "ArrayScopeWindow._note_viewport_interaction", "QTimer", "UI cosmetic"): 1,
-            ("arrayscope/window/frame_effects.py", "FramePipelineEffects.request_presentation", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/frame_runtime.py", "FrameRuntimeMixin.request_montage_replan", "singleShot", "UI cosmetic"): 1,
-            ("arrayscope/window/frame_runtime.py", "FrameRuntimeMixin._ensure_montage_watchdog", "QTimer", "anti-hang fallback"): 1,
-            ("arrayscope/window/render_coordinator.py", "RenderCoordinator.__init__", "QTimer", "UI cosmetic"): 2,
+            (
+                "arrayscope/window/canvas_preserve.py",
+                "CanvasPreserveController._single_shot",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/display_presenter.py",
+                "DisplayPresentationMixin._schedule_frame_viewport_update",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/display_presenter.py",
+                "DisplayPresentationMixin._schedule_interactive_montage_viewport_update",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/file_view_session.py",
+                "FileViewSessionMixin._schedule_viewport_continuity_shape_restore",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/file_view_session.py",
+                "FileViewSessionMixin._restore_viewport_continuity_shape_step",
+                "singleShot",
+                "UI cosmetic",
+            ): 2,
+            (
+                "arrayscope/window/file_view_session.py",
+                "FileViewSessionMixin._schedule_viewport_continuity_when_ready",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/file_view_session.py",
+                "FileViewSessionMixin._schedule_viewport_continuity_retarget",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/layout_controller.py",
+                "WindowLayoutManager.restore_window_settings",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/layout_controller.py",
+                "WindowLayoutManager.reset_layout",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/layout_controller.py",
+                "WindowLayoutManager.schedule_view_geometry_refresh",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/layout_controller.py",
+                "WindowLayoutManager.set_dock_visible_later",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/layout_controller.py",
+                "WindowLayoutManager.set_managed_dock_visible",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/main.py",
+                "ArrayScopeWindow.__init__",
+                "singleShot",
+                "UI cosmetic",
+            ): 3,
+            (
+                "arrayscope/window/main.py",
+                "ArrayScopeWindow._note_viewport_interaction",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/frame_effects.py",
+                "FramePipelineEffects.request_presentation",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/frame_runtime.py",
+                "FrameRuntimeMixin.request_montage_replan",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
+                "arrayscope/window/frame_runtime.py",
+                "FrameRuntimeMixin._ensure_montage_watchdog",
+                "QTimer",
+                "anti-hang fallback",
+            ): 1,
+            (
+                "arrayscope/window/render_coordinator.py",
+                "RenderCoordinator.__init__",
+                "QTimer",
+                "UI cosmetic",
+            ): 2,
         }
     )
     found = Counter()
@@ -950,9 +1169,13 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
         Visitor(str(path.relative_to(ROOT))).visit(ast.parse(path.read_text()))
 
     allowed_without_category = Counter(
-        (rel, qualname, kind) for (rel, qualname, kind, _category), count in allowed.items() for _ in range(count)
+        (rel, qualname, kind)
+        for (rel, qualname, kind, _category), count in allowed.items()
+        for _ in range(count)
     )
     assert found == allowed_without_category
+
+
 def test_vispy_warm_residency_has_no_backend_scheduling_timer():
     text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
     assert "_vispy_warm_tile_timer" not in text
@@ -963,7 +1186,9 @@ def test_vispy_warm_residency_has_no_backend_scheduling_timer():
 def test_image_view_shell_exposes_surface_contract():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     backend_text = (ROOT / "arrayscope" / "display" / "backends" / "base.py").read_text()
-    layer_text = (ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "tiles.py").read_text()
+    layer_text = (
+        ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "tiles.py"
+    ).read_text()
     assert "class ImageViewShell" in text
     assert "class ImageView2D(ImageViewShell)" in text
     assert "class ImageSurface" in backend_text
@@ -988,7 +1213,11 @@ def test_image_view_shell_exposes_surface_contract():
 
 def test_vispy_view_inherits_shell_not_pyqtgraph_concrete_view():
     text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
-    assert "from arrayscope.display.imageview2d import ImageViewShell" in text
+    shell_import = re.search(
+        r"from arrayscope\.display\.imageview2d import \([^)]*\bImageViewShell\b",
+        text,
+    )
+    assert shell_import is not None
     assert "class VisPyImageView2D(ImageViewShell)" in text
     assert "class VisPyImageView2D(ImageView2D)" not in text
 
@@ -1009,18 +1238,22 @@ def test_backend_identity_uses_declared_surface_capabilities():
     for path in (ROOT / "arrayscope").rglob("*.py"):
         rel = path.relative_to(ROOT)
         text = path.read_text()
-        for token in forbidden:
-            if token in text:
-                offenders.append(f"{rel}:{token}")
+        offenders.extend(f"{rel}:{token}" for token in forbidden if token in text)
     assert offenders == []
 
 
 def test_imageview2d_display_ownership_helpers_are_split_out():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     assert "class _MontageTileOverlayItem" not in text
-    assert "class MontageTileOverlayItem" in (ROOT / "arrayscope" / "display" / "overlays.py").read_text()
+    assert (
+        "class MontageTileOverlayItem"
+        in (ROOT / "arrayscope" / "display" / "overlays.py").read_text()
+    )
     assert "def item_for_roi" in (ROOT / "arrayscope" / "display" / "roi_items.py").read_text()
-    assert "class ProfileMarkerOwner" in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
+    assert (
+        "class ProfileMarkerOwner"
+        in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
+    )
 
 
 def test_production_lod_has_no_synchronous_pyramid_entrypoints():
@@ -1039,9 +1272,11 @@ def test_production_lod_has_no_synchronous_pyramid_entrypoints():
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden:
                 offenders.append(f"{rel}:{node.lineno}:def {node.name}")
             if isinstance(node, ast.ImportFrom) and node.module == "arrayscope.display.lod":
-                for alias in node.names:
-                    if alias.name in forbidden:
-                        offenders.append(f"{rel}:{node.lineno}:import {alias.name}")
+                offenders.extend(
+                    f"{rel}:{node.lineno}:import {alias.name}"
+                    for alias in node.names
+                    if alias.name in forbidden
+                )
     assert offenders == []
 
 
@@ -1063,9 +1298,7 @@ def test_r3_lod_ladder_deletes_legacy_montage_lod_path():
             continue
         rel = path.relative_to(ROOT)
         text = path.read_text(encoding="utf-8")
-        for token in forbidden:
-            if token in text:
-                offenders.append(f"{rel}:{token}")
+        offenders.extend(f"{rel}:{token}" for token in forbidden if token in text)
     assert offenders == []
 
 
@@ -1104,11 +1337,12 @@ def test_predictive_compute_modules_exist():
 
 
 def test_render_orchestrator_uses_one_frame_session_staleness_guard_name():
-    offenders = []
     stale_name = "_is_current_" + "montage_session"
-    for path in (ROOT / "arrayscope" / "window").rglob("*.py"):
-        if stale_name in path.read_text():
-            offenders.append(str(path.relative_to(ROOT)))
+    offenders = [
+        str(path.relative_to(ROOT))
+        for path in (ROOT / "arrayscope" / "window").rglob("*.py")
+        if stale_name in path.read_text()
+    ]
     assert offenders == []
 
 
@@ -1138,7 +1372,9 @@ def test_display_semantics_live_in_display_package():
 
 
 def test_histogram_imageitem_binding_is_centralized():
-    adapter = (ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "histogram_adapter.py").read_text()
+    adapter = (
+        ROOT / "arrayscope" / "display" / "backends" / "pyqtgraph" / "histogram_adapter.py"
+    ).read_text()
     image_view = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
 
     assert "def _bind_histogram_item" in image_view
@@ -1235,7 +1471,10 @@ def test_operation_simplification_does_not_mutate_document_steps():
     optimize_operations(data.shape, data.dtype, document.enabled_operations)
 
     assert document.steps == steps
-    assert [type(step.operation).__name__ for step in document.steps] == ["CenteredFFT", "CenteredIFFT"]
+    assert [type(step.operation).__name__ for step in document.steps] == [
+        "CenteredFFT",
+        "CenteredIFFT",
+    ]
 
 
 def test_window_render_does_not_contain_operation_simplification_type_checks():
@@ -1344,9 +1583,7 @@ def test_operation_evaluator_owns_unified_display_cache():
 
 
 def test_scheduler_v2_pure_modules_are_qt_free():
-    for rel in (
-        Path("arrayscope/operations/chunked.py"),
-    ):
+    for rel in (Path("arrayscope/operations/chunked.py"),):
         text = (ROOT / rel).read_text()
         assert "Qt" not in text
         assert "pyqtgraph" not in text
@@ -1424,14 +1661,14 @@ def test_deferred_single_shot_callbacks_carry_receiver_context():
     offenders = []
     for path in (ROOT / "arrayscope").rglob("*.py"):
         tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "singleShot"
-                and len(node.args) < 3
-            ):
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        offenders.extend(
+            f"{path.relative_to(ROOT)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "singleShot"
+            and len(node.args) < 3
+        )
     assert offenders == []
 
 
@@ -1521,12 +1758,16 @@ def test_live_lod_modules_cannot_import_legacy_whole_plane_ownership():
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 imported = {alias.name for alias in node.names}
-                for name in sorted(imported.intersection(legacy_names)):
-                    offenders.append(f"{rel}:{node.lineno}:{name}")
+                offenders.extend(
+                    f"{rel}:{node.lineno}:{name}"
+                    for name in sorted(imported.intersection(legacy_names))
+                )
             elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.rsplit(".", 1)[-1] in legacy_names:
-                        offenders.append(f"{rel}:{node.lineno}:{alias.name}")
+                offenders.extend(
+                    f"{rel}:{node.lineno}:{alias.name}"
+                    for alias in node.names
+                    if alias.name.rsplit(".", 1)[-1] in legacy_names
+                )
     assert offenders == []
 
     pyramid_tree = ast.parse((ROOT / "arrayscope" / "display" / "pyramid.py").read_text())

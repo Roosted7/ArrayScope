@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import numpy as np
 
 from arrayscope.display.lod import LodInfo, factor_xy_for_level
-from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.montage_levels import (
     LevelEvidenceQuality,
     TileLevelStats,
@@ -28,14 +27,17 @@ from arrayscope.display.model.tile_identity import (
     tile_ack_identity,
 )
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
+from arrayscope.display.montage import RenderedTile
 from arrayscope.display.pyramid import MaterializedLodPage, plan_source_grid_pages
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderScale,
     TexturePlaneKind,
-    apply_scale as apply_shader_scale,
     extract_component,
     mapped_scalar,
+)
+from arrayscope.display.shader_mapping import (
+    apply_scale as apply_shader_scale,
 )
 from arrayscope.display.slice_engine import (
     make_image,
@@ -48,7 +50,8 @@ from arrayscope.operations.capabilities import (
     pipeline_supports_reduced_display_lod,
 )
 from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
-from arrayscope.operations.pipeline import ArrayDocument, evaluate as evaluate_pipeline
+from arrayscope.operations.pipeline import ArrayDocument
+from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, region_contains
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
@@ -57,9 +60,8 @@ from arrayscope.operations.slabs import (
 )
 from arrayscope.operations.source_read import read_base_region
 from arrayscope.presentation import LevelPhase
-from arrayscope.render.ladder import TileLodState
 from arrayscope.render import lod as render_lod
-
+from arrayscope.render.ladder import TileLodState
 
 SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 1, "sample-display-axes-before-operations")
 
@@ -98,7 +100,11 @@ def _evaluate_native_tile_result(
         stage_key = stage_materializer.key_for_candidate(document_key, candidate)
     stage_value = None if stage_key is None else session.stage_fan_in.values.get(stage_key)
     if stage_value is None and stage_key is not None and stage_cache is not None:
-        getter = stage_cache.get_containing if hasattr(stage_cache, "get_containing") else stage_cache.get
+        getter = (
+            stage_cache.get_containing
+            if hasattr(stage_cache, "get_containing")
+            else stage_cache.get
+        )
         stage_value = getter(stage_key)
     if stage_value is not None:
         request = request_for_image(tile.view_state)
@@ -123,7 +129,9 @@ def _evaluate_native_tile_result(
                         continue
                     if str(getattr(item, "dtype", "")) != str(getattr(stage_key, "dtype", "")):
                         continue
-                    if tuple(getattr(item, "shape", ()) or ()) != tuple(getattr(stage_key, "shape", ()) or ()):
+                    if tuple(getattr(item, "shape", ()) or ()) != tuple(
+                        getattr(stage_key, "shape", ()) or ()
+                    ):
                         continue
                     try:
                         contains = region_contains(stage_value.region, item.region, stage_key.shape)
@@ -321,9 +329,7 @@ def evaluate_shared_preview(
         not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed)
     )
     preview_document = (
-        ArrayDocument(transformed, revision=session.document.revision)
-        if shader_preview
-        else None
+        ArrayDocument(transformed, revision=session.document.revision) if shader_preview else None
     )
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
@@ -389,9 +395,7 @@ def evaluate_shared_preview(
             shader_display=bool(shader_display),
         )
         template_plan = format_key.plans[0]
-        source_height, source_width = (
-            int(value) for value in session.plan.tile_shape[:2]
-        )
+        source_height, source_width = (int(value) for value in session.plan.tile_shape[:2])
         plans = plan_source_grid_pages(
             # Reduced-before-operation shared values are deliberately
             # non-semantic.  Keep their value identity separate from direct
@@ -417,7 +421,9 @@ def evaluate_shared_preview(
             plans=plans,
         )
         pages = _materialize_shared_preview_pages(source, plans=plans)
-        histogram = _preview_display_histogram(rendered, source, texture_kind, getattr(value, "histogram_data", None))
+        histogram = _preview_display_histogram(
+            rendered, source, texture_kind, getattr(value, "histogram_data", None)
+        )
         previews.append(
             (
                 int(tile.montage_index),
@@ -480,7 +486,9 @@ def _materialize_shared_preview_pages(
     return tuple(pages)
 
 
-def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> tuple[TileLodState, ...]:
+def tile_lod_states(
+    session, demand=None, *, tile_numbers=None, scope=None
+) -> tuple[TileLodState, ...]:
     """Snapshot ladder inputs from lifecycle records and pyramid residency.
 
     The lifecycle machine owns acknowledged presentation/residency events; the
@@ -492,7 +500,9 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
     allowed = None if tile_numbers is None else {int(value) for value in tuple(tile_numbers)}
     states: list[TileLodState] = []
-    payloads = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {})
+    payloads = dict(
+        getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+    )
     skipped_numbers = set(getattr(session, "skipped_tiles", ()) or ())
     active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
@@ -518,7 +528,9 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
         )
         payload = payloads.get(tile_number)
         payload_current = False
-        if payload is not None and int(getattr(payload, "source_index", -1)) == int(tile.source_index):
+        if payload is not None and int(getattr(payload, "source_index", -1)) == int(
+            tile.source_index
+        ):
             if backend_identities:
                 payload_current = backend_identities.get(tile_number) == tile_ack_identity(payload)
             else:
@@ -533,8 +545,7 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
             and str(getattr(payload, "quality", "exact") or "exact") != "preview"
         )
         committable_exact_ready = bool(
-            ready_ref is not None
-            and str(getattr(ready_ref, "quality", "") or "") != "preview"
+            ready_ref is not None and str(getattr(ready_ref, "quality", "") or "") != "preview"
         )
         if (
             not committable_exact_payload
@@ -552,12 +563,18 @@ def tile_lod_states(session, demand=None, *, tile_numbers=None, scope=None) -> t
             resident_levels.clear()
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
-        presented_quality = "exact" if payload is None else str(getattr(payload, "quality", "exact") or "exact")
+        presented_quality = (
+            "exact" if payload is None else str(getattr(payload, "quality", "exact") or "exact")
+        )
         desired = 0 if demand is None else max(0, int(getattr(demand, "desired_level", 0) or 0))
         target_quality_available = bool(
             tile_number in getattr(session, "rendered_tiles", {})
             or any(int(level) <= desired for level in resident_levels)
-            or (presented_level is not None and int(presented_level) <= desired and presented_quality != "preview")
+            or (
+                presented_level is not None
+                and int(presented_level) <= desired
+                and presented_quality != "preview"
+            )
         )
         blank = payload is None and not resident_levels
         visible_missing_count = int(getattr(scope, "visible_missing_count", 0) or 0)
@@ -652,9 +669,10 @@ def _resident_levels_from_lifecycle(
 def _floor_available(session, tile, demand, *, preview_cache) -> bool:
     if preview_cache is None or demand is None:
         return False
-    return session._best_floor_key(
-        int(tile.source_index), tile_number=int(tile.montage_index)
-    ) is not None
+    return (
+        session._best_floor_key(int(tile.source_index), tile_number=int(tile.montage_index))
+        is not None
+    )
 
 
 def can_evaluate_preview(session, tile) -> bool:
@@ -663,9 +681,7 @@ def can_evaluate_preview(session, tile) -> bool:
     if document is None or view_state is None or getattr(view_state, "image_axes", None) is None:
         return False
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
-    if len(base_shape) != int(getattr(view_state, "ndim", len(base_shape))):
-        return False
-    return True
+    return len(base_shape) == int(getattr(view_state, "ndim", len(base_shape)))
 
 
 def can_evaluate_reduced_preview(session, tile) -> bool:
@@ -858,7 +874,9 @@ def presented_first_pixel_payload(session, tile_number: int):
     lifecycle = getattr(session, "lifecycle", None)
     if tile_number not in set(getattr(lifecycle, "presented_tiles", ()) or ()):
         return None
-    payload = dict(getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}).get(tile_number)
+    payload = dict(
+        getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+    ).get(tile_number)
     if payload is None:
         return None
     backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
@@ -898,8 +916,12 @@ def read_reduced_preview_base_and_state(
     base_shape = tuple(int(size) for size in np.shape(document.base_data))
     image_axes = tuple(int(axis) for axis in view_state.image_axes)
     reduced_shape = list(base_shape)
-    display_y_region = _display_axis_region_for_preview(view_state, image_axes[0], base_shape[image_axes[0]])
-    display_x_region = _display_axis_region_for_preview(view_state, image_axes[1], base_shape[image_axes[1]])
+    display_y_region = _display_axis_region_for_preview(
+        view_state, image_axes[0], base_shape[image_axes[0]]
+    )
+    display_x_region = _display_axis_region_for_preview(
+        view_state, image_axes[1], base_shape[image_axes[1]]
+    )
     if sample_display_axes:
         preview_y_region = _sample_preview_axis_region(
             display_y_region,
@@ -968,7 +990,11 @@ def read_reduced_preview_base_and_state(
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
     )
-    reduced = np.asarray(base) if sample_display_axes else reduce_array_display_axes(base, image_axes, factor_xy)
+    reduced = (
+        np.asarray(base)
+        if sample_display_axes
+        else reduce_array_display_axes(base, image_axes, factor_xy)
+    )
     preview_state = reduced_preview_view_state(
         view_state,
         np.shape(reduced),
@@ -994,7 +1020,11 @@ def _sample_preview_axis_region(axis_region: AxisRegion, size: int, factor: int)
     if kind == AxisRegionKind.INDICES:
         return AxisRegion(
             AxisRegionKind.INDICES,
-            tuple(int(value) for offset, value in enumerate(tuple(axis_region.value)) if offset % factor == 0),
+            tuple(
+                int(value)
+                for offset, value in enumerate(tuple(axis_region.value))
+                if offset % factor == 0
+            ),
         )
     return axis_region
 
@@ -1334,7 +1364,9 @@ def _evaluate_tile_native_output_preview(
     )
 
 
-def _native_preview_axis_region(axis_region: AxisRegion, output_index: int) -> tuple[AxisRegion, int]:
+def _native_preview_axis_region(
+    axis_region: AxisRegion, output_index: int
+) -> tuple[AxisRegion, int]:
     kind = AxisRegionKind(axis_region.kind)
     if kind == AxisRegionKind.POINT:
         index = int(axis_region.value)
@@ -1389,10 +1421,7 @@ def _shared_preview_axis_override(session, tiles):
     if axis is None:
         return None
     values = tuple(
-        dict.fromkeys(
-            int(getattr(tile, "source_index", 0))
-            for tile in tuple(tiles or ())
-        )
+        dict.fromkeys(int(getattr(tile, "source_index", 0)) for tile in tuple(tiles or ()))
     )
     if not values:
         return None
@@ -1438,8 +1467,8 @@ __all__ = [
     "can_evaluate_preview",
     "can_evaluate_reduced_preview",
     "evaluate_preview_tile",
-    "evaluate_target_tile",
     "evaluate_shared_preview",
+    "evaluate_target_tile",
     "montage_refined_level_values",
     "preview_claim_key",
     "preview_evaluation_level",

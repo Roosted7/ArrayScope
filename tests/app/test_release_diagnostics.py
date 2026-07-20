@@ -1,4 +1,5 @@
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -11,7 +12,7 @@ def _read_jsonl(path):
 
 @pytest.mark.parametrize(
     ("backend", "previous_backend"),
-    (("pyqtgraph", "vispy"), ("vispy", "pyqtgraph")),
+    [("pyqtgraph", "vispy"), ("vispy", "pyqtgraph")],
 )
 def test_release_diagnostics_writes_trace_and_preserves_image_renderer_choice(
     qt_app,
@@ -78,9 +79,9 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
         key = ("target", 7)
         flush_pending = False
         final_commit_pending = False
-        dirty_payloads = {}
-        pending_payload_upserts = {}
-        pending_removals = set()
+        dirty_payloads: ClassVar[dict] = {}
+        pending_payload_upserts: ClassVar[dict] = {}
+        pending_removals: ClassVar[set] = set()
         atomic_successor_pending = False
         stage_planning_deferred = False
         pending_rung_materializations = ()
@@ -114,7 +115,7 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
 
     class ImageView:
         draw_pending = False
-        rows = {}
+        rows: ClassVar[dict] = {}
         rendering_capabilities = type("Capabilities", (), {"name": "vispy"})()
 
         def presentationDrawPending(self):
@@ -219,7 +220,9 @@ def test_wait_until_raises_loudly_on_timeout(qt_app):
 def test_capture_propagates_incomplete_presentation_timeout(qt_app, tmp_path, monkeypatch):
     import arrayscope.tools.release_diagnostics as release_diagnostics
 
-    monkeypatch.setattr(release_diagnostics, "presentation_is_settled", lambda _win, **_kwargs: False)
+    monkeypatch.setattr(
+        release_diagnostics, "presentation_is_settled", lambda _win, **_kwargs: False
+    )
     monkeypatch.setattr(
         release_diagnostics,
         "bounded_interaction_settle_timeout_s",

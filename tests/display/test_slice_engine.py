@@ -1,34 +1,67 @@
 import ast
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 
 ROOT = Path(__file__).parents[2]
 
 
 MODULE_PATHS = {
     "axis_utils": ("arrayscope.core.axis_utils", ROOT / "arrayscope" / "core" / "axis_utils.py"),
-    "cache_status": ("arrayscope.core.cache_status", ROOT / "arrayscope" / "core" / "cache_status.py"),
-    "dimension_roles": ("arrayscope.core.dimension_roles", ROOT / "arrayscope" / "core" / "dimension_roles.py"),
+    "cache_status": (
+        "arrayscope.core.cache_status",
+        ROOT / "arrayscope" / "core" / "cache_status.py",
+    ),
+    "dimension_roles": (
+        "arrayscope.core.dimension_roles",
+        ROOT / "arrayscope" / "core" / "dimension_roles.py",
+    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
-    "window_levels": ("arrayscope.core.window_levels", ROOT / "arrayscope" / "core" / "window_levels.py"),
+    "window_levels": (
+        "arrayscope.core.window_levels",
+        ROOT / "arrayscope" / "core" / "window_levels.py",
+    ),
     "dim_ops": ("arrayscope.operations.dim_ops", ROOT / "arrayscope" / "operations" / "dim_ops.py"),
-    "operation_pipeline": ("arrayscope.operations.pipeline", ROOT / "arrayscope" / "operations" / "pipeline.py"),
-    "operation_stack": ("arrayscope.operations.stack", ROOT / "arrayscope" / "operations" / "stack.py"),
-    "operation_evaluator": ("arrayscope.operations.evaluator", ROOT / "arrayscope" / "operations" / "evaluator.py"),
-    "operation_registry": ("arrayscope.operations.registry", ROOT / "arrayscope" / "operations" / "registry.py"),
-    "operation_recipes": ("arrayscope.operations.recipes", ROOT / "arrayscope" / "operations" / "recipes.py"),
-    "operation_coordinator": ("arrayscope.operations.coordinator", ROOT / "arrayscope" / "operations" / "coordinator.py"),
-    "slice_engine": ("arrayscope.display.slice_engine", ROOT / "arrayscope" / "display" / "slice_engine.py"),
+    "operation_pipeline": (
+        "arrayscope.operations.pipeline",
+        ROOT / "arrayscope" / "operations" / "pipeline.py",
+    ),
+    "operation_stack": (
+        "arrayscope.operations.stack",
+        ROOT / "arrayscope" / "operations" / "stack.py",
+    ),
+    "operation_evaluator": (
+        "arrayscope.operations.evaluator",
+        ROOT / "arrayscope" / "operations" / "evaluator.py",
+    ),
+    "operation_registry": (
+        "arrayscope.operations.registry",
+        ROOT / "arrayscope" / "operations" / "registry.py",
+    ),
+    "operation_recipes": (
+        "arrayscope.operations.recipes",
+        ROOT / "arrayscope" / "operations" / "recipes.py",
+    ),
+    "operation_coordinator": (
+        "arrayscope.operations.coordinator",
+        ROOT / "arrayscope" / "operations" / "coordinator.py",
+    ),
+    "slice_engine": (
+        "arrayscope.display.slice_engine",
+        ROOT / "arrayscope" / "display" / "slice_engine.py",
+    ),
     "profile": ("arrayscope.profiles.model", ROOT / "arrayscope" / "profiles" / "model.py"),
-    "profile_coordinator": ("arrayscope.profiles.coordinator", ROOT / "arrayscope" / "profiles" / "coordinator.py"),
+    "profile_coordinator": (
+        "arrayscope.profiles.coordinator",
+        ROOT / "arrayscope" / "profiles" / "coordinator.py",
+    ),
     "theme": ("arrayscope.app.theme", ROOT / "arrayscope" / "app" / "theme.py"),
-    "settings_state": ("arrayscope.app.settings_state", ROOT / "arrayscope" / "app" / "settings_state.py"),
+    "settings_state": (
+        "arrayscope.app.settings_state",
+        ROOT / "arrayscope" / "app" / "settings_state.py",
+    ),
 }
 
 
@@ -54,7 +87,14 @@ symlog = slice_engine.symlog
 with_slice_index = slice_engine.with_slice_index
 
 
-def state_for(shape, image_axes=None, line_axis=None, slices=None, channel=ChannelMode.REAL, scale=ScaleMode.LINEAR):
+def state_for(
+    shape,
+    image_axes=None,
+    line_axis=None,
+    slices=None,
+    channel=ChannelMode.REAL,
+    scale=ScaleMode.LINEAR,
+):
     return ViewState(
         ndim=len(shape),
         shape=tuple(shape),
@@ -74,7 +114,9 @@ def test_apply_channel_values():
     np.testing.assert_array_equal(apply_channel(data, ChannelMode.REAL), np.array([1.0, -3.0]))
     np.testing.assert_array_equal(apply_channel(data, ChannelMode.IMAG), np.array([2.0, -4.0]))
     np.testing.assert_allclose(apply_channel(data, ChannelMode.ABS), np.array([np.sqrt(5), 5.0]))
-    np.testing.assert_allclose(apply_channel(data, ChannelMode.COMPLEX), np.array([np.sqrt(5), 5.0]))
+    np.testing.assert_allclose(
+        apply_channel(data, ChannelMode.COMPLEX), np.array([np.sqrt(5), 5.0])
+    )
     np.testing.assert_allclose(apply_channel(data, ChannelMode.ANGLE), np.angle(data))
 
 
@@ -109,7 +151,9 @@ def test_make_image_3d_slices_non_display_axis_and_applies_channel_and_scale():
 
 def test_make_image_applies_display_axis_ranges():
     data = np.arange(5 * 6).reshape(5, 6)
-    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(0, (0, 2, 4), "0:2:100")
+    state = state_for(data.shape, image_axes=(0, 1), line_axis=0).with_axis_range(
+        0, (0, 2, 4), "0:2:100"
+    )
 
     image = make_image(data, state)
 
@@ -138,7 +182,9 @@ def test_make_image_preserves_one_column_axis_range():
 
 def test_make_image_reversed_axes_preserves_one_pixel_range():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    state = state_for(data.shape, image_axes=(2, 1), line_axis=2, slices=(1, 0, 0)).with_axis_range(1, (2,), "2")
+    state = state_for(data.shape, image_axes=(2, 1), line_axis=2, slices=(1, 0, 0)).with_axis_range(
+        1, (2,), "2"
+    )
 
     image = make_image(data, state)
 
@@ -149,7 +195,9 @@ def test_make_image_reversed_axes_preserves_one_pixel_range():
 
 def test_make_image_complex_rgb_preserves_one_row_axis_range():
     data = np.array([[1 + 0j, 1j, -1 + 0j], [-1j, 2 + 0j, 2j]])
-    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX).with_axis_range(0, (1,), "1")
+    state = state_for(
+        data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX
+    ).with_axis_range(0, (1,), "1")
 
     image = make_image(data, state)
 
@@ -160,7 +208,9 @@ def test_make_image_complex_rgb_preserves_one_row_axis_range():
 
 def test_make_image_complex_log_histogram_uses_scaled_magnitude_for_levels():
     data = np.array([[1 + 0j, 10j, 100 + 0j]], dtype=np.complex64)
-    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG)
+    state = state_for(
+        data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG
+    )
 
     image = make_image(data, state)
 
@@ -199,7 +249,9 @@ def test_make_image_from_slab_preserves_one_column_axis_range():
 
 def test_make_shader_image_from_slab_keeps_scalar_texture_unscaled_and_histogram_scaled():
     data = np.array([[1.0, 10.0, 100.0]], dtype=np.float32)
-    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.REAL, scale=ScaleMode.LOG)
+    state = state_for(
+        data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.REAL, scale=ScaleMode.LOG
+    )
 
     image = make_shader_image_from_slab(data, _FakeImageRequest(state))
 
@@ -212,7 +264,9 @@ def test_make_shader_image_from_slab_keeps_scalar_texture_unscaled_and_histogram
 
 def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_scaled():
     data = np.array([[1 + 0j, 10j, 100 + 0j]], dtype=np.complex64)
-    state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG)
+    state = state_for(
+        data.shape, image_axes=(0, 1), line_axis=0, channel=ChannelMode.COMPLEX, scale=ScaleMode.LOG
+    )
 
     image = make_shader_image_from_slab(data, _FakeImageRequest(state))
 
@@ -278,14 +332,16 @@ def test_provisional_shader_level_grid_is_shared_by_shape():
 
 @pytest.mark.parametrize(
     ("channel", "component", "display_mode", "expected"),
-    (
+    [
         (ChannelMode.REAL, "real", "scalar", lambda data: np.real(data)),
         (ChannelMode.IMAG, "imag", "scalar", lambda data: np.imag(data)),
         (ChannelMode.ABS, "abs", "scalar", lambda data: np.abs(data)),
         (ChannelMode.ANGLE, "angle", "phase_color", lambda data: np.angle(data)),
-    ),
+    ],
 )
-def test_shader_complex_channels_share_raw_rg32f_texture(channel, component, display_mode, expected):
+def test_shader_complex_channels_share_raw_rg32f_texture(
+    channel, component, display_mode, expected
+):
     data = np.array([[1 + 2j, -3 + 4j]], dtype=np.complex64)
     state = state_for(data.shape, image_axes=(0, 1), line_axis=0, channel=channel)
 
@@ -439,7 +495,9 @@ def test_make_line_complex_channel_preserves_complex_values_for_profile_modes():
 
 def test_make_line_3d_slices_other_axes():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    state = state_for(data.shape, image_axes=(1, 2), line_axis=2, slices=(1, 2, 0), channel=ChannelMode.REAL)
+    state = state_for(
+        data.shape, image_axes=(1, 2), line_axis=2, slices=(1, 2, 0), channel=ChannelMode.REAL
+    )
 
     line = make_line(data, state)
 

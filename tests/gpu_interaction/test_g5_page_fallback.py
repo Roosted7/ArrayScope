@@ -18,9 +18,7 @@ import pytest
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
 )
-
 from tests.gpu_interaction.conftest import wait_for_qt_condition
-
 
 pytestmark = pytest.mark.gpu_interaction
 
@@ -32,9 +30,7 @@ def _canonical_payloads():
 
     yy, xx = np.mgrid[:64, :64]
     source = np.ascontiguousarray(
-        0.2
-        + 0.5 * (xx + yy) / 126.0
-        + 0.1 * ((xx // 8 + yy // 8) % 2),
+        0.2 + 0.5 * (xx + yy) / 126.0 + 0.1 * ((xx // 8 + yy // 8) % 2),
         dtype=np.float32,
     )
     route = {
@@ -80,9 +76,16 @@ def _canonical_payloads():
             ),
         )
 
-    return source, fine_plan, fine, coarse, payload(coarse, quality="preview"), payload(
+    return (
+        source,
+        fine_plan,
         fine,
-        quality="exact",
+        coarse,
+        payload(coarse, quality="preview"),
+        payload(
+            fine,
+            quality="exact",
+        ),
     )
 
 
@@ -188,9 +191,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
     from arrayscope.display.model.frame import TilePresentationState
     from arrayscope.display.viewport import ViewportPolicy
 
-    source, fine_plan, fine, coarse, coarse_payload, fine_payload = (
-        _canonical_payloads()
-    )
+    source, fine_plan, fine, coarse, coarse_payload, fine_payload = _canonical_payloads()
     geometry = _geometry()
     view = create_image_view(
         AppSettingsState(
@@ -219,10 +220,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
                 qt_app,
                 lambda: (
                     not bool(view.presentationDrawPending())
-                    and int(
-                        getattr(view, "_vispy_tile_presentation_draw_count", 0)
-                    )
-                    > before_draw
+                    and int(getattr(view, "_vispy_tile_presentation_draw_count", 0)) > before_draw
                 ),
             ), f"{name} physical draw exceeded the hard limit"
         elapsed = perf_counter() - start
@@ -242,9 +240,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
             histogramPlotData=source,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
-            viewport_policy=(
-                ViewportPolicy.FIT_ONCE if fit else ViewportPolicy.PRESERVE
-            ),
+            viewport_policy=(ViewportPolicy.FIT_ONCE if fit else ViewportPolicy.PRESERVE),
             rgb_already_windowed=False,
             tile_residency_budget_bytes=8 * 1024 * 1024,
         )
@@ -273,9 +269,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
         # restore it.  This proves the framebuffer oracle is capable of
         # catching the exact transition the gate forbids.
         visible = tuple(
-            visual
-            for visual in layer._visuals_by_page
-            if bool(getattr(visual, "visible", False))
+            visual for visual in layer._visuals_by_page if bool(getattr(visual, "visible", False))
         )
         assert visible, "fault injection would be vacuous without a visible GL page"
         for visual in visible:
@@ -345,9 +339,7 @@ def test_g5_pinned_coarse_fine_arrival_and_eviction_never_black_real_gl(
         assert fallback_binding["quality"] == "fallback"
         assert int(fallback_binding["binding_generation"]) == coarse_generation
         assert pool._page_table.is_pinned(coarse.key)
-        frames["fallback-after-eviction"] = np.asarray(
-            view._vispy_canvas.render()
-        ).copy()
+        frames["fallback-after-eviction"] = np.asarray(view._vispy_canvas.render()).copy()
         assert _frame_has_tile_signal(frames["fallback-after-eviction"])
 
         for name, frame in frames.items():

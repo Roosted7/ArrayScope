@@ -4,22 +4,30 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.core.memory_policy import MemoryProfileChoice
 from arrayscope.core.resource_governor import ResourcePressure, ResourcePressureState
+from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.render.progressive_scheduling import SchedulingPhase, SchedulingVerdict
-from arrayscope.window.montage_prefetch import _owner_memory_pressure_blocks_prefetch, _owner_prefetch_batch_limit
+from arrayscope.window.montage_payload_cache import (
+    RetainedTiledPayloadStore,
+)
 from arrayscope.window.montage_payload_cache import (
     base_tile_source_id as _base_tile_source_id,
-    payload_lod_matches as _payload_lod_matches,
+)
+from arrayscope.window.montage_payload_cache import (
     payload_compatible_with_tile as _payload_compatible_with_tile,
-    RetainedTiledPayloadStore,
+)
+from arrayscope.window.montage_payload_cache import (
+    payload_lod_matches as _payload_lod_matches,
+)
+from arrayscope.window.montage_prefetch import (
+    _owner_memory_pressure_blocks_prefetch,
+    _owner_prefetch_batch_limit,
 )
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     frame_session_key,
 )
-
 
 
 def _window_ns(**kwargs):
@@ -29,9 +37,7 @@ def _window_ns(**kwargs):
 
 
 def _refine_scheduling_policy():
-    return SimpleNamespace(
-        verdict=SchedulingVerdict(1, SchedulingPhase.REFINE, ())
-    )
+    return SimpleNamespace(verdict=SchedulingVerdict(1, SchedulingPhase.REFINE, ()))
 
 
 def _coverage_scheduling_policy():
@@ -39,8 +45,8 @@ def _coverage_scheduling_policy():
         verdict=SchedulingVerdict(1, SchedulingPhase.COVERAGE, ()),
         evidence_pending_calls=[],
     )
-    policy.set_coverage_evidence_pending = (
-        lambda pending: policy.evidence_pending_calls.append(bool(pending))
+    policy.set_coverage_evidence_pending = lambda pending: policy.evidence_pending_calls.append(
+        bool(pending)
     )
     return policy
 
@@ -49,7 +55,9 @@ def _geometry():
     return SimpleNamespace(montage=object())
 
 
-def _prefetch_window(*, profile=MemoryProfileChoice.BALANCED, memory_pressure=ResourcePressure.NORMAL):
+def _prefetch_window(
+    *, profile=MemoryProfileChoice.BALANCED, memory_pressure=ResourcePressure.NORMAL
+):
     pressure = ResourcePressureState(
         ResourcePressure.NORMAL,
         0.5,
@@ -57,14 +65,20 @@ def _prefetch_window(*, profile=MemoryProfileChoice.BALANCED, memory_pressure=Re
         ResourcePressure.NORMAL,
         "test",
     )
-    governor = SimpleNamespace(profile=profile, diagnostics=lambda: SimpleNamespace(pressure=pressure))
+    governor = SimpleNamespace(
+        profile=profile, diagnostics=lambda: SimpleNamespace(pressure=pressure)
+    )
     return SimpleNamespace(win=SimpleNamespace(resource_governor=governor))
 
 
 def test_montage_prefetch_owner_uses_profile_batch_without_governor_decision():
-    assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.CONSERVATIVE)) == 1
+    assert (
+        _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.CONSERVATIVE)) == 1
+    )
     assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.BALANCED)) == 2
-    assert _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.AGGRESSIVE)) == 4
+    assert (
+        _owner_prefetch_batch_limit(_prefetch_window(profile=MemoryProfileChoice.AGGRESSIVE)) == 4
+    )
 
 
 def test_montage_prefetch_owner_blocks_memory_pressure_from_telemetry():
@@ -77,8 +91,12 @@ def test_montage_prefetch_owner_blocks_memory_pressure_from_telemetry():
 
 
 def _committed_tiled_frame(geometry, *, key):
+    from arrayscope.display.model.frame import (
+        CommittedDisplayFrame,
+        DisplayTilePayload,
+        TiledValueSource,
+    )
     from arrayscope.display.montage import MontageTileState
-    from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayTilePayload, TiledValueSource
 
     shape = tuple(int(value) for value in geometry.display_shape[:2])
     data = np.zeros(shape, dtype=np.float32)
@@ -161,7 +179,9 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     runtime._ensure_montage_watchdog = lambda: None
     runtime._schedule_montage_cached_level_stats = lambda _session: None
 
-    monkeypatch.setattr(render_lod, "selected_lod_factor", lambda _session: calls.append("select") or 8)
+    monkeypatch.setattr(
+        render_lod, "selected_lod_factor", lambda _session: calls.append("select") or 8
+    )
     monkeypatch.setattr(
         render_lod,
         "mark_ladder_swaps_for_current_demand",
@@ -190,8 +210,8 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
 
 
 def test_known_montage_level_source_is_not_resampled(monkeypatch):
-    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(FrameControllerMixin):
@@ -271,10 +291,10 @@ def test_montage_source_level_cache_reuses_overlapping_selection_and_keeps_refin
 
 @pytest.mark.parametrize(
     ("scheduling_policy", "first_pass_histogram_published"),
-    (
+    [
         (_refine_scheduling_policy, True),
         (_coverage_scheduling_policy, False),
-    ),
+    ],
     ids=("refinement", "displayed-fallback-coverage"),
 )
 def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation(
@@ -329,9 +349,7 @@ def test_histogram_aggregate_is_worker_derived_and_wakes_parked_presentation(
         flush_pending=True,
         final_commit_pending=True,
         pipeline=SimpleNamespace(
-            effects=SimpleNamespace(
-                request_presentation=lambda: requested.append("presentation")
-            )
+            effects=SimpleNamespace(request_presentation=lambda: requested.append("presentation"))
         ),
         required_target_settled=lambda: True,
     )
@@ -405,8 +423,8 @@ def test_prepared_atomic_transaction_expires_when_level_generation_changes():
 
 
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
-    from arrayscope.display.model.montage_levels import MontageLevelTracker
     import arrayscope.render.level_stats as level_stats
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(FrameControllerMixin):
@@ -444,7 +462,9 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
         level_key=("levels", "bounded"),
         level_expected_indices=tuple(range(32)),
         rendered_tiles=rendered,
-        plan=SimpleNamespace(tiles=tuple(SimpleNamespace(source_index=index) for index in range(32))),
+        plan=SimpleNamespace(
+            tiles=tuple(SimpleNamespace(source_index=index) for index in range(32))
+        ),
         pending_level_tiles=deque(),
         pending_level_sources=set(),
         pending_refined_level_tiles=deque(),
@@ -454,7 +474,9 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     )
     win = Window()
 
-    merged = win._queue_montage_level_stats_for_payloads(session, {index: object() for index in range(32)})
+    merged = win._queue_montage_level_stats_for_payloads(
+        session, {index: object() for index in range(32)}
+    )
 
     assert merged == 0
     assert calls == []
@@ -513,8 +535,8 @@ def test_deferred_level_scan_owns_sparse_montage_indices():
 
 
 def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypatch):
-    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     import arrayscope.render.level_stats as level_stats
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(FrameControllerMixin):
@@ -541,7 +563,11 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
     rendered = {
         index: SimpleNamespace(
             tile=SimpleNamespace(source_index=index),
-            level_stats=TileLevelStats(index, (float(index), float(index + 1)), np.asarray([float(index)], dtype=np.float32)),
+            level_stats=TileLevelStats(
+                index,
+                (float(index), float(index + 1)),
+                np.asarray([float(index)], dtype=np.float32),
+            ),
             level_data=None,
             histogram_data=None,
             image=np.asarray([float(index)], dtype=np.float32),
@@ -552,7 +578,9 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
         level_key=("levels", "prepared"),
         level_expected_indices=tuple(range(4)),
         rendered_tiles=rendered,
-        plan=SimpleNamespace(tiles=tuple(SimpleNamespace(source_index=index) for index in range(4))),
+        plan=SimpleNamespace(
+            tiles=tuple(SimpleNamespace(source_index=index) for index in range(4))
+        ),
         pending_level_tiles=deque(),
         pending_level_sources=set(),
         pending_refined_level_tiles=deque(),
@@ -562,7 +590,9 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
     )
     win = Window()
 
-    merged = win._queue_montage_level_stats_for_payloads(session, {index: object() for index in range(4)})
+    merged = win._queue_montage_level_stats_for_payloads(
+        session, {index: object() for index in range(4)}
+    )
 
     assert merged == 4
     assert calls == []
@@ -656,16 +686,18 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
 
 
 def test_preview_payload_level_data_updates_provisional_level_tracker(monkeypatch):
+    import arrayscope.render.level_stats as level_stats
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
-    import arrayscope.render.level_stats as level_stats
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(
-                rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True)
+                rendering_capabilities=ImageViewBackendCapabilities(
+                    name="vispy", shader_windowing=True
+                )
             )
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
@@ -779,6 +811,7 @@ def test_preview_level_evidence_is_not_promoted_to_refined_when_pyqtgraph_waits(
 
 def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact():
     from types import SimpleNamespace
+
     from arrayscope.display.backend_contract import VISPY_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
@@ -1089,8 +1122,7 @@ def test_first_pass_rough_evidence_completion_uses_required_scope():
     from arrayscope.render.level_stats import LevelStatsService
 
     tiles = tuple(
-        SimpleNamespace(montage_index=index, source_index=100 + index)
-        for index in range(4)
+        SimpleNamespace(montage_index=index, source_index=100 + index) for index in range(4)
     )
     summary = SimpleNamespace(source_indices=frozenset({100, 101}))
     service = SimpleNamespace(
@@ -1140,7 +1172,11 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
     from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
 
-    window = SimpleNamespace(img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")))
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+        )
+    )
     window.win = window
     session = SimpleNamespace(
         loading_tiles=set(),
@@ -1178,7 +1214,9 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
 
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, partial) is True
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, complete) is True
-    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, sampled_full) is False
+    assert (
+        tile_layer_first_pixels_wait_for_level_source(window, session, True, sampled_full) is False
+    )
 
 
 def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
@@ -1222,12 +1260,8 @@ def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
         evidence_quality=LevelEvidenceQuality.REFINED,
     )
 
-    assert tile_layer_first_pixels_wait_for_level_source(
-        window, session, True, missing_required
-    )
-    assert not tile_layer_first_pixels_wait_for_level_source(
-        window, session, True, required_subset
-    )
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, missing_required)
+    assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, required_subset)
 
 
 def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
@@ -1242,8 +1276,8 @@ def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
 
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import (
-        LevelEvidenceQuality,
         MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        LevelEvidenceQuality,
         MontageLevelStats,
     )
     from arrayscope.window.frame_effects import (
@@ -1258,8 +1292,7 @@ def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
     window.win = window
     tile_count = 272
     tiles = tuple(
-        SimpleNamespace(montage_index=number, source_index=number)
-        for number in range(tile_count)
+        SimpleNamespace(montage_index=number, source_index=number) for number in range(tile_count)
     )
     session = SimpleNamespace(
         plan=SimpleNamespace(tiles=tiles),
@@ -1276,21 +1309,28 @@ def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
             rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
             refined=refined,
             evidence_quality=(
-                LevelEvidenceQuality.REFINED
-                if refined
-                else LevelEvidenceQuality.ROUGH_TARGET
+                LevelEvidenceQuality.REFINED if refined else LevelEvidenceQuality.ROUGH_TARGET
             ),
         )
 
-    assert tile_layer_first_pixels_wait_for_level_source(
-        window, session, True, summary(batch - 1, refined=True)
-    ) is True
-    assert tile_layer_first_pixels_wait_for_level_source(
-        window, session, True, summary(batch, refined=False)
-    ) is True
-    assert tile_layer_first_pixels_wait_for_level_source(
-        window, session, True, summary(batch, refined=True)
-    ) is False
+    assert (
+        tile_layer_first_pixels_wait_for_level_source(
+            window, session, True, summary(batch - 1, refined=True)
+        )
+        is True
+    )
+    assert (
+        tile_layer_first_pixels_wait_for_level_source(
+            window, session, True, summary(batch, refined=False)
+        )
+        is True
+    )
+    assert (
+        tile_layer_first_pixels_wait_for_level_source(
+            window, session, True, summary(batch, refined=True)
+        )
+        is False
+    )
 
 
 def test_first_cpu_histogram_publishes_provisional_refined_first_batch():
@@ -1304,8 +1344,8 @@ def test_first_cpu_histogram_publishes_provisional_refined_first_batch():
     import numpy as np
 
     from arrayscope.display.model.montage_levels import (
-        LevelEvidenceQuality,
         MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        LevelEvidenceQuality,
         MontageLevelTracker,
         TileLevelStats,
     )
@@ -1367,7 +1407,9 @@ def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
     from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
 
     window = SimpleNamespace(
-        img_view=SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True))
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True)
+        )
     )
     window.win = window
     session = SimpleNamespace(pending_level_tiles=deque([object()]), level_scan_remaining_tiles=1)
@@ -1422,7 +1464,9 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
             return object()
 
         def submit_speculative_batch(self, **_kwargs):
-            raise AssertionError("first-frame correctness continuation must not use a speculative lane")
+            raise AssertionError(
+                "first-frame correctness continuation must not use a speculative lane"
+            )
 
     image_view = SimpleNamespace(
         rendering_capabilities=ImageViewBackendCapabilities(
@@ -1519,7 +1563,7 @@ def test_wgpu_resident_histogram_evidence_uses_coverage_lane_and_shared_tracker(
         LevelEvidenceQuality,
         MontageLevelTracker,
     )
-    from arrayscope.kernel import Lane, Priority, UNRANKED_SCHEDULING_RANK
+    from arrayscope.kernel import UNRANKED_SCHEDULING_RANK, Lane, Priority
     from arrayscope.render.level_stats import LevelStatsService
 
     submitted = []
@@ -1758,8 +1802,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     # phase-1 evidence debt: the barrier must hold COVERAGE open.
     assert policy.observe(session.lifecycle) is False
     assert policy.verdict.coverage_open, (
-        "COVERAGE closed evidence-empty while a cold histogram obligation "
-        "was deferred"
+        "COVERAGE closed evidence-empty while a cold histogram obligation was deferred"
     )
 
     # -- quiet edge: the interaction stops and the forced commit re-runs the
@@ -1780,9 +1823,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
         # The composed design (settle-edge pump, 6c32ed2b) dispatches the
         # deferred evidence BEFORE the forced commit — strictly earlier than
         # the quiet-edge-only flow this test originally encoded.
-        settle_pumped.append(
-            service._queue_montage_level_stats_for_payloads(current, payloads)
-        )
+        settle_pumped.append(service._queue_montage_level_stats_for_payloads(current, payloads))
 
     session.tile_presentation_state = SimpleNamespace(payloads={0: object()})
     owner = SimpleNamespace(
@@ -1830,7 +1871,9 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
 
     win = Window()
     win.win = win
-    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
+    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, columns=None, indices=tuple(range(8)), text=":"
+    )
     win.img_view = SimpleNamespace(
         image=None,
         viewport_controller=SimpleNamespace(
@@ -1839,7 +1882,9 @@ def test_initial_montage_plan_uses_pending_restored_viewport_range():
             promote_near_auto=lambda _view_range: False,
             is_auto_active=lambda: False,
         ),
-        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
+        graphicsView=SimpleNamespace(
+            viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))
+        ),
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
@@ -1865,7 +1910,9 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
 
     win = Window()
     win.win = win
-    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(2, columns=None, indices=tuple(range(8)), text=":")
+    state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
+        2, columns=None, indices=tuple(range(8)), text=":"
+    )
     win.img_view = SimpleNamespace(
         image=None,
         viewport_controller=SimpleNamespace(
@@ -1873,7 +1920,9 @@ def test_initial_montage_plan_ignores_invalid_restored_columns():
             is_fit_locked=lambda: False,
             is_auto_active=lambda: False,
         ),
-        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))),
+        graphicsView=SimpleNamespace(
+            viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(400, 200))
+        ),
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
@@ -1913,7 +1962,9 @@ def test_initial_montage_plan_without_image_measures_startup_lod_from_layout():
             is_fit_locked=lambda: False,
             is_auto_active=lambda: False,
         ),
-        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(200, 200))),
+        graphicsView=SimpleNamespace(
+            viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(200, 200))
+        ),
         getView=lambda: SimpleNamespace(viewRange=lambda: ((0.0, 1.0), (0.0, 1.0))),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
@@ -1959,7 +2010,9 @@ def test_auto_successor_plan_uses_successor_fit_while_predecessor_camera_is_reta
             is_fit_locked=lambda: False,
             is_auto_active=lambda: True,
         ),
-        graphicsView=SimpleNamespace(viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(1245, 753))),
+        graphicsView=SimpleNamespace(
+            viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(1245, 753))
+        ),
         getView=lambda: SimpleNamespace(viewRange=lambda: predecessor_range),
         rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
     )
@@ -1992,7 +2045,9 @@ def test_lod_policy_selects_producer_without_owning_target_debt():
             indices=(0, 1, 2, 3),
             text=":",
         )
-        plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(16, 16), columns=4)
+        plan = make_montage_plan(
+            state, axis=2, indices=(0, 1, 2, 3), tile_shape=(16, 16), columns=4
+        )
         return FrameSession(
             session_id=1,
             key=("target-debt", policy),
@@ -2056,9 +2111,6 @@ def test_montage_commit_reschedules_restored_roi_stats():
     assert calls == ["viewport", ("roi", "montage-semantic-commit")]
 
 
-
-
-
 def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     from arrayscope.window import frame_effects as montage_commit
 
@@ -2078,7 +2130,9 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=11, byte_cap=2 * 1024 * 1024, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2377,7 +2431,9 @@ def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=4, byte_cap=1024 * 1024, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=4, byte_cap=1024 * 1024, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2401,7 +2457,11 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
         semantic_data=semantic,
     )
     session = SimpleNamespace(
-        rendered_tiles={0: SimpleNamespace(image=image, histogram_data=None, semantic_data=semantic, level_data=None)},
+        rendered_tiles={
+            0: SimpleNamespace(
+                image=image, histogram_data=None, semantic_data=semantic, level_data=None
+            )
+        },
         display_tile_payloads={},
         dirty_payloads={0: None},
         pending_payload_upserts={},
@@ -2416,7 +2476,9 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=1, byte_cap=1024 * 1024, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2442,7 +2504,7 @@ def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
     def build_session(backlog: int):
         return SimpleNamespace(
             display_committed=True,
-            dirty_payloads={i: None for i in range(backlog)},
+            dirty_payloads=dict.fromkeys(range(backlog)),
             pending_payload_upserts={},
         )
 
@@ -2464,30 +2526,20 @@ def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
     window.win = window
 
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(60))[
-            "max_upserts"
-        ]
+        montage_commit._persistent_tile_upsert_limits(window, build_session(60))["max_upserts"]
         == 32
     )
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(10))[
-            "max_upserts"
-        ]
+        montage_commit._persistent_tile_upsert_limits(window, build_session(10))["max_upserts"]
         == 10
     )
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(3))[
-            "max_upserts"
-        ]
-        == 4
+        montage_commit._persistent_tile_upsert_limits(window, build_session(3))["max_upserts"] == 4
     )
 
     window._viewport_interaction_active = True
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(60))[
-            "max_upserts"
-        ]
-        == 4
+        montage_commit._persistent_tile_upsert_limits(window, build_session(60))["max_upserts"] == 4
     )
 
 
@@ -2502,7 +2554,7 @@ def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
     def build_session(backlog: int):
         return SimpleNamespace(
             display_committed=True,
-            dirty_payloads={i: None for i in range(backlog)},
+            dirty_payloads=dict.fromkeys(range(backlog)),
             pending_payload_upserts={},
             pending_removals=set(),
             has_pending_level_update=lambda: False,
@@ -2526,20 +2578,11 @@ def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
     )
     window.win = window
 
-    assert (
-        montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"]
-        == 2
-    )
-    assert (
-        montage_commit.tile_layer_upsert_limits(window, build_session(1))["max_upserts"]
-        == 2
-    )
+    assert montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"] == 2
+    assert montage_commit.tile_layer_upsert_limits(window, build_session(1))["max_upserts"] == 2
 
     window._viewport_interaction_active = True
-    assert (
-        montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"]
-        <= 8
-    )
+    assert montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"] <= 8
 
 
 def test_pyqtgraph_floor_progress_commits_stay_governed():
@@ -2612,7 +2655,9 @@ def test_pyqtgraph_tile_layer_upsert_limits_use_display_image_upload_cost():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=3, byte_cap=1024 * 1024, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2646,7 +2691,9 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=2, byte_cap=4096, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2656,7 +2703,10 @@ def test_pyqtgraph_tile_layer_upsert_limits_apply_to_cold_dirty_payloads():
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 4096
     assert limits["cold_deadline_ms"] == 2.0
-    assert limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32))) == 8 * 8 * 4
+    assert (
+        limits["upsert_cost_fn"](SimpleNamespace(image=np.zeros((8, 8), dtype=np.float32)))
+        == 8 * 8 * 4
+    )
 
 
 def test_pyqtgraph_first_frame_uses_bounded_batches():
@@ -2704,17 +2754,20 @@ def test_presentation_cold_walk_budget_keeps_callback_safety_margin():
     window = SimpleNamespace()
     window.win = window
 
-    assert presentation_upload_control_budget_ms(
-        window,
-        "tile_layer_commit",
-        decision,
-        interactive=False,
-    ) == 12.0
+    assert (
+        presentation_upload_control_budget_ms(
+            window,
+            "tile_layer_commit",
+            decision,
+            interactive=False,
+        )
+        == 12.0
+    )
 
 
 def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
-    from arrayscope.window import frame_effects as montage_commit
     from arrayscope.display.model.frame import TileCommitReport
+    from arrayscope.window import frame_effects as montage_commit
 
     report = TileCommitReport(
         presented_tiles=(0, 1, 2),
@@ -2727,8 +2780,12 @@ def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
 
 
 def test_retained_payload_store_receives_only_accepted_delta_payloads():
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        TileCommitReport,
+        TilePresentationDelta,
+    )
     from arrayscope.window import frame_effects as montage_commit
-    from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationDelta
 
     payloads = {
         index: DisplayTilePayload(
@@ -2825,7 +2882,9 @@ def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=2, byte_cap=4096, budget_ms=2.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=2, byte_cap=4096, budget_ms=2.0
+            )
         ),
     )
     window.win = window
@@ -2861,7 +2920,9 @@ def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature(
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=8, byte_cap=8 * 1024 * 1024, budget_ms=8.0
+            )
         ),
     )
     window.win = window
@@ -2908,7 +2969,9 @@ def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
         ),
         _viewport_interaction_active=False,
         resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(batch_limit=1, byte_cap=1024, budget_ms=4.0)
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=1, byte_cap=1024, budget_ms=4.0
+            )
         ),
     )
     window.win = window
@@ -3025,8 +3088,7 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
 
     assert order == [3, 1]
     assert stats.presented_identities == {
-        tile_number: payload.source_id
-        for tile_number, payload in payloads.items()
+        tile_number: payload.source_id for tile_number, payload in payloads.items()
     }
 
 
@@ -3054,7 +3116,9 @@ def test_tile_presentation_admission_uses_backend_cost_function():
         render_generation=1,
         level_key=None,
         level_expected_indices=(0, 1),
-        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 2), columns=2, rows=1, gap=0, tiles=tiles),
+        plan=MontagePlan(
+            axis=0, tile_shape=(2, 2), grid_shape=(1, 2), columns=2, rows=1, gap=0, tiles=tiles
+        ),
         view_state=None,
         document=None,
         montage_axis=0,
@@ -3120,7 +3184,9 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
         render_generation=1,
         level_key=None,
         level_expected_indices=tuple(range(4)),
-        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles),
+        plan=MontagePlan(
+            axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles
+        ),
         view_state=None,
         document=None,
         montage_axis=0,
@@ -3148,16 +3214,16 @@ def test_tile_presentation_limits_do_not_hide_acknowledged_resident_tiles():
         )
         session.dirty_payloads[index] = None
 
-    state, delta = session.build_tile_presentation({})
+    _state, delta = session.build_tile_presentation({})
     session.acknowledge_tile_presentation(
         delta,
         TileCommitReport(
             presented_tiles=frozenset(delta.upserts),
             committed_upserts=frozenset(delta.upserts),
             delta_key=(delta.base_revision, delta.target_revision),
-                presented_identities={
-                    tile: tile_ack_identity(payload) for tile, payload in delta.upserts.items()
-                },
+            presented_identities={
+                tile: tile_ack_identity(payload) for tile, payload in delta.upserts.items()
+            },
         ),
     )
     session.mark_presented(tuple(delta.upserts))
@@ -3198,7 +3264,9 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
         render_generation=1,
         level_key=None,
         level_expected_indices=tuple(range(4)),
-        plan=MontagePlan(axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles),
+        plan=MontagePlan(
+            axis=0, tile_shape=(2, 2), grid_shape=(1, 4), columns=4, rows=1, gap=0, tiles=tiles
+        ),
         view_state=None,
         document=None,
         montage_axis=0,
@@ -3248,11 +3316,9 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
     assert tuple(delta.upserts) == (1, 2)
 
 
-
-
-
 def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import MontageTileState, make_montage_plan
     from arrayscope.window.frame_controller import FrameControllerMixin
@@ -3271,7 +3337,9 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
             self.win = self
 
     state = ViewState.from_shape((2, 2, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
-    plan = make_montage_plan(state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8, gap=1)
+    plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(8)), tile_shape=(2, 2), columns=8, gap=1
+    )
     controller = Controller()
     session = FrameSession(
         session_id=7,
@@ -3315,12 +3383,13 @@ def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):
 
 def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
     from arrayscope.operations.pipeline import ArrayDocument
-    from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window import frame_effects as montage_commit
+    from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.frame_session import FrameSession
 
     class Window(QtCore.QObject, FrameControllerMixin):
@@ -3413,7 +3482,9 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
     monkeypatch.setattr(
         montage_commit,
         "build_stage_fan_in_plan",
-        lambda *_args, **_kwargs: pytest.fail("interactive viewport update must not plan stage fan-in"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "interactive viewport update must not plan stage fan-in"
+        ),
     )
     monkeypatch.setattr(
         "arrayscope.window.frame_controller.montage_commit.submit_deferred_stage_fan_in_plan",
@@ -3432,9 +3503,7 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
     assert session.loading_tiles == set()
     assert win.pipeline_retargets == 2
     assert submitted_stage_plans == [session.deferred_missing_tiles]
-    assert {
-        int(tile.montage_index) for tile in session.deferred_missing_tiles
-    } == required
+    assert {int(tile.montage_index) for tile in session.deferred_missing_tiles} == required
     assert session.stage_planning_deferred is True
     assert not getattr(win, "_montage_viewport_update_pending", False)
     assert not hasattr(win, "_montage_viewport_continue_immediately")
@@ -3443,6 +3512,7 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
 
 def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_app, monkeypatch):
     from pyqtgraph.Qt import QtCore, QtWidgets
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
@@ -3480,7 +3550,9 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
             pass
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
-    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=4, indices=tuple(range(4)), text=":"
+    )
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
     viewport_plan = MontageViewportPlan(
         axis=2,
@@ -3519,7 +3591,9 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
     win = Window(document, state, viewport_plan)
     win._frame_session = session
     win._viewport_interaction_active = False
-    monkeypatch.setattr(QtWidgets.QApplication, "mouseButtons", lambda: QtCore.Qt.MouseButton.NoButton)
+    monkeypatch.setattr(
+        QtWidgets.QApplication, "mouseButtons", lambda: QtCore.Qt.MouseButton.NoButton
+    )
 
     assert win._try_update_montage_viewport_only() is True
 
@@ -3528,8 +3602,11 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
     assert session.deferred_missing_tiles == tuple(plan.tiles)
 
 
-def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(qt_app, monkeypatch):
+def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
+    qt_app, monkeypatch
+):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
@@ -3687,7 +3764,9 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
     monkeypatch.setattr(
         montage_commit,
         "build_stage_fan_in_plan",
-        lambda *_args, **_kwargs: pytest.fail("active index-window retarget must not plan stage fan-in"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "active index-window retarget must not plan stage fan-in"
+        ),
     )
     monkeypatch.setattr(
         "arrayscope.window.frame_controller.montage_commit.submit_deferred_stage_fan_in_plan",
@@ -3730,6 +3809,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
 
 def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
@@ -3819,6 +3899,7 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
 
 def test_resize_retarget_requests_presentation_through_gate(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.backend_contract import ImageViewBackendCapabilities
     from arrayscope.display.montage import make_montage_plan
@@ -3853,7 +3934,9 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
         def __init__(self):
             super().__init__()
             self.win = self
-            self.view_state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=tuple(range(4)), text=":")
+            self.view_state = ViewState.from_shape((4, 4, 4)).with_montage_axis(
+                2, indices=tuple(range(4)), text=":"
+            )
             self.document = ArrayDocument(np.zeros((4, 4, 4), dtype=np.float32))
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
@@ -3904,6 +3987,7 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
 
 def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
     from arrayscope.operations.evaluator import _document_key
@@ -3942,7 +4026,9 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
             self.commits += 1
 
     document = ArrayDocument(np.zeros((2, 2, 4), dtype=np.float32))
-    state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=4, indices=tuple(range(4)), text=":"
+    )
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
     viewport_plan = MontageViewportPlan(
         axis=2,
@@ -3990,9 +4076,10 @@ def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app)
 
 def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
-    from arrayscope.display.montage import make_montage_plan
     from arrayscope.display.model.tile_priority import prioritize_tiles
+    from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.frame_session import FrameSession
 
@@ -4003,7 +4090,9 @@ def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
             self.view_state = state
             self._viewport_plan = viewport_plan
             self.scheduled = []
-            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+            )
 
         def _montage_viewport_plan(self, view_state, *, view_range=None):
             return self._viewport_plan
@@ -4018,7 +4107,9 @@ def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
             )
             self.scheduled.append(int(ordered[0].montage_index))
 
-    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=4, indices=tuple(range(4)), text=":")
+    state = ViewState.from_shape((2, 2, 4)).with_montage_axis(
+        2, columns=4, indices=tuple(range(4)), text=":"
+    )
     plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(2, 2), columns=4)
     viewport_plan = SimpleNamespace(priority_focus=(10.0, 1.0))
     session = FrameSession(
@@ -4053,11 +4144,13 @@ def test_hover_priority_retarget_changes_canonical_pipeline_order(qt_app):
 
 def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
     from dataclasses import replace
+
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-    from arrayscope.display.montage import MontageTileState
     from arrayscope.display.model.frame import DisplayFrameKey
+    from arrayscope.display.montage import MontageTileState
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(QtCore.QObject, FrameControllerMixin):
@@ -4090,10 +4183,11 @@ def test_tiled_commit_syncs_hover_geometry_after_backend_ack(qt_app):
 
 def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(qt_app):
     from pyqtgraph.Qt import QtCore
+
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-    from arrayscope.display.montage import MontageTileState
     from arrayscope.display.model.frame import DisplayFrameKey
+    from arrayscope.display.montage import MontageTileState
     from arrayscope.window.frame_controller import FrameControllerMixin
 
     class Window(QtCore.QObject, FrameControllerMixin):
@@ -4104,7 +4198,9 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
         def _set_committed_display_frame(self, frame):
             self._committed_display_frame = frame
 
-    first_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
+    first_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(
+        2, columns=2, indices=(0, 1), text="0:2"
+    )
     second_state = first_state.with_axis_range(2, indices=(2, 3), text="2:4")
     committed = DisplayGeometry(
         view_state=first_state,
@@ -4131,8 +4227,11 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
+    from arrayscope.window.frame_effects import (
+        persistent_gpu_tile_residency_backend,
+        persistent_tile_residency_backend,
+    )
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
-    from arrayscope.window.frame_effects import persistent_gpu_tile_residency_backend, persistent_tile_residency_backend
 
     capabilities = ImageViewBackendCapabilities(
         name="vispy",
@@ -4152,7 +4251,10 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         persistent_tile_residency=True,
         shader_windowing=False,
     )
-    assert montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles == 1
+    assert (
+        montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles
+        == 1
+    )
     assert (
         persistent_tile_residency_backend(
             _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
@@ -4175,7 +4277,10 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         is False
     )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
-    assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles == 0
+    assert (
+        montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles
+        == 0
+    )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
 
 
@@ -4189,7 +4294,17 @@ def test_retained_payload_store_is_keyed_by_semantic_source_identity():
         0,
         texture,
         np.ones((2, 2), dtype=np.float32),
-        (("montage_tile", "doc", 2), "texture_kind", "complex_rg32f", "shader", None, "lod", 4, 2, 1),
+        (
+            ("montage_tile", "doc", 2),
+            "texture_kind",
+            "complex_rg32f",
+            "shader",
+            None,
+            "lod",
+            4,
+            2,
+            1,
+        ),
         texture_data=texture,
         texture_kind=TexturePlaneKind.COMPLEX_RG32F,
         semantic_data=texture,
@@ -4458,7 +4573,6 @@ def test_tiled_payload_source_id_follows_semantic_materialization_identity():
     assert third.source_id != second.source_id
 
 
-
 def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     pytest.importorskip("pyqtgraph")
     from arrayscope.display.geometry import MontageGeometry
@@ -4468,7 +4582,9 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
     class _Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"))
+            self.img_view = SimpleNamespace(
+                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+            )
             self.commits = 0
 
         def _frame_session_is_current(self, _session):
@@ -4590,12 +4706,20 @@ def test_interactive_cache_hit_requires_committed_semantic_montage_mapping():
             return None
 
     document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
-    old_state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
-    new_state = ViewState.from_shape(document.current_shape).with_montage_axis(2, columns=2, indices=(1, 2), text="1:3")
+    old_state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=2, indices=(0, 1), text="0:2"
+    )
+    new_state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=2, indices=(1, 2), text="1:3"
+    )
     old_plan = make_montage_plan(old_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
     new_plan = make_montage_plan(new_state, axis=2, indices=(1, 2), tile_shape=(2, 2), columns=2)
-    old_viewport = MontageViewportPlan(2, (0, 1), (4, 8), (2, 2), old_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
-    new_viewport = MontageViewportPlan(2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), False, True)
+    old_viewport = MontageViewportPlan(
+        2, (0, 1), (4, 8), (2, 2), old_plan, ((0.0, 4.0), (0.0, 2.0)), False, True
+    )
+    new_viewport = MontageViewportPlan(
+        2, (1, 2), (4, 8), (2, 2), new_plan, ((0.0, 4.0), (0.0, 2.0)), False, True
+    )
     old_key = frame_session_key(_document_key(document), old_state, old_viewport, None)
     new_key = frame_session_key(_document_key(document), new_state, new_viewport, None)
 
@@ -4749,10 +4873,16 @@ def test_frame_session_key_excludes_transient_viewport_range():
 
     state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
-    first = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((0, 10), (0, 10)), True, True)
-    second = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan, ((10, 20), (0, 10)), True, True)
+    first = MontageViewportPlan(
+        2, tuple(range(6)), (100, 100), (4, 4), plan, ((0, 10), (0, 10)), True, True
+    )
+    second = MontageViewportPlan(
+        2, tuple(range(6)), (100, 100), (4, 4), plan, ((10, 20), (0, 10)), True, True
+    )
 
-    assert frame_session_key("doc", state, first, None) == frame_session_key("doc", state, second, None)
+    assert frame_session_key("doc", state, first, None) == frame_session_key(
+        "doc", state, second, None
+    )
 
 
 def test_frame_session_key_changes_with_population_but_not_layout_reflow():
@@ -4763,8 +4893,12 @@ def test_frame_session_key_changes_with_population_but_not_layout_reflow():
     plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
     plan2 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=2)
     base = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan3, None, True, True)
-    changed_population = MontageViewportPlan(2, tuple(range(5)), (100, 100), (4, 4), plan3, None, True, True)
-    changed_layout = MontageViewportPlan(2, tuple(range(6)), (100, 100), (4, 4), plan2, None, True, True)
+    changed_population = MontageViewportPlan(
+        2, tuple(range(5)), (100, 100), (4, 4), plan3, None, True, True
+    )
+    changed_layout = MontageViewportPlan(
+        2, tuple(range(6)), (100, 100), (4, 4), plan2, None, True, True
+    )
 
     key = frame_session_key("doc", state, base, None)
     assert key != frame_session_key("doc", state, changed_population, None)
@@ -4780,9 +4914,15 @@ def test_direct_tiled_payload_retarget_allows_only_safe_layout_reflow():
     state = ViewState.from_shape((4, 4, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     plan3 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=3)
     plan2 = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(4, 4), columns=2)
-    previous = DisplayGeometry(view_state=state, display_shape=plan3.display_shape, montage=plan3.geometry)
-    reflow = DisplayGeometry(view_state=state, display_shape=plan2.display_shape, montage=plan2.geometry)
-    changed_indices = make_montage_plan(state, axis=2, indices=tuple(range(5)), tile_shape=(4, 4), columns=3)
+    previous = DisplayGeometry(
+        view_state=state, display_shape=plan3.display_shape, montage=plan3.geometry
+    )
+    reflow = DisplayGeometry(
+        view_state=state, display_shape=plan2.display_shape, montage=plan2.geometry
+    )
+    changed_indices = make_montage_plan(
+        state, axis=2, indices=tuple(range(5)), tile_shape=(4, 4), columns=3
+    )
     incompatible = DisplayGeometry(
         view_state=state,
         display_shape=changed_indices.display_shape,
@@ -4836,8 +4976,7 @@ def _late_evidence_service(covered, *, drain_active=False):
 
 def _late_evidence_session(**overrides):
     tiles = tuple(
-        SimpleNamespace(montage_index=index, source_index=100 + index)
-        for index in range(4)
+        SimpleNamespace(montage_index=index, source_index=100 + index) for index in range(4)
     )
     presentation_requests = []
     session = SimpleNamespace(
@@ -4956,20 +5095,18 @@ def _wgpu_evidence_service(session, *, cached=None):
     tracker_updates = []
     service._montage_level_tracker = lambda: SimpleNamespace(
         ensure_expected=lambda key, expected: None,
-        update_from_stats=lambda key, stats, aggregate=True: tracker_updates.append(
-            (key, stats)
-        ),
+        update_from_stats=lambda key, stats, aggregate=True: tracker_updates.append((key, stats)),
     )
     remembered = []
-    service._remember_montage_source_level_stats = (
-        lambda level_key, stats: remembered.append((level_key, stats))
+    service._remember_montage_source_level_stats = lambda level_key, stats: remembered.append(
+        (level_key, stats)
     )
-    service._cached_montage_source_level_stats = (
-        lambda level_key, source_index, quality: (cached or {}).get(int(source_index))
-    )
+    service._cached_montage_source_level_stats = lambda level_key, source_index, quality: (
+        cached or {}
+    ).get(int(source_index))
     published = []
-    service._maybe_publish_after_level_evidence = (
-        lambda current, processed: published.append(processed)
+    service._maybe_publish_after_level_evidence = lambda current, processed: published.append(
+        processed
     )
     service._frame_session = session
     service._probes = SimpleNamespace(
@@ -5034,9 +5171,7 @@ def test_refined_remembered_evidence_satisfies_rough_obligation_without_dispatch
     session = _late_evidence_session(
         level_expected_indices=(100, 101),
         level_evidence_inflight=False,
-        scheduling_policy=SimpleNamespace(
-            verdict=SimpleNamespace(admits=lambda work: True)
-        ),
+        scheduling_policy=SimpleNamespace(verdict=SimpleNamespace(admits=lambda work: True)),
     )
     service = _wgpu_evidence_service(session, cached={100: refined, 101: refined})
     rows = tuple(row for row, _ in _wgpu_evidence_rows(100, 101))

@@ -1,14 +1,8 @@
-import importlib.util
-import sys
-import types
 import warnings
-from pathlib import Path
 
 import numpy as np
+
 import arrayscope.core.histograms as histograms
-
-
-
 
 
 def test_comparison_histograms_use_shared_range():

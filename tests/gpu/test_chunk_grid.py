@@ -3,7 +3,8 @@ the slice-window example (100:200 -> 101:201 keeps interior chunks) as
 testable geometry."""
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from arrayscope.gpu import ChunkGrid
 
@@ -58,7 +59,8 @@ def test_slice_window_shift_requests_at_most_one_boundary_chunk():
 def test_window_delta_cold_start_is_all_added():
     grid = ChunkGrid(array_shape=(256, 256), chunk_shape=(128, 128))
     delta = grid.window_delta(None, ((0, 256), (0, 256)))
-    assert delta.kept == () and delta.dropped == ()
+    assert delta.kept == ()
+    assert delta.dropped == ()
     assert set(delta.added) == set(grid.origins())
 
 
@@ -117,5 +119,6 @@ def test_window_chunks_cover_window_exactly(case):
     # And every selected chunk genuinely intersects the window.
     for origin in origins:
         shape = grid.shape_at(origin)
-        for (start, stop), o, s in zip(window, origin, shape):
-            assert o < stop and o + s > start
+        for (start, stop), o, s in zip(window, origin, shape, strict=False):
+            assert o < stop
+            assert o + s > start

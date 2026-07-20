@@ -18,7 +18,6 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.ui.helpers import (
     apply_plane,
     clear_arrayscope_settings,
@@ -28,7 +27,6 @@ from tests.ui.helpers import (
     restore_default_backend,
     use_vispy_backend,
 )
-
 
 HEIGHT = 96
 WIDTH = 128

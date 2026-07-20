@@ -96,7 +96,7 @@ class TileTruthOverlayLayer:
 
     def reposition(self) -> None:
         parent_rect = self.parent.rect()
-        for label, row in zip(self.labels, self.rows):
+        for label, row in zip(self.labels, self.rows, strict=False):
             tile_rect = row.get("tile_rect")
             if tile_rect is None:
                 label.hide()
@@ -121,7 +121,7 @@ class TileTruthOverlayLayer:
 
     def visible_text(self) -> str:
         visible_rows = (
-            row for label, row in zip(self.labels, self.rows) if not label.isHidden()
+            row for label, row in zip(self.labels, self.rows, strict=False) if not label.isHidden()
         )
         return tile_truth_overlay_text(visible_rows)
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import perf_counter
 
-
 INTERACTIVE_TARGET_MS = 4.0
 IDLE_TARGET_MS = 8.0
 WARNING_THRESHOLD_MS = 16.0
@@ -83,7 +82,7 @@ class GuiCallbackBudget:
         backend: str = "",
         item_cap: int | None = None,
         byte_cap: int | None = None,
-    ) -> "GuiCallbackBudget":
+    ) -> GuiCallbackBudget:
         return cls(
             channel=channel,
             work_class=work_class,
@@ -154,7 +153,9 @@ def should_yield_after_item(
     return budget.should_yield()
 
 
-def default_gui_callback_budget_decision(channel: str, *, interactive: bool = False) -> GuiCallbackBudgetDecision:
+def default_gui_callback_budget_decision(
+    channel: str, *, interactive: bool = False
+) -> GuiCallbackBudgetDecision:
     """Return the static GUI drain-budget vocabulary outside governor knobs."""
 
     budget_ms = INTERACTIVE_TARGET_MS if interactive else IDLE_TARGET_MS

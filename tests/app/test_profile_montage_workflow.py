@@ -1,10 +1,10 @@
 import json
 import os
-from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
-import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -60,9 +60,7 @@ def test_journey_end_sample_waits_for_pending_presentation_draw(monkeypatch):
     monkeypatch.setattr(
         workflow,
         "_process_events",
-        lambda *_args, **_kwargs: pending.update(
-            pumps_left=max(0, pending["pumps_left"] - 1)
-        ),
+        lambda *_args, **_kwargs: pending.update(pumps_left=max(0, pending["pumps_left"] - 1)),
     )
     events = []
     monkeypatch.setattr(
@@ -82,12 +80,8 @@ def test_journey_end_drain_is_bounded_when_redraw_never_comes(monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 
     pumps = []
-    monkeypatch.setattr(
-        workflow, "_process_events", lambda *_args, **_kwargs: pumps.append(1)
-    )
-    win = SimpleNamespace(
-        img_view=SimpleNamespace(presentationDrawPending=lambda: True)
-    )
+    monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: pumps.append(1))
+    win = SimpleNamespace(img_view=SimpleNamespace(presentationDrawPending=lambda: True))
 
     settled = workflow._drain_presentation_draw_for_journey_sample(
         win,
@@ -525,7 +519,8 @@ def test_synthetic_geometry_scene_is_indexed_and_spatially_recognizable():
     assert data.shape == (48, 64, 8)
     assert data.dtype == np.float32
     assert data.flags.c_contiguous
-    assert float(data.min()) >= 0.0 and float(data.max()) <= 1.0
+    assert float(data.min()) >= 0.0
+    assert float(data.max()) <= 1.0
     assert not np.array_equal(data[..., 0], data[..., 1])
     assert not np.array_equal(data[0, :, :], data[-1, :, :])
 
@@ -547,9 +542,16 @@ def test_synthetic_complex_scene_has_amplitude_phase_and_zero_fiducials():
 def test_profile_suite_commands_cover_required_profilers(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
-    commands = profiler_suite_commands(("--backend", "vispy", "--profile-suite", str(tmp_path)), tmp_path)
+    commands = profiler_suite_commands(
+        ("--backend", "vispy", "--profile-suite", str(tmp_path)), tmp_path
+    )
 
-    assert {item["profiler_type"] for item in commands} == {"plain", "py-spy-raw-low-impact", "py-spy-raw-full", "perf-record"}
+    assert {item["profiler_type"] for item in commands} == {
+        "plain",
+        "py-spy-raw-low-impact",
+        "py-spy-raw-full",
+        "perf-record",
+    }
     by_type = {item["profiler_type"]: item for item in commands}
     assert "py-spy record" in by_type["py-spy-raw-low-impact"]["command"]
     assert "--format raw" in by_type["py-spy-raw-low-impact"]["command"]
@@ -586,17 +588,29 @@ def test_profile_suite_can_opt_into_cprofile_without_passing_flag_to_child(tmp_p
 
 
 def test_profile_parser_stages_resolve_and_deconflict():
-    from arrayscope.tools.profile_montage_workflow import _parse_stage_flags, _resolve_profile_stages
+    from arrayscope.tools.profile_montage_workflow import (
+        _parse_stage_flags,
+        _resolve_profile_stages,
+    )
 
     stages = _resolve_profile_stages(
-        include_stages=_parse_stage_flags(("raw_full_tiled_montage,montage_zoompan_fft", "montage_zoompan_fft", "montage_scroll_scalar")),
+        include_stages=_parse_stage_flags(
+            (
+                "raw_full_tiled_montage,montage_zoompan_fft",
+                "montage_zoompan_fft",
+                "montage_scroll_scalar",
+            )
+        ),
         skip_stages=_parse_stage_flags(("montage_zoompan_fft",)),
     )
     assert stages == ("raw_full_tiled_montage", "montage_scroll_scalar")
 
 
 def test_profile_stage_resolve_defaults_to_all():
-    from arrayscope.tools.profile_montage_workflow import _resolve_profile_stages, PROFILE_MONTAGE_STAGES
+    from arrayscope.tools.profile_montage_workflow import (
+        PROFILE_MONTAGE_STAGES,
+        _resolve_profile_stages,
+    )
 
     assert _resolve_profile_stages() == tuple(PROFILE_MONTAGE_STAGES)
 
@@ -612,7 +626,16 @@ def test_profile_suite_commands_preserve_stage_filter_flags(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
     commands = profiler_suite_commands(
-        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--stages", "raw_full_tiled_montage,montage_zoompan_fft", "--skip-stages", "montage_scroll_scalar"),
+        (
+            "--backend",
+            "vispy",
+            "--profile-suite",
+            str(tmp_path),
+            "--stages",
+            "raw_full_tiled_montage,montage_zoompan_fft",
+            "--skip-stages",
+            "montage_scroll_scalar",
+        ),
         tmp_path,
     )
     for item in commands:
@@ -679,7 +702,9 @@ def test_profile_suite_commands_preserve_scroll_max_tiles(tmp_path):
 def test_profile_suite_splits_attribution_artifacts_for_all_backends(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
-    commands = profiler_suite_commands(("--backend", "all", "--profile-suite", str(tmp_path), "--include-cprofile"), tmp_path)
+    commands = profiler_suite_commands(
+        ("--backend", "all", "--profile-suite", str(tmp_path), "--include-cprofile"), tmp_path
+    )
 
     by_step = {item["step_id"]: item for item in commands}
     for backend in ("pyqtgraph", "vispy"):
@@ -709,7 +734,11 @@ def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_
 
 
 def test_profile_workflow_preserves_theme_while_forcing_backend_and_resident_policy():
-    from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice, MontageQualityPolicyChoice
+    from arrayscope.app.settings_state import (
+        AppSettingsState,
+        ImageRenderingBackendChoice,
+        MontageQualityPolicyChoice,
+    )
     from arrayscope.app.theme import ThemeChoice
     from arrayscope.tools.profile_montage_workflow import _replace_settings
 
@@ -910,7 +939,9 @@ def test_r8_certification_skips_timing_only_for_profiled_or_smoke_runs():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record()
-    record.update(profiler_type="cprofile", action_render_call_ms=500.0, event_loop_max_gap_ms=500.0)
+    record.update(
+        profiler_type="cprofile", action_render_call_ms=500.0, event_loop_max_gap_ms=500.0
+    )
 
     result = _r8_certification(record)
 
@@ -936,8 +967,14 @@ def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatc
             },
         ),
     )
-    monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"})
-    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(
+        workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"}
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_repository_state",
+        lambda: {"repository_revision": "abc123", "repository_dirty": False},
+    )
     monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
 
     def fake_run(_command, **kwargs):
@@ -954,7 +991,10 @@ def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatc
 
     rc = workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path)
 
-    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     step, summary = records
     assert rc == 0
     assert step["record_type"] == "suite_step"
@@ -1005,7 +1045,11 @@ def test_profile_suite_summary_marks_multiple_child_processes_mixed(tmp_path, mo
         ),
     )
     monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test"})
-    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(
+        workflow,
+        "_repository_state",
+        lambda: {"repository_revision": "abc123", "repository_dirty": False},
+    )
     monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
 
     def fake_run(command, **kwargs):
@@ -1023,7 +1067,10 @@ def test_profile_suite_summary_marks_multiple_child_processes_mixed(tmp_path, mo
 
     assert workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path) == 0
 
-    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     assert [record["run_temperature"] for record in records[:2]] == ["cold", "warm"]
     assert records[-1]["run_temperature"] == "mixed"
 
@@ -1046,8 +1093,14 @@ def test_profile_suite_py_spy_nonzero_is_failed_even_with_artifacts(tmp_path, mo
             },
         ),
     )
-    monkeypatch.setattr(workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"})
-    monkeypatch.setattr(workflow, "_repository_state", lambda: {"repository_revision": "abc123", "repository_dirty": False})
+    monkeypatch.setattr(
+        workflow, "_suite_tool_versions", lambda: {"python": "test", "py-spy": "py-spy 0.4.2"}
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_repository_state",
+        lambda: {"repository_revision": "abc123", "repository_dirty": False},
+    )
     monkeypatch.setattr(workflow.shutil, "which", lambda exe: f"/usr/bin/{exe}")
 
     def fake_run(_command, **kwargs):
@@ -1060,7 +1113,10 @@ def test_profile_suite_py_spy_nonzero_is_failed_even_with_artifacts(tmp_path, mo
 
     rc = workflow.run_profile_suite(("--backend", "pyqtgraph"), tmp_path)
 
-    records = [json.loads(line) for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "suite-manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     step, summary = records
     assert rc == 1
     assert step["status"] == "failed"
@@ -1074,7 +1130,10 @@ def test_profile_suite_py_spy_nonzero_is_failed_even_with_artifacts(tmp_path, mo
 
 
 def test_py_spy_full_profile_tolerates_one_missed_stack(tmp_path):
-    from arrayscope.tools.profile_montage_workflow import _profiler_log_diagnostics, _profiler_sample_issue
+    from arrayscope.tools.profile_montage_workflow import (
+        _profiler_log_diagnostics,
+        _profiler_sample_issue,
+    )
 
     stdout = tmp_path / "stdout.log"
     stderr = tmp_path / "stderr.log"
@@ -1096,7 +1155,10 @@ def test_py_spy_full_profile_tolerates_one_missed_stack(tmp_path):
 
 
 def test_py_spy_full_profile_rejects_multiple_missed_stacks(tmp_path):
-    from arrayscope.tools.profile_montage_workflow import _profiler_log_diagnostics, _profiler_sample_issue
+    from arrayscope.tools.profile_montage_workflow import (
+        _profiler_log_diagnostics,
+        _profiler_sample_issue,
+    )
 
     stdout = tmp_path / "stdout.log"
     stderr = tmp_path / "stderr.log"
@@ -1105,16 +1167,23 @@ def test_py_spy_full_profile_rejects_multiple_missed_stacks(tmp_path):
         "py-spy> Wrote raw flamegraph data. Samples: 20 Errors: 2\n",
         encoding="utf-8",
     )
-    stderr.write_text("[WARN  py_spy] Failed to get stack trace from 123\n[WARN  py_spy] Failed to get stack trace from 456\n", encoding="utf-8")
+    stderr.write_text(
+        "[WARN  py_spy] Failed to get stack trace from 123\n[WARN  py_spy] Failed to get stack trace from 456\n",
+        encoding="utf-8",
+    )
 
     diagnostics = _profiler_log_diagnostics("py-spy-raw-full", stdout, stderr)
 
     assert diagnostics["sampling_complete"] is False
-    assert _profiler_sample_issue("py-spy-raw-full", diagnostics) == "py-spy full profile missed more than 1 stack sample(s)"
+    assert (
+        _profiler_sample_issue("py-spy-raw-full", diagnostics)
+        == "py-spy full profile missed more than 1 stack sample(s)"
+    )
 
 
 def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch):
     import numpy as np
+
     from arrayscope.tools.profile_montage_workflow import _base_record
 
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
@@ -1133,21 +1202,24 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
         profiler_artifact_paths=(),
         qt_platform="xcb",
     )
-    hidden = {**visible, **_base_record(
-        run_id="run",
-        backend="vispy",
-        data_path=Path("data.nii"),
-        data=np.zeros((2, 3, 4), dtype=np.float32),
-        load_mode="native",
-        montage_axis=2,
-        indices=(0, 1),
-        full_tile_count=4,
-        columns=2,
-        max_tiles=2,
-        profiler_type="perf-record",
-        profiler_artifact_paths=("perf.data",),
-        qt_platform="offscreen",
-    )}
+    hidden = {
+        **visible,
+        **_base_record(
+            run_id="run",
+            backend="vispy",
+            data_path=Path("data.nii"),
+            data=np.zeros((2, 3, 4), dtype=np.float32),
+            load_mode="native",
+            montage_axis=2,
+            indices=(0, 1),
+            full_tile_count=4,
+            columns=2,
+            max_tiles=2,
+            profiler_type="perf-record",
+            profiler_artifact_paths=("perf.data",),
+            qt_platform="offscreen",
+        ),
+    }
 
     assert visible["smoke_only"] is False
     assert visible["pacing_evidence"] is True
@@ -1160,6 +1232,7 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
 
 def test_profile_base_record_exposes_intentional_scroll_grid_as_pacing_evidence(monkeypatch):
     import numpy as np
+
     from arrayscope.tools.profile_montage_workflow import _base_record
 
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
@@ -1274,7 +1347,9 @@ def test_presentation_continuity_probe_accepts_atomic_successor_commit():
         img_view=image_view,
         _committed_display_frame=predecessor,
         _frame_session=SimpleNamespace(applied_level_source=level_source),
-        renderer=SimpleNamespace(_last_montage_level_decision=None, _montage_refined_level_applied_count=0),
+        renderer=SimpleNamespace(
+            _last_montage_level_decision=None, _montage_refined_level_applied_count=0
+        ),
     )
     probe = _PresentationContinuityProbe(SimpleNamespace(QTimer=FakeTimer), win)
 
@@ -1342,7 +1417,9 @@ def test_montage_scroll_pattern_targets_selected_center_band(monkeypatch):
     assert record["scroll_center_band"] == [fake_calls["fast"]["low"], fake_calls["fast"]["high"]]
     selected_count = len(range(20))
     window_size = 8
-    assert 0 <= fake_calls["fast"]["low"] <= fake_calls["fast"]["high"] <= selected_count - window_size
+    assert (
+        0 <= fake_calls["fast"]["low"] <= fake_calls["fast"]["high"] <= selected_count - window_size
+    )
     assert fake_calls["slow"].get("indices") == tuple(range(20))
 
 
@@ -1384,7 +1461,9 @@ def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
     )
     monkeypatch.setattr(workflow, "_wait_for_target_lod", lambda *args, **kwargs: (True, 0.0))
     scroll_calls = []
-    monkeypatch.setattr(workflow, "_scroll_montage_window", lambda *args, **kwargs: scroll_calls.append(kwargs))
+    monkeypatch.setattr(
+        workflow, "_scroll_montage_window", lambda *args, **kwargs: scroll_calls.append(kwargs)
+    )
 
     record = workflow._apply_montage_zoom_pan_stress(
         SimpleNamespace(),
@@ -1516,7 +1595,9 @@ def test_profile_montage_level_state_uses_session_snapshot():
     level_generation = PresentationGenerationTracker()
     level_generation.tile_values = {0: (0.0, 1.0), 1: (2.0, 8.0), 2: (2.0, 8.0)}
     level_generation.set_active_tiles((0, 1, 2))
-    session = SimpleNamespace(level_generation=level_generation, level_presentation_snapshot=lambda: snapshot)
+    session = SimpleNamespace(
+        level_generation=level_generation, level_presentation_snapshot=lambda: snapshot
+    )
     win = SimpleNamespace(_frame_session=session)
 
     state = _montage_level_presentation_state(win)
@@ -1783,16 +1864,30 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert raw.exists() and raw.stat().st_size > 0
-    assert jsonl.exists() and jsonl.stat().st_size > 0
+    assert raw.exists()
+    assert raw.stat().st_size > 0
+    assert jsonl.exists()
+    assert jsonl.stat().st_size > 0
     records = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
     by_phase = {record["phase"]: record for record in records}
-    assert by_phase["raw_full_tiled_montage"]["tile_count"] == by_phase["raw_full_tiled_montage"]["full_tile_count"]
+    assert (
+        by_phase["raw_full_tiled_montage"]["tile_count"]
+        == by_phase["raw_full_tiled_montage"]["full_tile_count"]
+    )
     assert by_phase["raw_full_tiled_montage"]["tile_cap_applied"] is False
-    assert by_phase["raw_full_tiled_montage"]["active_presented_tile_count"] == by_phase["raw_full_tiled_montage"]["requested_tile_count"]
-    assert by_phase["fft_full_tiled_montage"]["tile_count"] == by_phase["fft_full_tiled_montage"]["full_tile_count"]
+    assert (
+        by_phase["raw_full_tiled_montage"]["active_presented_tile_count"]
+        == by_phase["raw_full_tiled_montage"]["requested_tile_count"]
+    )
+    assert (
+        by_phase["fft_full_tiled_montage"]["tile_count"]
+        == by_phase["fft_full_tiled_montage"]["full_tile_count"]
+    )
     assert by_phase["fft_full_tiled_montage"]["tile_cap_applied"] is False
-    assert by_phase["fft_full_tiled_montage"]["active_presented_tile_count"] == by_phase["fft_full_tiled_montage"]["requested_tile_count"]
+    assert (
+        by_phase["fft_full_tiled_montage"]["active_presented_tile_count"]
+        == by_phase["fft_full_tiled_montage"]["requested_tile_count"]
+    )
     assert "Signal source has been deleted" not in completed.stderr
 
 
@@ -1801,7 +1896,10 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
     reason="opt-in realistic GUI profiling workflow; set ARRAYSCOPE_RUN_PROFILE_WORKFLOW=1",
 )
 def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
-    from arrayscope.tools.profile_montage_workflow import DEFAULT_DATA_PATH, run_profile_montage_workflow
+    from arrayscope.tools.profile_montage_workflow import (
+        DEFAULT_DATA_PATH,
+        run_profile_montage_workflow,
+    )
 
     data_path = Path(os.environ.get("ARRAYSCOPE_PROFILE_DATA", DEFAULT_DATA_PATH))
     if not data_path.exists():
@@ -1843,6 +1941,7 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
 
 def test_session_fixture_shape_mismatch_raises_actionable_error(tmp_path):
     import numpy as np
+
     from arrayscope.core.view_session import (
         loads_session,
         metadata_for_file,

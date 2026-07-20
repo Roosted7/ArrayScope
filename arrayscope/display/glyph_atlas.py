@@ -79,8 +79,7 @@ class GlyphAtlas:
         max_size = int(max_size)
         if initial_size <= 0 or max_size < initial_size:
             raise ValueError(
-                f"atlas bounds must satisfy 0 < initial <= max, got "
-                f"{initial_size}/{max_size}"
+                f"atlas bounds must satisfy 0 < initial <= max, got {initial_size}/{max_size}"
             )
         self.max_size = max_size
         self._size = initial_size
@@ -198,10 +197,7 @@ class GlyphAtlas:
         padded_w = width + _PAD
         padded_h = height + _PAD
         if padded_w > self.max_size or padded_h > self.max_size:
-            raise ValueError(
-                f"glyph cell {width}x{height} exceeds the atlas bound "
-                f"{self.max_size}"
-            )
+            raise ValueError(f"glyph cell {width}x{height} exceeds the atlas bound {self.max_size}")
         while True:
             for shelf in self._shelves:
                 shelf_y, shelf_h, cursor_x = shelf

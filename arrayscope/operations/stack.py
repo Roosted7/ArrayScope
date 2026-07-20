@@ -79,7 +79,9 @@ def replace_step_operation(steps, index, operation, base_shape):
 
 
 def validate_operation_steps(steps, base_shape):
-    steps = tuple(OperationStep(step) if not isinstance(step, OperationStep) else step for step in steps)
+    steps = tuple(
+        OperationStep(step) if not isinstance(step, OperationStep) else step for step in steps
+    )
     evaluate_shape(base_shape, tuple(step.operation for step in steps if step.enabled))
     return steps
 

@@ -10,7 +10,6 @@ import importlib.util
 import os
 import sys
 
-
 _QT_BINDING_MODULES = ("PyQt6", "PySide6", "PyQt5", "PySide2")
 
 

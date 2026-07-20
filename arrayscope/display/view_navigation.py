@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 ViewRange = tuple[tuple[float, float], tuple[float, float]]
 
 
@@ -24,7 +23,9 @@ def copy_view_range(view_range) -> ViewRange:
     )
 
 
-def begin_pan(start_pixel, view_range, viewport_size, *, x_inverted: bool = False, y_inverted: bool = True) -> PanGesture:
+def begin_pan(
+    start_pixel, view_range, viewport_size, *, x_inverted: bool = False, y_inverted: bool = True
+) -> PanGesture:
     return PanGesture(
         start_pixel=(float(start_pixel[0]), float(start_pixel[1])),
         start_range=copy_view_range(view_range),
@@ -53,7 +54,9 @@ def pan_view_range(gesture: PanGesture, current_pixel) -> ViewRange:
     )
 
 
-def wheel_zoom_view_range(view_range, focus, wheel_steps: float, *, step_scale: float = 0.9) -> ViewRange:
+def wheel_zoom_view_range(
+    view_range, focus, wheel_steps: float, *, step_scale: float = 0.9
+) -> ViewRange:
     scale = float(step_scale) ** float(wheel_steps)
     focus_x, focus_y = (float(focus[0]), float(focus[1]))
     x_range, y_range = copy_view_range(view_range)

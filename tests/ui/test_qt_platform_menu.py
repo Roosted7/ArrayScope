@@ -1,10 +1,11 @@
 """View > Display Server menu (Linux/Wayland-gated qt_platform setting)."""
 
 import numpy as np
-import pytest
 
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
 )
 

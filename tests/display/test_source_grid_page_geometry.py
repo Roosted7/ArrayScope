@@ -12,7 +12,6 @@ import numpy as np
 
 from arrayscope.display import pyramid
 
-
 FIRST_RECT = (100, 104, 101, 113)
 SHIFTED_RECT = (100, 104, 102, 114)
 REDUCTION = (1, 1)  # (x, y): factor two on both display axes

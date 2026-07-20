@@ -32,9 +32,7 @@ if _XDIST_WORKER:
     # On Linux/Unix QSettings (UserScope) resolves under XDG_CONFIG_HOME;
     # isolating it per worker keeps each worker's settings store private.
     os.environ["XDG_CONFIG_HOME"] = _worker_config
-    os.environ.setdefault(
-        "ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_worker_root, "artifacts")
-    )
+    os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_worker_root, "artifacts"))
 
 
 def pytest_xdist_auto_num_workers(config):
@@ -54,6 +52,8 @@ def pytest_xdist_auto_num_workers(config):
 
 
 # Keep direct-import test modules from replacing the real package in sys.modules.
+import contextlib
+
 import arrayscope  # noqa: F401
 
 
@@ -98,9 +98,7 @@ def _restore_arrayscope_module_identity():
     yield
 
     current = _arrayscope_modules()
-    replaced_names = {
-        name for name, module in snapshot.items() if current.get(name) is not module
-    }
+    replaced_names = {name for name, module in snapshot.items() if current.get(name) is not module}
     discard_names = replaced_names | {
         name
         for name in current.keys() - snapshot.keys()
@@ -190,10 +188,8 @@ def _isolate_qt_test_state(request):
     app = QtWidgets.QApplication.instance()
     if app is not None:
         for widget in tuple(app.topLevelWidgets()):
-            try:
+            with contextlib.suppress(RuntimeError):
                 widget.close()
-            except RuntimeError:
-                pass
         _drain_qt_events(QtCore, QtWidgets)
     _clear_qt_settings(QtCore)
 
@@ -207,4 +203,4 @@ def qt_app():
     app = pg.mkQApp()
     app.setOrganizationName("ArrayScopeTests")
     app.setApplicationName("ArrayScopeTests")
-    yield app
+    return app

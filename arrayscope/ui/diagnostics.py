@@ -16,8 +16,8 @@ from arrayscope.core.runtime_diagnostics import (
     format_runtime_diagnostics_sections,
     runtime_bottleneck_text,
 )
-from arrayscope.ui.file_dialogs import get_save_file_name
 from arrayscope.ui.diagnostics_logging import DiagnosticsJsonlLogger, default_diagnostics_log_path
+from arrayscope.ui.file_dialogs import get_save_file_name
 
 
 class _CompactUsageBar(QtWidgets.QProgressBar):
@@ -30,11 +30,13 @@ class _CompactUsageBar(QtWidgets.QProgressBar):
         self.setMaximumHeight(18)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
-    def set_usage(self, *, used: int, total: int, detail: str | None = None, color_mode: str = "usage") -> None:
+    def set_usage(
+        self, *, used: int, total: int, detail: str | None = None, color_mode: str = "usage"
+    ) -> None:
         total = max(1, int(total))
         used = max(0, int(used))
         fraction = min(1.0, used / float(total))
-        self.setValue(int(round(fraction * 1000)))
+        self.setValue(round(fraction * 1000))
         text = detail or f"{format_bytes(used)} / {format_bytes(total)}"
         self.setFormat(f"{self._label}: {text}")
         self.setStyleSheet(_compact_bar_style(fraction, color_mode=color_mode))
@@ -51,7 +53,11 @@ class _CompactSegmentBar(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
     def set_segments(self, segments, *, summary: str) -> None:
-        self._segments = tuple((str(label), int(value), str(color)) for label, value, color in segments if int(value) > 0)
+        self._segments = tuple(
+            (str(label), int(value), str(color))
+            for label, value, color in segments
+            if int(value) > 0
+        )
         self._summary = str(summary)
         self.setVisible(bool(self._segments))
         self.update()
@@ -67,7 +73,11 @@ class _CompactSegmentBar(QtWidgets.QWidget):
             x = rect.x()
             remaining_width = rect.width()
             for index, (_label, value, color) in enumerate(self._segments):
-                width = remaining_width if index == len(self._segments) - 1 else int(round(rect.width() * value / total))
+                width = (
+                    remaining_width
+                    if index == len(self._segments) - 1
+                    else round(rect.width() * value / total)
+                )
                 segment_rect = Qt.QtCore.QRect(x, rect.y(), max(1, width), rect.height())
                 painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
                 painter.setBrush(QtGui.QColor(color))
@@ -78,7 +88,11 @@ class _CompactSegmentBar(QtWidgets.QWidget):
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
-        painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter, f"{self._label}: {self._summary}")
+        painter.drawText(
+            rect.adjusted(5, 0, -5, 0),
+            Qt.QtCore.Qt.AlignmentFlag.AlignVCenter,
+            f"{self._label}: {self._summary}",
+        )
 
 
 class _CompactCapacitySegmentBar(QtWidgets.QWidget):
@@ -93,7 +107,11 @@ class _CompactCapacitySegmentBar(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
 
     def set_capacity_segments(self, segments, *, total: int, summary: str) -> None:
-        self._segments = tuple((str(label), max(0, int(value)), str(color)) for label, value, color in segments if int(value) > 0)
+        self._segments = tuple(
+            (str(label), max(0, int(value)), str(color))
+            for label, value, color in segments
+            if int(value) > 0
+        )
         self._total = max(1, int(total))
         self._summary = str(summary)
         self.update()
@@ -110,9 +128,12 @@ class _CompactCapacitySegmentBar(QtWidgets.QWidget):
         for index, (_label, value, color) in enumerate(self._segments):
             consumed += int(value)
             if index == len(self._segments) - 1:
-                width = min(remaining_width, int(round(rect.width() * min(consumed, self._total) / self._total)) - (x - rect.x()))
+                width = min(
+                    remaining_width,
+                    round(rect.width() * min(consumed, self._total) / self._total) - (x - rect.x()),
+                )
             else:
-                width = int(round(rect.width() * min(value, self._total) / self._total))
+                width = round(rect.width() * min(value, self._total) / self._total)
             if width > 0:
                 segment_rect = Qt.QtCore.QRect(x, rect.y(), max(1, width), rect.height())
                 painter.setPen(Qt.QtCore.Qt.PenStyle.NoPen)
@@ -124,7 +145,11 @@ class _CompactCapacitySegmentBar(QtWidgets.QWidget):
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
-        painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.QtCore.Qt.AlignmentFlag.AlignCenter, f"{self._label}: {self._summary}")
+        painter.drawText(
+            rect.adjusted(5, 0, -5, 0),
+            Qt.QtCore.Qt.AlignmentFlag.AlignCenter,
+            f"{self._label}: {self._summary}",
+        )
 
 
 class _ElidedOverviewLabel(QtWidgets.QLabel):
@@ -151,8 +176,14 @@ class _ElidedOverviewLabel(QtWidgets.QLabel):
         painter = QtGui.QPainter(self)
         painter.setPen(self.palette().text().color())
         metrics = painter.fontMetrics()
-        text = metrics.elidedText(self._text, Qt.QtCore.Qt.TextElideMode.ElideRight, max(1, self.width() - 2))
-        painter.drawText(self.rect(), Qt.QtCore.Qt.AlignmentFlag.AlignVCenter | Qt.QtCore.Qt.AlignmentFlag.AlignLeft, text)
+        text = metrics.elidedText(
+            self._text, Qt.QtCore.Qt.TextElideMode.ElideRight, max(1, self.width() - 2)
+        )
+        painter.drawText(
+            self.rect(),
+            Qt.QtCore.Qt.AlignmentFlag.AlignVCenter | Qt.QtCore.Qt.AlignmentFlag.AlignLeft,
+            text,
+        )
 
 
 class DiagnosticsDialog(QtWidgets.QDialog):
@@ -210,7 +241,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         self.tabs = QtWidgets.QTabWidget()
         self._section_edits = {}
-        self._section_titles = tuple(format_runtime_diagnostics_sections(self._snapshot_provider()).keys())
+        self._section_titles = tuple(
+            format_runtime_diagnostics_sections(self._snapshot_provider()).keys()
+        )
         for title in (*self._section_titles, "All"):
             edit = QtWidgets.QPlainTextEdit()
             edit.setReadOnly(True)
@@ -224,12 +257,18 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         layout.addWidget(self.tabs, 1)
 
         buttons = QtWidgets.QDialogButtonBox()
-        self.refresh_button = buttons.addButton("Auto text", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
+        self.refresh_button = buttons.addButton(
+            "Auto text", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+        )
         self.refresh_button.setCheckable(True)
         self.refresh_button.setChecked(True)
-        self.log_button = buttons.addButton("Log...", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
+        self.log_button = buttons.addButton(
+            "Log...", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+        )
         close_button = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Close)
-        self.refresh_button.toggled.connect(lambda checked: self.refresh(force_text=True) if checked else None)
+        self.refresh_button.toggled.connect(
+            lambda checked: self.refresh(force_text=True) if checked else None
+        )
         self.log_button.clicked.connect(self._toggle_logging)
         close_button.clicked.connect(self.close)
         layout.addWidget(buttons)
@@ -301,7 +340,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             self.log_button.setText("Stop")
         except Exception as exc:
             self._stop_logging()
-            QtWidgets.QMessageBox.warning(self, "Diagnostics Log Error", f"Failed to start diagnostics logging:\n{exc}")
+            QtWidgets.QMessageBox.warning(
+                self, "Diagnostics Log Error", f"Failed to start diagnostics logging:\n{exc}"
+            )
 
     def _write_snapshot_log_record(self, snapshot) -> None:
         if self._logger is None:
@@ -310,7 +351,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             self._logger.write_snapshot(snapshot)
         except Exception as exc:
             self._stop_logging()
-            QtWidgets.QMessageBox.warning(self, "Diagnostics Log Error", f"Diagnostics logging stopped:\n{exc}")
+            QtWidgets.QMessageBox.warning(
+                self, "Diagnostics Log Error", f"Diagnostics logging stopped:\n{exc}"
+            )
 
     def _stop_logging(self) -> None:
         logger = self._logger
@@ -343,7 +386,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             total=snapshot.stage_cache.max_bytes,
             detail=f"{_short_bytes(snapshot.stage_cache.bytes_used)} / {_short_bytes(snapshot.stage_cache.max_bytes)}",
         )
-        bars["workers"].set_segments(_worker_segments(snapshot.schedulers), summary=_active_work_summary(snapshot.schedulers))
+        bars["workers"].set_segments(
+            _worker_segments(snapshot.schedulers), summary=_active_work_summary(snapshot.schedulers)
+        )
         bars["stage"].setVisible(not workers_active)
         bars["workers"].setVisible(workers_active)
         bars["gpu"].set_usage(used=gpu_used, total=gpu_total, detail=gpu_detail)
@@ -352,7 +397,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             total=snapshot.display_cache.max_bytes,
             detail=f"{_short_bytes(snapshot.display_cache.bytes_used)} / {_short_bytes(snapshot.display_cache.max_bytes)}",
         )
-        show_gpu = str(getattr(snapshot, "image_rendering_backend_actual", "")) == "vispy" and _gpu_available(snapshot)
+        show_gpu = str(
+            getattr(snapshot, "image_rendering_backend_actual", "")
+        ) == "vispy" and _gpu_available(snapshot)
         bars["gpu"].setVisible(show_gpu)
         bars["tile"].setVisible(not show_gpu)
 
@@ -466,7 +513,7 @@ def _timing_segments(items):
     for label, value, color in items:
         if value is None:
             continue
-        scaled = max(1, int(round(float(value) * 1000.0)))
+        scaled = max(1, round(float(value) * 1000.0))
         segments.append((label, scaled, color))
     return tuple(segments)
 
@@ -555,7 +602,11 @@ def _ops_overview(snapshot) -> str:
     computed = int(snapshot.montage.loaded_tiles)
     total = max(0, int(snapshot.montage.visible_tiles))
     staged = int(snapshot.montage.tile_compute_stage_backed)
-    optimized = "n/a" if snapshot.optimized_operation_count is None else str(int(snapshot.optimized_operation_count))
+    optimized = (
+        "n/a"
+        if snapshot.optimized_operation_count is None
+        else str(int(snapshot.optimized_operation_count))
+    )
     return (
         f"Ops {optimized}/{total_ops}: "
         f"{staged}/{computed}/{total} ({_percent(computed, total or 1)})"
@@ -563,7 +614,9 @@ def _ops_overview(snapshot) -> str:
 
 
 def _drawn_tiles_overview(snapshot) -> str:
-    drawn = int(snapshot.montage_timing.tile_layer_visible_items or snapshot.montage.presented_tiles)
+    drawn = int(
+        snapshot.montage_timing.tile_layer_visible_items or snapshot.montage.presented_tiles
+    )
     total = max(0, int(snapshot.montage.visible_tiles))
     return f"Drawn {drawn}/{total} ({_percent(drawn, total or 1)}) | Up: {format_bytes(_upload_total_bytes(snapshot))}"
 
@@ -586,7 +639,11 @@ def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
     budget_bytes = int(getattr(timing, "tile_layer_budget_bytes", 0) or 0)
     resident = int(getattr(timing, "tile_layer_resident_items", 0) or 0)
     capacity = int(getattr(timing, "tile_layer_storage_capacity", 0) or 0)
-    slot_text = "slots n/a" if capacity <= 0 else f"slots {resident}/{capacity} {_percent(resident, capacity)}"
+    slot_text = (
+        "slots n/a"
+        if capacity <= 0
+        else f"slots {resident}/{capacity} {_percent(resident, capacity)}"
+    )
     if budget_bytes > 0:
         return (
             gpu_bytes,
@@ -623,7 +680,7 @@ def _gpu_overview(snapshot) -> str:
 def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
     segments = []
     colors = ("#2563eb", "#9333ea", "#0f766e", "#ca8a04", "#0891b2", "#64748b", "#dc2626")
-    for scheduler, color in zip(schedulers, colors):
+    for scheduler, color in zip(schedulers, colors, strict=False):
         active = (
             int(getattr(scheduler, "pending", 0) or 0)
             + int(getattr(scheduler, "running", 0) or 0)
@@ -637,7 +694,11 @@ def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
 def _active_work_summary(schedulers) -> str:
     parts = []
     for scheduler in schedulers:
-        active = int(getattr(scheduler, "pending", 0) or 0) + int(getattr(scheduler, "running", 0) or 0) + int(getattr(scheduler, "queued", 0) or 0)
+        active = (
+            int(getattr(scheduler, "pending", 0) or 0)
+            + int(getattr(scheduler, "running", 0) or 0)
+            + int(getattr(scheduler, "queued", 0) or 0)
+        )
         if active:
             parts.append(f"{scheduler.name} {active}")
     return ", ".join(parts) if parts else "idle"

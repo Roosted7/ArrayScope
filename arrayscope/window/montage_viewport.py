@@ -8,10 +8,9 @@ import numpy as np
 
 from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.montage import montage_rect_for_viewport, optimal_montage_columns
 from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
+from arrayscope.display.montage import montage_rect_for_viewport, optimal_montage_columns
 from arrayscope.display.viewport import view_ranges_near
-
 
 MIN_VIEW_SPAN = 1e-9
 
@@ -79,8 +78,8 @@ def _nearest_montage_tile_center(plan, view_range) -> tuple[float, float] | None
         count = len(tiles)
         stride_x = max(1, tile_width + gap)
         stride_y = max(1, tile_height + gap)
-        col = int(round((float(center[0]) - float(tile_width) * 0.5) / float(stride_x)))
-        row = int(round((float(center[1]) - float(tile_height) * 0.5) / float(stride_y)))
+        col = round((float(center[0]) - float(tile_width) * 0.5) / float(stride_x))
+        row = round((float(center[1]) - float(tile_height) * 0.5) / float(stride_y))
         row = max(0, min(rows - 1, row))
         max_col = min(columns - 1, count - row * columns - 1)
         if max_col < 0:
@@ -220,7 +219,9 @@ def effective_montage_columns(
     return max(1, min(int(requested_columns), count))
 
 
-def square_montage_fit_view_range(plan, viewport_shape) -> tuple[tuple[float, float], tuple[float, float]]:
+def square_montage_fit_view_range(
+    plan, viewport_shape
+) -> tuple[tuple[float, float], tuple[float, float]]:
     """Return a square-pixel fit range for the full applied montage layout."""
 
     display_height, display_width = tuple(int(value) for value in plan.display_shape[:2])
@@ -270,8 +271,12 @@ def retarget_montage_viewport_plan(
     next_plan = viewport_plan.plan
     if previous_plan is None or next_plan is None:
         return MontageViewportReflow(viewport_plan)
-    layout_changed = getattr(previous_plan, "geometry", None) != getattr(next_plan, "geometry", None)
-    viewport_shape_changed = tuple(previous_viewport_shape or ()) != tuple(viewport_plan.viewport_shape)
+    layout_changed = getattr(previous_plan, "geometry", None) != getattr(
+        next_plan, "geometry", None
+    )
+    viewport_shape_changed = tuple(previous_viewport_shape or ()) != tuple(
+        viewport_plan.viewport_shape
+    )
     if not layout_changed and not viewport_shape_changed:
         return MontageViewportReflow(viewport_plan)
     if viewport_plan.view_range is None or bool(skip_remap):
@@ -298,7 +303,9 @@ def retarget_montage_viewport_plan(
             return MontageViewportReflow(viewport_plan)
 
     retargeted = replace(viewport_plan, view_range=next_range)
-    apply_range = None if view_ranges_near(current_range, next_range, tolerance_fraction=1e-9) else next_range
+    apply_range = (
+        None if view_ranges_near(current_range, next_range, tolerance_fraction=1e-9) else next_range
+    )
     return MontageViewportReflow(
         retargeted,
         view_range_to_apply=apply_range,
@@ -363,7 +370,9 @@ def remap_montage_view_range(
     if getattr(previous_plan, "geometry", None) == getattr(next_plan, "geometry", None):
         next_focus_x, next_focus_y = focus_x, focus_y
     else:
-        anchor = _tile_local_anchor(previous_plan, view_range, (focus_x, focus_y), allow_nearest=True)
+        anchor = _tile_local_anchor(
+            previous_plan, view_range, (focus_x, focus_y), allow_nearest=True
+        )
         if anchor is None:
             return None
         source_index, local_x, local_y = anchor
@@ -380,7 +389,9 @@ def remap_montage_view_range(
     )
 
 
-def remap_montage_roi_geometry(previous_plan, next_plan, geometry: RoiGeometry) -> RoiGeometry | None:
+def remap_montage_roi_geometry(
+    previous_plan, next_plan, geometry: RoiGeometry
+) -> RoiGeometry | None:
     """Move ROI geometry through a same-source montage layout reflow.
 
     Returns ``None`` when the source population changed.  Rectangle ROIs keep
@@ -408,7 +419,9 @@ def remap_montage_roi_selections(previous_plan, next_plan, selections) -> tuple[
         if not isinstance(selection, RoiSelection):
             remapped.append(selection)
             continue
-        geometry = _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, selection.geometry)
+        geometry = _remap_montage_roi_geometry_with_layout(
+            previous_layout, next_layout, selection.geometry
+        )
         if geometry is not None and geometry != selection.geometry:
             remapped.append(replace(selection, geometry=geometry))
         else:
@@ -416,7 +429,9 @@ def remap_montage_roi_selections(previous_plan, next_plan, selections) -> tuple[
     return tuple(remapped)
 
 
-def _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, geometry: RoiGeometry) -> RoiGeometry | None:
+def _remap_montage_roi_geometry_with_layout(
+    previous_layout, next_layout, geometry: RoiGeometry
+) -> RoiGeometry | None:
     geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
     if previous_layout.source_indices != next_layout.source_indices:
         return None
@@ -430,7 +445,9 @@ def _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, geomet
     return None
 
 
-def frame_session_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
+def frame_session_key(
+    document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut
+) -> tuple[object, ...]:
     """Stable render-session identity, excluding transient viewport coverage."""
 
     if viewport_plan.axis is None:
@@ -458,7 +475,9 @@ def frame_session_key(document_key, view_state, viewport_plan: MontageViewportPl
     )
 
 
-def montage_tile_semantic_key(document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut) -> tuple[object, ...]:
+def montage_tile_semantic_key(
+    document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut
+) -> tuple[object, ...]:
     """Identity of one montage tile's TEXELS, shared across index windows.
 
     ``frame_session_key`` includes the sibling-index selection
@@ -493,7 +512,9 @@ def montage_tile_semantic_key(document_key, view_state, viewport_plan: MontageVi
     )
 
 
-def montage_viewport_retarget_policy(capabilities, display_mode: str) -> MontageViewportRetargetPolicy:
+def montage_viewport_retarget_policy(
+    capabilities, display_mode: str
+) -> MontageViewportRetargetPolicy:
     """Return viewport-retarget behaviour for the current presentation surface.
 
     Montage retargeting updates the tiled presentation when only camera/view
@@ -551,7 +572,9 @@ def _focus_or_center(view_range, focus) -> tuple[float, float]:
     )
 
 
-def _tile_local_anchor(plan, view_range, focus, *, allow_nearest: bool = True) -> tuple[int, float, float] | None:
+def _tile_local_anchor(
+    plan, view_range, focus, *, allow_nearest: bool = True
+) -> tuple[int, float, float] | None:
     tile = _tile_at_point(plan, focus)
     if tile is None and allow_nearest:
         tile = _nearest_visible_tile(plan, view_range, focus)
@@ -680,10 +703,10 @@ def _nearest_tile_by_grid(plan, focus):
     try:
         x = float(focus[0])
         y = float(focus[1])
-        tile_height, tile_width = tuple(int(value) for value in getattr(plan, "tile_shape"))
-        gap = max(0, int(getattr(plan, "gap")))
-        columns = max(1, int(getattr(plan, "columns")))
-        rows = max(1, int(getattr(plan, "rows")))
+        tile_height, tile_width = tuple(int(value) for value in plan.tile_shape)
+        gap = max(0, int(plan.gap))
+        columns = max(1, int(plan.columns))
+        rows = max(1, int(plan.rows))
         tiles = tuple(getattr(plan, "tiles", ()) or ())
     except Exception:
         return None

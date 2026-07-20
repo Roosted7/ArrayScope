@@ -6,13 +6,17 @@ from arrayscope.operations.stage_cache import StageCache, StageValue
 
 def _key(name, region=None):
     region = RegionSpec((AxisRegion(AxisRegionKind.ALL),)) if region is None else region
-    return StageKey(document_key=("doc",), operation_prefix=(name,), region=region, dtype="float32", shape=(4,))
+    return StageKey(
+        document_key=("doc",), operation_prefix=(name,), region=region, dtype="float32", shape=(4,)
+    )
 
 
 def _value(data, *, priority="low", region=None):
     data = np.asarray(data, dtype=np.float32)
     region = RegionSpec((AxisRegion(AxisRegionKind.ALL),)) if region is None else region
-    return StageValue(data=data, region=region, stage_index=1, nbytes=int(data.nbytes), priority=priority)
+    return StageValue(
+        data=data, region=region, stage_index=1, nbytes=int(data.nbytes), priority=priority
+    )
 
 
 def test_stage_cache_put_get_and_diagnostics():
@@ -183,7 +187,8 @@ def test_stage_cache_in_flight_claim_and_publish():
     cache.finish_compute(key, value)
     finished, waited = cache.wait_for_compute(key)
     # Entry is gone after finish: nothing in flight means the caller may claim.
-    assert finished is True and waited is None
+    assert finished is True
+    assert waited is None
     assert cache.begin_compute(key) is True
     cache.finish_compute(key, None)
 
@@ -200,7 +205,9 @@ def test_stage_cache_wait_receives_published_value_and_times_out():
     assert cache.begin_compute(key) is True
 
     results = []
-    waiter = threading.Thread(target=lambda: results.append(cache.wait_for_compute(key, poll_s=0.01)))
+    waiter = threading.Thread(
+        target=lambda: results.append(cache.wait_for_compute(key, poll_s=0.01))
+    )
     waiter.start()
     cache.finish_compute(key, value)
     waiter.join(timeout=5)
@@ -212,10 +219,12 @@ def test_stage_cache_wait_receives_published_value_and_times_out():
     finisher = threading.Timer(0.05, cache.finish_compute, args=(key, None))
     finisher.start()
     finished, waited = cache.wait_for_compute(key, poll_s=0.01)
-    assert finished is True and waited is None
+    assert finished is True
+    assert waited is None
 
     # Timeout leaves the claim in place and reports not-finished.
     assert cache.begin_compute(key) is True
     finished, waited = cache.wait_for_compute(key, poll_s=0.01, timeout_s=0.05)
-    assert finished is False and waited is None
+    assert finished is False
+    assert waited is None
     cache.finish_compute(key, None)

@@ -33,18 +33,34 @@ class StageFanInState:
         self.active_requests = set(self.active_requests or ())
         self.attached_requests = set(self.attached_requests or ())
         self.values = dict(self.values or {})
-        self.tile_stage_keys = {int(key): value for key, value in dict(self.tile_stage_keys or {}).items()}
-        self.tile_stage_plans = {int(key): value for key, value in dict(self.tile_stage_plans or {}).items()}
-        self.tile_stage_candidates = {int(key): value for key, value in dict(self.tile_stage_candidates or {}).items()}
-        self.lead_warmups = {int(key): value for key, value in dict(self.lead_warmups or {}).items()}
+        self.tile_stage_keys = {
+            int(key): value for key, value in dict(self.tile_stage_keys or {}).items()
+        }
+        self.tile_stage_plans = {
+            int(key): value for key, value in dict(self.tile_stage_plans or {}).items()
+        }
+        self.tile_stage_candidates = {
+            int(key): value for key, value in dict(self.tile_stage_candidates or {}).items()
+        }
+        self.lead_warmups = {
+            int(key): value for key, value in dict(self.lead_warmups or {}).items()
+        }
 
     def merge_plan(self, plan: dict) -> None:
-        self.tile_stage_keys.update({int(key): value for key, value in dict(plan.get("tile_stage_keys", {})).items()})
-        self.tile_stage_plans.update({int(key): value for key, value in dict(plan.get("tile_stage_plans", {})).items()})
-        self.tile_stage_candidates.update({int(key): value for key, value in dict(plan.get("tile_stage_candidates", {})).items()})
+        self.tile_stage_keys.update(
+            {int(key): value for key, value in dict(plan.get("tile_stage_keys", {})).items()}
+        )
+        self.tile_stage_plans.update(
+            {int(key): value for key, value in dict(plan.get("tile_stage_plans", {})).items()}
+        )
+        self.tile_stage_candidates.update(
+            {int(key): value for key, value in dict(plan.get("tile_stage_candidates", {})).items()}
+        )
         self.attached_requests.update(plan.get("attached_stage_keys", ()) or ())
         self.values.update(dict(plan.get("stage_values", {}) or {}))
-        self.lead_warmups.update({int(key): value for key, value in dict(plan.get("lead_stage_warmups", {})).items()})
+        self.lead_warmups.update(
+            {int(key): value for key, value in dict(plan.get("lead_stage_warmups", {})).items()}
+        )
 
     def activate_value(self, key, value, *, max_items: int | None = None) -> StageActivationBatch:
         self.active_requests.discard(key)
@@ -70,7 +86,9 @@ class StageFanInState:
     def fail(self, key) -> tuple[object, ...]:
         self.active_requests.discard(key)
         self.attached_requests.discard(key)
-        failed_tiles = tuple(tile for tile, stage_key in tuple(self.tile_stage_keys.items()) if stage_key == key)
+        failed_tiles = tuple(
+            tile for tile, stage_key in tuple(self.tile_stage_keys.items()) if stage_key == key
+        )
         for tile in failed_tiles:
             self.tile_stage_keys.pop(_tile_index(tile), None)
         return failed_tiles

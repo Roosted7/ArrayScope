@@ -11,9 +11,9 @@ from arrayscope.display.backends.vispy.tiles import (
     GpuDeviceLimits,
     GpuMontageLayer,
     GpuWindowedTileVisual,
+    PayloadBatchQueue,
     TextureAtlasPage,
     TextureAtlasPool,
-    PayloadBatchQueue,
     _atlas_reserve_count,
     _complex_rg_texture,
     _fit_color,
@@ -25,8 +25,6 @@ from arrayscope.display.backends.vispy.tiles import (
     query_gpu_device_limits,
     take_payload_batch,
 )
-from arrayscope.display.tile_layout import TileLayoutRegion
-from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, TexturePlaneKind
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
@@ -34,7 +32,13 @@ from arrayscope.display.model.frame import (
     TilePresentationDelta,
 )
 from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
-
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    ShaderMapping,
+    TexturePlaneKind,
+)
+from arrayscope.display.tile_layout import TileLayoutRegion
 from tests.display.vispy_test_utils import (
     FakeGloo,
     FakeScene,
@@ -80,7 +84,9 @@ def test_atlas_page_uses_free_slot_stack_without_owner_scan(monkeypatch):
         def index(self, _value, *_args):
             raise AssertionError("free-slot allocation must not scan slot owners")
 
-    page = TextureAtlasPage(FakeGloo, tile_shape=(2, 2), capacity=2, storage_mode="scalar", max_texture_size=8)
+    page = TextureAtlasPage(
+        FakeGloo, tile_shape=(2, 2), capacity=2, storage_mode="scalar", max_texture_size=8
+    )
     page.slot_owners = OwnerList(page.slot_owners)
 
     assert page.take_free_slot(("owner", 1)) == 0
@@ -160,7 +166,9 @@ def test_atlas_consumes_ordered_upserts_before_active_grid_order():
         tile_delta=delta,
     )
 
-    uploaded_values = [float(data[0, 0]) for data, _offset, _copy in pool.scalar_texture.updates[update_start:]]
+    uploaded_values = [
+        float(data[0, 0]) for data, _offset, _copy in pool.scalar_texture.updates[update_start:]
+    ]
     assert uploaded_values == [40.0, 30.0]
     assert stats.committed_upserts == (3, 2)
 
@@ -407,7 +415,9 @@ def test_gpu_windowed_tile_mapping_tracks_lut_without_texture_identity():
     updates = []
     uploaded_luts = []
     visual.update = lambda: updates.append("update")
-    visual._set_lut_texture = lambda lut, key=None: uploaded_luts.append(np.array(lut, copy=True)) or True
+    visual._set_lut_texture = lambda lut, key=None: (
+        uploaded_luts.append(np.array(lut, copy=True)) or True
+    )
 
     first = ShaderMapping(lut_data=np.array([[0, 0, 0], [255, 255, 255]], dtype=np.uint8))
     second = ShaderMapping(lut_data=np.array([[0, 0, 255], [255, 0, 0]], dtype=np.uint8))
@@ -613,11 +623,14 @@ def test_mapping_only_update_is_uniform_across_pages_without_texture_or_vertex_u
     assert second.vertex_uploads == 0
     assert second.shader_uniform_updates == 2
     assert [visual.geometry_calls for visual in layer._visuals_by_page] == geometry_calls
-    assert sum(
-        len(texture.updates)
-        for page in layer._pool.pages
-        for texture in (page.scalar_texture, page.color_texture)
-    ) == texture_updates
+    assert (
+        sum(
+            len(texture.updates)
+            for page in layer._pool.pages
+            for texture in (page.scalar_texture, page.color_texture)
+        )
+        == texture_updates
+    )
     assert all(visual.mappings[-1][1] is second_mapping for visual in layer._visuals_by_page)
 
 
@@ -652,7 +665,9 @@ def test_storage_classes_coexist_and_visibility_clear_preserves_page_residency()
             reducer="mean",
         )
         pages = (
-            tuple(materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans)
+            tuple(
+                materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans
+            )
             if supplied
             else ()
         )
@@ -1473,7 +1488,9 @@ def test_atlas_rejects_active_set_that_exceeds_byte_budget():
 def test_atlas_eviction_prefers_far_inactive_tiles_before_near_tiles():
     pool = TextureAtlasPool(FakeGloo(), max_texture_size=4)
     values = {index: payload(index, float(index)) for index in range(4)}
-    pool.update_payloads(values, tile_shape=(2, 2), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4)
+    pool.update_payloads(
+        values, tile_shape=(2, 2), dirty_tiles=None, rgb_already_windowed=False, reserve_count=4
+    )
     pool.update_payloads(
         {2: values[2], 3: values[3]},
         tile_shape=(2, 2),
@@ -1629,7 +1646,11 @@ def test_speculative_payload_queue_removes_batches_without_rebuilding_remaining_
 
 
 def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
-    layout = {12_345: TileLayoutRegion(tile_number=12_345, source_index=12_345, x=90, y=246, width=2, height=2)}
+    layout = {
+        12_345: TileLayoutRegion(
+            tile_number=12_345, source_index=12_345, x=90, y=246, width=2, height=2
+        )
+    }
     vertices, _texcoords, _modes = _quad_buffers(
         layout,
         {12_345: payload(12_345, 1.0)},
@@ -1640,7 +1661,9 @@ def test_quad_generation_iterates_active_payloads_not_the_complete_plan():
     assert vertices.shape == (6, 2)
 
 
-def _lod_payload(tile_number: int, value: float, *, level: int, source_shape=(4, 4)) -> DisplayTilePayload:
+def _lod_payload(
+    tile_number: int, value: float, *, level: int, source_shape=(4, 4)
+) -> DisplayTilePayload:
     from arrayscope.display.lod import LodInfo
 
     if int(level) != 0:
@@ -1745,7 +1768,9 @@ def test_eviction_reclaims_active_tiles_adjacent_level_only_as_last_resort():
         "the retained adjacent level of an active tile goes last"
     )
 
-    pool._slot_for("incoming-3", active_keys={"incoming-1", "incoming-2", "incoming-3"}, near_keys=set())
+    pool._slot_for(
+        "incoming-3", active_keys={"incoming-1", "incoming-2", "incoming-3"}, near_keys=set()
+    )
     assert "active-adjacent" not in pool.resident_slots
     # Both superseded victims counted as pressure reclaims.
     assert pool.superseded_reclaimed_count == 2

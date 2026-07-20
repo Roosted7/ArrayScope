@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
-from enum import Enum
 import json
 import math
 import os
+from dataclasses import fields, is_dataclass
+from enum import Enum
 
 from arrayscope.core.runtime_diagnostics import WindowRuntimeDiagnostics
-
 
 DIAGNOSTICS_JSONL_SCHEMA_VERSION = 1
 
@@ -23,7 +22,9 @@ def diagnostics_to_jsonable(value):
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: diagnostics_to_jsonable(getattr(value, item.name)) for item in fields(value)}
+        return {
+            item.name: diagnostics_to_jsonable(getattr(value, item.name)) for item in fields(value)
+        }
     if isinstance(value, dict):
         return {_json_key(key): diagnostics_to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
@@ -96,7 +97,12 @@ def diagnostics_snapshot_record(
 
 
 def diagnostics_jsonl_line(record: dict[str, object]) -> str:
-    return json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    return (
+        json.dumps(
+            record, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+    )
 
 
 def _json_key(value) -> str:

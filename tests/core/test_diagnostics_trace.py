@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from arrayscope.core.diagnostics_trace import format_trace_summary_markdown, summarize_diagnostics_trace
+from arrayscope.core.diagnostics_trace import (
+    format_trace_summary_markdown,
+    summarize_diagnostics_trace,
+)
 
 
 def _write_trace(path):

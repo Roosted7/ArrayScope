@@ -8,9 +8,9 @@ state.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
 
 from arrayscope.core.trace import emit_trace
 from arrayscope.kernel.task import Lane
@@ -54,10 +54,7 @@ class SchedulingVerdict:
     def admits_lane(self, lane: Lane) -> bool:
         """Whether work on ``lane`` belongs in the current compute phase."""
 
-        return bool(
-            self.phase is SchedulingPhase.REFINE
-            or Lane(lane) not in _REFINEMENT_LANES
-        )
+        return bool(self.phase is SchedulingPhase.REFINE or Lane(lane) not in _REFINEMENT_LANES)
 
     def admits(self, work: SchedulingWork) -> bool:
         """Admit prerequisites always; admit refinements only after coverage.

@@ -7,7 +7,8 @@ from typing import Literal
 
 import numpy as np
 
-from arrayscope.operations.capabilities import OperationCapabilities, OperationKind as DeclaredOperationKind, normalize_capabilities
+from arrayscope.operations.capabilities import OperationCapabilities, normalize_capabilities
+from arrayscope.operations.capabilities import OperationKind as DeclaredOperationKind
 
 OperationKind = Literal["view", "elementwise", "reduction", "transform", "reshape"]
 
@@ -64,7 +65,9 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
     output_dtype = operation_output_dtype(input_dtype, operation)
     input_bytes = _array_bytes(input_shape, input_dtype)
     output_bytes = _array_bytes(output_shape, output_dtype)
-    capabilities = _operation_capabilities(operation, input_shape, input_dtype, output_shape=output_shape)
+    capabilities = _operation_capabilities(
+        operation, input_shape, input_dtype, output_shape=output_shape
+    )
     peak = _estimate_peak_bytes(capabilities, input_bytes=input_bytes, output_bytes=output_bytes)
     notes = tuple(capabilities.notes)
     for axis in capabilities.expands_request_axes:
@@ -91,7 +94,9 @@ def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCos
     )
 
 
-def estimate_pipeline_cost(base_shape, base_dtype, operations, *, optimize: bool = True) -> PipelineCost:
+def estimate_pipeline_cost(
+    base_shape, base_dtype, operations, *, optimize: bool = True
+) -> PipelineCost:
     original_operations = tuple(operations)
     optimization_steps = ()
     if optimize:
@@ -119,12 +124,20 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations, *, optimize: bool
         shape = cost.output_shape
         dtype = cost.output_dtype
         if cost.estimated_peak_bytes is not None:
-            peak = cost.estimated_peak_bytes if peak is None else max(peak, cost.estimated_peak_bytes)
+            peak = (
+                cost.estimated_peak_bytes if peak is None else max(peak, cost.estimated_peak_bytes)
+            )
         if cost.requires_full_axis:
-            warnings.append(f"{type(operation).__name__} requires full axis {cost.requires_full_axis[0]}.")
+            warnings.append(
+                f"{type(operation).__name__} requires full axis {cost.requires_full_axis[0]}."
+            )
     output_bytes = _array_bytes(shape, dtype)
-    final_blocking_axes = tuple(index for index, label in enumerate(axis_labels) if label in blocking_labels)
-    chunkable_axes = tuple(index for index in range(len(shape)) if index not in set(final_blocking_axes))
+    final_blocking_axes = tuple(
+        index for index, label in enumerate(axis_labels) if label in blocking_labels
+    )
+    chunkable_axes = tuple(
+        index for index in range(len(shape)) if index not in set(final_blocking_axes)
+    )
     return PipelineCost(
         operation_costs=tuple(costs),
         output_shape=shape,
@@ -142,7 +155,9 @@ def estimate_pipeline_cost(base_shape, base_dtype, operations, *, optimize: bool
 
 def format_operation_cost(cost: OperationCost) -> str:
     dtype = "unknown" if cost.output_dtype is None else str(cost.output_dtype)
-    peak = "unknown" if cost.estimated_peak_bytes is None else _format_bytes(cost.estimated_peak_bytes)
+    peak = (
+        "unknown" if cost.estimated_peak_bytes is None else _format_bytes(cost.estimated_peak_bytes)
+    )
     return f"{cost.kind} -> shape {cost.output_shape}, dtype {dtype}, peak {peak}"
 
 
@@ -167,7 +182,11 @@ def _cost(
     notes=(),
 ):
     if chunkable_axes is None:
-        chunkable_axes = tuple(range(len(output_shape))) if can_chunk or kind in {"view", "elementwise", "reshape", "reduction"} else ()
+        chunkable_axes = (
+            tuple(range(len(output_shape)))
+            if can_chunk or kind in {"view", "elementwise", "reshape", "reduction"}
+            else ()
+        )
     return OperationCost(
         kind=kind,
         input_shape=input_shape,
@@ -189,9 +208,13 @@ def _cost(
     )
 
 
-def _operation_capabilities(operation, input_shape, input_dtype, *, output_shape) -> OperationCapabilities:
+def _operation_capabilities(
+    operation, input_shape, input_dtype, *, output_shape
+) -> OperationCapabilities:
     if hasattr(operation, "capabilities"):
-        return normalize_capabilities(operation.capabilities(input_shape, input_dtype), ndim=len(input_shape))
+        return normalize_capabilities(
+            operation.capabilities(input_shape, input_dtype), ndim=len(input_shape)
+        )
     return OperationCapabilities(
         kind=DeclaredOperationKind.ELEMENTWISE,
         chunkable_axes=tuple(range(len(output_shape))),
@@ -199,14 +222,20 @@ def _operation_capabilities(operation, input_shape, input_dtype, *, output_shape
     )
 
 
-def _estimate_peak_bytes(capabilities: OperationCapabilities, *, input_bytes, output_bytes) -> int | None:
+def _estimate_peak_bytes(
+    capabilities: OperationCapabilities, *, input_bytes, output_bytes
+) -> int | None:
     kind = capabilities.kind
     if kind == DeclaredOperationKind.VIEW:
         return output_bytes
     if kind == DeclaredOperationKind.TRANSFORM:
         return None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
     if kind == DeclaredOperationKind.REDUCTION and capabilities.temp_multiplier > 1.0:
-        return None if input_bytes is None or output_bytes is None else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+        return (
+            None
+            if input_bytes is None or output_bytes is None
+            else int(input_bytes * capabilities.temp_multiplier + output_bytes)
+        )
     return _sum_known(input_bytes, output_bytes)
 
 
@@ -223,7 +252,9 @@ def _output_axis_labels(axis_labels, operation, cost: OperationCost):
 def _array_bytes(shape, dtype) -> int | None:
     if dtype is None:
         return None
-    return int(np.prod(tuple(int(size) for size in shape), dtype=np.int64)) * np.dtype(dtype).itemsize
+    return (
+        int(np.prod(tuple(int(size) for size in shape), dtype=np.int64)) * np.dtype(dtype).itemsize
+    )
 
 
 def _sum_known(*values) -> int | None:

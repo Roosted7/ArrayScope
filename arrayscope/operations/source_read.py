@@ -60,7 +60,11 @@ def read_base_region(
     reader = getattr(base_data, "read_region", None)
     if not callable(reader):
         return apply_region(base_data, region)
-    budget = int(budget_bytes) if budget_bytes is not None else source_read_budget_bytes(evaluation_context)
+    budget = (
+        int(budget_bytes)
+        if budget_bytes is not None
+        else source_read_budget_bytes(evaluation_context)
+    )
     estimated = region_nbytes(np.shape(base_data), getattr(base_data, "dtype", None), region)
     if estimated is not None and int(estimated) > budget:
         raise SourceReadRefused(

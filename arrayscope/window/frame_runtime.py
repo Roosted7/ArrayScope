@@ -15,31 +15,36 @@ from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.core.trace import TRACE, emit_trace
-from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.imageview2d import MontageTileOverlay
 from arrayscope.display.montage import MontageTileState, montage_rect_for_viewport
-from arrayscope.display.viewport import ViewportMode, view_ranges_near
+from arrayscope.display.overlays import MontageTileOverlay
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.pyramid import LodPageCache
+from arrayscope.display.viewport import ViewportMode, view_ranges_near
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import WorkItem
+from arrayscope.kernel import complete_inline_work as _complete_inline_work
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
+from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import LadderPolicy, LodLadder
 from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 from arrayscope.ui.toasts import show_revert_action, show_status_message
-from arrayscope.render import lod as render_lod
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import FramePipelineEffects
 from arrayscope.window.montage_viewport import (
     montage_priority_focus as _montage_priority_focus,
+)
+from arrayscope.window.montage_viewport import (
     square_montage_fit_view_range,
 )
 from arrayscope.window.render_contract import (
     montage_work_token as _montage_work_token,
+)
+from arrayscope.window.render_contract import (
     montage_work_token_is_current as _montage_work_token_is_current,
 )
-
 
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION = 0.35
@@ -70,10 +75,7 @@ class FrameRuntimeMixin:
         physical_rows = (
             {}
             if not callable(physical_getter)
-            else {
-                int(tile): dict(row)
-                for tile, row in dict(physical_getter() or {}).items()
-            }
+            else {int(tile): dict(row) for tile, row in dict(physical_getter() or {}).items()}
         )
         for row in session.diagnostic_tile_identity_rows(
             limit=max(1, len(tiles)),
@@ -134,17 +136,30 @@ class FrameRuntimeMixin:
         # through their own bounded presentation requests.
         self.win.img_view.setImageStale(True)
         self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
-        rect = montage_rect_for_viewport(session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape)
+        rect = montage_rect_for_viewport(
+            session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape
+        )
         overlay_start = perf_counter()
         self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
         self._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-        self.win.operation_evaluator.last_status = CacheStatusSnapshot(CacheStatus.COMPUTING, "Evaluating image frame")
+        self.win.operation_evaluator.last_status = CacheStatusSnapshot(
+            CacheStatus.COMPUTING, "Evaluating image frame"
+        )
         if getattr(session, "defer_side_panels", False) or _viewport_interaction_active(self):
             self.win._deferred_side_panel_refresh_pending = True
         else:
             self.win._update_operation_dock()
 
-    def _store_reusable_montage_tile_result(self, tile, result, *, document, montage_axis: int | None, colormap_lut, shader_display: bool):
+    def _store_reusable_montage_tile_result(
+        self,
+        tile,
+        result,
+        *,
+        document,
+        montage_axis: int | None,
+        colormap_lut,
+        shader_display: bool,
+    ):
         if _document_key(document) != _document_key(self.win.document):
             return None
         stored = self.win.operation_evaluator.store_montage_tile_result(
@@ -156,7 +171,11 @@ class FrameRuntimeMixin:
             shader_display=shader_display,
         )
         controller = getattr(self.win, "montage_tile_evaluation_controller", None)
-        if stored is not None and controller is not None and hasattr(controller, "note_stale_reused"):
+        if (
+            stored is not None
+            and controller is not None
+            and hasattr(controller, "note_stale_reused")
+        ):
             controller.note_stale_reused()
         return stored
 
@@ -199,13 +218,12 @@ class FrameRuntimeMixin:
         visible = frozenset(int(tile) for tile in required_tiles())
         # Coverage and near tiles remain lower-priority retained/speculative
         # work. They never redefine the required set above.
-        coverage = set(
-            int(tile)
-            for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())
-        )
+        coverage = {int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())}
         coverage.update(visible)
         coverage.update(int(tile) for tile in tuple(getattr(session, "loading_tiles", ()) or ()))
-        coverage.update(int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ()))
+        coverage.update(
+            int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ())
+        )
         near = tuple(getattr(frame_plan, "near_region_ids", ()) or ())
         if not near:
             near = (
@@ -213,7 +231,7 @@ class FrameRuntimeMixin:
                 if hasattr(session, "_near_tile_numbers")
                 else ()
             )
-        skipped = set(int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ()))
+        skipped = {int(tile) for tile in tuple(getattr(session, "skipped_tiles", ()) or ())}
         missing = 0
         for tile_number in visible:
             if int(tile_number) in skipped:
@@ -243,7 +261,9 @@ class FrameRuntimeMixin:
                 FramePipelineEffects(self, session),
                 LodLadder(
                     LadderPolicy(
-                        mode=str(getattr(session, "lod_policy_mode", "native-only") or "native-only"),
+                        mode=str(
+                            getattr(session, "lod_policy_mode", "native-only") or "native-only"
+                        ),
                         floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         # Per-tile preview rungs are cheap only for pipelines
@@ -347,7 +367,10 @@ class FrameRuntimeMixin:
             first_pass_quality=getattr(session, "first_pass_quality", None),
             first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
         )
-        if getattr(session, "pending_level_tiles", None) or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0:
+        if (
+            getattr(session, "pending_level_tiles", None)
+            or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+        ):
             self._schedule_montage_cached_level_stats(session)
         if (
             force_commit
@@ -379,9 +402,7 @@ class FrameRuntimeMixin:
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)
         residency_deferred = bool(getattr(session, "_interactive_residency_deferred", False))
-        histogram_deferred = bool(
-            getattr(session, "_wgpu_histogram_evidence_deferred", False)
-        )
+        histogram_deferred = bool(getattr(session, "_wgpu_histogram_evidence_deferred", False))
         # Interactive montage retargets also park their MISSING-tile producer:
         # stage planning is deferred (``stage_planning_deferred``) and the
         # immutable missing-tile set remains in ``deferred_missing_tiles``.
@@ -412,8 +433,7 @@ class FrameRuntimeMixin:
             not residency_deferred
             and not stage_deferred
             and not histogram_deferred
-            and deferred_generation
-            == getattr(self, "_montage_native_deferred_replanned", None)
+            and deferred_generation == getattr(self, "_montage_native_deferred_replanned", None)
         ):
             return False
         session._interactive_residency_deferred = False
@@ -562,12 +582,12 @@ class FrameRuntimeMixin:
             and int(getattr(kernel_diag, "parked_quota", 0) or 0) == 0
             and (completion_queue is None or completion_queue.empty())
         )
-        if not kernel_idle or bool(
-            getattr(self, "_montage_presentation_gate_armed", False)
-        ):
+        if not kernel_idle or bool(getattr(self, "_montage_presentation_gate_armed", False)):
             return
         probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
-        actionable_probe = tuple(row for row in tuple(probe) if _stall_tile_probe_row_actionable(row))
+        actionable_probe = tuple(
+            row for row in tuple(probe) if _stall_tile_probe_row_actionable(row)
+        )
         self._montage_stall_assertions = int(getattr(self, "_montage_stall_assertions", 0) or 0) + 1
         self._montage_watchdog_last_stall = signature
         owner_chain = {
@@ -633,7 +653,7 @@ class FrameRuntimeMixin:
         tile_state_revision = None
         if session is not None and getattr(session, "plan", None) is plan:
             tile_state_revision = int(getattr(session, "tile_state_revision", 0) or 0)
-            candidates = set(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
+            candidates = {int(tile) for tile in getattr(session, "skipped_tiles", ()) or ()}
             candidate_numbers = tuple(sorted(candidates))
             key = (
                 id(plan),
@@ -645,7 +665,10 @@ class FrameRuntimeMixin:
                 return
             if not candidate_numbers:
                 self._last_montage_overlay_update_key = key
-                if int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0) != 0:
+                if (
+                    int(getattr(self.win.img_view, "montageTileOverlayCount", lambda: 0)() or 0)
+                    != 0
+                ):
                     self.win.img_view.setMontageTileOverlays(())
                 return
             self._last_montage_overlay_update_key = key
@@ -661,7 +684,11 @@ class FrameRuntimeMixin:
                 if 0 <= int(index) < len(plan_tiles)
             )
         for tile in tiles:
-            state = tile_states[int(tile.montage_index)] if int(tile.montage_index) < len(tile_states) else MontageTileState.UNLOADED
+            state = (
+                tile_states[int(tile.montage_index)]
+                if int(tile.montage_index) < len(tile_states)
+                else MontageTileState.UNLOADED
+            )
             # In-progress work is represented once by the evaluation overlay
             # and diagnostics. Per-tile loading rectangles doubled scene item
             # count, covered compatible predecessor pixels, and made a valid
@@ -690,9 +717,10 @@ class FrameRuntimeMixin:
                 )
             )
         self.win.img_view.setMontageTileOverlays(tuple(overlays))
+
     def _retry_live_profile_after_montage_tile(self) -> None:
         try:
-            if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
+            if not self.win.widgets["buttons"]["display"]["live_profile"].isChecked():
                 return
             position = self.win.img_view.profileMarkerPosition()
             if position is None:
@@ -733,7 +761,9 @@ class FrameRuntimeMixin:
         observation = budget.observation()
         if observation.processed_items <= 0 and observation.elapsed_ms < observation.warning_ms:
             return
-        recorder = getattr(getattr(self.win, "resource_governor", None), "record_gui_callback_observation", None)
+        recorder = getattr(
+            getattr(self.win, "resource_governor", None), "record_gui_callback_observation", None
+        )
         if callable(recorder):
             recorder(observation)
             return
@@ -757,7 +787,7 @@ class FrameRuntimeMixin:
         self._pending_montage_profile_retry = None
         if point is None or self.win.view_state.montage_axis is None:
             return
-        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
+        if not self.win.widgets["buttons"]["display"]["live_profile"].isChecked():
             return
         if not self.win.profile_dock.isVisible():
             self._pending_montage_profile_retry = (float(point[0]), float(point[1]))
@@ -771,7 +801,9 @@ class FrameRuntimeMixin:
             self.win._montage_viewport_update_pending = True
             return
         session = getattr(self, "_frame_session", None)
-        self._montage_viewport_update_token = None if session is None else _montage_work_token(session, "viewport_update")
+        self._montage_viewport_update_token = (
+            None if session is None else _montage_work_token(session, "viewport_update")
+        )
         self.apply_montage_viewport_retarget()
 
     def retarget_montage_priority_from_hover(self) -> None:
@@ -941,7 +973,7 @@ class FrameRuntimeMixin:
         if montage is None or not getattr(montage, "indices", ()):
             return bool(set_extent(None))
         (x0, x1), (y0, y1) = _montage_full_view_range(montage)
-        return bool(set_extent((max(1, int(round(y1 - y0))), max(1, int(round(x1 - x0))))))
+        return bool(set_extent((max(1, round(y1 - y0)), max(1, round(x1 - x0)))))
 
     def _maybe_auto_fit_montage_tiles(self, plan_or_geometry) -> bool:
         if bool(getattr(self, "_montage_live_layout_reflow", False)):
@@ -977,7 +1009,9 @@ class FrameRuntimeMixin:
         )
         previous_signature = getattr(self, "_last_montage_autofit_signature", None)
         self._last_montage_autofit_signature = signature
-        if previous_signature is not None and not _montage_autofit_scope_grew(previous_signature, signature):
+        if previous_signature is not None and not _montage_autofit_scope_grew(
+            previous_signature, signature
+        ):
             return False
         viewport_controller = getattr(self.win.img_view, "viewport_controller", None)
         if viewport_controller is not None and viewport_controller.is_fit_locked():
@@ -1021,7 +1055,9 @@ class FrameRuntimeMixin:
             return False
         if not can_auto_adjust:
             return False
-        if not auto_like and (tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION):
+        if not auto_like and (
+            tile_count <= 0 or visible_count / float(tile_count) > MONTAGE_AUTOFIT_VISIBLE_FRACTION
+        ):
             return False
         if _view_range_contains_near(before_range, fallback_range):
             return False
@@ -1091,15 +1127,11 @@ class FrameRuntimeMixin:
             session.tile_source_ids = source_ids
         plan = getattr(session, "plan", None)
         plan_tiles_tuple = tuple(getattr(plan, "tiles", ()) or ())
-        if (
-            getattr(session, "_tile_source_ids_plan", None) is plan
-            and len(source_ids) == len(plan_tiles_tuple)
+        if getattr(session, "_tile_source_ids_plan", None) is plan and len(source_ids) == len(
+            plan_tiles_tuple
         ):
             return source_ids
-        plan_tiles = {
-            int(tile.montage_index): tile
-            for tile in plan_tiles_tuple
-        }
+        plan_tiles = {int(tile.montage_index): tile for tile in plan_tiles_tuple}
         for stale in tuple(source_ids):
             if int(stale) not in plan_tiles:
                 source_ids.pop(int(stale), None)
@@ -1135,6 +1167,8 @@ class FrameRuntimeMixin:
                     )
         session._tile_source_ids_plan = plan
         return source_ids
+
+
 def _copy_view_range(view_range):
     return (
         (float(view_range[0][0]), float(view_range[0][1])),
@@ -1143,8 +1177,12 @@ def _copy_view_range(view_range):
 
 
 def _montage_full_view_range(montage):
-    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(montage.gap)
-    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(montage.gap)
+    height = int(montage.rows) * int(montage.tile_height) + max(0, int(montage.rows) - 1) * int(
+        montage.gap
+    )
+    width = int(montage.columns) * int(montage.tile_width) + max(0, int(montage.columns) - 1) * int(
+        montage.gap
+    )
     return ((0.0, float(max(1, width))), (0.0, float(max(1, height))))
 
 
@@ -1168,7 +1206,9 @@ def _visible_montage_tile_count(montage, view_range) -> int:
     return visible
 
 
-def _view_range_contains_near(view_range, target_range, *, tolerance_fraction: float = 0.02) -> bool:
+def _view_range_contains_near(
+    view_range, target_range, *, tolerance_fraction: float = 0.02
+) -> bool:
     x0, x1 = sorted((float(view_range[0][0]), float(view_range[0][1])))
     y0, y1 = sorted((float(view_range[1][0]), float(view_range[1][1])))
     tx0, tx1 = sorted((float(target_range[0][0]), float(target_range[0][1])))
@@ -1176,7 +1216,12 @@ def _view_range_contains_near(view_range, target_range, *, tolerance_fraction: f
     tolerance_fraction = max(0.0, float(tolerance_fraction))
     x_tolerance = max(abs(tx1 - tx0), 1.0) * tolerance_fraction
     y_tolerance = max(abs(ty1 - ty0), 1.0) * tolerance_fraction
-    return x0 <= tx0 + x_tolerance and x1 >= tx1 - x_tolerance and y0 <= ty0 + y_tolerance and y1 >= ty1 - y_tolerance
+    return (
+        x0 <= tx0 + x_tolerance
+        and x1 >= tx1 - x_tolerance
+        and y0 <= ty0 + y_tolerance
+        and y1 >= ty1 - y_tolerance
+    )
 
 
 def _should_auto_fit_montage_view(
@@ -1197,9 +1242,7 @@ def _should_auto_fit_montage_view(
     if view_ranges_near(view_range, full_range):
         return True
     visible_fraction = max(0, int(visible_count)) / float(max(1, int(tile_count)))
-    if visible_fraction <= MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION:
-        return True
-    return False
+    return visible_fraction <= MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION
 
 
 def _viewport_controller_auto_active_for_range(viewport_controller, view_range) -> bool:
@@ -1209,9 +1252,7 @@ def _viewport_controller_auto_active_for_range(viewport_controller, view_range) 
     if callable(active) and bool(active()):
         return True
     near_auto = getattr(viewport_controller, "is_near_auto", None)
-    if callable(near_auto) and bool(near_auto(view_range)):
-        return True
-    return False
+    return bool(callable(near_auto) and bool(near_auto(view_range)))
 
 
 def _montage_autofit_signature(montage) -> tuple[tuple[int, ...], int, int, int]:
@@ -1229,8 +1270,8 @@ def _montage_autofit_scope_grew(previous, current) -> bool:
         current_indices, current_width, current_height, current_gap = current
     except Exception:
         return True
-    previous_set = set(int(index) for index in tuple(previous_indices))
-    current_set = set(int(index) for index in tuple(current_indices))
+    previous_set = {int(index) for index in tuple(previous_indices)}
+    current_set = {int(index) for index in tuple(current_indices)}
     return (
         len(current_set) > len(previous_set)
         or current_set > previous_set
@@ -1264,21 +1305,24 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
         return True
     if state_present and not bool(row.get("state_matches_current_source")):
         return True
-    if desired_present and row.get("backend_source") not in (None, "") and not bool(
-        row.get("backend_matches_desired")
+    if (
+        desired_present
+        and row.get("backend_source") not in (None, "")
+        and not bool(row.get("backend_matches_desired"))
     ):
         return True
-    if not desired_present and state_present and row.get("backend_source") not in (None, "") and not bool(
-        row.get("backend_matches_state")
-    ):
-        return True
-    return False
+    return bool(
+        not desired_present
+        and state_present
+        and row.get("backend_source") not in (None, "")
+        and not bool(row.get("backend_matches_state"))
+    )
 
 
 def _interactive_active(window) -> bool:
     coordinator = getattr(window.win, "render_coordinator", None)
     return bool(
-        coordinator is not None and getattr(coordinator, "interactive_active", False)
+        (coordinator is not None and getattr(coordinator, "interactive_active", False))
         or _viewport_interaction_active(window)
     )
 

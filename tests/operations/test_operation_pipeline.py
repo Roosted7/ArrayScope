@@ -1,34 +1,67 @@
 import ast
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 
 ROOT = Path(__file__).parents[2]
 
 
 MODULE_PATHS = {
     "axis_utils": ("arrayscope.core.axis_utils", ROOT / "arrayscope" / "core" / "axis_utils.py"),
-    "cache_status": ("arrayscope.core.cache_status", ROOT / "arrayscope" / "core" / "cache_status.py"),
-    "dimension_roles": ("arrayscope.core.dimension_roles", ROOT / "arrayscope" / "core" / "dimension_roles.py"),
+    "cache_status": (
+        "arrayscope.core.cache_status",
+        ROOT / "arrayscope" / "core" / "cache_status.py",
+    ),
+    "dimension_roles": (
+        "arrayscope.core.dimension_roles",
+        ROOT / "arrayscope" / "core" / "dimension_roles.py",
+    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
-    "window_levels": ("arrayscope.core.window_levels", ROOT / "arrayscope" / "core" / "window_levels.py"),
+    "window_levels": (
+        "arrayscope.core.window_levels",
+        ROOT / "arrayscope" / "core" / "window_levels.py",
+    ),
     "dim_ops": ("arrayscope.operations.dim_ops", ROOT / "arrayscope" / "operations" / "dim_ops.py"),
-    "operation_pipeline": ("arrayscope.operations.pipeline", ROOT / "arrayscope" / "operations" / "pipeline.py"),
-    "operation_stack": ("arrayscope.operations.stack", ROOT / "arrayscope" / "operations" / "stack.py"),
-    "operation_evaluator": ("arrayscope.operations.evaluator", ROOT / "arrayscope" / "operations" / "evaluator.py"),
-    "operation_registry": ("arrayscope.operations.registry", ROOT / "arrayscope" / "operations" / "registry.py"),
-    "operation_recipes": ("arrayscope.operations.recipes", ROOT / "arrayscope" / "operations" / "recipes.py"),
-    "operation_coordinator": ("arrayscope.operations.coordinator", ROOT / "arrayscope" / "operations" / "coordinator.py"),
-    "slice_engine": ("arrayscope.display.slice_engine", ROOT / "arrayscope" / "display" / "slice_engine.py"),
+    "operation_pipeline": (
+        "arrayscope.operations.pipeline",
+        ROOT / "arrayscope" / "operations" / "pipeline.py",
+    ),
+    "operation_stack": (
+        "arrayscope.operations.stack",
+        ROOT / "arrayscope" / "operations" / "stack.py",
+    ),
+    "operation_evaluator": (
+        "arrayscope.operations.evaluator",
+        ROOT / "arrayscope" / "operations" / "evaluator.py",
+    ),
+    "operation_registry": (
+        "arrayscope.operations.registry",
+        ROOT / "arrayscope" / "operations" / "registry.py",
+    ),
+    "operation_recipes": (
+        "arrayscope.operations.recipes",
+        ROOT / "arrayscope" / "operations" / "recipes.py",
+    ),
+    "operation_coordinator": (
+        "arrayscope.operations.coordinator",
+        ROOT / "arrayscope" / "operations" / "coordinator.py",
+    ),
+    "slice_engine": (
+        "arrayscope.display.slice_engine",
+        ROOT / "arrayscope" / "display" / "slice_engine.py",
+    ),
     "profile": ("arrayscope.profiles.model", ROOT / "arrayscope" / "profiles" / "model.py"),
-    "profile_coordinator": ("arrayscope.profiles.coordinator", ROOT / "arrayscope" / "profiles" / "coordinator.py"),
+    "profile_coordinator": (
+        "arrayscope.profiles.coordinator",
+        ROOT / "arrayscope" / "profiles" / "coordinator.py",
+    ),
     "theme": ("arrayscope.app.theme", ROOT / "arrayscope" / "app" / "theme.py"),
-    "settings_state": ("arrayscope.app.settings_state", ROOT / "arrayscope" / "app" / "settings_state.py"),
+    "settings_state": (
+        "arrayscope.app.settings_state",
+        ROOT / "arrayscope" / "app" / "settings_state.py",
+    ),
 }
 
 
@@ -73,7 +106,9 @@ def test_crop_reverse_and_conjugate_preserve_base_data_reference_and_values():
 
 def test_mean_and_root_sum_squares_remove_axes_predictably():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4).astype(float)
-    document = ArrayDocument(data).with_operation(Mean(axis=1)).with_operation(RootSumSquares(axis=1))
+    document = (
+        ArrayDocument(data).with_operation(Mean(axis=1)).with_operation(RootSumSquares(axis=1))
+    )
 
     result = document.materialize()
 
@@ -84,7 +119,9 @@ def test_mean_and_root_sum_squares_remove_axes_predictably():
 
 def test_centered_fft_and_ifft_operations_wrap_existing_dim_ops():
     data = np.arange(12).reshape(3, 4).astype(float)
-    document = ArrayDocument(data).with_operation(CenteredFFT(axis=1)).with_operation(CenteredIFFT(axis=1))
+    document = (
+        ArrayDocument(data).with_operation(CenteredFFT(axis=1)).with_operation(CenteredIFFT(axis=1))
+    )
 
     result = document.materialize()
 
@@ -121,7 +158,11 @@ def test_real_complex_axis_operations_wrap_existing_dim_ops():
 
 def test_document_is_undoable_by_removing_operations():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    document = ArrayDocument(data).with_operation(Crop(axis=2, start=1, stop=4)).with_operation(Mean(axis=0))
+    document = (
+        ArrayDocument(data)
+        .with_operation(Crop(axis=2, start=1, stop=4))
+        .with_operation(Mean(axis=0))
+    )
 
     undone = document.without_last_operation()
 
@@ -133,7 +174,11 @@ def test_document_is_undoable_by_removing_operations():
 
 def test_operation_steps_can_be_disabled_and_reenabled():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    document = ArrayDocument(data).with_operation(Crop(axis=2, start=1, stop=4)).with_operation(Mean(axis=0))
+    document = (
+        ArrayDocument(data)
+        .with_operation(Crop(axis=2, start=1, stop=4))
+        .with_operation(Mean(axis=0))
+    )
 
     disabled = document.with_step_enabled(1, False)
     assert disabled.current_shape == (2, 3, 3)
@@ -156,7 +201,11 @@ def test_operation_step_edit_replaces_operation_and_updates_values():
 
 def test_reload_base_data_preserves_compatible_operations():
     data = np.arange(2 * 4).reshape(2, 4)
-    document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=3)).with_operation(ReverseAxis(axis=0))
+    document = (
+        ArrayDocument(data)
+        .with_operation(Crop(axis=1, start=1, stop=3))
+        .with_operation(ReverseAxis(axis=0))
+    )
 
     reloaded = document.reload_base_data(np.ones((2, 4)), preserve_steps=True)
 

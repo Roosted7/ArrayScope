@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -12,7 +14,6 @@ from arrayscope.core.slice_selection import (
     shift_slice_selection_text,
 )
 from arrayscope.ui.icons import set_button_icon
-
 
 _QT_WIDGET_MAX_SIZE = 16_777_215
 
@@ -84,7 +85,9 @@ class DimensionChip(QtWidgets.QFrame):
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setFocusPolicy(Qt.QtCore.Qt.FocusPolicy.StrongFocus)
         self.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(lambda _pos: self.operationRequested.emit(self.axis))
+        self.customContextMenuRequested.connect(
+            lambda _pos: self.operationRequested.emit(self.axis)
+        )
 
         layout = QtWidgets.QHBoxLayout()
         # The index badge sits flush against the chip's left edge.
@@ -120,7 +123,9 @@ class DimensionChip(QtWidgets.QFrame):
         for role, button in (("y", self.y_button), ("x", self.x_button)):
             button.setFixedSize(24, 22)
             button.setText(role.upper())
-            button.clicked.connect(lambda _checked=False, role=role: self.roleChanged.emit(role, self.axis))
+            button.clicked.connect(
+                lambda _checked=False, role=role: self.roleChanged.emit(role, self.axis)
+            )
             layout.addWidget(button)
         layout.addWidget(_make_chip_separator(self))
 
@@ -155,10 +160,7 @@ class DimensionChip(QtWidgets.QFrame):
         display_name = _elide(axis_display_name(axis_info, self.axis))
         # The chip badge already shows the dimension index; the label carries
         # the size (plus the metadata name when one exists).
-        if display_name == str(self.axis):
-            label_text = str(size)
-        else:
-            label_text = f"{display_name} · {size}"
+        label_text = str(size) if display_name == str(self.axis) else f"{display_name} · {size}"
         _set_text_if_changed(self.axis_label, label_text)
         _set_tooltip_if_changed(
             self.axis_label,
@@ -176,11 +178,21 @@ class DimensionChip(QtWidgets.QFrame):
         if profile_available:
             badge_tooltip = f"Dimension {self.axis} — click to plot a profile along it"
         else:
-            badge_tooltip = f"Dimension {self.axis} — click to open the profile dock and plot along it"
+            badge_tooltip = (
+                f"Dimension {self.axis} — click to open the profile dock and plot along it"
+            )
         _set_tooltip_if_changed(self.index_badge, badge_tooltip)
         tiled_tooltip = "Use this range as an image-axis crop"
-        y_tooltip = tiled_tooltip if is_m else ("Flip Y direction" if is_y else f"Show dim {self.axis} on the image Y axis")
-        x_tooltip = tiled_tooltip if is_m else ("Flip X direction" if is_x else f"Show dim {self.axis} on the image X axis")
+        y_tooltip = (
+            tiled_tooltip
+            if is_m
+            else ("Flip Y direction" if is_y else f"Show dim {self.axis} on the image Y axis")
+        )
+        x_tooltip = (
+            tiled_tooltip
+            if is_m
+            else ("Flip X direction" if is_x else f"Show dim {self.axis} on the image X axis")
+        )
         flipped = bool(view_state.axis_flipped[self.axis])
         _set_text_if_changed(self.y_button, ("Y↓" if flipped else "Y↑") if is_y else "Y")
         _set_tooltip_if_changed(self.y_button, y_tooltip)
@@ -308,7 +320,9 @@ class DimensionStrip(QtWidgets.QWidget):
         self.setLayout(layout)
         self._sync_badge_widths(tuple(range(int(ndim))))
         self._relayout()
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum
+        )
 
     def set_profile_available(self, available: bool) -> None:
         """Profile toggles highlight only while the profile dock is visible."""
@@ -383,16 +397,17 @@ class DimensionStrip(QtWidgets.QWidget):
         if parent is previous:
             return
         if previous is not None:
-            try:
+            with contextlib.suppress(RuntimeError):
                 previous.removeEventFilter(self)
-            except RuntimeError:
-                pass
         self._watched_parent = parent
         if parent is not None:
             parent.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if obj is getattr(self, "_watched_parent", None) and event.type() == QtCore.QEvent.Type.Resize:
+        if (
+            obj is getattr(self, "_watched_parent", None)
+            and event.type() == QtCore.QEvent.Type.Resize
+        ):
             self._schedule_relayout()
         return super().eventFilter(obj, event)
 

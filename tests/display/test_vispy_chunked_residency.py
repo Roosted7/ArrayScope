@@ -9,6 +9,7 @@ draw parts over the surviving interior chunks. Reduced planes enter only as
 canonical page-backed payloads planned outside the backend.
 """
 
+import itertools
 from dataclasses import replace
 
 import numpy as np
@@ -33,7 +34,6 @@ from arrayscope.display.pyramid import (
     plan_source_grid_pages,
 )
 from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot
-
 from tests.display.vispy_test_utils import FakeGloo
 
 CHUNK = int(ANCHORED_CHUNK_SHAPE[0])
@@ -192,7 +192,9 @@ def commit_page_backed(pool, payload):
     return stats
 
 
-def anchored_payload(data, start, *, extent=EXTENT, content_key=CONTENT_KEY, tile_number=0, quality="exact"):
+def anchored_payload(
+    data, start, *, extent=EXTENT, content_key=CONTENT_KEY, tile_number=0, quality="exact"
+):
     plane = np.ascontiguousarray(data[:, start : start + extent])
     return DisplayTilePayload(
         tile_number=tile_number,
@@ -265,7 +267,8 @@ def test_chunk_plan_keys_and_rects():
     for chunk in plan:
         py0, py1, px0, px1 = chunk.plane_rect
         covered[py0:py1, px0:px1] += 1
-    assert covered.min() == 1 and covered.max() == 1
+    assert covered.min() == 1
+    assert covered.max() == 1
 
 
 def test_one_pixel_shift_uploads_only_boundary_chunks():
@@ -285,10 +288,10 @@ def test_one_pixel_shift_uploads_only_boundary_chunks():
     plane_a = data[:, 100 : 100 + EXTENT]
     page_index = next(iter(placements.values()))[0]
     page = pool.pages[page_index]
-    by_offset = {offset: content for offset, content in page.scalar_texture.uploads}
+    by_offset = dict(page.scalar_texture.uploads)
     plan = _payload_chunk_plan(anchored_payload(data, 100))
     for chunk in plan:
-        page_i, slot = placements[chunk.key]
+        _page_i, slot = placements[chunk.key]
         offset = page.offset_for_slot(slot)
         py0, py1, px0, px1 = chunk.plane_rect
         assert np.array_equal(by_offset[offset], plane_a[py0:py1, px0:px1])
@@ -312,8 +315,10 @@ def test_one_pixel_shift_uploads_only_boundary_chunks():
     assert area == HEIGHT * EXTENT
     xs = sorted({part.world_rect[0] for part in parts} | {part.world_rect[2] for part in parts})
     ys = sorted({part.world_rect[1] for part in parts} | {part.world_rect[3] for part in parts})
-    assert xs[0] == 0.0 and xs[-1] == float(EXTENT)
-    assert ys[0] == 0.0 and ys[-1] == float(HEIGHT)
+    assert xs[0] == 0.0
+    assert xs[-1] == float(EXTENT)
+    assert ys[0] == 0.0
+    assert ys[-1] == float(HEIGHT)
     # Boundary edges fall where native chunk boundaries map into the window.
     assert xs == [0.0, 155.0, 411.0, 667.0, 923.0, float(EXTENT)]
 
@@ -345,7 +350,9 @@ def test_chunk_eviction_invalidates_only_owning_tile():
         pool,
         {
             0: anchored_payload(data, 100, tile_number=0),
-            1: anchored_payload(other, 100, content_key=("src-anchored", "doc-B", "view"), tile_number=1),
+            1: anchored_payload(
+                other, 100, content_key=("src-anchored", "doc-B", "view"), tile_number=1
+            ),
         },
     )
     assert set(pool.tile_chunk_residency) == {0, 1}
@@ -372,7 +379,9 @@ def test_chunk_eviction_invalidates_only_owning_tile():
         pool,
         {
             0: anchored_payload(data, 100, tile_number=0),
-            1: anchored_payload(other, 100, content_key=("src-anchored", "doc-B", "view"), tile_number=1),
+            1: anchored_payload(
+                other, 100, content_key=("src-anchored", "doc-B", "view"), tile_number=1
+            ),
         },
     )
     assert pool.chunk_upload_count - uploads_before == 1
@@ -419,7 +428,8 @@ def test_chunked_to_classic_transition_releases_chunk_links():
     data = _data()
     pool = TextureAtlasPool(FakeGloo())
     commit(pool, {0: anchored_payload(data, 100)})
-    assert 0 in pool.tile_chunk_residency and 0 in pool.tile_draw_parts
+    assert 0 in pool.tile_chunk_residency
+    assert 0 in pool.tile_draw_parts
 
     classic = DisplayTilePayload(
         tile_number=0,
@@ -434,9 +444,7 @@ def test_chunked_to_classic_transition_releases_chunk_links():
     # Stale per-chunk draw parts must not survive a classic presentation.
     assert 0 not in pool.tile_draw_parts
     # The chunked tile-level key's records were dropped with the mapping.
-    assert ("window", 100, EXTENT, 0) not in {
-        source_id for source_id in pool.source_ids.values()
-    }
+    assert ("window", 100, EXTENT, 0) not in set(pool.source_ids.values())
     # The chunks themselves stay warm and reusable: re-presenting the
     # anchored payload re-links them without any texture upload.
     uploads_before = pool.chunk_upload_count
@@ -487,7 +495,7 @@ def test_warm_payloads_chunks_are_pure_residency_and_make_commit_upload_free():
         assert chunk.key in slots, f"warm chunk not resident: {chunk.key!r}"
         page_index, slot = slots[chunk.key]
         page = pool.pages[page_index]
-        by_offset = {offset: content for offset, content in page.scalar_texture.uploads}
+        by_offset = dict(page.scalar_texture.uploads)
         py0, py1, px0, px1 = chunk.plane_rect
         assert np.array_equal(by_offset[page.offset_for_slot(slot)], plane_b[py0:py1, px0:px1])
 
@@ -726,8 +734,6 @@ def test_eviction_free_placement_never_relocates_foreign_page_residents():
     allow_eviction=False a set straddling pages is a denial, not a move.
     """
 
-    import pytest as _pytest
-
     from arrayscope.gpu.page_table import PageSlot
 
     data = _data()
@@ -753,13 +759,11 @@ def test_eviction_free_placement_never_relocates_foreign_page_residents():
     pool._page_table.unbind(moved)
     target_page = pool.pages[target_index]
     new_slot = target_page.take_free_slot(moved)
-    pool._page_table.bind(
-        moved, PageSlot("vispy-atlas", target_index, new_slot), nbytes=0
-    )
+    pool._page_table.bind(moved, PageSlot("vispy-atlas", target_index, new_slot), nbytes=0)
 
     resident_before = dict(pool.resident_slots)
 
-    with _pytest.raises(AtlasCapacityError):
+    with pytest.raises(AtlasCapacityError):
         pool._chunk_slots_for(
             tuple(keys),
             protected_keys=set(),
@@ -829,7 +833,8 @@ def test_classic_re_present_of_same_key_clears_stale_draw_parts():
     data = _data()
     pool = TextureAtlasPool(FakeGloo())
     commit(pool, {0: anchored_payload(data, 100)})
-    assert 0 in pool.tile_draw_parts and 0 in pool.tile_chunk_residency
+    assert 0 in pool.tile_draw_parts
+    assert 0 in pool.tile_chunk_residency
 
     stats = commit_classic(pool, {0: anchored_payload(data, 100)})
     assert stats.presented_tiles == (0,)
@@ -840,7 +845,8 @@ def test_classic_re_present_of_same_key_clears_stale_draw_parts():
     # its classic slot stays resident.
     assert not pool._chunked_tile_keys
     rows = pool.tile_truth_physical_rows()
-    assert 0 in rows and rows[0]["physical_texture_dtype"] == "float32"
+    assert 0 in rows
+    assert rows[0]["physical_texture_dtype"] == "float32"
 
 
 def test_index_retarget_remap_keeps_chunked_records_and_draw_parts():
@@ -858,7 +864,9 @@ def test_index_retarget_remap_keeps_chunked_records_and_draw_parts():
         pool,
         {
             0: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A")),
-            1: anchored_content_payload(data_b, content_key=("doc", "B"), source_id=("plane", "B"), tile_number=1),
+            1: anchored_content_payload(
+                data_b, content_key=("doc", "B"), source_id=("plane", "B"), tile_number=1
+            ),
         },
     )
     assert set(pool.tile_chunk_residency) == {0, 1}
@@ -869,7 +877,9 @@ def test_index_retarget_remap_keeps_chunked_records_and_draw_parts():
         pool,
         {
             0: anchored_content_payload(data_c, content_key=("doc", "C"), source_id=("plane", "C")),
-            1: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"), tile_number=1),
+            1: anchored_content_payload(
+                data_a, content_key=("doc", "A"), source_id=("plane", "A"), tile_number=1
+            ),
         },
     )
     assert stats.presented_tiles == (0, 1)
@@ -882,7 +892,8 @@ def test_index_retarget_remap_keeps_chunked_records_and_draw_parts():
     # Every drawn tile has a physical truth row (the field showed phys
     # None/None on exactly the remapped tiles).
     rows = pool.tile_truth_physical_rows()
-    assert 0 in rows and 1 in rows
+    assert 0 in rows
+    assert 1 in rows
 
 
 def test_commit_end_sweep_reclaims_records_of_unpresented_chunked_keys():
@@ -897,13 +908,19 @@ def test_commit_end_sweep_reclaims_records_of_unpresented_chunked_keys():
     commit(pool, {0: payload_a})
     resident_key_a = next(iter(pool._chunked_tile_keys))
 
-    commit(pool, {0: anchored_content_payload(data_c, content_key=("doc", "C"), source_id=("plane", "C"))})
+    commit(
+        pool,
+        {0: anchored_content_payload(data_c, content_key=("doc", "C"), source_id=("plane", "C"))},
+    )
     assert resident_key_a not in pool._chunked_tile_keys
     assert resident_key_a not in pool.source_ids
     assert resident_key_a not in pool.physical_upload_records
     # Re-presenting A re-links the warm chunks and rebuilds its records.
     uploads_before = pool.chunk_upload_count
-    commit(pool, {0: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"))})
+    commit(
+        pool,
+        {0: anchored_content_payload(data_a, content_key=("doc", "A"), source_id=("plane", "A"))},
+    )
     assert pool.chunk_upload_count == uploads_before
     assert 0 in pool.tile_truth_physical_rows()
 
@@ -927,7 +944,8 @@ def test_warm_promoted_classic_tile_has_physical_truth_row():
     assert 0 in stats.presented_tiles
     assert stats.texture_uploads == 0  # promotion reuses the warm upload
     rows = pool.tile_truth_physical_rows()
-    assert 0 in rows and 1 in rows
+    assert 0 in rows
+    assert 1 in rows
     assert rows[0]["physical_texture_dtype"] == "float32"
 
 
@@ -1007,7 +1025,7 @@ def virtual_page_payload(key, value, *, tile_number):
     reduction = tuple(int(step) for step in key.lod.reduction)
     stored_shape = tuple(
         max(1, int(extent) // (1 << int(step)))
-        for extent, step in zip(key.chunk_shape, reduction)
+        for extent, step in zip(key.chunk_shape, reduction, strict=False)
     )
     return DisplayTilePayload(
         tile_number=int(tile_number),
@@ -1096,9 +1114,7 @@ def test_sequential_page_backed_uploads_reuse_free_class_slots_within_budget():
     # Texture bytes are based on the rounded atlas grid, not merely the
     # advertised logical slot capacity. Both the reuse decision and budget
     # gate must use this physical allocation truth.
-    logical_slot_bytes = sum(
-        int(page.capacity) * 256 * 256 * 4 for page in scalar_pages
-    )
+    logical_slot_bytes = sum(int(page.capacity) * 256 * 256 * 4 for page in scalar_pages)
     actual_page_bytes = sum(int(page.estimated_gpu_bytes) for page in scalar_pages)
     assert actual_page_bytes > logical_slot_bytes
     assert pool.estimated_gpu_bytes == actual_page_bytes
@@ -1135,10 +1151,12 @@ def test_page_backed_draw_parts_cover_exact_clipped_geometry_and_report_all_bind
 
     x_edges = sorted({edge for part in parts for edge in (part.world_rect[0], part.world_rect[2])})
     y_edges = sorted({edge for part in parts for edge in (part.world_rect[1], part.world_rect[3])})
-    assert x_edges[0] == 0.0 and x_edges[-1] == 12.0
-    assert y_edges[0] == 0.0 and y_edges[-1] == 4.0
-    for x0, x1 in zip(x_edges, x_edges[1:]):
-        for y0, y1 in zip(y_edges, y_edges[1:]):
+    assert x_edges[0] == 0.0
+    assert x_edges[-1] == 12.0
+    assert y_edges[0] == 0.0
+    assert y_edges[-1] == 4.0
+    for x0, x1 in itertools.pairwise(x_edges):
+        for y0, y1 in itertools.pairwise(y_edges):
             owners = sum(
                 int(
                     part.world_rect[0] <= x0 < x1 <= part.world_rect[2]
@@ -1200,9 +1218,7 @@ def test_clipped_coarse_fallback_uses_actual_page_bins_for_uv_mapping():
         )
         for part in parts
     ]
-    assert stored_x == pytest.approx(
-        [(0.0, 1.0 / 3.0), (1.0 / 3.0, 1.0), (1.0, 2.0), (2.0, 2.4)]
-    )
+    assert stored_x == pytest.approx([(0.0, 1.0 / 3.0), (1.0 / 3.0, 1.0), (1.0, 2.0), (2.0, 2.4)])
     assert stored_x[0][1] != pytest.approx(resolution.scale[1]), (
         "the nominal page-table affine cannot describe the clipped 3-sample "
         "leading bin; exact draw-block geometry must remain authoritative"
@@ -1237,10 +1253,7 @@ def test_page_backed_multi_tile_commit_preserves_every_tiles_page_mapping():
     assert set(pool.tile_page_target_resolutions) == {0, 1}
     assert set(pool.tile_draw_parts) >= {0, 1}
     assert all(pool.tile_draw_parts[tile] for tile in (0, 1))
-    assert all(
-        pool.tile_truth_physical_rows()[tile]["physical_page_bindings"]
-        for tile in (0, 1)
-    )
+    assert all(pool.tile_truth_physical_rows()[tile]["physical_page_bindings"] for tile in (0, 1))
 
 
 def test_missing_fine_target_binds_resident_coarse_page_without_upload():
@@ -1281,9 +1294,7 @@ def test_resident_fine_arrival_supersedes_coarse_with_zero_resolution_uploads():
         rgb_already_windowed=False,
     )
     assert warmed.texture_uploads == 1
-    uploads_before_resolution = sum(
-        len(page.scalar_texture.uploads) for page in pool.pages
-    )
+    uploads_before_resolution = sum(len(page.scalar_texture.uploads) for page in pool.pages)
 
     refined = pool.resolve_page_targets({7: target})[7]
 
@@ -1308,9 +1319,7 @@ def test_multi_page_candidate_replaces_pins_only_when_every_target_resolves():
         reserve_count=2,
     )
 
-    first = pool.resolve_tile_page_targets(
-        {7: (left, right)}, owner_scope=("session", 1)
-    )[7]
+    first = pool.resolve_tile_page_targets({7: (left, right)}, owner_scope=("session", 1))[7]
     assert first is not None
     assert tuple(item.actual_key for item in first) == (coarse, coarse)
     assert coarse not in pool._page_table.eviction_candidates()
@@ -1446,9 +1455,7 @@ def test_remap_generation_rebinds_target_instead_of_sampling_stale_slot():
     page._free_slots = [slot for slot in page._free_slots if int(slot) != 1]
     page._free_slots.append(0)
     pool._page_table.remap_slots(
-        lambda slot: PageSlot(slot.pool_id, slot.page_index, 1)
-        if slot == initial.slot
-        else slot
+        lambda slot: PageSlot(slot.pool_id, slot.page_index, 1) if slot == initial.slot else slot
     )
 
     remapped = pool.resolve_page_targets({7: target})[7]

@@ -6,9 +6,9 @@ from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
+import numpy as np
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
-import numpy as np
 
 from arrayscope.display.line_plot import LinePlotController
 from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
@@ -68,7 +68,9 @@ class ProfileDock(StandardDockWidget):
         self.resize(560, 260)
 
         self.axis_combo.currentIndexChanged.connect(self._axis_index_changed)
-        self.profile_mode_combo.currentIndexChanged.connect(lambda _index: parent.update_line_plot())
+        self.profile_mode_combo.currentIndexChanged.connect(
+            lambda _index: parent.update_line_plot()
+        )
         self.export_button.clicked.connect(self.export_profile)
 
     @property
@@ -98,10 +100,16 @@ class ProfileDock(StandardDockWidget):
         converted = []
         phase_strip = None
         for line_result, view_state, label in line_entries:
-            if phase_strip is None and self.profile_mode() == "abs_phase" and np.iscomplexobj(line_result.data):
+            if (
+                phase_strip is None
+                and self.profile_mode() == "abs_phase"
+                and np.iscomplexobj(line_result.data)
+            ):
                 phase_strip = np.angle(line_result.data)
             converted.append((self._line_result_for_mode(line_result), view_state, label))
-        self.line_plot.update_line_results(tuple(converted), y_range=y_range, phase_strip_data=phase_strip)
+        self.line_plot.update_line_results(
+            tuple(converted), y_range=y_range, phase_strip_data=phase_strip
+        )
 
     def profile_mode(self):
         return self.profile_mode_combo.currentData() or "abs"

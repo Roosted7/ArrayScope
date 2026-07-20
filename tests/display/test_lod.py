@@ -1,9 +1,9 @@
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
     LOD_REASON_BACKEND_ADOPTION_PENDING,
+    LOD_REASON_INVALID_VIEW,
     LOD_REASON_NATIVE_POLICY,
     LOD_REASON_NATIVE_SCALE,
-    LOD_REASON_INVALID_VIEW,
     inner_uv_for_gutter,
     native_lod_policy,
     select_lod_demand,

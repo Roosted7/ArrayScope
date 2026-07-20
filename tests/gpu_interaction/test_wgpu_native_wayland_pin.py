@@ -26,16 +26,11 @@ import pytest
 pytest.importorskip("wgpu")
 
 PROBE = (
-    Path(__file__).resolve().parents[2]
-    / "experiments"
-    / "wgpu_gate_b"
-    / "probe_native_wayland.py"
+    Path(__file__).resolve().parents[2] / "experiments" / "wgpu_gate_b" / "probe_native_wayland.py"
 )
 
 
-@pytest.mark.skipif(
-    not os.environ.get("WAYLAND_DISPLAY"), reason="needs a live Wayland session"
-)
+@pytest.mark.skipif(not os.environ.get("WAYLAND_DISPLAY"), reason="needs a live Wayland session")
 def test_qt_winid_is_the_wl_surface_and_presentation_succeeds(tmp_path):
     out = tmp_path / "probe.json"
     env = dict(os.environ, QT_QPA_PLATFORM="wayland")
@@ -43,6 +38,7 @@ def test_qt_winid_is_the_wl_surface_and_presentation_succeeds(tmp_path):
         [sys.executable, str(PROBE), str(out)],
         env=env,
         capture_output=True,
+        check=False,
         text=True,
         timeout=120,
     )

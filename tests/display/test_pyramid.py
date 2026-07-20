@@ -13,8 +13,8 @@ from arrayscope.display.lod import (
     LOD_REASON_RESIDENT_NATIVE_FALLBACK,
     choose_resident_level,
     factor_xy_for_level,
-    resident_presentation_rank,
     resident_lod_policy,
+    resident_presentation_rank,
     select_lod_demand,
 )
 from arrayscope.display.pyramid import (
@@ -76,7 +76,9 @@ class TestReduceBoxMean:
         np.testing.assert_allclose(reduced_y[0], [6.0, 7.0, 8.0, 9.0])
 
     def test_complex_input_reduces_per_component(self):
-        array = (np.arange(8, dtype=np.float64) + 1j * np.arange(8, dtype=np.float64)[::-1]).reshape(2, 4)
+        array = (
+            np.arange(8, dtype=np.float64) + 1j * np.arange(8, dtype=np.float64)[::-1]
+        ).reshape(2, 4)
 
         reduced = reduce_box_mean(array, (2, 2))
 
@@ -277,7 +279,7 @@ class TestSourceGridMeanReduction:
         assert result.reduction_vector_xy == (2, 1)
         assert result.grid_origin_yx == (4, 8)
         assert np.asarray(result.values).shape == (4, 3)
-        assert tuple(result.source_rects)[0] == (5, 6, 9, 12)
+        assert next(iter(result.source_rects)) == (5, 6, 9, 12)
         assert tuple(result.source_rects)[-1] == (10, 12, 16, 20)
 
     def test_reported_coverage_partitions_valid_rect_without_gaps_or_overlaps(self):
@@ -291,7 +293,9 @@ class TestSourceGridMeanReduction:
             reduction_vector_xy=(2, 1),
         )
 
-        coverage = np.zeros((valid_rect[1] - valid_rect[0], valid_rect[3] - valid_rect[2]), dtype=np.uint8)
+        coverage = np.zeros(
+            (valid_rect[1] - valid_rect[0], valid_rect[3] - valid_rect[2]), dtype=np.uint8
+        )
         for y0, y1, x0, x1 in result.source_rects:
             assert valid_rect[0] <= y0 < y1 <= valid_rect[1]
             assert valid_rect[2] <= x0 < x1 <= valid_rect[3]
@@ -433,4 +437,4 @@ class TestResidentSelectionHelpers:
 
         for level in (1, 2, 3):
             factor_x, factor_y = factor_xy_for_level(demand, level)
-            assert max(factor_x, factor_y) == 2 ** level
+            assert max(factor_x, factor_y) == 2**level

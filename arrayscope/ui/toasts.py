@@ -7,7 +7,6 @@ from html import escape
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
-
 _STATUS_LANE_GAP = 12
 
 
@@ -38,8 +37,7 @@ def show_status_message(window, message, timeout=4000):
         label.setObjectName("ArrayScopeStatusMessageLabel")
         label.setTextFormat(Qt.QtCore.Qt.TextFormat.PlainText)
         label.setAlignment(
-            Qt.QtCore.Qt.AlignmentFlag.AlignRight
-            | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter
+            Qt.QtCore.Qt.AlignmentFlag.AlignRight | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter
         )
         label.setAttribute(Qt.QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         window._arrayscope_status_message_widget = label
@@ -183,8 +181,7 @@ def _layout_status_widgets(window) -> None:
         _set_status_message_text(status_label, available)
         status_width = min(max(1, status_label.sizeHint().width()), max(1, available))
         status_label.setAlignment(
-            Qt.QtCore.Qt.AlignmentFlag.AlignRight
-            | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter
+            Qt.QtCore.Qt.AlignmentFlag.AlignRight | Qt.QtCore.Qt.AlignmentFlag.AlignVCenter
         )
         status_label.setGeometry(
             rect.left() + rect.width() - status_width,
@@ -207,9 +204,7 @@ def _is_visible_widget(widget) -> bool:
 def _set_status_action_text(widget) -> None:
     message = str(widget.property("arrayscope_status_action_message") or "")
     action_text = str(widget.property("arrayscope_status_action_text") or "")
-    widget.setText(
-        f"{escape(message)} <a href=\"action\">{escape(action_text)}</a>"
-    )
+    widget.setText(f'{escape(message)} <a href="action">{escape(action_text)}</a>')
 
 
 def _set_status_message_text(widget, available_width: int | None) -> None:

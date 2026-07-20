@@ -48,7 +48,9 @@ class LatencyFeedbackController:
     def reset_channel(self, channel: str) -> None:
         self._channels.pop(str(channel), None)
 
-    def observe(self, channel: str, elapsed_ms: float, *, count: int = 1, byte_count: int = 0) -> None:
+    def observe(
+        self, channel: str, elapsed_ms: float, *, count: int = 1, byte_count: int = 0
+    ) -> None:
         state = self._channels.setdefault(str(channel), LatencyFeedbackChannel())
         elapsed = max(0.0, float(elapsed_ms))
         count = max(1, int(count))
@@ -98,7 +100,9 @@ class LatencyFeedbackController:
         return tuple(self.channel_snapshot(channel) for channel in sorted(self._channels))
 
     def _target(self, interactive: bool) -> float:
-        return float(self.tuning.target_interactive_ms if interactive else self.tuning.target_idle_ms)
+        return float(
+            self.tuning.target_interactive_ms if interactive else self.tuning.target_idle_ms
+        )
 
 
 def _ewma(previous: float | None, value: float, alpha: float) -> float:

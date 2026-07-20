@@ -3,9 +3,8 @@ import pytest
 
 from arrayscope.core.view_state import ChannelMode, ScaleMode, ViewState
 from arrayscope.operations import fft_backend
-from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.chunked import evaluate_image_snapshot_chunked
-from arrayscope.operations.evaluator import EvaluationResult, evaluate_image_snapshot
+from arrayscope.operations.evaluator import evaluate_image_snapshot
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Mean
 
 
@@ -80,7 +79,9 @@ def test_chunked_shader_complex_keeps_raw_texture_and_scaled_histogram():
         .with_scale(ScaleMode.LOG)
     )
 
-    chunked = evaluate_image_snapshot_chunked(document, state, chunk_axis=0, chunk_size=3, shader_display=True)
+    chunked = evaluate_image_snapshot_chunked(
+        document, state, chunk_axis=0, chunk_size=3, shader_display=True
+    )
 
     assert chunked.value.texture_kind == "complex_rg32f"
     assert np.iscomplexobj(chunked.value.data)
@@ -96,7 +97,9 @@ def test_chunked_evaluation_stops_when_cancelled_before_next_chunk(monkeypatch):
     state = ViewState.from_shape(document.current_shape)
 
     with pytest.raises(Exception) as exc_info:
-        evaluate_image_snapshot_chunked(document, state, chunk_axis=0, chunk_size=2, cancellation_token=token)
+        evaluate_image_snapshot_chunked(
+            document, state, chunk_axis=0, chunk_size=2, cancellation_token=token
+        )
     assert type(exc_info.value).__name__ == "EvaluationCancelled"
 
 
@@ -108,7 +111,9 @@ def test_chunked_cancellation_after_fft_runtime_options_change(monkeypatch):
     state = ViewState.from_shape(document.current_shape)
 
     with pytest.raises(Exception) as exc_info:
-        evaluate_image_snapshot_chunked(document, state, chunk_axis=0, chunk_size=2, cancellation_token=token)
+        evaluate_image_snapshot_chunked(
+            document, state, chunk_axis=0, chunk_size=2, cancellation_token=token
+        )
     assert type(exc_info.value).__name__ == "EvaluationCancelled"
 
 

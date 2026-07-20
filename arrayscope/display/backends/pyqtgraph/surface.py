@@ -11,4 +11,5 @@ class PyQtGraphSurface(ImageView2D):
     def interaction_event_owner(self) -> str:
         return "shared-controller"
 
+
 __all__ = ["PyQtGraphSurface"]

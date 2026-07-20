@@ -5,14 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
-from typing import Iterable
+from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
-
 
 JOURNEYS = ("cold_fill", "zoom_in", "zoom_out", "scroll_shuffle", "index_scroll")
 BACKENDS = ("vispy", "pyqtgraph", "wgpu")
@@ -84,7 +83,9 @@ def _gesture_intervals(events: Iterable[dict[str, object]]) -> list[dict[str, ob
         if event.get("edge") == "start":
             starts[gesture_id] = event
         elif event.get("edge") == "complete" and gesture_id in starts:
-            intervals.append({"gesture_id": gesture_id, "start": starts.pop(gesture_id), "end": event})
+            intervals.append(
+                {"gesture_id": gesture_id, "start": starts.pop(gesture_id), "end": event}
+            )
     intervals.extend(
         {"gesture_id": gesture_id, "start": start, "end": None}
         for gesture_id, start in starts.items()
@@ -101,7 +102,9 @@ def _pixel_change_fraction(before_path: str | Path, after_path: str | Path) -> f
     return float(np.count_nonzero(changed) / max(1, changed.size))
 
 
-def _first_new_pixels(samples: list[dict[str, object]]) -> tuple[float | None, dict[str, object] | None]:
+def _first_new_pixels(
+    samples: list[dict[str, object]],
+) -> tuple[float | None, dict[str, object] | None]:
     baseline = next((row for row in samples if row.get("reason") == "journey-start"), None)
     if baseline is None or not bool(baseline.get("screenshot_saved", False)):
         return None, None
@@ -163,9 +166,7 @@ def _presentation_oracle(
             and "cold_upsert_tiles" in event
             and limit > 0
             and len(cold_upserts) <= limit
-            and set(int(tile) for tile in cold_upserts).issubset(
-                int(row[0]) for row in delta
-            )
+            and {int(tile) for tile in cold_upserts}.issubset(int(row[0]) for row in delta)
         )
         if limit > 0 and len(delta) > limit:
             record = {
@@ -182,13 +183,13 @@ def _presentation_oracle(
                     }
                 )
             elif zero_upload_rebind:
-                cap_exemptions.append(
-                    {**record, "reason": f"{backend}_zero_upload_rebind"}
-                )
+                cap_exemptions.append({**record, "reason": f"{backend}_zero_upload_rebind"})
             else:
                 bounded_failures.append(record)
         elif limit <= 0 and reason not in {"atomic_successor", "first_cpu_frame"}:
-            bounded_failures.append({"sequence": event.get("sequence"), "size": len(delta), "limit": None})
+            bounded_failures.append(
+                {"sequence": event.get("sequence"), "size": len(delta), "limit": None}
+            )
         ranks = {
             int(tile): rank
             for tile, rank in tuple(event.get("delta_priority_ranks", ()) or ())
@@ -202,7 +203,9 @@ def _presentation_oracle(
                 scheduling_ranks.append(float(ranks[tile] - rank_origin))
     rho = _pearson(commit_ordinals, scheduling_ranks)
     correlation_applicable = len(set(commit_ordinals)) >= 2 and len(set(scheduling_ranks)) >= 2
-    priority_ok = not correlation_applicable or (rho is not None and rho >= MIN_PRIORITY_CORRELATION)
+    priority_ok = not correlation_applicable or (
+        rho is not None and rho >= MIN_PRIORITY_CORRELATION
+    )
     return {
         "minimum_commits": minimum,
         "commit_count": len(deltas),
@@ -229,7 +232,9 @@ def evaluate_gesture(
     gesture_id = str(interval["gesture_id"])
     start_ns = int(start.get("ts_ns", 0) or 0)
     end_ns = int(dict(end or {}).get("ts_ns", 2**63 - 1) or (2**63 - 1))
-    segment = [event for event in trace_events if start_ns <= int(event.get("ts_ns", 0) or 0) <= end_ns]
+    segment = [
+        event for event in trace_events if start_ns <= int(event.get("ts_ns", 0) or 0) <= end_ns
+    ]
     commits = [
         event
         for event in segment
@@ -253,9 +258,7 @@ def evaluate_gesture(
             (sample for sample in reversed(samples) if sample.get("reason") == "journey-end"),
             None,
         )
-        final_camera = (
-            None if final_sample is None else final_sample.get("camera_desired_level")
-        )
+        final_camera = None if final_sample is None else final_sample.get("camera_desired_level")
         confirm_ns = None
         for sample in samples:
             sample_ns = int(sample.get("monotonic_ns", 0) or 0)
@@ -308,16 +311,10 @@ def evaluate_gesture(
     )
     coverage_pass_observed = bool(close_event is not None or not coverage_open_observed)
     close_ns = (
-        start_ns
-        if close_event is None
-        else int(close_event.get("ts_ns", start_ns) or start_ns)
+        start_ns if close_event is None else int(close_event.get("ts_ns", start_ns) or start_ns)
     )
     convergence_events = (
-        [
-            event
-            for event in commits
-            if int(event.get("ts_ns", 0) or 0) >= close_ns
-        ]
+        [event for event in commits if int(event.get("ts_ns", 0) or 0) >= close_ns]
         if coverage_pass_observed
         else []
     )
@@ -329,7 +326,9 @@ def evaluate_gesture(
         applied = event.get("applied_level")
         if desired is None or applied is None or int(applied) > int(desired):
             continue
-        level_convergence_ms = (int(event.get("ts_ns", close_ns) or close_ns) - close_ns) / 1_000_000.0
+        level_convergence_ms = (
+            int(event.get("ts_ns", close_ns) or close_ns) - close_ns
+        ) / 1_000_000.0
         break
 
     presentation = _presentation_oracle(commits, backend=backend, journey=journey)
@@ -400,9 +399,7 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
     rows = []
     for backend in BACKENDS:
         instances_by_journey = {journey: [] for journey in JOURNEYS}
-        unsupported_by_journey: dict[str, set[str]] = {
-            journey: set() for journey in JOURNEYS
-        }
+        unsupported_by_journey: dict[str, set[str]] = {journey: set() for journey in JOURNEYS}
         for run_name, (_stages, owned_journeys) in DRIVER_RUNS.items():
             output = artifact_dir / backend / run_name
             unsupported_path = output / "unsupported.json"
@@ -488,9 +485,7 @@ def _wgpu_cold_runtime_clean(stderr: str) -> bool:
         "ValueError:",
     )
     return not any(
-        marker in line
-        for line in str(stderr).splitlines()
-        for marker in exception_prefixes
+        marker in line for line in str(stderr).splitlines() for marker in exception_prefixes
     )
 
 
@@ -506,10 +501,7 @@ def _classify_reference_blocked_wgpu_rows(
     passes or the reference no longer has the identical isolated failure.
     """
 
-    indexed = {
-        (str(row.get("backend", "")), str(row.get("journey", ""))): row
-        for row in rows
-    }
+    indexed = {(str(row.get("backend", "")), str(row.get("journey", ""))): row for row in rows}
     vispy = indexed.get(("vispy", "cold_fill"))
     wgpu = indexed.get(("wgpu", "cold_fill"))
     if (
@@ -522,9 +514,7 @@ def _classify_reference_blocked_wgpu_rows(
     ):
         return
     wgpu["status"] = "unsupported"
-    wgpu["unsupported_reasons"] = [
-        "reference_vispy_cold_level_convergence_standing_red"
-    ]
+    wgpu["unsupported_reasons"] = ["reference_vispy_cold_level_convergence_standing_red"]
     wgpu["ok"] = True
 
 
@@ -582,9 +572,7 @@ def run_matrix(args) -> int:
                 data=args.data,
                 stages=stages,
                 output=output,
-                wgpu_present_method=str(
-                    getattr(args, "wgpu_present_method", "bitmap") or "bitmap"
-                ),
+                wgpu_present_method=str(getattr(args, "wgpu_present_method", "bitmap") or "bitmap"),
             )
             env = dict(os.environ)
             if args.offscreen_smoke:
@@ -593,9 +581,10 @@ def run_matrix(args) -> int:
                 raise SystemExit("real journey ring requires QT_QPA_PLATFORM=wayland")
             stdout_path = output / "driver.stdout.log"
             stderr_path = output / "driver.stderr.log"
-            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-                "w", encoding="utf-8"
-            ) as stderr:
+            with (
+                stdout_path.open("w", encoding="utf-8") as stdout,
+                stderr_path.open("w", encoding="utf-8") as stderr,
+            ):
                 try:
                     completed = subprocess.run(
                         command,
@@ -653,12 +642,9 @@ def run_matrix(args) -> int:
     report["driver_failures"] = failures
     report["driver_unsupported"] = unsupported_runs
     report["ring"] = "offscreen-smoke" if args.offscreen_smoke else "real-wayland"
-    report["wgpu_present_method"] = str(
-        getattr(args, "wgpu_present_method", "bitmap") or "bitmap"
-    )
+    report["wgpu_present_method"] = str(getattr(args, "wgpu_present_method", "bitmap") or "bitmap")
     report["ok"] = bool(
-        report["ok"]
-        and not any("timed_out_after_s" in failure for failure in failures)
+        report["ok"] and not any("timed_out_after_s" in failure for failure in failures)
     )
     (artifact_dir / "journey-matrix.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",

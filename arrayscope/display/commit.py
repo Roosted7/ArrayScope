@@ -7,9 +7,14 @@ from dataclasses import replace
 import numpy as np
 
 from arrayscope.display.backends import surface_for_view
-from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
-from arrayscope.display.model.frame import CommittedDisplayFrame, DisplayFrameKey, TileCommitReport, TiledValueSource
 from arrayscope.display.model.commit import DisplayTiledPresentation
+from arrayscope.display.model.frame import (
+    CommittedDisplayFrame,
+    DisplayFrameKey,
+    TileCommitReport,
+    TiledValueSource,
+)
+from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
 
 
 class DisplayCommitter:
@@ -19,7 +24,9 @@ class DisplayCommitter:
         self.last_tile_commit_report: TileCommitReport | None = None
         self.last_tile_committed_state = None
 
-    def commit_tile_layer(self, presentation: DisplayTiledPresentation, key: DisplayFrameKey) -> CommittedDisplayFrame:
+    def commit_tile_layer(
+        self, presentation: DisplayTiledPresentation, key: DisplayFrameKey
+    ) -> CommittedDisplayFrame:
         self._validate_presentation(presentation)
         self.commit_tiled_delta(presentation)
         committed_state = self.last_tile_committed_state or presentation.base_tile_state
@@ -62,7 +69,10 @@ class DisplayCommitter:
             histogram_data=histogram_data,
             geometry=presentation.geometry,
             levels=(float(presentation.levels[0]), float(presentation.levels[1])),
-            histogram_range=(float(presentation.histogram_range[0]), float(presentation.histogram_range[1])),
+            histogram_range=(
+                float(presentation.histogram_range[0]),
+                float(presentation.histogram_range[1]),
+            ),
             key=key,
             value_source=value_source,
             scene=scene,
@@ -72,9 +82,7 @@ class DisplayCommitter:
         for tile_number, payload in dict(presentation.tile_state.payloads).items():
             if int(tile_number) != int(payload.tile_number):
                 raise ValueError("tile payload key must match tile_number")
-        transaction_payloads = presentation.tile_state.active_payloads(
-            presentation.tile_delta
-        )
+        transaction_payloads = presentation.tile_state.active_payloads(presentation.tile_delta)
         transaction_payloads.update(presentation.tile_delta.upserts)
         for tile_number, payload in transaction_payloads.items():
             if int(tile_number) != int(payload.tile_number):
@@ -82,14 +90,16 @@ class DisplayCommitter:
             identity = getattr(payload, "presentation_identity", None)
             if (
                 identity is None
-                or int(identity.levels_generation)
-                != int(presentation.tile_delta.level_revision)
+                or int(identity.levels_generation) != int(presentation.tile_delta.level_revision)
                 or identity.levels != tuple(float(value) for value in presentation.levels)
             ):
                 raise ValueError(
                     "tile delta payload must name the transaction's accepted level generation"
                 )
-        if presentation.histogram_plot_data is not None and np.asarray(presentation.histogram_plot_data).size < 1:
+        if (
+            presentation.histogram_plot_data is not None
+            and np.asarray(presentation.histogram_plot_data).size < 1
+        ):
             raise ValueError("histogram plot data must not be empty")
         self._validate_bounds("levels", presentation.levels)
         self._validate_bounds("histogram range", presentation.histogram_range)

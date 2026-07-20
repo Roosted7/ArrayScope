@@ -39,7 +39,8 @@ def test_user_colormap_round_trip_and_shadowing():
     assert info.source == "user"
 
     found = library.find_colormap("test-hot")
-    assert found is not None and found.stops == info.stops
+    assert found is not None
+    assert found.stops == info.stops
     lut = library.get_colormap("test-hot").getLookupTable(0.0, 1.0, 3, alpha=False)
     assert tuple(lut[0]) == (0, 0, 0)
     assert tuple(lut[-1]) == (255, 255, 0)
@@ -55,9 +56,7 @@ def test_user_colormap_round_trip_and_shadowing():
 def test_import_matlab_colormap(tmp_path):
     from scipy.io import savemat
 
-    table = np.column_stack(
-        [np.linspace(0, 1, 16), np.zeros(16), np.linspace(1, 0, 16)]
-    )
+    table = np.column_stack([np.linspace(0, 1, 16), np.zeros(16), np.linspace(1, 0, 16)])
     path = tmp_path / "mymap.mat"
     savemat(path, {"mymap": table})
 
@@ -150,7 +149,8 @@ def test_builtin_override_and_reset():
     library.save_user_colormap("viridis", library.SEQUENTIAL, stops)
     assert library.overrides_builtin("viridis")
     info = library.find_colormap("viridis")
-    assert info.source == "user" and info.group == library.builtin_group_for("viridis")
+    assert info.source == "user"
+    assert info.group == library.builtin_group_for("viridis")
     assert library.reset_builtin("viridis")
     assert library.find_colormap("viridis").source == "builtin"
 
@@ -158,17 +158,17 @@ def test_builtin_override_and_reset():
 def test_kind_detection_on_real_maps():
     detect = library.detect_colormap_kind
     kind, confidence = detect(library.colormap_stops("RomaO", 33))
-    assert kind == library.CYCLIC and confidence > 0.9
+    assert kind == library.CYCLIC
+    assert confidence > 0.9
     kind, confidence = detect(library.colormap_stops("Vik", 33))
-    assert kind == library.DIVERGING and confidence > 0.9
+    assert kind == library.DIVERGING
+    assert confidence > 0.9
     kind, _confidence = detect(library.colormap_stops("Batlow", 33))
     assert kind == library.SEQUENTIAL
 
 
 def test_import_auto_detects_cyclic(tmp_path):
-    table = np.asarray(
-        [library.get_colormap("RomaO").getLookupTable(0.0, 1.0, 64, alpha=False)]
-    )[0]
+    table = np.asarray([library.get_colormap("RomaO").getLookupTable(0.0, 1.0, 64, alpha=False)])[0]
     path = tmp_path / "wrapped.csv"
     np.savetxt(path, table, delimiter=",")
     info = library.import_colormap_file(str(path), name="wrapped")

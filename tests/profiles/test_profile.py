@@ -4,7 +4,6 @@ from pathlib import Path
 from arrayscope.core.view_state import ViewState
 from arrayscope.profiles import model as profile
 
-
 ROOT = Path(__file__).parents[2]
 
 
@@ -38,4 +37,3 @@ def test_profile_module_has_no_qt_or_pyqtgraph_imports():
 
     assert "pyqtgraph" not in imported_roots
     assert not any(name.startswith(("PyQt", "PySide")) for name in imported_roots)
-

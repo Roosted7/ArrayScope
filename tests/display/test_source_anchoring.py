@@ -12,11 +12,11 @@ from arrayscope.display.source_anchoring import (
     source_anchoring_for_view,
 )
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate
-
 from tests.display.vispy_test_utils import FakeDisplayImage
 
-
-TARGET = FrameTarget(semantic_key="test", viewport_key=None, presentation_key=None, quality="exact-visible")
+TARGET = FrameTarget(
+    semantic_key="test", viewport_key=None, presentation_key=None, quality="exact-visible"
+)
 
 
 def windowed_state(shape, *, x_range=None, y_range=None):
@@ -66,17 +66,22 @@ class TestAnchoringDecision:
         assert anchoring.anchored_starts == (0, 100)
 
     def test_fft_on_displayed_axis_blocks_that_axis_only(self):
-        document = ArrayDocument(np.zeros((512, 512), dtype=np.complex64), operations=(CenteredFFT(axis=1),))
+        document = ArrayDocument(
+            np.zeros((512, 512), dtype=np.complex64), operations=(CenteredFFT(axis=1),)
+        )
         state = windowed_state((512, 512), x_range=(100, 200), y_range=(50, 400))
         anchoring = source_anchoring_for_view(document, state)
         assert anchoring is not None
         assert anchoring.anchored_starts == (50, None)
 
     def test_elementwise_chain_still_anchors(self):
-        document = ArrayDocument(np.zeros((512, 512), dtype=np.complex64), operations=(Conjugate(),))
+        document = ArrayDocument(
+            np.zeros((512, 512), dtype=np.complex64), operations=(Conjugate(),)
+        )
         state = windowed_state((512, 512), x_range=(100, 200))
         anchoring = source_anchoring_for_view(document, state)
-        assert anchoring is not None and anchoring.any_anchored
+        assert anchoring is not None
+        assert anchoring.any_anchored
 
     def test_non_contiguous_window_does_not_anchor_its_axis(self):
         document = ArrayDocument(np.zeros((512, 512), dtype=np.float32))
@@ -91,7 +96,9 @@ class TestAnchoringDecision:
         b = source_anchoring_for_view(document, windowed_state((512, 512), x_range=(101, 201)))
         assert a.content_key == b.content_key
         # A data revision bump changes content identity.
-        bumped = source_anchoring_for_view(document.mark_base_data_changed(), windowed_state((512, 512), x_range=(100, 200)))
+        bumped = source_anchoring_for_view(
+            document.mark_base_data_changed(), windowed_state((512, 512), x_range=(100, 200))
+        )
         assert bumped.content_key != a.content_key
 
 
@@ -102,8 +109,12 @@ class TestAnchoredPlan:
         document = ArrayDocument(np.zeros((2048, 4096), dtype=np.float32))
         old_state = windowed_state((2048, 4096), x_range=(100, 100 + extent))
         new_state = windowed_state((2048, 4096), x_range=(101, 101 + extent))
-        old_plan = plan_for(old_state, (2048, extent), source_anchoring_for_view(document, old_state))
-        new_plan = plan_for(new_state, (2048, extent), source_anchoring_for_view(document, new_state))
+        old_plan = plan_for(
+            old_state, (2048, extent), source_anchoring_for_view(document, old_state)
+        )
+        new_plan = plan_for(
+            new_state, (2048, extent), source_anchoring_for_view(document, new_state)
+        )
         assert old_plan.source_content_key == new_plan.source_content_key
         old_rects = {region.source_rect for region in old_plan.regions}
         new_rects = {region.source_rect for region in new_plan.regions}
@@ -155,7 +166,9 @@ class TestAnchoredSourceIds:
         plan = plan_for(state, (512, 512), None)
         region = plan.regions[0]
         image = FakeDisplayImage(np.zeros((512, 512), dtype=np.float32))
-        first = EagerDisplayRegionSource(image, source_key="k").read_region(region, quality="exact-visible")
+        first = EagerDisplayRegionSource(image, source_key="k").read_region(
+            region, quality="exact-visible"
+        )
         other = EagerDisplayRegionSource(
             FakeDisplayImage(np.zeros((512, 512), dtype=np.float32)), source_key="k"
         ).read_region(region, quality="exact-visible")

@@ -142,7 +142,7 @@ class DataChunkKey:
 
     @property
     def stop(self) -> tuple[int, ...]:
-        return tuple(o + s for o, s in zip(self.chunk_origin, self.chunk_shape))
+        return tuple(o + s for o, s in zip(self.chunk_origin, self.chunk_shape, strict=False))
 
 
 @dataclass(frozen=True)

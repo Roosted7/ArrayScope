@@ -42,6 +42,8 @@ pytestmark = pytest.mark.skipif(
     reason="needs ARRAYSCOPE_STRESS=1, a real display, and the local NIfTI dataset",
 )
 
+import contextlib
+
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_MS,
     INTERACTION_SETTLE_HARD_LIMIT_S,
@@ -51,7 +53,6 @@ from arrayscope.tools.interaction_budget import (
 # operation on this hardware. The five-second interaction budget above
 # applies to per-gesture probes only.
 _FILL_TIMEOUT_S = 120
-
 
 
 # PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
@@ -166,13 +167,13 @@ def _dump_convergence_state(win, label: str) -> None:
     for attr in ("_queues", "_pending", "_heap", "_tasks"):
         value = getattr(kernel, attr, None)
         if value is not None:
-            try:
+            with contextlib.suppress(TypeError):
                 print(f"[{label}] kernel.{attr}: size={len(value)}")
-            except TypeError:
-                pass
     coordinator = getattr(win, "render_coordinator", None)
-    print(f"[{label}] coordinator pending_render={getattr(coordinator, 'has_pending_render', None)} "
-          f"backpressure_skips={getattr(coordinator, 'presentation_backpressure_skips', None)}")
+    print(
+        f"[{label}] coordinator pending_render={getattr(coordinator, 'has_pending_render', None)} "
+        f"backpressure_skips={getattr(coordinator, 'presentation_backpressure_skips', None)}"
+    )
     renderer = win.renderer
     print(
         f"[{label}] commit outcome={getattr(renderer, '_last_montage_commit_outcome', None)} "
@@ -194,22 +195,22 @@ def _dump_convergence_state(win, label: str) -> None:
     print(
         f"[{label}] after manual retarget: "
         f"target_unsettled={len(session.required_target_unsettled_tiles())} "
-          f"active={len(session.active_tile_requests)} "
+        f"active={len(session.active_tile_requests)} "
         f"fanin_active={len(getattr(fan_in, 'active_requests', ()) or ())}"
     )
 
 
 def _build_fft_montage_window(qtbot):
-    from tests.ui.helpers import make_backend_window, use_vispy_backend
-
     # Doctrine (docs/testing/stress-and-trace-strategy.md): every harness run
     # records a complete trace. The bounded watchdog ring only covers the
     # FIRST stall; the compound churn stalls need the full stream.
     from arrayscope.core.trace import configure_trace
+    from tests.ui.helpers import make_backend_window, use_vispy_backend
 
-    trace_path = Path(
-        os.environ.get("ARRAYSCOPE_ARTIFACT_DIR", "/tmp")
-    ) / f"arrayscope-churn-{os.getpid()}.trace.jsonl"
+    trace_path = (
+        Path(os.environ.get("ARRAYSCOPE_ARTIFACT_DIR", "/tmp"))
+        / f"arrayscope-churn-{os.getpid()}.trace.jsonl"
+    )
     configure_trace(trace_path)
     print(f"[harness] full trace: {trace_path}")
 

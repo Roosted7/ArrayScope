@@ -73,10 +73,13 @@ class StubEffects:
         self.last_intent = intent
         self.last_demand = demand
         self.last_scope = scope
-        numbers = tuple(scope.visible_tile_numbers) if scope.visible_tile_numbers else tuple(range(self.tiles))
+        numbers = (
+            tuple(scope.visible_tile_numbers)
+            if scope.visible_tile_numbers
+            else tuple(range(self.tiles))
+        )
         return tuple(
-            self.states.get(number, TileLodState(tile_number=number))
-            for number in sorted(numbers)
+            self.states.get(number, TileLodState(tile_number=number)) for number in sorted(numbers)
         )
 
     def prepare_rung(self, intent, step):
@@ -100,7 +103,9 @@ class StubEffects:
         return tuple(self.deps.get(step.tile_number, ()))
 
     def rung_admitted(self, intent, step, task_key):
-        self.admitted.append((intent.semantic_key, step.tile_number, int(step.rung), step.level, task_key))
+        self.admitted.append(
+            (intent.semantic_key, step.tile_number, int(step.rung), step.level, task_key)
+        )
 
     def rung_dropped(self, intent, step):
         self.last_intent = intent
@@ -325,7 +330,9 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
     assert effects.evaluated == [(0, 0, 4), (0, 1, 2)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
-    effects.states[0] = TileLodState(tile_number=0, presented_level=2, resident_levels=(2,), presented_quality="preview")
+    effects.states[0] = TileLodState(
+        tile_number=0, presented_level=2, resident_levels=(2,), presented_quality="preview"
+    )
     effects.phase = SchedulingPhase.REFINE
     assert pipeline.retarget(intent(interactive=False), demand(0), scope(0)) == 1
     drain(kernel)
@@ -491,7 +498,7 @@ def test_dropped_queued_rung_releases_prepared_state():
 
 
 def test_counters_track_pipeline_activity():
-    kernel, effects, pipeline = make_pipeline(tiles=1)
+    kernel, _effects, pipeline = make_pipeline(tiles=1)
     pipeline.retarget(intent(), demand(1), scope(0))
     drain(kernel)
     counts = pipeline.counters.as_dict()
@@ -548,7 +555,9 @@ def test_retarget_plans_visible_scope_only_not_coverage_or_near_tiles():
 
     submitted_tiles = {int(spec.key.tile_number) for spec in kernel.specs}
     assert submitted_tiles == {2, 4}
-    assert all(spec.lane in (Lane.DISPLAY_PREVIEW, Lane.DISPLAY_PREPARATION) for spec in kernel.specs)
+    assert all(
+        spec.lane in (Lane.DISPLAY_PREVIEW, Lane.DISPLAY_PREPARATION) for spec in kernel.specs
+    )
 
 
 def test_large_visible_plan_admission_is_chunked_and_completion_driven():

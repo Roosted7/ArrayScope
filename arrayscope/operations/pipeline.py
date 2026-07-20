@@ -3,28 +3,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Protocol
 from uuid import uuid4
-from typing import Protocol, Tuple
 
 import numpy as np
 
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
 from arrayscope.operations import dim_ops
-from arrayscope.operations.capabilities import OperationCapabilities, OperationKind, default_chunkable_axes
+from arrayscope.operations.capabilities import (
+    OperationCapabilities,
+    OperationKind,
+    default_chunkable_axes,
+)
 from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
     RegionSpec,
-    axis_region_kind,
     axis_in_region_result,
-    replace_region_axis,
+    axis_region_kind,
     insert_region_axis,
+    replace_region_axis,
     take_axis_region,
 )
 
-
-Shape = Tuple[int, ...]
+Shape = tuple[int, ...]
 
 
 class ArrayOperation(Protocol):
@@ -65,9 +68,13 @@ class Crop:
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         axis = _validate_axis(input_shape, self.axis)
         start, stop = _validate_crop_bounds(input_shape[axis], self.start, self.stop)
-        return replace_region_axis(output_region, axis, _crop_axis_region(output_region.axes[axis], start, stop))
+        return replace_region_axis(
+            output_region, axis, _crop_axis_region(output_region.axes[axis], start, stop)
+        )
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del input_region, output_region
         return data
 
@@ -93,9 +100,13 @@ class ReverseAxis:
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         axis = _validate_axis(input_shape, self.axis)
-        return replace_region_axis(output_region, axis, _reverse_axis_region(output_region.axes[axis], input_shape[axis]))
+        return replace_region_axis(
+            output_region, axis, _reverse_axis_region(output_region.axes[axis], input_shape[axis])
+        )
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del input_region, output_region
         return data
 
@@ -115,13 +126,17 @@ class Conjugate:
         # Pointwise value map: box-mean reduction of the display axes
         # commutes exactly (conjugation is linear), so display payloads may
         # evaluate it on reduced input (ADR 0050).
-        return _capabilities(OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True, lod_commuting=True)
+        return _capabilities(
+            OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True, lod_commuting=True
+        )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         del input_shape
         return output_region
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del input_region, output_region
         return np.conjugate(data)
 
@@ -156,7 +171,9 @@ class Mean:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del output_region
         return np.mean(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -192,9 +209,13 @@ class RootSumSquares:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del output_region
-        return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis_in_region_result(input_region, self.axis)))
+        return np.sqrt(
+            np.sum(np.abs(data) ** 2, axis=axis_in_region_result(input_region, self.axis))
+        )
 
 
 @dataclass(frozen=True)
@@ -227,7 +248,9 @@ class Sum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del output_region
         return np.sum(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -260,7 +283,9 @@ class Maximum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del output_region
         return np.max(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -293,7 +318,9 @@ class Minimum:
         axis = _validate_axis(input_shape, self.axis)
         return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del output_region
         return np.min(data, axis=axis_in_region_result(input_region, self.axis))
 
@@ -329,14 +356,20 @@ class CenteredFFT:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
         if evaluation_context is None:
             transformed = dim_ops.centered_fft(data, slab_axis)
         else:
-            transformed = dim_ops.centered_fft(data, slab_axis, workers=int(evaluation_context.fft_workers))
-        return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
+            transformed = dim_ops.centered_fft(
+                data, slab_axis, workers=int(evaluation_context.fft_workers)
+            )
+        return take_axis_region(
+            transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis
+        )
 
 
 @dataclass(frozen=True)
@@ -370,14 +403,20 @@ class CenteredIFFT:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
         if evaluation_context is None:
             transformed = dim_ops.centered_ifft(data, slab_axis)
         else:
-            transformed = dim_ops.centered_ifft(data, slab_axis, workers=int(evaluation_context.fft_workers))
-        return take_axis_region(transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis)
+            transformed = dim_ops.centered_ifft(
+                data, slab_axis, workers=int(evaluation_context.fft_workers)
+            )
+        return take_axis_region(
+            transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis
+        )
 
 
 @dataclass(frozen=True)
@@ -405,9 +444,13 @@ class FFTShift:
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         axis = _validate_axis(input_shape, self.axis)
-        return replace_region_axis(output_region, axis, _fftshift_axis_region(output_region.axes[axis], input_shape[axis]))
+        return replace_region_axis(
+            output_region, axis, _fftshift_axis_region(output_region.axes[axis], input_shape[axis])
+        )
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         del input_region, output_region
         return data
 
@@ -438,7 +481,9 @@ class CombineRealImagAxis:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         axis = _validate_axis(input_region.axes, self.axis)
         slab_axis = axis_in_region_result(input_region, axis)
         combined = dim_ops.combine_real_imag_axis(data, slab_axis)
@@ -473,7 +518,9 @@ class SplitComplexAxis:
         axis = _validate_axis(input_shape, self.axis)
         return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.POINT, 0))
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         axis = _validate_axis(output_region.axes, self.axis)
         requested = output_region.axes[axis]
         if axis_region_kind(requested.kind) == AxisRegionKind.POINT:
@@ -496,7 +543,7 @@ class ArrayDocument:
     """Base array plus an ordered list of operations for its derived view."""
 
     base_data: object
-    steps: Tuple[OperationStep, ...] = field(default_factory=tuple)
+    steps: tuple[OperationStep, ...] = field(default_factory=tuple)
     revision: int = 0
     base_axes: tuple = field(default_factory=tuple)
     current_axes: tuple = field(init=False)
@@ -510,8 +557,12 @@ class ArrayDocument:
             steps = tuple(_coerce_step(step) for step in steps)
         base_shape = np.shape(self.base_data)
         base_axes = axes_for_shape(axes, base_shape)
-        current_shape = evaluate_shape(base_shape, tuple(step.operation for step in steps if step.enabled))
-        current_axes = output_axes_for_operations(base_axes, tuple(step.operation for step in steps if step.enabled))
+        current_shape = evaluate_shape(
+            base_shape, tuple(step.operation for step in steps if step.enabled)
+        )
+        current_axes = output_axes_for_operations(
+            base_axes, tuple(step.operation for step in steps if step.enabled)
+        )
         if tuple(axis.size for axis in current_axes) != tuple(current_shape):
             current_axes = axes_for_shape(current_axes, current_shape)
         object.__setattr__(self, "steps", steps)
@@ -525,45 +576,58 @@ class ArrayDocument:
         return self.current_shape
 
     @property
-    def operations(self) -> Tuple[ArrayOperation, ...]:
+    def operations(self) -> tuple[ArrayOperation, ...]:
         return self.enabled_operations
 
     @property
-    def enabled_operations(self) -> Tuple[ArrayOperation, ...]:
+    def enabled_operations(self) -> tuple[ArrayOperation, ...]:
         return tuple(step.operation for step in self.steps if step.enabled)
 
-    def with_operation(self, operation: ArrayOperation) -> "ArrayDocument":
-        return ArrayDocument(self.base_data, steps=self.steps + (OperationStep(operation),), revision=self.revision, axes=self.base_axes)
+    def with_operation(self, operation: ArrayOperation) -> ArrayDocument:
+        return ArrayDocument(
+            self.base_data,
+            steps=(*self.steps, OperationStep(operation)),
+            revision=self.revision,
+            axes=self.base_axes,
+        )
 
-    def without_last_operation(self) -> "ArrayDocument":
+    def without_last_operation(self) -> ArrayDocument:
         if not self.steps:
             return self
-        return ArrayDocument(self.base_data, steps=self.steps[:-1], revision=self.revision, axes=self.base_axes)
+        return ArrayDocument(
+            self.base_data, steps=self.steps[:-1], revision=self.revision, axes=self.base_axes
+        )
 
-    def with_step_enabled(self, index, enabled) -> "ArrayDocument":
+    def with_step_enabled(self, index, enabled) -> ArrayDocument:
         index = _validate_step_index(index, self.steps)
         steps = list(self.steps)
         steps[index] = replace(steps[index], enabled=bool(enabled))
-        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes)
+        return ArrayDocument(
+            self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes
+        )
 
-    def with_replaced_operation(self, index, operation: ArrayOperation) -> "ArrayDocument":
+    def with_replaced_operation(self, index, operation: ArrayOperation) -> ArrayDocument:
         index = _validate_step_index(index, self.steps)
         steps = list(self.steps)
         steps[index] = replace(steps[index], operation=operation)
-        return ArrayDocument(self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes)
+        return ArrayDocument(
+            self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes
+        )
 
-    def mark_base_data_changed(self) -> "ArrayDocument":
-        return ArrayDocument(self.base_data, steps=self.steps, revision=self.revision + 1, axes=self.base_axes)
+    def mark_base_data_changed(self) -> ArrayDocument:
+        return ArrayDocument(
+            self.base_data, steps=self.steps, revision=self.revision + 1, axes=self.base_axes
+        )
 
-    def reload_base_data(self, data, *, preserve_steps=True) -> "ArrayDocument":
+    def reload_base_data(self, data, *, preserve_steps=True) -> ArrayDocument:
         steps = self.steps if preserve_steps else ()
         axes = self.base_axes if np.shape(data) == np.shape(self.base_data) else None
         return ArrayDocument(data, steps=steps, revision=self.revision + 1, axes=axes)
 
-    def replace_base_and_clear_steps(self, data) -> "ArrayDocument":
+    def replace_base_and_clear_steps(self, data) -> ArrayDocument:
         return ArrayDocument(data, steps=(), revision=self.revision + 1)
 
-    def with_data_changed(self, base_data=None) -> "ArrayDocument":
+    def with_data_changed(self, base_data=None) -> ArrayDocument:
         if base_data is None or base_data is self.base_data:
             return self.mark_base_data_changed()
         return self.replace_base_and_clear_steps(base_data)
@@ -575,7 +639,9 @@ class ArrayDocument:
 def evaluate(base_data, operations):
     from arrayscope.operations.optimizer import optimize_operations
 
-    optimized = optimize_operations(np.shape(base_data), getattr(base_data, "dtype", None), operations)
+    optimized = optimize_operations(
+        np.shape(base_data), getattr(base_data, "dtype", None), operations
+    )
     data = base_data
     for operation in optimized.operations:
         data = operation.apply(data)
@@ -593,7 +659,11 @@ def _coerce_step(step) -> OperationStep:
     if isinstance(step, OperationStep):
         return step
     if hasattr(step, "operation") and hasattr(step, "enabled"):
-        return OperationStep(step.operation, enabled=bool(step.enabled), step_id=str(getattr(step, "step_id", uuid4().hex)))
+        return OperationStep(
+            step.operation,
+            enabled=bool(step.enabled),
+            step_id=str(getattr(step, "step_id", uuid4().hex)),
+        )
     return OperationStep(step)
 
 
@@ -640,7 +710,9 @@ def _axis_region_indices(axis_region: AxisRegion, size: int):
         indices = np.asarray(axis_region.value, dtype=np.int64)
         return np.where(indices < 0, indices + size, indices)
     start, stop, step = axis_region.value
-    return np.arange(size, dtype=np.int64)[slice(int(start), None if stop is None else int(stop), int(step))]
+    return np.arange(size, dtype=np.int64)[
+        slice(int(start), None if stop is None else int(stop), int(step))
+    ]
 
 
 def _axis_region_from_indices(indices) -> AxisRegion:

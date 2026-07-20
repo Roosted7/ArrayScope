@@ -8,8 +8,6 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-
-
 def _wait_until(qtbot, predicate, *, timeout_ms=INTERACTION_SETTLE_HARD_LIMIT_MS):
     qtbot.waitUntil(predicate, timeout=min(int(timeout_ms), INTERACTION_SETTLE_HARD_LIMIT_MS))
 
@@ -21,7 +19,11 @@ def test_evaluation_controller_ignores_stale_results(qtbot):
     done = []
     stale = []
     try:
-        controller.start(lambda: (time.sleep(0.05), "old")[1], on_done=done.append, on_stale=lambda: stale.append("old"))
+        controller.start(
+            lambda: (time.sleep(0.05), "old")[1],
+            on_done=done.append,
+            on_stale=lambda: stale.append("old"),
+        )
         controller.start(lambda: "new", on_done=done.append, on_stale=lambda: stale.append("new"))
 
         _wait_until(qtbot, lambda: done == ["new"] and stale == ["old"])
@@ -96,7 +98,9 @@ def test_active_plus_latest_reuses_stale_completion(qtbot):
             on_stale=lambda: stale.append("latest"),
         )
 
-        _wait_until(qtbot, lambda: done == ["latest"] and reused == ["active"] and stale == ["active"])
+        _wait_until(
+            qtbot, lambda: done == ["latest"] and reused == ["active"] and stale == ["active"]
+        )
         assert controller.diagnostics().stale_reused >= 1
     finally:
         controller.shutdown_for_close()
@@ -170,10 +174,14 @@ def test_start_prefetch_local_gates_then_submits_to_kernel(qtbot):
 
         _wait_until(qtbot, lambda: done == ["a"])
         assert first.scheduled
-        assert not duplicate.scheduled and duplicate.reason == "deduped"
-        assert not limited.scheduled and limited.reason == "limited"
-        assert not idle.scheduled and idle.reason == "idle"
-        assert not cost.scheduled and cost.reason == "cost"
+        assert not duplicate.scheduled
+        assert duplicate.reason == "deduped"
+        assert not limited.scheduled
+        assert limited.reason == "limited"
+        assert not idle.scheduled
+        assert idle.reason == "idle"
+        assert not cost.scheduled
+        assert cost.reason == "cost"
     finally:
         controller.shutdown_for_close()
 
@@ -234,9 +242,9 @@ def test_start_latest_can_pass_cancellation_token(qtbot):
 
 
 def test_cancelled_evaluation_does_not_call_error(qtbot):
-    from arrayscope.operations.cancellation import EvaluationCancelled
     from arrayscope.kernel import Priority as EvalPriority
     from arrayscope.kernel.eval_adapter import KernelEvaluationController as EvaluationController
+    from arrayscope.operations.cancellation import EvaluationCancelled
 
     controller = EvaluationController(max_workers=1)
     errors = []

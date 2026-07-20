@@ -17,7 +17,6 @@ import numpy as np
 
 from arrayscope.core.memory_budget import format_bytes
 
-
 GiB = 1024 * 1024 * 1024
 
 DEFAULT_SOURCE_READ_BUDGET_BYTES = 1 * GiB
@@ -30,7 +29,9 @@ class SourceReadRefused(RuntimeError):
     Raised by the budget guard above the adapter, never by transport failures.
     """
 
-    def __init__(self, message: str, *, requested_nbytes: int | None = None, budget_bytes: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, requested_nbytes: int | None = None, budget_bytes: int | None = None
+    ) -> None:
         super().__init__(message)
         self.requested_nbytes = None if requested_nbytes is None else int(requested_nbytes)
         self.budget_bytes = None if budget_bytes is None else int(budget_bytes)
@@ -63,7 +64,9 @@ class ArraySource(Protocol):
     @property
     def label(self) -> str: ...
 
-    def read_region(self, index_spec: tuple, *, cancellation_token: object | None = None) -> np.ndarray: ...
+    def read_region(
+        self, index_spec: tuple, *, cancellation_token: object | None = None
+    ) -> np.ndarray: ...
 
     def close(self) -> None: ...
 
@@ -71,10 +74,19 @@ class ArraySource(Protocol):
 class NdArraySource:
     """Adapt an ndarray-like backing store (including ``np.memmap``) to :class:`ArraySource`."""
 
-    def __init__(self, array, *, label: str | None = None, chunk_shape: tuple[int, ...] | None = None, close=None) -> None:
+    def __init__(
+        self,
+        array,
+        *,
+        label: str | None = None,
+        chunk_shape: tuple[int, ...] | None = None,
+        close=None,
+    ) -> None:
         self._array = array
         self._label = str(label) if label is not None else type(array).__name__
-        self._chunk_shape = None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        self._chunk_shape = (
+            None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        )
         self._close = close
         self._closed = False
 
@@ -98,7 +110,9 @@ class NdArraySource:
     def label(self) -> str:
         return self._label
 
-    def read_region(self, index_spec: tuple, *, cancellation_token: object | None = None) -> np.ndarray:
+    def read_region(
+        self, index_spec: tuple, *, cancellation_token: object | None = None
+    ) -> np.ndarray:
         del cancellation_token  # single bounded read; the caller checks around it
         result = read_index_spec(self._array, index_spec)
         if isinstance(result, np.memmap):
@@ -123,9 +137,16 @@ class LazySourceArray:
     never silently mean "decode everything".
     """
 
-    def __init__(self, source: ArraySource, *, materialize_budget_bytes: int = DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES) -> None:
+    def __init__(
+        self,
+        source: ArraySource,
+        *,
+        materialize_budget_bytes: int = DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES,
+    ) -> None:
         self._source = source
-        self._materialize_budget_bytes = None if materialize_budget_bytes is None else int(materialize_budget_bytes)
+        self._materialize_budget_bytes = (
+            None if materialize_budget_bytes is None else int(materialize_budget_bytes)
+        )
 
     @property
     def source(self) -> ArraySource:
@@ -168,7 +189,9 @@ class LazySourceArray:
     def __repr__(self) -> str:
         return f"LazySourceArray(label={self.label!r}, shape={self.shape}, dtype={self.dtype}, nbytes={format_bytes(self.nbytes)})"
 
-    def read_region(self, index_spec: tuple, *, cancellation_token: object | None = None) -> np.ndarray:
+    def read_region(
+        self, index_spec: tuple, *, cancellation_token: object | None = None
+    ) -> np.ndarray:
         return self._source.read_region(tuple(index_spec), cancellation_token=cancellation_token)
 
     def materialize(self, *, budget_bytes: int | None | str = "default") -> np.ndarray:
@@ -200,7 +223,9 @@ def read_index_spec(array, index_spec: tuple):
 
     spec = tuple(index_spec)
     if len(spec) != int(np.ndim(array)):
-        raise ValueError(f"index spec length {len(spec)} must match array ndim {int(np.ndim(array))}")
+        raise ValueError(
+            f"index spec length {len(spec)} must match array ndim {int(np.ndim(array))}"
+        )
     for item in spec:
         if not isinstance(item, (int, np.integer, slice, tuple, list, np.ndarray)):
             raise TypeError(f"unsupported index item: {item!r}")
@@ -225,9 +250,9 @@ def read_index_spec(array, index_spec: tuple):
 
 
 __all__ = [
-    "ArraySource",
     "DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES",
     "DEFAULT_SOURCE_READ_BUDGET_BYTES",
+    "ArraySource",
     "LazySourceArray",
     "NdArraySource",
     "SourceReadRefused",

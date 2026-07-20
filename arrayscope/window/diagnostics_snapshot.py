@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from time import perf_counter
 
+from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.core.runtime_diagnostics import (
     CanvasPreserveRuntimeDiagnostics,
@@ -14,7 +15,6 @@ from arrayscope.core.runtime_diagnostics import (
     RenderTimingDiagnostics,
     WindowRuntimeDiagnostics,
 )
-from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.operations import fft_backend
@@ -61,7 +61,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
                     str(reducer),
                     int(count),
                 )
-                for (reduction, reducer), count in lod_page_cache.resident_lod_reducer_counts().items()
+                for (
+                    reduction,
+                    reducer,
+                ), count in lod_page_cache.resident_lod_reducer_counts().items()
             )
         )
     )
@@ -71,12 +74,14 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     lifecycle_phase_counts = {} if lifecycle_snapshot is None else dict(lifecycle_snapshot.counts)
     tile_identity_probe = _tile_identity_probe(window, session)
     retention_started_at = getattr(window.renderer, "_slice_retention_started_at", None)
-    stage_values = {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
-    stage_bindings = {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
+    stage_values = (
+        {} if session is None else dict(getattr(session.stage_fan_in, "values", {}) or {})
+    )
+    stage_bindings = (
+        {} if session is None else dict(getattr(session.stage_fan_in, "tile_stage_keys", {}) or {})
+    )
     unresolved_stage_bindings = {
-        int(tile): key
-        for tile, key in stage_bindings.items()
-        if key not in stage_values
+        int(tile): key for tile, key in stage_bindings.items() if key not in stage_values
     }
     semantic_evidence = (
         {
@@ -97,16 +102,22 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         session_id=None if session is None else int(session.session_id),
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
-        active_tile_requests=0 if session is None else len(getattr(session, "active_tile_requests", ())),
+        active_tile_requests=0
+        if session is None
+        else len(getattr(session, "active_tile_requests", ())),
         target_unsettled_tiles=(
-            0
-            if session is None
-            else len(session.required_target_unsettled_tiles())
+            0 if session is None else len(session.required_target_unsettled_tiles())
         ),
-        pending_payload_upserts=0 if session is None else len(getattr(session, "pending_payload_upserts", ())),
+        pending_payload_upserts=0
+        if session is None
+        else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
-        pending_level_tiles=0 if session is None else len(getattr(session, "pending_level_tiles", ())),
-        level_scan_remaining_tiles=0 if session is None else int(getattr(session, "level_scan_remaining_tiles", 0) or 0),
+        pending_level_tiles=0
+        if session is None
+        else len(getattr(session, "pending_level_tiles", ())),
+        level_scan_remaining_tiles=0
+        if session is None
+        else int(getattr(session, "level_scan_remaining_tiles", 0) or 0),
         histogram_aggregate_inflight=(
             False
             if session is None
@@ -124,22 +135,44 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         visible_tiles=0 if session is None else len(session.visible_tiles),
         presented_tiles=0 if session is None else len(session.lifecycle.presented_tiles),
         overlay_count=overlay_count,
-        attached_stage_requests=0 if session is None else len(session.stage_fan_in.attached_requests),
+        attached_stage_requests=0
+        if session is None
+        else len(session.stage_fan_in.attached_requests),
         waiting_stage_requests=len(unresolved_stage_bindings),
-        final_commit_pending=False if session is None else bool(getattr(session, "final_commit_pending", False)),
+        final_commit_pending=False
+        if session is None
+        else bool(getattr(session, "final_commit_pending", False)),
         flush_pending=False if session is None else bool(getattr(session, "flush_pending", False)),
         presentation_draw_count=int(presentation.get("draw_count", 0) or 0),
-        tile_presentation_request_count=int(presentation.get("tile_presentation_request_count", 0) or 0),
+        tile_presentation_request_count=int(
+            presentation.get("tile_presentation_request_count", 0) or 0
+        ),
         tile_presentation_draw_count=int(presentation.get("tile_presentation_draw_count", 0) or 0),
-        tile_presentation_draw_pending=bool(presentation.get("tile_presentation_draw_pending", False)),
+        tile_presentation_draw_pending=bool(
+            presentation.get("tile_presentation_draw_pending", False)
+        ),
         tile_visual_visible_pages=int(presentation.get("tile_visual_visible_pages", 0) or 0),
         overlays_above_tiles=bool(presentation.get("overlays_above_tiles", False)),
         display_mode=str(getattr(window.img_view, "montageDisplayMode", lambda: "none")()),
-        backend_chosen=str(getattr(window.renderer, "_last_montage_backend_actual", getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "backend", "none"))),
-        backend_reason=str(getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "reason", "")),
+        backend_chosen=str(
+            getattr(
+                window.renderer,
+                "_last_montage_backend_actual",
+                getattr(
+                    getattr(window.renderer, "_last_montage_backend_choice", None),
+                    "backend",
+                    "none",
+                ),
+            )
+        ),
+        backend_reason=str(
+            getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "reason", "")
+        ),
         backend_warning=str(getattr(window.renderer, "_last_montage_backend_warning", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
-        tile_lod_desired_factor=1 if lod_demand is None else int(getattr(lod_demand, "desired_factor", 1) or 1),
+        tile_lod_desired_factor=1
+        if lod_demand is None
+        else int(getattr(lod_demand, "desired_factor", 1) or 1),
         tile_lod_applied_factor=int(presented_lod[1]),
         tile_lod_desired_factor_xy=(1, 1)
         if lod_demand is None
@@ -147,58 +180,132 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_applied_factor_xy=tuple(int(value) for value in presented_lod[2]),
         tile_lod_source_texels_per_pixel_xy=(0.0, 0.0)
         if lod_demand is None
-        else tuple(float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))),
-        tile_lod_policy="native-only" if lod_decision is None else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
+        else tuple(
+            float(value) for value in getattr(lod_demand, "source_texels_per_pixel_xy", (0.0, 0.0))
+        ),
+        tile_lod_policy="native-only"
+        if lod_decision is None
+        else str(getattr(lod_decision, "policy", "native-only") or "native-only"),
         tile_lod_reason=_presented_lod_reason(lod_decision, presented_lod),
         tile_lod_applied_level=int(presented_lod[0]),
         tile_lod_resident_tile_levels=lod_tile_levels,
-        tile_lod_pyramid_bytes=0 if lod_page_cache is None else int(getattr(lod_page_cache, "bytes_used", 0) or 0),
+        tile_lod_pyramid_bytes=0
+        if lod_page_cache is None
+        else int(getattr(lod_page_cache, "bytes_used", 0) or 0),
         tile_lod_pyramid_entries=0 if lod_page_cache is None else len(lod_page_cache),
-        tile_lod_pyramid_hits=0 if lod_page_cache is None else int(getattr(lod_page_cache, "hits", 0) or 0),
-        tile_lod_pyramid_misses=0 if lod_page_cache is None else int(getattr(lod_page_cache, "misses", 0) or 0),
-        tile_lod_pyramid_evictions=0 if lod_page_cache is None else int(getattr(lod_page_cache, "evictions", 0) or 0),
+        tile_lod_pyramid_hits=0
+        if lod_page_cache is None
+        else int(getattr(lod_page_cache, "hits", 0) or 0),
+        tile_lod_pyramid_misses=0
+        if lod_page_cache is None
+        else int(getattr(lod_page_cache, "misses", 0) or 0),
+        tile_lod_pyramid_evictions=0
+        if lod_page_cache is None
+        else int(getattr(lod_page_cache, "evictions", 0) or 0),
         tile_lod_page_families=lod_page_families,
         tile_lod_pending_materializations=(
             0
             if session is None
             else len(getattr(session, "pending_rung_materializations", ()) or ())
-            + (0 if lod_page_cache is None else int(getattr(lod_page_cache, "pending_count", 0) or 0))
+            + (
+                0
+                if lod_page_cache is None
+                else int(getattr(lod_page_cache, "pending_count", 0) or 0)
+            )
         ),
-        tile_lod_materializations_completed=0 if session is None else int(getattr(session, "lod_materializations_completed", 0) or 0),
-        tile_lod_ingest_reductions=int(getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0),
-        tile_lod_preview_reduced_scheduled=int(getattr(window.renderer, "_montage_preview_reduced_scheduled", 0) or 0),
-        tile_lod_preview_reduced_blocked=int(getattr(window.renderer, "_montage_preview_reduced_blocked", 0) or 0),
-        tile_lod_preview_reduced_failures=int(getattr(window.renderer, "_montage_preview_reduced_failures", 0) or 0),
-        tile_lod_preview_presentations=0 if session is None else int(getattr(session, "lod_preview_presentations", 0) or 0),
-        tile_lod_stats_cross_level_reuses=0 if session is None else int(getattr(session, "lod_stats_cross_level_reuses", 0) or 0),
-        tile_lod_stats_recomputes=0 if session is None else int(getattr(session, "lod_stats_recomputes", 0) or 0),
-        tile_lod_cross_level_reductions=0 if session is None else int(getattr(session, "lod_cross_level_reductions", 0) or 0),
-        tile_lod_pipeline_reruns_avoided=int(getattr(window.renderer, "_montage_quality_pipeline_reruns_avoided", 0) or 0),
+        tile_lod_materializations_completed=0
+        if session is None
+        else int(getattr(session, "lod_materializations_completed", 0) or 0),
+        tile_lod_ingest_reductions=int(
+            getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0
+        ),
+        tile_lod_preview_reduced_scheduled=int(
+            getattr(window.renderer, "_montage_preview_reduced_scheduled", 0) or 0
+        ),
+        tile_lod_preview_reduced_blocked=int(
+            getattr(window.renderer, "_montage_preview_reduced_blocked", 0) or 0
+        ),
+        tile_lod_preview_reduced_failures=int(
+            getattr(window.renderer, "_montage_preview_reduced_failures", 0) or 0
+        ),
+        tile_lod_preview_presentations=0
+        if session is None
+        else int(getattr(session, "lod_preview_presentations", 0) or 0),
+        tile_lod_stats_cross_level_reuses=0
+        if session is None
+        else int(getattr(session, "lod_stats_cross_level_reuses", 0) or 0),
+        tile_lod_stats_recomputes=0
+        if session is None
+        else int(getattr(session, "lod_stats_recomputes", 0) or 0),
+        tile_lod_cross_level_reductions=0
+        if session is None
+        else int(getattr(session, "lod_cross_level_reductions", 0) or 0),
+        tile_lod_pipeline_reruns_avoided=int(
+            getattr(window.renderer, "_montage_quality_pipeline_reruns_avoided", 0) or 0
+        ),
         tile_lod_stage_hits_serving_derivations=int(
             getattr(window.renderer, "_montage_quality_stage_hits_serving_derivations", 0) or 0
         ),
-        tile_histogram_lod_swap_recomputes=int(getattr(window.img_view, "tile_histogram_lod_swap_recomputes", 0) or 0),
-        tile_histogram_cross_level_reuses=int(getattr(window.img_view, "tile_histogram_cross_level_reuses", 0) or 0),
-        tile_compute_cache_hits=0 if session is None else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
-        tile_compute_stage_backed=0 if session is None else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
-        tile_compute_direct=0 if session is None else int(getattr(session, "tile_compute_direct", 0) or 0),
-        tile_compute_waiting_for_stage=0 if session is None else int(getattr(session, "tile_compute_waiting_for_stage", 0) or 0),
-        tile_compute_stage_backed_ms=0.0 if session is None else float(getattr(session, "tile_compute_stage_backed_ms", 0.0) or 0.0),
-        tile_compute_direct_ms=0.0 if session is None else float(getattr(session, "tile_compute_direct_ms", 0.0) or 0.0),
-        tile_compute_stage_backed_max_ms=0.0 if session is None else float(getattr(session, "tile_compute_stage_backed_max_ms", 0.0) or 0.0),
-        tile_compute_direct_max_ms=0.0 if session is None else float(getattr(session, "tile_compute_direct_max_ms", 0.0) or 0.0),
-        lead_direct_tiles=0 if session is None else int(getattr(session, "lead_direct_tiles", 0) or 0),
-        stage_backed_tiles_pending=0 if session is None else int(getattr(session, "stage_backed_tiles_pending", 0) or 0),
-        retained_stage_index=None if session is None else getattr(session, "retained_stage_index", None),
-        retained_stage_decision="" if session is None else str(getattr(session, "retained_stage_decision", "") or ""),
-        repeated_expensive_stage_per_tile=False if session is None else bool(getattr(session, "repeated_expensive_stage_per_tile", False)),
-        priority_retargeted_tiles=0 if session is None else int(getattr(session, "priority_retargeted_tiles", 0) or 0),
+        tile_histogram_lod_swap_recomputes=int(
+            getattr(window.img_view, "tile_histogram_lod_swap_recomputes", 0) or 0
+        ),
+        tile_histogram_cross_level_reuses=int(
+            getattr(window.img_view, "tile_histogram_cross_level_reuses", 0) or 0
+        ),
+        tile_compute_cache_hits=0
+        if session is None
+        else int(getattr(session, "tile_compute_cache_hits", 0) or 0),
+        tile_compute_stage_backed=0
+        if session is None
+        else int(getattr(session, "tile_compute_stage_backed", 0) or 0),
+        tile_compute_direct=0
+        if session is None
+        else int(getattr(session, "tile_compute_direct", 0) or 0),
+        tile_compute_waiting_for_stage=0
+        if session is None
+        else int(getattr(session, "tile_compute_waiting_for_stage", 0) or 0),
+        tile_compute_stage_backed_ms=0.0
+        if session is None
+        else float(getattr(session, "tile_compute_stage_backed_ms", 0.0) or 0.0),
+        tile_compute_direct_ms=0.0
+        if session is None
+        else float(getattr(session, "tile_compute_direct_ms", 0.0) or 0.0),
+        tile_compute_stage_backed_max_ms=0.0
+        if session is None
+        else float(getattr(session, "tile_compute_stage_backed_max_ms", 0.0) or 0.0),
+        tile_compute_direct_max_ms=0.0
+        if session is None
+        else float(getattr(session, "tile_compute_direct_max_ms", 0.0) or 0.0),
+        lead_direct_tiles=0
+        if session is None
+        else int(getattr(session, "lead_direct_tiles", 0) or 0),
+        stage_backed_tiles_pending=0
+        if session is None
+        else int(getattr(session, "stage_backed_tiles_pending", 0) or 0),
+        retained_stage_index=None
+        if session is None
+        else getattr(session, "retained_stage_index", None),
+        retained_stage_decision=""
+        if session is None
+        else str(getattr(session, "retained_stage_decision", "") or ""),
+        repeated_expensive_stage_per_tile=False
+        if session is None
+        else bool(getattr(session, "repeated_expensive_stage_per_tile", False)),
+        priority_retargeted_tiles=0
+        if session is None
+        else int(getattr(session, "priority_retargeted_tiles", 0) or 0),
         lifecycle_parked=0 if session is None else len(session.lifecycle.parked_tiles),
         lifecycle_evaluating=0 if session is None else len(session.lifecycle.evaluating_tiles),
-        lifecycle_dangling_claims=0 if session is None else len(session.lifecycle.dangling_claims()),
+        lifecycle_dangling_claims=0
+        if session is None
+        else len(session.lifecycle.dangling_claims()),
         lifecycle_semantic_mismatches=_lifecycle_semantic_mismatches(session),
-        lifecycle_identity_rejections=0 if session is None else int(session.lifecycle.identity_rejections),
-        dirty_payload_tiles=0 if session is None else len(getattr(session, "dirty_payloads", ()) or ()),
+        lifecycle_identity_rejections=0
+        if session is None
+        else int(session.lifecycle.identity_rejections),
+        dirty_payload_tiles=0
+        if session is None
+        else len(getattr(session, "dirty_payloads", ()) or ()),
         ledger_needs_first_pixel=int(lifecycle_phase_counts.get("needs_first_pixel", 0) or 0),
         ledger_fallback_shown=int(lifecycle_phase_counts.get("fallback_shown", 0) or 0),
         ledger_target_schedulable=int(lifecycle_phase_counts.get("target_schedulable", 0) or 0),
@@ -207,7 +314,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ledger_target_ready=int(lifecycle_phase_counts.get("target_ready", 0) or 0),
         ledger_target_emitted=int(lifecycle_phase_counts.get("target_emitted", 0) or 0),
         ledger_target_presented=int(lifecycle_phase_counts.get("target_presented", 0) or 0),
-        ledger_orphan_running=0 if lifecycle_snapshot is None else int(lifecycle_snapshot.orphan_running),
+        ledger_orphan_running=0
+        if lifecycle_snapshot is None
+        else int(lifecycle_snapshot.orphan_running),
         ledger_parked_without_producer=(
             0 if lifecycle_snapshot is None else int(lifecycle_snapshot.parked_without_producer)
         ),
@@ -232,22 +341,33 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
         last_stall_signature=tuple(
-            int(value) for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
+            int(value)
+            for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())
         ),
         tile_identity_probe=tile_identity_probe,
-        presented_order_sample=() if session is None else tuple(int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]),
+        presented_order_sample=()
+        if session is None
+        else tuple(
+            int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]
+        ),
     )
 
     decision = getattr(window, "_last_render_decision", None)
     context = getattr(window, "_last_render_context", None)
     render = RenderRuntimeDiagnostics(
-        last_decision_kind="" if decision is None else str(getattr(decision.kind, "value", decision.kind)),
+        last_decision_kind=""
+        if decision is None
+        else str(getattr(decision.kind, "value", decision.kind)),
         last_decision_reason="" if decision is None else str(getattr(decision, "reason", "")),
         last_context_summary="" if context is None else str(context),
         last_request_key=str(getattr(window, "_last_render_request_key", "") or ""),
         last_error=str(getattr(window, "_last_render_error", "") or ""),
-        estimated_display_bytes=None if context is None else int(getattr(context, "estimated_display_bytes", 0)),
-        render_budget_bytes=None if context is None else int(getattr(context, "render_budget_bytes", 0)),
+        estimated_display_bytes=None
+        if context is None
+        else int(getattr(context, "estimated_display_bytes", 0)),
+        render_budget_bytes=None
+        if context is None
+        else int(getattr(context, "render_budget_bytes", 0)),
     )
 
     coalescer = getattr(window, "render_coordinator", None)
@@ -259,12 +379,24 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tuple(window.document.enabled_operations),
     )
     region_plan = window.operation_evaluator.planner_diagnostics()
-    capability_stage_count = None if region_plan is None else len(tuple(getattr(region_plan, "stages", ())))
+    capability_stage_count = (
+        None if region_plan is None else len(tuple(getattr(region_plan, "stages", ())))
+    )
     candidates = () if region_plan is None else tuple(getattr(region_plan, "cache_candidates", ()))
     transitions = () if region_plan is None else tuple(getattr(region_plan, "transitions", ()))
-    expanded_axes = tuple(sorted({int(axis) for transition in transitions for axis in getattr(transition, "expanded_axes", ())}))
+    expanded_axes = tuple(
+        sorted(
+            {
+                int(axis)
+                for transition in transitions
+                for axis in getattr(transition, "expanded_axes", ())
+            }
+        )
+    )
     stage_cache_diagnostics = window.operation_evaluator.stage_cache_diagnostics()
-    stage_materialization_diagnostics = window.operation_evaluator.stage_materialization_diagnostics()
+    stage_materialization_diagnostics = (
+        window.operation_evaluator.stage_materialization_diagnostics()
+    )
     upload_timing = (
         window.img_view.lastImageUploadTiming()
         if hasattr(getattr(window, "img_view", None), "lastImageUploadTiming")
@@ -292,7 +424,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         else ()
     )
 
-    image_backend_selected = getattr(getattr(getattr(window, "app_settings", None), "image_rendering_backend", "pyqtgraph"), "value", "pyqtgraph")
+    image_backend_selected = getattr(
+        getattr(getattr(window, "app_settings", None), "image_rendering_backend", "pyqtgraph"),
+        "value",
+        "pyqtgraph",
+    )
     image_backend_actual = image_view_backend_capabilities(getattr(window, "img_view", None)).name
 
     return WindowRuntimeDiagnostics(
@@ -301,7 +437,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         profile_cache=window.operation_evaluator.profile_cache_diagnostics(),
         stage_cache=stage_cache_diagnostics,
         stage_materialization=stage_materialization_diagnostics,
-        montage_prefetch=tuple(getattr(window.renderer, "_last_montage_prefetch_decisions", ()) or ()),
+        montage_prefetch=tuple(
+            getattr(window.renderer, "_last_montage_prefetch_decisions", ()) or ()
+        ),
         resource_governor=(
             None
             if getattr(window, "resource_governor", None) is None
@@ -346,79 +484,205 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             last_cache_resolve_ms=getattr(window.renderer, "_last_montage_cache_resolve_ms", None),
             last_stage_plan_ms=getattr(window.renderer, "_last_montage_stage_plan_ms", None),
             last_session_setup_ms=getattr(window.renderer, "_last_frame_session_setup_ms", None),
-            last_initial_commit_ms=getattr(window.renderer, "_last_montage_initial_commit_ms", None),
+            last_initial_commit_ms=getattr(
+                window.renderer, "_last_montage_initial_commit_ms", None
+            ),
             last_tile_eval_ms=getattr(window.renderer, "_last_montage_tile_eval_ms", None),
-            last_display_cache_lookup_ms=getattr(window.renderer, "_last_montage_display_cache_lookup_ms", None),
-            last_display_cache_hit=getattr(window.renderer, "_last_montage_display_cache_hit", None),
+            last_display_cache_lookup_ms=getattr(
+                window.renderer, "_last_montage_display_cache_lookup_ms", None
+            ),
+            last_display_cache_hit=getattr(
+                window.renderer, "_last_montage_display_cache_hit", None
+            ),
             last_stage_cache_lookup_ms=getattr(stage_cache_diagnostics, "last_lookup_ms", None),
             last_stage_cache_hit=getattr(stage_cache_diagnostics, "last_lookup_hit", None),
-            last_stage_attach_wait_ms=getattr(window.renderer, "_last_montage_stage_attach_wait_ms", None),
+            last_stage_attach_wait_ms=getattr(
+                window.renderer, "_last_montage_stage_attach_wait_ms", None
+            ),
             last_level_stats_ms=getattr(window.renderer, "_last_montage_level_stats_ms", None),
-            last_tile_payload_build_ms=getattr(window.renderer, "_last_montage_tile_payload_build_ms", None),
-            last_visible_upload_ms=None if upload_timing is None else upload_timing.visible_upload_ms,
-            last_histogram_upload_ms=None if upload_timing is None else upload_timing.histogram_upload_ms,
-            last_histogram_recompute_ms=None if upload_timing is None else upload_timing.histogram_recompute_ms,
+            last_tile_payload_build_ms=getattr(
+                window.renderer, "_last_montage_tile_payload_build_ms", None
+            ),
+            last_visible_upload_ms=None
+            if upload_timing is None
+            else upload_timing.visible_upload_ms,
+            last_histogram_upload_ms=None
+            if upload_timing is None
+            else upload_timing.histogram_upload_ms,
+            last_histogram_recompute_ms=None
+            if upload_timing is None
+            else upload_timing.histogram_recompute_ms,
             last_rgb_window_ms=None if upload_timing is None else upload_timing.rgb_window_ms,
-            last_tile_layer_upload_ms=None if upload_timing is None else upload_timing.tile_layer_upload_ms,
-            last_tile_layer_rgb_window_ms=None if upload_timing is None else upload_timing.tile_layer_rgb_window_ms,
+            last_tile_layer_upload_ms=None
+            if upload_timing is None
+            else upload_timing.tile_layer_upload_ms,
+            last_tile_layer_rgb_window_ms=None
+            if upload_timing is None
+            else upload_timing.tile_layer_rgb_window_ms,
             last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
             last_tile_commit_ms=getattr(window.renderer, "_last_montage_tile_commit_ms", None),
-            last_tile_prepare_apply_ms=getattr(window.renderer, "_last_montage_tile_prepare_apply_ms", None),
-            last_tile_layer_apply_ms=getattr(window.renderer, "_last_montage_tile_layer_apply_ms", None),
-            last_tile_acknowledge_ms=getattr(window.renderer, "_last_montage_tile_acknowledge_ms", None),
-            last_tile_retained_store_ms=getattr(window.renderer, "_last_montage_tile_retained_store_ms", None),
-            last_tile_state_publish_ms=getattr(window.renderer, "_last_montage_tile_state_publish_ms", None),
-            last_tile_geometry_sync_ms=getattr(window.renderer, "_last_montage_tile_geometry_sync_ms", None),
-            last_tile_identity_check_ms=getattr(window.renderer, "_last_montage_tile_identity_check_ms", None),
+            last_tile_prepare_apply_ms=getattr(
+                window.renderer, "_last_montage_tile_prepare_apply_ms", None
+            ),
+            last_tile_layer_apply_ms=getattr(
+                window.renderer, "_last_montage_tile_layer_apply_ms", None
+            ),
+            last_tile_acknowledge_ms=getattr(
+                window.renderer, "_last_montage_tile_acknowledge_ms", None
+            ),
+            last_tile_retained_store_ms=getattr(
+                window.renderer, "_last_montage_tile_retained_store_ms", None
+            ),
+            last_tile_state_publish_ms=getattr(
+                window.renderer, "_last_montage_tile_state_publish_ms", None
+            ),
+            last_tile_geometry_sync_ms=getattr(
+                window.renderer, "_last_montage_tile_geometry_sync_ms", None
+            ),
+            last_tile_identity_check_ms=getattr(
+                window.renderer, "_last_montage_tile_identity_check_ms", None
+            ),
             last_tile_followup_ms=getattr(window.renderer, "_last_montage_tile_followup_ms", None),
             last_set_image_ms=getattr(window.renderer, "_last_set_image_ms", None),
-            last_overlay_update_ms=getattr(window.renderer, "_last_montage_overlay_update_ms", None),
-            cached_tiles_last_session=int(getattr(window.renderer, "_montage_cached_tiles_last_session", 0) or 0),
-            missing_tiles_last_session=int(getattr(window.renderer, "_montage_missing_tiles_last_session", 0) or 0),
-            committed_tile_upserts_last_flush=int(getattr(window.renderer, "_montage_committed_tile_upserts_last_flush", 0) or 0),
+            last_overlay_update_ms=getattr(
+                window.renderer, "_last_montage_overlay_update_ms", None
+            ),
+            cached_tiles_last_session=int(
+                getattr(window.renderer, "_montage_cached_tiles_last_session", 0) or 0
+            ),
+            missing_tiles_last_session=int(
+                getattr(window.renderer, "_montage_missing_tiles_last_session", 0) or 0
+            ),
+            committed_tile_upserts_last_flush=int(
+                getattr(window.renderer, "_montage_committed_tile_upserts_last_flush", 0) or 0
+            ),
             upload_visible_bytes=0 if upload_timing is None else int(upload_timing.visible_bytes),
-            upload_histogram_bytes=0 if upload_timing is None else int(upload_timing.histogram_bytes),
-            upload_fast_same_object=False if upload_timing is None else bool(upload_timing.fast_same_object),
-            tile_layer_visible_items=0 if upload_timing is None else int(upload_timing.tile_layer_visible_items),
-            tile_layer_items_created=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_items_created", 0)),
-            tile_layer_items_updated=0 if upload_timing is None else int(upload_timing.tile_layer_items_updated),
-            tile_layer_items_skipped=0 if upload_timing is None else int(upload_timing.tile_layer_items_skipped),
-            tile_layer_rgb_window_tiles=0 if upload_timing is None else int(upload_timing.tile_layer_rgb_window_tiles),
-            tile_layer_image_replacements=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_image_replacements", 0)),
-            tile_layer_existing_items_shown=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_existing_items_shown", 0)),
-            tile_layer_relocated_tiles=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_relocated_tiles", 0)),
-            tile_layer_resident_items=0 if upload_timing is None else int(upload_timing.tile_layer_resident_items),
-            tile_layer_storage_capacity=0 if upload_timing is None else int(upload_timing.tile_layer_storage_capacity),
-            tile_layer_storage_rebuilds=0 if upload_timing is None else int(upload_timing.tile_layer_storage_rebuilds),
-            tile_layer_storage_evictions=0 if upload_timing is None else int(upload_timing.tile_layer_storage_evictions),
-            tile_layer_texture_uploads=0 if upload_timing is None else int(upload_timing.tile_layer_texture_uploads),
-            tile_layer_texture_upload_bytes=0 if upload_timing is None else int(upload_timing.tile_layer_texture_upload_bytes),
-            tile_layer_texture_prepare_ms=None if upload_timing is None else upload_timing.tile_layer_texture_prepare_ms,
-            tile_layer_texture_submit_ms=None if upload_timing is None else upload_timing.tile_layer_texture_submit_ms,
-            tile_layer_vertex_uploads=0 if upload_timing is None else int(upload_timing.tile_layer_vertex_uploads),
-            tile_layer_level_updates=0 if upload_timing is None else int(upload_timing.tile_layer_level_updates),
-            tile_layer_estimated_gpu_bytes=0 if upload_timing is None else int(upload_timing.tile_layer_estimated_gpu_bytes),
-            tile_layer_cpu_shadow_bytes=0 if upload_timing is None else int(upload_timing.tile_layer_cpu_shadow_bytes),
-            tile_layer_page_count=0 if upload_timing is None else int(upload_timing.tile_layer_page_count),
-            tile_layer_active_pages=0 if upload_timing is None else int(upload_timing.tile_layer_active_pages),
-            tile_layer_device_max_texture_size=0 if upload_timing is None else int(upload_timing.tile_layer_device_max_texture_size),
-            tile_layer_budget_bytes=0 if upload_timing is None else int(upload_timing.tile_layer_budget_bytes),
-            tile_layer_near_resident_items=0 if upload_timing is None else int(upload_timing.tile_layer_near_resident_items),
-            tile_layer_warm_resident_items=0 if upload_timing is None else int(upload_timing.tile_layer_warm_resident_items),
-            tile_layer_evicted_near_items=0 if upload_timing is None else int(upload_timing.tile_layer_evicted_near_items),
-            tile_layer_capacity_warning="" if upload_timing is None else str(upload_timing.tile_layer_capacity_warning),
-            tile_layer_lod_level=0 if upload_timing is None else int(upload_timing.tile_layer_lod_level),
-            tile_layer_lod_factor=1 if upload_timing is None else int(upload_timing.tile_layer_lod_factor),
-            tile_layer_source_texels_per_pixel=0.0 if upload_timing is None else float(upload_timing.tile_layer_source_texels_per_pixel),
-            tile_layer_gutter_pixels=0 if upload_timing is None else int(upload_timing.tile_layer_gutter_pixels),
-            tile_layer_mipmap_updates=0 if upload_timing is None else int(upload_timing.tile_layer_mipmap_updates),
-            tile_layer_mipmap_available=False if upload_timing is None else bool(upload_timing.tile_layer_mipmap_available),
-            tile_layer_complex_texture_uploads=0 if upload_timing is None else int(upload_timing.tile_layer_complex_texture_uploads),
-            tile_layer_lod_level_swaps_zero_upload=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_lod_level_swaps_zero_upload", 0)),
-            tile_layer_lod_level_swaps_with_upload=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_lod_level_swaps_with_upload", 0)),
-            tile_layer_superseded_reclaimed_under_pressure=0 if upload_timing is None else int(getattr(upload_timing, "tile_layer_superseded_reclaimed_under_pressure", 0)),
-            tile_layer_shader_uniform_updates=0 if upload_timing is None else int(upload_timing.tile_layer_shader_uniform_updates),
-            cpu_complex_prep_ms=None if upload_timing is None else upload_timing.cpu_complex_prep_ms,
+            upload_histogram_bytes=0
+            if upload_timing is None
+            else int(upload_timing.histogram_bytes),
+            upload_fast_same_object=False
+            if upload_timing is None
+            else bool(upload_timing.fast_same_object),
+            tile_layer_visible_items=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_visible_items),
+            tile_layer_items_created=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_items_created", 0)),
+            tile_layer_items_updated=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_items_updated),
+            tile_layer_items_skipped=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_items_skipped),
+            tile_layer_rgb_window_tiles=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_rgb_window_tiles),
+            tile_layer_image_replacements=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_image_replacements", 0)),
+            tile_layer_existing_items_shown=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_existing_items_shown", 0)),
+            tile_layer_relocated_tiles=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_relocated_tiles", 0)),
+            tile_layer_resident_items=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_resident_items),
+            tile_layer_storage_capacity=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_storage_capacity),
+            tile_layer_storage_rebuilds=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_storage_rebuilds),
+            tile_layer_storage_evictions=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_storage_evictions),
+            tile_layer_texture_uploads=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_texture_uploads),
+            tile_layer_texture_upload_bytes=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_texture_upload_bytes),
+            tile_layer_texture_prepare_ms=None
+            if upload_timing is None
+            else upload_timing.tile_layer_texture_prepare_ms,
+            tile_layer_texture_submit_ms=None
+            if upload_timing is None
+            else upload_timing.tile_layer_texture_submit_ms,
+            tile_layer_vertex_uploads=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_vertex_uploads),
+            tile_layer_level_updates=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_level_updates),
+            tile_layer_estimated_gpu_bytes=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_estimated_gpu_bytes),
+            tile_layer_cpu_shadow_bytes=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_cpu_shadow_bytes),
+            tile_layer_page_count=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_page_count),
+            tile_layer_active_pages=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_active_pages),
+            tile_layer_device_max_texture_size=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_device_max_texture_size),
+            tile_layer_budget_bytes=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_budget_bytes),
+            tile_layer_near_resident_items=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_near_resident_items),
+            tile_layer_warm_resident_items=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_warm_resident_items),
+            tile_layer_evicted_near_items=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_evicted_near_items),
+            tile_layer_capacity_warning=""
+            if upload_timing is None
+            else str(upload_timing.tile_layer_capacity_warning),
+            tile_layer_lod_level=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_lod_level),
+            tile_layer_lod_factor=1
+            if upload_timing is None
+            else int(upload_timing.tile_layer_lod_factor),
+            tile_layer_source_texels_per_pixel=0.0
+            if upload_timing is None
+            else float(upload_timing.tile_layer_source_texels_per_pixel),
+            tile_layer_gutter_pixels=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_gutter_pixels),
+            tile_layer_mipmap_updates=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_mipmap_updates),
+            tile_layer_mipmap_available=False
+            if upload_timing is None
+            else bool(upload_timing.tile_layer_mipmap_available),
+            tile_layer_complex_texture_uploads=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_complex_texture_uploads),
+            tile_layer_lod_level_swaps_zero_upload=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_lod_level_swaps_zero_upload", 0)),
+            tile_layer_lod_level_swaps_with_upload=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_lod_level_swaps_with_upload", 0)),
+            tile_layer_superseded_reclaimed_under_pressure=0
+            if upload_timing is None
+            else int(getattr(upload_timing, "tile_layer_superseded_reclaimed_under_pressure", 0)),
+            tile_layer_shader_uniform_updates=0
+            if upload_timing is None
+            else int(upload_timing.tile_layer_shader_uniform_updates),
+            cpu_complex_prep_ms=None
+            if upload_timing is None
+            else upload_timing.cpu_complex_prep_ms,
             coalesced_commits=int(getattr(window.renderer, "_montage_coalesced_commits", 0) or 0),
         ),
         render_coalescer=RenderCoalescerDiagnostics(
@@ -427,7 +691,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             requested=0 if coalescer is None else int(coalescer.requested),
             flushed=0 if coalescer is None else int(coalescer.flushed),
             coalesced=0 if coalescer is None else int(coalescer.coalesced),
-            deferred_side_panel_refreshes=0 if coalescer is None else int(coalescer.deferred_side_panel_refreshes),
+            deferred_side_panel_refreshes=0
+            if coalescer is None
+            else int(coalescer.deferred_side_panel_refreshes),
         ),
         fft_backend_choice=backend_choice.value,
         fft_backend_resolved=resolved.name,
@@ -452,11 +718,17 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ),
         capability_stage_count=capability_stage_count,
         stage_cache_candidate_count=None if region_plan is None else len(candidates),
-        stage_cache_candidate_summaries=tuple(_stage_cache_candidate_summary(candidate) for candidate in candidates),
+        stage_cache_candidate_summaries=tuple(
+            _stage_cache_candidate_summary(candidate) for candidate in candidates
+        ),
         operation_final_region="" if region_plan is None else region_text(region_plan.final_region),
-        operation_required_input_region="" if region_plan is None else region_text(region_plan.required_input_region),
+        operation_required_input_region=""
+        if region_plan is None
+        else region_text(region_plan.required_input_region),
         operation_expanded_axes=expanded_axes,
-        operation_transition_summaries=tuple(_region_transition_summary(transition) for transition in transitions),
+        operation_transition_summaries=tuple(
+            _region_transition_summary(transition) for transition in transitions
+        ),
         image_rendering_backend=image_backend_actual,
         image_rendering_backend_selected=str(image_backend_selected),
         image_rendering_backend_actual=image_backend_actual,
@@ -625,7 +897,11 @@ def _montage_overlay_count(window) -> int:
 
 def _stage_cache_candidate_summary(candidate):
     region = getattr(candidate, "region", None)
-    axes = "n/a" if region is None else ",".join(str(getattr(axis.kind, "value", axis.kind)) for axis in region.axes)
+    axes = (
+        "n/a"
+        if region is None
+        else ",".join(str(getattr(axis.kind, "value", axis.kind)) for axis in region.axes)
+    )
     nbytes = getattr(candidate, "estimated_nbytes", None)
     size = "unknown" if nbytes is None else format_bytes(int(nbytes))
     return (

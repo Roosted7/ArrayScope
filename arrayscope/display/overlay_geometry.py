@@ -6,9 +6,7 @@ from __future__ import annotations
 def roi_outline_points(geometry) -> tuple[tuple[float, float], ...]:
     """Return the ordered world-space outline for one semantic ROI."""
 
-    kind = str(
-        getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", ""))
-    )
+    kind = str(getattr(getattr(geometry, "kind", ""), "value", getattr(geometry, "kind", "")))
     if kind == "rectangle":
         rect = getattr(geometry, "rect", None)
         if rect is None:
@@ -22,8 +20,7 @@ def roi_outline_points(geometry) -> tuple[tuple[float, float], ...]:
             (x, y),
         )
     points = tuple(
-        (float(point[0]), float(point[1]))
-        for point in tuple(getattr(geometry, "points", ()) or ())
+        (float(point[0]), float(point[1])) for point in tuple(getattr(geometry, "points", ()) or ())
     )
     if kind == "line" and len(points) >= 2:
         return points[:2]

@@ -24,7 +24,9 @@ def selected_numpy_data(data, ranges, *, squeeze=True):
 
 
 def estimate_nbytes(shape, dtype):
-    return int(np.prod(tuple(int(size) for size in shape), dtype=np.int64)) * np.dtype(dtype).itemsize
+    return (
+        int(np.prod(tuple(int(size) for size in shape), dtype=np.int64)) * np.dtype(dtype).itemsize
+    )
 
 
 def save_derived_array(path, data, *, recipe_json=None, view_recipe_json=None, sidecar=True):

@@ -8,10 +8,20 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.lod import LodInfo
-from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
-from arrayscope.display.model.frame import DisplayTilePayload, TileCommitReport, TilePresentationState
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    TileCommitReport,
+    TilePresentationState,
+)
 from arrayscope.display.model.tile_identity import tile_ack_identity
-from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, ShaderMapping, ShaderScale, TexturePlaneKind
+from arrayscope.display.montage import MontageTileState, RenderedTile, make_montage_plan
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    ShaderMapping,
+    ShaderScale,
+    TexturePlaneKind,
+)
 from arrayscope.window.frame_session import FrameSession
 
 
@@ -85,10 +95,7 @@ def test_stage_materialization_inherits_best_consumer_tile_rank():
     session.stage_fan_in.tile_stage_keys = {2: "shared-stage", 3: "shared-stage"}
 
     assert _stage_consumer_scheduling_rank(session, "shared-stage") == 2
-    assert (
-        _stage_consumer_scheduling_rank(session, "unbound-stage")
-        == UNRANKED_SCHEDULING_RANK
-    )
+    assert _stage_consumer_scheduling_rank(session, "unbound-stage") == UNRANKED_SCHEDULING_RANK
 
 
 def test_first_pass_physical_completion_uses_required_tiles():
@@ -177,8 +184,7 @@ def test_retained_physical_fallback_seeds_first_pass_without_settling_exact_targ
     assert session.first_pass_pixels_presented()
     assert session.required_target_unsettled_tiles() == (0, 1, 2, 3)
     assert all(
-        (record := session.lifecycle.peek(tile_number)) is not None
-        and not record.target_settled
+        (record := session.lifecycle.peek(tile_number)) is not None and not record.target_settled
         for tile_number in session.required_tile_numbers()
     )
 
@@ -283,7 +289,9 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
     tile = session.plan.tiles[0]
     session.mark_loading(tile)
     session.active_tile_requests.add(int(tile.montage_index))
-    rendered = RenderedTile(tile, np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16)
+    rendered = RenderedTile(
+        tile, np.ones((2, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32), 0.0, (2, 2), 16
+    )
 
     session.mark_materialized(rendered)
 
@@ -313,7 +321,9 @@ def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_back
     session.display_tile_payloads[0] = payload
     session.tile_presentation_state = TilePresentationState({0: payload}, revision=1)
     session.lifecycle.backend_presented_snapshot({0: payload.source_id})
-    session.lifecycle.acknowledge_presented(0, payload.source_id, payload.quality, payload.lod.level)
+    session.lifecycle.acknowledge_presented(
+        0, payload.source_id, payload.quality, payload.lod.level
+    )
 
     row = next(row for row in session.diagnostic_tile_identity_rows() if row["tile"] == 0)
 
@@ -498,7 +508,9 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     assert clean_state.payloads[0] is first[0]
     assert clean_delta.upserts == {}
     replacement = np.full((2, 2), 3.0, dtype=np.float32)
-    session.mark_materialized(RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes))
+    session.mark_materialized(
+        RenderedTile(tile, replacement, replacement, 0.0, replacement.shape, replacement.nbytes)
+    )
     third_state, third_delta = session.build_tile_presentation({0: ("tile", 0, "replacement")})
     assert third_state.payloads[0] is not first[0]
     assert third_state.payloads[0].image is replacement
@@ -541,7 +553,7 @@ def test_montage_render_session_does_not_acknowledge_deferred_visible_upsert():
         session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(tile.montage_index)] = ("tile", int(tile.montage_index))
 
-    proposed, delta = session.build_tile_presentation(source_ids)
+    _proposed, delta = session.build_tile_presentation(source_ids)
     session.acknowledge_tile_presentation(
         delta,
         TileCommitReport(
@@ -626,7 +638,9 @@ def test_montage_render_session_caps_upserts_without_clipping_active_scope():
     assert tuple(first_delta.upserts) == (0,)
     assert first_delta.active_tiles == (0, 1, 2, 3)
     assert first_state.active_payloads(first_delta) == {0: first_delta.upserts[0]}
-    session.acknowledge_tile_presentation(first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)))
+    session.acknowledge_tile_presentation(
+        first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta))
+    )
     session.mark_presented(first_state.active_payloads(first_delta))
 
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
@@ -648,7 +662,9 @@ def test_montage_render_session_capped_upserts_preserve_ready_priority_order():
         source_ids[int(tile.montage_index)] = ("tile-source", int(tile.montage_index))
 
     first_state, first_delta = session.build_tile_presentation(source_ids, max_upserts=1)
-    session.acknowledge_tile_presentation(first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta)))
+    session.acknowledge_tile_presentation(
+        first_delta, TileCommitReport(presented_tiles=first_state.active_payloads(first_delta))
+    )
     session.mark_presented(first_state.active_payloads(first_delta))
     second_state, second_delta = session.build_tile_presentation(source_ids, max_upserts=1)
 
@@ -674,7 +690,9 @@ def test_montage_render_session_dirty_payloads_keep_session_incomplete_until_ack
     assert not session.is_complete()
 
     state, delta = session.build_tile_presentation({0: ("tile", 0)})
-    session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=state.active_payloads(delta)))
+    session.acknowledge_tile_presentation(
+        delta, TileCommitReport(presented_tiles=state.active_payloads(delta))
+    )
     session.mark_presented(state.active_payloads(delta))
     session.note_committed()
 
@@ -979,9 +997,7 @@ def test_retargeted_seed_rebuilds_typed_identity_for_current_source():
             image.nbytes,
         )
     )
-    stale_wrapper = original.snapshot_display_tile_payloads(
-        {0: ("tile-source", 3)}
-    )[0]
+    stale_wrapper = original.snapshot_display_tile_payloads({0: ("tile-source", 3)})[0]
     assert stale_wrapper.tile_identity.source_index == 0
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(
@@ -1095,7 +1111,12 @@ def test_shader_mapping_change_reuses_texture_content_identity():
         display_mode=ShaderDisplayMode.PHASE_COLOR,
     )
     first_rendered = RenderedTile(
-        session.plan.tiles[0], source, histogram, 0.0, source.shape, source.nbytes,
+        session.plan.tiles[0],
+        source,
+        histogram,
+        0.0,
+        source.shape,
+        source.nbytes,
         texture_kind=TexturePlaneKind.COMPLEX_RG32F,
         semantic_data=source,
         shader_mapping=first_mapping,
@@ -1104,7 +1125,12 @@ def test_shader_mapping_change_reuses_texture_content_identity():
     first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
 
     second_rendered = RenderedTile(
-        session.plan.tiles[0], source, histogram, 0.0, source.shape, source.nbytes,
+        session.plan.tiles[0],
+        source,
+        histogram,
+        0.0,
+        source.shape,
+        source.nbytes,
         texture_kind=TexturePlaneKind.COMPLEX_RG32F,
         semantic_data=source,
         shader_mapping=second_mapping,
@@ -1159,7 +1185,9 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
     assert set(session.rendered_tiles) == {0, 1}
     assert tuple(tile.montage_index for tile in additions) == (2, 3, 4)
 
-    state, delta = session.build_tile_presentation({index: ("tile-source", index) for index in range(8)})
+    state, delta = session.build_tile_presentation(
+        {index: ("tile-source", index) for index in range(8)}
+    )
     assert delta.active_tiles == (2, 3)
     assert state.active_payloads(delta) == {}
 
@@ -1295,8 +1323,12 @@ def test_retarget_viewport_adopts_replacement_plan_with_same_geometry():
 
 def test_layout_reflow_repositions_materialized_tiles_without_payload_upserts():
     state = ViewState.from_shape((2, 2, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
-    first_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=2)
-    second_plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3)
+    first_plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=2
+    )
+    second_plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3
+    )
     session = FrameSession(
         session_id=1,
         key="key",
@@ -1832,7 +1864,6 @@ def test_montage_render_session_commits_ready_payloads_atomically():
     assert tuple(state.payloads) == (0, 1, 2, 3)
 
 
-
 def test_tile_presentation_state_rejects_stale_delta():
     session = _session()
     tile = session.plan.tiles[0]
@@ -1871,7 +1902,9 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     original.mark_presented(state.active_payloads(delta))
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
-    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted_plan = make_montage_plan(
+        shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2
+    )
     shifted_rendered = RenderedTile(
         shifted_plan.tiles[0],
         image,
@@ -1904,7 +1937,9 @@ def test_seeded_payloads_retain_committed_state_across_retarget():
     )
 
     shifted.seed_display_tile_payloads(state.payloads, {0: ("tile-source", 2)})
-    next_state, next_delta = shifted.build_tile_presentation({0: ("tile-source", 2), 1: ("tile-source", 3)})
+    next_state, next_delta = shifted.build_tile_presentation(
+        {0: ("tile-source", 2), 1: ("tile-source", 3)}
+    )
 
     assert 0 in next_state.payloads
     assert next_state.payloads[0].source_index == 2
@@ -1932,7 +1967,9 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
     original.mark_presented(state.active_payloads(delta))
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
-    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted_plan = make_montage_plan(
+        shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2
+    )
     shifted = FrameSession(
         session_id=2,
         key="key",
@@ -1961,7 +1998,9 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
     monkeypatch.setattr(
         shifted,
         "_texture_for_rendered_tile",
-        lambda _rendered: (_ for _ in ()).throw(AssertionError("texture lookup should not seed resident payload")),
+        lambda _rendered: (_ for _ in ()).throw(
+            AssertionError("texture lookup should not seed resident payload")
+        ),
     )
 
     shifted.seed_display_tile_payloads(
@@ -1990,7 +2029,9 @@ def test_seeded_payloads_only_confirm_when_backend_identity_matches():
     original.mark_presented(state.active_payloads(delta))
 
     shifted_state = ViewState.from_shape((2, 2, 4)).with_montage_axis(2, indices=(2, 3), text="2:4")
-    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2)
+    shifted_plan = make_montage_plan(
+        shifted_state, axis=2, indices=(2, 3), tile_shape=(2, 2), columns=2
+    )
     shifted = FrameSession(
         session_id=2,
         key="key",
@@ -2031,10 +2072,7 @@ def test_seeded_payloads_only_confirm_when_backend_identity_matches():
 
 def test_resident_retarget_upserts_bypass_cold_priority_cap():
     original = _session()
-    images = {
-        index: np.full((2, 2), float(index), dtype=np.float32)
-        for index in range(7)
-    }
+    images = {index: np.full((2, 2), float(index), dtype=np.float32) for index in range(7)}
     original_sources = {index: ("tile-source", index) for index in range(4)}
     for index in range(4):
         image = images[index]
@@ -2055,8 +2093,12 @@ def test_resident_retarget_upserts_bypass_cold_priority_cap():
     )
     original.mark_presented(state.active_payloads(delta))
 
-    shifted_state = ViewState.from_shape((2, 2, 7)).with_montage_axis(2, indices=(3, 4, 5, 6), text="3:7")
-    shifted_plan = make_montage_plan(shifted_state, axis=2, indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4)
+    shifted_state = ViewState.from_shape((2, 2, 7)).with_montage_axis(
+        2, indices=(3, 4, 5, 6), text="3:7"
+    )
+    shifted_plan = make_montage_plan(
+        shifted_state, axis=2, indices=(3, 4, 5, 6), tile_shape=(2, 2), columns=4
+    )
     shifted = FrameSession(
         session_id=2,
         key="key",
@@ -2171,10 +2213,11 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
     import json
     from pathlib import Path
 
+    from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.core.trace import close_trace, configure_trace
     from arrayscope.window import frame_runtime
     from arrayscope.window.frame_runtime import FrameRuntimeMixin
-    from pyqtgraph.Qt import QtWidgets
 
     monkeypatch.setattr(frame_runtime, "perf_counter", lambda: 12.1)
     dump_directory = tmp_path / "stall-dumps"
@@ -2333,7 +2376,16 @@ def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot)
             # progress (commit_batches=6): commits are still landing.
             self._montage_watchdog_state = (
                 session_id,
-                1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 6,
                 3,
             )

@@ -70,9 +70,7 @@ def test_tile_truth_overlay_positions_one_label_inside_each_tile(qt_app):
     assert "slot 1  LOAD" in layer.labels[1].text()
     assert "planes r 0x1000:16x16:float32  i 0x2000:16x16:float32" in layer.labels[0].text()
     assert "phys complex_rg32f/complex map 4.0 comp 2.0" in layer.labels[0].text()
-    assert layer.labels[0].testAttribute(
-        QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
-    )
+    assert layer.labels[0].testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
     layer.clear()
     assert all(label.isHidden() for label in layer.labels)

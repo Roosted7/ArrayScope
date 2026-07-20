@@ -38,7 +38,6 @@ import shutil
 import statistics
 import subprocess
 import sys
-import tempfile
 import time
 
 REAL_SIZE = (1300, 650)
@@ -158,7 +157,9 @@ class RendercanvasCanvas:
 
         self.renderer = renderer
         self.t = 0.0
-        self.widget = QRenderWidget(parent=parent, present_method=present_method, update_mode="ondemand")
+        self.widget = QRenderWidget(
+            parent=parent, present_method=present_method, update_mode="ondemand"
+        )
         self.context = self.widget.get_context("wgpu")
         self.fmt = None
         self.widget.request_draw(self._draw)
@@ -181,8 +182,8 @@ class NativeWaylandCanvas:
 
     def __init__(self, renderer, parent):
         from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication, QWidget
         from PySide6.QtGui import QNativeInterface
+        from PySide6.QtWidgets import QApplication, QWidget
         from wgpu.backends.wgpu_native import _helpers
         from wgpu.backends.wgpu_native._ffi import ffi, lib
 
@@ -305,7 +306,9 @@ def _surface_format_name(fmt_int):
     if _FMT_NAMES is None:
         from wgpu.backends.wgpu_native._mappings import enummap
 
-        _FMT_NAMES = {v: k.split(".")[-1] for k, v in enummap.items() if k.startswith("TextureFormat.")}
+        _FMT_NAMES = {
+            v: k.split(".")[-1] for k, v in enummap.items() if k.startswith("TextureFormat.")
+        }
     return _FMT_NAMES[fmt_int]
 
 
@@ -323,11 +326,7 @@ def count_magenta(qimage, rect=None, tol=12):
     count = 0
     r0, g0, b0 = MAGENTA
     for i in range(0, len(buf), 4):
-        if (
-            abs(buf[i] - r0) <= tol
-            and abs(buf[i + 1] - g0) <= tol
-            and abs(buf[i + 2] - b0) <= tol
-        ):
+        if abs(buf[i] - r0) <= tol and abs(buf[i + 1] - g0) <= tol and abs(buf[i + 2] - b0) <= tol:
             count += 1
     return count
 
@@ -392,8 +391,8 @@ def main():
         "phases": {},
         "notes": [],
     }
-    import wgpu
     import rendercanvas
+    import wgpu
 
     evidence["versions"] = {
         "wgpu": wgpu.__version__,
@@ -504,7 +503,9 @@ def main():
     if args.mode == "screen-native":
         canvas2 = NativeWaylandCanvas(renderer, page2)
     else:
-        canvas2 = RendercanvasCanvas(renderer, page2, "bitmap" if args.mode == "bitmap" else "screen")
+        canvas2 = RendercanvasCanvas(
+            renderer, page2, "bitmap" if args.mode == "bitmap" else "screen"
+        )
     canvas2.widget.setMinimumSize(300, 200)
     lay2.addWidget(canvas2.widget)
     win2.setCentralWidget(page2)
@@ -532,7 +533,9 @@ def main():
     backing = win.grab().toImage()
     # Map canvas rect to window coords for the crop.
     top_left = canvas.widget.mapTo(win, canvas.widget.rect().topLeft())
-    crop = QRect(top_left.x(), top_left.y(), canvas_rect_in_page.width(), canvas_rect_in_page.height())
+    crop = QRect(
+        top_left.x(), top_left.y(), canvas_rect_in_page.width(), canvas_rect_in_page.height()
+    )
     backing_count = count_magenta(backing, crop)
     out_dir = os.path.dirname(os.path.abspath(args.out))
     backing.save(os.path.join(out_dir, f"{args.mode}-{session}-backing.png"))

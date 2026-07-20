@@ -8,8 +8,8 @@ Scenario: FFT->shift->iFFT pipeline on the real dataset, d2 index window
      floor level exists (should present instantly).
 """
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -24,15 +24,18 @@ from arrayscope.tools.presentation_settlement import (
 
 prefer_pyside6()
 
+from pyqtgraph.Qt import QtCore
+
 from arrayscope.app.launch import _create_window
 from arrayscope.io.file_interpreters import load_path
 from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
 from arrayscope.render import lod as render_lod
-from pyqtgraph.Qt import QtCore
 
 fp = REPO_ROOT / "data" / "_WIPDelRec-tT2_20260223150234_14.nii"
 loaded = load_path(fp)
-app, win = _create_window(loaded.data, title=fp.name, filepath=fp, axes=getattr(loaded, "axes", None))
+app, win = _create_window(
+    loaded.data, title=fp.name, filepath=fp, axes=getattr(loaded, "axes", None)
+)
 
 from time import perf_counter
 
@@ -58,7 +61,9 @@ def sample_floor_misses():
     if s is None or not render_lod.resident_lod_active(s):
         return
     required = set(s.required_tile_numbers()) - set(s.skipped_tiles)
-    planned = {int(t.montage_index): t for t in tuple(s.plan.tiles) if int(t.montage_index) in required}
+    planned = {
+        int(t.montage_index): t for t in tuple(s.plan.tiles) if int(t.montage_index) in required
+    }
     drawn = physical_rows()
     now = perf_counter()
     sid = int(s.session_id)
@@ -83,7 +88,7 @@ def sample_floor_misses():
             )
     for key in tuple(miss_started):
         if key not in missing_now:
-            miss_durations.append(now - miss_started.pop(key))
+            miss_durations.append(now - miss_started.pop(key))  # noqa: PERF401
     floor_misses["samples"] += 1
     floor_misses["misses"] += misses
     floor_misses["worst"] = max(floor_misses["worst"], misses)
@@ -105,8 +110,7 @@ def stuck_scan(label):
         )
     }
     pending_rung_tiles = {
-        int(request.tile_number)
-        for request in tuple(s.pending_rung_materializations)
+        int(request.tile_number) for request in tuple(s.pending_rung_materializations)
     }
     stuck = []
     for number in s.required_tile_numbers():
@@ -118,8 +122,7 @@ def stuck_scan(label):
         requested_level = row.get("desired_payload_lod")
         bindings = tuple(row.get("physical_page_bindings", ()) or ())
         actual_levels = tuple(
-            int(getattr(binding.get("actual_lod"), "level", 0) or 0)
-            for binding in bindings
+            int(getattr(binding.get("actual_lod"), "level", 0) or 0) for binding in bindings
         )
         if not actual_levels and row.get("physical_lod_level") is not None:
             actual_levels = (int(row["physical_lod_level"]),)
@@ -136,9 +139,8 @@ def stuck_scan(label):
         problem = None
         if number not in physical and not has_progress:
             problem = "physically-blank-no-progress"
-        elif (
-            row.get("desired_payload_source_index") is not None
-            and not bool(row.get("desired_matches_current_source"))
+        elif row.get("desired_payload_source_index") is not None and not bool(
+            row.get("desired_matches_current_source")
         ):
             problem = "desired-payload-wrong-source"
         elif (
@@ -192,7 +194,9 @@ def stuck_scan(label):
 
 
 def set_ops():
-    win.operation_coordinator.load_operations((CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2)))
+    win.operation_coordinator.load_operations(
+        (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+    )
     win._set_document(win.operation_coordinator.document)
     win._coerce_channel_for_current_dtype()
     win.render(reason="verify-stale-ops")
@@ -204,9 +208,7 @@ def set_window(text):
 
     def apply():
         vs = win.view_state
-        win._set_view_state(
-            vs.with_montage_axis(2, indices=range(start, stop), text=text)
-        )
+        win._set_view_state(vs.with_montage_axis(2, indices=range(start, stop), text=text))
         win.render(reason=f"verify-stale-window-{text}")
 
     return apply
@@ -234,6 +236,7 @@ floor_timer = QtCore.QTimer(win)
 floor_timer.setInterval(120)
 floor_timer.timeout.connect(sample_floor_misses)
 floor_timer.start()
+
 
 def settled() -> bool:
     current = presentation_target_token(win)
@@ -277,8 +280,7 @@ def advance():
             if now < machine["deadline"]:
                 return
             print(
-                f"[{name}] HARD FAIL: did not settle within "
-                f"{INTERACTION_SETTLE_HARD_LIMIT_S:.0f}s",
+                f"[{name}] HARD FAIL: did not settle within {INTERACTION_SETTLE_HARD_LIMIT_S:.0f}s",
                 flush=True,
             )
             print(presentation_settlement_diagnostic(win), flush=True)
@@ -335,10 +337,7 @@ def finish():
     for number, info in list(floor_misses["detail"].items())[:15]:
         print(f"  tile {number}: {info}", flush=True)
     failed = bool(
-        correctness_failures
-        or floor_misses["misses"]
-        or miss_started
-        or stall_assertions
+        correctness_failures or floor_misses["misses"] or miss_started or stall_assertions
     )
     if failed:
         print(

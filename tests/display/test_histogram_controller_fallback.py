@@ -75,9 +75,7 @@ def test_terminally_declined_submission_never_reaches_module_executor(
     controller_factory, monkeypatch
 ):
     submitted = _capture_executor(monkeypatch)
-    controller = controller_factory(
-        lambda fn, *, on_done, key: WorkStart(False, "admission")
-    )
+    controller = controller_factory(lambda fn, *, on_done, key: WorkStart(False, "admission"))
 
     controller._schedule_histogram_job(_request())
 

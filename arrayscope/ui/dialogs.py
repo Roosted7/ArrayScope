@@ -10,7 +10,6 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.ui.widgets import RangeSlider
 
-
 SPINBOX_STYLE = "QSpinBox { font-size: 9pt; } QSpinBox:disabled { color: palette(mid); }"
 
 
@@ -56,22 +55,32 @@ class SaveRangeDialog(QtWidgets.QDialog):
                 spinbox.setFixedWidth(70)
 
             end_spinbox.setValue(max_index)
-            start_spinbox.valueChanged.connect(lambda value, end_box=end_spinbox: end_box.setMinimum(value))
-            end_spinbox.valueChanged.connect(lambda value, start_box=start_spinbox: start_box.setMaximum(value))
             start_spinbox.valueChanged.connect(
-                lambda value, slider_widget=slider, end_box=end_spinbox: slider_widget.setValues(value, end_box.value())
+                lambda value, end_box=end_spinbox: end_box.setMinimum(value)
             )
             end_spinbox.valueChanged.connect(
-                lambda value, slider_widget=slider, start_box=start_spinbox: slider_widget.setValues(start_box.value(), value)
+                lambda value, start_box=start_spinbox: start_box.setMaximum(value)
+            )
+            start_spinbox.valueChanged.connect(
+                lambda value, slider_widget=slider, end_box=end_spinbox: slider_widget.setValues(
+                    value, end_box.value()
+                )
+            )
+            end_spinbox.valueChanged.connect(
+                lambda value, slider_widget=slider, start_box=start_spinbox: (
+                    slider_widget.setValues(start_box.value(), value)
+                )
             )
             start_spinbox.valueChanged.connect(lambda _value: self._update_output_shape_label())
             end_spinbox.valueChanged.connect(lambda _value: self._update_output_shape_label())
             slider.valuesChanged.connect(
-                lambda lower, upper, start_box=start_spinbox, end_box=end_spinbox: self._sync_spinboxes(
-                    start_box,
-                    end_box,
-                    lower,
-                    upper,
+                lambda lower, upper, start_box=start_spinbox, end_box=end_spinbox: (
+                    self._sync_spinboxes(
+                        start_box,
+                        end_box,
+                        lower,
+                        upper,
+                    )
                 )
             )
 
@@ -113,7 +122,9 @@ class SaveRangeDialog(QtWidgets.QDialog):
         self._squeeze_checkbox.toggled.connect(self._update_output_shape_label)
         footer_layout.addWidget(self._squeeze_checkbox)
         self._output_shape_label = QtWidgets.QLabel()
-        self._output_shape_label.setStyleSheet("QLabel { font-size: 9pt; color: palette(windowText); }")
+        self._output_shape_label.setStyleSheet(
+            "QLabel { font-size: 9pt; color: palette(windowText); }"
+        )
         footer_layout.addWidget(self._output_shape_label)
         footer_layout.addStretch()
         layout.addLayout(footer_layout)
@@ -139,7 +150,9 @@ class SaveRangeDialog(QtWidgets.QDialog):
         self._update_output_shape_label()
 
     def _selected_shape(self):
-        selected_shape = [max(end.value() - start.value() + 1, 0) for _, start, end in self._controls]
+        selected_shape = [
+            max(end.value() - start.value() + 1, 0) for _, start, end in self._controls
+        ]
         if self.should_squeeze():
             squeezed_shape = [size for size in selected_shape if size != 1]
             return squeezed_shape or [1]

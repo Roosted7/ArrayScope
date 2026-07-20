@@ -34,7 +34,7 @@ def gradient_montage_data() -> np.ndarray:
     return (frames + gradient[None]).transpose(1, 2, 0).copy()
 
 
-@pytest.fixture()
+@pytest.fixture
 def pyqtgraph_gradient_montage_window():
     """Production PyQtGraph window under an isolated QSettings namespace."""
 
@@ -54,9 +54,7 @@ def pyqtgraph_gradient_montage_window():
     app.setApplicationName("ArrayScopeQtRasterOracleHarness")
     settings = QtCore.QSettings()
     settings.clear()
-    settings.setValue(
-        "image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value
-    )
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
     settings.sync()
     win = ArrayScopeWindow(gradient_montage_data())
     win.setWindowTitle("pyqtgraph-raster-cpu-oracle")
@@ -120,9 +118,7 @@ def _visible_states(harness):
 def _settled_healthy_report(harness):
     harness.fit_plan_view()
     harness.pump(0.3)
-    assert harness.wait_settled(), (
-        f"scene never settled: {harness.settlement_diagnostics()}"
-    )
+    assert harness.wait_settled(), f"scene never settled: {harness.settlement_diagnostics()}"
     for number in harness.session.required_tile_numbers():
         payload = harness.session.display_tile_payloads[int(number)]
         level = 0 if payload.lod is None else int(payload.lod.level)
@@ -139,9 +135,9 @@ def test_settled_scene_matches_cpu_reference(pyqtgraph_gradient_montage_window):
     required = {int(number) for number in harness.session.required_tile_numbers()}
     assert {tile.tile_number for tile in report.tiles} == required
     assert len(report.tiles) == COUNT
-    assert all(
-        tile.samples >= report.min_samples_per_tile for tile in report.tiles
-    ), "oracle sample floor not met -- comparison would be vacuous"
+    assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles), (
+        "oracle sample floor not met -- comparison would be vacuous"
+    )
 
 
 def test_wrong_levels_fail_oracle_and_recover(pyqtgraph_gradient_montage_window):
@@ -211,7 +207,8 @@ def test_swapped_tile_positions_fail_oracle_and_recover(
     with pytest.raises(AssertionError, match="Qt raster diverges from the CPU") as excinfo:
         harness.assert_tile_matches_cpu_reference()
     message = str(excinfo.value)
-    assert f"tile {tile_a}:" in message and f"tile {tile_b}:" in message
+    assert f"tile {tile_a}:" in message
+    assert f"tile {tile_b}:" in message
 
     state_a.item.setPos(position_a)
     state_b.item.setPos(position_b)

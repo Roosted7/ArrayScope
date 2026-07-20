@@ -13,25 +13,37 @@ from time import perf_counter
 import numpy as np
 
 from arrayscope.app.errors import handle_ui_exception
-from arrayscope.core.memory_policy import MiB, MemoryPolicy
 from arrayscope.core.frame_targets import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, WorkItem, complete_inline_work as _complete_inline_work
+from arrayscope.core.memory_policy import MemoryPolicy, MiB
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.operations.evaluator import _document_key
-from arrayscope.ui.toasts import show_status_message
 from arrayscope.display.commit import DisplayCommitter
+from arrayscope.display.frame_planner import FramePlanner
+from arrayscope.display.model.commit import (
+    CommitKind,
+    DisplayPayload,
+    DisplayTiledPresentation,
+    PresentationInput,
+    RenderRequestContext,
+)
 from arrayscope.display.model.frame import (
     CommittedDisplayFrame,
     DisplayFrameKey,
-    DisplayTilePayload,
+    TiledValueSource,
     TilePresentationDelta,
     TilePresentationState,
-    TiledValueSource,
 )
-from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation, normalize_bounds
-from arrayscope.display.model.commit import CommitKind, DisplayPayload, DisplayTiledPresentation, PresentationInput, RenderRequestContext
+from arrayscope.display.planning import (
+    LevelSource,
+    LevelSourceRank,
+    decide_presentation,
+    normalize_bounds,
+)
+from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import WorkItem
+from arrayscope.kernel import complete_inline_work as _complete_inline_work
+from arrayscope.operations.evaluator import _document_key
+from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.viewport_bridge import ViewportBridge
 
 
@@ -89,14 +101,18 @@ class DisplayPresentationMixin:
                         geometry=frame_plan.geometry,
                         viewport_policy=viewport_policy,
                         frame_plan=frame_plan,
-                        rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
+                        rgb_already_windowed=bool(
+                            getattr(display_image, "rgb_already_windowed", False)
+                        ),
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
                         tile_state=tile_state,
                         base_tile_state=base_tile_state,
                         tile_delta=tile_delta,
-                        tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
+                        tile_residency_budget_bytes=tile_residency_budget_bytes(
+                            self._memory_policy()
+                        ),
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -112,22 +128,27 @@ class DisplayPresentationMixin:
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
 
             set_image_start = perf_counter()
-            frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            frame = self._display_committer().commit_tile_layer(
+                decision.display_presentation, context.frame_key
+            )
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = frame.geometry
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
             semantic_frame_commit = bool(
-                semantic_commit
-                and bool(getattr(report, "presented_tiles", ()))
+                semantic_commit and bool(getattr(report, "presented_tiles", ()))
             )
             if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
+                apply_restored_viewport = getattr(
+                    self.win, "_apply_viewport_continuity_when_ready", None
+                )
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
-                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
+                show_pending_montage_revert = getattr(
+                    self, "_show_pending_montage_view_revert", None
+                )
                 if callable(show_pending_montage_revert):
                     show_pending_montage_revert()
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
@@ -139,7 +160,7 @@ class DisplayPresentationMixin:
                 self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:
                 self.win._update_operation_dock()
-        
+
             # Apply axis flips after setting the image
             self.win.apply_axis_flips()
             self.win.img_view.setImageStale(False)
@@ -149,7 +170,7 @@ class DisplayPresentationMixin:
                 self.win._deferred_side_panel_refresh_pending = True
             elif semantic_frame_commit:
                 self.win._refresh_inspection_dock()
-        
+
         except Exception as e:
             handle_ui_exception("image update", e)
             show_status_message(self.win, f"Image update failed: {e}")
@@ -206,14 +227,18 @@ class DisplayPresentationMixin:
                         geometry=frame_plan.geometry,
                         viewport_policy=viewport_policy,
                         frame_plan=frame_plan,
-                        rgb_already_windowed=bool(getattr(display_image, "rgb_already_windowed", False)),
+                        rgb_already_windowed=bool(
+                            getattr(display_image, "rgb_already_windowed", False)
+                        ),
                         histogram_plot_data=histogram_plot_data,
                         montage_dirty_tiles=montage_dirty_tiles,
                         montage_tile_source_ids=montage_tile_source_ids,
                         tile_state=tile_state,
                         base_tile_state=base_tile_state,
                         tile_delta=tile_delta,
-                        tile_residency_budget_bytes=tile_residency_budget_bytes(self._memory_policy()),
+                        tile_residency_budget_bytes=tile_residency_budget_bytes(
+                            self._memory_policy()
+                        ),
                     ),
                     context=context,
                     previous_frame=previous_frame,
@@ -228,22 +253,27 @@ class DisplayPresentationMixin:
             )
             self._last_levels_histogram_ms = (perf_counter() - levels_start) * 1000.0
             set_image_start = perf_counter()
-            frame = self._display_committer().commit_tile_layer(decision.display_presentation, context.frame_key)
+            frame = self._display_committer().commit_tile_layer(
+                decision.display_presentation, context.frame_key
+            )
             self._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
             self.display_geometry = frame.geometry
             report = getattr(self._display_committer(), "last_tile_commit_report", None)
             semantic_frame_commit = bool(
-                semantic_commit
-                and bool(getattr(report, "presented_tiles", ()))
+                semantic_commit and bool(getattr(report, "presented_tiles", ()))
             )
             if semantic_frame_commit:
                 self._set_committed_display_frame(frame)
                 self._consume_pending_display_levels(user_levels)
                 self._note_display_level_source(decision)
-                apply_restored_viewport = getattr(self.win, "_apply_viewport_continuity_when_ready", None)
+                apply_restored_viewport = getattr(
+                    self.win, "_apply_viewport_continuity_when_ready", None
+                )
                 if callable(apply_restored_viewport):
                     apply_restored_viewport()
-                show_pending_montage_revert = getattr(self, "_show_pending_montage_view_revert", None)
+                show_pending_montage_revert = getattr(
+                    self, "_show_pending_montage_view_revert", None
+                )
                 if callable(show_pending_montage_revert):
                     show_pending_montage_revert()
                 refresh_hover = getattr(self, "_refresh_hover_after_display_commit", None)
@@ -280,7 +310,9 @@ class DisplayPresentationMixin:
             self._frame_planner_instance = planner
         return planner
 
-    def _previous_display_frame_for_policy(self, *, force_auto: bool) -> CommittedDisplayFrame | None:
+    def _previous_display_frame_for_policy(
+        self, *, force_auto: bool
+    ) -> CommittedDisplayFrame | None:
         if force_auto:
             return None
         frame = getattr(self.win, "_committed_display_frame", None)
@@ -311,11 +343,14 @@ class DisplayPresentationMixin:
                 return False
         elif tuple(np.shape(frame.data)[:2]) != display_shape:
             return False
-        if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != display_shape:
-            return False
-        return True
+        return not (
+            frame.histogram_data is not None
+            and tuple(np.shape(frame.histogram_data)[:2]) != display_shape
+        )
 
-    def _render_request_context(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> RenderRequestContext:
+    def _render_request_context(
+        self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None
+    ) -> RenderRequestContext:
         if document_key is None:
             document_key = _document_key(self.win.document)
         if request_key is None:
@@ -393,7 +428,10 @@ class DisplayPresentationMixin:
         scene = getattr(frame, "scene", None)
         if frame is None or scene is None:
             return
-        if getattr(getattr(scene, "layout", None), "value", getattr(scene, "layout", None)) != "single":
+        if (
+            getattr(getattr(scene, "layout", None), "value", getattr(scene, "layout", None))
+            != "single"
+        ):
             return
         value_source = getattr(frame, "value_source", None)
         if not isinstance(value_source, TiledValueSource):
@@ -461,7 +499,9 @@ class DisplayPresentationMixin:
             ),
         )
 
-    def _display_frame_key(self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None) -> DisplayFrameKey:
+    def _display_frame_key(
+        self, *, document_key=None, request_key=None, render_generation=None, semantic_key=None
+    ) -> DisplayFrameKey:
         if document_key is None:
             document_key = _document_key(self.win.document)
         if request_key is None:
@@ -480,7 +520,9 @@ class DisplayPresentationMixin:
             raise RuntimeError("Committed display frames must be tiled.")
         self._committed_display_request_key = frame.key.request_key
         self.win._committed_display_frame = frame
-        refresh_hidden_roi_overlay = getattr(self.win, "_refresh_hidden_roi_overlay_from_committed_frame", None)
+        refresh_hidden_roi_overlay = getattr(
+            self.win, "_refresh_hidden_roi_overlay_from_committed_frame", None
+        )
         if callable(refresh_hidden_roi_overlay):
             refresh_hidden_roi_overlay()
 
@@ -574,7 +616,9 @@ class DisplayPresentationMixin:
         if emit_user:
             controller = getattr(self.win, "sync_controller", None)
             publish_now = getattr(controller, "_publish_now", None)
-            if controller is not None and "levels" in getattr(controller, "_pending_requests", set()):
+            if controller is not None and "levels" in getattr(
+                controller, "_pending_requests", set()
+            ):
                 controller._pending_requests.discard("levels")
                 controller._ignore_join_state.add("levels")
             if not callable(publish_now) or not publish_now("levels", force=True):
@@ -596,7 +640,9 @@ class DisplayPresentationMixin:
         source = LevelSource(
             levels=levels,
             histogram_range=histogram_range or levels,
-            rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
+            rank=LevelSourceRank.EXPLICIT_USER
+            if mode == "absolute"
+            else LevelSourceRank.PREVIOUS_COMMITTED,
             source_count=0,
             expected_count=0,
             semantic_key=getattr(getattr(self, "_frame_session", None), "level_key", None),
@@ -609,7 +655,9 @@ class DisplayPresentationMixin:
 
         frame = getattr(self.win, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):
-            self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range or frame.histogram_range)
+            self.win._committed_display_frame = replace(
+                frame, levels=levels, histogram_range=histogram_range or frame.histogram_range
+            )
         self.win._notify_sync("levels")
 
     def _on_level_presentation_changed(self, levels, *, final: bool = False) -> bool:
@@ -619,17 +667,25 @@ class DisplayPresentationMixin:
         session = getattr(self, "_frame_session", None)
         if session is None or not bool(getattr(session, "display_committed", False)):
             return False
-        if str(getattr(self.win.img_view, "montageDisplayMode", lambda: "none")()) not in {"tile_layer", "vispy_tile_layer"}:
+        if str(getattr(self.win.img_view, "montageDisplayMode", lambda: "none")()) not in {
+            "tile_layer",
+            "vispy_tile_layer",
+        }:
             return False
 
-        histogram_range = normalize_bounds(getattr(self.win.img_view, "getHistogramDataBounds", lambda: None)()) or levels
+        histogram_range = (
+            normalize_bounds(getattr(self.win.img_view, "getHistogramDataBounds", lambda: None)())
+            or levels
+        )
         mode = self._current_window_mode()
         source_override = getattr(self, "_level_presentation_source_override", None)
         if source_override is None:
             source = LevelSource(
                 levels=levels,
                 histogram_range=histogram_range,
-                rank=LevelSourceRank.EXPLICIT_USER if mode == "absolute" else LevelSourceRank.PREVIOUS_COMMITTED,
+                rank=LevelSourceRank.EXPLICIT_USER
+                if mode == "absolute"
+                else LevelSourceRank.PREVIOUS_COMMITTED,
                 source_count=0,
                 expected_count=0,
                 semantic_key=getattr(session, "level_key", None),
@@ -662,7 +718,9 @@ class DisplayPresentationMixin:
 
         frame = getattr(self.win, "_committed_display_frame", None)
         if frame is not None and self._is_level_history_frame_usable(frame):
-            self.win._committed_display_frame = replace(frame, levels=levels, histogram_range=histogram_range)
+            self.win._committed_display_frame = replace(
+                frame, levels=levels, histogram_range=histogram_range
+            )
         if source.rank == LevelSourceRank.EXPLICIT_USER:
             self.win._notify_sync("levels")
 
@@ -671,7 +729,9 @@ class DisplayPresentationMixin:
 
         if bool(final):
             committer = getattr(self, "commit_frame_session_presentation", None)
-            if callable(committer) and not bool(getattr(self, "_montage_presentation_commit_active", False)):
+            if callable(committer) and not bool(
+                getattr(self, "_montage_presentation_commit_active", False)
+            ):
                 committer(session)
                 return True
 
@@ -700,5 +760,3 @@ def _current_view_range(window):
         )
     except Exception:
         return None
-
-

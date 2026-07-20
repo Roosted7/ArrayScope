@@ -1,15 +1,25 @@
-from arrayscope.display.model.tile_priority import MontageTilePriorityQueue, TilePriorityContext, prioritize_tile_numbers
+from arrayscope.display.model.tile_priority import (
+    MontageTilePriorityQueue,
+    TilePriorityContext,
+    prioritize_tile_numbers,
+)
 
 
 def _plan(count=9, columns=3):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
 
-    state = ViewState.from_shape((10, 10, count)).with_montage_axis(2, indices=tuple(range(count)), text=":")
-    return make_montage_plan(state, axis=2, indices=tuple(range(count)), tile_shape=(10, 10), columns=columns, gap=1)
+    state = ViewState.from_shape((10, 10, count)).with_montage_axis(
+        2, indices=tuple(range(count)), text=":"
+    )
+    return make_montage_plan(
+        state, axis=2, indices=tuple(range(count)), tile_shape=(10, 10), columns=columns, gap=1
+    )
 
 
-def _context(*, focus=None, visible=(), near=(), priority=(), view_range=((0.0, 32.0), (0.0, 32.0))):
+def _context(
+    *, focus=None, visible=(), near=(), priority=(), view_range=((0.0, 32.0), (0.0, 32.0))
+):
     return TilePriorityContext.from_tiles(
         view_range=view_range,
         focus=focus,
@@ -97,7 +107,10 @@ def test_priority_queue_bulk_drain_stays_in_priority_order():
 
     def distance(index):
         tile = plan.tiles[index]
-        center = (float(tile.x0) + float(tile.width) * 0.5, float(tile.y0) + float(tile.height) * 0.5)
+        center = (
+            float(tile.x0) + float(tile.width) * 0.5,
+            float(tile.y0) + float(tile.height) * 0.5,
+        )
         return (center[0] - focus[0]) ** 2 + (center[1] - focus[1]) ** 2
 
     assert popped == sorted(popped, key=distance)
@@ -150,7 +163,10 @@ def test_priority_queue_retarget_takes_full_effect_on_every_pop():
 
     def distance(index):
         tile = plan.tiles[index]
-        center = (float(tile.x0) + float(tile.width) * 0.5, float(tile.y0) + float(tile.height) * 0.5)
+        center = (
+            float(tile.x0) + float(tile.width) * 0.5,
+            float(tile.y0) + float(tile.height) * 0.5,
+        )
         return ((center[0] - focus[0]) / 132.0) ** 2 + ((center[1] - focus[1]) / 44.0) ** 2
 
     assert popped == sorted(popped, key=lambda index: (distance(index), index))

@@ -5,8 +5,8 @@ import pytest
 
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
-
 pytest.importorskip("vispy")
+
 
 @pytest.fixture(scope="module")
 def benchmark_results(qt_app):
@@ -18,17 +18,14 @@ def benchmark_results(qt_app):
 
     view_types = (PyQtGraphSurface, VisPySurface)
     before = sum(
-        isinstance(widget, view_types)
-        for widget in QtWidgets.QApplication.topLevelWidgets()
+        isinstance(widget, view_types) for widget in QtWidgets.QApplication.topLevelWidgets()
     )
     results = benchmark_rendering_backends(measure_presented=False)
     after = sum(
-        isinstance(widget, view_types)
-        for widget in QtWidgets.QApplication.topLevelWidgets()
+        isinstance(widget, view_types) for widget in QtWidgets.QApplication.topLevelWidgets()
     )
     assert after <= before
     return results
-
 
 
 def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_results):
@@ -102,7 +99,13 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
         tile_layer_source_texels_per_pixel=8.0,
     )
 
-    result = _result(view, "non_native_probe", _ActionMeasurement(submission_ms=0.0), timing=timing, commit_count=2)
+    result = _result(
+        view,
+        "non_native_probe",
+        _ActionMeasurement(submission_ms=0.0),
+        timing=timing,
+        commit_count=2,
+    )
 
     assert result.lod_applied_factor == 4
     assert result.lod_applied_factor_xy == (4, 4)
@@ -170,7 +173,9 @@ def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_
     assert vispy.tile_layer_items_skipped == vispy.tile_layer_visible_items
 
 
-def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counters(benchmark_results):
+def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counters(
+    benchmark_results,
+):
     results = {result.name: result for result in benchmark_results}
     timing = results["pyqtgraph_large_tile_level_preview"].timing
 
@@ -252,7 +257,10 @@ def test_progressive_tile_stream_reports_aggregate_work(benchmark_results):
 
 
 def test_benchmark_jsonl_writer_emits_mergeable_sample_records(qt_app, tmp_path):
-    from arrayscope.display.rendering_benchmarks import collect_benchmark_samples, write_benchmark_jsonl
+    from arrayscope.display.rendering_benchmarks import (
+        collect_benchmark_samples,
+        write_benchmark_jsonl,
+    )
 
     samples = collect_benchmark_samples(runs=1, stress=False, measure_presented=False)
     path = tmp_path / "rendering.jsonl"

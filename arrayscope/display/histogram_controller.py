@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from time import perf_counter
-import weakref
 
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -21,7 +21,6 @@ from arrayscope.display.histogram_plot import (
     sample_histogram_data,
 )
 from arrayscope.ui.icons import material_icon, set_button_icon
-
 
 MIN_LEVEL_SPAN_FRACTION = 1e-12
 ASYNC_HISTOGRAM_SOURCE_SIZE = 256 * 256
@@ -148,7 +147,9 @@ class HistogramDisplayController(QtCore.QObject):
         self._install_manual_clicks()
 
     def eventFilter(self, obj, event):
-        if obj in self._filtered_histogram_widgets and self._handle_native_histogram_double_click(obj, event):
+        if obj in self._filtered_histogram_widgets and self._handle_native_histogram_double_click(
+            obj, event
+        ):
             return True
         return super().eventFilter(obj, event)
 
@@ -203,7 +204,9 @@ class HistogramDisplayController(QtCore.QObject):
         if auto_level:
             auto_bounds = _finite_increasing_pair(self.owner.getHistogramDataBounds())
             if auto_bounds is not None:
-                self.owner._apply_display_levels(float(auto_bounds[0]), float(auto_bounds[1]), emit_user=False)
+                self.owner._apply_display_levels(
+                    float(auto_bounds[0]), float(auto_bounds[1]), emit_user=False
+                )
             if np.asarray(request.data).size > ASYNC_HISTOGRAM_SOURCE_SIZE:
                 self._schedule_histogram_job(request)
                 return True
@@ -236,7 +239,11 @@ class HistogramDisplayController(QtCore.QObject):
         if self._running_request_signature is not None:
             self._pending_request = request
             previous_future = self._active_future
-            if previous_future is not None and not previous_future.done() and previous_future.cancel():
+            if (
+                previous_future is not None
+                and not previous_future.done()
+                and previous_future.cancel()
+            ):
                 self._running_request_signature = None
                 self._active_future = None
             else:
@@ -256,11 +263,16 @@ class HistogramDisplayController(QtCore.QObject):
             if getattr(started, "scheduled", False):
                 self._active_future = None
                 return
-            if str(getattr(started, "reason", "")) in {"limited", "idle", "cost"} and not self._closed:
+            if (
+                str(getattr(started, "reason", "")) in {"limited", "idle", "cost"}
+                and not self._closed
+            ):
                 self._running_request_signature = None
                 self._refresh_pending = True
                 if not self._refresh_timer.isActive():
-                    self._refresh_timer.start(max(8, int(getattr(self.owner, "_histogram_retry_interval_ms", 33))))
+                    self._refresh_timer.start(
+                        max(8, int(getattr(self.owner, "_histogram_retry_interval_ms", 33)))
+                    )
                 return
             # Terminal decline (owner closed for shutdown, or no controller
             # behind the submitter): drop the refresh. The module executor
@@ -338,7 +350,10 @@ class HistogramDisplayController(QtCore.QObject):
         if int(result.generation) != int(self._generation):
             return False
         result_signature = _result_signature(result)
-        if result_signature != self._active_request_signature and self._active_request_signature is not None:
+        if (
+            result_signature != self._active_request_signature
+            and self._active_request_signature is not None
+        ):
             return False
         item = self._histogram_item()
         if item is None or item.imageItem() is None:
@@ -372,7 +387,9 @@ class HistogramDisplayController(QtCore.QObject):
                 levels = item.imageItem().getLevels()
             if levels is not None:
                 if auto_level:
-                    self.owner._apply_display_levels(float(levels[0]), float(levels[1]), emit_user=False)
+                    self.owner._apply_display_levels(
+                        float(levels[0]), float(levels[1]), emit_user=False
+                    )
                 else:
                     with QtCore.QSignalBlocker(region):
                         region.setRegion((float(levels[0]), float(levels[1])))
@@ -524,7 +541,9 @@ class HistogramDisplayController(QtCore.QObject):
             return False
         return self._histogram_position_was_recently_handled(perf_counter(), position)
 
-    def _histogram_position_was_recently_handled(self, now: float, position: QtCore.QPointF) -> bool:
+    def _histogram_position_was_recently_handled(
+        self, now: float, position: QtCore.QPointF
+    ) -> bool:
         previous = self._last_histogram_auto_reset
         if previous is None:
             return False
@@ -827,7 +846,9 @@ class HistogramLevelEditPopup(QtWidgets.QWidget):
         self.edit.valueEdited.connect(self._apply_value)
         layout.addWidget(self.edit)
         self.accept_button = QtWidgets.QToolButton(frame)
-        set_button_icon(self.accept_button, "done", icon_size=16, tooltip="Apply", text_beside_icon=False)
+        set_button_icon(
+            self.accept_button, "done", icon_size=16, tooltip="Apply", text_beside_icon=False
+        )
         self.accept_button.setFixedSize(24, 22)
         self.accept_button.clicked.connect(self.accept)
         layout.addWidget(self.accept_button)
@@ -1005,7 +1026,11 @@ def _histogram_value_pixel_height(histogram_item) -> float:
             rect = getter()
             if rect is None:
                 continue
-            value = rect.height() if getattr(histogram_item, "orientation", "vertical") == "vertical" else rect.width()
+            value = (
+                rect.height()
+                if getattr(histogram_item, "orientation", "vertical") == "vertical"
+                else rect.width()
+            )
             if value and np.isfinite(float(value)) and float(value) > 1.0:
                 return float(value)
         except Exception:

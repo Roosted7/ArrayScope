@@ -18,6 +18,7 @@ import time
 import pytest
 
 from arrayscope.kernel import (
+    UNRANKED_SCHEDULING_RANK,
     InlineWorkerBackend,
     Kernel,
     Lane,
@@ -26,7 +27,6 @@ from arrayscope.kernel import (
     TaskOutcome,
     TaskSpec,
     ThreadWorkerBackend,
-    UNRANKED_SCHEDULING_RANK,
 )
 from arrayscope.operations.cancellation import EvaluationCancelled
 
@@ -134,9 +134,7 @@ def test_priority_orders_real_execution():
         ("visible", Priority.VISIBLE_IMAGE),
         ("interactive", Priority.INTERACTIVE),
     ):
-        kernel.submit(
-            TaskSpec(key=key, fn=lambda key=key: ran.append(key), priority=priority)
-        )
+        kernel.submit(TaskSpec(key=key, fn=lambda key=key: ran.append(key), priority=priority))
     backend.run_all()
     assert ran == ["interactive", "visible", "hover", "prefetch"]
 
@@ -654,9 +652,7 @@ def test_scope_clear_dropping_last_visible_item_releases_parked_optional_work():
     lane = Lane.VISIBLE_MATERIALIZATION
     kernel.set_lane_quota(lane, 0)
     ran = []
-    kernel.submit(
-        TaskSpec(key="vis", fn=lambda: ran.append("vis"), lane=lane, scope="montage:s")
-    )
+    kernel.submit(TaskSpec(key="vis", fn=lambda: ran.append("vis"), lane=lane, scope="montage:s"))
     kernel.submit(
         TaskSpec(
             key="opt",
@@ -811,14 +807,10 @@ def test_shutdown_cancels_queued_work_instead_of_draining_it(monkeypatch):
         ran.append("current")
 
     for index in range(2):
-        kernel.submit(
-            TaskSpec(key=("current", index), fn=current, pass_token=True)
-        )
+        kernel.submit(TaskSpec(key=("current", index), fn=current, pass_token=True))
     started.wait(timeout=5.0)
     for index in range(20):
-        kernel.submit(
-            TaskSpec(key=("queued", index), fn=lambda: ran.append("queued"))
-        )
+        kernel.submit(TaskSpec(key=("queued", index), fn=lambda: ran.append("queued")))
 
     before = time.monotonic()
     kernel.shutdown(timeout=0.5)
@@ -827,7 +819,7 @@ def test_shutdown_cancels_queued_work_instead_of_draining_it(monkeypatch):
     assert elapsed < 0.5
     assert ran == ["current", "current"]
     assert kernel.diagnostics().queued == 0
-    start = [fields for kind, fields in traces if kind == "kernel_shutdown"][0]
+    start = next(fields for kind, fields in traces if kind == "kernel_shutdown")
     assert start["action"] == "cancel"
     assert start["queued_cancelled"] == 20
     assert start["running_cancelled"] == 2
@@ -844,7 +836,7 @@ def test_shutdown_delivers_cancelled_completions_for_queued_cleanup_owners():
     events are drained afterwards is the consumer's decision.
     """
 
-    kernel, backend = make_manual()
+    kernel, _backend = make_manual()
     stale = []
     kernel.submit(
         TaskSpec(key="queued-cleanup", fn=lambda: None),
@@ -884,9 +876,7 @@ def test_shutdown_timeout_is_one_global_deadline_and_lists_running_scopes():
     assert elapsed < 0.2
     diagnostics = kernel.last_shutdown_diagnostics
     assert len(diagnostics) == 4
-    assert {row["scope"] for row in diagnostics} == {
-        f"shutdown:test:{index}" for index in range(4)
-    }
+    assert {row["scope"] for row in diagnostics} == {f"shutdown:test:{index}" for index in range(4)}
 
     release.set()
     backend.shutdown(timeout=1.0)

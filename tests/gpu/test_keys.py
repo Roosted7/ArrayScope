@@ -9,15 +9,15 @@ from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 
 
 def make_key(**overrides):
-    kwargs = dict(
-        document_generation=("doc", 1),
-        operation_key=("op", "fft"),
-        lod=ChunkLod(),
-        chunk_origin=(0, 128),
-        chunk_shape=(128, 128),
-        dtype="float32",
-        representation=SCALAR_R32F,
-    )
+    kwargs = {
+        "document_generation": ("doc", 1),
+        "operation_key": ("op", "fft"),
+        "lod": ChunkLod(),
+        "chunk_origin": (0, 128),
+        "chunk_shape": (128, 128),
+        "dtype": "float32",
+        "representation": SCALAR_R32F,
+    }
     kwargs.update(overrides)
     return DataChunkKey(**kwargs)
 
@@ -69,7 +69,9 @@ def test_chunk_lod_anisotropic_reduction_identity():
     from arrayscope.gpu.keys import REDUCER_MEAN_ABS, REDUCER_NATIVE
 
     native = ChunkLod()
-    assert native.is_native and native.reduction == () and native.reducer == REDUCER_NATIVE
+    assert native.is_native
+    assert native.reduction == ()
+    assert native.reducer == REDUCER_NATIVE
     aniso = ChunkLod(reduction=(4, 1), reducer=REDUCER_MEAN_ABS)
     assert aniso.axis_scale(0) == 16
     assert aniso.axis_scale(1) == 2
@@ -84,11 +86,9 @@ def test_chunk_lod_anisotropic_reduction_identity():
 
 
 def test_chunk_lod_rejects_inconsistent_reduction():
-    import pytest as _pytest
-
-    with _pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         ChunkLod(reduction=(-1,), reducer="mean")
-    with _pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         ChunkLod(reduction=(1,), reducer="native")
-    with _pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         ChunkLod(reduction=(1,), reducer="bicubic-guess")

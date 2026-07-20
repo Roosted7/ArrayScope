@@ -6,12 +6,17 @@ preserves the experiment's zero-upload / never-black / physical-truth
 guarantees.  Mirrors ``experiments/wgpu_gate_b/virtual_tensor.py``.
 """
 
+import contextlib
+
 import numpy as np
 import pytest
 
 wgpu = pytest.importorskip("wgpu")
 
-from arrayscope.gpu.command_protocol import (  # noqa: E402
+from arrayscope.gpu.chunk_summary import (
+    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
+)
+from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     ContentPlane,
     DispatchHistogram,
@@ -22,16 +27,13 @@ from arrayscope.gpu.command_protocol import (  # noqa: E402
     GenerateLodPages,
     OverlayPrimitive,
     PresentGeneration,
-    SetOverlayCamera,
     SetDisplayMapping,
+    SetOverlayCamera,
     TileInstance,
     UpdateOverlayGeometry,
     UpdateTileInstances,
 )
-from arrayscope.gpu.chunk_summary import (  # noqa: E402
-    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
-)
-from arrayscope.gpu.keys import (  # noqa: E402
+from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN_ABS,
     REDUCER_PHASE_VECTOR,
@@ -39,7 +41,7 @@ from arrayscope.gpu.keys import (  # noqa: E402
     RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
 )
-from arrayscope.gpu.wgpu_executor import (  # noqa: E402
+from arrayscope.gpu.wgpu_executor import (
     PAGE,
     WgpuPlaneExecutor,
     plane_chunk_key,
@@ -64,12 +66,10 @@ def _shared_device():
     if _DEVICE is None:
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-        try:
+        with contextlib.suppress(RuntimeError):
             # Vulkan-only instance: the GL backend's EGL re-init is fatal
             # under Wayland (gate-B Tier 0).  Harmless if already set.
             set_instance_extras(backends=["Vulkan"])
-        except RuntimeError:
-            pass
         adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
         _DEVICE = adapter.request_device_sync()
     return _DEVICE
@@ -79,12 +79,10 @@ def _adapter_available() -> bool:
     try:
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-        try:
+        with contextlib.suppress(RuntimeError):  # instance already exists
             # Vulkan-only instance BEFORE the first adapter request (the
             # GL backend's EGL re-init is fatal in workers with GL state).
             set_instance_extras(backends=["Vulkan"])
-        except RuntimeError:
-            pass  # instance already exists
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
     except Exception:
@@ -212,15 +210,11 @@ def test_glyph_quads_sample_the_atlas_pan_with_camera_and_upload_once():
     # the text moved WITH the image in the same camera-only frame.
     assert (pan_columns.min(), pan_columns.max()) == (32, 35)
 
-    executor.submit(
-        FrameSubmission(3, (UpdateOverlayGeometry(()), PresentGeneration(3)))
-    )
+    executor.submit(FrameSubmission(3, (UpdateOverlayGeometry(()), PresentGeneration(3))))
     assert not np.any(executor.read_target()[..., :3]), "removal clears the glyphs"
 
 
-pytestmark = pytest.mark.skipif(
-    not _adapter_available(), reason="no wgpu adapter on this machine"
-)
+pytestmark = pytest.mark.skipif(not _adapter_available(), reason="no wgpu adapter on this machine")
 
 
 def _scale_reference(values, mapping):
@@ -236,10 +230,7 @@ def _scale_reference(values, mapping):
         with np.errstate(divide="ignore", invalid="ignore"):
             return (
                 np.sign(values)
-                * np.log10(
-                    1.0
-                    + np.abs(values) / (10.0 ** float(mapping.symlog_constant))
-                )
+                * np.log10(1.0 + np.abs(values) / (10.0 ** float(mapping.symlog_constant)))
             ).astype(np.float32, copy=False)
     raise AssertionError(f"unhandled scale {mapping.scale!r}")
 
@@ -262,9 +253,7 @@ def test_gpu_generated_complex_mean_page_matches_cpu_component_reference():
         rng.standard_normal((PAGE * 2, PAGE * 2), dtype=np.float32)
         + 1j * rng.standard_normal((PAGE * 2, PAGE * 2), dtype=np.float32)
     ).astype(np.complex64)
-    executor = WgpuPlaneExecutor(
-        pool_layers={COMPLEX_RG32F: 8}, device=_shared_device()
-    )
+    executor = WgpuPlaneExecutor(pool_layers={COMPLEX_RG32F: 8}, device=_shared_device())
     sources = tuple(
         plane_chunk_key(
             "lod-doc",
@@ -277,9 +266,7 @@ def test_gpu_generated_complex_mean_page_matches_cpu_component_reference():
         for cy in range(2)
         for cx in range(2)
     )
-    destination = plane_chunk_key(
-        "lod-doc", "lod-op", 1, 0, 0, plane_shape=source.shape
-    )
+    destination = plane_chunk_key("lod-doc", "lod-op", 1, 0, 0, plane_shape=source.shape)
     upload = executor.submit(
         FrameSubmission(
             1,
@@ -314,9 +301,7 @@ def test_gpu_generated_complex_mean_page_matches_cpu_component_reference():
     )
     assert upload.uploads == 4
 
-    generated = executor.submit(
-        FrameSubmission(2, (GenerateLodPages(sources, destination),))
-    )
+    generated = executor.submit(FrameSubmission(2, (GenerateLodPages(sources, destination),)))
     generated.wait_completed()
 
     assert generated.uploads == 0
@@ -329,9 +314,7 @@ def test_gpu_generated_complex_mean_page_matches_cpu_component_reference():
 
 
 def test_gpu_lod_generation_rejects_non_mean_family_loudly():
-    executor = WgpuPlaneExecutor(
-        pool_layers={SCALAR_R32F: 8}, device=_shared_device()
-    )
+    executor = WgpuPlaneExecutor(pool_layers={SCALAR_R32F: 8}, device=_shared_device())
     source = plane_chunk_key(
         "lod-doc",
         "lod-op",
@@ -359,16 +342,12 @@ def test_gpu_lod_generation_rejects_non_mean_family_loudly():
             (EnsureChunkResident(source, np.ones((PAGE, PAGE), np.float32)),),
         )
     )
-    with pytest.raises(ValueError, match="reducer-honest.*component mean only"):
-        executor.submit(
-            FrameSubmission(2, (GenerateLodPages((source,), destination),))
-        )
+    with pytest.raises(ValueError, match=r"reducer-honest.*component mean only"):
+        executor.submit(FrameSubmission(2, (GenerateLodPages((source,), destination),)))
 
 
 def test_bound_plane_reducer_selects_one_resident_complex_lod_family():
-    executor = WgpuPlaneExecutor(
-        pool_layers={COMPLEX_RG32F: 4}, device=_shared_device()
-    )
+    executor = WgpuPlaneExecutor(pool_layers={COMPLEX_RG32F: 4}, device=_shared_device())
     mean = plane_chunk_key("family-doc", "family-op", 1, 0, 0)
     phase = plane_chunk_key(
         "family-doc",
@@ -450,16 +429,16 @@ class Scene:
                 )
             )
         ]
-        for cy in range(GRID1):  # pinned coarse coverage first (ADR 0056)
-            for cx in range(GRID1):
-                commands.append(
-                    EnsureChunkResident(
-                        self.key(1, cx, cy), self.l1_page(cx, cy), pinned=True
-                    )
-                )
-        for cy in range(GRID0):
-            for cx in range(GRID0):
-                commands.append(EnsureChunkResident(self.key(0, cx, cy), self.l0_page(cx, cy)))
+        commands.extend(  # pinned coarse coverage first (ADR 0056)
+            EnsureChunkResident(self.key(1, cx, cy), self.l1_page(cx, cy), pinned=True)
+            for cy in range(GRID1)
+            for cx in range(GRID1)
+        )
+        commands.extend(
+            EnsureChunkResident(self.key(0, cx, cy), self.l0_page(cx, cy))
+            for cy in range(GRID0)
+            for cx in range(GRID0)
+        )
         report = self.executor.submit(FrameSubmission(0, commands))
         assert report.uploads == GRID1 * GRID1 + GRID0 * GRID0  # 20
 
@@ -493,10 +472,10 @@ class Scene:
         mode = _MODES[mapping.mode]
         lo, hi = mapping.level_lo, mapping.level_hi
         for t in tiles:
-            x0 = int(round(t.dst_rect[0] * w))
-            y0 = int(round(t.dst_rect[1] * h))
-            tw = int(round(t.dst_rect[2] * w))
-            th = int(round(t.dst_rect[3] * h))
+            x0 = round(t.dst_rect[0] * w)
+            y0 = round(t.dst_rect[1] * h)
+            tw = round(t.dst_rect[2] * w)
+            th = round(t.dst_rect[3] * h)
             sx = t.src_origin[0] + (np.arange(tw) + 0.5) / tw * t.src_size[0]
             sy = t.src_origin[1] + (np.arange(th) + 0.5) / th * t.src_size[1]
             sxg, syg = np.meshgrid(sx, sy)
@@ -511,24 +490,22 @@ class Scene:
                 if absent_l0:
                     cx1 = np.clip(sxg / 2, 0, PLANE // 2 - 1).astype(np.int64)
                     cy1 = np.clip(syg / 2, 0, PLANE // 2 - 1).astype(np.int64)
-                    for (acx, acy) in absent_l0:
+                    for acx, acy in absent_l0:
                         m = (cx // PAGE == acx) & (cy // PAGE == acy)
                         v[m] = self.plane_l1[cy1[m], cx1[m]]
             re = v[..., 0].astype(np.float32)
             im = v[..., 1].astype(np.float32)
             x = {
-                0: lambda: np.sqrt(re * re + im * im),
-                1: lambda: np.arctan2(im, re),
-                2: lambda: re,
-                3: lambda: im,
+                0: lambda re=re, im=im: np.sqrt(re * re + im * im),
+                1: lambda re=re, im=im: np.arctan2(im, re),
+                2: lambda re=re: re,
+                3: lambda im=im: im,
             }[mode]()
             x = _scale_reference(x, mapping)
             g = np.clip((x.astype(np.float64) - lo) / (hi - lo), 0, 1)
             if bool(getattr(mapping, "phase_color", False)) and mode != 1:
                 phase = np.arctan2(im, re)
-                phase_g = np.clip(
-                    (phase.astype(np.float64) + np.pi) / (2.0 * np.pi), 0, 1
-                )
+                phase_g = np.clip((phase.astype(np.float64) + np.pi) / (2.0 * np.pi), 0, 1)
             else:
                 phase_g = g
             phase_idx = np.clip(np.round(phase_g * 255).astype(np.int32), 0, 255)
@@ -588,9 +565,7 @@ def test_log_and_symlog_switches_render_exactly_with_zero_uploads(scene):
     for generation, mapping in enumerate(
         (
             DisplayMapping("magnitude", -2.0, 1.0, scale="log"),
-            DisplayMapping(
-                "real", -1.0, 1.0, scale="symlog", symlog_constant=0.5
-            ),
+            DisplayMapping("real", -1.0, 1.0, scale="symlog", symlog_constant=0.5),
         ),
         start=6,
     ):
@@ -655,9 +630,7 @@ def test_evicted_page_falls_back_to_pinned_ancestor_then_refills(scene):
 
 def test_reensure_resident_chunk_is_zero_upload(scene):
     report = scene.executor.submit(
-        FrameSubmission(
-            20, (EnsureChunkResident(scene.key(0, 0, 0), scene.l0_page(0, 0)),)
-        )
+        FrameSubmission(20, (EnsureChunkResident(scene.key(0, 0, 0), scene.l0_page(0, 0)),))
     )
     assert report.uploads == 0
 
@@ -671,9 +644,7 @@ def test_histogram_exact_over_all_l0_pages(scene):
     re = scene.plane[..., 0]
     im = scene.plane[..., 1]
     mag = np.sqrt(re * re + im * im, dtype=np.float32)
-    cpu = np.bincount(
-        np.clip((mag / 6.0 * 64).astype(np.int32), 0, 63).ravel(), minlength=64
-    )
+    cpu = np.bincount(np.clip((mag / 6.0 * 64).astype(np.int32), 0, 63).ravel(), minlength=64)
     assert int(bins.sum()) == PLANE * PLANE
     assert (bins.astype(np.int64) == cpu.astype(np.int64)).all()
 
@@ -685,9 +656,7 @@ def test_custom_lut_is_applied_exactly_with_zero_uploads(scene):
     mapping = DisplayMapping("magnitude", 0.0, 6.0, lut=table.tobytes())
     report = scene.render(FULL, mapping, generation=35)
     assert report.uploads == 0  # LUT changes are mapping state, not residency
-    scene.assert_matches(
-        scene.executor.read_target(), scene.reference(FULL, mapping), allow_px=64
-    )
+    scene.assert_matches(scene.executor.read_target(), scene.reference(FULL, mapping), allow_px=64)
     # And back to the neutral ramp.
     report = scene.render(FULL, MAG, generation=36)
     assert report.uploads == 0
@@ -763,10 +732,10 @@ def _scalar_reference(tiles_with_data, mapping, canvas=SP_CANVAS):
         else _gray_table()
     )
     for tile, data in tiles_with_data:
-        x0 = int(round(tile.dst_rect[0] * w))
-        y0 = int(round(tile.dst_rect[1] * h))
-        tw = int(round(tile.dst_rect[2] * w))
-        th = int(round(tile.dst_rect[3] * h))
+        x0 = round(tile.dst_rect[0] * w)
+        y0 = round(tile.dst_rect[1] * h)
+        tw = round(tile.dst_rect[2] * w)
+        th = round(tile.dst_rect[3] * h)
         sx = tile.src_origin[0] + (np.arange(tw) + 0.5) / tw * tile.src_size[0]
         sy = tile.src_origin[1] + (np.arange(th) + 0.5) / th * tile.src_size[1]
         sxg, syg = np.meshgrid(sx, sy)
@@ -786,9 +755,7 @@ def _assert_matches(got, ref, tol=2, allow_px=0):
 
 
 def _scalar_key(doc, cx, cy):
-    return plane_chunk_key(
-        doc, "op-live", 0, cx, cy, dtype="float32", representation=SCALAR_R32F
-    )
+    return plane_chunk_key(doc, "op-live", 0, cx, cy, dtype="float32", representation=SCALAR_R32F)
 
 
 def _scalar_plane_binding(doc):
@@ -966,11 +933,7 @@ def test_refined_grade_histogram_supports_the_histogram_widget_bin_cap(scene):
     assert bounds == pytest.approx((float(values.min()), float(values.max())))
     cpu = np.bincount(
         np.clip(
-            (
-                (values - bounds[0])
-                / (bounds[1] - bounds[0])
-                * bins_requested
-            ).astype(np.int32),
+            ((values - bounds[0]) / (bounds[1] - bounds[0]) * bins_requested).astype(np.int32),
             0,
             bins_requested - 1,
         ).ravel(),
@@ -979,8 +942,7 @@ def test_refined_grade_histogram_supports_the_histogram_widget_bin_cap(scene):
     assert bins.shape == (bins_requested,)
     assert int(bins.sum()) == values.size
     normalized_l1 = float(
-        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum()
-        / max(1, int(cpu.sum()))
+        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum() / max(1, int(cpu.sum()))
     )
     # WGSL performs the bin coordinate in float32; NumPy can place values
     # exactly on one of the 500 boundaries a bin to either side after its
@@ -1023,8 +985,7 @@ def test_dynamic_complex_histogram_matches_cpu_over_same_resident_pages(scene):
     )
     assert int(bins.sum()) == values.size
     normalized_l1 = float(
-        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum()
-        / max(1, int(cpu.sum()))
+        np.abs(bins.astype(np.int64) - cpu.astype(np.int64)).sum() / max(1, int(cpu.sum()))
     )
     assert normalized_l1 <= HISTOGRAM_NORMALIZED_L1_TOLERANCE
 
@@ -1034,9 +995,7 @@ def test_dynamic_histogram_excludes_padding_and_weights_source_coverage():
     values = np.linspace(-3.0, 7.0, shape[0] * shape[1], dtype=np.float32).reshape(shape)
     page = np.zeros((PAGE, PAGE), dtype=np.float32)
     page[: shape[0], : shape[1]] = values
-    executor = WgpuPlaneExecutor(
-        pool_layers={SCALAR_R32F: 2}, device=_shared_device()
-    )
+    executor = WgpuPlaneExecutor(pool_layers={SCALAR_R32F: 2}, device=_shared_device())
     key = plane_chunk_key(
         "boundary-doc",
         "op-live",
@@ -1072,9 +1031,7 @@ def test_dynamic_histogram_uses_windowable_rgb_scalar_signal():
     page = np.zeros((PAGE, PAGE, 4), dtype=np.float32)
     page[..., :3] = 0.5
     page[..., 3] = values
-    executor = WgpuPlaneExecutor(
-        pool_layers={RGB_WINDOWED_RGBA32F: 2}, device=_shared_device()
-    )
+    executor = WgpuPlaneExecutor(pool_layers={RGB_WINDOWED_RGBA32F: 2}, device=_shared_device())
     key = plane_chunk_key(
         "windowed-rgb-doc",
         "op-live",
@@ -1114,17 +1071,13 @@ def test_dynamic_histogram_uses_windowable_rgb_scalar_signal():
 def test_tile_plane_index_outside_bound_planes_is_loud(multi_scene):
     with pytest.raises(ValueError, match="plane_index"):
         multi_scene.executor.submit(
-            FrameSubmission(
-                40, (UpdateTileInstances(_montage_tiles((3,))),)
-            )
+            FrameSubmission(40, (UpdateTileInstances(_montage_tiles((3,))),))
         )
 
 
 def test_plane_rebind_keeps_warm_residency_zero_upload():
     planes = {doc: _scalar_plane(10 + i) for i, doc in enumerate("AB")}
-    executor = WgpuPlaneExecutor(
-            target_size=SP_CANVAS, pool_layers=16, device=_shared_device()
-        )
+    executor = WgpuPlaneExecutor(target_size=SP_CANVAS, pool_layers=16, device=_shared_device())
     tiles = _montage_tiles((0,))
 
     def commit(doc, generation):
@@ -1157,9 +1110,7 @@ def test_plane_rebind_keeps_warm_residency_zero_upload():
 def test_plane_binding_indexes_resident_keys_by_content_family():
     data = _scalar_plane(21)
     wanted = _scalar_plane_binding("wanted")
-    unrelated = tuple(
-        _scalar_plane_binding(f"other-{index}") for index in range(59)
-    )
+    unrelated = tuple(_scalar_plane_binding(f"other-{index}") for index in range(59))
     executor = WgpuPlaneExecutor(
         target_size=SP_CANVAS,
         pool_layers=8,
@@ -1245,7 +1196,8 @@ def test_per_pool_eviction_respects_budget_and_pins():
     resident = set(executor.page_table.resident_keys())
     # Scalar pool budget 2: the unpinned scalar LRU was evicted; the pinned
     # page and the (older) complex chunk in the OTHER pool were untouched.
-    assert scalar_keys[0] in resident and scalar_keys[2] in resident
+    assert scalar_keys[0] in resident
+    assert scalar_keys[2] in resident
     assert scalar_keys[1] not in resident
     assert complex_key in resident
     assert executor.pool_free_layers(SCALAR_R32F) == 0
@@ -1260,8 +1212,13 @@ def test_per_pool_eviction_respects_budget_and_pins():
                 (
                     EnsureChunkResident(
                         plane_chunk_key(
-                            "doc-s", "op-live", 0, 3, 0,
-                            dtype="float32", representation=SCALAR_R32F,
+                            "doc-s",
+                            "op-live",
+                            0,
+                            3,
+                            0,
+                            dtype="float32",
+                            representation=SCALAR_R32F,
                         ),
                         page,
                     ),
@@ -1284,9 +1241,7 @@ def test_histogram_frontier_survives_same_submission_eviction_pressure():
     filler = np.zeros((PAGE, PAGE), np.float32)
 
     def key(doc):
-        return plane_chunk_key(
-            doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F
-        )
+        return plane_chunk_key(doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F)
 
     frontier_key, filler_key, pressure_key = key("doc-hf"), key("doc-hb"), key("doc-hc")
     report = executor.submit(
@@ -1305,7 +1260,8 @@ def test_histogram_frontier_survives_same_submission_eviction_pressure():
     )
     assert report.histogram_missing == {}
     resident = set(executor.page_table.resident_keys())
-    assert frontier_key in resident and pressure_key in resident
+    assert frontier_key in resident
+    assert pressure_key in resident
     assert filler_key not in resident
     counts = np.asarray(report.histograms[3])
     assert int(counts.sum()) == PAGE * PAGE
@@ -1327,9 +1283,7 @@ def test_histogram_key_sacrificed_to_pool_pressure_reports_missing_not_abort():
     values = np.linspace(0.0, 1.0, PAGE * PAGE, dtype=np.float32).reshape(PAGE, PAGE)
 
     def key(doc):
-        return plane_chunk_key(
-            doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F
-        )
+        return plane_chunk_key(doc, "op-live", 0, 0, 0, dtype="float32", representation=SCALAR_R32F)
 
     first_key, second_key = key("doc-sa"), key("doc-sb")
     report = executor.submit(

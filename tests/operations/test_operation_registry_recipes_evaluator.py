@@ -1,34 +1,67 @@
 import ast
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 
 ROOT = Path(__file__).parents[2]
 
 
 MODULE_PATHS = {
     "axis_utils": ("arrayscope.core.axis_utils", ROOT / "arrayscope" / "core" / "axis_utils.py"),
-    "cache_status": ("arrayscope.core.cache_status", ROOT / "arrayscope" / "core" / "cache_status.py"),
-    "dimension_roles": ("arrayscope.core.dimension_roles", ROOT / "arrayscope" / "core" / "dimension_roles.py"),
+    "cache_status": (
+        "arrayscope.core.cache_status",
+        ROOT / "arrayscope" / "core" / "cache_status.py",
+    ),
+    "dimension_roles": (
+        "arrayscope.core.dimension_roles",
+        ROOT / "arrayscope" / "core" / "dimension_roles.py",
+    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
-    "window_levels": ("arrayscope.core.window_levels", ROOT / "arrayscope" / "core" / "window_levels.py"),
+    "window_levels": (
+        "arrayscope.core.window_levels",
+        ROOT / "arrayscope" / "core" / "window_levels.py",
+    ),
     "dim_ops": ("arrayscope.operations.dim_ops", ROOT / "arrayscope" / "operations" / "dim_ops.py"),
-    "operation_pipeline": ("arrayscope.operations.pipeline", ROOT / "arrayscope" / "operations" / "pipeline.py"),
-    "operation_stack": ("arrayscope.operations.stack", ROOT / "arrayscope" / "operations" / "stack.py"),
-    "operation_evaluator": ("arrayscope.operations.evaluator", ROOT / "arrayscope" / "operations" / "evaluator.py"),
-    "operation_registry": ("arrayscope.operations.registry", ROOT / "arrayscope" / "operations" / "registry.py"),
-    "operation_recipes": ("arrayscope.operations.recipes", ROOT / "arrayscope" / "operations" / "recipes.py"),
-    "operation_coordinator": ("arrayscope.operations.coordinator", ROOT / "arrayscope" / "operations" / "coordinator.py"),
-    "slice_engine": ("arrayscope.display.slice_engine", ROOT / "arrayscope" / "display" / "slice_engine.py"),
+    "operation_pipeline": (
+        "arrayscope.operations.pipeline",
+        ROOT / "arrayscope" / "operations" / "pipeline.py",
+    ),
+    "operation_stack": (
+        "arrayscope.operations.stack",
+        ROOT / "arrayscope" / "operations" / "stack.py",
+    ),
+    "operation_evaluator": (
+        "arrayscope.operations.evaluator",
+        ROOT / "arrayscope" / "operations" / "evaluator.py",
+    ),
+    "operation_registry": (
+        "arrayscope.operations.registry",
+        ROOT / "arrayscope" / "operations" / "registry.py",
+    ),
+    "operation_recipes": (
+        "arrayscope.operations.recipes",
+        ROOT / "arrayscope" / "operations" / "recipes.py",
+    ),
+    "operation_coordinator": (
+        "arrayscope.operations.coordinator",
+        ROOT / "arrayscope" / "operations" / "coordinator.py",
+    ),
+    "slice_engine": (
+        "arrayscope.display.slice_engine",
+        ROOT / "arrayscope" / "display" / "slice_engine.py",
+    ),
     "profile": ("arrayscope.profiles.model", ROOT / "arrayscope" / "profiles" / "model.py"),
-    "profile_coordinator": ("arrayscope.profiles.coordinator", ROOT / "arrayscope" / "profiles" / "coordinator.py"),
+    "profile_coordinator": (
+        "arrayscope.profiles.coordinator",
+        ROOT / "arrayscope" / "profiles" / "coordinator.py",
+    ),
     "theme": ("arrayscope.app.theme", ROOT / "arrayscope" / "app" / "theme.py"),
-    "settings_state": ("arrayscope.app.settings_state", ROOT / "arrayscope" / "app" / "settings_state.py"),
+    "settings_state": (
+        "arrayscope.app.settings_state",
+        ROOT / "arrayscope" / "app" / "settings_state.py",
+    ),
 }
 
 
@@ -125,12 +158,16 @@ def test_recipe_v2_preserves_disabled_steps():
 
     assert tuple(step.operation for step in loaded_steps) == tuple(step.operation for step in steps)
     assert tuple(step.enabled for step in loaded_steps) == (True, False)
-    assert operation_recipes.loads_recipe(text, base_shape=(3, 4)) == (Crop(axis=1, start=1, stop=3),)
+    assert operation_recipes.loads_recipe(text, base_shape=(3, 4)) == (
+        Crop(axis=1, start=1, stop=3),
+    )
 
 
 def test_invalid_recipe_validation_reports_clear_error():
     with pytest.raises(ValueError, match="unsupported recipe version"):
-        operation_recipes.operations_from_recipe({"version": 999, "operations": []}, base_shape=(2, 3))
+        operation_recipes.operations_from_recipe(
+            {"version": 999, "operations": []}, base_shape=(2, 3)
+        )
 
     invalid_crop = {
         "version": operation_recipes.RECIPE_VERSION,
@@ -232,7 +269,11 @@ def test_display_cache_status_tracks_display_hit_and_miss():
 def test_line_cache_and_base_data_remains_unmodified():
     data = np.arange(3 * 4).reshape(3, 4).astype(float)
     original = data.copy()
-    document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=4)).with_operation(ReverseAxis(axis=0))
+    document = (
+        ArrayDocument(data)
+        .with_operation(Crop(axis=1, start=1, stop=4))
+        .with_operation(ReverseAxis(axis=0))
+    )
     evaluator = OperationEvaluator(document)
     state = ViewState.from_shape(document.current_shape).with_line_axis(1).with_slice(0, 0)
 

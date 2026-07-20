@@ -18,7 +18,18 @@ from arrayscope.ui.roi_model import RoiTableModel
 
 
 class InspectionDock(StandardDockWidget):
-    def __init__(self, parent, *, on_tool_changed, on_add_roi, on_delete_roi, on_clear_rois, on_select_roi=None, on_sync_toggled=None, on_change_color=None):
+    def __init__(
+        self,
+        parent,
+        *,
+        on_tool_changed,
+        on_add_roi,
+        on_delete_roi,
+        on_clear_rois,
+        on_select_roi=None,
+        on_sync_toggled=None,
+        on_change_color=None,
+    ):
         super().__init__("Inspection", parent)
         self.setObjectName("InspectionDock")
         self._on_sync_toggled = on_sync_toggled
@@ -66,7 +77,9 @@ class InspectionDock(StandardDockWidget):
             tooltip="Sync ROIs with other linked ArrayScope windows (also from separately started sessions)",
         )
         self.sync_button.toggled.connect(
-            lambda checked: self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+            lambda checked: (
+                self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+            )
         )
         controls.addWidget(self.sync_button)
         layout.addLayout(controls)
@@ -79,7 +92,9 @@ class InspectionDock(StandardDockWidget):
             QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
             | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
         )
-        self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stats_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
         self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
 
         self.histogram_plot = pg.PlotWidget()
@@ -149,7 +164,9 @@ class InspectionDock(StandardDockWidget):
         if rows and self.stats_table.rowHeight(0) > 0:
             row_height = self.stats_table.rowHeight(0)
         row_height = max(16, int(row_height or 24))
-        table_needed = int(header_height + (rows + 0.5) * row_height + 2 * self.stats_table.frameWidth())
+        table_needed = int(
+            header_height + (rows + 0.5) * row_height + 2 * self.stats_table.frameWidth()
+        )
         graph = total - table_needed
         graph = max(int(total * 0.25), min(int(total * 0.75), graph))
         self._applying_auto_split = True
@@ -209,18 +226,27 @@ class InspectionDock(StandardDockWidget):
                 _fmt(stats.maximum),
                 "",
             )
-            rows.append({"id": roi_id, "values": values, "enabled": selection.enabled, "color": selection.color})
+            rows.append(
+                {
+                    "id": roi_id,
+                    "values": values,
+                    "enabled": selection.enabled,
+                    "color": selection.color,
+                }
+            )
         self.roi_model.set_rows(rows)
         self.stats_table.resizeColumnsToContents()
         self._apply_auto_split()
 
     def set_histograms(self, histogram_results):
         self.histogram_plot.clear()
-        for index, result in enumerate(histogram_results):
+        for _index, result in enumerate(histogram_results):
             if result.counts.size == 0:
                 continue
             centers = (result.edges[:-1] + result.edges[1:]) * 0.5
-            color = getattr(result, "color", None) or _color_for_histogram_name(result.name, self._stats_by_roi)
+            color = getattr(result, "color", None) or _color_for_histogram_name(
+                result.name, self._stats_by_roi
+            )
             pen = pg.mkPen(color, width=2)
             self.histogram_plot.plot(centers, result.counts, pen=pen, name=result.name)
 
@@ -268,7 +294,7 @@ def _fmt(value):
 
 
 def _color_for_histogram_name(name, stats_by_roi):
-    for _roi_id, (selection, _stats) in stats_by_roi.items():
+    for selection, _stats in stats_by_roi.values():
         if str(name).startswith(selection.label):
             return selection.color
     return (230, 60, 30)

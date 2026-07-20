@@ -17,15 +17,16 @@ reject a phase-1 collapse; it cannot be rescued by adding materialization cost.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+import contextlib
 import gc
 import json
 import os
-from pathlib import Path
 import statistics
 import subprocess
-from threading import Thread
 import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from threading import Thread
 from time import perf_counter
 
 import numpy as np
@@ -42,7 +43,6 @@ from arrayscope.gpu.command_protocol import (
 )
 from arrayscope.gpu.keys import SCALAR_R32F
 from arrayscope.gpu.wgpu_executor import PAGE, WgpuPlaneExecutor, plane_chunk_key
-
 
 ROUGH_BINS = 64
 EXACT_BINS = 500
@@ -166,9 +166,7 @@ def _page_rows(
 
 def _prepare_executor(device, data, sources, rough_lod: int):
     source_shape = tuple(int(value) for value in data.shape[:2])
-    exact_pages_per_source = (
-        -(-source_shape[0] // PAGE) * -(-source_shape[1] // PAGE)
-    )
+    exact_pages_per_source = -(-source_shape[0] // PAGE) * -(-source_shape[1] // PAGE)
     rough_shape = tuple(-(-value // (1 << int(rough_lod))) for value in source_shape)
     rough_pages_per_source = -(-rough_shape[0] // PAGE) * -(-rough_shape[1] // PAGE)
     pages_per_source = exact_pages_per_source + (
@@ -178,9 +176,7 @@ def _prepare_executor(device, data, sources, rough_lod: int):
         pool_layers={SCALAR_R32F: len(sources) * pages_per_source},
         device=device,
     )
-    plane_identities = {
-        int(source): ("g6b-real-data", int(source)) for source in sources
-    }
+    plane_identities = {int(source): ("g6b-real-data", int(source)) for source in sources}
     executor.submit(
         FrameSubmission(
             0,
@@ -226,13 +222,9 @@ def _prepare_executor(device, data, sources, rough_lod: int):
         exact_keys[int(source)] = tuple(key for key, _page in exact_rows)
         rough_keys[int(source)] = tuple(key for key, _page in rough_rows)
         unique_rows = dict((*exact_rows, *rough_rows))
-        batch_commands.extend(
-            EnsureChunkResident(key, page) for key, page in unique_rows.items()
-        )
+        batch_commands.extend(EnsureChunkResident(key, page) for key, page in unique_rows.items())
         if len(batch_commands) >= 80 or offset == len(sources) - 1:
-            report = executor.submit(
-                FrameSubmission(generation, tuple(batch_commands))
-            )
+            report = executor.submit(FrameSubmission(generation, tuple(batch_commands)))
             report.wait_completed()
             generation += 1
             batch_commands.clear()
@@ -266,9 +258,7 @@ def _measure_once(
         range(0, len(source_rows), LIVE_COMMIT_BATCH_SOURCES)
     ):
         batch_started = perf_counter()
-        batch = source_rows[
-            batch_start : batch_start + LIVE_COMMIT_BATCH_SOURCES
-        ]
+        batch = source_rows[batch_start : batch_start + LIVE_COMMIT_BATCH_SOURCES]
         commands = tuple(
             DispatchHistogram(keys, bins=bins, lo=None, hi=None, mode="real")
             for _source, keys in batch
@@ -283,7 +273,7 @@ def _measure_once(
         submit_times.append((perf_counter() - submit_started) * 1000.0)
         resolved: dict[str, object] = {}
 
-        def fence_and_resolve(report=report) -> None:
+        def fence_and_resolve(report=report, resolved=resolved) -> None:
             fence_started = perf_counter()
             report.wait_completed()
             fence_finished = perf_counter()
@@ -293,9 +283,7 @@ def _measure_once(
             batch_finite_weight = 0
             for readback in report.histograms.values():
                 counts, bounds = readback.resolve()
-                batch_finite_weight += int(
-                    np.asarray(counts, dtype=np.uint64).sum()
-                )
+                batch_finite_weight += int(np.asarray(counts, dtype=np.uint64).sum())
                 if bounds is not None:
                     sample_count += int(
                         representative_sample_from_histogram(
@@ -329,7 +317,13 @@ def _measure_once(
             first_batch_wall_ms = (perf_counter() - batch_started) * 1000.0
     finished = perf_counter()
     heartbeat_max_gap_ms = probe.finish_turn()
-    source_pixels = int(sum(key.chunk_shape[0] * key.chunk_shape[1] for keys in keys_by_source.values() for key in keys))
+    source_pixels = int(
+        sum(
+            key.chunk_shape[0] * key.chunk_shape[1]
+            for keys in keys_by_source.values()
+            for key in keys
+        )
+    )
     return Measurement(
         scenario=str(scenario),
         variant=str(variant),
@@ -367,9 +361,7 @@ def _summaries(rows: tuple[Measurement, ...]) -> tuple[dict[str, object], ...]:
     summaries = []
     identities = sorted({(row.scenario, row.variant) for row in rows})
     for scenario, variant in identities:
-        selected = tuple(
-            row for row in rows if row.scenario == scenario and row.variant == variant
-        )
+        selected = tuple(row for row in rows if row.scenario == scenario and row.variant == variant)
         summary = {
             "scenario": scenario,
             "variant": variant,
@@ -405,15 +397,13 @@ def _summaries(rows: tuple[Measurement, ...]) -> tuple[dict[str, object], ...]:
     return tuple(summaries)
 
 
-def run_benchmark(
-    *, data_path: Path, repetitions: int, warmups: int
-) -> dict[str, object]:
+def run_benchmark(*, data_path: Path, repetitions: int, warmups: int) -> dict[str, object]:
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
-    from pyqtgraph.Qt import QtCore, QtWidgets
     import pyqtgraph as pg
     import wgpu
+    from pyqtgraph.Qt import QtCore, QtWidgets
     from wgpu.backends.wgpu_native.extras import set_instance_extras
 
     app = pg.mkQApp("ArrayScope G6(b) histogram benchmark")
@@ -424,10 +414,8 @@ def run_benchmark(
     for _ in range(10):
         app.processEvents()
 
-    try:
+    with contextlib.suppress(RuntimeError):
         set_instance_extras(backends=["Vulkan"])
-    except RuntimeError:
-        pass
     adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
     if "timestamp-query" not in adapter.features:
         raise RuntimeError("G6(b) benchmark requires GPU timestamp-query support")
@@ -436,9 +424,7 @@ def run_benchmark(
     probe = _HeartbeatProbe(QtCore)
     rows: list[Measurement] = []
     for scenario, sources, rough_lod in _scenario_sources(data.shape[2]):
-        executor, exact_keys, rough_keys = _prepare_executor(
-            device, data, sources, rough_lod
-        )
+        executor, exact_keys, rough_keys = _prepare_executor(device, data, sources, rough_lod)
         variants = (
             ("rough", rough_keys, rough_lod, ROUGH_BINS, ROUGH_SAMPLE_LIMIT),
             ("exact", exact_keys, 0, EXACT_BINS, REFINED_TILE_SAMPLE_LIMIT),
@@ -462,28 +448,21 @@ def run_benchmark(
         del executor
         gc.collect()
     summaries = _summaries(tuple(rows))
-    by_identity = {
-        (str(row["scenario"]), str(row["variant"])): row for row in summaries
-    }
+    by_identity = {(str(row["scenario"]), str(row["variant"])): row for row in summaries}
     exact_summaries = []
     for row in summaries:
         if row["variant"] != "exact":
             continue
         rough = by_identity[(str(row["scenario"]), "rough")]
-        same_phase1_population = bool(
-            int(row["resident_lod"]) == int(rough["resident_lod"])
-        )
+        same_phase1_population = bool(int(row["resident_lod"]) == int(rough["resident_lod"]))
         row["same_phase1_resident_population"] = same_phase1_population
-        row["collapse_eligible"] = bool(
-            row["fits_phase1_budget"] and same_phase1_population
-        )
+        row["collapse_eligible"] = bool(row["fits_phase1_budget"] and same_phase1_population)
         exact_summaries.append(row)
     return {
         "schema": "arrayscope.g6b-histogram-benchmark.v1",
         "decision": (
             "collapse"
-            if exact_summaries
-            and all(bool(row["collapse_eligible"]) for row in exact_summaries)
+            if exact_summaries and all(bool(row["collapse_eligible"]) for row in exact_summaries)
             else "keep-rough-then-refined"
         ),
         "phase1_budget_ms": PHASE1_BUDGET_MS,
@@ -493,9 +472,7 @@ def run_benchmark(
         "data_path": str(data_path.resolve()),
         "data_shape": [int(value) for value in data.shape],
         "data_dtype": str(data.dtype),
-        "git_revision": subprocess.check_output(
-            ("git", "rev-parse", "HEAD"), text=True
-        ).strip(),
+        "git_revision": subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip(),
         "git_dirty": bool(
             subprocess.check_output(("git", "status", "--porcelain"), text=True).strip()
         ),

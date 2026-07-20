@@ -21,6 +21,8 @@ Interaction model:
 
 from __future__ import annotations
 
+import contextlib
+
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -29,7 +31,6 @@ from arrayscope.display.colormap_policy import colormap_family
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.toasts import show_status_message
-
 
 _KIND_LABELS = (
     ("Sequential", library.SEQUENTIAL),
@@ -134,12 +135,24 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self.duplicate_button = QtWidgets.QToolButton(self)
         set_button_icon(self.duplicate_button, "data_object", tooltip="Duplicate selected")
         self.import_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.import_button, "folder_open", tooltip="Import (.json, .mat, .csv, .txt, .npy)")
+        set_button_icon(
+            self.import_button, "folder_open", tooltip="Import (.json, .mat, .csv, .txt, .npy)"
+        )
         self.export_button = QtWidgets.QToolButton(self)
         set_button_icon(self.export_button, "download", tooltip="Export selected as JSON")
         self.delete_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.delete_button, "delete", tooltip="Delete (built-ins are hidden and can be restored)")
-        for button in (self.new_button, self.duplicate_button, self.import_button, self.export_button, self.delete_button):
+        set_button_icon(
+            self.delete_button,
+            "delete",
+            tooltip="Delete (built-ins are hidden and can be restored)",
+        )
+        for button in (
+            self.new_button,
+            self.duplicate_button,
+            self.import_button,
+            self.export_button,
+            self.delete_button,
+        ):
             tree_buttons.addWidget(button)
         tree_buttons.addStretch(1)
         left.addLayout(tree_buttons)
@@ -153,11 +166,15 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         self.kind_combo = QtWidgets.QComboBox(self)
         for label, kind in _KIND_LABELS:
             self.kind_combo.addItem(label, kind)
-        self.kind_combo.setToolTip("Cyclic maps wrap smoothly and are required for phase/complex display")
+        self.kind_combo.setToolTip(
+            "Cyclic maps wrap smoothly and are required for phase/complex display"
+        )
         form.addRow("Kind", self.kind_combo)
         right.addLayout(form)
 
-        right.addWidget(QtWidgets.QLabel("Stops — drag to move, double-click to recolor, click the bar to add:"))
+        right.addWidget(
+            QtWidgets.QLabel("Stops — drag to move, double-click to recolor, click the bar to add:")
+        )
         self.gradient = pg.GradientWidget(orientation="bottom")
         self.gradient.setMinimumHeight(58)
         right.addWidget(self.gradient)
@@ -264,7 +281,12 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
             | QtCore.Qt.ItemFlag.ItemIsDragEnabled
         )
         if info.hidden:
-            item.setForeground(0, self.palette().brush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text))
+            item.setForeground(
+                0,
+                self.palette().brush(
+                    QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text
+                ),
+            )
         return item
 
     def select_map(self, name: str) -> bool:
@@ -351,7 +373,11 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
             return False
         name, kind, stops, _source = self._loaded
         current_name, current_kind, current_stops = self._editor_state()
-        return bool(current_name) and (current_name, current_kind, current_stops) != (name, kind, stops)
+        return bool(current_name) and (current_name, current_kind, current_stops) != (
+            name,
+            kind,
+            stops,
+        )
 
     def _on_selection_changed(self, *_args):
         if self._reloading:
@@ -379,7 +405,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
 
     def _set_gradient_stops(self, stops):
         positions = [position for position, _color in stops]
-        colors = [tuple(color) + (255,) for _position, color in stops]
+        colors = [(*tuple(color), 255) for _position, color in stops]
         self.gradient.item.setColorMap(pg.ColorMap(positions, colors))
 
     def _gradient_stops(self):
@@ -387,7 +413,7 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         positions, colors = colormap.getStops(mode=pg.ColorMap.BYTE)
         return library._normalize_stops(
             (float(position), (int(color[0]), int(color[1]), int(color[2])))
-            for position, color in zip(positions, colors)
+            for position, color in zip(positions, colors, strict=False)
         )
 
     # ------------------------------------------------------------------
@@ -441,7 +467,9 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         if library.reset_builtin(name):
             self._loaded = None
             self._reload_tree(select=name)
-            show_status_message(self._window, f"Restored “{name}” to the system definition.", timeout=2500)
+            show_status_message(
+                self._window, f"Restored “{name}” to the system definition.", timeout=2500
+            )
 
     def _apply_and_close(self, _checked=False):
         self._autosave_pending_edits()
@@ -476,13 +504,13 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
                 revertable = False
         self.revert_button.setVisible(revertable)
         self.reset_button.setVisible(resettable)
-        self.delete_button.setEnabled(info is not None and not (info.source == "builtin" and info.hidden))
+        self.delete_button.setEnabled(
+            info is not None and not (info.source == "builtin" and info.hidden)
+        )
 
         family = None
-        try:
+        with contextlib.suppress(Exception):
             family = colormap_family(self._window.view_state.channel)
-        except Exception:
-            pass
         kind = self.kind_combo.currentData()
         compatible = family is None or kind in library.kinds_for_family(family)
         self.apply_button.setEnabled(compatible)
@@ -502,11 +530,17 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
         elif info.hidden:
             self.source_label.setText("Hidden built-in — Reset restores it to the library.")
         elif library.overrides_builtin(info.name):
-            self.source_label.setText("Modified built-in — edits persist as your override; Reset restores the system definition.")
+            self.source_label.setText(
+                "Modified built-in — edits persist as your override; Reset restores the system definition."
+            )
         elif info.source == "user":
-            self.source_label.setText("User colormap — edits save automatically when you switch maps or close.")
+            self.source_label.setText(
+                "User colormap — edits save automatically when you switch maps or close."
+            )
         else:
-            self.source_label.setText("Built-in colormap — editing it stores your override under the same name.")
+            self.source_label.setText(
+                "Built-in colormap — editing it stores your override under the same name."
+            )
 
     # ------------------------------------------------------------------
     # Tree actions
@@ -515,7 +549,9 @@ class ColormapDesignerDialog(QtWidgets.QDialog):
     def _new_map(self, _checked=False):
         self._autosave_pending_edits()
         name = self._unique_name("custom")
-        library.save_user_colormap(name, library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255))))
+        library.save_user_colormap(
+            name, library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255)))
+        )
         self._reload_tree(select=name)
 
     def _duplicate_map(self, _checked=False):

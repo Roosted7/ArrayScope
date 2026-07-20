@@ -4,7 +4,15 @@ silent eviction."""
 
 import pytest
 
-from arrayscope.gpu import CapacityError, ChunkLod, ChunkStore, DataChunkKey, PageSlot, PageTable, SlotPool
+from arrayscope.gpu import (
+    CapacityError,
+    ChunkLod,
+    ChunkStore,
+    DataChunkKey,
+    PageSlot,
+    PageTable,
+    SlotPool,
+)
 
 
 def chunk(n, generation=1):
@@ -19,7 +27,9 @@ def chunk(n, generation=1):
 
 
 def make_store(slots_per_page=2, max_pages=2):
-    return ChunkStore(pool=SlotPool(pool_id="test", slots_per_page=slots_per_page, max_pages=max_pages))
+    return ChunkStore(
+        pool=SlotPool(pool_id="test", slots_per_page=slots_per_page, max_pages=max_pages)
+    )
 
 
 class TestPageTable:
@@ -94,7 +104,8 @@ class TestChunkStore:
     def test_miss_then_hit(self):
         store = make_store()
         first = store.ensure(chunk(0), nbytes=64)
-        assert first.needs_upload and first.evicted == ()
+        assert first.needs_upload
+        assert first.evicted == ()
         again = store.ensure(chunk(0), nbytes=64)
         assert not again.needs_upload
         assert again.slot == first.slot

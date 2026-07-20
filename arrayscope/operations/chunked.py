@@ -58,7 +58,10 @@ def evaluate_image_snapshot_chunked(
     else:
         axis_indices = tuple(axis_indices)
     chunk_size = max(1, int(chunk_size))
-    chunks = [axis_indices[start : start + chunk_size] for start in range(0, len(axis_indices), chunk_size)]
+    chunks = [
+        axis_indices[start : start + chunk_size]
+        for start in range(0, len(axis_indices), chunk_size)
+    ]
     if len(chunks) <= 1:
         result = _evaluate_image_snapshot(
             evaluate_image_snapshot,
@@ -80,7 +83,9 @@ def evaluate_image_snapshot_chunked(
     total_slab_nbytes = 0
     for chunk_number, indices in enumerate(chunks):
         _check_cancelled(cancellation_token)
-        chunk_state = view_state.with_axis_range(original_axis, indices, text=f"chunk {chunk_number + 1}/{len(chunks)}")
+        chunk_state = view_state.with_axis_range(
+            original_axis, indices, text=f"chunk {chunk_number + 1}/{len(chunks)}"
+        )
         result = _evaluate_image_snapshot(
             evaluate_image_snapshot,
             document,

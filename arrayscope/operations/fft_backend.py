@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import importlib.util
 import os
+from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
 
 import numpy as np
@@ -43,13 +43,19 @@ class ScipyFFTBackend:
 
         # ArrayScope's names are MRI/k-space oriented: "centered FFT" maps to
         # an inverse FFT internally, preserving established viewer behavior.
-        return fft.ifftshift(fft.ifft(fft.fftshift(data, axes=axis), axis=axis, norm="ortho", workers=int(workers)), axes=axis)
+        return fft.ifftshift(
+            fft.ifft(fft.fftshift(data, axes=axis), axis=axis, norm="ortho", workers=int(workers)),
+            axes=axis,
+        )
 
     def centered_ifft(self, data, axis: int, *, workers: int = 1):
         from scipy import fft
 
         # Inverse in viewer vocabulary maps to a forward FFT internally.
-        return fft.ifftshift(fft.fft(fft.fftshift(data, axes=axis), axis=axis, norm="ortho", workers=int(workers)), axes=axis)
+        return fft.ifftshift(
+            fft.fft(fft.fftshift(data, axes=axis), axis=axis, norm="ortho", workers=int(workers)),
+            axes=axis,
+        )
 
 
 @dataclass(frozen=True)
@@ -59,12 +65,16 @@ class NumpyFFTBackend:
     def centered_fft(self, data, axis: int, *, workers: int = 1):
         if int(workers) < 1:
             raise ValueError("workers must be at least 1")
-        return np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis)
+        return np.fft.ifftshift(
+            np.fft.ifft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis
+        )
 
     def centered_ifft(self, data, axis: int, *, workers: int = 1):
         if int(workers) < 1:
             raise ValueError("workers must be at least 1")
-        return np.fft.ifftshift(np.fft.fft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis)
+        return np.fft.ifftshift(
+            np.fft.fft(np.fft.fftshift(data, axes=axis), axis=axis, norm="ortho"), axes=axis
+        )
 
 
 @dataclass(frozen=True)
@@ -75,7 +85,9 @@ class PyFFTWBackend:
         from pyfftw.interfaces import numpy_fft
 
         return numpy_fft.ifftshift(
-            numpy_fft.ifft(numpy_fft.fftshift(data, axes=axis), axis=axis, norm="ortho", threads=int(workers)),
+            numpy_fft.ifft(
+                numpy_fft.fftshift(data, axes=axis), axis=axis, norm="ortho", threads=int(workers)
+            ),
             axes=axis,
         )
 
@@ -83,7 +95,9 @@ class PyFFTWBackend:
         from pyfftw.interfaces import numpy_fft
 
         return numpy_fft.ifftshift(
-            numpy_fft.fft(numpy_fft.fftshift(data, axes=axis), axis=axis, norm="ortho", threads=int(workers)),
+            numpy_fft.fft(
+                numpy_fft.fftshift(data, axes=axis), axis=axis, norm="ortho", threads=int(workers)
+            ),
             axes=axis,
         )
 
@@ -129,7 +143,9 @@ def resolve_fft_workers(choice: FFTWorkersChoice | str, *, cpu_count: int | None
     return min(8, max(1, count // 2))
 
 
-def set_fft_runtime_options(*, backend: FFTBackendChoice | str, workers: FFTWorkersChoice | str) -> None:
+def set_fft_runtime_options(
+    *, backend: FFTBackendChoice | str, workers: FFTWorkersChoice | str
+) -> None:
     global _runtime_backend_choice, _runtime_workers_choice
     _runtime_backend_choice = _normalize_backend_choice(backend)
     _runtime_workers_choice = _normalize_workers_choice(workers)

@@ -59,9 +59,7 @@ def test_g6b_summary_rejects_a_montage_heartbeat_regression():
         ),
     )
 
-    summaries = {
-        (row["scenario"], row["variant"]): row for row in _summaries(rows)
-    }
+    summaries = {(row["scenario"], row["variant"]): row for row in _summaries(rows)}
 
     assert summaries[("single_slice", "exact")]["fits_phase1_budget"] is True
     assert summaries[("montage_60", "exact")]["fits_phase1_budget"] is False

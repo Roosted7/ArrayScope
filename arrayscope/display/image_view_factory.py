@@ -38,9 +38,7 @@ def create_image_view(settings=None, *, notify=None):
         if callable(notify):
             notify(f"Image rendering backend: {choice_value} | {reason}")
     if choice_value == ImageRenderingBackendChoice.WGPU.value:
-        present_method = getattr(
-            settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP
-        )
+        present_method = getattr(settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP)
         present_method_value = getattr(present_method, "value", present_method)
         try:
             from arrayscope.display.backends.wgpu import WgpuSurface
@@ -121,7 +119,8 @@ def _probe_hardware_gl_renderer() -> str | None:
     from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
 
     try:
-        from vispy import app as vispy_app, gloo
+        from vispy import app as vispy_app
+        from vispy import gloo
 
         canvas = vispy_app.Canvas(show=False, size=(4, 4))
         try:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.prefetch_policy import SliceScrubMomentum
 from arrayscope.core.frame_targets import FrameTarget
-from arrayscope.kernel import Lane as WorkLane, Priority, WorkItem
+from arrayscope.core.prefetch_policy import SliceScrubMomentum
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import Priority, WorkItem
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.slabs import plan_slab, request_for_image
@@ -63,7 +64,9 @@ class RenderPrefetchMixin:
             # Dropping the request here left the prefetcher deterministically
             # dead. Keep it pending (latest-wins: newer slice changes simply
             # overwrite it) and retry when the visible work drains.
-            self.win.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
+            self.win.prefetch_evaluation_controller.start_prefetch(
+                lambda: None, blocked_reason="visible_busy"
+            )
             self.win.operation_evaluator.note_prefetch_skipped()
             self._arm_prefetch_visible_drain_retry()
             return
@@ -128,10 +131,11 @@ class RenderPrefetchMixin:
         if axis is None or not indices:
             return
         key = (int(axis), len(indices))
-        if previous_axis != axis or len(previous_indices) != len(indices):
-            self._montage_prefetch_momentum_key = key
-            self._montage_prefetch_momentum = SliceScrubMomentum()
-        elif getattr(self, "_montage_prefetch_momentum_key", None) != key:
+        if (
+            previous_axis != axis
+            or len(previous_indices) != len(indices)
+            or getattr(self, "_montage_prefetch_momentum_key", None) != key
+        ):
             self._montage_prefetch_momentum_key = key
             self._montage_prefetch_momentum = SliceScrubMomentum()
         momentum = getattr(self, "_montage_prefetch_momentum", None)
@@ -148,21 +152,28 @@ class RenderPrefetchMixin:
             self.win.operation_evaluator.note_prefetch_skipped()
             return
         if self.win.visible_evaluation_controller.is_busy():
-            self.win.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="visible_busy")
+            self.win.prefetch_evaluation_controller.start_prefetch(
+                lambda: None, blocked_reason="visible_busy"
+            )
             self.win.operation_evaluator.note_prefetch_skipped()
             if getattr(self, "_pending_prefetch_request", None) is None:
                 self._pending_prefetch_request = (view_state, colormap_lut)
             self._arm_prefetch_visible_drain_retry()
             return
         policy = self._memory_policy()
-        if self.win.operation_evaluator._display_cache.bytes_used > int(self.win.operation_evaluator._display_cache.max_bytes * policy.cache_prefetch_skip_fraction):
+        if self.win.operation_evaluator._display_cache.bytes_used > int(
+            self.win.operation_evaluator._display_cache.max_bytes
+            * policy.cache_prefetch_skip_fraction
+        ):
             self.win.operation_evaluator.note_prefetch_skipped()
             return
         if self._estimated_image_display_bytes(view_state) > policy.prefetch_budget_bytes:
             self.win.operation_evaluator.note_prefetch_skipped()
             return
         if not self._prefetch_cost_allowed(view_state):
-            self.win.prefetch_evaluation_controller.start_prefetch(lambda: None, blocked_reason="cost")
+            self.win.prefetch_evaluation_controller.start_prefetch(
+                lambda: None, blocked_reason="cost"
+            )
             self.win.operation_evaluator.note_prefetch_skipped()
             return
         axis = getattr(self.win, "_active_slice_axis", None)
@@ -198,20 +209,26 @@ class RenderPrefetchMixin:
                     shader_display=shader_display,
                 )
                 started = self.win.prefetch_evaluation_controller.start_prefetch(
-                    lambda prefetch_state=prefetch_state, document=document, shader_display=shader_display: self.win.operation_evaluator.prefetch_display_tile_snapshot(
-                        document,
-                        prefetch_state,
-                        colormap_lut=colormap_lut,
-                        evaluation_context=self.win._evaluation_context(ComputeLane.PREFETCH, None),
-                        shader_display=shader_display,
+                    lambda prefetch_state=prefetch_state, document=document, shader_display=shader_display: (
+                        self.win.operation_evaluator.prefetch_display_tile_snapshot(
+                            document,
+                            prefetch_state,
+                            colormap_lut=colormap_lut,
+                            evaluation_context=self.win._evaluation_context(
+                                ComputeLane.PREFETCH, None
+                            ),
+                            shader_display=shader_display,
+                        )
                     ),
-                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key, shader_display=shader_display: self._store_prefetch_display_tile_if_current(
-                        document,
-                        prefetch_key,
-                        prefetch_state,
-                        colormap_lut,
-                        result,
-                        shader_display=shader_display,
+                    on_done=lambda result, prefetch_state=prefetch_state, document=document, prefetch_key=prefetch_key, shader_display=shader_display: (
+                        self._store_prefetch_display_tile_if_current(
+                            document,
+                            prefetch_key,
+                            prefetch_state,
+                            colormap_lut,
+                            result,
+                            shader_display=shader_display,
+                        )
                     ),
                     key=prefetch_key,
                     memory_budget_bytes=policy.prefetch_budget_bytes,
@@ -241,17 +258,26 @@ class RenderPrefetchMixin:
             return True
         image_axes = set(view_state.image_axes or ())
         for operation in operations:
-            if type(operation).__name__ in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"} and int(operation.axis) in image_axes:
+            if (
+                type(operation).__name__ in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}
+                and int(operation.axis) in image_axes
+            ):
                 return False
-        cost = estimate_pipeline_cost(self.win.base_data.shape, getattr(self.win.base_data, "dtype", None), operations)
+        cost = estimate_pipeline_cost(
+            self.win.base_data.shape, getattr(self.win.base_data, "dtype", None), operations
+        )
         peak = cost.estimated_peak_bytes or 0
         policy = self._memory_policy()
         if peak > policy.operation_prefetch_peak_budget_bytes:
             return False
-        has_fft = any(type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations)
-        if has_fft and peak > policy.fft_prefetch_peak_budget_bytes and not self._stage_cached_or_in_flight_for_prefetch(view_state):
-            return False
-        return True
+        has_fft = any(
+            type(operation).__name__ in {"CenteredFFT", "CenteredIFFT"} for operation in operations
+        )
+        return not (
+            has_fft
+            and peak > policy.fft_prefetch_peak_budget_bytes
+            and not self._stage_cached_or_in_flight_for_prefetch(view_state)
+        )
 
     def _stage_cached_or_in_flight_for_prefetch(self, view_state) -> bool:
         try:
@@ -259,15 +285,25 @@ class RenderPrefetchMixin:
             plan = plan_slab(self.win.document, request)
         except Exception:
             return False
-        candidates = tuple(candidate for candidate in getattr(plan.region_plan, "cache_candidates", ()) if getattr(candidate, "retain", True))
+        candidates = tuple(
+            candidate
+            for candidate in getattr(plan.region_plan, "cache_candidates", ())
+            if getattr(candidate, "retain", True)
+        )
         if not candidates:
             return False
         candidate = candidates[-1]
-        if candidate.estimated_nbytes is not None and int(candidate.estimated_nbytes) > int(self._memory_policy().stage_cache_budget_bytes):
+        if candidate.estimated_nbytes is not None and int(candidate.estimated_nbytes) > int(
+            self._memory_policy().stage_cache_budget_bytes
+        ):
             return False
-        key = self.win.operation_evaluator.stage_materializer.key_for_candidate(stage_document_key(self.win.document), candidate)
+        key = self.win.operation_evaluator.stage_materializer.key_for_candidate(
+            stage_document_key(self.win.document), candidate
+        )
         cache = self.win.operation_evaluator.stage_cache
-        if (cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)) is not None:
+        if (
+            cache.get_containing(key) if hasattr(cache, "get_containing") else cache.get(key)
+        ) is not None:
             return True
         return key in getattr(self.win.operation_evaluator.stage_materializer, "_in_flight", {})
 
@@ -276,40 +312,51 @@ class RenderPrefetchMixin:
             return
         document = self.win.document
         primary_axis, secondary_axis = view_state.image_axes
-        cx = int(round(image_x))
-        cy = int(round(image_y))
+        cx = round(image_x)
+        cy = round(image_y)
         max_radius = 4
         scheduled = 0
         request_key_cache = {}
-        for radius in range(0, max_radius + 1):
+        for radius in range(max_radius + 1):
             points = []
             if radius == 0:
                 points.append((cx, cy))
             else:
-                for dx in (-radius, radius):
-                    points.append((cx + dx, cy))
-                for dy in (-radius, radius):
-                    points.append((cx, cy + dy))
+                points.extend((cx + dx, cy) for dx in (-radius, radius))
+                points.extend((cx, cy + dy) for dy in (-radius, radius))
             for x, y in points:
                 if scheduled >= 24:
                     return
-                if not (0 <= x < view_state.shape[secondary_axis] and 0 <= y < view_state.shape[primary_axis]):
+                if not (
+                    0 <= x < view_state.shape[secondary_axis]
+                    and 0 <= y < view_state.shape[primary_axis]
+                ):
                     continue
-                profile_state = self.win.profile_coordinator.state_from_marker(view_state, x, y, line_axis=line_axis)
+                profile_state = self.win.profile_coordinator.state_from_marker(
+                    view_state, x, y, line_axis=line_axis
+                )
                 if profile_state is None:
                     continue
-                request_key_cache[profile_state] = self.win.operation_evaluator.line_key(profile_state, document=document)
+                request_key_cache[profile_state] = self.win.operation_evaluator.line_key(
+                    profile_state, document=document
+                )
                 started = self.win.prefetch_evaluation_controller.start_prefetch(
-                    lambda profile_state=profile_state, document=document: self.win.operation_evaluator.prefetch_line_snapshot(
-                        document,
-                        profile_state,
-                        evaluation_context=self.win._evaluation_context(ComputeLane.PREFETCH, None),
+                    lambda profile_state=profile_state, document=document: (
+                        self.win.operation_evaluator.prefetch_line_snapshot(
+                            document,
+                            profile_state,
+                            evaluation_context=self.win._evaluation_context(
+                                ComputeLane.PREFETCH, None
+                            ),
+                        )
                     ),
-                    on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: self._store_prefetch_profile_if_current(
-                        document,
-                        key,
-                        profile_state,
-                        result,
+                    on_done=lambda result, profile_state=profile_state, document=document, key=request_key_cache[profile_state]: (
+                        self._store_prefetch_profile_if_current(
+                            document,
+                            key,
+                            profile_state,
+                            result,
+                        )
                     ),
                     key=request_key_cache[profile_state],
                     memory_budget_bytes=self._prefetch_budget_bytes(),
@@ -337,7 +384,9 @@ class RenderPrefetchMixin:
         if request_key != self.win.operation_evaluator.line_key(profile_state):
             self.win.operation_evaluator.note_prefetch_stale()
             return False
-        return self.win.operation_evaluator.store_prefetch_line_result(document, profile_state, result)
+        return self.win.operation_evaluator.store_prefetch_line_result(
+            document, profile_state, result
+        )
 
     def _prefetch_shader_display(self) -> bool:
         """Whether this window's backend evaluates shader-display images."""
@@ -352,7 +401,16 @@ class RenderPrefetchMixin:
             )
         )
 
-    def _store_prefetch_display_tile_if_current(self, document, request_key, view_state, colormap_lut, result, *, shader_display: bool = False):
+    def _store_prefetch_display_tile_if_current(
+        self,
+        document,
+        request_key,
+        view_state,
+        colormap_lut,
+        result,
+        *,
+        shader_display: bool = False,
+    ):
         current_key = self.win.operation_evaluator.display_tile_key(
             view_state,
             colormap_lut=colormap_lut,
@@ -441,8 +499,7 @@ class RenderPrefetchMixin:
             return None
         lod = getattr(value, "lod", None)
         if lod is not None and (
-            int(getattr(lod, "factor", 1) or 1) != 1
-            or int(getattr(lod, "gutter", 0) or 0) != 0
+            int(getattr(lod, "factor", 1) or 1) != 1 or int(getattr(lod, "gutter", 0) or 0) != 0
         ):
             # Reduced/gutter previews never take the chunked path; warming
             # them would key residency the visible commit cannot reuse.

@@ -2,7 +2,7 @@
 
 from arrayscope.window.domain import Domain
 
-__all__ = ["Domain", "ArrayScopeWindow"]
+__all__ = ["ArrayScopeWindow", "Domain"]
 
 
 def __getattr__(name):

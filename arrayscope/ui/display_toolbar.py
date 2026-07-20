@@ -16,7 +16,6 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from arrayscope.ui.icons import glyph_icon, material_icon, set_action_icon
 from arrayscope.ui.widgets import TOOL_BUTTON_STYLE, configure_tool_button
 
-
 _CHANNEL_ITEMS = (
     ("Complex", "complex", "ℂ"),
     ("Real", "real", "ℝ"),
@@ -41,6 +40,7 @@ _COLORMAP_ICON_CACHE: dict[str, object] = {}
 
 def _colormap_icon(name):
     from pyqtgraph.Qt import QtGui
+
     from arrayscope.display.colormap_library import get_colormap
 
     icon = _COLORMAP_ICON_CACHE.get(name)
@@ -82,7 +82,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.setMovable(False)
         self.setIconSize(Qt.QtCore.QSize(16, 16))
         self.setStyleSheet(TOOL_BUTTON_STYLE)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
+        )
         self._channel_options_state: tuple[tuple[str, bool], ...] | None = None
         self._compact_level = 0
         self._group_icon_labels: list[tuple[QtWidgets.QLabel, str]] = []
@@ -125,11 +127,15 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.fit_action.setCheckable(True)
         set_action_icon(self.fit_action, "fit_screen")
         self.fit_action.setToolTip("Fit image to viewport")
-        self.fit_action.triggered.connect(lambda checked=False: self.fitRequested.emit(bool(checked)))
+        self.fit_action.triggered.connect(
+            lambda checked=False: self.fitRequested.emit(bool(checked))
+        )
         self.one_to_one_action = self.addAction("1:1")
         set_action_icon(self.one_to_one_action, "aspect_ratio")
         self.one_to_one_action.setToolTip("Show image at one screen pixel per image pixel")
-        self.one_to_one_action.triggered.connect(lambda _checked=False: self.oneToOneRequested.emit())
+        self.one_to_one_action.triggered.connect(
+            lambda _checked=False: self.oneToOneRequested.emit()
+        )
         for action in (self.fit_action, self.one_to_one_action):
             button = self.widgetForAction(action)
             if button is not None:
@@ -171,7 +177,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.sync_window_action.setToolTip(
             "Sync window/level with other linked ArrayScope windows (also from separately started sessions)"
         )
-        self.sync_window_action.toggled.connect(lambda checked: self.syncWindowToggled.emit(bool(checked)))
+        self.sync_window_action.toggled.connect(
+            lambda checked: self.syncWindowToggled.emit(bool(checked))
+        )
         button = self.widgetForAction(self.sync_window_action)
         if button is not None:
             configure_tool_button(button)
@@ -201,10 +209,13 @@ class DisplayToolbar(QtWidgets.QToolBar):
         state = (self._colormap_family, names)
         # Binder syncs call this often; never tear the menu down while the
         # user is browsing it, and skip rebuilds when nothing changed.
-        if state == getattr(self, "_colormap_menu_state", None) or menu.isVisible():
-            if state == getattr(self, "_colormap_menu_state", None):
-                self._sync_colormap_button()
-                return
+        if state == getattr(self, "_colormap_menu_state", None):
+            self._sync_colormap_button()
+            return
+        if menu.isVisible():
+            # Leave _colormap_menu_state stale so the rebuild happens on the
+            # next sync after the menu closes.
+            return
         self._colormap_menu_state = state
         menu.clear()
 
@@ -348,7 +359,10 @@ class DisplayToolbar(QtWidgets.QToolBar):
 
     def set_channel_options(self, enabled_channels):
         state = tuple(
-            (str(self.channel_combo.itemData(index)), bool(enabled_channels.get(self.channel_combo.itemData(index), False)))
+            (
+                str(self.channel_combo.itemData(index)),
+                bool(enabled_channels.get(self.channel_combo.itemData(index), False)),
+            )
             for index in range(self.channel_combo.count())
         )
         if self._channel_options_state == state:
@@ -366,7 +380,9 @@ class DisplayToolbar(QtWidgets.QToolBar):
             return
         self.channelChanged.emit(self.channel_combo.currentData())
 
-    def set_current(self, *, channel=None, scale=None, aspect=None, window_mode=None, colormap=None):
+    def set_current(
+        self, *, channel=None, scale=None, aspect=None, window_mode=None, colormap=None
+    ):
         if colormap is not None and str(colormap) != self._current_colormap:
             self._current_colormap = str(colormap)
             self._sync_colormap_button()

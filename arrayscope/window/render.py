@@ -10,12 +10,15 @@ from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.trace import emit_trace
 from arrayscope.core.view_state import ChannelMode
-from arrayscope.kernel import Lane as WorkLane, WorkItem
 from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.colormap_library import get_colormap, phase_colormap
 from arrayscope.display.colormap_policy import resolved_colormap_name
+from arrayscope.display.geometry import display_geometry_coordinates_equal
+from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.kernel import Lane as WorkLane
+from arrayscope.kernel import Priority, WorkItem
 from arrayscope.operations.evaluator import (
     _document_key,
     evaluate_line_snapshot,
@@ -24,12 +27,9 @@ from arrayscope.operations.evaluator import (
 )
 from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_revert_action, show_status_message
-from arrayscope.display.model.frame import CommittedDisplayFrame, TiledValueSource
-from arrayscope.display.geometry import display_geometry_coordinates_equal
 from arrayscope.window.display_presenter import DisplayPresentationMixin
-from arrayscope.kernel import Priority
-from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.frame_controller import FrameControllerMixin
+from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.render_contract import RenderGeneration, generation_is_current
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
@@ -37,7 +37,7 @@ from arrayscope.window.render_resources import RenderResourceMixin
 
 def getNumberOfDecimalPlaces(number):
     if isinstance(number, (int, np.integer)):
-        return int(0)
+        return 0
     else:
         return int(max(1, (number.as_integer_ratio()[1]).bit_length()))
 
@@ -82,7 +82,9 @@ class RenderOrchestrator(
         if shader_display is None:
             from arrayscope.display.backend_contract import image_view_backend_capabilities
 
-            shader_display = bool(image_view_backend_capabilities(self.win.img_view).shader_windowing)
+            shader_display = bool(
+                image_view_backend_capabilities(self.win.img_view).shader_windowing
+            )
         if shader_display:
             return None
         return self._active_display_colormap_lut()
@@ -92,7 +94,7 @@ class RenderOrchestrator(
         if source is None:
             source = getattr(self.win.img_view, "image", None)
         if source is None or self.win.view_state.image_axes is None:
-            label = self.win.widgets['labels']['pixelValue']
+            label = self.win.widgets["labels"]["pixelValue"]
             if hasattr(label, "set_pixel_status"):
                 label.set_pixel_status("", self._slice_context_text())
             else:
@@ -103,28 +105,40 @@ class RenderOrchestrator(
         container = self.win.img_view.getView()
         mousePoint = container.mapSceneToView(pos)
         geometry = getattr(self, "display_geometry", None)
-        status = None if geometry is None else geometry.view_point_to_tile_point(mousePoint.x(), mousePoint.y(), require_loaded=True)
+        status = (
+            None
+            if geometry is None
+            else geometry.view_point_to_tile_point(
+                mousePoint.x(), mousePoint.y(), require_loaded=True
+            )
+        )
         if status is not None and status.kind != "loaded":
             text_pair = self._montage_status_value_text(status)
             if text_pair is None:
                 if hasattr(self.win, "img_view"):
                     self.win.img_view.hideHud()
-                label = self.win.widgets['labels']['pixelValue']
+                label = self.win.widgets["labels"]["pixelValue"]
                 if hasattr(label, "set_pixel_status"):
                     label.set_pixel_status("", self._slice_context_text())
                 else:
                     label.setText("")
                 return
             value_text, context = text_pair
-            label = self.win.widgets['labels']['pixelValue']
+            label = self.win.widgets["labels"]["pixelValue"]
             if hasattr(label, "set_pixel_status"):
                 label.set_pixel_status(value_text, context)
             else:
                 label.setText(value_text if not context else f"{value_text} | {context}")
             if hasattr(self.win, "img_view"):
-                self.win.img_view.showHudText(value_text if not context else f"{value_text} | {context}", pos)
+                self.win.img_view.showHudText(
+                    value_text if not context else f"{value_text} | {context}", pos
+                )
             return
-        point_context = None if geometry is None else geometry.context_for_view_point(mousePoint.x(), mousePoint.y())
+        point_context = (
+            None
+            if geometry is None
+            else geometry.context_for_view_point(mousePoint.x(), mousePoint.y())
+        )
         if point_context is not None:
             mapping = point_context.mapping
             if mapping.montage_axis is None:
@@ -175,11 +189,11 @@ class RenderOrchestrator(
                 return False
         elif tuple(np.shape(frame.data)[:2]) != tuple(frame.geometry.display_shape):
             return False
-        if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(frame.geometry.display_shape):
+        if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(
+            frame.geometry.display_shape
+        ):
             return False
-        if frame.key.request_key != getattr(self, "_committed_display_request_key", None):
-            return False
-        return True
+        return frame.key.request_key == getattr(self, "_committed_display_request_key", None)
 
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
         view_state = self.win.view_state
@@ -259,13 +273,13 @@ class RenderOrchestrator(
             else:
                 decimal_places = getNumberOfDecimalPlaces(abs(value))
                 if decimal_places > 5:
-                    value_text = "({}, {}) = {:.3e}".format(x_i, y_i, value)
+                    value_text = f"({x_i}, {y_i}) = {value:.3e}"
                 else:
                     value_text = "({}, {}) = {:.{}f}".format(x_i, y_i, value, decimal_places)
         except Exception:
             value_text = f"({x_i}, {y_i}) = {value}"
         text = value_text if not context else f"{value_text} | {context}"
-        label = self.win.widgets['labels']['pixelValue']
+        label = self.win.widgets["labels"]["pixelValue"]
         if hasattr(label, "set_pixel_status"):
             label.set_pixel_status(value_text, context)
         else:
@@ -282,7 +296,9 @@ class RenderOrchestrator(
     def _on_image_mouse_moved(self, pos):
         self._last_image_mouse_scene_pos = pos
         self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
-        self._last_image_hover_focus_frame_key = getattr(getattr(self.win, "_committed_display_frame", None), "key", None)
+        self._last_image_hover_focus_frame_key = getattr(
+            getattr(self.win, "_committed_display_frame", None), "key", None
+        )
         self.getPixel(pos)
         schedule_priority = getattr(self, "retarget_montage_priority_from_hover", None)
         if callable(schedule_priority):
@@ -312,7 +328,9 @@ class RenderOrchestrator(
         pos = getattr(self, "_last_image_mouse_scene_pos", None)
         if pos is not None:
             self._last_image_hover_focus = self._image_hover_focus_from_scene_pos(pos)
-            self._last_image_hover_focus_frame_key = getattr(getattr(self.win, "_committed_display_frame", None), "key", None)
+            self._last_image_hover_focus_frame_key = getattr(
+                getattr(self.win, "_committed_display_frame", None), "key", None
+            )
             self.getPixel(pos)
 
     def _image_hover_focus_from_scene_pos(self, pos):
@@ -321,7 +339,11 @@ class RenderOrchestrator(
             x = float(view_point.x())
             y = float(view_point.y())
             geometry = getattr(self, "display_geometry", None)
-            status = None if geometry is None else geometry.view_point_to_tile_point(x, y, require_loaded=False)
+            status = (
+                None
+                if geometry is None
+                else geometry.view_point_to_tile_point(x, y, require_loaded=False)
+            )
             if status is None or status.kind in {"outside", "gap"}:
                 return None
             return (x, y)
@@ -329,7 +351,7 @@ class RenderOrchestrator(
             return None
 
     def _on_profile_marker_moved(self, image_x, image_y):
-        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
+        if not self.win.widgets["buttons"]["display"]["live_profile"].isChecked():
             return
         if self.win.view_state.image_axes is None:
             return
@@ -367,7 +389,7 @@ class RenderOrchestrator(
         self.win._pending_profile_pos = None
         if point is None and pos is None:
             return
-        if not self.win.widgets['buttons']['display']['live_profile'].isChecked():
+        if not self.win.widgets["buttons"]["display"]["live_profile"].isChecked():
             return
         if not self.win.profile_dock.isVisible():
             return
@@ -388,17 +410,30 @@ class RenderOrchestrator(
         request_id = self._profile_request_id
         image_levels = self.win.img_view.getLevels()
         y_range_mode = self.win.profile_dock.y_range_mode()
-        profile_axes = tuple(getattr(self.win, "profile_axes", ()) or ((self.win.view_state.line_axis,) if self.win.view_state.line_axis is not None else ()))
+        profile_axes = tuple(
+            getattr(self.win, "profile_axes", ())
+            or (
+                (self.win.view_state.line_axis,)
+                if self.win.view_state.line_axis is not None
+                else ()
+            )
+        )
         clamped = self._clamp_profile_marker_point(point[0], point[1])
         if clamped is None:
             self._clear_live_profile_marker()
             return
         geometry = getattr(self, "display_geometry", None)
-        status = None if geometry is None else geometry.view_point_to_tile_point(clamped[0], clamped[1], require_loaded=False)
+        status = (
+            None
+            if geometry is None
+            else geometry.view_point_to_tile_point(clamped[0], clamped[1], require_loaded=False)
+        )
         if status is not None and status.kind in {"gap", "outside"}:
             self._clear_live_profile_marker()
             return
-        profile_states, profile_label_suffix = self._profile_states_for_display_point(view_state, clamped[0], clamped[1], profile_axes)
+        profile_states, profile_label_suffix = self._profile_states_for_display_point(
+            view_state, clamped[0], clamped[1], profile_axes
+        )
         if not profile_states:
             self._clear_live_profile_marker()
             return
@@ -409,7 +444,9 @@ class RenderOrchestrator(
             if cached is None:
                 cached_entries = []
                 break
-            cached_entries.append((cached, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
+            cached_entries.append(
+                (cached, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}")
+            )
         if cached_entries:
             if request_id != getattr(self, "_profile_request_id", 0):
                 return
@@ -417,7 +454,9 @@ class RenderOrchestrator(
             self.win._update_operation_dock()
             self.win.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
             if hasattr(self.win, "_record_ui_work"):
-                self.win._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
+                self.win._record_ui_work(
+                    "profile_update", (perf_counter() - profile_update_start) * 1000.0
+                )
             return
 
         def evaluate():
@@ -436,25 +475,40 @@ class RenderOrchestrator(
                 for profile_state in profile_states
             )
 
-        request_keys = {profile_state: self.win.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
+        request_keys = {
+            profile_state: self.win.operation_evaluator.line_key(profile_state, document=document)
+            for profile_state in profile_states
+        }
 
         def done(results):
             if request_id != getattr(self, "_profile_request_id", 0):
                 return
             entries = []
             for profile_state, result in results:
-                if request_keys[profile_state] != self.win.operation_evaluator.line_key(profile_state):
+                if request_keys[profile_state] != self.win.operation_evaluator.line_key(
+                    profile_state
+                ):
                     return
                 line_result = self.win.operation_evaluator.store_line_result(profile_state, result)
-                entries.append((line_result, profile_state, f"dim {profile_state.line_axis}{profile_label_suffix}"))
+                entries.append(
+                    (
+                        line_result,
+                        profile_state,
+                        f"dim {profile_state.line_axis}{profile_label_suffix}",
+                    )
+                )
             self.win.profile_dock.update_line_results(tuple(entries), y_range=y_range)
             self.win._update_operation_dock()
             self.win.img_view.setProfileMarker(round(point[0]), round(point[1]), visible=True)
             if hasattr(self.win, "_record_ui_work"):
-                self.win._record_ui_work("profile_update", (perf_counter() - profile_update_start) * 1000.0)
+                self.win._record_ui_work(
+                    "profile_update", (perf_counter() - profile_update_start) * 1000.0
+                )
             if view_state.montage_axis is None:
                 for axis in profile_axes:
-                    self._prefetch_profiles_near_marker(view_state, point[0], point[1], line_axis=axis)
+                    self._prefetch_profiles_near_marker(
+                        view_state, point[0], point[1], line_axis=axis
+                    )
 
         def error(exc):
             show_status_message(self.win, f"Live profile update failed: {exc}")
@@ -505,8 +559,14 @@ class RenderOrchestrator(
         mapping = geometry.view_point_to_array_index(image_x, image_y, require_loaded=False)
         if mapping is None:
             return (), ""
-        states = geometry.view_point_to_profile_states(image_x, image_y, profile_axes, require_loaded=False)
-        suffix = "" if mapping.montage_axis is None or mapping.montage_index is None else f" d{mapping.montage_axis}={mapping.montage_index}"
+        states = geometry.view_point_to_profile_states(
+            image_x, image_y, profile_axes, require_loaded=False
+        )
+        suffix = (
+            ""
+            if mapping.montage_axis is None or mapping.montage_index is None
+            else f" d{mapping.montage_axis}={mapping.montage_index}"
+        )
         return states, suffix
 
     def _clear_live_profile_marker(self):
@@ -520,7 +580,9 @@ class RenderOrchestrator(
             if hasattr(self.win, "img_view"):
                 self.win.img_view.cancelPendingRoiDrawing()
                 self.win.img_view.setInspectionTool("profile")
-            self.win.layout_manager.set_managed_dock_visible(self.win.profile_dock, True, reason="live-profile")
+            self.win.layout_manager.set_managed_dock_visible(
+                self.win.profile_dock, True, reason="live-profile"
+            )
             self.win._schedule_view_geometry_refresh()
             self.win.img_view.getView().setCursor(Qt.QtCore.Qt.CursorShape.CrossCursor)
             self._ensure_profile_marker()
@@ -686,7 +748,11 @@ class RenderOrchestrator(
         # Shader-backed paths update uniforms in setColorMap.  The CPU complex
         # path bakes the LUT into RGB pixels and therefore needs a new
         # materialization/cache key.
-        if request_render and previous_key != current_key and self._evaluation_colormap_lut() is not None:
+        if (
+            request_render
+            and previous_key != current_key
+            and self._evaluation_colormap_lut() is not None
+        ):
             self.render(reason="colormap")
         return self.win.current_colormap
 
@@ -704,16 +770,16 @@ class RenderOrchestrator(
         return ViewportPolicy.PRESERVE
 
     def _current_window_mode(self):
-        if self.win.widgets['buttons']['display']['window_absolute'].isChecked():
+        if self.win.widgets["buttons"]["display"]["window_absolute"].isChecked():
             return "absolute"
         return "relative"
 
     def update_display_mode(self):
         """Update the display mode for the image view"""
-        if self.win.widgets['buttons']['display']['square_pixels'].isChecked():
-            self.win.img_view.setDisplayMode('square_pixels')
-        elif self.win.widgets['buttons']['display']['fit'].isChecked():
-            self.win.img_view.setDisplayMode('fit')
+        if self.win.widgets["buttons"]["display"]["square_pixels"].isChecked():
+            self.win.img_view.setDisplayMode("square_pixels")
+        elif self.win.widgets["buttons"]["display"]["fit"].isChecked():
+            self.win.img_view.setDisplayMode("fit")
 
     def _on_aspect_toolbar_changed(self, mode):
         if mode == "one_to_one":
@@ -722,19 +788,19 @@ class RenderOrchestrator(
         self.fit_image_to_view()
 
     def _on_window_mode_changed(self, mode):
-        self.win.widgets['buttons']['display']['window_relative'].setChecked(mode != "absolute")
-        self.win.widgets['buttons']['display']['window_absolute'].setChecked(mode == "absolute")
+        self.win.widgets["buttons"]["display"]["window_relative"].setChecked(mode != "absolute")
+        self.win.widgets["buttons"]["display"]["window_absolute"].setChecked(mode == "absolute")
         self.render(reason="window-mode")
         self.win._notify_sync("levels")
 
     def _set_live_profile_checked(self, enabled):
-        self.win.widgets['buttons']['display']['live_profile'].setChecked(bool(enabled))
+        self.win.widgets["buttons"]["display"]["live_profile"].setChecked(bool(enabled))
 
     def fit_image_to_view(self, enabled=True):
         note_interaction = getattr(self.win, "_note_viewport_interaction", None)
         if callable(note_interaction):
             note_interaction("fit-toggle")
-        self.win.widgets['buttons']['display']['fit'].setChecked(bool(enabled))
+        self.win.widgets["buttons"]["display"]["fit"].setChecked(bool(enabled))
         if hasattr(self.win, "display_toolbar"):
             blocker = Qt.QtCore.QSignalBlocker(self.win.display_toolbar.fit_action)
             try:
@@ -745,7 +811,7 @@ class RenderOrchestrator(
         self.win._sync_controls_from_view_state()
 
     def one_to_one_image(self):
-        self.win.widgets['buttons']['display']['square_pixels'].setChecked(True)
+        self.win.widgets["buttons"]["display"]["square_pixels"].setChecked(True)
         if hasattr(self.win, "display_toolbar"):
             blocker = Qt.QtCore.QSignalBlocker(self.win.display_toolbar.fit_action)
             try:
@@ -756,7 +822,9 @@ class RenderOrchestrator(
         self.win._sync_controls_from_view_state()
 
     def auto_window_levels(self):
-        cancel_level_interaction = getattr(self.win.img_view, "cancelHistogramLevelInteraction", None)
+        cancel_level_interaction = getattr(
+            self.win.img_view, "cancelHistogramLevelInteraction", None
+        )
         if callable(cancel_level_interaction):
             cancel_level_interaction()
         previous_levels = normalize_bounds(self.win.img_view.getLevels())
@@ -792,7 +860,9 @@ class RenderOrchestrator(
         levels = normalize_bounds(levels)
         if levels is None:
             return
-        cancel_level_interaction = getattr(self.win.img_view, "cancelHistogramLevelInteraction", None)
+        cancel_level_interaction = getattr(
+            self.win.img_view, "cancelHistogramLevelInteraction", None
+        )
         if callable(cancel_level_interaction):
             cancel_level_interaction()
         self.win._force_autolevel = False
@@ -843,16 +913,16 @@ class RenderOrchestrator(
     def _update_display_group_title(self):
         """Update the display group title with aspect ratio information."""
         mode = self.win.img_view.displayMode
-        aspect_str = ''
+        aspect_str = ""
 
-        if mode == 'square_pixels': # Simple
-            self.win.display_group.setTitle('Display (1:1)')
+        if mode == "square_pixels":  # Simple
+            self.win.display_group.setTitle("Display (1:1)")
             return
 
-        if mode == 'fit': #use the viewport aspect ratio
-            aspect_str = ''
+        if mode == "fit":  # use the viewport aspect ratio
+            aspect_str = ""
             try:
-                if hasattr(self.win.img_view, 'image') and self.win.img_view.image is not None:
+                if hasattr(self.win.img_view, "image") and self.win.img_view.image is not None:
                     view = self.win.img_view.getView()
 
                     img_height, img_width = self.win.img_view.image.shape[:2]
@@ -860,20 +930,17 @@ class RenderOrchestrator(
                     img_ratio = img_width / img_height
                     ratio = img_ratio * widget_ratio
 
-                    if abs(ratio - 1.0) < 1e-2:
-                        aspect_str = '(1:1)'
-                    else:
-                        aspect_str = f'({ratio:.2f}:1)'
+                    aspect_str = "(1:1)" if abs(ratio - 1.0) < 0.01 else f"({ratio:.2f}:1)"
             finally:
-                self.win.display_group.setTitle(f'Display {aspect_str}')
+                self.win.display_group.setTitle(f"Display {aspect_str}")
 
         else:
-            self.win.display_group.setTitle('Display')
+            self.win.display_group.setTitle("Display")
 
     def update_line_plot(self):
         if not hasattr(self.win, "profile_dock") or not self.win.profile_dock.isVisible():
             return
-        if self.win.widgets['buttons']['display']['live_profile'].isChecked():
+        if self.win.widgets["buttons"]["display"]["live_profile"].isChecked():
             position = self.win.img_view.profileMarkerPosition()
             if position is not None:
                 self._on_profile_marker_moved(*position)
@@ -881,7 +948,10 @@ class RenderOrchestrator(
         view_state = self.win.view_state
         y_range = self._current_profile_y_range()
         document = self.win.document
-        profile_axes = tuple(getattr(self.win, "profile_axes", ()) or ((view_state.line_axis,) if view_state.line_axis is not None else ()))
+        profile_axes = tuple(
+            getattr(self.win, "profile_axes", ())
+            or ((view_state.line_axis,) if view_state.line_axis is not None else ())
+        )
         profile_states = tuple(view_state.with_line_axis(axis) for axis in profile_axes)
         cached_entries = []
         for profile_state in profile_states:
@@ -911,12 +981,17 @@ class RenderOrchestrator(
                 for profile_state in profile_states
             )
 
-        request_keys = {profile_state: self.win.operation_evaluator.line_key(profile_state, document=document) for profile_state in profile_states}
+        request_keys = {
+            profile_state: self.win.operation_evaluator.line_key(profile_state, document=document)
+            for profile_state in profile_states
+        }
 
         def done(results):
             entries = []
             for profile_state, result in results:
-                if request_keys[profile_state] != self.win.operation_evaluator.line_key(profile_state):
+                if request_keys[profile_state] != self.win.operation_evaluator.line_key(
+                    profile_state
+                ):
                     return
                 line_result = self.win.operation_evaluator.store_line_result(profile_state, result)
                 entries.append((line_result, profile_state, f"dim {profile_state.line_axis}"))
@@ -969,7 +1044,9 @@ class RenderOrchestrator(
         """Line-plot mode is disabled while the 2D viewer owns the primary surface."""
         return False
 
-    def request_render(self, *, reason: str, force_autolevel: bool = False, interactive: bool = False) -> None:
+    def request_render(
+        self, *, reason: str, force_autolevel: bool = False, interactive: bool = False
+    ) -> None:
         coordinator = getattr(self.win, "render_coordinator", None)
         target_key = self._render_request_key()
         if coordinator is None:
@@ -1059,27 +1136,46 @@ class RenderOrchestrator(
         if getattr(self.win, "_closing", False) or not hasattr(self.win, "widgets"):
             return
         try:
-            if self.win.profile_dock.isVisible() or self.win.widgets['buttons']['display']['live_profile'].isChecked():
+            if (
+                self.win.profile_dock.isVisible()
+                or self.win.widgets["buttons"]["display"]["live_profile"].isChecked()
+            ):
                 self.update_line_plot()
             self.win._update_operation_dock()
             self.win._sync_progressive_docks()
             self.win._refresh_inspection_dock()
-            restore_viewport_shape = getattr(self.win, "_restore_viewport_continuity_shape_after_layout", None)
+            restore_viewport_shape = getattr(
+                self.win, "_restore_viewport_continuity_shape_after_layout", None
+            )
             restore_shape = getattr(self.win, "_viewport_continuity_shape_target", lambda: None)
-            if callable(restore_viewport_shape) and callable(restore_shape) and restore_shape() is not None:
+            if (
+                callable(restore_viewport_shape)
+                and callable(restore_shape)
+                and restore_shape() is not None
+            ):
                 restore_viewport_shape()
         finally:
             self.win._deferred_side_panel_refresh_pending = False
 
-    def render(self, *, reason: str = "state", force_autolevel: bool = False, defer_side_panels: bool = False):
+    def render(
+        self,
+        *,
+        reason: str = "state",
+        force_autolevel: bool = False,
+        defer_side_panels: bool = False,
+    ):
         render_start = perf_counter()
         self._cancel_render_dependent_work_for_interactive_change()
         self._advance_render_generation(f"render:{reason}")
-        self.win._set_view_state(self.win.view_state.for_shape(self.win.data.shape, preserve_flags=True))
+        self.win._set_view_state(
+            self.win.view_state.for_shape(self.win.data.shape, preserve_flags=True)
+        )
         self.win._coerce_channel_for_current_dtype()
         self._last_render_preamble_ms = (perf_counter() - render_start) * 1000.0
         control_start = perf_counter()
-        if self._interactive_slice_controls_are_current(reason=reason, defer_side_panels=defer_side_panels):
+        if self._interactive_slice_controls_are_current(
+            reason=reason, defer_side_panels=defer_side_panels
+        ):
             if hasattr(self.win, "tab_widget"):
                 self.win.tab_widget.setVisible(self.win.data.ndim >= 2)
         else:
@@ -1099,7 +1195,10 @@ class RenderOrchestrator(
         if defer_side_panels:
             self.win._deferred_side_panel_refresh_pending = True
         else:
-            if self.win.profile_dock.isVisible() or self.win.widgets['buttons']['display']['live_profile'].isChecked():
+            if (
+                self.win.profile_dock.isVisible()
+                or self.win.widgets["buttons"]["display"]["live_profile"].isChecked()
+            ):
                 self.update_line_plot()
             self.win._update_operation_dock()
             self.win._sync_progressive_docks()
@@ -1107,7 +1206,9 @@ class RenderOrchestrator(
         self._last_side_panel_sync_ms = (perf_counter() - side_panel_start) * 1000.0
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
 
-    def _interactive_slice_controls_are_current(self, *, reason: str, defer_side_panels: bool) -> bool:
+    def _interactive_slice_controls_are_current(
+        self, *, reason: str, defer_side_panels: bool
+    ) -> bool:
         if not bool(defer_side_panels):
             return False
         if str(reason) != "slice":

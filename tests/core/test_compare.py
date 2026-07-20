@@ -1,13 +1,6 @@
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
 import numpy as np
+
 import arrayscope.core.compare as compare
-
-
-
 
 
 def test_compare_document_adds_compatible_layers():

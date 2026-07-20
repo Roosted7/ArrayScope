@@ -86,7 +86,7 @@ def synthetic_montage_data() -> np.ndarray:
     return frames.reshape(COUNT, TILE, TILE).transpose(1, 2, 0).copy()
 
 
-@pytest.fixture()
+@pytest.fixture
 def montage_window():
     from arrayscope.app.qt_binding import prefer_pyside6
 
@@ -127,11 +127,7 @@ class Harness:
         s = self.session
         pending_draw = getattr(self.win.img_view, "presentationDrawPending", None)
         physical_drawn = not bool(pending_draw()) if callable(pending_draw) else True
-        return bool(
-            s is not None
-            and s.visible_plan_complete()
-            and physical_drawn
-        )
+        return bool(s is not None and s.visible_plan_complete() and physical_drawn)
 
     def assert_lifecycle_settled(self) -> None:
         s = self.session
@@ -142,17 +138,13 @@ class Harness:
             "stall assertion probe fired: "
             f"{stall_assertions}x, last={getattr(self.win.renderer, '_montage_watchdog_last_stall', None)}"
         )
-        assert counters["dangling_claims"] == 0, (
-            f"leaked claims: {s.lifecycle.dangling_claims()}"
-        )
+        assert counters["dangling_claims"] == 0, f"leaked claims: {s.lifecycle.dangling_claims()}"
         assert counters["evaluating"] == 0, (
             f"immortal loading tiles: {sorted(s.lifecycle.evaluating_tiles)}"
         )
         active = {int(tile) for tile in s._last_active_tiles}
         parked_active = s.lifecycle.parked_tiles & active
-        assert not parked_active, (
-            f"parked tiles inside active scope: {sorted(parked_active)}"
-        )
+        assert not parked_active, f"parked tiles inside active scope: {sorted(parked_active)}"
         # Semantic-vs-backend agreement (field defect 2026-07-05): the layer's
         # last payload map must present the same LOD the session believes is
         # presented — a levels-only commit that falsely acknowledged level
@@ -181,15 +173,14 @@ class Harness:
         from arrayscope.display.backends.vispy.tiles import _tile_quad_rects
 
         for tile, resolutions in layer._pool.tile_page_target_resolutions.items():
-            bound_pages = {
-                int(resolution.slot.page_index) for resolution in resolutions
-            }
+            bound_pages = {int(resolution.slot.page_index) for resolution in resolutions}
             drawn_pages = {
                 int(part.page_index)
                 for part in layer._pool.tile_draw_parts.get(int(tile), ())
                 if part.page_index is not None
             }
-            assert drawn_pages and drawn_pages.issubset(bound_pages), (
+            assert drawn_pages, f"tile {tile} has no draw pages"
+            assert drawn_pages.issubset(bound_pages), (
                 f"tile {tile} draw pages {sorted(drawn_pages)} do not match "
                 f"bound pages {sorted(bound_pages)}"
             )
@@ -218,7 +209,11 @@ class Harness:
                     )
             expected = np.asarray(expected_texcoords, dtype=np.float32).reshape((-1, 2))
             actual = np.asarray(visual.texcoord_data, dtype=np.float32).reshape((-1, 2))
-            assert actual.shape == expected.shape and np.allclose(actual, expected), (
+            assert actual.shape == expected.shape, (
+                f"page {page_index} submitted texcoords diverge from canonical "
+                f"draw parts: actual={actual.shape}, expected={expected.shape}"
+            )
+            assert np.allclose(actual, expected), (
                 f"page {page_index} submitted texcoords diverge from canonical "
                 f"draw parts: actual={actual.shape}, expected={expected.shape}"
             )
@@ -253,9 +248,7 @@ class Harness:
         while monotonic() < deadline:
             self.app.processEvents()
 
-    def wait_settled(
-        self, timeout: float = INTERACTION_SETTLE_HARD_LIMIT_S
-    ) -> bool:
+    def wait_settled(self, timeout: float = INTERACTION_SETTLE_HARD_LIMIT_S) -> bool:
         return wait_for_qt_condition(
             self.app,
             self.settled,
@@ -327,9 +320,7 @@ class Harness:
         from pyqtgraph.Qt import QtGui
 
         image = (
-            self.win.img_view.grab()
-            .toImage()
-            .convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+            self.win.img_view.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
         )
         w, h = image.width(), image.height()
         buf = np.frombuffer(image.constBits(), dtype=np.uint8, count=w * h * 4)
@@ -347,41 +338,34 @@ class Harness:
             return float(widget_pt.x()), float(widget_pt.y())
 
         return [
-            to_widget(t.x0 + t.width / 2.0, t.y0 + t.height / 2.0)
-            for t in self.session.plan.tiles
+            to_widget(t.x0 + t.width / 2.0, t.y0 + t.height / 2.0) for t in self.session.plan.tiles
         ]
 
-    def tile_means(
-        self, shot: np.ndarray | None = None, *, half: int = 5
-    ) -> list[float]:
+    def tile_means(self, shot: np.ndarray | None = None, *, half: int = 5) -> list[float]:
         shot = self.screenshot() if shot is None else shot
         means: list[float] = []
         for x, y in self.tile_centers_px():
-            xi, yi = int(round(x)), int(round(y))
-            assert 0 <= yi - half and yi + half < shot.shape[0], (
-                f"tile center off-widget: ({xi}, {yi})"
-            )
-            assert 0 <= xi - half and xi + half < shot.shape[1], (
-                f"tile center off-widget: ({xi}, {yi})"
-            )
+            xi, yi = round(x), round(y)
+            assert yi - half >= 0, f"tile center off-widget: ({xi}, {yi})"
+            assert yi + half < shot.shape[0], f"tile center off-widget: ({xi}, {yi})"
+            assert xi - half >= 0, f"tile center off-widget: ({xi}, {yi})"
+            assert xi + half < shot.shape[1], f"tile center off-widget: ({xi}, {yi})"
             means.append(
-                float(
-                    shot[yi - half : yi + half + 1, xi - half : xi + half + 1, 0].mean()
-                )
+                float(shot[yi - half : yi + half + 1, xi - half : xi + half + 1, 0].mean())
             )
         return means
 
-    def tile_medians(
-        self, shot: np.ndarray | None = None, *, half: int = 5
-    ) -> list[float]:
+    def tile_medians(self, shot: np.ndarray | None = None, *, half: int = 5) -> list[float]:
         """Center-patch pixel oracle robust to thin ROI/hover overlay lines."""
 
         shot = self.screenshot() if shot is None else shot
         medians: list[float] = []
         for x, y in self.tile_centers_px():
-            xi, yi = int(round(x)), int(round(y))
-            assert 0 <= yi - half and yi + half < shot.shape[0]
-            assert 0 <= xi - half and xi + half < shot.shape[1]
+            xi, yi = round(x), round(y)
+            assert yi - half >= 0
+            assert yi + half < shot.shape[0]
+            assert xi - half >= 0
+            assert xi + half < shot.shape[1]
             medians.append(
                 float(
                     np.median(
@@ -412,7 +396,7 @@ class Harness:
         def to_widget(x: float, y: float) -> tuple[int, int]:
             scene_pt = vb.mapViewToScene(QtCore.QPointF(x, y))
             widget_pt = gv.mapTo(self.win.img_view, gv.mapFromScene(scene_pt))
-            return int(round(widget_pt.x())), int(round(widget_pt.y()))
+            return round(widget_pt.x()), round(widget_pt.y())
 
         modes: list[float] = []
         for tile in self.session.plan.tiles:
@@ -477,7 +461,7 @@ class Harness:
                 f"tile {k} does not show its own content: means[{k - 1}]={means[k - 1]:.1f} "
                 f"means[{k}]={means[k]:.1f} (full ramp: {[round(m) for m in means]})"
             )
-        worst = max(abs(m - e) for m, e in zip(means, expected))
+        worst = max(abs(m - e) for m, e in zip(means, expected, strict=False))
         assert worst <= tolerance, (
             f"tile gray ramp deviates {worst:.1f} > {tolerance} from analytic values "
             f"(colormap/window drift or wrong LOD content): {[round(m) for m in means]}"

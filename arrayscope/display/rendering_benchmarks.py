@@ -2,31 +2,37 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import argparse
+import contextlib
 import gc
+import itertools
 import json
 import os
-from pathlib import Path
 import platform
 import sys
 import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
 
-from arrayscope.core.runtime_diagnostics import ImageUploadTiming
-from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.core.frame_targets import FrameTarget
-from arrayscope.kernel import InlineWorkerBackend, Kernel, Lane as WorkLane, WorkItem
+from arrayscope.core.runtime_diagnostics import ImageUploadTiming
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.lod import LOD_POLICY_NATIVE_ONLY, LOD_REASON_NATIVE_SCALE
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    TilePresentationDelta,
+    TilePresentationState,
+)
 from arrayscope.display.montage import MontageTileState
-from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta, TilePresentationState
+from arrayscope.kernel import InlineWorkerBackend, Kernel, WorkItem
+from arrayscope.kernel import Lane as WorkLane
 
 
 @dataclass(frozen=True)
@@ -100,7 +106,9 @@ class _ActionMeasurement:
     ui_max_gap_ms: float | None = None
 
 
-def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tuple[RenderingBenchmarkResult, ...]:
+def benchmark_rendering_backends(
+    *, measure_presented: bool | None = None
+) -> tuple[RenderingBenchmarkResult, ...]:
     """Compare PyQtGraph and VisPy display-update hot paths.
 
     ``elapsed_ms``/``submission_ms`` measures CPU-side setter submission only.
@@ -132,15 +140,15 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
         _benchmark_progressive_tile_stream,
     )
     try:
-        for scenario in scenarios:
-            for view_type in (ImageView2D, VisPyImageView2D):
-                results.append(
-                    _run_view_benchmark(
-                        view_type,
-                        scenario,
-                        measure_presented=measure_presented,
-                    )
-                )
+        results.extend(
+            _run_view_benchmark(
+                view_type,
+                scenario,
+                measure_presented=measure_presented,
+            )
+            for scenario in scenarios
+            for view_type in (ImageView2D, VisPyImageView2D)
+        )
 
         results.append(
             _run_view_benchmark(
@@ -154,7 +162,9 @@ def benchmark_rendering_backends(*, measure_presented: bool | None = None) -> tu
         _collect_benchmark_widgets()
 
 
-def _run_view_benchmark(view_type, scenario, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _run_view_benchmark(
+    view_type, scenario, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
     """Run one scenario and close its parentless Qt/VisPy view."""
 
     view = view_type()
@@ -189,7 +199,9 @@ def _collect_benchmark_widgets() -> None:
 
 def _benchmark_scalar_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
     data = np.linspace(0.0, 1.0, 256 * 256, dtype=np.float32).reshape(256, 256)
-    _present_single_plane_benchmark_tiled(view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data)
+    _present_single_plane_benchmark_tiled(
+        view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data
+    )
     measurement = _measure_action(
         view,
         lambda: view._apply_histogram_preview_levels((0.25, 0.85)),
@@ -202,7 +214,9 @@ def _benchmark_tiled_small_initial(view, *, measure_presented: bool) -> Renderin
     data = np.linspace(0.0, 1.0, 128 * 128, dtype=np.float32).reshape(128, 128)
     measurement = _measure_action(
         view,
-        lambda: _present_single_plane_benchmark_tiled(view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data),
+        lambda: _present_single_plane_benchmark_tiled(
+            view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data
+        ),
         measure_presented=measure_presented,
     )
     return _result(view, "tiled_small_initial", measurement)
@@ -249,8 +263,12 @@ def _benchmark_tiled_large_initial(view, *, measure_presented: bool) -> Renderin
     return _result(view, "tiled_large_initial", measurement)
 
 
-def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(128, 128), count=1, columns=1)
+def _benchmark_one_tile_montage_initial(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(128, 128), count=1, columns=1
+    )
     measurement = _measure_action(
         view,
         lambda: _present_benchmark_tiled(
@@ -265,8 +283,12 @@ def _benchmark_one_tile_montage_initial(view, *, measure_presented: bool) -> Ren
     return _result(view, "one_tile_montage_initial", measurement)
 
 
-def _benchmark_multi_tile_montage_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=16, columns=4)
+def _benchmark_multi_tile_montage_initial(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=16, columns=4
+    )
     measurement = _measure_action(
         view,
         lambda: _present_benchmark_tiled(
@@ -281,9 +303,13 @@ def _benchmark_multi_tile_montage_initial(view, *, measure_presented: bool) -> R
     return _result(view, "multi_tile_montage_initial", measurement)
 
 
-def _benchmark_large_histogram_plot_refresh(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _benchmark_large_histogram_plot_refresh(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
     data = np.linspace(0.0, 1.0, 1024 * 1024, dtype=np.float32).reshape(1024, 1024)
-    _present_single_plane_benchmark_tiled(view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data)
+    _present_single_plane_benchmark_tiled(
+        view, data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0), histogramPlotData=data
+    )
     measurement = _measure_action(
         view,
         lambda: view._refresh_histogram_plot(auto_level=False),
@@ -292,8 +318,12 @@ def _benchmark_large_histogram_plot_refresh(view, *, measure_presented: bool) ->
     return _result(view, "large_histogram_plot_refresh", measurement)
 
 
-def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
+def _benchmark_complex_tile_level_preview(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(96, 96), count=2, columns=2
+    )
     _present_benchmark_tiled(
         view,
         geometry=geometry,
@@ -324,8 +354,12 @@ def _benchmark_complex_tile_level_preview(view, *, measure_presented: bool) -> R
     return _result(view, "complex_tile_level_preview", measurement)
 
 
-def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=96, columns=12)
+def _benchmark_large_tile_level_preview(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=96, columns=12
+    )
     _present_benchmark_tiled(
         view,
         geometry=geometry,
@@ -348,8 +382,12 @@ def _benchmark_large_tile_level_preview(view, *, measure_presented: bool) -> Ren
     return _result(view, "large_tile_level_preview", measurement)
 
 
-def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=24, columns=6)
+def _benchmark_tile_level_uniform_update(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=24, columns=6
+    )
     _present_benchmark_tiled(
         view,
         geometry=geometry,
@@ -373,7 +411,9 @@ def _benchmark_tile_level_uniform_update(view, *, measure_presented: bool) -> Re
 
 
 def _benchmark_clean_tile_flush(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(96, 96), count=2, columns=2)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(96, 96), count=2, columns=2
+    )
     _present_benchmark_tiled(
         view,
         geometry=geometry,
@@ -396,8 +436,12 @@ def _benchmark_clean_tile_flush(view, *, measure_presented: bool) -> RenderingBe
     return _result(view, "clean_tile_flush", measurement)
 
 
-def _benchmark_large_complex_tiled_initial(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=128, columns=16)
+def _benchmark_large_complex_tiled_initial(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=128, columns=16
+    )
     measurement = _measure_action(
         view,
         lambda: _present_benchmark_tiled(
@@ -413,7 +457,9 @@ def _benchmark_large_complex_tiled_initial(view, *, measure_presented: bool) -> 
 
 
 def _benchmark_one_dirty_tile_commit(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=64, columns=8
+    )
     _present_benchmark_tiled(
         view,
         geometry=geometry,
@@ -424,7 +470,9 @@ def _benchmark_one_dirty_tile_commit(view, *, measure_presented: bool) -> Render
     dirty_payloads = dict(payloads)
     image = np.array(payloads[3].image, copy=True)
     image[..., 0] = 64
-    dirty_payloads[3] = DisplayTilePayload(3, payloads[3].source_index, image, payloads[3].histogram_data, ("montage_tile", 3, "dirty"))
+    dirty_payloads[3] = DisplayTilePayload(
+        3, payloads[3].source_index, image, payloads[3].histogram_data, ("montage_tile", 3, "dirty")
+    )
     measurement = _measure_action(
         view,
         lambda: _present_benchmark_tiled(
@@ -441,7 +489,9 @@ def _benchmark_one_dirty_tile_commit(view, *, measure_presented: bool) -> Render
 
 
 def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
-    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(tile_shape=(64, 64), count=64, columns=8)
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=(64, 64), count=64, columns=8
+    )
     view.resize(900, 700)
     view.show()
     _present_benchmark_tiled(
@@ -459,6 +509,7 @@ def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> Rendering
         histogramRange=(0.0, 1.0),
         dirty_tiles=(),
     )
+
     def pan_zoom():
         view.getView().setRange(xRange=(0.0, 256.0), yRange=(0.0, 256.0), padding=0)
         view.getView().setRange(xRange=(64.0, 320.0), yRange=(64.0, 320.0), padding=0)
@@ -467,7 +518,9 @@ def _benchmark_pan_zoom_no_upload(view, *, measure_presented: bool) -> Rendering
     return _result(view, "pan_zoom_no_upload", measurement)
 
 
-def _benchmark_progressive_tile_stream(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _benchmark_progressive_tile_stream(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
     """Measure UI-thread cost while representative tile batches arrive."""
 
     return _benchmark_progressive_tile_stream_configured(
@@ -493,7 +546,7 @@ def _benchmark_progressive_tile_stream_configured(
 ) -> RenderingBenchmarkResult:
     """Measure one complete progressive direct-tile presentation."""
 
-    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
         tile_shape=tile_shape,
         count=count,
         columns=columns,
@@ -506,7 +559,11 @@ def _benchmark_progressive_tile_stream_configured(
             end = min(end, len(payloads))
             visible = {index: payloads[index] for index in range(end)}
             dirty_start = max(0, end - batch_size)
-            upserts = visible if end == batch_size else {index: payloads[index] for index in range(dirty_start, end)}
+            upserts = (
+                visible
+                if end == batch_size
+                else {index: payloads[index] for index in range(dirty_start, end)}
+            )
             state = TilePresentationState(visible)
             delta = TilePresentationDelta(
                 structure_revision=1,
@@ -545,12 +602,14 @@ def _benchmark_progressive_tile_stream_configured(
     )
 
 
-def _benchmark_warm_residency_queue_scaling(view, *, measure_presented: bool) -> RenderingBenchmarkResult:
+def _benchmark_warm_residency_queue_scaling(
+    view, *, measure_presented: bool
+) -> RenderingBenchmarkResult:
     from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
 
     active_count = 8
     total_count = 40
-    placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
+    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
         tile_shape=(64, 64),
         count=total_count,
         columns=8,
@@ -672,7 +731,11 @@ def _present_single_plane_benchmark_tiled(
     histogramPlotData=None,
 ) -> object:
     data = np.asarray(data)
-    tile_edge = 256 if max(tuple(int(value) for value in data.shape[:2])) > 256 else max(1, int(data.shape[0]), int(data.shape[1]))
+    tile_edge = (
+        256
+        if max(tuple(int(value) for value in data.shape[:2])) > 256
+        else max(1, int(data.shape[0]), int(data.shape[1]))
+    )
     state = ViewState.from_shape(data.shape[:2]).with_image_axes(0, 1)
     plan = FramePlanner(internal_tile_shape=(tile_edge, tile_edge)).plan(
         target=FrameTarget(("normal", data.shape), None, None, "exact-visible"),
@@ -702,9 +765,17 @@ def _direct_tile_layer_inputs(*, tile_shape=(32, 32), count=2, columns=2):
     y = np.linspace(0.0, 1.0, tile_h, dtype=np.float32)[:, None]
     x = np.linspace(0.0, 1.0, tile_w, dtype=np.float32)[None, :]
     geometry = DisplayGeometry(
-        view_state=ViewState.from_shape((tile_h, tile_w, count)).with_montage_axis(2, columns=columns, indices=tuple(range(count)), text=":"),
+        view_state=ViewState.from_shape((tile_h, tile_w, count)).with_montage_axis(
+            2, columns=columns, indices=tuple(range(count)), text=":"
+        ),
         display_shape=(height, width),
-        montage=MontageGeometry(indices=tuple(range(count)), tile_shape=(tile_h, tile_w), columns=columns, rows=rows, gap=gap),
+        montage=MontageGeometry(
+            indices=tuple(range(count)),
+            tile_shape=(tile_h, tile_w),
+            columns=columns,
+            rows=rows,
+            gap=gap,
+        ),
         montage_tile_states=tuple(MontageTileState.LOADED for _ in range(count)),
     )
     payloads = {}
@@ -763,7 +834,13 @@ def _single_plane_tile_state_from_array(frame_plan, data: np.ndarray) -> TilePre
             int(region.region_id),
             tile,
             tile,
-            ("tiled_region", frame_plan.semantic_key, int(region.region_id), tuple(tile.shape), str(tile.dtype)),
+            (
+                "tiled_region",
+                frame_plan.semantic_key,
+                int(region.region_id),
+                tuple(tile.shape),
+                str(tile.dtype),
+            ),
             semantic_data=tile,
             semantic_histogram_data=tile,
             source_shape=tile.shape[:2],
@@ -781,9 +858,13 @@ def _result(
 ) -> RenderingBenchmarkResult:
     backend = image_view_backend_capabilities(view).name
     result_timing = view.lastImageUploadTiming() if timing is None else timing
-    pending_count = max(0, int(getattr(result_timing, "tile_layer_level_update_pending_items", 0) or 0))
+    pending_count = max(
+        0, int(getattr(result_timing, "tile_layer_level_update_pending_items", 0) or 0)
+    )
     applied_lod = max(1, int(getattr(result_timing, "tile_layer_lod_factor", 1) or 1))
-    source_texels = max(0.0, float(getattr(result_timing, "tile_layer_source_texels_per_pixel", 0.0) or 0.0))
+    source_texels = max(
+        0.0, float(getattr(result_timing, "tile_layer_source_texels_per_pixel", 0.0) or 0.0)
+    )
     lod_policy = LOD_POLICY_NATIVE_ONLY if applied_lod == 1 else "backend-reported"
     lod_reason = (
         LOD_REASON_NATIVE_SCALE
@@ -820,7 +901,9 @@ def _result(
     )
 
 
-def _backend_commit_work_counters(*, backend: str, scenario: str, commit_count: int) -> dict[str, dict[str, int]]:
+def _backend_commit_work_counters(
+    *, backend: str, scenario: str, commit_count: int
+) -> dict[str, dict[str, int]]:
     kernel = Kernel(InlineWorkerBackend())
     for index in range(max(1, int(commit_count))):
         target = FrameTarget(
@@ -834,7 +917,12 @@ def _backend_commit_work_counters(*, backend: str, scenario: str, commit_count: 
                 key=("benchmark_backend_commit", str(backend), str(scenario), int(index)),
                 lane=WorkLane.BACKEND_COMMIT,
                 frame_target=target,
-                supersession_key=("benchmark-backend-commit", str(backend), str(scenario), int(index)),
+                supersession_key=(
+                    "benchmark-backend-commit",
+                    str(backend),
+                    str(scenario),
+                    int(index),
+                ),
                 supersession_value=int(index),
             )
         )
@@ -872,16 +960,28 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_visible_items=int(last.tile_layer_visible_items),
         tile_layer_items_updated=sum(int(timing.tile_layer_items_updated) for timing in timings),
         tile_layer_items_skipped=sum(int(timing.tile_layer_items_skipped) for timing in timings),
-        tile_layer_rgb_window_tiles=sum(int(timing.tile_layer_rgb_window_tiles) for timing in timings),
+        tile_layer_rgb_window_tiles=sum(
+            int(timing.tile_layer_rgb_window_tiles) for timing in timings
+        ),
         tile_layer_resident_items=int(last.tile_layer_resident_items),
         tile_layer_storage_capacity=int(last.tile_layer_storage_capacity),
-        tile_layer_storage_rebuilds=sum(int(timing.tile_layer_storage_rebuilds) for timing in timings),
-        tile_layer_storage_evictions=sum(int(timing.tile_layer_storage_evictions) for timing in timings),
-        tile_layer_texture_uploads=sum(int(timing.tile_layer_texture_uploads) for timing in timings),
-        tile_layer_texture_upload_bytes=sum(int(timing.tile_layer_texture_upload_bytes) for timing in timings),
+        tile_layer_storage_rebuilds=sum(
+            int(timing.tile_layer_storage_rebuilds) for timing in timings
+        ),
+        tile_layer_storage_evictions=sum(
+            int(timing.tile_layer_storage_evictions) for timing in timings
+        ),
+        tile_layer_texture_uploads=sum(
+            int(timing.tile_layer_texture_uploads) for timing in timings
+        ),
+        tile_layer_texture_upload_bytes=sum(
+            int(timing.tile_layer_texture_upload_bytes) for timing in timings
+        ),
         tile_layer_vertex_uploads=sum(int(timing.tile_layer_vertex_uploads) for timing in timings),
         tile_layer_level_updates=sum(int(timing.tile_layer_level_updates) for timing in timings),
-        tile_layer_level_update_pending_items=sum(int(timing.tile_layer_level_update_pending_items) for timing in timings),
+        tile_layer_level_update_pending_items=sum(
+            int(timing.tile_layer_level_update_pending_items) for timing in timings
+        ),
         tile_layer_estimated_gpu_bytes=int(last.tile_layer_estimated_gpu_bytes),
         tile_layer_cpu_shadow_bytes=int(last.tile_layer_cpu_shadow_bytes),
         tile_layer_page_count=int(last.tile_layer_page_count),
@@ -890,15 +990,23 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
         tile_layer_budget_bytes=int(last.tile_layer_budget_bytes),
         tile_layer_near_resident_items=int(last.tile_layer_near_resident_items),
         tile_layer_warm_resident_items=int(last.tile_layer_warm_resident_items),
-        tile_layer_evicted_near_items=sum(int(timing.tile_layer_evicted_near_items) for timing in timings),
+        tile_layer_evicted_near_items=sum(
+            int(timing.tile_layer_evicted_near_items) for timing in timings
+        ),
         tile_layer_lod_level=int(last.tile_layer_lod_level),
         tile_layer_lod_factor=int(last.tile_layer_lod_factor),
         tile_layer_source_texels_per_pixel=float(last.tile_layer_source_texels_per_pixel),
         tile_layer_gutter_pixels=int(last.tile_layer_gutter_pixels),
         tile_layer_mipmap_updates=sum(int(timing.tile_layer_mipmap_updates) for timing in timings),
-        tile_layer_mipmap_available=any(bool(timing.tile_layer_mipmap_available) for timing in timings),
-        tile_layer_complex_texture_uploads=sum(int(timing.tile_layer_complex_texture_uploads) for timing in timings),
-        tile_layer_shader_uniform_updates=sum(int(timing.tile_layer_shader_uniform_updates) for timing in timings),
+        tile_layer_mipmap_available=any(
+            bool(timing.tile_layer_mipmap_available) for timing in timings
+        ),
+        tile_layer_complex_texture_uploads=sum(
+            int(timing.tile_layer_complex_texture_uploads) for timing in timings
+        ),
+        tile_layer_shader_uniform_updates=sum(
+            int(timing.tile_layer_shader_uniform_updates) for timing in timings
+        ),
         cpu_complex_prep_ms=total("cpu_complex_prep_ms"),
         tile_layer_capacity_warning=str(last.tile_layer_capacity_warning),
     )
@@ -1022,9 +1130,9 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
     def poll():
         now = perf_counter()
         heartbeat_times.append(now)
-        if frame_times and (now - frame_times[-1]) * 1000.0 >= quiet_ms:
-            loop.quit()
-        elif deadline is not None and now >= deadline:
+        if (frame_times and (now - frame_times[-1]) * 1000.0 >= quiet_ms) or (
+            deadline is not None and now >= deadline
+        ):
             loop.quit()
 
     heartbeat.timeout.connect(poll)
@@ -1040,19 +1148,14 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
     finally:
         heartbeat.stop()
         if draw_emitter is not None:
-            try:
+            with contextlib.suppress(Exception):
                 draw_emitter.disconnect(note_frame)
-            except Exception:
-                pass
         if paint_target is not None and paint_probe is not None:
             paint_target.removeEventFilter(paint_probe)
 
     end_time = perf_counter()
     heartbeat_times.append(end_time)
-    gaps = [
-        (right - left) * 1000.0
-        for left, right in zip(heartbeat_times, heartbeat_times[1:])
-    ]
+    gaps = [(right - left) * 1000.0 for left, right in itertools.pairwise(heartbeat_times)]
     measurement_start = end_time if start_time is None else start_time
     return _ActionMeasurement(
         submission_ms=float(submission_ms),
@@ -1244,7 +1347,8 @@ def _gpu_limits_from_results(results):
     # already closed by the time the environment record is written, so make a
     # short-lived context for the query.
     try:
-        from vispy import app as vispy_app, gloo
+        from vispy import app as vispy_app
+        from vispy import gloo
 
         canvas = vispy_app.Canvas(show=False, size=(4, 4))
         try:
@@ -1258,8 +1362,13 @@ def _gpu_limits_from_results(results):
         pass
     for result in tuple(results or ()):
         timing = getattr(result, "timing", None)
-        if timing is not None and int(getattr(timing, "tile_layer_device_max_texture_size", 0) or 0):
-            return GpuDeviceLimits(max_texture_size=int(timing.tile_layer_device_max_texture_size), source="benchmark_timing")
+        if timing is not None and int(
+            getattr(timing, "tile_layer_device_max_texture_size", 0) or 0
+        ):
+            return GpuDeviceLimits(
+                max_texture_size=int(timing.tile_layer_device_max_texture_size),
+                source="benchmark_timing",
+            )
     try:
         from vispy import gloo
 

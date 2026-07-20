@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import numpy as np
 
@@ -12,11 +11,11 @@ from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
     RegionSpec,
+    StageCacheCandidate,
     axis_region_kind,
     region_nbytes,
     region_shape,
 )
-from arrayscope.operations.regions import StageCacheCandidate
 from arrayscope.operations.slabs import (
     _default_stage_document_key,
     claim_or_reuse_stage,
@@ -92,8 +91,16 @@ def plan_chunked_stage_materialization(
         chunks.append(RegionSpec(tuple(axes)))
     if len(chunks) <= 1:
         return None
-    estimated = int(region_nbytes(candidate.shape, candidate.dtype, chunks[0]) or min(int(total), target))
-    return StageChunkPlan(candidate=candidate, chunk_axes=(int(axis),), blocking_axes=blocking_axes, chunks=tuple(chunks), estimated_chunk_bytes=estimated)
+    estimated = int(
+        region_nbytes(candidate.shape, candidate.dtype, chunks[0]) or min(int(total), target)
+    )
+    return StageChunkPlan(
+        candidate=candidate,
+        chunk_axes=(int(axis),),
+        blocking_axes=blocking_axes,
+        chunks=tuple(chunks),
+        estimated_chunk_bytes=estimated,
+    )
 
 
 def stage_materialization_allowed_chunk_axes(shape, *, preferred_axes=None) -> tuple[int, ...]:
@@ -156,7 +163,9 @@ def materialize_stage_candidate_chunked(
             return reused
     result = None
     try:
-        output = np.empty(region_shape(candidate.shape, candidate.region), dtype=np.dtype(candidate.dtype))
+        output = np.empty(
+            region_shape(candidate.shape, candidate.region), dtype=np.dtype(candidate.dtype)
+        )
         completed = 0
         for chunk in plan.chunks:
             _check_cancelled(cancellation_token)

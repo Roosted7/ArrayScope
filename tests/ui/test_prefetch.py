@@ -32,14 +32,18 @@ def test_nearby_slice_prefetch_uses_prefetch_state_keys(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         _process_events(qtbot, count=40)
 
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
-        assert win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
+        assert (
+            win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
+        )
     finally:
         win.close()
 
@@ -73,7 +77,9 @@ def test_prefetch_dispatch_is_queued_but_not_timer_admitted(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         assert not hasattr(win, "_prefetch_idle_timer")
@@ -93,7 +99,9 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         momentum = SliceScrubMomentum()
         momentum.observe(2, now=0.0)
@@ -116,7 +124,9 @@ def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         momentum = SliceScrubMomentum()
         base = time.monotonic() - 0.3
@@ -127,7 +137,9 @@ def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
         _process_events(qtbot, count=40)
 
         scheduled = win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
-        assert scheduled > 2, "sustained same-direction scrubbing should warm deeper ahead of the motion"
+        assert scheduled > 2, (
+            "sustained same-direction scrubbing should warm deeper ahead of the motion"
+        )
     finally:
         win.close()
 
@@ -142,7 +154,9 @@ def test_montage_prefetch_denial_does_not_cap_slice_prefetch(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         win.prefetch_evaluation_controller.set_max_prefetch(32)
 
@@ -171,8 +185,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
 ):
     _clear_arrayscope_settings()
     from arrayscope.core.frame_targets import WorkStart
-    from arrayscope.window import ArrayScopeWindow
-    from arrayscope.window import montage_prefetch
+    from arrayscope.window import ArrayScopeWindow, montage_prefetch
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
     qtbot.addWidget(win)
@@ -248,8 +261,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
         captured["done"](object())
 
         assert (
-            win.operation_evaluator.display_cache_diagnostics().prefetch_stale
-            == stale_before + 1
+            win.operation_evaluator.display_cache_diagnostics().prefetch_stale == stale_before + 1
         )
         assert replans == [win.renderer._frame_session], (
             "stale prefetch claim release must wake the current session that "
@@ -271,8 +283,7 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
     from arrayscope.core.frame_targets import WorkStart
     from arrayscope.display.backend_contract import VISPY_CAPABILITIES
     from arrayscope.display.montage import RenderedTile
-    from arrayscope.window import ArrayScopeWindow
-    from arrayscope.window import montage_prefetch
+    from arrayscope.window import ArrayScopeWindow, montage_prefetch
 
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
     qtbot.addWidget(win)
@@ -287,7 +298,10 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
         )
         win._set_view_state(state)
         win.render(reason="test-gpu-montage-prefetch-warm")
-        qtbot.waitUntil(lambda: win.renderer._frame_session is not None, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not None,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
         session = win.renderer._frame_session
         tile = session.plan.tiles[-1]
         image = np.full(tuple(session.plan.tile_shape), float(tile.source_index), dtype=np.float32)
@@ -376,8 +390,8 @@ def test_montage_prefetch_candidates_bias_ahead_of_scroll_direction():
     from types import SimpleNamespace
 
     from arrayscope.core.view_state import ViewState
-    from arrayscope.display.montage import make_montage_plan
     from arrayscope.display.model.tile_priority import TilePriorityContext
+    from arrayscope.display.montage import make_montage_plan
     from arrayscope.window.montage_prefetch import _candidate_tiles
 
     state = ViewState.from_shape((2, 2, 5)).with_montage_axis(
@@ -420,9 +434,9 @@ def test_montage_prefetch_candidates_bias_ahead_of_scroll_direction():
 def test_montage_index_window_observation_reuses_scrub_momentum(monkeypatch):
     from types import SimpleNamespace
 
+    import arrayscope.window.render_prefetch as render_prefetch
     from arrayscope.core.view_state import ViewState
     from arrayscope.window.render_prefetch import RenderPrefetchMixin
-    import arrayscope.window.render_prefetch as render_prefetch
 
     times = iter((0.0, 0.1, 0.2))
     monkeypatch.setattr(render_prefetch, "monotonic", lambda: next(times))
@@ -430,12 +444,8 @@ def test_montage_index_window_observation_reuses_scrub_momentum(monkeypatch):
     initial = ViewState.from_shape((2, 2, 8)).with_montage_axis(
         2, columns=4, indices=(0, 1, 2, 3), text="0:4"
     )
-    forward = initial.with_montage_axis(
-        2, columns=4, indices=(1, 2, 3, 4), text="1:5"
-    )
-    reverse = initial.with_montage_axis(
-        2, columns=4, indices=(0, 1, 2, 3), text="0:4"
-    )
+    forward = initial.with_montage_axis(2, columns=4, indices=(1, 2, 3, 4), text="1:5")
+    reverse = initial.with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text="0:4")
 
     observe = RenderPrefetchMixin._observe_montage_prefetch_momentum
     observe(owner, initial, initial)
@@ -450,7 +460,8 @@ def _hold_real_visible_work(win):
     """Keep one real visible task active until the test releases it."""
 
     from arrayscope.core.frame_targets import FrameTarget
-    from arrayscope.kernel import Lane as WorkLane, WorkItem
+    from arrayscope.kernel import Lane as WorkLane
+    from arrayscope.kernel import WorkItem
 
     started = threading.Event()
     release = threading.Event()
@@ -490,7 +501,9 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
     release_busy = None
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         started, release_busy = _hold_real_visible_work(win)
         qtbot.waitUntil(started.is_set, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
@@ -501,7 +514,10 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
         # (post re-arm fix) the request is retained for the drain retry
         # rather than dropped.
         assert win.prefetch_evaluation_controller.diagnostics().prefetch_visible_busy_blocked >= 1
-        assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled == before_scheduled
+        assert (
+            win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
+            == before_scheduled
+        )
         assert getattr(win.renderer, "_pending_prefetch_request", None) is not None
     finally:
         if release_busy is not None:
@@ -528,7 +544,9 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
     release_busy = None
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         # Let startup evaluation drain first so the speculative dispatch is
         # not parked behind real work under parallel test load.
@@ -556,8 +574,12 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         qtbot.waitUntil(
-            lambda: win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
-            or win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 3)) is not None,
+            lambda: (
+                win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1))
+                is not None
+                or win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 3))
+                is not None
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
     finally:
@@ -583,7 +605,9 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
     release_busy = None
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win._active_slice_axis = 2
         qtbot.waitUntil(
             lambda: not win.visible_evaluation_controller.is_busy(),
@@ -628,7 +652,9 @@ def test_cost_aware_prefetch_allows_cheap_operation_backed_stack(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True
+        )
         win.request_operation("reverse", 0)
         _process_events(qtbot, count=20)
         win._active_slice_axis = 2
@@ -651,7 +677,9 @@ def test_cost_aware_prefetch_blocks_expensive_fft_stack(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.app_settings = AppSettingsState(theme=win.app_settings.theme, prefetch_nearby_slices=True, render_memory_budget_mb=128)
+        win.app_settings = AppSettingsState(
+            theme=win.app_settings.theme, prefetch_nearby_slices=True, render_memory_budget_mb=128
+        )
         win.request_operation("centered_fft", 2)
         _process_events(qtbot, count=20)
         win._active_slice_axis = 2
@@ -662,7 +690,9 @@ def test_cost_aware_prefetch_blocks_expensive_fft_stack(qtbot):
         after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
-        assert win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked > before_blocked
+        assert (
+            win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked > before_blocked
+        )
     finally:
         win.close()
 

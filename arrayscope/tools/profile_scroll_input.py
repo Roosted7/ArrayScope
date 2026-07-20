@@ -5,10 +5,9 @@ from __future__ import annotations
 import argparse
 import cProfile
 import json
-import os
-from pathlib import Path
 import pstats
 import sys
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -18,12 +17,13 @@ from arrayscope.tools.interaction_budget import (
     bounded_interaction_settle_timeout_s,
 )
 
-
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Profile 60Hz dimension scrolling in a real ArrayScope window")
+    parser = argparse.ArgumentParser(
+        description="Profile 60Hz dimension scrolling in a real ArrayScope window"
+    )
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH))
     parser.add_argument("--backend", choices=("pyqtgraph", "vispy"), default="vispy")
     parser.add_argument("--axis", type=int, default=2)
@@ -33,7 +33,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--count", type=int, default=48)
     parser.add_argument("--ticks", type=int, default=180)
     parser.add_argument("--hz", type=float, default=60.0)
-    parser.add_argument("--ops", choices=("none", "fft", "fftshift", "fft-fftshift", "fft-ifft"), default="fft-fftshift")
+    parser.add_argument(
+        "--ops",
+        choices=("none", "fft", "fftshift", "fft-fftshift", "fft-ifft"),
+        default="fft-fftshift",
+    )
     parser.add_argument("--load-mode", choices=("app", "native"), default="app")
     parser.add_argument("--artifact-dir", default="tests/artifacts/scroll-input")
     parser.add_argument("--jsonl", default=None)
@@ -46,7 +50,6 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
     from arrayscope.window import ArrayScopeWindow
 
     app = pg.mkQApp()
@@ -61,7 +64,9 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     previous_backend = settings.value("image_rendering_backend", None)
     settings.setValue(
         "image_rendering_backend",
-        ImageRenderingBackendChoice.VISPY.value if args.backend == "vispy" else ImageRenderingBackendChoice.PYQTGRAPH.value,
+        ImageRenderingBackendChoice.VISPY.value
+        if args.backend == "vispy"
+        else ImageRenderingBackendChoice.PYQTGRAPH.value,
     )
     settings.sync()
 
@@ -80,7 +85,9 @@ def main(argv: tuple[str, ...] | None = None) -> int:
             raise ValueError("empty scroll index range")
 
         win = ArrayScopeWindow(data, filepath=data_path)
-        win.app_settings = _replace_backend(win.app_settings, args.backend, ImageRenderingBackendChoice)
+        win.app_settings = _replace_backend(
+            win.app_settings, args.backend, ImageRenderingBackendChoice
+        )
         apply_theme = getattr(win, "_apply_theme_choice", None)
         if callable(apply_theme):
             apply_theme(win.app_settings.theme, persist=False)
@@ -131,7 +138,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         # and measures latency; it is outside production scheduling.
         timer = QtCore.QTimer()
         timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
-        interval_ms = max(1, int(round(1000.0 / max(1.0, float(args.hz)))))
+        interval_ms = max(1, round(1000.0 / max(1.0, float(args.hz))))
         timer.setInterval(interval_ms)
         state_box = {"tick": 0, "last": None, "start": 0.0}
 
@@ -154,11 +161,13 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     "handler_ms": (perf_counter() - now) * 1000.0,
                     "pending_before": pending_before,
                     "pending_after": _presentation_pending(win),
-                    "requested_delta": int(request_after["requested"]) - int(request_before["requested"]),
+                    "requested_delta": int(request_after["requested"])
+                    - int(request_before["requested"]),
                     "flushed_delta": int(request_after["flushed"]) - int(request_before["flushed"]),
                     "backpressure_delta": int(request_after["presentation_backpressure_skips"])
                     - int(request_before["presentation_backpressure_skips"]),
-                    "coalesced_delta": int(request_after["coalesced"]) - int(request_before["coalesced"]),
+                    "coalesced_delta": int(request_after["coalesced"])
+                    - int(request_before["coalesced"]),
                 }
             )
             if state_box["tick"] >= int(args.ticks):
@@ -216,7 +225,7 @@ def _load_dataset(path: Path, *, mode: str):
 
 def _is_nifti(path: Path) -> bool:
     name = path.name.lower()
-    return name.endswith(".nii") or name.endswith(".nii.gz")
+    return name.endswith((".nii", ".nii.gz"))
 
 
 def _operations_for(name: str, axis: int):
@@ -240,7 +249,9 @@ def _replace_backend(settings, backend: str, image_choice):
 
     return replace(
         settings,
-        image_rendering_backend=image_choice.VISPY if backend == "vispy" else image_choice.PYQTGRAPH,
+        image_rendering_backend=image_choice.VISPY
+        if backend == "vispy"
+        else image_choice.PYQTGRAPH,
     )
 
 
@@ -297,7 +308,9 @@ def _coordinator_snapshot(win) -> dict[str, int]:
         "flushed": int(getattr(coordinator, "flushed", 0)),
         "coalesced": int(getattr(coordinator, "coalesced", 0)),
         "immediate_cache_flushes": int(getattr(coordinator, "immediate_cache_flushes", 0)),
-        "presentation_backpressure_skips": int(getattr(coordinator, "presentation_backpressure_skips", 0)),
+        "presentation_backpressure_skips": int(
+            getattr(coordinator, "presentation_backpressure_skips", 0)
+        ),
     }
 
 
@@ -318,7 +331,9 @@ def _summary(
     dts = [float(row["dt_ms"]) for row in tick_records if float(row["dt_ms"]) > 0.0]
     handler = [float(row["handler_ms"]) for row in tick_records]
     renders = [float(row["elapsed_ms"]) for row in render_records]
-    delta = {key: int(after.get(key, 0)) - int(before.get(key, 0)) for key in set(before) | set(after)}
+    delta = {
+        key: int(after.get(key, 0)) - int(before.get(key, 0)) for key in set(before) | set(after)
+    }
     return {
         "data": str(data_path),
         "backend": str(args.backend),
@@ -342,7 +357,9 @@ def _summary(
         "render_p95_ms": _percentile(renders, 95),
         "render_max_ms": max(renders) if renders else 0.0,
         "coordinator_delta": delta,
-        "tick_backpressure_events": sum(1 for row in tick_records if int(row["backpressure_delta"]) > 0),
+        "tick_backpressure_events": sum(
+            1 for row in tick_records if int(row["backpressure_delta"]) > 0
+        ),
         "tick_flushed_events": sum(1 for row in tick_records if int(row["flushed_delta"]) > 0),
         "cprofile": str(cprofile_path),
     }
@@ -356,7 +373,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int(round((float(percentile) / 100.0) * (len(ordered) - 1)))))
+    index = min(len(ordered) - 1, max(0, round((float(percentile) / 100.0) * (len(ordered) - 1))))
     return float(ordered[index])
 
 

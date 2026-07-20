@@ -7,6 +7,7 @@ and mode/levels switches, the phase LUT, RGB display-ready bytes, and the
 loud rejections at the honest scope boundary.
 """
 
+import contextlib
 import os
 
 import numpy as np
@@ -15,7 +16,6 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.display.test_imageview2d import _present_tiled, _view_class
 
 
@@ -24,14 +24,12 @@ def _wgpu_adapter_available() -> bool:
         import wgpu
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
-        try:
+        with contextlib.suppress(RuntimeError):  # instance already exists
             # Vulkan-only instance BEFORE the first adapter request: letting
             # the probe create an all-backends instance makes GL adapter
             # enumeration re-init EGL, which SIGABRTs in workers that hold
             # live vispy GL state (gate-B Tier 0; full-suite crash 2026-07-18).
             set_instance_extras(backends=["Vulkan"])
-        except RuntimeError:
-            pass  # instance already exists
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
     except Exception:
@@ -207,9 +205,7 @@ def _rerender_internal(view):
     from arrayscope.gpu.command_protocol import UpdateTileInstances
 
     camera = view._wgpu_camera_command()
-    view._submit_wgpu(
-        (camera, UpdateTileInstances(view._wgpu_camera_tiles(camera)))
-    )
+    view._submit_wgpu((camera, UpdateTileInstances(view._wgpu_camera_tiles(camera))))
 
 
 def _center_pixel(view):
@@ -229,11 +225,7 @@ def _green_overlay_mask(target):
 
 def _orange_overlay_mask(target):
     pixels = np.asarray(target, dtype=np.int16)
-    return (
-        (pixels[..., 0] > 150)
-        & (pixels[..., 0] > pixels[..., 1] + 45)
-        & (pixels[..., 2] < 120)
-    )
+    return (pixels[..., 0] > 150) & (pixels[..., 0] > pixels[..., 1] + 45) & (pixels[..., 2] < 120)
 
 
 def _mask_center(mask):
@@ -297,9 +289,7 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app, qtbot):
         )
         view.sync_interaction_state(state)
         _rerender_internal(view)
-        assert np.count_nonzero(
-            _green_overlay_mask(view._wgpu_executor.read_target())
-        ) > base_green
+        assert np.count_nonzero(_green_overlay_mask(view._wgpu_executor.read_target())) > base_green
         view.highlightRoi(roi.id)
         _rerender_internal(view)
 
@@ -309,22 +299,18 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app, qtbot):
         )
         view.sync_interaction_state(state)
         _rerender_internal(view)
-        assert np.count_nonzero(
-            _orange_overlay_mask(view._wgpu_executor.read_target())
-        ) > base_orange
+        assert (
+            np.count_nonzero(_orange_overlay_mask(view._wgpu_executor.read_target())) > base_orange
+        )
 
         overlay_writes = view._wgpu_executor.overlay_buffer_writes_total
         view.getView().setRange(xRange=(64, 128), yRange=(0, 64), padding=0)
         _rerender_internal(view)
-        assert not np.any(
-            _orange_overlay_mask(view._wgpu_executor.read_target())
-        )
+        assert not np.any(_orange_overlay_mask(view._wgpu_executor.read_target()))
         assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
         view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
         _rerender_internal(view)
-        assert np.count_nonzero(
-            _orange_overlay_mask(view._wgpu_executor.read_target())
-        ) > 100
+        assert np.count_nonzero(_orange_overlay_mask(view._wgpu_executor.read_target())) > 100
         assert view._wgpu_executor.overlay_buffer_writes_total == overlay_writes
 
         assert view.removeRoi(roi.id)
@@ -437,9 +423,7 @@ def test_loading_and_skipped_tile_geometry_is_in_executor_target(qt_app):
 
         view.clearMontageTileOverlays()
         _rerender_internal(view)
-        assert not np.any(
-            np.all(view._wgpu_executor.read_target()[..., :3] > 150, axis=-1)
-        )
+        assert not np.any(np.all(view._wgpu_executor.read_target()[..., :3] > 150, axis=-1))
     finally:
         view.close()
 
@@ -454,11 +438,7 @@ def _truth_text_mask(target):
 def _truth_border_mask(target):
     # The DRAW-state label border is #22d3ee (34, 211, 238) at full alpha.
     pixels = np.asarray(target, dtype=np.int16)
-    return (
-        (np.abs(pixels[..., 0] - 34) < 30)
-        & (pixels[..., 1] > 180)
-        & (pixels[..., 2] > 200)
-    )
+    return (np.abs(pixels[..., 0] - 34) < 30) & (pixels[..., 1] > 180) & (pixels[..., 2] > 200)
 
 
 def _label_anchor_px(view, target_shape, world_point):
@@ -499,9 +479,7 @@ def test_tile_truth_labels_are_native_glyph_pixels_pan_with_camera_and_clear(qt_
         )
         _rerender_internal(view)
         target = view._wgpu_executor.read_target()
-        assert np.count_nonzero(_truth_text_mask(target)) > 80, (
-            "a truth label is many glyph pixels"
-        )
+        assert np.count_nonzero(_truth_text_mask(target)) > 80, "a truth label is many glyph pixels"
         border_rows, border_columns = np.nonzero(_truth_border_mask(target))
         assert len(border_rows), "the label draws its state border"
         anchor_x, anchor_y = _label_anchor_px(view, target.shape, (0.0, 0.0))
@@ -547,9 +525,7 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
     view = _shown_view(qt_app)
     try:
         rng = np.random.default_rng(11)
-        images = {
-            name: rng.random((20, 30), dtype=np.float32) for name in ("p0", "p1", "p2")
-        }
+        images = {name: rng.random((20, 30), dtype=np.float32) for name in ("p0", "p1", "p2")}
         geometry = _montage_geometry((20, 30), 2, 1, loaded=2)
 
         payloads = {
@@ -606,9 +582,7 @@ def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
         counts, bounds = evidence.readback.resolve()
         assert bounds == pytest.approx((-2.0, 5.0))
         assert int(counts.sum()) == image.size
-        assert evidence.frontier_keys == tuple(
-            view._wgpu_committed["tiles"][0]["page_keys"]
-        )
+        assert evidence.frontier_keys == tuple(view._wgpu_committed["tiles"][0]["page_keys"])
 
         view.acceptResidentHistogramEvidence((evidence.evidence_key,))
         report = _commit(view, geometry, payloads, levels=(-2.0, 5.0))
@@ -626,9 +600,7 @@ def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
         view.close()
 
 
-def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(
-    qt_app, monkeypatch
-):
+def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(qt_app, monkeypatch):
     """Dogfood crash 2026-07-19: pool pressure inside one submission evicted a
     snapshotted histogram frontier page; the executor's loud KeyError then
     killed the whole commit mid-batch (ensures applied, present never ran).
@@ -643,9 +615,7 @@ def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(
         # One physical complex layer for two planes with evidence required:
         # tile 1's upload evicts tile 0's page after tile 0's frontier was
         # snapshotted, inside the same submission.
-        small = WgpuPlaneExecutor(
-            pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device()
-        )
+        small = WgpuPlaneExecutor(pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device())
         view._wgpu_executor = small
         view._ensure_wgpu_executor = lambda required, **_kwargs: small
         view.setResidentHistogramEvidenceRequired(True)
@@ -750,9 +720,7 @@ def test_phase1_windowable_rgb_uses_resident_alpha_histogram_signal(qt_app):
                 0,
                 image,
                 source_id=("g6a-windowed-rgb", 0),
-                shader_mapping=ShaderMapping(
-                    display_mode=ShaderDisplayMode.RGB_WINDOWED
-                ),
+                shader_mapping=ShaderMapping(display_mode=ShaderDisplayMode.RGB_WINDOWED),
                 histogram_data=histogram,
             )
         }
@@ -812,8 +780,7 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         assert coarse_keys <= set(view._wgpu_executor.page_table.resident_keys())
         assert all(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
         assert {
-            key.document_generation
-            for key in view._wgpu_executor.page_table.resident_keys()
+            key.document_generation for key in view._wgpu_executor.page_table.resident_keys()
         } == {view._wgpu_executor._bound_planes[0].document_generation}
         _rerender_internal(view)
         assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
@@ -888,7 +855,7 @@ def test_non_power_of_two_payload_factor_is_rejected_loudly(qt_app):
             source_shape=source_shape,
         )
 
-        with pytest.raises(NotImplementedError, match="power-of-two.*factor 3"):
+        with pytest.raises(NotImplementedError, match=r"power-of-two.*factor 3"):
             _commit(view, geometry, {0: payload}, levels=(0.0, 1.0))
     finally:
         view.close()
@@ -902,9 +869,7 @@ def test_partial_residency_acknowledges_only_resident_tiles(qt_app):
     try:
         # One-layer scalar pool: the second tile's upload must evict the
         # first tile's page inside the same submission.
-        small = WgpuPlaneExecutor(
-            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
-        )
+        small = WgpuPlaneExecutor(pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device())
         view._wgpu_executor = small
         view._ensure_wgpu_executor = lambda required, **_kwargs: small
 
@@ -934,9 +899,7 @@ def test_complex_tile_mode_switch_is_zero_upload_with_physical_truth(qt_app):
         geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
 
         def mapping(component):
-            return ShaderMapping(
-                component=component, display_mode=ShaderDisplayMode.COMPLEX
-            )
+            return ShaderMapping(component=component, display_mode=ShaderDisplayMode.COMPLEX)
 
         payloads = {
             0: _payload(
@@ -989,9 +952,7 @@ def test_complex_montage_acknowledges_only_resident_content_planes(qt_app):
     try:
         # One physical complex layer for two requested ContentPlanes: the
         # second upload evicts the first, so only tile 1 can be acknowledged.
-        small = WgpuPlaneExecutor(
-            pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device()
-        )
+        small = WgpuPlaneExecutor(pool_layers={"complex_rg32f": 1}, device=_shared_wgpu_device())
         view._wgpu_executor = small
         view._ensure_wgpu_executor = lambda required, **_kwargs: small
 
@@ -1013,8 +974,7 @@ def test_complex_montage_acknowledges_only_resident_content_planes(qt_app):
         assert report.presented_identities == {1: ("complex-partial", 1)}
         assert len(view._wgpu_executor.bound_planes) == 2
         assert all(
-            plane.representation == "complex_rg32f"
-            for plane in view._wgpu_executor.bound_planes
+            plane.representation == "complex_rg32f" for plane in view._wgpu_executor.bound_planes
         )
     finally:
         view.close()
@@ -1036,9 +996,7 @@ def test_complex_montage_mode_switch_is_zero_upload_per_tile(qt_app):
         }
 
         def payloads(component):
-            mapping = ShaderMapping(
-                component=component, display_mode=ShaderDisplayMode.COMPLEX
-            )
+            mapping = ShaderMapping(component=component, display_mode=ShaderDisplayMode.COMPLEX)
             return {
                 tile: _payload(
                     tile,
@@ -1049,9 +1007,7 @@ def test_complex_montage_mode_switch_is_zero_upload_per_tile(qt_app):
                 for tile, image in images.items()
             }
 
-        report = _commit(
-            view, geometry, payloads(ShaderComponent.ABS), levels=(0.0, 10.0)
-        )
+        report = _commit(view, geometry, payloads(ShaderComponent.ABS), levels=(0.0, 10.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.presented_identities == {
             0: ("complex-montage", 0),
@@ -1069,9 +1025,7 @@ def test_complex_montage_mode_switch_is_zero_upload_per_tile(qt_app):
 
         # Same per-tile content identities, new component uniform: both tiles
         # remain physically acknowledged without another texture upload.
-        report = _commit(
-            view, geometry, payloads(ShaderComponent.REAL), levels=(0.0, 10.0)
-        )
+        report = _commit(view, geometry, payloads(ShaderComponent.REAL), levels=(0.0, 10.0))
         assert set(report.presented_tiles) == {0, 1}
         assert report.presented_identities == {
             0: ("complex-montage", 0),
@@ -1139,9 +1093,7 @@ def test_magnitude_modulated_phase_color_matches_cpu_oracle_and_switches_zero_up
     view = _shown_view(qt_app)
     try:
         phase = np.pi / 3.0
-        image = np.full(
-            (16, 24), 0.5 * np.exp(1j * phase), dtype=np.complex64
-        )
+        image = np.full((16, 24), 0.5 * np.exp(1j * phase), dtype=np.complex64)
         geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
         scalar_mapping = ShaderMapping(
             component=ShaderComponent.ABS,
@@ -1233,12 +1185,10 @@ def test_float_rgb_acknowledges_only_physically_resident_packed_pages(qt_app):
 
         assert report.texture_uploads == 2
         assert set(report.presented_tiles) == {1}
-        assert report.presented_identities == {
-            1: ("wgpu-float-rgb-partial", 1)
+        assert report.presented_identities == {1: ("wgpu-float-rgb-partial", 1)}
+        assert {key.representation for key in small.page_table.resident_keys()} == {
+            RGB_WINDOWED_RGBA32F
         }
-        assert {
-            key.representation for key in small.page_table.resident_keys()
-        } == {RGB_WINDOWED_RGBA32F}
     finally:
         view.close()
 
@@ -1257,9 +1207,7 @@ def test_log_and_symlog_scale_switch_is_zero_upload(qt_app):
                     0,
                     image,
                     source_id=("wgpu-scale", 1),
-                    shader_mapping=ShaderMapping(
-                        scale=scale, symlog_constant=symlog_constant
-                    ),
+                    shader_mapping=ShaderMapping(scale=scale, symlog_constant=symlog_constant),
                 )
             }
 
@@ -1290,9 +1238,7 @@ def test_log_and_symlog_scale_switch_is_zero_upload(qt_app):
         _rerender_internal(view)
         # symlog(100, C=1) = log10(11), mapped through [0, 2].
         expected = round(np.log10(11.0) / 2.0 * 255.0)
-        assert np.allclose(
-            _center_pixel(view), (*([expected] * 3), 255), atol=2
-        )
+        assert np.allclose(_center_pixel(view), (*([expected] * 3), 255), atol=2)
     finally:
         view.close()
 
@@ -1304,9 +1250,7 @@ def test_rgb_display_ready_tile_renders_raw_bytes(qt_app):
         image = np.broadcast_to(color, (20, 30, 3)).copy()
         geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
         payloads = {0: _payload(0, image, source_id=("wgpu-rgb", 1))}
-        report = _commit(
-            view, geometry, payloads, levels=(0.0, 1.0), rgb_already_windowed=True
-        )
+        report = _commit(view, geometry, payloads, levels=(0.0, 1.0), rgb_already_windowed=True)
         assert set(report.presented_tiles) == {0}
         view.getView().setRange(xRange=(0, 30), yRange=(0, 20), padding=0)
         _rerender_internal(view)
@@ -1336,9 +1280,7 @@ def test_float_rgb_windowing_matches_cpu_reference_and_levels_switch_is_zero_upl
                 0,
                 image,
                 source_id=("wgpu-float-rgb", 1),
-                shader_mapping=ShaderMapping(
-                    display_mode=ShaderDisplayMode.RGB_WINDOWED
-                ),
+                shader_mapping=ShaderMapping(display_mode=ShaderDisplayMode.RGB_WINDOWED),
                 histogram_data=histogram,
             )
         }

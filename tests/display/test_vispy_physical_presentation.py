@@ -34,7 +34,6 @@ from arrayscope.display.shader_mapping import (
     ShaderMapping,
 )
 from arrayscope.gpu import ChunkLod, DataChunkKey
-
 from tests.display.vispy_test_utils import FakeGloo, FakeVisual, complex_payload
 
 
@@ -287,7 +286,7 @@ def test_uniforms_only_path_repairs_divergent_visual_state():
     # A levels/mapping no-op through set_presentation_uniforms must also
     # audit physical state: the level gesture path re-presents without a
     # payload commit.
-    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    layer, _geometry, _payloads, _clean_delta = _committed_phase_layer()
     visual = _visible_visual(layer)
     visual._component_mode = 5.0
     visual.mode_data = visual.mode_data.copy()
@@ -310,7 +309,7 @@ def test_full_update_repairs_stale_uniform_the_page_sync_cannot_see():
     # visual.set_shader_mapping, but that setter no-ops when the visual's
     # mapping KEY still looks fresh — a corrupted derived uniform slips
     # through.  The end-of-update physical audit must catch it.
-    layer, geometry, payloads, clean_delta = _committed_phase_layer()
+    layer, geometry, payloads, _clean_delta = _committed_phase_layer()
     visual = _visible_visual(layer)
     visual._component_mode = 5.0
 

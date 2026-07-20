@@ -8,7 +8,6 @@ from collections import deque
 from pathlib import Path
 from time import perf_counter_ns
 
-
 TRACE_SCHEMA_VERSION = 1
 DEFAULT_RING_BYTES = 8 * 1024 * 1024
 
@@ -95,8 +94,7 @@ class TraceBus:
         with output.open("w", encoding="utf-8") as handle:
             for event in events:
                 handle.write(
-                    json.dumps(event, sort_keys=True, separators=(",", ":"), default=repr)
-                    + "\n"
+                    json.dumps(event, sort_keys=True, separators=(",", ":"), default=repr) + "\n"
                 )
         return output
 

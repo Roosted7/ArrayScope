@@ -16,7 +16,6 @@ import numpy as np
 from arrayscope.core.array_source import LazySourceArray, NdArraySource
 from arrayscope.core.memory_policy import MiB, sample_system_memory
 
-
 DEFAULT_LAZY_FRACTION_OF_AVAILABLE = 0.25
 MIN_LAZY_THRESHOLD_BYTES = 64 * MiB
 
@@ -32,7 +31,10 @@ def lazy_load_threshold_bytes(*, system_available_bytes: int | None = None) -> i
 
     if system_available_bytes is None:
         system_available_bytes = sample_system_memory().available_bytes
-    return max(MIN_LAZY_THRESHOLD_BYTES, int(int(system_available_bytes) * DEFAULT_LAZY_FRACTION_OF_AVAILABLE))
+    return max(
+        MIN_LAZY_THRESHOLD_BYTES,
+        int(int(system_available_bytes) * DEFAULT_LAZY_FRACTION_OF_AVAILABLE),
+    )
 
 
 def should_load_lazily(filepath, *, lazy="auto", threshold_bytes: int | None = None) -> bool:
@@ -66,7 +68,9 @@ def open_memmap_source(filepath) -> LazySourceArray:
         mapped = np.memmap(filepath, dtype=np.complex64, mode="r", shape=loader.dims, order="F")
         mapped = remove_trailing_singletons(mapped)
         return LazySourceArray(NdArraySource(mapped, label=f"cfl-memmap:{filepath.name}"))
-    raise ValueError(f"unsupported lazy source format: {suffix!r} (supported: {', '.join(MEMMAP_SOURCE_SUFFIXES)})")
+    raise ValueError(
+        f"unsupported lazy source format: {suffix!r} (supported: {', '.join(MEMMAP_SOURCE_SUFFIXES)})"
+    )
 
 
 __all__ = [

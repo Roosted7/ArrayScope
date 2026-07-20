@@ -9,8 +9,8 @@ import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LodDemand, LodInfo
-from arrayscope.display.montage import MontageTile, RenderedTile, make_montage_plan
 from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+from arrayscope.display.montage import MontageTile, RenderedTile, make_montage_plan
 from arrayscope.display.pyramid import (
     LodPageCache,
     MaterializedLodPage,
@@ -24,6 +24,8 @@ from arrayscope.operations.pipeline import (
     CenteredFFT,
     CenteredIFFT,
     FFTShift,
+)
+from arrayscope.operations.pipeline import (
     evaluate as evaluate_pipeline,
 )
 from arrayscope.operations.stage_fanin import StageFanInState
@@ -139,7 +141,8 @@ def _assert_preview_rows_equal(left, right):
 
 def _stored_preview_values(pages) -> np.ndarray:
     pages = tuple(pages)
-    assert pages and all(isinstance(page, MaterializedLodPage) for page in pages)
+    assert pages
+    assert all(isinstance(page, MaterializedLodPage) for page in pages)
     y0 = min(page.plan.stored_rect_yx[0] for page in pages)
     y1 = max(page.plan.stored_rect_yx[1] for page in pages)
     x0 = min(page.plan.stored_rect_yx[2] for page in pages)
@@ -393,7 +396,16 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
 
     assert [row[0] for row in previews] == [0, 1]
     for row in previews:
-        tile_number, key, pages, histogram, shader_mapping, texture_kind, level_data, level_stats = row
+        (
+            tile_number,
+            key,
+            pages,
+            histogram,
+            shader_mapping,
+            texture_kind,
+            level_data,
+            level_stats,
+        ) = row
         assert key.source_id == ("semantic", int(tile_number))
         assert key.level_xy == (1, 1)
         assert _stored_preview_values(pages).shape == (2, 3)
@@ -513,7 +525,9 @@ def test_noncommuting_shared_preview_cannot_alias_direct_exact_pages():
     preview_key = rows[0][1]
     preview_pages = rows[0][2]
     exact_volume = evaluate_pipeline(data, session.document.enabled_operations)
-    exact_plane = np.ascontiguousarray(exact_volume[..., int(tile.source_index)], dtype=np.complex64)
+    exact_plane = np.ascontiguousarray(
+        exact_volume[..., int(tile.source_index)], dtype=np.complex64
+    )
     exact_rendered = RenderedTile(
         tile=tile,
         image=exact_plane,
@@ -959,8 +973,7 @@ def test_chunk_summary_levels_share_complex_shader_mapping():
         reducer="native",
     )
     pages = tuple(
-        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
-        for plan in plans
+        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans
     )
 
     real = effects.chunk_level_stats_for_pages(
@@ -995,8 +1008,7 @@ def test_chunk_summary_levels_reuse_identity_mapped_scalar_summary(monkeypatch):
         reducer="native",
     )
     pages = tuple(
-        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
-        for plan in plans
+        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans
     )
     monkeypatch.setattr(
         effects,

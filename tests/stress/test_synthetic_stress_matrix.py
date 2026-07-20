@@ -30,7 +30,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-
 pytestmark = [
     pytest.mark.skipif(
         not os.environ.get("ARRAYSCOPE_STRESS"),
@@ -112,6 +111,7 @@ def test_full_workflow_settles_and_trace_verifies(tmp_path, shape, dtype, max_ti
         cwd=ROOT,
         env=env,
         capture_output=True,
+        check=False,
         text=True,
         # Process-deadlock guard for the whole multi-stage child.  Each
         # user-visible stage has already hard-failed at five seconds.
@@ -121,7 +121,11 @@ def test_full_workflow_settles_and_trace_verifies(tmp_path, shape, dtype, max_ti
     # (full-grid-not-capped, presentation-continuity, ...) are calibrated for
     # the canonical fixture geometry and are advisory under synthetic stress.
     # A crash, stall, or timeout is not.
-    assert result.returncode in (0, 1) and "Traceback" not in result.stderr, (
+    assert result.returncode in (0, 1), (
+        f"workflow crashed/stalled for {shape}/{dtype}:\n"
+        f"{result.stdout[-1500:]}\n{result.stderr[-2500:]}"
+    )
+    assert "Traceback" not in result.stderr, (
         f"workflow crashed/stalled for {shape}/{dtype}:\n"
         f"{result.stdout[-1500:]}\n{result.stderr[-2500:]}"
     )
@@ -138,9 +142,7 @@ def test_full_workflow_settles_and_trace_verifies(tmp_path, shape, dtype, max_ti
     }
     assert core.issubset(set(phases)), f"core phases missing (crash mid-run?): {phases}"
     unsettled = [
-        record["phase"]
-        for record in records
-        if record.get("presentation_settled") is False
+        record["phase"] for record in records if record.get("presentation_settled") is False
     ]
     assert not unsettled, f"phases left unsettled: {unsettled}"
 

@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import contextlib
+
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
@@ -72,7 +74,12 @@ def _phantom2d(n=384):
 
     y, x = np.mgrid[0:n, 0:n].astype(np.float64) / n
     img = 0.35 * x + 0.15 * y
-    for cx, cy, s, a in ((0.32, 0.4, 0.05, 1.0), (0.7, 0.3, 0.02, 0.8), (0.55, 0.68, 0.09, 0.6), (0.8, 0.8, 0.01, 1.4)):
+    for cx, cy, s, a in (
+        (0.32, 0.4, 0.05, 1.0),
+        (0.7, 0.3, 0.02, 0.8),
+        (0.55, 0.68, 0.09, 0.6),
+        (0.8, 0.8, 0.01, 1.4),
+    ):
         img += a * np.exp(-(((x - cx) ** 2 + (y - cy) ** 2) / (2 * s)))
     rng = np.random.default_rng(7)
     img += rng.normal(scale=0.02, size=img.shape)
@@ -137,9 +144,7 @@ class Ctx:
         except Exception:
             pass
         overlay = getattr(getattr(win, "img_view", None), "_evaluation_overlay", None)
-        if overlay is not None and overlay.isVisible():
-            return True
-        return False
+        return bool(overlay is not None and overlay.isVisible())
 
     @staticmethod
     def _window_settle_diagnostics(win) -> dict[str, object]:
@@ -167,8 +172,7 @@ class Ctx:
             time.sleep(0.02)
         diagnostics = tuple(self._window_settle_diagnostics(win) for win in self.windows)
         raise TimeoutError(
-            f"UI gallery interaction did not settle within {timeout:.3f}s: "
-            f"{diagnostics!r}"
+            f"UI gallery interaction did not settle within {timeout:.3f}s: {diagnostics!r}"
         )
 
     def shot(self, widget, label):
@@ -190,10 +194,8 @@ class Ctx:
 
     def close_all(self):
         for win in self.windows:
-            try:
+            with contextlib.suppress(Exception):
                 win.close()
-            except Exception:
-                pass
         self.pump(4)
         self.windows.clear()
 
@@ -315,7 +317,9 @@ def s_roi(ctx: Ctx):
     win = ctx.window(_phantom2d(192), size=(1200, 800))
     win.img_view.createRoi(RoiKind.RECTANGLE, rect=(30, 40, 60, 50))
     win.img_view.createRoi(RoiKind.POLYLINE, points=((10, 10), (90, 25), (150, 140)))
-    win.img_view.createRoi(RoiKind.FREEHAND_POLYGON, points=((100, 100), (170, 100), (170, 170), (100, 170)))
+    win.img_view.createRoi(
+        RoiKind.FREEHAND_POLYGON, points=((100, 100), (170, 100), (170, 170), (100, 170))
+    )
     ctx.pump(12)
     ctx.settle()
     ctx.shot(win, "rois_overlay")
@@ -490,7 +494,15 @@ def _spawn(name: str, theme: str, out_root: Path, extra_env: dict) -> tuple[str,
     )
     env.update(extra_env)
     tag = f"{name}:{theme}"
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--child", name, theme, "--out", str(out_root)]
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--child",
+        name,
+        theme,
+        "--out",
+        str(out_root),
+    ]
     try:
         # Whole-child deadlock guard. Each interaction inside the child still
         # hard-fails independently through the shared five-second owner.
@@ -498,6 +510,7 @@ def _spawn(name: str, theme: str, out_root: Path, extra_env: dict) -> tuple[str,
             cmd,
             env=env,
             capture_output=True,
+            check=False,
             text=True,
             timeout=300,
             cwd=str(REPO_ROOT),
@@ -520,14 +533,15 @@ def write_index(out_root: Path) -> Path:
             f"<figcaption>{html.escape(img.name)}</figcaption></figure>"
             for img in images
         )
-        rows.append(f"<section><h2>{html.escape(scenario_dir.name)}</h2><div class='grid'>{cells}</div></section>")
+        rows.append(
+            f"<section><h2>{html.escape(scenario_dir.name)}</h2><div class='grid'>{cells}</div></section>"
+        )
     doc = (
         "<!doctype html><meta charset='utf-8'><title>ArrayScope UI gallery</title>"
         "<style>body{font-family:sans-serif;background:#202124;color:#e8eaed;margin:2rem}"
         ".grid{display:flex;flex-wrap:wrap;gap:12px}figure{margin:0}"
         "img{max-width:520px;height:auto;border:1px solid #5f6368;display:block}"
-        "figcaption{font-size:12px;color:#9aa0a6;padding:2px 0 10px}</style>"
-        + "".join(rows)
+        "figcaption{font-size:12px;color:#9aa0a6;padding:2px 0 10px}</style>" + "".join(rows)
     )
     index = out_root / "index.html"
     index.write_text(doc)
@@ -567,7 +581,10 @@ def main() -> int:
     failures = []
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {pool.submit(_spawn, name, theme, args.out, env): (name, theme) for name, theme, env in jobs}
+        futures = {
+            pool.submit(_spawn, name, theme, args.out, env): (name, theme)
+            for name, theme, env in jobs
+        }
         for future in concurrent.futures.as_completed(futures):
             tag, ok, log = future.result()
             status = "ok" if ok else "FAIL"
@@ -575,7 +592,9 @@ def main() -> int:
             if not ok:
                 failures.append((tag, log))
     index = write_index(args.out)
-    print(f"\n{len(jobs) - len(failures)}/{len(jobs)} scenario runs succeeded in {time.monotonic() - started:.0f}s")
+    print(
+        f"\n{len(jobs) - len(failures)}/{len(jobs)} scenario runs succeeded in {time.monotonic() - started:.0f}s"
+    )
     print(f"gallery: {index}")
     for tag, log in failures:
         print(f"\n--- {tag} ---\n{log[-2000:]}")

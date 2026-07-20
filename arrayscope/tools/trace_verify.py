@@ -6,7 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 MAX_IDENTICAL_ACKS = 25
 MAX_IDENTICAL_COMMIT_BAILS = 25
 
@@ -102,9 +101,8 @@ def verify_trace(
         event = json.loads(line)
         kind = str(event.get("kind", ""))
         if kind == "kernel_submit":
-            if (
-                int(event.get("presentation_phase", 0) or 0) == 2
-                and bool(event.get("coverage_pass_open", False))
+            if int(event.get("presentation_phase", 0) or 0) == 2 and bool(
+                event.get("coverage_pass_open", False)
             ):
                 phase2_submits_during_coverage.append(event)
             continue
@@ -123,9 +121,8 @@ def verify_trace(
             # never satisfy its own target — the silent re-emit loop behind
             # the 2026-07-16 stale/empty-tile stall.  Healthy replays commit
             # zero such payloads even when every target eventually settles.
-            if (
-                str(event.get("phase", "")) == "backend_complete"
-                and tuple(event.get("identity_rejected", ()) or ())
+            if str(event.get("phase", "")) == "backend_complete" and tuple(
+                event.get("identity_rejected", ()) or ()
             ):
                 identity_rejected_commits.append(event)
             continue
@@ -161,9 +158,7 @@ def verify_trace(
                     and _ack_satisfies_target(event, target)
                 ):
                     acknowledgements[tile] = event
-                    first_ack_sequences.setdefault(
-                        tile, int(event.get("sequence", 0) or 0)
-                    )
+                    first_ack_sequences.setdefault(tile, int(event.get("sequence", 0) or 0))
             elif edge == "target_released":
                 targets.pop(tile, None)
                 acknowledgements.pop(tile, None)
@@ -189,9 +184,7 @@ def verify_trace(
         level = event.get("level")
         target_level = target["target_level"]
         level_matches = (
-            level is not None
-            and target_level is not None
-            and int(level) <= int(target_level)
+            level is not None and target_level is not None and int(level) <= int(target_level)
         )
         if source_matches and quality not in {"fallback", "preview", ""} and level_matches:
             acknowledgements[tile] = event
@@ -256,9 +249,7 @@ def verify_trace(
                 "identical_acks": count,
                 "limit": int(max_identical_acks),
             }
-            for signature, count in sorted(
-                identical_ack_counts.items(), key=lambda item: -item[1]
-            )
+            for signature, count in sorted(identical_ack_counts.items(), key=lambda item: -item[1])
             if count > int(max_identical_acks)
         )
     if max_identical_commit_bails > 0:
@@ -285,7 +276,8 @@ def verify_trace(
         "required_targets": len(targets),
         "acknowledged_targets": len(acknowledgements),
         "acknowledgement_order": tuple(
-            tile for tile, _sequence in sorted(first_ack_sequences.items(), key=lambda item: item[1])
+            tile
+            for tile, _sequence in sorted(first_ack_sequences.items(), key=lambda item: item[1])
         ),
         "violations": tuple(violations),
     }

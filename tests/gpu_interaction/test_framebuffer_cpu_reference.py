@@ -52,7 +52,7 @@ def gradient_montage_data() -> np.ndarray:
     return frames.transpose(1, 2, 0).copy()
 
 
-@pytest.fixture()
+@pytest.fixture
 def gradient_montage_window():
     """Production window pinned to the VisPy backend in a dedicated QSettings
     namespace (profile-harness pattern) — the user's real ArrayScope settings
@@ -75,9 +75,7 @@ def gradient_montage_window():
     app.setApplicationName("ArrayScopeGpuOracleHarness")
     settings = QtCore.QSettings()
     settings.clear()
-    settings.setValue(
-        "image_rendering_backend", ImageRenderingBackendChoice.VISPY.value
-    )
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
     settings.sync()
     win = ArrayScopeWindow(gradient_montage_data())
     win.setWindowTitle("gpu-fb-cpu-oracle")
@@ -112,9 +110,7 @@ def _require_vispy_layer(harness):
 def _settled_healthy_report(harness):
     harness.fit_plan_view()
     harness.pump(0.3)
-    assert harness.wait_settled(), (
-        f"scene never settled: {harness.settlement_diagnostics()}"
-    )
+    assert harness.wait_settled(), f"scene never settled: {harness.settlement_diagnostics()}"
     # Regime guard (strategy law 3): this gate pins the native-LOD scalar
     # regime; silently running reduced would weaken every assertion below.
     session = harness.session
@@ -145,9 +141,9 @@ def test_settled_scene_matches_cpu_reference(gradient_montage_window):
     required = set(harness.session.required_tile_numbers())
     assert {tile.tile_number for tile in report.tiles} == required
     assert len(report.tiles) == COUNT
-    assert all(
-        tile.samples >= report.min_samples_per_tile for tile in report.tiles
-    ), "oracle sample floor not met — comparison would be vacuous"
+    assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles), (
+        "oracle sample floor not met — comparison would be vacuous"
+    )
 
 
 def test_wrong_levels_uniform_fails_oracle_and_recovers(gradient_montage_window):
@@ -165,7 +161,7 @@ def test_wrong_levels_uniform_fails_oracle_and_recovers(gradient_montage_window)
 
     # Restoring the uniform restores the oracle: the failure was caused by
     # the injected fault, not by comparison noise.
-    for (_index, visual), levels in zip(visuals, originals):
+    for (_index, visual), levels in zip(visuals, originals, strict=False):
         visual.set_levels(levels)
     harness.assert_tile_matches_cpu_reference()
 
@@ -181,9 +177,7 @@ def test_stale_page_content_fails_oracle(gradient_montage_window):
     for index, _visual in _visible_visuals(layer):
         page = layer._pool.pages[index]
         assert page.scalar_is_atlas
-        page.scalar_texture.set_data(
-            np.full(page.atlas_shape + (1,), 177.0, dtype=np.float32)
-        )
+        page.scalar_texture.set_data(np.full((*page.atlas_shape, 1), 177.0, dtype=np.float32))
     with pytest.raises(AssertionError, match="diverges from the CPU"):
         harness.assert_tile_matches_cpu_reference()
 
@@ -213,9 +207,7 @@ def test_swapped_tile_texcoords_fail_oracle_and_recover(gradient_montage_window)
         count = 6 * len(quads)
         spans[tile_number] = (offset, count)
         offset += count
-    swappable = [
-        (number, span) for number, span in spans.items() if span[1] == 6
-    ]
+    swappable = [(number, span) for number, span in spans.items() if span[1] == 6]
     assert len(swappable) >= 2, f"need two single-quad tiles to swap: {spans}"
     (tile_a, (offset_a, count_a)), (tile_b, (offset_b, count_b)) = swappable[:2]
 
@@ -228,7 +220,10 @@ def test_swapped_tile_texcoords_fail_oracle_and_recover(gradient_montage_window)
     with pytest.raises(AssertionError, match="diverges from the CPU") as excinfo:
         harness.assert_tile_matches_cpu_reference()
     message = str(excinfo.value)
-    assert f"tile {tile_a}:" in message and f"tile {tile_b}:" in message, (
+    assert f"tile {tile_a}:" in message, (
+        f"swapped tiles {tile_a}/{tile_b} must both be reported: {message}"
+    )
+    assert f"tile {tile_b}:" in message, (
         f"swapped tiles {tile_a}/{tile_b} must both be reported: {message}"
     )
 

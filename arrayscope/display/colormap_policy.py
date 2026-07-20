@@ -8,7 +8,6 @@ maps.
 
 from __future__ import annotations
 
-
 SCALAR_DEFAULT_COLORMAP = "gray"
 PHASE_DEFAULT_COLORMAP = "PAL-relaxed"
 _PHASE_CHANNELS = frozenset({"complex", "angle"})
@@ -18,7 +17,9 @@ def default_colormap_name(channel) -> str:
     """Return the deterministic default colormap for a semantic channel."""
 
     value = getattr(channel, "value", channel)
-    return PHASE_DEFAULT_COLORMAP if str(value).lower() in _PHASE_CHANNELS else SCALAR_DEFAULT_COLORMAP
+    return (
+        PHASE_DEFAULT_COLORMAP if str(value).lower() in _PHASE_CHANNELS else SCALAR_DEFAULT_COLORMAP
+    )
 
 
 def colormap_family(channel) -> str:

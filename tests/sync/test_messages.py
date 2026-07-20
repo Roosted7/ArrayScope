@@ -17,7 +17,9 @@ from arrayscope.sync.messages import (
 
 
 def test_state_message_round_trip_through_codec():
-    message = state_message(FACET_LEVELS, "origin-a", 3, {"levels": [0.0, 1.5], "window_mode": "relative"})
+    message = state_message(
+        FACET_LEVELS, "origin-a", 3, {"levels": [0.0, 1.5], "window_mode": "relative"}
+    )
     messages, remainder = decode_lines(encode_message(message))
     assert remainder == b""
     assert messages == [message]
@@ -77,7 +79,9 @@ def test_dimension_state_payload_round_trips_full_view_state_subset():
         .with_axis_fftshifted(1, True)
         .with_axis_range(1, (0, 2, 4), "0:2:5")
     )
-    current = ViewState.from_shape((4, 5, 6)).with_channel(ChannelMode.ABS).with_scale(ScaleMode.LOG)
+    current = (
+        ViewState.from_shape((4, 5, 6)).with_channel(ChannelMode.ABS).with_scale(ScaleMode.LOG)
+    )
 
     merged = merged_dimension_state(current, dimension_state_payload(incoming))
 
@@ -116,7 +120,9 @@ def test_merged_dimension_state_migrates_image_axes_when_sender_axis_is_missing(
 
 
 def test_merged_dimension_state_preserves_valid_montage_range_on_receiver():
-    incoming = ViewState.from_shape((4, 5, 6)).with_montage_axis(2, columns=2, indices=(0, 3, 5), text="0 3 5")
+    incoming = ViewState.from_shape((4, 5, 6)).with_montage_axis(
+        2, columns=2, indices=(0, 3, 5), text="0 3 5"
+    )
     current = ViewState.from_shape((4, 5, 4))
 
     merged = merged_dimension_state(current, dimension_state_payload(incoming))

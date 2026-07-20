@@ -129,10 +129,10 @@ class RoiHitIndex:
             x0, x1 = x1, x0
         if y1 < y0:
             y0, y1 = y1, y0
-        ix0 = int(floor(x0 / self._cell_size))
-        ix1 = int(floor(x1 / self._cell_size))
-        iy0 = int(floor(y0 / self._cell_size))
-        iy1 = int(floor(y1 / self._cell_size))
+        ix0 = floor(x0 / self._cell_size)
+        ix1 = floor(x1 / self._cell_size)
+        iy0 = floor(y0 / self._cell_size)
+        iy1 = floor(y1 / self._cell_size)
         for ix in range(ix0, ix1 + 1):
             for iy in range(iy0, iy1 + 1):
                 yield (ix, iy)
@@ -200,7 +200,9 @@ def hit_test_roi(
     return None
 
 
-def roi_segments(geometry: RoiGeometry) -> tuple[tuple[tuple[float, float], tuple[float, float]], ...]:
+def roi_segments(
+    geometry: RoiGeometry,
+) -> tuple[tuple[tuple[float, float], tuple[float, float]], ...]:
     """Return line segments forming the interactive ROI outline."""
 
     geometry = _coerce_geometry(geometry)
@@ -279,7 +281,7 @@ def _coerce_geometry(geometry) -> RoiGeometry:
     if isinstance(geometry, dict):
         return RoiGeometry(**geometry)
     if hasattr(geometry, "kind") and (hasattr(geometry, "points") or hasattr(geometry, "rect")):
-        kind = getattr(geometry, "kind")
+        kind = geometry.kind
         return RoiGeometry(
             kind=getattr(kind, "value", kind),
             points=tuple(getattr(geometry, "points", ()) or ()),

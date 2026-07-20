@@ -10,7 +10,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from arrayscope.operations.capabilities import OperationCapabilities, OperationKind, default_chunkable_axes
+from arrayscope.operations.capabilities import (
+    OperationCapabilities,
+    OperationKind,
+    default_chunkable_axes,
+)
 from arrayscope.operations.regions import RegionSpec
 
 
@@ -57,7 +61,9 @@ class CastDType:
     def required_input_region(self, _input_shape, output_region: RegionSpec) -> RegionSpec:
         return output_region
 
-    def apply_to_region(self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None):
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
         return self.apply(data)
 
 
@@ -65,7 +71,9 @@ def optimize_operations(base_shape, base_dtype, operations) -> OptimizedOperatio
     from arrayscope.operations.pipeline import evaluate_shape
 
     original_operations = tuple(operations)
-    original_shape, original_dtype = _evaluate_shape_dtype(base_shape, base_dtype, original_operations)
+    original_shape, original_dtype = _evaluate_shape_dtype(
+        base_shape, base_dtype, original_operations
+    )
     optimized = original_operations
     steps = []
 
@@ -78,9 +86,13 @@ def optimize_operations(base_shape, base_dtype, operations) -> OptimizedOperatio
 
     output_shape, output_dtype = _evaluate_shape_dtype(base_shape, base_dtype, optimized)
     if tuple(output_shape) != tuple(original_shape):
-        raise ValueError(f"optimized operation shape {output_shape} does not match original shape {original_shape}")
+        raise ValueError(
+            f"optimized operation shape {output_shape} does not match original shape {original_shape}"
+        )
     if _dtype_key(output_dtype) != _dtype_key(original_dtype):
-        raise ValueError(f"optimized operation dtype {output_dtype} does not match original dtype {original_dtype}")
+        raise ValueError(
+            f"optimized operation dtype {output_dtype} does not match original dtype {original_dtype}"
+        )
     if tuple(evaluate_shape(base_shape, optimized)) != tuple(original_shape):
         raise ValueError("optimized operation shape contract does not match original operations")
 
@@ -98,7 +110,9 @@ def format_optimization_steps(steps: tuple[OptimizationStep, ...]) -> tuple[str,
 
 
 def _simplify_once(base_shape, base_dtype, operations):
-    from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, Conjugate, Crop, ReverseAxis
+    from arrayscope.operations.pipeline import (
+        Crop,
+    )
 
     operations = tuple(operations)
     shapes, dtypes = _prefix_shape_dtype(base_shape, base_dtype, operations)
@@ -131,13 +145,23 @@ def _simplify_once(base_shape, base_dtype, operations):
                     len(replacement),
                 ),
             )
-        if _op_name(left) == "ReverseAxis" and _op_name(right) == "ReverseAxis" and int(left.axis) == int(right.axis):
+        if (
+            _op_name(left) == "ReverseAxis"
+            and _op_name(right) == "ReverseAxis"
+            and int(left.axis) == int(right.axis)
+        ):
             return _replace(
                 operations,
                 index,
                 index + 2,
                 (),
-                OptimizationStep("reverse_pair", f"removed ReverseAxis pair axis {int(left.axis)}", index, index + 2, 0),
+                OptimizationStep(
+                    "reverse_pair",
+                    f"removed ReverseAxis pair axis {int(left.axis)}",
+                    index,
+                    index + 2,
+                    0,
+                ),
             )
         if _op_name(left) == "Conjugate" and _op_name(right) == "Conjugate":
             return _replace(
@@ -147,11 +171,21 @@ def _simplify_once(base_shape, base_dtype, operations):
                 (),
                 OptimizationStep("conjugate_pair", "removed Conjugate pair", index, index + 2, 0),
             )
-        if _op_name(left) == "Crop" and _op_name(right) == "Crop" and int(left.axis) == int(right.axis):
-            composed = Crop(axis=int(left.axis), start=int(left.start) + int(right.start), stop=int(left.start) + int(right.stop))
+        if (
+            _op_name(left) == "Crop"
+            and _op_name(right) == "Crop"
+            and int(left.axis) == int(right.axis)
+        ):
+            composed = Crop(
+                axis=int(left.axis),
+                start=int(left.start) + int(right.start),
+                stop=int(left.start) + int(right.stop),
+            )
             pair_shape, pair_dtype = _evaluate_shape_dtype(shapes[index], dtypes[index], pair)
             new_shape, new_dtype = _evaluate_shape_dtype(shapes[index], dtypes[index], (composed,))
-            if tuple(pair_shape) == tuple(new_shape) and _dtype_key(pair_dtype) == _dtype_key(new_dtype):
+            if tuple(pair_shape) == tuple(new_shape) and _dtype_key(pair_dtype) == _dtype_key(
+                new_dtype
+            ):
                 return _replace(
                     operations,
                     index,

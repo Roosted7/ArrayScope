@@ -1,9 +1,17 @@
 import numpy as np
 
-from arrayscope.core.memory_policy import MemoryProfileChoice, SystemMemorySnapshot, compute_memory_policy
+from arrayscope.core.memory_policy import (
+    MemoryProfileChoice,
+    SystemMemorySnapshot,
+    compute_memory_policy,
+)
 from arrayscope.core.view_state import ViewState
 from arrayscope.operations import dim_ops
-from arrayscope.operations.evaluator import OperationEvaluator, evaluate_image_snapshot, stage_document_key
+from arrayscope.operations.evaluator import (
+    OperationEvaluator,
+    evaluate_image_snapshot,
+    stage_document_key,
+)
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, ReverseAxis
 
 
@@ -48,7 +56,9 @@ def test_fft_ifft_pair_is_simplified_without_transform_or_stage_cache(monkeypatc
     monkeypatch.setattr(dim_ops, "centered_fft", counted_fft)
     monkeypatch.setattr(dim_ops, "centered_ifft", counted_ifft)
     data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
-    evaluator = OperationEvaluator(ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2))))
+    evaluator = OperationEvaluator(
+        ArrayDocument(data, operations=(CenteredFFT(axis=2), CenteredIFFT(axis=2)))
+    )
     state = ViewState.from_shape(evaluator.document.current_shape)
 
     evaluator.image(state.with_slice(2, 0))
@@ -87,8 +97,15 @@ def test_stage_cache_respects_memory_policy_shrink():
     evaluator.image(state.with_slice(2, 0))
     assert evaluator.stage_cache_diagnostics().entries == 1
 
-    system = SystemMemorySnapshot(total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0)
-    policy = compute_memory_policy(profile=MemoryProfileChoice.BALANCED, render_cap_mb=512, input_nbytes=data.nbytes, system=system)
+    system = SystemMemorySnapshot(
+        total_bytes=8 * 1024**3, available_bytes=4 * 1024**3, process_rss_bytes=0
+    )
+    policy = compute_memory_policy(
+        profile=MemoryProfileChoice.BALANCED,
+        render_cap_mb=512,
+        input_nbytes=data.nbytes,
+        system=system,
+    )
     policy = policy.__class__(**{**policy.__dict__, "stage_cache_budget_bytes": 1})
     evaluator.apply_memory_policy(policy)
 

@@ -1,13 +1,18 @@
 import numpy as np
 import pytest
 
-from arrayscope.core.memory_budget import DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES, estimate_montage_tile_grid_bytes
+from arrayscope.core.memory_budget import (
+    DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES,
+    estimate_montage_tile_grid_bytes,
+)
 from arrayscope.display.levels import finite_bounds
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 
 
 def test_memory_estimate_blocks_large_montage_without_allocation():
-    nbytes = estimate_montage_tile_grid_bytes((8192, 8192), 128, np.float32, histogram=True, columns=16)
+    nbytes = estimate_montage_tile_grid_bytes(
+        (8192, 8192), 128, np.float32, histogram=True, columns=16
+    )
 
     assert nbytes > DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES
 
@@ -25,7 +30,7 @@ def test_large_level_bounds_uses_sampling():
 def test_montage_tile_residency_rss_stays_bounded(qtbot):
     psutil = pytest.importorskip("psutil")
     from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
-    from tests.ui.helpers import clear_arrayscope_settings
+
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.tools.presentation_settlement import (
         presentation_is_settled,
@@ -33,6 +38,7 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
         presentation_target_token,
     )
     from arrayscope.window import ArrayScopeWindow
+    from tests.ui.helpers import clear_arrayscope_settings
 
     budget = 8 * 1024 * 1024
     clear_arrayscope_settings()
@@ -98,7 +104,9 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
 
         initial_target = presentation_target_token(win)
         assert initial_target is not None
-        win._set_view_state(win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(64)), text=":"))
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=8, indices=tuple(range(64)), text=":")
+        )
         win.render(reason="rss-stress")
         wait_and_sample_residency(previous_target=initial_target)
         for row in (1, 3, 5):

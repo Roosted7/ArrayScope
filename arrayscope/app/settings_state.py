@@ -81,11 +81,17 @@ def settings_from_mapping(values) -> AppSettingsState:
         panel_resize_behavior=normalize_panel_resize_behavior(values.get("panel_resize_behavior")),
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
-        image_rendering_backend=normalize_image_rendering_backend_choice(values.get("image_rendering_backend")),
+        image_rendering_backend=normalize_image_rendering_backend_choice(
+            values.get("image_rendering_backend")
+        ),
         wgpu_present_method=normalize_wgpu_present_method_choice(values.get("wgpu_present_method")),
-        montage_quality_policy=normalize_montage_quality_policy_choice(values.get("montage_quality_policy")),
+        montage_quality_policy=normalize_montage_quality_policy_choice(
+            values.get("montage_quality_policy")
+        ),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
-        render_memory_budget_mb=normalize_render_memory_budget_mb(values.get("render_memory_budget_mb", 512)),
+        render_memory_budget_mb=normalize_render_memory_budget_mb(
+            values.get("render_memory_budget_mb", 512)
+        ),
         qt_platform=normalize_qt_platform_choice(values.get("qt_platform")),
     )
 
@@ -143,6 +149,7 @@ def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoi
         return ImageRenderingBackendChoice(str(value))
     except Exception:
         return ImageRenderingBackendChoice.AUTO
+
 
 def normalize_wgpu_present_method_choice(value) -> WgpuPresentMethodChoice:
     if isinstance(value, WgpuPresentMethodChoice):

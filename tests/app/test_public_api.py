@@ -1,5 +1,5 @@
-from pathlib import Path
 import sys
+from pathlib import Path
 
 try:
     import tomllib
@@ -176,12 +176,18 @@ def test_cli_multi_path_selector_uses_nonblocking_view(monkeypatch, tmp_path):
             events.append(("selector", self.filepath.name, block))
             return True
 
-    monkeypatch.setattr(cli, "load_path", lambda filepath, **kwargs: SimpleNamespace(data=np.zeros((2, 2)), metadata={}))
+    monkeypatch.setattr(
+        cli,
+        "load_path",
+        lambda filepath, **kwargs: SimpleNamespace(data=np.zeros((2, 2)), metadata={}),
+    )
     monkeypatch.setattr(cli, "NpzDatasetSelector", FakeSelector)
     monkeypatch.setattr(
         cli,
         "_open_array_window",
-        lambda **kwargs: events.append(("open", kwargs["filepath"].name, kwargs["block"])) or object(),
+        lambda **kwargs: (
+            events.append(("open", kwargs["filepath"].name, kwargs["block"])) or object()
+        ),
     )
     monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
     monkeypatch.setattr("sys.argv", ["arrayscope", str(array_path), str(selector_path)])
@@ -221,16 +227,18 @@ def test_cli_multi_path_single_dataset_selector_opens_inline(monkeypatch, tmp_pa
     monkeypatch.setattr(
         cli,
         "_open_array_window",
-        lambda **kwargs: events.append(
-            (
-                "open",
-                kwargs["filepath"].name,
-                kwargs["dataset_path"],
-                kwargs["selector_class_name"],
-                kwargs["block"],
+        lambda **kwargs: (
+            events.append(
+                (
+                    "open",
+                    kwargs["filepath"].name,
+                    kwargs["dataset_path"],
+                    kwargs["selector_class_name"],
+                    kwargs["block"],
+                )
             )
-        )
-        or object(),
+            or object()
+        ),
     )
     monkeypatch.setattr(cli, "_run_cli_event_loop", lambda: events.append(("loop",)))
     monkeypatch.setattr("sys.argv", ["arrayscope", str(selector_path), str(selector_path)])

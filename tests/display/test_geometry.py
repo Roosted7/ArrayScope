@@ -1,5 +1,5 @@
-import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -60,7 +60,9 @@ def test_image_axis_subrange_maps_display_index_to_actual_axis_index():
 
 
 def test_montage_point_maps_tile_and_local_position():
-    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 3), text=":")
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 3), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 3), tile_shape=(2, 3), columns=2, rows=2, gap=1)
     geometry = DisplayGeometry(state, (5, 7), montage=montage)
 
@@ -75,7 +77,9 @@ def test_montage_point_maps_tile_and_local_position():
 
 
 def test_context_for_montage_point_labels_tiled_axis_once():
-    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 3), text=":")
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 3), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 3), tile_shape=(2, 3), columns=2, rows=2, gap=1)
     geometry = DisplayGeometry(state, (5, 7), montage=montage)
 
@@ -86,7 +90,9 @@ def test_context_for_montage_point_labels_tiled_axis_once():
 
 
 def test_montage_gaps_and_missing_last_tile_return_none():
-    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=2, rows=2, gap=1)
     geometry = DisplayGeometry(state, (5, 7), montage=montage)
 
@@ -95,7 +101,9 @@ def test_montage_gaps_and_missing_last_tile_return_none():
 
 
 def test_clamp_view_point_uses_nearest_valid_montage_tile():
-    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1), text=":")
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1), tile_shape=(2, 3), columns=2, rows=1, gap=1)
     geometry = DisplayGeometry(state, (2, 7), montage=montage)
 
@@ -103,7 +111,9 @@ def test_clamp_view_point_uses_nearest_valid_montage_tile():
 
 
 def test_profile_states_under_montage_include_tile_slice_and_local_xy():
-    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=2).with_montage_axis(2, indices=(0, 2), text=":")
+    state = state_for((2, 3, 4), image_axes=(0, 1), line_axis=2).with_montage_axis(
+        2, indices=(0, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 2), tile_shape=(2, 3), columns=2, rows=1, gap=1)
     geometry = DisplayGeometry(state, (2, 7), montage=montage)
 
@@ -115,9 +125,13 @@ def test_profile_states_under_montage_include_tile_slice_and_local_xy():
 
 
 def test_montage_display_origin_maps_world_point_to_global_source_index():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+    geometry = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6
+    )
 
     mapping = geometry.view_point_to_array_index(1, 7)
 
@@ -128,10 +142,16 @@ def test_montage_display_origin_maps_world_point_to_global_source_index():
 
 
 def test_montage_display_origin_change_does_not_change_world_to_array_mapping():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    first = DisplayGeometry(state, (11, 19), montage=montage, montage_origin_x=0, montage_origin_y=0)
-    shifted = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+    first = DisplayGeometry(
+        state, (11, 19), montage=montage, montage_origin_x=0, montage_origin_y=0
+    )
+    shifted = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6
+    )
 
     first_mapping = first.view_point_to_array_index(1, 7)
     shifted_mapping = shifted.view_point_to_array_index(1, 7)
@@ -142,9 +162,13 @@ def test_montage_display_origin_change_does_not_change_world_to_array_mapping():
 
 
 def test_montage_status_for_loaded_tile_allows_mapping():
-    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3)
+    geometry = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3
+    )
 
     status = geometry.view_point_to_tile_point(1, 1)
     mapping = geometry.view_point_to_array_index(1, 1)
@@ -154,13 +178,19 @@ def test_montage_status_for_loaded_tile_allows_mapping():
 
 
 def test_montage_status_for_loading_tile_blocks_hover_array_mapping_but_allows_demand_mapping():
-    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
     geometry = DisplayGeometry(
         state,
         (2, 11),
         montage=montage,
-        montage_tile_states=(MontageTileState.LOADED, MontageTileState.LOADING, MontageTileState.LOADED),
+        montage_tile_states=(
+            MontageTileState.LOADED,
+            MontageTileState.LOADING,
+            MontageTileState.LOADED,
+        ),
     )
 
     assert geometry.view_point_to_tile_point(4, 1).kind == "loading"
@@ -169,13 +199,19 @@ def test_montage_status_for_loading_tile_blocks_hover_array_mapping_but_allows_d
 
 
 def test_montage_status_for_skipped_tile_blocks_array_mapping():
-    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
     geometry = DisplayGeometry(
         state,
         (2, 11),
         montage=montage,
-        montage_tile_states=(MontageTileState.LOADED, MontageTileState.SKIPPED, MontageTileState.LOADED),
+        montage_tile_states=(
+            MontageTileState.LOADED,
+            MontageTileState.SKIPPED,
+            MontageTileState.LOADED,
+        ),
     )
 
     assert geometry.view_point_to_tile_point(4, 1).kind == "skipped"
@@ -183,19 +219,36 @@ def test_montage_status_for_skipped_tile_blocks_array_mapping():
 
 
 def test_montage_status_for_gap_reports_gap():
-    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=(0, 1, 2), text=":")
+    state = state_for((2, 3, 3), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=(0, 1, 2), text=":"
+    )
     montage = MontageGeometry(indices=(0, 1, 2), tile_shape=(2, 3), columns=3, rows=1, gap=1)
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3)
+    geometry = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_tile_states=(MontageTileState.LOADED,) * 3
+    )
 
     assert geometry.view_point_to_tile_point(3, 1).kind == "gap"
     assert geometry.view_point_to_array_index(3, 1) is None
 
 
 def test_montage_display_origin_applies_to_tile_status():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    states = tuple(MontageTileState.UNLOADED for _ in range(10)) + (MontageTileState.LOADING,) + tuple(MontageTileState.LOADED for _ in range(9))
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6, montage_tile_states=states)
+    states = (
+        *tuple(MontageTileState.UNLOADED for _ in range(10)),
+        MontageTileState.LOADING,
+        *tuple(MontageTileState.LOADED for _ in range(9)),
+    )
+    geometry = DisplayGeometry(
+        state,
+        (2, 11),
+        montage=montage,
+        montage_origin_x=0,
+        montage_origin_y=6,
+        montage_tile_states=states,
+    )
 
     status = geometry.view_point_to_tile_point(1, 7)
 
@@ -204,17 +257,25 @@ def test_montage_display_origin_applies_to_tile_status():
 
 
 def test_montage_display_origin_gap_returns_none():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+    geometry = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6
+    )
 
     assert geometry.view_point_to_array_index(3, 7) is None
 
 
 def test_montage_display_origin_profile_state_uses_global_tile_slice():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=2).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=2).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    geometry = DisplayGeometry(state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6)
+    geometry = DisplayGeometry(
+        state, (2, 11), montage=montage, montage_origin_x=0, montage_origin_y=6
+    )
 
     states = geometry.view_point_to_profile_states(9, 7, (1, 2))
 
@@ -223,9 +284,13 @@ def test_montage_display_origin_profile_state_uses_global_tile_slice():
 
 
 def test_montage_display_origin_clamp_returns_world_point():
-    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(2, indices=tuple(range(20)), text=":")
+    state = state_for((2, 3, 20), image_axes=(0, 1), line_axis=1).with_montage_axis(
+        2, indices=tuple(range(20)), text=":"
+    )
     montage = MontageGeometry(indices=tuple(range(20)), tile_shape=(2, 3), columns=5, rows=4, gap=1)
-    geometry = DisplayGeometry(state, (2, 7), montage=montage, montage_origin_x=4, montage_origin_y=6)
+    geometry = DisplayGeometry(
+        state, (2, 7), montage=montage, montage_origin_x=4, montage_origin_y=6
+    )
 
     assert geometry.clamp_view_point(3, 7) in {(2, 7), (4, 7)}
 
@@ -238,7 +303,9 @@ def test_montage_display_origin_clamp_returns_world_point():
     use_y_range=st.booleans(),
     use_x_range=st.booleans(),
 )
-def test_display_point_mapping_property_bounds_and_ranges(height, width, x, y, use_y_range, use_x_range):
+def test_display_point_mapping_property_bounds_and_ranges(
+    height, width, x, y, use_y_range, use_x_range
+):
     state = state_for((height, width), line_axis=0)
     y_range = tuple(range(0, height, 2)) if use_y_range else None
     x_range = tuple(range(0, width, 2)) if use_x_range else None

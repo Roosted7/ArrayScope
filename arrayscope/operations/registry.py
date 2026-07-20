@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Tuple
 
 from arrayscope.operations.pipeline import (
     CenteredFFT,
@@ -34,7 +34,7 @@ class OperationEntry:
     id: str
     label: str
     operation_type: type
-    parameters: Tuple[OperationParameter, ...] = ()
+    parameters: tuple[OperationParameter, ...] = ()
     changes_shape: bool = False
     requires_axis: bool = True
 
@@ -162,7 +162,10 @@ def operation_id_for(operation) -> str:
     operation_name = getattr(operation_type, "__name__", "")
     for entry in OPERATION_REGISTRY.values():
         entry_type = entry.operation_type
-        if getattr(entry_type, "__module__", "") == operation_module and getattr(entry_type, "__name__", "") == operation_name:
+        if (
+            getattr(entry_type, "__module__", "") == operation_module
+            and getattr(entry_type, "__name__", "") == operation_name
+        ):
             return entry.id
     raise ValueError(f"operation type is not registered: {operation_type.__name__}")
 
@@ -173,12 +176,9 @@ def describe_operation(operation) -> str:
     label = entry.label.rstrip(".")
     parts = [label]
     if entry.requires_axis:
-        axis = getattr(operation, "axis")
-        if label.endswith(" over axis"):
-            # "Mean over axis" + 2 -> "Mean over axis 2", not "... axis axis 2".
-            parts = [f"{label} {axis}"]
-        else:
-            parts = [f"{label} · axis {axis}"]
+        axis = operation.axis
+        # "Mean over axis" + 2 -> "Mean over axis 2", not "... axis axis 2".
+        parts = [f"{label} {axis}"] if label.endswith(" over axis") else [f"{label} · axis {axis}"]
     for parameter in entry.parameters:
         parts.append(f"{parameter.name}={getattr(operation, parameter.name)}")
     return " ".join(parts)

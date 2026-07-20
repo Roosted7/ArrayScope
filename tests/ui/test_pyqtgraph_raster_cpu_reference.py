@@ -14,11 +14,10 @@ must be non-vacuous, fault-proven, and present for both rendering backends.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import pyqtgraph as pg
+import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-
 from tests.oracles.framebuffer_reference import (
     assert_qt_raster_matches_cpu_reference,
 )
@@ -77,15 +76,11 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_wrong_levels(qtbot):
         qtbot.waitExposed(win)
         win._set_view_state(win.view_state.with_montage_axis(2, text=":"))
         win.render(reason="qt-raster-cpu-reference-smoke")
-        qtbot.waitUntil(
-            lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
-        )
+        qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
         session = win.renderer._frame_session
         required = {int(number) for number in session.required_tile_numbers()}
-        assert len(required) == COUNT, (
-            f"smoke regime drifted: required tiles {sorted(required)}"
-        )
+        assert len(required) == COUNT, f"smoke regime drifted: required tiles {sorted(required)}"
         for number in sorted(required):
             payload = session.display_tile_payloads[number]
             level = 0 if payload.lod is None else int(payload.lod.level)
@@ -115,15 +110,11 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_wrong_levels(qtbot):
 
         report = assert_qt_raster_matches_cpu_reference(win)
         assert {tile.tile_number for tile in report.tiles} == required
-        assert all(
-            tile.samples >= report.min_samples_per_tile for tile in report.tiles
-        )
+        assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles)
         with pytest.raises(AssertionError, match="requires an exact tile set"):
             assert_qt_raster_matches_cpu_reference(win, tiles=())
         with pytest.raises(AssertionError, match="min_samples=1000000000"):
-            assert_qt_raster_matches_cpu_reference(
-                win, min_samples_per_tile=1_000_000_000
-            )
+            assert_qt_raster_matches_cpu_reference(win, min_samples_per_tile=1_000_000_000)
 
         states = _visible_tile_states(win)
         originals = {number: tuple(state.item.levels) for number, state in states.items()}

@@ -96,7 +96,9 @@ def test_drain_is_item_bounded_but_makes_progress(qt_app):
     try:
         done = []
         for index in range(10):
-            kernel.submit(TaskSpec(key=("n", index), fn=lambda index=index: index), on_done=done.append)
+            kernel.submit(
+                TaskSpec(key=("n", index), fn=lambda index=index: index), on_done=done.append
+            )
         assert _process_until(qt_app, lambda: len(done) == 10)
         assert sorted(done) == list(range(10))
     finally:

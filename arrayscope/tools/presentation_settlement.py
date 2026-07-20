@@ -156,10 +156,7 @@ def presentation_settlement_snapshot(
     commit_debt = _commit_debt(session)
     draw_pending_fn = _required_callable(image_view, "presentationDrawPending")
     physical_rows_fn = _required_callable(image_view, "tileTruthPhysicalRows")
-    rows = {
-        int(tile): dict(row)
-        for tile, row in dict(physical_rows_fn() or {}).items()
-    }
+    rows = {int(tile): dict(row) for tile, row in dict(physical_rows_fn() or {}).items()}
     physical_tiles = tuple(sorted(rows))
     lifecycle = getattr(session, "lifecycle", None)
     backend_identities = {
@@ -261,18 +258,19 @@ def _required_callable(owner, name: str):
 
 
 def _commit_debt(session) -> tuple[str, ...]:
-    debt = []
-    for name in (
-        "stage_planning_deferred",
-        "flush_pending",
-        "final_commit_pending",
-        "dirty_payloads",
-        "pending_payload_upserts",
-        "pending_removals",
-        "atomic_successor_pending",
-    ):
-        if bool(getattr(session, name, False)):
-            debt.append(name)
+    debt = [
+        name
+        for name in (
+            "stage_planning_deferred",
+            "flush_pending",
+            "final_commit_pending",
+            "dirty_payloads",
+            "pending_payload_upserts",
+            "pending_removals",
+            "atomic_successor_pending",
+        )
+        if bool(getattr(session, name, False))
+    ]
     pending_levels = getattr(session, "has_pending_level_update", None)
     if callable(pending_levels) and bool(pending_levels()):
         debt.append("pending_level_update")

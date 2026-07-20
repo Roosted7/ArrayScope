@@ -146,7 +146,11 @@ def test_array_document_propagates_spacing_through_operations():
         AxisInfo("readout", "Readout", 3, unit="mm", spacing=0.5, origin=0.0),
         AxisInfo("coil", "Coil", 2),
     )
-    document = ArrayDocument([[1, 2], [3, 4], [5, 6]], operations=(Crop(axis=0, start=1, stop=3), Mean(axis=1)), axes=axes)
+    document = ArrayDocument(
+        [[1, 2], [3, 4], [5, 6]],
+        operations=(Crop(axis=0, start=1, stop=3), Mean(axis=1)),
+        axes=axes,
+    )
 
     assert document.current_shape == (2,)
     assert document.current_axes[0].spacing == 0.5
@@ -155,8 +159,9 @@ def test_array_document_propagates_spacing_through_operations():
 
 
 def test_operation_coordinator_passes_axes_to_document():
-    from arrayscope.operations.coordinator import OperationCoordinator
     import numpy as np
+
+    from arrayscope.operations.coordinator import OperationCoordinator
 
     axes = (AxisInfo("slice", "Slice", 3, unit="mm", spacing=2.0), AxisInfo("coil", "Coil", 2))
     coordinator = OperationCoordinator(np.zeros((3, 2)), axes=axes)
@@ -172,10 +177,11 @@ def test_axis_display_name_prefers_custom_labels():
 
 
 def test_axis_metadata_summary_includes_unit_spacing_and_origin():
-    summary = axis_metadata_summary(AxisInfo("slice", "Slice", 8, unit="mm", spacing=1.5, origin=-4.0))
+    summary = axis_metadata_summary(
+        AxisInfo("slice", "Slice", 8, unit="mm", spacing=1.5, origin=-4.0)
+    )
 
     assert "Slice [8]" in summary
     assert "unit: mm" in summary
     assert "spacing: 1.5 mm" in summary
     assert "origin: -4 mm" in summary
-

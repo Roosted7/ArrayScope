@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 
-
 INTERACTION_SETTLE_TARGET_S = 2.0
 INTERACTION_SETTLE_HARD_LIMIT_S = 5.0
 INTERACTION_SETTLE_HARD_LIMIT_MS = int(INTERACTION_SETTLE_HARD_LIMIT_S * 1000.0)
@@ -29,4 +28,4 @@ def bounded_interaction_settle_timeout_s(requested_s: float | None = None) -> fl
 def interaction_settle_timeout_ms(requested_s: float | None = None) -> int:
     """Qt millisecond form of :func:`bounded_interaction_settle_timeout_s`."""
 
-    return int(round(bounded_interaction_settle_timeout_s(requested_s) * 1000.0))
+    return round(bounded_interaction_settle_timeout_s(requested_s) * 1000.0)

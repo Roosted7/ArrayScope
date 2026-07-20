@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Optional, Tuple
 
-from arrayscope.core.axis_utils import clamp_index, non_singleton_axes, validate_axis, validate_distinct_axes
+from arrayscope.core.axis_utils import (
+    clamp_index,
+    non_singleton_axes,
+    validate_axis,
+    validate_distinct_axes,
+)
 from arrayscope.core.slice_selection import center_index
 
 
@@ -45,39 +49,48 @@ def _coerce_enum(enum_type, value):
 @dataclass(frozen=True)
 class ViewState:
     ndim: int
-    shape: Tuple[int, ...]
-    image_axes: Optional[Tuple[int, int]]
-    line_axis: Optional[int]
-    slice_indices: Tuple[int, ...]
+    shape: tuple[int, ...]
+    image_axes: tuple[int, int] | None
+    line_axis: int | None
+    slice_indices: tuple[int, ...]
     channel: ChannelMode = ChannelMode.REAL
     scale: ScaleMode = ScaleMode.LINEAR
-    axis_flipped: Tuple[bool, ...] = ()
-    axis_fftshifted: Tuple[bool, ...] = ()
-    montage_axis: Optional[int] = None
-    montage_columns: Optional[int] = None
-    montage_indices: Optional[Tuple[int, ...]] = None
-    montage_text: Optional[str] = None
-    axis_range_indices: Tuple[Optional[Tuple[int, ...]], ...] = ()
-    axis_range_text: Tuple[Optional[str], ...] = ()
+    axis_flipped: tuple[bool, ...] = ()
+    axis_fftshifted: tuple[bool, ...] = ()
+    montage_axis: int | None = None
+    montage_columns: int | None = None
+    montage_indices: tuple[int, ...] | None = None
+    montage_text: str | None = None
+    axis_range_indices: tuple[tuple[int, ...] | None, ...] = ()
+    axis_range_text: tuple[str | None, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "ndim", int(self.ndim))
         object.__setattr__(self, "shape", tuple(int(size) for size in self.shape))
         object.__setattr__(self, "slice_indices", tuple(int(index) for index in self.slice_indices))
         object.__setattr__(self, "axis_flipped", tuple(bool(value) for value in self.axis_flipped))
-        object.__setattr__(self, "axis_fftshifted", tuple(bool(value) for value in self.axis_fftshifted))
+        object.__setattr__(
+            self, "axis_fftshifted", tuple(bool(value) for value in self.axis_fftshifted)
+        )
         if not self.axis_range_indices:
             object.__setattr__(self, "axis_range_indices", (None,) * self.ndim)
         else:
             object.__setattr__(
                 self,
                 "axis_range_indices",
-                tuple(None if value is None else tuple(int(index) for index in value) for value in self.axis_range_indices),
+                tuple(
+                    None if value is None else tuple(int(index) for index in value)
+                    for value in self.axis_range_indices
+                ),
             )
         if not self.axis_range_text:
             object.__setattr__(self, "axis_range_text", (None,) * self.ndim)
         else:
-            object.__setattr__(self, "axis_range_text", tuple(None if value is None else str(value) for value in self.axis_range_text))
+            object.__setattr__(
+                self,
+                "axis_range_text",
+                tuple(None if value is None else str(value) for value in self.axis_range_text),
+            )
         # Canonical spelling: an explicit range covering the whole axis IS the
         # unwindowed axis. Every identity derived from this state (semantic
         # generations, session keys, cache keys) compares tuples textually, so
@@ -111,7 +124,9 @@ class ViewState:
         if self.montage_columns is not None:
             object.__setattr__(self, "montage_columns", max(1, int(self.montage_columns)))
         if self.montage_indices is not None:
-            object.__setattr__(self, "montage_indices", tuple(int(index) for index in self.montage_indices))
+            object.__setattr__(
+                self, "montage_indices", tuple(int(index) for index in self.montage_indices)
+            )
         if self.montage_text is not None:
             object.__setattr__(self, "montage_text", str(self.montage_text))
         # Canonical spelling, same contract as axis_range_indices above: an
@@ -184,7 +199,9 @@ class ViewState:
         slice_indices = tuple(slice_indices)
         if len(slice_indices) != self.ndim:
             raise ValueError("slice_indices length must match ndim")
-        slice_indices = tuple(clamp_index(self.shape, axis, index) for axis, index in enumerate(slice_indices))
+        slice_indices = tuple(
+            clamp_index(self.shape, axis, index) for axis, index in enumerate(slice_indices)
+        )
         return replace(self, slice_indices=slice_indices)
 
     def with_image_axes(self, axis0, axis1):
@@ -280,7 +297,11 @@ class ViewState:
         migrated = ViewState.from_shape(shape)
 
         slice_indices = tuple(
-            clamp_index(shape, axis, self.slice_indices[axis] if axis < self.ndim else center_index(shape[axis]))
+            clamp_index(
+                shape,
+                axis,
+                self.slice_indices[axis] if axis < self.ndim else center_index(shape[axis]),
+            )
             for axis in range(ndim)
         )
 
@@ -301,7 +322,11 @@ class ViewState:
         else:
             line_axis = migrated.line_axis
 
-        if self.montage_axis is not None and self.montage_axis < ndim and shape[self.montage_axis] != 1:
+        if (
+            self.montage_axis is not None
+            and self.montage_axis < ndim
+            and shape[self.montage_axis] != 1
+        ):
             montage_axis = self.montage_axis
             if image_axes is not None and montage_axis in image_axes:
                 montage_axis = None
@@ -310,7 +335,9 @@ class ViewState:
         montage_indices = None
         montage_text = None
         if montage_axis is not None and self.montage_indices is not None:
-            montage_indices = tuple(index for index in self.montage_indices if 0 <= index < shape[montage_axis])
+            montage_indices = tuple(
+                index for index in self.montage_indices if 0 <= index < shape[montage_axis]
+            )
             if not montage_indices:
                 montage_axis = None
             else:
@@ -421,7 +448,9 @@ class ViewState:
         index = int(index)
         size = self.shape[int(axis)]
         if index < 0 or index >= size:
-            raise ValueError(f"slice index {index} is out of bounds for axis {axis} with size {size}")
+            raise ValueError(
+                f"slice index {index} is out of bounds for axis {axis} with size {size}"
+            )
         return index
 
     def _replace_validated(self, **changes):

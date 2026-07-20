@@ -3,7 +3,6 @@
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[2]
 
 
@@ -66,7 +65,10 @@ def test_render_and_gate_paths_cannot_resurrect_frame_session_pending_queue():
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "pending_tiles":
                 violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: .pending_tiles")
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden_helpers:
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in forbidden_helpers
+            ):
                 violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.name}")
             if (
                 path.name == "frame_session.py"

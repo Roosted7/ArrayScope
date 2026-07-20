@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
 
 
 @dataclass(frozen=True)
 class DimensionRoles:
-    image_axes: Tuple[int, int]
-    profile_axes: Tuple[int, ...]
+    image_axes: tuple[int, int]
+    profile_axes: tuple[int, ...]
 
     @classmethod
     def from_axes(cls, image_axes, profile_axes=()):

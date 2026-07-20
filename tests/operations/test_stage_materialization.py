@@ -8,14 +8,16 @@ from arrayscope.operations.stage_materialization import StageMaterializationMana
 
 
 def _candidate():
-    document = ArrayDocument(np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6), operations=(CenteredFFT(axis=2),))
+    document = ArrayDocument(
+        np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6), operations=(CenteredFFT(axis=2),)
+    )
     state = ViewState.from_shape(document.current_shape).with_slice(2, 1)
     plan = plan_slab(document, request_for_image(state))
     return document, plan.region_plan.cache_candidates[0]
 
 
 def test_stage_materialization_singleflight_and_complete():
-    document, candidate = _candidate()
+    _document, candidate = _candidate()
     cache = StageCache(max_bytes=1024 * 1024, max_entries=8)
     manager = StageMaterializationManager(cache)
     document_key = ("doc",)

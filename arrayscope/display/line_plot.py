@@ -88,7 +88,9 @@ class LinePlotController:
         self.apply_theme()
 
         self.current_line_data = None
-        self.crosshair = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((150, 0, 0, 180), width=2))
+        self.crosshair = pg.InfiniteLine(
+            angle=90, movable=False, pen=pg.mkPen((150, 0, 0, 180), width=2)
+        )
         self.crosshair.setVisible(False)
         self.widget.addItem(self.crosshair)
         self.widget.scene().sigMouseMoved.connect(self.on_hover)
@@ -149,7 +151,10 @@ class LinePlotController:
             for index, (line_result, view_state, label) in enumerate(entries):
                 line_data = np.asarray(line_result.data)
                 if line_data.ndim != 1:
-                    show_status_message(self.owner, f"Expected 1D profile, got {line_data.ndim}D shape {line_data.shape}")
+                    show_status_message(
+                        self.owner,
+                        f"Expected 1D profile, got {line_data.ndim}D shape {line_data.shape}",
+                    )
                     continue
                 if self.current_line_data is None:
                     self.current_line_data = line_data
@@ -158,11 +163,19 @@ class LinePlotController:
                 color = colors[index % len(colors)]
                 if self.plot_style == "bar" and len(entries) == 1:
                     x = np.arange(len(line_data))
-                    item = pg.BarGraphItem(x=x, height=line_data, width=0.8, brush=pg.mkBrush(*color, 180), pen=pg.mkPen(*color))
+                    item = pg.BarGraphItem(
+                        x=x,
+                        height=line_data,
+                        width=0.8,
+                        brush=pg.mkBrush(*color, 180),
+                        pen=pg.mkPen(*color),
+                    )
                     self.widget.addItem(item)
                 else:
                     pen = pg.mkPen(color=color, width=2)
-                    item = self.widget.plot(line_data, pen=pen, name=label or f"dim {view_state.line_axis}")
+                    item = self.widget.plot(
+                        line_data, pen=pen, name=label or f"dim {view_state.line_axis}"
+                    )
                 self.curves.append(item)
                 if self.curve is None:
                     self.curve = item
@@ -227,7 +240,7 @@ class LinePlotController:
         view_box = self.widget.getViewBox()
         if view_box.sceneBoundingRect().contains(pos):
             mouse_point = view_box.mapSceneToView(pos)
-            idx = int(round(mouse_point.x()))
+            idx = round(mouse_point.x())
             if 0 <= idx < len(self.current_line_data):
                 value = self.current_line_data[idx]
                 label = self.owner.widgets["labels"]["pixelValue"]

@@ -76,7 +76,11 @@ def test_one_tile_montage_matches_single_region_geometry():
 
 
 def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
-    state = ViewState.from_shape((10, 10, 6)).with_image_axes(0, 1).with_montage_axis(2, columns=3, indices=tuple(range(6)))
+    state = (
+        ViewState.from_shape((10, 10, 6))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=3, indices=tuple(range(6)))
+    )
 
     plan = FramePlanner().plan(
         target=_target(),
@@ -95,7 +99,11 @@ def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
 
 
 def test_montage_requires_tiles_that_touch_the_viewport_boundary():
-    state = ViewState.from_shape((10, 10, 6)).with_image_axes(0, 1).with_montage_axis(2, columns=3, indices=tuple(range(6)))
+    state = (
+        ViewState.from_shape((10, 10, 6))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=3, indices=tuple(range(6)))
+    )
 
     plan = FramePlanner().plan(
         target=_target(),

@@ -40,9 +40,7 @@ class FakeTexture2D:
     def set_data(self, data, *, offset=None, copy=True):
         stored = np.array(data, copy=True)
         self.updates.append((stored, offset, bool(copy)))
-        self.uploads.append(
-            (tuple(int(value) for value in (offset or (0, 0))), stored)
-        )
+        self.uploads.append((tuple(int(value) for value in (offset or (0, 0))), stored))
 
 
 class FakeGloo:

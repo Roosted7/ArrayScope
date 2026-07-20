@@ -6,7 +6,6 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.ui.icons import glyph_icon, material_icon
 
-
 _HINTS = (
     ("glyph:0", "Click a dimension's number badge to plot a profile along it"),
     ("glyph::", "Type : into a dimension's index box to montage that axis"),

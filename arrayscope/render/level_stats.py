@@ -9,23 +9,14 @@ import numpy as np
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.bounded_cache import BoundedCache
-from arrayscope.kernel import (
-    Lane as WorkLane,
-    Priority,
-    Supersession,
-    TaskSpec,
-    UNRANKED_SCHEDULING_RANK,
-    WorkItem,
-    complete_inline_work as _complete_inline_work,
-)
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
-    LevelEvidenceQuality,
     MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+    REFINED_TILE_SAMPLE_LIMIT,
+    LevelEvidenceQuality,
     MontageLevelStats,
     MontageLevelTracker,
-    REFINED_TILE_SAMPLE_LIMIT,
     TileLevelStats,
     aggregate_histogram_samples,
     montage_level_key,
@@ -35,13 +26,26 @@ from arrayscope.display.model.montage_levels import (
 )
 from arrayscope.display.montage import RenderedTile
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
+from arrayscope.gpu.chunk_summary import representative_sample_from_histogram
+from arrayscope.kernel import (
+    UNRANKED_SCHEDULING_RANK,
+    Priority,
+    Supersession,
+    TaskSpec,
+    WorkItem,
+)
+from arrayscope.kernel import (
+    Lane as WorkLane,
+)
+from arrayscope.kernel import (
+    complete_inline_work as _complete_inline_work,
+)
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.evaluator import (
     _document_key,
     evaluate_level_evidence_snapshot,
     stage_document_key,
 )
-from arrayscope.gpu.chunk_summary import representative_sample_from_histogram
 from arrayscope.render import effects as render_effects
 from arrayscope.render.progressive_scheduling import SchedulingWork
 from arrayscope.window import frame_effects as montage_commit
@@ -49,7 +53,6 @@ from arrayscope.window.frame_session import (
     SemanticLevelEvidenceProgress,
     SemanticLevelEvidenceTarget,
 )
-
 
 MONTAGE_LEVEL_STATS_COMMIT_BATCH = 4
 MONTAGE_LEVEL_STATS_BACKGROUND_BATCH = 2
@@ -73,12 +76,8 @@ def _presentation_trace_fields(
 
     work = SchedulingWork(work)
     return {
-        "presentation_phase": (
-            1 if work is SchedulingWork.COVERAGE else 2
-        ),
-        "coverage_pass_open": bool(
-            session.scheduling_policy.verdict.coverage_open
-        ),
+        "presentation_phase": (1 if work is SchedulingWork.COVERAGE else 2),
+        "coverage_pass_open": bool(session.scheduling_policy.verdict.coverage_open),
         "session_id": int(getattr(session, "session_id", 0) or 0),
     }
 
@@ -97,10 +96,8 @@ class LevelStatsService:
         cache = self._montage_source_level_cache()
         cache_key = (_montage_level_family_key(level_key), int(stats.source_index))
         previous = cache.peek(cache_key)
-        if (
-            previous is not None
-            and int(getattr(previous, "evidence_quality", 0) or 0)
-            > int(getattr(stats, "evidence_quality", 0) or 0)
+        if previous is not None and int(getattr(previous, "evidence_quality", 0) or 0) > int(
+            getattr(stats, "evidence_quality", 0) or 0
         ):
             return
         sample = np.asarray(getattr(stats, "sample", ()))
@@ -116,11 +113,7 @@ class LevelStatsService:
         )
         if stats is None:
             return None
-        return (
-            stats
-            if int(getattr(stats, "evidence_quality", 0) or 0) >= int(quality)
-            else None
-        )
+        return stats if int(getattr(stats, "evidence_quality", 0) or 0) >= int(quality) else None
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
         return montage_level_key(
@@ -131,7 +124,9 @@ class LevelStatsService:
         )
 
     def _montage_level_expected_indices(self, session) -> tuple[int, ...]:
-        expected = tuple(int(index) for index in getattr(session, "level_expected_indices", ()) or ())
+        expected = tuple(
+            int(index) for index in getattr(session, "level_expected_indices", ()) or ()
+        )
         if expected:
             return expected
         return tuple(int(tile.source_index) for tile in getattr(session.plan, "tiles", ()))
@@ -145,7 +140,9 @@ class LevelStatsService:
         return self._montage_level_tracker().ensure(level_key, expected_indices)
 
     def _montage_coverage_rank(self, source_indices, expected_indices) -> int:
-        stats = self._montage_level_tracker().ensure(("rank", tuple(expected_indices)), expected_indices)
+        stats = self._montage_level_tracker().ensure(
+            ("rank", tuple(expected_indices)), expected_indices
+        )
         rank = self._montage_level_tracker()._rank_for(source_indices, stats.expected_indices)
         if rank == LevelSourceRank.NONE:
             return 0
@@ -182,14 +179,20 @@ class LevelStatsService:
             refined=bool(refined),
             evidence_quality=evidence_quality,
         )
-        if refined and quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
+        if (
+            refined
+            and quality == LevelEvidenceQuality.ROUGH_PREVIEW
+            and not self._preview_evidence_can_refine()
+        ):
             refined = False
             quality = LevelEvidenceQuality.ROUGH_PREVIEW
         refined = bool(refined)
         level_stats = getattr(rendered, "level_stats", None)
         if tracker.has_source_quality(level_key, source_index, quality):
             return
-        if level_stats is not None and (not refined or bool(getattr(level_stats, "refined", False))):
+        if level_stats is not None and (
+            not refined or bool(getattr(level_stats, "refined", False))
+        ):
             stats = tile_level_stats_with_quality(
                 level_stats,
                 quality,
@@ -219,9 +222,9 @@ class LevelStatsService:
             tracker.update_from_stats(level_key, stats, aggregate=False)
             self._remember_montage_source_level_stats(level_key, stats)
             if refined:
-                self._montage_refined_level_applied_count = int(
-                    getattr(self, "_montage_refined_level_applied_count", 0)
-                ) + 1
+                self._montage_refined_level_applied_count = (
+                    int(getattr(self, "_montage_refined_level_applied_count", 0)) + 1
+                )
         elif refined:
             # Nothing finite to sample: record that as refined evidence, or
             # level convergence re-queues this source forever and an
@@ -250,7 +253,11 @@ class LevelStatsService:
             refined=bool(require_refined),
             evidence_quality=evidence_quality,
         )
-        if bool(require_refined) and quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
+        if (
+            bool(require_refined)
+            and quality == LevelEvidenceQuality.ROUGH_PREVIEW
+            and not self._preview_evidence_can_refine()
+        ):
             return False
         level_stats = getattr(rendered, "level_stats", None)
         if level_stats is not None:
@@ -288,7 +295,10 @@ class LevelStatsService:
             # evidence owner, including sources absent from display payloads.
             return
         quality = _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
-        if quality == LevelEvidenceQuality.ROUGH_PREVIEW and not self._preview_evidence_can_refine():
+        if (
+            quality == LevelEvidenceQuality.ROUGH_PREVIEW
+            and not self._preview_evidence_can_refine()
+        ):
             return
         tracker = self._montage_level_tracker()
         source_index = int(rendered.tile.source_index)
@@ -307,7 +317,9 @@ class LevelStatsService:
         pending.append(rendered)
         pending_sources.add(source_index)
 
-    def _rendered_tile_for_current_payload(self, session, tile_number: int, payload) -> RenderedTile | None:
+    def _rendered_tile_for_current_payload(
+        self, session, tile_number: int, payload
+    ) -> RenderedTile | None:
         rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
         if rendered is not None:
             return rendered
@@ -315,7 +327,9 @@ class LevelStatsService:
         if 0 <= int(tile_number) < len(plan_tiles):
             tile = plan_tiles[int(tile_number)]
             if int(getattr(tile, "montage_index", int(tile_number))) == int(tile_number):
-                if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+                if int(getattr(payload, "source_index", -1)) != int(
+                    getattr(tile, "source_index", -2)
+                ):
                     return None
                 return _rendered_tile_from_previous_payload(tile, payload)
         for offset, tile in enumerate(plan_tiles):
@@ -395,7 +409,7 @@ class LevelStatsService:
             if int(tile_number) in plan_tiles
         }
         summary = self._montage_level_tracker().summary_for(session.level_key)
-        covered = set() if summary is None else set(int(source) for source in summary.source_indices)
+        covered = set() if summary is None else {int(source) for source in summary.source_indices}
         return bool(expected and expected <= covered)
 
     @staticmethod
@@ -413,26 +427,32 @@ class LevelStatsService:
         histogram/window-level pass without competing with visible rendering.
         """
 
-        if not session.scheduling_policy.verdict.admits_lane(
-            WorkLane.HISTOGRAM_REFINEMENT
-        ):
+        if not session.scheduling_policy.verdict.admits_lane(WorkLane.HISTOGRAM_REFINEMENT):
             return
 
         queued_tiles: set[int] = set()
         for tile_number, rendered in tuple((getattr(session, "rendered_tiles", {}) or {}).items()):
-            if _rendered_level_evidence_quality_for_session(session, rendered, refined=True) == LevelEvidenceQuality.ROUGH_PREVIEW:
+            if (
+                _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
+                == LevelEvidenceQuality.ROUGH_PREVIEW
+            ):
                 continue
             queued_tiles.add(int(tile_number))
             self._queue_montage_level_refinement(session, rendered)
 
-        for tile_number, payload in tuple((getattr(session, "display_tile_payloads", {}) or {}).items()):
+        for tile_number, payload in tuple(
+            (getattr(session, "display_tile_payloads", {}) or {}).items()
+        ):
             tile_number = int(tile_number)
             if tile_number in queued_tiles:
                 continue
             rendered = self._rendered_tile_for_current_payload(session, tile_number, payload)
             if rendered is None:
                 continue
-            if _rendered_level_evidence_quality_for_session(session, rendered, refined=True) == LevelEvidenceQuality.ROUGH_PREVIEW:
+            if (
+                _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
+                == LevelEvidenceQuality.ROUGH_PREVIEW
+            ):
                 continue
             self._queue_montage_level_refinement(session, rendered)
 
@@ -456,7 +476,10 @@ class LevelStatsService:
         stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
-        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
+        if not allow_partial and stats.rank not in {
+            LevelSourceRank.MONTAGE_COMPLETE,
+            LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        }:
             return None
         return tracker.source_for_stats(session.level_key, stats)
 
@@ -465,7 +488,10 @@ class LevelStatsService:
         stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
-        if not allow_partial and stats.rank not in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
+        if not allow_partial and stats.rank not in {
+            LevelSourceRank.MONTAGE_COMPLETE,
+            LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        }:
             return None
         cached = tracker.cached_histogram_data(session.level_key)
         if cached is not None:
@@ -488,14 +514,9 @@ class LevelStatsService:
             and not bool(getattr(session, "first_pass_histogram_published", False))
         )
         visible_dependency = bool(
-            not bool(getattr(session, "display_committed", False))
-            or wgpu_first_pass_dependency
+            not bool(getattr(session, "display_committed", False)) or wgpu_first_pass_dependency
         )
-        work_class = (
-            SchedulingWork.COVERAGE
-            if visible_dependency
-            else SchedulingWork.REFINEMENT
-        )
+        work_class = SchedulingWork.COVERAGE if visible_dependency else SchedulingWork.REFINEMENT
         if not session.scheduling_policy.verdict.admits(work_class):
             return False
         tracker = self._montage_level_tracker()
@@ -641,9 +662,7 @@ class LevelStatsService:
         progress = SemanticLevelEvidenceProgress(
             target=target,
             current_batch_limit=(
-                target.blocking_batch_limit
-                if visible_dependency
-                else target.background_batch_limit
+                target.blocking_batch_limit if visible_dependency else target.background_batch_limit
             ),
         )
         session.semantic_level_evidence_target = target
@@ -688,11 +707,7 @@ class LevelStatsService:
             _montage_level_evidence_requires_refined(self, session)
             and not bool(getattr(session, "display_committed", False))
         )
-        work_class = (
-            SchedulingWork.COVERAGE
-            if visible_dependency
-            else SchedulingWork.REFINEMENT
-        )
+        work_class = SchedulingWork.COVERAGE if visible_dependency else SchedulingWork.REFINEMENT
         if not session.scheduling_policy.verdict.admits(work_class):
             return
         if bool(getattr(session, "shader_display", False)):
@@ -745,8 +760,16 @@ class LevelStatsService:
 
         def done(result):
             current = getattr(self, "_frame_session", None)
-            current_target = None if current is None else getattr(current, "semantic_level_evidence_target", None)
-            if current is not session or current_target is None or current_target.generation != generation:
+            current_target = (
+                None
+                if current is None
+                else getattr(current, "semantic_level_evidence_target", None)
+            )
+            if (
+                current is not session
+                or current_target is None
+                or current_target.generation != generation
+            ):
                 release(session)
                 return
             release(current)
@@ -829,9 +852,8 @@ class LevelStatsService:
             progress.blocking_reason = "kernel-admission"
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
-        if (
-            _montage_level_evidence_requires_refined(self, session)
-            and not bool(getattr(session, "display_committed", False))
+        if _montage_level_evidence_requires_refined(self, session) and not bool(
+            getattr(session, "display_committed", False)
         ):
             # Arm the full-population owner as soon as a CPU first-frame
             # commit asks for evidence. Payload-derived evidence can reduce
@@ -875,7 +897,9 @@ class LevelStatsService:
             return
         session.level_scan_remaining_tiles = tile_count
 
-    def _queue_montage_cached_level_stats(self, session, rendered_tiles, *, seed_if_empty: bool) -> None:
+    def _queue_montage_cached_level_stats(
+        self, session, rendered_tiles, *, seed_if_empty: bool
+    ) -> None:
         """Admit cached-payload level work without making commit latency scale with tile count.
 
         Prepared per-tile evidence can be merged immediately for a small,
@@ -902,7 +926,9 @@ class LevelStatsService:
                 rendered,
                 refined=bool(require_refined),
             )
-            if source_index in queued_sources or tracker.has_source_quality(session.level_key, source_index, quality):
+            if source_index in queued_sources or tracker.has_source_quality(
+                session.level_key, source_index, quality
+            ):
                 continue
             if self._update_montage_level_bounds_from_prepared(
                 session.level_key,
@@ -924,9 +950,8 @@ class LevelStatsService:
         """Request level evidence for a presentation delta without scanning it inline."""
 
         capabilities = image_view_backend_capabilities(self.win.img_view)
-        if (
-            str(capabilities.name) == "wgpu"
-            and not bool(getattr(session, "first_pass_histogram_published", False))
+        if str(capabilities.name) == "wgpu" and not bool(
+            getattr(session, "first_pass_histogram_published", False)
         ):
             return self._queue_wgpu_resident_histogram_evidence(session, payloads)
 
@@ -940,7 +965,9 @@ class LevelStatsService:
         require_refined = _montage_level_evidence_requires_refined(self, session)
         tiles_by_number = {
             int(getattr(tile, "montage_index", offset)): tile
-            for offset, tile in enumerate(tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()))
+            for offset, tile in enumerate(
+                tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+            )
         }
         for tile_number in payloads or ():
             if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
@@ -958,9 +985,8 @@ class LevelStatsService:
             if bool(getattr(session, "shader_display", False)):
                 payload_quality = str(getattr(rendered, "quality", "exact") or "exact")
                 first_pass_quality = getattr(session, "first_pass_quality", None)
-                if (
-                    first_pass_quality is not None
-                    and not session.first_pass_accepts_quality(payload_quality)
+                if first_pass_quality is not None and not session.first_pass_accepts_quality(
+                    payload_quality
                 ):
                     continue
             source_index = int(rendered.tile.source_index)
@@ -969,7 +995,9 @@ class LevelStatsService:
                 rendered,
                 refined=bool(require_refined),
             )
-            if getattr(rendered, "level_stats", None) is not None and self._update_montage_level_bounds_from_prepared(
+            if getattr(
+                rendered, "level_stats", None
+            ) is not None and self._update_montage_level_bounds_from_prepared(
                 session.level_key,
                 rendered,
                 expected_indices=expected,
@@ -1007,7 +1035,9 @@ class LevelStatsService:
                 queued_sources.add(source_index)
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
         self._montage_level_sources_added_last_commit = int(merged)
-        self._montage_pending_level_tiles_last_session = len(getattr(session, "pending_level_tiles", ()) or ())
+        self._montage_pending_level_tiles_last_session = len(
+            getattr(session, "pending_level_tiles", ()) or ()
+        )
         self._schedule_montage_cached_level_stats(session)
         return int(merged)
 
@@ -1148,8 +1178,7 @@ class LevelStatsService:
         session.level_evidence_generation = generation
         quality = (
             LevelEvidenceQuality.ROUGH_PREVIEW
-            if str(getattr(session, "first_pass_quality", "preview") or "preview")
-            == "preview"
+            if str(getattr(session, "first_pass_quality", "preview") or "preview") == "preview"
             else LevelEvidenceQuality.ROUGH_TARGET
         )
 
@@ -1178,13 +1207,17 @@ class LevelStatsService:
         def done(result):
             evidence_rows, elapsed_ms = result
             current = getattr(self, "_frame_session", None)
-            current_generation = None if current is None else (
-                current.key,
-                int(current.session_id),
-                int(getattr(current, "viewport_revision", 0) or 0),
-                current.level_key,
-                "wgpu-resident-histogram",
-                generation[5],
+            current_generation = (
+                None
+                if current is None
+                else (
+                    current.key,
+                    int(current.session_id),
+                    int(getattr(current, "viewport_revision", 0) or 0),
+                    current.level_key,
+                    "wgpu-resident-histogram",
+                    generation[5],
+                )
             )
             if current is not session or current_generation != generation:
                 release(session)
@@ -1308,9 +1341,7 @@ class LevelStatsService:
                 continue
             batch.append(rendered)
 
-        plan_tiles = tuple(
-            getattr(getattr(session, "plan", None), "tiles", ()) or ()
-        )
+        plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
         tile_count = len(plan_tiles)
         remaining = int(getattr(session, "level_scan_remaining_tiles", 0) or 0)
         if tile_count <= 0 or remaining <= 0:
@@ -1339,9 +1370,7 @@ class LevelStatsService:
             tile_number = int(getattr(plan_tile, "montage_index", cursor))
             rendered = getattr(session, "rendered_tiles", {}).get(tile_number)
             if rendered is None:
-                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(
-                    tile_number
-                )
+                payload = (getattr(session, "display_tile_payloads", {}) or {}).get(tile_number)
                 if payload is not None:
                     rendered = self._rendered_tile_for_current_payload(
                         session,
@@ -1359,7 +1388,9 @@ class LevelStatsService:
                 rendered,
                 refined=bool(require_refined),
             )
-            if source_index in pending_sources or tracker.has_source_quality(session.level_key, source_index, quality):
+            if source_index in pending_sources or tracker.has_source_quality(
+                session.level_key, source_index, quality
+            ):
                 continue
             cached_stats = self._cached_montage_source_level_stats(
                 session.level_key,
@@ -1399,9 +1430,7 @@ class LevelStatsService:
         require_refined = _montage_level_evidence_requires_refined(self, session)
         visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         work_class = (
-            SchedulingWork.COVERAGE
-            if visible_level_dependency
-            else SchedulingWork.REFINEMENT
+            SchedulingWork.COVERAGE if visible_level_dependency else SchedulingWork.REFINEMENT
         )
         if not session.scheduling_policy.verdict.admits(work_class):
             return
@@ -1453,7 +1482,13 @@ class LevelStatsService:
                 cancellation_token=token,
             )
 
-        def done(result, batch=batch, generation=generation, expected=expected, require_refined=require_refined):
+        def done(
+            result,
+            batch=batch,
+            generation=generation,
+            expected=expected,
+            require_refined=require_refined,
+        ):
             rows, elapsed_ms, total_bytes = result
             # Worker results are immutable per-source evidence. A scroll may
             # supersede the presentation generation before this callback, but
@@ -1465,12 +1500,16 @@ class LevelStatsService:
                 if stats is not None:
                     self._remember_montage_source_level_stats(generation[3], stats)
             current = getattr(self, "_frame_session", None)
-            current_generation = None if current is None else (
-                current.key,
-                int(current.session_id),
-                int(getattr(current, "viewport_revision", 0) or 0),
-                current.level_key,
-                bool(require_refined),
+            current_generation = (
+                None
+                if current is None
+                else (
+                    current.key,
+                    int(current.session_id),
+                    int(getattr(current, "viewport_revision", 0) or 0),
+                    current.level_key,
+                    bool(require_refined),
+                )
             )
             if current_generation != generation:
                 reuse(result)
@@ -1481,23 +1520,31 @@ class LevelStatsService:
                 return
             release_generation(current)
             processed = 0
-            for rendered, (source_index, stats) in zip(batch, tuple(rows or ())):
+            for rendered, (source_index, stats) in zip(batch, tuple(rows or ()), strict=False):
                 source_index = int(source_index)
                 quality = _rendered_level_evidence_quality_for_session(
                     current,
                     rendered,
                     refined=bool(require_refined),
                 )
-                if not self._montage_level_tracker().has_source_quality(current.level_key, source_index, quality):
+                if not self._montage_level_tracker().has_source_quality(
+                    current.level_key, source_index, quality
+                ):
                     if stats is not None:
-                        self._montage_level_tracker().update_from_stats(current.level_key, stats, aggregate=False)
+                        self._montage_level_tracker().update_from_stats(
+                            current.level_key, stats, aggregate=False
+                        )
                         self._remember_montage_source_level_stats(current.level_key, stats)
                     elif require_refined:
-                        self._montage_level_tracker().record_vacuous_source(current.level_key, source_index)
+                        self._montage_level_tracker().record_vacuous_source(
+                            current.level_key, source_index
+                        )
                 self._queue_montage_level_refinement(current, rendered)
                 processed += 1
             self._last_montage_level_stats_ms = float(elapsed_ms)
-            self._montage_pending_level_tiles_last_session = len(getattr(current, "pending_level_tiles", ()) or ())
+            self._montage_pending_level_tiles_last_session = len(
+                getattr(current, "pending_level_tiles", ()) or ()
+            )
             if processed:
                 _complete_inline_work(
                     self,
@@ -1524,7 +1571,7 @@ class LevelStatsService:
             """Retain immutable evidence even when its presentation was superseded."""
 
             rows, _elapsed_ms, _total_bytes = result
-            for source_index, stats in tuple(rows or ()):
+            for _source_index, stats in tuple(rows or ()):
                 if stats is not None:
                     self._remember_montage_source_level_stats(generation[3], stats)
             current = getattr(self, "_frame_session", None)
@@ -1596,9 +1643,8 @@ class LevelStatsService:
                 pass_token=True,
                 **_presentation_trace_fields(session, work_class),
             )
-        if handle is None:
-            if release_generation(session):
-                self._requeue_montage_level_evidence(session, batch)
+        if handle is None and release_generation(session):
+            self._requeue_montage_level_evidence(session, batch)
 
     def _requeue_montage_level_evidence(self, session, batch) -> None:
         pending, pending_sources = self._pending_montage_level_sources(session)
@@ -1630,11 +1676,15 @@ class LevelStatsService:
 
         def done(_value=None, generation=generation):
             current = getattr(self, "_frame_session", None)
-            current_generation = None if current is None else (
-                current.key,
-                int(current.session_id),
-                int(getattr(current, "viewport_revision", 0) or 0),
-                current.level_key,
+            current_generation = (
+                None
+                if current is None
+                else (
+                    current.key,
+                    int(current.session_id),
+                    int(getattr(current, "viewport_revision", 0) or 0),
+                    current.level_key,
+                )
             )
             if current_generation != generation:
                 release_generation(session)
@@ -1654,12 +1704,15 @@ class LevelStatsService:
             stale(session=session)
             handle_ui_exception("montage level evidence continuation", exc)
 
-        task_key = ("montage_level_evidence_continuation", session.key, int(session.session_id), generation)
+        task_key = (
+            "montage_level_evidence_continuation",
+            session.key,
+            int(session.session_id),
+            generation,
+        )
         visible_level_dependency = _montage_payload_level_evidence_is_visible_dependency(session)
         work_class = (
-            SchedulingWork.COVERAGE
-            if visible_level_dependency
-            else SchedulingWork.REFINEMENT
+            SchedulingWork.COVERAGE if visible_level_dependency else SchedulingWork.REFINEMENT
         )
         if not session.scheduling_policy.verdict.admits(work_class):
             release_generation(session)
@@ -1677,7 +1730,9 @@ class LevelStatsService:
                     priority=Priority.INTERACTIVE,
                     scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
                     scope=f"montage:{session.key!r}:histogram",
-                    supersession=Supersession(("montage-level-evidence-continuation", session.key), generation),
+                    supersession=Supersession(
+                        ("montage-level-evidence-continuation", session.key), generation
+                    ),
                     pass_token=False,
                     **_presentation_trace_fields(session, work_class),
                 ),
@@ -1736,7 +1791,10 @@ class LevelStatsService:
             or bool(getattr(session, "histogram_aggregate_inflight", False))
             or semantic_remaining
         )
-        flush_parked = bool(getattr(session, "flush_pending", False) or getattr(session, "final_commit_pending", False))
+        flush_parked = bool(
+            getattr(session, "flush_pending", False)
+            or getattr(session, "final_commit_pending", False)
+        )
         if (
             processed
             and not flush_parked
@@ -1775,8 +1833,7 @@ class LevelStatsService:
             and not getattr(session, "pending_removals", ())
         )
         if processed and (
-            can_resume_parked_flush
-            or (payload_backlog_clear and can_refresh_settled_metadata)
+            can_resume_parked_flush or (payload_backlog_clear and can_refresh_settled_metadata)
         ):
             if bool(getattr(self, "_montage_commit_drain_active", False)):
                 # The current presentation callback synchronously drained the
@@ -1791,7 +1848,9 @@ class LevelStatsService:
                 return
             pipeline = getattr(session, "pipeline", None)
             effects = None if pipeline is None else getattr(pipeline, "effects", None)
-            request_presentation = None if effects is None else getattr(effects, "request_presentation", None)
+            request_presentation = (
+                None if effects is None else getattr(effects, "request_presentation", None)
+            )
             if not callable(request_presentation):
                 raise RuntimeError("live frame session has no presentation effect gate")
             request_presentation()
@@ -1821,8 +1880,7 @@ class LevelStatsService:
             >= min(len(summary.expected_indices), MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
         )
         if (
-            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL
-            and not provisional_first_batch
+            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL and not provisional_first_batch
         ) or not self._should_publish_montage_level_metadata(session, summary):
             return False
         source = self._montage_level_source_for_session(session, allow_partial=True)
@@ -1840,17 +1898,15 @@ class LevelStatsService:
         note = getattr(self, "_note_montage_level_source_applied", None)
         if callable(note):
             note(session, source, explicit=False)
-        self._montage_first_cpu_histogram_publications = int(
-            getattr(self, "_montage_first_cpu_histogram_publications", 0) or 0
-        ) + 1
+        self._montage_first_cpu_histogram_publications = (
+            int(getattr(self, "_montage_first_cpu_histogram_publications", 0) or 0) + 1
+        )
         return True
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
-        if not session.scheduling_policy.verdict.admits_lane(
-            WorkLane.HISTOGRAM_REFINEMENT
-        ):
+        if not session.scheduling_policy.verdict.admits_lane(WorkLane.HISTOGRAM_REFINEMENT):
             return
         pending = getattr(session, "pending_refined_level_tiles", None)
         if not pending:
@@ -1862,7 +1918,9 @@ class LevelStatsService:
             rendered = pending.popleft()
             source_index = int(rendered.tile.source_index)
             quality = _rendered_level_evidence_quality_for_session(session, rendered, refined=True)
-            if self._montage_level_tracker().has_source_quality(session.level_key, source_index, quality):
+            if self._montage_level_tracker().has_source_quality(
+                session.level_key, source_index, quality
+            ):
                 pending_sources = getattr(session, "pending_refined_level_sources", None)
                 if pending_sources is not None:
                     pending_sources.discard(source_index)
@@ -1903,24 +1961,33 @@ class LevelStatsService:
             generation=generation,
         ):
             current = getattr(self, "_frame_session", None)
-            current_generation = None if current is None else (
-                current.key,
-                int(current.session_id),
-                int(getattr(current, "viewport_revision", 0) or 0),
-                current.level_key,
+            current_generation = (
+                None
+                if current is None
+                else (
+                    current.key,
+                    int(current.session_id),
+                    int(getattr(current, "viewport_revision", 0) or 0),
+                    current.level_key,
+                )
             )
             if current_generation != generation:
                 return
             metadata_improved = False
             for source_index, stats in tuple(rows or ()):
-                metadata_improved = bool(self._on_montage_refined_level_stats_done(
-                    session_id,
-                    session_key,
-                    level_key,
-                    int(source_index),
-                    stats,
-                    schedule_next=False,
-                )) or metadata_improved
+                metadata_improved = (
+                    bool(
+                        self._on_montage_refined_level_stats_done(
+                            session_id,
+                            session_key,
+                            level_key,
+                            int(source_index),
+                            stats,
+                            schedule_next=False,
+                        )
+                    )
+                    or metadata_improved
+                )
             self._schedule_montage_refined_level_stats(current)
             if metadata_improved and not getattr(current, "pending_refined_level_tiles", None):
                 self._request_level_metadata_presentation(current)
@@ -1990,7 +2057,9 @@ class LevelStatsService:
     def _request_level_metadata_presentation(session) -> None:
         pipeline = getattr(session, "pipeline", None)
         effects = None if pipeline is None else getattr(pipeline, "effects", None)
-        request_presentation = None if effects is None else getattr(effects, "request_presentation", None)
+        request_presentation = (
+            None if effects is None else getattr(effects, "request_presentation", None)
+        )
         if not callable(request_presentation):
             raise RuntimeError("live frame session has no presentation effect gate")
         request_presentation()
@@ -2015,7 +2084,6 @@ def _montage_side_work_visible_settled(renderer, session) -> bool:
     )
 
 
-
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     semantic = None if payload.semantic_data is None else np.asarray(payload.semantic_data)
     image = semantic if semantic is not None else np.asarray(payload.image)
@@ -2024,8 +2092,10 @@ def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
         if getattr(payload, "semantic_histogram_data", None) is None
         else np.asarray(payload.semantic_histogram_data)
     )
-    histogram = semantic_histogram if semantic_histogram is not None else (
-        None if payload.histogram_data is None else np.asarray(payload.histogram_data)
+    histogram = (
+        semantic_histogram
+        if semantic_histogram is not None
+        else (None if payload.histogram_data is None else np.asarray(payload.histogram_data))
     )
     slab_shape = tuple(getattr(payload, "source_shape", None) or image.shape)
     return RenderedTile(
@@ -2051,20 +2121,28 @@ def _rendered_tile_is_preview(rendered) -> bool:
     return str(getattr(rendered, "quality", "exact") or "exact") == "preview"
 
 
-def _rendered_level_evidence_quality(rendered, *, refined: bool, evidence_quality=None) -> LevelEvidenceQuality:
+def _rendered_level_evidence_quality(
+    rendered, *, refined: bool, evidence_quality=None
+) -> LevelEvidenceQuality:
     if evidence_quality is not None:
         return LevelEvidenceQuality(int(evidence_quality))
     if bool(refined) and not _rendered_tile_is_preview(rendered):
         return LevelEvidenceQuality.REFINED
     stats = getattr(rendered, "level_stats", None)
-    if stats is not None and bool(getattr(stats, "refined", False)) and not _rendered_tile_is_preview(rendered):
+    if (
+        stats is not None
+        and bool(getattr(stats, "refined", False))
+        and not _rendered_tile_is_preview(rendered)
+    ):
         return LevelEvidenceQuality.REFINED
     if _rendered_tile_is_preview(rendered):
         return LevelEvidenceQuality.ROUGH_PREVIEW
     return LevelEvidenceQuality.ROUGH_TARGET
 
 
-def _rendered_level_evidence_quality_for_session(session, rendered, *, refined: bool) -> LevelEvidenceQuality:
+def _rendered_level_evidence_quality_for_session(
+    session, rendered, *, refined: bool
+) -> LevelEvidenceQuality:
     quality = _rendered_level_evidence_quality(rendered, refined=bool(refined))
     if quality != LevelEvidenceQuality.ROUGH_PREVIEW:
         return quality
@@ -2207,7 +2285,7 @@ def _montage_level_family_key(level_key):
 def _interactive_active(window) -> bool:
     coordinator = getattr(window.win, "render_coordinator", None)
     return bool(
-        coordinator is not None and getattr(coordinator, "interactive_active", False)
+        (coordinator is not None and getattr(coordinator, "interactive_active", False))
         or _viewport_interaction_active(window)
     )
 

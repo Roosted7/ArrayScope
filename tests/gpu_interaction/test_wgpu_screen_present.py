@@ -30,7 +30,7 @@ pytestmark = pytest.mark.gpu_interaction
 pytest.importorskip("wgpu")
 
 
-@pytest.fixture()
+@pytest.fixture
 def screen_view(qt_app):
     from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
 
@@ -72,8 +72,10 @@ def test_commit_presents_on_the_swapchain_and_drains_the_draw_gate(qt_app, scree
 
     assert wait_for_qt_condition(
         qt_app,
-        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1
-        and not view.presentationDrawPending(),
+        lambda: (
+            view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1
+            and not view.presentationDrawPending()
+        ),
         timeout_s=10.0,
     ), f"draw gate never drained: {view.wgpuPresentationDiagnostics()}"
 
@@ -110,8 +112,10 @@ def test_resize_reconfigures_and_keeps_presenting(qt_app, screen_view):
     view._request_wgpu_canvas_draw()
     assert wait_for_qt_condition(
         qt_app,
-        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] > before
-        and not view.presentationDrawPending(),
+        lambda: (
+            view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] > before
+            and not view.presentationDrawPending()
+        ),
         timeout_s=10.0,
     ), f"no present after resize: {view.wgpuPresentationDiagnostics()}"
     diagnostics = view.wgpuPresentationDiagnostics()
@@ -132,13 +136,12 @@ def test_native_child_is_input_transparent(qt_app, screen_view):
     view = screen_view
     _commit_ramp(view)
     canvas = view._wgpu_canvas
-    assert canvas.testAttribute(
-        QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
-    )
+    assert canvas.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     assert canvas.focusPolicy() == QtCore.Qt.FocusPolicy.NoFocus
     center = canvas.geometry().center()
     target = view._display_container.childAt(center)
-    assert target is not None and target is not canvas
+    assert target is not None
+    assert target is not canvas
     # The deepest widget under the pointer is the graphics view's viewport.
     viewport = view.graphicsView.viewport()
     assert target is viewport, f"input target is {target!r}, not the viewport"
@@ -186,7 +189,9 @@ def test_grab_presented_framebuffer_sees_the_committed_content(qt_app, screen_vi
         timeout_s=10.0,
     )
     frame = view.grabPresentedFramebuffer()
-    assert frame is not None and frame.ndim == 3 and frame.shape[2] == 4
+    assert frame is not None
+    assert frame.ndim == 3
+    assert frame.shape[2] == 4
     gray = frame[..., :3].astype(np.float32).mean(axis=2)
     # The ramp spans dark to bright; a blind capture would be uniform.
     assert float(gray.max() - gray.min()) > 100.0
@@ -204,9 +209,7 @@ def test_auto_present_method_activates_screen_on_wayland(qt_app):
     try:
         for _ in range(30):
             qt_app.processEvents()
-        assert view.wgpuPresentMethod() == "screen", (
-            view.wgpuPresentMethodFallbackReason()
-        )
+        assert view.wgpuPresentMethod() == "screen", view.wgpuPresentMethodFallbackReason()
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_present_method_requested"] == "auto"
         assert diagnostics["wgpu_present_method_fallback_reason"] == ""

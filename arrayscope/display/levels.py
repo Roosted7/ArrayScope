@@ -13,7 +13,7 @@ def finite_bounds(data, *, exact_limit=4_000_000, max_samples=1_000_000):
     if array.size == 0:
         return None
     if array.size > int(exact_limit):
-        step = max(1, int(math.ceil(math.sqrt(array.size / max(1, int(max_samples))))))
+        step = max(1, math.ceil(math.sqrt(array.size / max(1, int(max_samples)))))
         sample = array[tuple(slice(None, None, step) for _axis in range(array.ndim))]
     else:
         sample = array

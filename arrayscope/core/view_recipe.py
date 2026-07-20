@@ -6,11 +6,9 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Tuple
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.operations.recipes import operation_to_recipe_item, steps_from_recipe
-
 
 VIEW_RECIPE_VERSION = 1
 
@@ -21,7 +19,7 @@ class DisplaySettings:
     scale: str
     aspect_mode: str
     window_mode: str
-    levels: Tuple[float, float] | None = None
+    levels: tuple[float, float] | None = None
     colormap: str | None = None
     profile_visible: bool = False
     live_profile: bool = False
@@ -47,9 +45,13 @@ def view_state_to_mapping(state: ViewState):
         "axis_fftshifted": list(state.axis_fftshifted),
         "montage_axis": state.montage_axis,
         "montage_columns": state.montage_columns,
-        "montage_indices": list(state.montage_indices) if state.montage_indices is not None else None,
+        "montage_indices": list(state.montage_indices)
+        if state.montage_indices is not None
+        else None,
         "montage_text": state.montage_text,
-        "axis_range_indices": [list(value) if value is not None else None for value in state.axis_range_indices],
+        "axis_range_indices": [
+            list(value) if value is not None else None for value in state.axis_range_indices
+        ],
         "axis_range_text": list(state.axis_range_text),
     }
 
@@ -69,7 +71,9 @@ def view_state_from_mapping(mapping, base_shape):
         axis_fftshifted=tuple(mapping.get("axis_fftshifted", (False,) * len(tuple(base_shape)))),
         montage_axis=mapping.get("montage_axis"),
         montage_columns=mapping.get("montage_columns"),
-        montage_indices=tuple(mapping["montage_indices"]) if mapping.get("montage_indices") is not None else None,
+        montage_indices=tuple(mapping["montage_indices"])
+        if mapping.get("montage_indices") is not None
+        else None,
         montage_text=mapping.get("montage_text"),
         axis_range_indices=tuple(
             None if value is None else tuple(value)
@@ -153,7 +157,9 @@ def loads_view_recipe(text: str, base_shape):
 def save_view_recipe(path, recipe: ViewRecipe):
     path = os.fspath(path)
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as recipe_file:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=directory, delete=False
+    ) as recipe_file:
         temporary_path = recipe_file.name
         recipe_file.write(dumps_view_recipe(recipe))
         recipe_file.write("\n")
@@ -161,5 +167,5 @@ def save_view_recipe(path, recipe: ViewRecipe):
 
 
 def load_view_recipe(path, base_shape):
-    with open(path, "r", encoding="utf-8") as recipe_file:
+    with open(path, encoding="utf-8") as recipe_file:
         return loads_view_recipe(recipe_file.read(), base_shape)

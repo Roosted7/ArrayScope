@@ -45,7 +45,6 @@ from arrayscope.display.shader_mapping import (
 )
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR
 
-
 # Per-channel 8-bit tolerance for GPU-vs-CPU rounding: float raster rounding
 # plus the <=0.5-texel LUT sampling-convention offset (GL samples the LUT at
 # ``intensity`` over N texel centers; the CPU mirror indexes ``intensity *
@@ -122,12 +121,8 @@ def payload_display_kind(payload) -> str:
         mapping = payload.shader_mapping
         display_mode = getattr(mapping, "display_mode", None)
         if display_mode == ShaderDisplayMode.PHASE_COLOR:
-            plans = tuple(
-                getattr(payload.page_backing, "requested_plans", ()) or ()
-            )
-            if plans and all(
-                plan.reducer == REDUCER_PHASE_VECTOR for plan in plans
-            ):
+            plans = tuple(getattr(payload.page_backing, "requested_plans", ()) or ())
+            if plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans):
                 return "phase_vector"
             return "phase_color"
         return "complex"
@@ -193,18 +188,16 @@ def cpu_reference_tile_image(payload, mapping) -> tuple[np.ndarray, np.ndarray]:
         # (tiles.py fragment shader, phase_vector branch).
         color, _magnitude = apply_phase_lut(values, mapping.lut_data)
         intensity = np.clip(np.abs(values).astype(np.float32), 0.0, 1.0)
-        rgb = np.clip(
-            color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0
-        ).astype(np.uint8)
+        rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(
+            np.uint8
+        )
         background = ~np.isfinite(values)
         return rgb, background
     rgba = cpu_display_rgba(values, mapping)
     return rgba[..., :3], rgba[..., 3] == 0
 
 
-def qt_scalar_reference_tile_image(
-    payload, mapping
-) -> tuple[np.ndarray, np.ndarray, int]:
+def qt_scalar_reference_tile_image(payload, mapping) -> tuple[np.ndarray, np.ndarray, int]:
     """Return expected PyQtGraph scalar RGB, alpha mask, and gutter.
 
     Page-backed Qt presentation expands resolved page samples over their
@@ -255,15 +248,11 @@ def _required_payloads_and_plan(win, tiles=None):
     payloads = dict(session.display_tile_payloads)
     missing = sorted(required - {int(key) for key in payloads})
     if missing:
-        raise AssertionError(
-            f"required tiles have no committed display payload: {missing}"
-        )
+        raise AssertionError(f"required tiles have no committed display payload: {missing}")
     plan_tiles = {int(t.montage_index): t for t in session.plan.tiles}
     missing_plan = sorted(required - set(plan_tiles))
     if missing_plan:
-        raise AssertionError(
-            f"required tiles missing from the montage plan: {missing_plan}"
-        )
+        raise AssertionError(f"required tiles missing from the montage plan: {missing_plan}")
     return required, payloads, plan_tiles
 
 
@@ -286,9 +275,7 @@ def _qimage_rgba_array(image) -> np.ndarray:
     width = int(converted.width())
     height = int(converted.height())
     if width <= 0 or height <= 0:
-        raise AssertionError(
-            f"Qt raster readback returned an empty image: {width}x{height}"
-        )
+        raise AssertionError(f"Qt raster readback returned an empty image: {width}x{height}")
     stride = int(converted.bytesPerLine())
     raw = np.frombuffer(
         converted.constBits(),
@@ -317,9 +304,7 @@ def _view_to_viewport_affine(img_view) -> tuple[np.ndarray, np.ndarray]:
         return np.asarray((float(point.x()), float(point.y())), dtype=np.float64)
 
     origin = mapped(0.0, 0.0)
-    matrix = np.column_stack(
-        (mapped(1.0, 0.0) - origin, mapped(0.0, 1.0) - origin)
-    )
+    matrix = np.column_stack((mapped(1.0, 0.0) - origin, mapped(0.0, 1.0) - origin))
     if not np.all(np.isfinite(matrix)) or abs(float(np.linalg.det(matrix))) < 1e-12:
         raise AssertionError(f"degenerate PyQtGraph view transform: {matrix!r}")
     return matrix, origin
@@ -350,14 +335,12 @@ def qt_raster_matches_cpu_reference(
     img_view = win.img_view
     if getattr(img_view, "_vispy_canvas", None) is not None:
         raise AssertionError(
-            "Qt-raster CPU-reference oracle needs the PyQtGraph backend "
-            "(found a VisPy canvas)"
+            "Qt-raster CPU-reference oracle needs the PyQtGraph backend (found a VisPy canvas)"
         )
     layer = getattr(img_view, "_montage_tile_layer", None)
     if layer is None:
         raise AssertionError(
-            "Qt-raster CPU-reference oracle needs the PyQtGraph montage "
-            "tile layer"
+            "Qt-raster CPU-reference oracle needs the PyQtGraph montage tile layer"
         )
     required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
 
@@ -393,9 +376,7 @@ def qt_raster_matches_cpu_reference(
                 f"payloads only (tile {tile_number}: {payload.texture_kind})"
             )
         mapping = resolve_reference_mapping(win, payload)
-        expected_rgb, background_mask, gutter = qt_scalar_reference_tile_image(
-            payload, mapping
-        )
+        expected_rgb, background_mask, gutter = qt_scalar_reference_tile_image(payload, mapping)
         expected_rgb = expected_rgb.astype(np.int16)
         tex_h, tex_w = expected_rgb.shape[:2]
         inner_w = max(1e-9, float(tex_w - 2 * gutter))
@@ -450,12 +431,7 @@ def qt_raster_matches_cpu_reference(
         world = (centers_viewport - view_offset) @ inverse_view_matrix.T
         frac_x = (world[:, 0] - float(tile.x0)) / float(tile.width)
         frac_y = (world[:, 1] - float(tile.y0)) / float(tile.height)
-        inside = (
-            (frac_x > 0.0)
-            & (frac_x < 1.0)
-            & (frac_y > 0.0)
-            & (frac_y < 1.0)
-        )
+        inside = (frac_x > 0.0) & (frac_x < 1.0) & (frac_y > 0.0) & (frac_y < 1.0)
         texel_x = gutter + frac_x * inner_w
         texel_y = gutter + frac_y * inner_h
         frac_tx = texel_x - np.floor(texel_x)
@@ -479,12 +455,8 @@ def qt_raster_matches_cpu_reference(
                 )
             )
             continue
-        index_x = np.clip(
-            np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1
-        )
-        index_y = np.clip(
-            np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1
-        )
+        index_x = np.clip(np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1)
+        index_y = np.clip(np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1)
         expected = expected_rgb[index_y, index_x]
         is_background = background_mask[index_y, index_x]
         if np.any(is_background):
@@ -708,19 +680,15 @@ def assert_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
             f"max_mismatch_fraction={report.max_mismatch_fraction}, "
             f"min_samples={report.min_samples_per_tile}):"
         ]
-        for tile in failures:
-            lines.append(
-                f"  tile {tile.tile_number}: samples={tile.samples} "
-                f"mismatched={tile.mismatched} "
-                f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
-                f"mean={tile.mean_diff:.2f}"
-                + (f" [{tile.detail}]" if tile.detail else "")
-            )
-        healthy = len(report.tiles) - len(failures)
-        lines.append(
-            f"  ({healthy}/{len(report.tiles)} required tiles within "
-            "tolerance)"
+        lines.extend(
+            f"  tile {tile.tile_number}: samples={tile.samples} "
+            f"mismatched={tile.mismatched} "
+            f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
+            f"mean={tile.mean_diff:.2f}" + (f" [{tile.detail}]" if tile.detail else "")
+            for tile in failures
         )
+        healthy = len(report.tiles) - len(failures)
+        lines.append(f"  ({healthy}/{len(report.tiles)} required tiles within tolerance)")
         raise AssertionError("\n".join(lines))
     return report
 
@@ -737,18 +705,14 @@ def assert_qt_raster_matches_cpu_reference(win, **kwargs) -> FrameReferenceRepor
             f"max_mismatch_fraction={report.max_mismatch_fraction}, "
             f"min_samples={report.min_samples_per_tile}):"
         ]
-        for tile in failures:
-            lines.append(
-                f"  tile {tile.tile_number}: samples={tile.samples} "
-                f"mismatched={tile.mismatched} "
-                f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
-                f"mean={tile.mean_diff:.2f}"
-                + (f" [{tile.detail}]" if tile.detail else "")
-            )
-        healthy = len(report.tiles) - len(failures)
-        lines.append(
-            f"  ({healthy}/{len(report.tiles)} required tiles within "
-            "tolerance)"
+        lines.extend(
+            f"  tile {tile.tile_number}: samples={tile.samples} "
+            f"mismatched={tile.mismatched} "
+            f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
+            f"mean={tile.mean_diff:.2f}" + (f" [{tile.detail}]" if tile.detail else "")
+            for tile in failures
         )
+        healthy = len(report.tiles) - len(failures)
+        lines.append(f"  ({healthy}/{len(report.tiles)} required tiles within tolerance)")
         raise AssertionError("\n".join(lines))
     return report

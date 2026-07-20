@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pyqtgraph.Qt as Qt
 
+# Shared invalid index for the Qt-conventional `parent=QModelIndex()` defaults.
+_INVALID_INDEX = Qt.QtCore.QModelIndex()
+
 
 class RoiTableModel(Qt.QtCore.QAbstractTableModel):
     HEADERS = ("", "ROI", "Kind", "Count", "Mean", "Std", "Min", "Max", "Visible")
@@ -24,14 +27,17 @@ class RoiTableModel(Qt.QtCore.QAbstractTableModel):
         self._rows = list(rows)
         self.endResetModel()
 
-    def rowCount(self, parent=Qt.QtCore.QModelIndex()):
+    def rowCount(self, parent=_INVALID_INDEX):
         return 0 if parent.isValid() else len(self._rows)
 
-    def columnCount(self, parent=Qt.QtCore.QModelIndex()):
+    def columnCount(self, parent=_INVALID_INDEX):
         return 0 if parent.isValid() else len(self.HEADERS)
 
     def headerData(self, section, orientation, role=Qt.QtCore.Qt.ItemDataRole.DisplayRole):
-        if role == Qt.QtCore.Qt.ItemDataRole.DisplayRole and orientation == Qt.QtCore.Qt.Orientation.Horizontal:
+        if (
+            role == Qt.QtCore.Qt.ItemDataRole.DisplayRole
+            and orientation == Qt.QtCore.Qt.Orientation.Horizontal
+        ):
             return self.HEADERS[int(section)]
         return None
 
@@ -47,7 +53,11 @@ class RoiTableModel(Qt.QtCore.QAbstractTableModel):
         if role == Qt.QtCore.Qt.ItemDataRole.EditRole and column == self.NAME_COLUMN:
             return row["values"][0]
         if role == Qt.QtCore.Qt.ItemDataRole.CheckStateRole and column == self.VISIBLE_COLUMN:
-            return Qt.QtCore.Qt.CheckState.Checked if row["enabled"] else Qt.QtCore.Qt.CheckState.Unchecked
+            return (
+                Qt.QtCore.Qt.CheckState.Checked
+                if row["enabled"]
+                else Qt.QtCore.Qt.CheckState.Unchecked
+            )
         if role == Qt.QtCore.Qt.ItemDataRole.BackgroundRole:
             color = row.get("color")
             if color is not None:
@@ -66,7 +76,11 @@ class RoiTableModel(Qt.QtCore.QAbstractTableModel):
         flags = super().flags(index)
         if index.isValid() and index.column() == self.VISIBLE_COLUMN:
             flags |= Qt.QtCore.Qt.ItemFlag.ItemIsUserCheckable
-        if index.isValid() and index.column() == self.NAME_COLUMN and self._rename_callback is not None:
+        if (
+            index.isValid()
+            and index.column() == self.NAME_COLUMN
+            and self._rename_callback is not None
+        ):
             flags |= Qt.QtCore.Qt.ItemFlag.ItemIsEditable
         return flags
 

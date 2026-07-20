@@ -19,4 +19,3 @@ def handle_ui_exception(context: str, exc: BaseException) -> None:
 
 def traceback_text(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-

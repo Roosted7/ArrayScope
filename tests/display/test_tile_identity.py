@@ -10,7 +10,13 @@ from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.presentation import TileLifecycle, TilePayloadRef, TileTarget
 
 
-def _identity(*, mapping=("phase_color", "abs", "mapped"), kind=TexturePlaneKind.COMPLEX_RG32F, level=0, quality="exact"):
+def _identity(
+    *,
+    mapping=("phase_color", "abs", "mapped"),
+    kind=TexturePlaneKind.COMPLEX_RG32F,
+    level=0,
+    quality="exact",
+):
     values = np.asarray([[1 + 2j]], dtype=np.complex64)
     real, imag = array_plane_identities(values)
     return TileIdentity(

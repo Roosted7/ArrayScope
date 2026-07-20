@@ -25,9 +25,7 @@ def _process_events(app, count=8):
         app.processEvents()
 
 
-def _wait_until(
-    app, predicate, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S
-):
+def _wait_until(app, predicate, timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S):
     import time
 
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
@@ -46,7 +44,8 @@ def _grab_widget(widget, name, *, min_width=80, min_height=40):
     out = _artifact_dir() / name
     pixmap = widget.grab()
     assert not pixmap.isNull(), f"{name} grab returned a null pixmap"
-    assert pixmap.width() >= min_width and pixmap.height() >= min_height
+    assert pixmap.width() >= min_width
+    assert pixmap.height() >= min_height
     assert pixmap.save(str(out), "PNG")
     assert out.stat().st_size > 1000
 
@@ -70,6 +69,7 @@ def _clear_arrayscope_settings():
 
 def test_main_window_interactions_create_useful_artifacts(qt_app):
     from pyqtgraph.Qt import QtCore, QtGui
+
     _clear_arrayscope_settings()
 
     from arrayscope.window import ArrayScopeWindow
@@ -97,7 +97,9 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
         win.keyPressEvent(event)
         _process_events(qt_app)
         assert win.view_state.image_axes == (2, 0)
-        _grab_widget(win.dimension_strip, "arrayscope_dimension_controls.png", min_width=150, min_height=30)
+        _grab_widget(
+            win.dimension_strip, "arrayscope_dimension_controls.png", min_width=150, min_height=30
+        )
 
         win._append_operation("mean", dim=1)
         _process_events(qt_app)
@@ -133,6 +135,7 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
 
 def test_progressive_view_configuration_artifacts(qt_app):
     from pyqtgraph.Qt import QtCore
+
     _clear_arrayscope_settings()
 
     from arrayscope.window import ArrayScopeWindow
@@ -178,14 +181,18 @@ def test_progressive_view_configuration_artifacts(qt_app):
         one_d.close()
         _process_events(qt_app)
 
-    complex_win = ArrayScopeWindow((np.ones((16, 16)) + 1j * np.ones((16, 16))))
+    complex_win = ArrayScopeWindow(np.ones((16, 16)) + 1j * np.ones((16, 16)))
     try:
         complex_win.show()
         _process_events(qt_app)
-        complex_win.display_toolbar.channel_combo.setCurrentIndex(complex_win.display_toolbar.channel_combo.findData("abs"))
+        complex_win.display_toolbar.channel_combo.setCurrentIndex(
+            complex_win.display_toolbar.channel_combo.findData("abs")
+        )
         _process_events(qt_app)
         assert complex_win.view_state.channel.value == "abs"
-        complex_win.display_toolbar.channel_combo.setCurrentIndex(complex_win.display_toolbar.channel_combo.findData("real"))
+        complex_win.display_toolbar.channel_combo.setCurrentIndex(
+            complex_win.display_toolbar.channel_combo.findData("real")
+        )
         _process_events(qt_app)
         assert complex_win.view_state.channel.value == "real"
     finally:
@@ -195,12 +202,13 @@ def test_progressive_view_configuration_artifacts(qt_app):
 
 def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
     from pyqtgraph.Qt import QtCore
+
     _clear_arrayscope_settings()
 
     pytest.importorskip("vispy")
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.display.imageview2d import MontageTileOverlay
+    from arrayscope.display.overlays import MontageTileOverlay
     from arrayscope.window import ArrayScopeWindow
 
     data = np.linspace(0.0, 1.0, 96 * 96, dtype=np.float32).reshape(96, 96)
@@ -216,12 +224,16 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         _process_events(qt_app, count=20)
 
         assert win.img_view.surface.capabilities.name == "vispy"
-        selection = win.img_view.createRoi("rectangle", rect=(18.0, 20.0, 34.0, 28.0), color=(255, 32, 16))
+        selection = win.img_view.createRoi(
+            "rectangle", rect=(18.0, 20.0, 34.0, 28.0), color=(255, 32, 16)
+        )
         assert selection.id in getattr(win.img_view, "_vispy_roi_visuals", {})
         assert selection.id in getattr(win.img_view, "_vispy_roi_handle_visuals", {})
         win.img_view.setProfileMarker(38.0, 42.0, visible=True)
         assert getattr(win.img_view, "_vispy_profile_visuals", {})
-        win.img_view.setMontageTileOverlays((MontageTileOverlay(58, 16, 18, 18, "loading", "Loading"),))
+        win.img_view.setMontageTileOverlays(
+            (MontageTileOverlay(58, 16, 18, 18, "loading", "Loading"),)
+        )
         assert getattr(win.img_view, "_vispy_overlay_visuals", [])
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
@@ -251,13 +263,23 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
         win.show()
         _process_events(qt_app)
         assert win.dimension_strip._columns <= 2
-        _grab_widget(win.dimension_strip, "arrayscope_dimension_strip_6d_narrow.png", min_width=220, min_height=80)
+        _grab_widget(
+            win.dimension_strip,
+            "arrayscope_dimension_strip_6d_narrow.png",
+            min_width=220,
+            min_height=80,
+        )
 
         win.resize(1180, 620)
         _process_events(qt_app)
         if win.dimension_strip.width() >= 900:
             assert win.dimension_strip._columns > 3
-            _grab_widget(win.dimension_strip, "arrayscope_dimension_strip_6d_wide.png", min_width=900, min_height=28)
+            _grab_widget(
+                win.dimension_strip,
+                "arrayscope_dimension_strip_6d_wide.png",
+                min_width=900,
+                min_height=28,
+            )
 
         win._enable_live_profile_for_axis(2)
         _process_events(qt_app, count=12)
@@ -292,7 +314,9 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         win.inspection_dock.set_current_tool("roi_rectangle")
         rectangle = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(3, 4, 8, 7))
         polyline = win.img_view.createRoi(RoiKind.POLYLINE, points=((1, 1), (12, 3), (18, 18)))
-        freehand = win.img_view.createRoi(RoiKind.FREEHAND_POLYGON, points=((8, 8), (19, 8), (19, 20), (8, 20)))
+        freehand = win.img_view.createRoi(
+            RoiKind.FREEHAND_POLYGON, points=((8, 8), (19, 8), (19, 20), (8, 20))
+        )
         win._add_compare_layer(data + 1000, label="offset")
         _process_events(qt_app, count=12)
 
@@ -301,7 +325,10 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         # overlay to materialize instead of counting event-loop turns.
         assert _wait_until(
             qt_app,
-            lambda: win.img_view._roi_info_panel is not None and win.img_view._roi_info_panel.isVisible(),
+            lambda: (
+                win.img_view._roi_info_panel is not None
+                and win.img_view._roi_info_panel.isVisible()
+            ),
         )
         assert win.img_view._roi_info_panel.isVisible()
         assert len(win.img_view.roiSelections()) == 3
@@ -313,12 +340,21 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
         win._show_inspection_dock()
         _process_events(qt_app)
         assert win.inspection_dock.isVisible()
-        assert win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+        assert (
+            win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+        )
         assert _wait_until(qt_app, lambda: win.inspection_dock.roi_model.rowCount() == 3)
         # The tiled ROI demand path histograms committed display tiles per ROI;
         # compare layers no longer contribute extra histogram overlays.
-        assert _wait_until(qt_app, lambda: len(win.inspection_dock.histogram_plot.listDataItems()) == 3)
-        _grab_widget(win.inspection_dock.widget(), "arrayscope_roi_inspection_dock.png", min_width=240, min_height=260)
+        assert _wait_until(
+            qt_app, lambda: len(win.inspection_dock.histogram_plot.listDataItems()) == 3
+        )
+        _grab_widget(
+            win.inspection_dock.widget(),
+            "arrayscope_roi_inspection_dock.png",
+            min_width=240,
+            min_height=260,
+        )
     finally:
         win.close()
         _process_events(qt_app)
@@ -341,7 +377,9 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
 
         win.set_profile_axis(2)
         win.set_dimension_role("p", 1)
-        win.profile_dock.profile_mode_combo.setCurrentIndex(win.profile_dock.profile_mode_combo.findData("abs_phase"))
+        win.profile_dock.profile_mode_combo.setCurrentIndex(
+            win.profile_dock.profile_mode_combo.findData("abs_phase")
+        )
         win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
         win.img_view.setProfileMarker(2, 2, visible=True)
         win._on_profile_marker_moved(2, 2)
@@ -356,7 +394,12 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         assert len(win.profile_dock.line_plot.curves) >= 2
         assert win.profile_dock.line_plot.legend is not None
         assert win.profile_dock.line_plot.phase_strip is not None
-        _grab_widget(win.profile_dock.widget, "arrayscope_multi_profile_phase_strip.png", min_width=300, min_height=90)
+        _grab_widget(
+            win.profile_dock.widget,
+            "arrayscope_multi_profile_phase_strip.png",
+            min_width=300,
+            min_height=90,
+        )
 
         win.widgets["buttons"]["display"]["live_profile"].setChecked(False)
         win.dimension_strip.chip(0).slice_edit.setText("0:2:100")
@@ -393,9 +436,7 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
             qt_app,
             lambda: bool(
                 win.profile_dock.line_plot.curves
-                and win.profile_dock.line_plot.curves[0]
-                .name()
-                .endswith("d2=1")
+                and win.profile_dock.line_plot.curves[0].name().endswith("d2=1")
             ),
             timeout_s=INTERACTION_SETTLE_HARD_LIMIT_S,
         )

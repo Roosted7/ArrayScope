@@ -57,8 +57,14 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         if int(source_index) not in after_sources or after_sources == before_sources:
             return
         quality = LevelEvidenceQuality(int(getattr(summary, "evidence_quality", 0) or 0))
-        phase = "rough sample merged" if quality <= LevelEvidenceQuality.ROUGH_TARGET else "refined sample merged"
-        events.append((phase, int(source_index), int(quality), tuple(getattr(summary, "bounds", ()) or ())))
+        phase = (
+            "rough sample merged"
+            if quality <= LevelEvidenceQuality.ROUGH_TARGET
+            else "refined sample merged"
+        )
+        events.append(
+            (phase, int(source_index), int(quality), tuple(getattr(summary, "bounds", ()) or ()))
+        )
 
     def update_prepared(service, level_key, rendered, **kwargs):
         summary = service._montage_level_tracker().summary_for(level_key)
@@ -99,9 +105,8 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         changed = original_set_levels(visual, levels)
         if changed:
             events.append(("shader levels applied", normalized))
-            if (
-                any(event[0] == "refined evidence start" for event in events)
-                and not any(event[0] == "refined levels publication" for event in events)
+            if any(event[0] == "refined evidence start" for event in events) and not any(
+                event[0] == "refined levels publication" for event in events
             ):
                 events.append(("refined levels publication", normalized))
         return changed
@@ -117,24 +122,21 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
             if getattr(payload, "texture_kind", None) == TexturePlaneKind.COMPLEX_RG32F
         }
         qualities = {
-            str(getattr(payload, "quality", "exact") or "exact")
-            for payload in payloads.values()
+            str(getattr(payload, "quality", "exact") or "exact") for payload in payloads.values()
         }
         complete_preview_payload = bool(
-            active
-            and set(active) <= set(payloads)
-            and qualities == {"preview"}
+            active and set(active) <= set(payloads) and qualities == {"preview"}
         )
         complete_target_payload = bool(
-            active
-            and set(active) <= set(payloads)
-            and qualities == {"exact"}
+            active and set(active) <= set(payloads) and qualities == {"exact"}
         )
         if kwargs.get("histogramPlotData") is not None:
             session = getattr(getattr(box.get("win"), "renderer", None), "_frame_session", None)
             summary = None
             if session is not None:
-                summary = box["win"].renderer._montage_level_tracker().summary_for(session.level_key)
+                summary = (
+                    box["win"].renderer._montage_level_tracker().summary_for(session.level_key)
+                )
             quality = int(getattr(summary, "evidence_quality", 0) or 0)
             name = (
                 "refined levels/histogram publication"
@@ -182,7 +184,9 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         return original_submit_speculative(kernel, **kwargs)
 
     def admit_reduced(effects, step, tile_number, payload, *, quality=None):
-        resolved = str(quality or ("exact" if step is not None and int(step.rung) == 2 else "preview"))
+        resolved = str(
+            quality or ("exact" if step is not None and int(step.rung) == 2 else "preview")
+        )
         if resolved != "preview" and not any(event[0] == "target pass start" for event in events):
             events.append(("target pass start", "reduced"))
         return original_admit_reduced(effects, step, tile_number, payload, quality=quality)
@@ -192,8 +196,12 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
             events.append(("target pass start", "native"))
         return original_admit_target(effects, tile, result)
 
-    monkeypatch.setattr(LevelStatsService, "_update_montage_level_bounds_from_prepared", update_prepared)
-    monkeypatch.setattr(LevelStatsService, "_update_montage_level_bounds_from_rendered", update_rendered)
+    monkeypatch.setattr(
+        LevelStatsService, "_update_montage_level_bounds_from_prepared", update_prepared
+    )
+    monkeypatch.setattr(
+        LevelStatsService, "_update_montage_level_bounds_from_rendered", update_rendered
+    )
     monkeypatch.setattr(GpuWindowedTileVisual, "set_levels", set_levels)
     monkeypatch.setattr(VisPyImageView2D, "setTiledPresentation", present)
     monkeypatch.setattr(Kernel, "submit_speculative_batch", submit_speculative)
@@ -213,9 +221,8 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
     win.show()
     qtbot.addWidget(win)
     try:
-        state = (
-            win.view_state.with_channel("complex")
-            .with_montage_axis(2, columns=3, indices=tuple(range(6)), text=":")
+        state = win.view_state.with_channel("complex").with_montage_axis(
+            2, columns=3, indices=tuple(range(6)), text=":"
         )
         win._set_view_state(state)
         win.render(reason="test-r8-first-pixel-phasing")
@@ -265,9 +272,7 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
             if event[0] == "shader levels applied" and index < rough_complete
         }
         assert rough_level_updates, events
-        assert sum(
-            1 for event in events if event[0] == "rough sample merged"
-        ) >= 2
+        assert sum(1 for event in events if event[0] == "rough sample merged") >= 2
 
         assert all(event[2] is True for event in events if event[0] == "refined evidence start")
     finally:

@@ -12,19 +12,7 @@ may import Qt, VisPy, pyqtgraph, or ``arrayscope.display`` — the dependency
 points the other way.
 """
 
-from arrayscope.gpu.keys import ChunkLod, DataChunkKey, ViewTileKey
-from arrayscope.gpu.chunk_summary import (
-    ChunkHistogramAggregate,
-    ChunkHistogramSummary,
-    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
-    aggregate_chunk_summaries,
-    chunk_key_frontier,
-    chunk_summary_frontier,
-    representative_sample_from_histogram,
-    summarize_chunk,
-)
 from arrayscope.gpu.chunk_grid import ChunkGrid, WindowDelta
-from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable, ResidencyEntry
 from arrayscope.gpu.chunk_store import (
     CapacityError,
     ChunkStore,
@@ -32,19 +20,31 @@ from arrayscope.gpu.chunk_store import (
     Residency,
     SlotPool,
 )
+from arrayscope.gpu.chunk_summary import (
+    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
+    ChunkHistogramAggregate,
+    ChunkHistogramSummary,
+    aggregate_chunk_summaries,
+    chunk_key_frontier,
+    chunk_summary_frontier,
+    representative_sample_from_histogram,
+    summarize_chunk,
+)
+from arrayscope.gpu.keys import ChunkLod, DataChunkKey, ViewTileKey
+from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable, ResidencyEntry
 
 __all__ = [
+    "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "CapacityError",
     "ChunkGrid",
     "ChunkHistogramAggregate",
     "ChunkHistogramSummary",
-    "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
     "ChunkLod",
     "ChunkStore",
     "ChunkStoreDiagnostics",
     "DataChunkKey",
-    "PageSlot",
     "PageResolution",
+    "PageSlot",
     "PageTable",
     "Residency",
     "ResidencyEntry",

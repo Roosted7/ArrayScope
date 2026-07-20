@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Tuple
 
 
 @dataclass(frozen=True)
@@ -38,7 +37,7 @@ class AxisInfo:
             object.__setattr__(self, "origin", float(self.origin))
 
 
-AxisInfoTuple = Tuple[AxisInfo, ...]
+AxisInfoTuple = tuple[AxisInfo, ...]
 
 
 def default_axes(shape) -> AxisInfoTuple:
@@ -90,7 +89,7 @@ def axes_for_shape(axes, shape) -> AxisInfoTuple:
     axes = tuple(_coerce_axis_info(axis) for axis in axes)
     if len(axes) != len(shape):
         raise ValueError("axis metadata length must match shape length")
-    return tuple(replace(axis, size=size) for axis, size in zip(axes, shape))
+    return tuple(replace(axis, size=size) for axis, size in zip(axes, shape, strict=False))
 
 
 def output_axes_for_operations(axes, operations) -> AxisInfoTuple:
@@ -104,7 +103,9 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
     name = type(operation).__name__
     if name in {"Crop"}:
         axis = _axis(operation, axes)
-        return _replace_axis(axes, axis, _cropped_axis(axes[axis], int(operation.start), int(operation.stop)))
+        return _replace_axis(
+            axes, axis, _cropped_axis(axes[axis], int(operation.start), int(operation.stop))
+        )
     if name in {"ReverseAxis"}:
         axis = _axis(operation, axes)
         return _replace_axis(axes, axis, _reversed_axis(axes[axis]))
@@ -124,12 +125,18 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
     if name in {"CombineRealImagAxis"}:
         axis = _axis(operation, axes)
         return _replace_axis(
-            axes, axis, replace(axes[axis], size=1, coordinate="complex", unit=None, spacing=None, origin=None)
+            axes,
+            axis,
+            replace(axes[axis], size=1, coordinate="complex", unit=None, spacing=None, origin=None),
         )
     if name in {"SplitComplexAxis"}:
         axis = _axis(operation, axes)
         return _replace_axis(
-            axes, axis, replace(axes[axis], size=2, coordinate="real-imag", unit=None, spacing=None, origin=None)
+            axes,
+            axis,
+            replace(
+                axes[axis], size=2, coordinate="real-imag", unit=None, spacing=None, origin=None
+            ),
         )
     return tuple(axes)
 

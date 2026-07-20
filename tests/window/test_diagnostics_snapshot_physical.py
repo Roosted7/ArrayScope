@@ -17,9 +17,7 @@ def test_tile_identity_probe_merges_backend_draw_geometry():
             "physical_draw_bounds_match_layout": True,
         }
     }
-    window = SimpleNamespace(
-        img_view=SimpleNamespace(tileTruthPhysicalRows=lambda: physical)
-    )
+    window = SimpleNamespace(img_view=SimpleNamespace(tileTruthPhysicalRows=lambda: physical))
 
     rows = _tile_identity_probe(window, session)
 

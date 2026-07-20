@@ -22,14 +22,16 @@ from __future__ import annotations
 from dataclasses import replace
 from time import perf_counter
 
-from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.core.trace import emit_trace
 from arrayscope.kernel.scheduler import Kernel
 from arrayscope.kernel.task import TaskOutcome
 
 prefer_pyside6()
+
+import contextlib
 
 import pyqtgraph.Qt as Qt
 
@@ -72,10 +74,8 @@ class QtKernelBridge(Qt.QtCore.QObject):
     def _notify_from_worker(self) -> None:
         if self._closed:
             return
-        try:
+        with contextlib.suppress(RuntimeError):
             self.eventsReady.emit()
-        except RuntimeError:
-            pass
 
     def close(self) -> None:
         self._closed = True
@@ -151,7 +151,7 @@ class QtKernelBridge(Qt.QtCore.QObject):
                 events=int(processed),
                 work_items=int(budget.processed_items),
                 elapsed_ms=float(budget.elapsed_ms),
-                queue_remaining=int(len(queue)),
+                queue_remaining=len(queue),
                 yielded=bool(budget.should_yield()),
                 worst_event_ms=float(worst_event_ms),
                 worst_event_key=worst_event_key,
@@ -179,7 +179,7 @@ class QtKernelBridge(Qt.QtCore.QObject):
         for fn in waiters:
             try:
                 fn()
-            except Exception as exc:  # noqa: BLE001 - waiter boundary
+            except Exception as exc:
                 handle_ui_exception("kernel capacity waiter", exc)
 
     def _schedule_fallback(self) -> None:

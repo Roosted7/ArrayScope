@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 
-from arrayscope.core.slice_selection import center_index, parse_slice_selection
 from arrayscope.core.array_metadata import derived_info_for
+from arrayscope.core.slice_selection import center_index, parse_slice_selection
 from arrayscope.core.view_state import ChannelMode, ScaleMode
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
@@ -24,8 +26,14 @@ class StateSyncMixin:
 
     def _set_view_state(self, state):
         self.view_state = state.for_shape(self.data.shape)
-        self.line_plot_dimension = self.view_state.line_axis if self.view_state.line_axis is not None else 0
-        self.profile_axes = tuple(axis for axis in getattr(self, "profile_axes", (self.line_plot_dimension,)) if axis < self.view_state.ndim)
+        self.line_plot_dimension = (
+            self.view_state.line_axis if self.view_state.line_axis is not None else 0
+        )
+        self.profile_axes = tuple(
+            axis
+            for axis in getattr(self, "profile_axes", (self.line_plot_dimension,))
+            if axis < self.view_state.ndim
+        )
         if not self.profile_axes and self.view_state.line_axis is not None:
             self.profile_axes = (self.view_state.line_axis,)
         return self.view_state
@@ -55,7 +63,9 @@ class StateSyncMixin:
             self.state_binder.sync(self, names=(f"slice-axis-{axis}", f"strip-axis-{axis}"))
         self._interactive_slice_controls_synced_state = self.view_state
 
-    def _apply_slice_state(self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool) -> None:
+    def _apply_slice_state(
+        self, axis: int, state, *, reason: str, interactive: bool, immediate_axis_only: bool
+    ) -> None:
         axis = int(axis)
         self._active_slice_axis = axis
         renderer = getattr(self, "renderer", None)
@@ -87,9 +97,7 @@ class StateSyncMixin:
         # (This call was severed when the legacy normal-image update path was
         # deleted; the setting had been silently dead since.)
         if state.montage_axis is None:
-            schedule_prefetch = getattr(
-                renderer, "_schedule_prefetch_nearby_slices", None
-            )
+            schedule_prefetch = getattr(renderer, "_schedule_prefetch_nearby_slices", None)
             if callable(schedule_prefetch):
                 schedule_prefetch(state, self.renderer._evaluation_colormap_lut(state))
         self._notify_sync("dims")
@@ -120,7 +128,9 @@ class StateSyncMixin:
         state = self.view_state.with_slice(axis, value).with_axis_range(axis, None)
         if state.montage_axis == axis:
             state = state.with_montage_axis(None)
-        self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
+        self._apply_slice_state(
+            axis, state, reason="slice", interactive=True, immediate_axis_only=True
+        )
 
     def _on_slice_text_changed(self, axis, text):
         axis = int(axis)
@@ -132,7 +142,13 @@ class StateSyncMixin:
             state = self.view_state.with_slice(axis, midpoint).with_axis_range(axis, None)
             if state.montage_axis == axis:
                 state = state.with_montage_axis(None)
-            self._apply_slice_state(axis, state, reason="slice-empty-midpoint", interactive=True, immediate_axis_only=False)
+            self._apply_slice_state(
+                axis,
+                state,
+                reason="slice-empty-midpoint",
+                interactive=True,
+                immediate_axis_only=False,
+            )
             return
         try:
             selection = parse_slice_selection(text, self.data.shape[axis])
@@ -150,13 +166,17 @@ class StateSyncMixin:
             state = self.view_state.with_slice(axis, indices[0]).with_axis_range(axis, None)
             if state.montage_axis == axis:
                 state = state.with_montage_axis(None)
-            self._apply_slice_state(axis, state, reason="slice", interactive=True, immediate_axis_only=True)
+            self._apply_slice_state(
+                axis, state, reason="slice", interactive=True, immediate_axis_only=True
+            )
             return
         if self.view_state.image_axes is not None and axis in self.view_state.image_axes:
             state = self.view_state.with_axis_range(axis, indices=indices, text=text)
         else:
             state = self.view_state.with_montage_axis(axis, indices=indices, text=text)
-        self._apply_slice_state(axis, state, reason="slice-range", interactive=True, immediate_axis_only=False)
+        self._apply_slice_state(
+            axis, state, reason="slice-range", interactive=True, immediate_axis_only=False
+        )
 
     def _on_channel_clicked(self, name):
         self._set_channel(name, user_selected=True)
@@ -165,7 +185,10 @@ class StateSyncMixin:
     def _set_channel(self, channel, *, user_selected: bool, force_autolevel: bool = True):
         self._channel_user_selected = bool(user_selected)
         self._set_view_state(self.view_state.with_channel(channel))
-        if self.view_state.channel == ChannelMode.ANGLE and self.view_state.scale != ScaleMode.LINEAR:
+        if (
+            self.view_state.channel == ChannelMode.ANGLE
+            and self.view_state.scale != ScaleMode.LINEAR
+        ):
             # Log/symlog of a signed cyclic phase is meaningless and renders
             # near-black; phase always displays on a linear scale.
             self._set_view_state(self.view_state.with_scale(ScaleMode.LINEAR))
@@ -182,7 +205,11 @@ class StateSyncMixin:
         target = None
         if not is_complex and channel in complex_only:
             target = ChannelMode.REAL
-        elif is_complex and not getattr(self, "_channel_user_selected", False) and channel == ChannelMode.REAL:
+        elif (
+            is_complex
+            and not getattr(self, "_channel_user_selected", False)
+            and channel == ChannelMode.REAL
+        ):
             target = ChannelMode.COMPLEX
         if target is None or target == channel:
             return False
@@ -227,10 +254,14 @@ class StateSyncMixin:
             self.can_combine_as_complex = [False] * ndim
         else:
             self.can_combine_as_complex = [self.data.shape[i] == 2 for i in range(ndim)]
-        self.combined_as_complex = [self._current_is_complex() and self.data.shape[i] == 1 for i in range(ndim)]
+        self.combined_as_complex = [
+            self._current_is_complex() and self.data.shape[i] == 1 for i in range(ndim)
+        ]
 
         valid_dims = [i for i in range(ndim) if not self.singleton[i]]
-        if ndim >= 1 and (self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]):
+        if ndim >= 1 and (
+            self.line_plot_dimension >= ndim or self.singleton[self.line_plot_dimension]
+        ):
             self.line_plot_dimension = valid_dims[0] if valid_dims else 0
         self.profile_axes = tuple(axis for axis in getattr(self, "profile_axes", ()) if axis < ndim)
         if not self.profile_axes and ndim >= 1:
@@ -241,15 +272,15 @@ class StateSyncMixin:
         for i, container in enumerate(getattr(self, "dim_containers", [])):
             visible = i < ndim
             container.setVisible(visible)
-            self.widgets['buttons']['primary'][i].setVisible(visible)
-            self.widgets['buttons']['secondary'][i].setVisible(visible)
-            self.widgets['buttons']['profile'][i].setVisible(visible)
-            self.widgets['spins']['slice_indices'][i].setVisible(visible)
+            self.widgets["buttons"]["primary"][i].setVisible(visible)
+            self.widgets["buttons"]["secondary"][i].setVisible(visible)
+            self.widgets["buttons"]["profile"][i].setVisible(visible)
+            self.widgets["spins"]["slice_indices"][i].setVisible(visible)
             if visible:
-                self.widgets['labels']['dims'][i].setText(f'[{self.data.shape[i]}]')
-                self.widgets['spins']['slice_indices'][i].setMaximum(self.data.shape[i] - 1)
-                self.widgets['spins']['slice_indices'][i].setValue(
-                    min(self.widgets['spins']['slice_indices'][i].value(), self.data.shape[i] - 1)
+                self.widgets["labels"]["dims"][i].setText(f"[{self.data.shape[i]}]")
+                self.widgets["spins"]["slice_indices"][i].setMaximum(self.data.shape[i] - 1)
+                self.widgets["spins"]["slice_indices"][i].setValue(
+                    min(self.widgets["spins"]["slice_indices"][i].value(), self.data.shape[i] - 1)
                 )
 
         self.tab_widget.setTabEnabled(0, ndim >= 2)
@@ -266,15 +297,17 @@ class StateSyncMixin:
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
             if ndim == 1:
-                self.layout_manager.set_managed_dock_visible(self.profile_dock, True, reason="one-dimensional")
+                self.layout_manager.set_managed_dock_visible(
+                    self.profile_dock, True, reason="one-dimensional"
+                )
         if hasattr(self, "dimension_strip"):
             panel_manager = getattr(self, "panel_manager", None)
             if panel_manager is not None and hasattr(self.dimension_strip, "set_profile_available"):
-                try:
+                with contextlib.suppress(KeyError):
                     self.dimension_strip.set_profile_available(panel_manager.is_visible("profile"))
-                except KeyError:
-                    pass
-            self.dimension_strip.update_state(self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes)
+            self.dimension_strip.update_state(
+                self.data.shape, self.view_state, self.profile_axes, axes=self.document.current_axes
+            )
 
         self._update_array_info_label()
 
@@ -287,13 +320,25 @@ class StateSyncMixin:
         self._sync_controls_from_view_state()
 
     def _update_array_info_label(self):
-        info_label = self.widgets.get('labels', {}).get('arrayInfo') if isinstance(getattr(self, 'widgets', None), dict) else None
+        info_label = (
+            self.widgets.get("labels", {}).get("arrayInfo")
+            if isinstance(getattr(self, "widgets", None), dict)
+            else None
+        )
         if info_label is None:
             return
         nbytes = getattr(self.data, "nbytes", None)
-        size_text = "" if nbytes is None else f" · {nbytes / 1e6:.1f} MB" if nbytes >= 1e6 else f" · {nbytes / 1e3:.0f} kB"
+        size_text = (
+            ""
+            if nbytes is None
+            else f" · {nbytes / 1e6:.1f} MB"
+            if nbytes >= 1e6
+            else f" · {nbytes / 1e3:.0f} kB"
+        )
         info_label.setText(f"{tuple(self.data.shape)} {self.data.dtype}")
-        info_label.setToolTip(f"shape {tuple(self.data.shape)} · dtype {self.data.dtype}{size_text}")
+        info_label.setToolTip(
+            f"shape {tuple(self.data.shape)} · dtype {self.data.dtype}{size_text}"
+        )
         toolbar = getattr(self, "display_toolbar", None)
         if toolbar is not None and hasattr(toolbar, "sync_center_separator"):
             toolbar.sync_center_separator()

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 LOD_POLICY_NATIVE_ONLY = "native-only"
 LOD_REASON_NATIVE_SCALE = "native-resolution texture is appropriate at the current scale"
 LOD_REASON_NATIVE_POLICY = (
@@ -15,7 +14,9 @@ LOD_REASON_NATIVE_POLICY = (
 LOD_REASON_BACKEND_ADOPTION_PENDING = (
     "desired LOD awaits resident-LOD adoption on this backend (resident is VisPy-only, ADR 0050)"
 )
-LOD_REASON_INVALID_VIEW = "native resolution selected because viewport LOD demand could not be measured"
+LOD_REASON_INVALID_VIEW = (
+    "native resolution selected because viewport LOD demand could not be measured"
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,9 @@ class LodDemand:
         factor = max(1, int(self.desired_factor))
         factor_xy = _factor2(self.desired_factor_xy)
         texels_xy = _float2(self.source_texels_per_pixel_xy)
-        levels = tuple(sorted({max(0, int(value)) for value in tuple(self.acceptable_levels or (level,))}))
+        levels = tuple(
+            sorted({max(0, int(value)) for value in tuple(self.acceptable_levels or (level,))})
+        )
         object.__setattr__(self, "desired_level", level)
         object.__setattr__(self, "desired_factor", factor)
         object.__setattr__(self, "desired_factor_xy", factor_xy)
@@ -177,7 +180,9 @@ LOD_POLICY_RESIDENT = "resident"
 LOD_REASON_RESIDENT_MATCH = "demanded LOD level is resident and presented"
 LOD_REASON_RESIDENT_NATIVE_FALLBACK = "native fallback shown while the demanded LOD materializes"
 LOD_REASON_RESIDENT_FINER = "finer resident level presented while the demanded level materializes"
-LOD_REASON_RESIDENT_COARSER = "coarser resident level presented while the demanded level materializes"
+LOD_REASON_RESIDENT_COARSER = (
+    "coarser resident level presented while the demanded level materializes"
+)
 
 
 def factor_xy_for_level(demand: LodDemand, level: int) -> tuple[int, int]:
@@ -194,15 +199,12 @@ def factor_xy_for_level(demand: LodDemand, level: int) -> tuple[int, int]:
         return (1, 1)
     if level == int(demand.desired_level):
         return demand.desired_factor_xy
-    factor_cap = 2 ** level
+    factor_cap = 2**level
     shift = level - int(demand.desired_level)
     factors = []
     for axis_factor in demand.desired_factor_xy:
         axis_factor = max(1, int(axis_factor))
-        if shift >= 0:
-            scaled = axis_factor << shift
-        else:
-            scaled = max(1, axis_factor >> (-shift))
+        scaled = axis_factor << shift if shift >= 0 else max(1, axis_factor >> -shift)
         factors.append(max(1, min(factor_cap, int(scaled))))
     factor_x, factor_y = factors
     if max(factor_x, factor_y) != factor_cap:
@@ -294,14 +296,16 @@ def resident_lod_policy(
     return LodPolicyDecision(
         demand=demand,
         applied_level=applied_level,
-        applied_factor=2 ** applied_level,
+        applied_factor=2**applied_level,
         applied_factor_xy=factor_xy_for_level(demand, applied_level),
         policy=LOD_POLICY_RESIDENT,
         reason=reason,
     )
 
 
-def inner_uv_for_gutter(texture_shape: tuple[int, int], gutter: int = 1) -> tuple[float, float, float, float]:
+def inner_uv_for_gutter(
+    texture_shape: tuple[int, int], gutter: int = 1
+) -> tuple[float, float, float, float]:
     height, width = _shape2(texture_shape)
     gutter = max(0, int(gutter))
     if gutter <= 0:
@@ -314,7 +318,9 @@ def inner_uv_for_gutter(texture_shape: tuple[int, int], gutter: int = 1) -> tupl
     )
 
 
-def _desired_factor_for_texels(texels_per_pixel: float, *, target_min: float, target_max: float) -> int:
+def _desired_factor_for_texels(
+    texels_per_pixel: float, *, target_min: float, target_max: float
+) -> int:
     if not np.isfinite(texels_per_pixel) or texels_per_pixel <= float(target_max):
         return 1
     factor = 1
@@ -395,23 +401,23 @@ def _shape2(shape) -> tuple[int, int]:
 
 
 __all__ = [
-    "LodInfo",
-    "LodDemand",
-    "LodPolicyDecision",
     "LOD_POLICY_NATIVE_ONLY",
-    "LOD_REASON_NATIVE_SCALE",
-    "LOD_REASON_NATIVE_POLICY",
+    "LOD_POLICY_RESIDENT",
     "LOD_REASON_BACKEND_ADOPTION_PENDING",
     "LOD_REASON_INVALID_VIEW",
-    "LOD_POLICY_RESIDENT",
+    "LOD_REASON_NATIVE_POLICY",
+    "LOD_REASON_NATIVE_SCALE",
+    "LOD_REASON_RESIDENT_COARSER",
+    "LOD_REASON_RESIDENT_FINER",
     "LOD_REASON_RESIDENT_MATCH",
     "LOD_REASON_RESIDENT_NATIVE_FALLBACK",
-    "LOD_REASON_RESIDENT_FINER",
-    "LOD_REASON_RESIDENT_COARSER",
-    "select_lod_demand",
-    "native_lod_policy",
-    "resident_lod_policy",
+    "LodDemand",
+    "LodInfo",
+    "LodPolicyDecision",
     "choose_resident_level",
     "factor_xy_for_level",
     "inner_uv_for_gutter",
+    "native_lod_policy",
+    "resident_lod_policy",
+    "select_lod_demand",
 ]

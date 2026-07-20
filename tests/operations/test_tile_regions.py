@@ -3,6 +3,13 @@ import numpy as np
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import (
+    CommittedDisplayFrame,
+    DisplayFrameKey,
+    DisplayTilePayload,
+    PageBackedPresentation,
+    TiledValueSource,
+)
 from arrayscope.display.montage import make_montage_plan
 from arrayscope.display.pyramid import (
     materialize_source_grid_pages,
@@ -12,20 +19,20 @@ from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult, OperationEvaluator, _document_key
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.tile_regions import TileRegionRequest
-from arrayscope.display.model.frame import (
-    CommittedDisplayFrame,
-    DisplayFrameKey,
-    DisplayTilePayload,
-    PageBackedPresentation,
-    TiledValueSource,
-)
 from arrayscope.window.tile_data_provider import TileDataProvider
 
 
 def _setup():
     data = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
-    state = ViewState.from_shape(data.shape).with_image_axes(0, 1).with_line_axis(2).with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":")
-    plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 3), columns=2, gap=1)
+    state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_line_axis(2)
+        .with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":")
+    )
+    plan = make_montage_plan(
+        state, axis=2, indices=(0, 1, 2, 3), tile_shape=(2, 3), columns=2, gap=1
+    )
     document = ArrayDocument(data)
     evaluator = OperationEvaluator(document)
     return data, state, plan, document, evaluator
@@ -44,7 +51,7 @@ def _request(document, tile, state, region=(slice(0, 2), slice(0, 3))):
 
 
 def test_tile_region_provider_uses_committed_payload_before_evaluation():
-    data, state, plan, document, evaluator = _setup()
+    _data, state, plan, document, evaluator = _setup()
     tile = plan.tiles[1]
     image = np.full((2, 3), 99.0, dtype=float)
     geometry = DisplayGeometry(state, (2, 7), montage=plan.geometry)
@@ -67,9 +74,13 @@ def test_tile_region_provider_uses_committed_payload_before_evaluation():
             }
         ),
     )
-    provider = TileDataProvider(operation_evaluator=evaluator, document=document, committed_frame=frame, montage_plan=plan)
+    provider = TileDataProvider(
+        operation_evaluator=evaluator, document=document, committed_frame=frame, montage_plan=plan
+    )
 
-    result = provider.request_tile_region(_request(document, tile, state, (slice(0, 2), slice(0, 2))))
+    result = provider.request_tile_region(
+        _request(document, tile, state, (slice(0, 2), slice(0, 2)))
+    )
 
     assert result.source == "committed_tile_payload"
     np.testing.assert_array_equal(result.image, np.full((2, 2), 99.0))
@@ -101,9 +112,13 @@ def test_tile_region_provider_uses_committed_direct_tile_payload_before_canvas_p
             }
         ),
     )
-    provider = TileDataProvider(operation_evaluator=evaluator, document=document, committed_frame=frame, montage_plan=plan)
+    provider = TileDataProvider(
+        operation_evaluator=evaluator, document=document, committed_frame=frame, montage_plan=plan
+    )
 
-    result = provider.request_tile_region(_request(document, tile, state, (slice(0, 2), slice(1, 3))))
+    result = provider.request_tile_region(
+        _request(document, tile, state, (slice(0, 2), slice(1, 3)))
+    )
 
     assert result.source == "committed_tile_payload"
     np.testing.assert_array_equal(result.image, image[:, 1:3])
@@ -197,11 +212,18 @@ def test_tile_region_provider_reuses_display_cache_tile():
         tile,
         montage_axis=state.montage_axis,
         colormap_lut=None,
-        result=EvaluationResult(DisplayImage(cached, histogram_data=cached), eval_ms=0.0, slab_shape=cached.shape, slab_nbytes=cached.nbytes),
+        result=EvaluationResult(
+            DisplayImage(cached, histogram_data=cached),
+            eval_ms=0.0,
+            slab_shape=cached.shape,
+            slab_nbytes=cached.nbytes,
+        ),
     )
     provider = TileDataProvider(operation_evaluator=evaluator, document=document, montage_plan=plan)
 
-    result = provider.request_tile_region(_request(document, tile, state, (slice(1, 2), slice(1, 3))))
+    result = provider.request_tile_region(
+        _request(document, tile, state, (slice(1, 2), slice(1, 3)))
+    )
 
     assert result.source == "display_cache"
     np.testing.assert_array_equal(result.image, np.full((1, 2), 7.0))

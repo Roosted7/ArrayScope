@@ -8,8 +8,24 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from arrayscope.display import pyramid as pyramid_core
 from arrayscope.core.view_state import ViewState
+from arrayscope.display import pyramid as pyramid_core
+from arrayscope.display.backends.pyqtgraph.tiles import (
+    MontageTileLayer,
+    _assemble_page_backed_payload,
+    _payload_rgb_already_windowed,
+    _resolve_page_backed_payload,
+)
+from arrayscope.display.backends.vispy.tiles import TextureAtlasPool, _payload_mode
+from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import (
+    DisplayTilePayload,
+    PageBackedPresentation,
+    TiledValueSource,
+    display_tile_payload_has_semantics,
+)
+from arrayscope.display.montage import MontageTile, RenderedTile
 from arrayscope.display.pyramid import (
     LodPageCache,
     MaterializedLodPage,
@@ -20,35 +36,18 @@ from arrayscope.display.pyramid import (
     reduction_xy_to_yx,
     reduction_yx_to_xy,
 )
-from arrayscope.display.lod import LodInfo
-from arrayscope.display.backends.pyqtgraph.tiles import (
-    MontageTileLayer,
-    _assemble_page_backed_payload,
-    _payload_rgb_already_windowed,
-    _resolve_page_backed_payload,
-)
-from arrayscope.display.backends.vispy.tiles import TextureAtlasPool, _payload_mode
-from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.montage import MontageTile, RenderedTile
-from arrayscope.display.model.frame import (
-    DisplayTilePayload,
-    PageBackedPresentation,
-    TiledValueSource,
-    display_tile_payload_has_semantics,
-)
-from arrayscope.gpu import PageSlot, PageTable
-from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
-from arrayscope.presentation.tile_lifecycle import TileTarget, payload_ref_from_display_payload
-from arrayscope.render import lod as render_lod
-from arrayscope.display.slice_engine import make_image
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
     ShaderMapping,
     TexturePlaneKind,
 )
+from arrayscope.display.slice_engine import make_image
+from arrayscope.gpu import PageSlot, PageTable
+from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
+from arrayscope.presentation.tile_lifecycle import TileTarget, payload_ref_from_display_payload
+from arrayscope.render import lod as render_lod
 from tests.display.vispy_test_utils import FakeGloo
-
 
 CONTENT = ("src-anchored", ("doc", 4), ("op", "fft"))
 
@@ -171,11 +170,7 @@ def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
         (16, 18),
     )
     assert y2_x1[0].source_y_bins == ((3, 4), (4, 8), (8, 12))
-    assert tuple(
-        source_bin
-        for page in y2_x1
-        for source_bin in page.source_x_bins
-    ) == (
+    assert tuple(source_bin for page in y2_x1 for source_bin in page.source_x_bins) == (
         (5, 6),
         (6, 8),
         (8, 10),
@@ -184,18 +179,24 @@ def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
         (14, 16),
         (16, 18),
     )
-    assert sum(
-        (block.source_rect_yx[1] - block.source_rect_yx[0])
-        * (block.source_rect_yx[3] - block.source_rect_yx[2])
-        for page in y1_x2
-        for block in page.draw_blocks
-    ) == 9 * 13
-    assert sum(
-        (block.source_rect_yx[1] - block.source_rect_yx[0])
-        * (block.source_rect_yx[3] - block.source_rect_yx[2])
-        for page in y2_x1
-        for block in page.draw_blocks
-    ) == 9 * 13
+    assert (
+        sum(
+            (block.source_rect_yx[1] - block.source_rect_yx[0])
+            * (block.source_rect_yx[3] - block.source_rect_yx[2])
+            for page in y1_x2
+            for block in page.draw_blocks
+        )
+        == 9 * 13
+    )
+    assert (
+        sum(
+            (block.source_rect_yx[1] - block.source_rect_yx[0])
+            * (block.source_rect_yx[3] - block.source_rect_yx[2])
+            for page in y2_x1
+            for block in page.draw_blocks
+        )
+        == 9 * 13
+    )
     assert y1_x2[0].key != y2_x1[0].key
 
 
@@ -205,7 +206,12 @@ def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
         ("mean", lambda z: np.mean(z, dtype=np.complex64), np.complex64, COMPLEX_RG32F),
         ("mean_abs", lambda z: np.mean(np.abs(z), dtype=np.float32), np.float32, SCALAR_R32F),
         ("power", lambda z: np.mean(np.abs(z) ** 2, dtype=np.float32), np.float32, SCALAR_R32F),
-        ("rms", lambda z: np.sqrt(np.mean(np.abs(z) ** 2, dtype=np.float32)), np.float32, SCALAR_R32F),
+        (
+            "rms",
+            lambda z: np.sqrt(np.mean(np.abs(z) ** 2, dtype=np.float32)),
+            np.float32,
+            SCALAR_R32F,
+        ),
     ],
 )
 def test_reducer_families_match_direct_bin_oracles(reducer, expected, dtype, representation):
@@ -326,7 +332,7 @@ def test_materialized_representation_rejects_two_dimensional_values_under_rgb_ke
         reducer="native",
     )[0]
 
-    with pytest.raises(ValueError, match="rgb8.*RGB"):
+    with pytest.raises(ValueError, match=r"rgb8.*RGB"):
         MaterializedLodPage(bad_plan, values)
 
 
@@ -427,7 +433,9 @@ def test_materialized_page_rejects_shape_dtype_and_noncontiguous_values():
         MaterializedLodPage(page_plan, np.zeros((1, 1), dtype=np.float32))
     with pytest.raises(ValueError, match="dtype"):
         MaterializedLodPage(page_plan, np.zeros(page_plan.stored_shape, dtype=np.float64))
-    noncontiguous = np.zeros((page_plan.stored_shape[1], page_plan.stored_shape[0]), dtype=np.float32).T
+    noncontiguous = np.zeros(
+        (page_plan.stored_shape[1], page_plan.stored_shape[0]), dtype=np.float32
+    ).T
     assert not noncontiguous.flags.c_contiguous
     with pytest.raises(ValueError, match="contiguous"):
         MaterializedLodPage(page_plan, noncontiguous)
@@ -655,10 +663,10 @@ def test_running_page_owner_defers_cancellation_release_until_worker_terminal():
 
 @pytest.mark.parametrize(
     ("first_rect", "shifted_rect", "evicted_origin", "shared_origin"),
-    (
+    [
         ((0, 4, 0, 8), (0, 4, 4, 12), (0, 0), (0, 4)),
         ((0, 4, 4, 12), (0, 4, 0, 8), (0, 8), (0, 4)),
-    ),
+    ],
 )
 def test_shifted_exact_set_evicts_outgoing_page_before_shared_interior(
     first_rect,
@@ -751,9 +759,7 @@ def test_plan_validation_rejects_key_geometry_or_route_drift():
 def test_page_backed_payload_validates_cover_and_counts_aliases_once():
     rect = (100, 104, 101, 113)
     plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
-    pages = materialize_source_grid_pages(
-        source(rect), source_origin_yx=(100, 101), plans=plans
-    )
+    pages = materialize_source_grid_pages(source(rect), source_origin_yx=(100, 101), plans=plans)
     lod = LodInfo(
         level=1,
         factor=2,
@@ -826,9 +832,7 @@ def test_page_backed_payload_validates_cover_and_counts_aliases_once():
 def test_page_backed_presentation_probe_uses_exact_clipped_bin_geometry_without_semantic_admission():
     rect = (100, 104, 101, 113)
     plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
-    pages = materialize_source_grid_pages(
-        source(rect), source_origin_yx=(100, 101), plans=plans
-    )
+    pages = materialize_source_grid_pages(source(rect), source_origin_yx=(100, 101), plans=plans)
     lod = LodInfo(1, 2, (4, 12), (2, 7), 0)
     backing = PageBackedPresentation(plans, pages, rect, lod)
     payload = DisplayTilePayload(
@@ -850,13 +854,14 @@ def test_page_backed_presentation_probe_uses_exact_clipped_bin_geometry_without_
     second = backing.sample_presented_value_at_native(100, 102)
     assert first == pytest.approx((10101 + 10201) / 2)
     assert second == pytest.approx((10102 + 10103 + 10202 + 10203) / 4)
-    assert semantic_values.value_at(
-        SimpleNamespace(tile_number=0, local_y=0, local_x=0)
-    ) is None
-    assert semantic_values.tile_region(
-        SimpleNamespace(tile_number=0),
-        (slice(0, 4), slice(0, 12)),
-    ) is None
+    assert semantic_values.value_at(SimpleNamespace(tile_number=0, local_y=0, local_x=0)) is None
+    assert (
+        semantic_values.tile_region(
+            SimpleNamespace(tile_number=0),
+            (slice(0, 4), slice(0, 12)),
+        )
+        is None
+    )
     assert not display_tile_payload_has_semantics(payload)
 
 
@@ -885,9 +890,10 @@ def test_page_backed_payload_uses_only_explicit_native_planes_for_semantic_reads
     values = TiledValueSource({0: payload})
 
     assert display_tile_payload_has_semantics(payload)
-    assert values.value_at(
-        SimpleNamespace(tile_number=0, local_y=3, local_x=11)
-    ) == semantic_histogram[3, 11]
+    assert (
+        values.value_at(SimpleNamespace(tile_number=0, local_y=3, local_x=11))
+        == semantic_histogram[3, 11]
+    )
     region, histogram, kind = values.tile_region(
         SimpleNamespace(tile_number=0),
         (slice(1, 4), slice(2, 9)),
@@ -900,9 +906,7 @@ def test_page_backed_payload_uses_only_explicit_native_planes_for_semantic_reads
 def test_page_backed_presentation_sample_crosses_clipped_pages_without_becoming_semantic():
     rect = (100, 105, 101, 114)
     plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 2))
-    pages = materialize_source_grid_pages(
-        source(rect), source_origin_yx=(100, 101), plans=plans
-    )
+    pages = materialize_source_grid_pages(source(rect), source_origin_yx=(100, 101), plans=plans)
     assert len(plans) > 2
     texture_shape = (
         max(item.stored_rect_yx[1] for item in plans)
@@ -940,18 +944,19 @@ def test_page_backed_presentation_sample_crosses_clipped_pages_without_becoming_
 
     np.testing.assert_array_equal(region, expected)
     assert region.shape == (5, 13)
-    assert TiledValueSource({0: payload}).tile_region(
-        SimpleNamespace(montage_index=0),
-        (slice(0, 5), slice(0, 13)),
-    ) is None
+    assert (
+        TiledValueSource({0: payload}).tile_region(
+            SimpleNamespace(montage_index=0),
+            (slice(0, 5), slice(0, 13)),
+        )
+        is None
+    )
 
 
 def test_incomplete_page_backing_refuses_presentation_sample_and_semantic_source_stays_empty():
     rect = (0, 8, 0, 8)
     plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 2))
-    first_page = materialize_lod_page(
-        source(rect), source_origin_yx=(0, 0), plan=plans[0]
-    )
+    first_page = materialize_lod_page(source(rect), source_origin_yx=(0, 0), plan=plans[0])
     lod = LodInfo(1, 2, (8, 8), (4, 4), 0)
     payload = DisplayTilePayload(
         0,
@@ -970,10 +975,13 @@ def test_incomplete_page_backing_refuses_presentation_sample_and_semantic_source
             np.arange(0, 8, dtype=np.int64),
             np.arange(0, 8, dtype=np.int64),
         )
-    assert TiledValueSource({0: payload}).tile_region(
-        SimpleNamespace(montage_index=0),
-        (slice(0, 8), slice(0, 8)),
-    ) is None
+    assert (
+        TiledValueSource({0: payload}).tile_region(
+            SimpleNamespace(montage_index=0),
+            (slice(0, 8), slice(0, 8)),
+        )
+        is None
+    )
 
 
 def test_page_backed_complex_presentation_sample_maps_all_pages_without_semantic_admission():
@@ -1018,18 +1026,19 @@ def test_page_backed_complex_presentation_sample_maps_all_pages_without_semantic
     assert presented.shape == (4, 9)
     assert np.iscomplexobj(presented)
     assert np.count_nonzero(np.abs(presented)) == presented.size
-    assert TiledValueSource({0: payload}).tile_region(
-        SimpleNamespace(tile_number=0),
-        (slice(0, 4), slice(0, 9)),
-    ) is None
+    assert (
+        TiledValueSource({0: payload}).tile_region(
+            SimpleNamespace(tile_number=0),
+            (slice(0, 4), slice(0, 9)),
+        )
+        is None
+    )
 
 
 def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
     rect = (100, 104, 101, 113)
     plans = plan(rect=rect, reduction=(1, 1), page_shape=(2, 3))
-    pages = materialize_source_grid_pages(
-        source(rect), source_origin_yx=(100, 101), plans=plans
-    )
+    pages = materialize_source_grid_pages(source(rect), source_origin_yx=(100, 101), plans=plans)
     lod = LodInfo(1, 2, (4, 12), (2, 7), 0)
     payload = DisplayTilePayload(
         0,
@@ -1046,9 +1055,9 @@ def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
     for page in pages:
         for index, (y0, y1, x0, x1) in enumerate(page.plan.sample_source_rects_yx):
             row, column = divmod(index, page.plan.stored_shape[1])
-            expected[y0 - rect[0] : y1 - rect[0], x0 - rect[2] : x1 - rect[2]] = (
-                page.values[row, column]
-            )
+            expected[y0 - rect[0] : y1 - rect[0], x0 - rect[2] : x1 - rect[2]] = page.values[
+                row, column
+            ]
     np.testing.assert_array_equal(assembled.image, expected)
     assert assembled.lod == lod
 
@@ -1066,9 +1075,7 @@ def _expanded_direct_oracle(reduction):
 
 
 def _assert_vispy_scalar_pages_match_oracle(pool, pages, reduction):
-    values_by_rect = dict(
-        zip(reduction.source_rects, reduction.values.reshape(-1), strict=True)
-    )
+    values_by_rect = dict(zip(reduction.source_rects, reduction.values.reshape(-1), strict=True))
     for materialized in pages:
         page_index, slot_index = pool.resident_slots[materialized.key]
         atlas = pool.pages[page_index]
@@ -1152,8 +1159,7 @@ def test_clipped_page_backed_backends_share_direct_oracle_and_exact_draw_geometr
     source_y_edges = {edge for source_rect in oracle.source_rects for edge in source_rect[:2]}
     source_x_edges = {edge for source_rect in oracle.source_rects for edge in source_rect[2:]}
     assert sum(
-        (part.world_rect[2] - part.world_rect[0])
-        * (part.world_rect[3] - part.world_rect[1])
+        (part.world_rect[2] - part.world_rect[0]) * (part.world_rect[3] - part.world_rect[1])
         for part in parts
     ) == pytest.approx(values.size)
     for part in parts:
@@ -1170,15 +1176,18 @@ def test_clipped_page_backed_backends_share_direct_oracle_and_exact_draw_geometr
             world_x + bx1 - rect[2],
             world_y + by1 - rect[0],
         )
-        assert sum(
-            int(
-                part.world_rect[0] <= expected_world[0]
-                and part.world_rect[1] <= expected_world[1]
-                and expected_world[2] <= part.world_rect[2]
-                and expected_world[3] <= part.world_rect[3]
+        assert (
+            sum(
+                int(
+                    part.world_rect[0] <= expected_world[0]
+                    and part.world_rect[1] <= expected_world[1]
+                    and expected_world[2] <= part.world_rect[2]
+                    and expected_world[3] <= part.world_rect[3]
+                )
+                for part in parts
             )
-            for part in parts
-        ) == 1
+            == 1
+        )
 
 
 def test_mean_abs_page_values_match_both_backends_and_never_alias_complex_mean():
@@ -1578,10 +1587,13 @@ def test_two_fine_targets_assemble_from_one_coarse_actual_page():
     for y in range(8):
         for x in range(8):
             assert backing.sample_presented_value_at_native(y, x) == expected[y, x]
-    assert TiledValueSource({0: payload}).tile_region(
-        SimpleNamespace(tile_number=0),
-        (slice(1, 7), slice(2, 8)),
-    ) is None
+    assert (
+        TiledValueSource({0: payload}).tile_region(
+            SimpleNamespace(tile_number=0),
+            (slice(1, 7), slice(2, 8)),
+        )
+        is None
+    )
 
 
 def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app):
@@ -1590,7 +1602,9 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
     targets = plan(rect=rect, reduction=(2, 2), page_shape=(4, 4))
     level_three = plan(rect=rect, reduction=(3, 3), page_shape=(2, 2))
     level_four = plan(rect=rect, reduction=(4, 4), page_shape=(2, 2))
-    assert len(targets) == 2 and len(level_three) == 2 and len(level_four) == 1
+    assert len(targets) == 2
+    assert len(level_three) == 2
+    assert len(level_four) == 1
     pages = (
         materialize_lod_page(values, source_origin_yx=(0, 0), plan=level_three[0]),
         materialize_lod_page(values, source_origin_yx=(0, 0), plan=level_four[0]),
@@ -1624,15 +1638,10 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
     assert not ref.satisfies_target(
         TileTarget(0, 0, ("heterogeneous-page-fallback", 0), lod_level=4)
     )
-    assert ref.satisfies_target(
-        TileTarget(0, 0, ("heterogeneous-page-fallback", 0), lod_level=5)
-    )
+    assert ref.satisfies_target(TileTarget(0, 0, ("heterogeneous-page-fallback", 0), lod_level=5))
 
     assembly = _resolve_page_backed_payload(payload)
-    assert tuple(
-        max(item.actual_key.lod.reduction)
-        for item in assembly.resolutions
-    ) == (3, 4)
+    assert tuple(max(item.actual_key.lod.reduction) for item in assembly.resolutions) == (3, 4)
     assert assembly.payload.image.shape == values.shape
     assert backing.sample_presented_value_at_native(0, 0) == pages[0].values[0, 0]
     assert backing.sample_presented_value_at_native(0, 31) == pages[1].values[0, 1]
@@ -1648,13 +1657,11 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
         rgb_already_windowed=False,
         reserve_count=len(pages),
     )
-    vispy = pool.resolve_page_targets(
-        {index: target.key for index, target in enumerate(targets)}
+    vispy = pool.resolve_page_targets({index: target.key for index, target in enumerate(targets)})
+    assert tuple(max(vispy[index].actual_key.lod.reduction) for index in range(len(targets))) == (
+        3,
+        4,
     )
-    assert tuple(
-        max(vispy[index].actual_key.lod.reduction)
-        for index in range(len(targets))
-    ) == (3, 4)
 
 
 def test_clipped_fine_targets_map_through_actual_coarse_page_bins():
@@ -1706,10 +1713,13 @@ def test_clipped_fine_targets_map_through_actual_coarse_page_bins():
     # x=101..103 is the clipped leading factor-eight bin; x=104 starts the
     # next actual coarse sample. Uniform scale/offset flooring aliases it.
     assert presented[0, 2] != presented[0, 3]
-    assert TiledValueSource({0: payload}).tile_region(
-        SimpleNamespace(tile_number=0),
-        (slice(0, 9), slice(0, 13)),
-    ) is None
+    assert (
+        TiledValueSource({0: payload}).tile_region(
+            SimpleNamespace(tile_number=0),
+            (slice(0, 9), slice(0, 13)),
+        )
+        is None
+    )
 
 
 def test_pyqtgraph_incomplete_complex_pages_use_honest_mapped_native_fallback(qt_app):
@@ -1984,25 +1994,24 @@ def test_phase_vector_backend_route_blacks_cancellation_and_rejects_mean_family(
     assert resolved.resolutions[0].actual_key == target.key
     np.testing.assert_array_equal(resolved.payload.image, np.zeros((2, 2, 3), np.uint8))
     vispy = _vispy_resolve_materialized_pages(target, (phase_page,))
-    assert vispy is not None and vispy.actual_key == target.key
+    assert vispy is not None
+    assert vispy.actual_key == target.key
 
 
 @pytest.mark.parametrize(
     ("channel", "reducer"),
-    (
+    [
         ("real", "mean"),
         ("imag", "mean"),
         ("abs", "mean_abs"),
         ("angle", "phase_vector"),
         ("complex", "mean"),
-    ),
+    ],
 )
 def test_live_complex_display_channels_select_canonical_reducer_family(channel, reducer):
     values = np.asarray([[0.0j, 1.0 + 0.0j], [-1.0 + 0.0j, 0.0j]], dtype=np.complex64)
     rendered = _rendered_complex_channel(values, channel)
-    source_values = render_lod.canonical_value_source_for_rendered(
-        rendered, shader_display=False
-    )
+    source_values = render_lod.canonical_value_source_for_rendered(rendered, shader_display=False)
     assert np.iscomplexobj(source_values)
     observed, _dtype, _representation = render_lod._reducer_format_for_rendered(
         rendered, source_values

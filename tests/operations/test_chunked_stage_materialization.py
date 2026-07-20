@@ -23,14 +23,22 @@ def _fft_plan(shape=(6, 5, 4)):
     document = ArrayDocument(data, operations=(CenteredFFT(axis=len(shape) - 1),))
     state = ViewState.from_shape(document.current_shape).with_slice(len(shape) - 1, 1)
     plan = plan_slab(document, request_for_image(state))
-    candidate = tuple(candidate for candidate in plan.region_plan.cache_candidates if candidate.retain)[-1]
+    candidate = tuple(
+        candidate for candidate in plan.region_plan.cache_candidates if candidate.retain
+    )[-1]
     return document, plan, candidate
 
 
 def test_fft_axis_stage_chunks_only_non_blocking_axes():
     _document, plan, candidate = _fft_plan()
 
-    chunk_plan = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320, allowed_chunk_axes=(0, 1))
+    chunk_plan = plan_chunked_stage_materialization(
+        plan.region_plan,
+        candidate,
+        _MemoryPolicy(),
+        target_chunk_bytes=320,
+        allowed_chunk_axes=(0, 1),
+    )
 
     assert chunk_plan is not None
     assert 2 in chunk_plan.blocking_axes
@@ -41,7 +49,9 @@ def test_fft_axis_stage_chunks_only_non_blocking_axes():
 def test_chunk_plan_defaults_to_all_non_blocking_axes():
     _document, plan, candidate = _fft_plan()
 
-    chunk_plan = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320)
+    chunk_plan = plan_chunked_stage_materialization(
+        plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320
+    )
 
     assert chunk_plan is not None
     assert chunk_plan.chunk_axes == (0,)
@@ -59,7 +69,9 @@ def test_chunked_stage_equals_non_chunked_stage():
     document, plan, candidate = _fft_plan()
     context = EvaluationContext(ComputeLane.STAGE, None, 1, _MemoryPolicy())
 
-    expected = materialize_stage_candidate(document, plan.region_plan, candidate, document_key=("doc",), evaluation_context=context)
+    expected = materialize_stage_candidate(
+        document, plan.region_plan, candidate, document_key=("doc",), evaluation_context=context
+    )
     actual = materialize_stage_candidate_chunked(
         document,
         plan.region_plan,
@@ -81,13 +93,19 @@ def test_chunked_stage_preserves_fftshift_region_semantics():
     data = np.zeros(shape, dtype=np.complex64)
     for index in range(shape[2]):
         data[:, :, index] = 1.0 if index % 2 == 0 else -1.0
-    document = ArrayDocument(data, operations=(CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2)))
+    document = ArrayDocument(
+        data, operations=(CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+    )
     state = ViewState.from_shape(document.current_shape).with_slice(2, 0)
     plan = plan_slab(document, request_for_image(state))
-    candidate = tuple(candidate for candidate in plan.region_plan.cache_candidates if candidate.retain)[-1]
+    candidate = tuple(
+        candidate for candidate in plan.region_plan.cache_candidates if candidate.retain
+    )[-1]
     context = EvaluationContext(ComputeLane.STAGE, None, 1, _MemoryPolicy())
 
-    expected = materialize_stage_candidate(document, plan.region_plan, candidate, document_key=("doc",), evaluation_context=context)
+    expected = materialize_stage_candidate(
+        document, plan.region_plan, candidate, document_key=("doc",), evaluation_context=context
+    )
     actual = materialize_stage_candidate_chunked(
         document,
         plan.region_plan,
@@ -134,7 +152,13 @@ def test_chunked_stage_cancellation_prevents_cache_store():
 def test_no_chunk_plan_when_only_blocking_axis_can_be_split():
     _document, plan, candidate = _fft_plan(shape=(1, 1, 16))
 
-    chunk_plan = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=16, allowed_chunk_axes=(0, 1))
+    chunk_plan = plan_chunked_stage_materialization(
+        plan.region_plan,
+        candidate,
+        _MemoryPolicy(),
+        target_chunk_bytes=16,
+        allowed_chunk_axes=(0, 1),
+    )
 
     assert chunk_plan is None
 
@@ -142,8 +166,20 @@ def test_no_chunk_plan_when_only_blocking_axis_can_be_split():
 def test_chunk_plan_respects_memory_threshold():
     _document, plan, candidate = _fft_plan(shape=(12, 4, 4))
 
-    small = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=320, allowed_chunk_axes=(0, 1))
-    large = plan_chunked_stage_materialization(plan.region_plan, candidate, _MemoryPolicy(), target_chunk_bytes=1024 * 1024, allowed_chunk_axes=(0, 1))
+    small = plan_chunked_stage_materialization(
+        plan.region_plan,
+        candidate,
+        _MemoryPolicy(),
+        target_chunk_bytes=320,
+        allowed_chunk_axes=(0, 1),
+    )
+    large = plan_chunked_stage_materialization(
+        plan.region_plan,
+        candidate,
+        _MemoryPolicy(),
+        target_chunk_bytes=1024 * 1024,
+        allowed_chunk_axes=(0, 1),
+    )
 
     assert small is not None
     assert len(small.chunks) > 1

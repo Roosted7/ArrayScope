@@ -24,24 +24,26 @@ optimistic bookkeeping — these rules are load-bearing):
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 import numpy as np
 
+from arrayscope.core.trace import emit_trace
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
-    LOD_REASON_NATIVE_POLICY,
     LOD_POLICY_RESIDENT,
+    LOD_REASON_NATIVE_POLICY,
     LodInfo,
     choose_resident_level,
     factor_xy_for_level,
     native_lod_policy,
-    resident_presentation_rank,
     resident_lod_policy,
+    resident_presentation_rank,
     select_lod_demand,
 )
-from arrayscope.display.montage import RenderedTile
 from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
+from arrayscope.display.montage import RenderedTile
 from arrayscope.display.pyramid import (
     LodPageCache,
     LodPagePlan,
@@ -51,7 +53,6 @@ from arrayscope.display.pyramid import (
     plan_source_grid_pages,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, TexturePlaneKind
-from arrayscope.core.trace import emit_trace
 from arrayscope.gpu import DataChunkKey
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
@@ -59,11 +60,9 @@ from arrayscope.gpu.keys import (
     REDUCER_MEAN_ABS,
     REDUCER_NATIVE,
     REDUCER_PHASE_VECTOR,
-    RGB8,
     SCALAR_R32F,
 )
 from arrayscope.presentation import ClaimOwner, LevelPhase
-
 
 PREVIEW_FLOOR_MIN_LEVEL = 4
 
@@ -156,9 +155,7 @@ def texture_source_for_rendered(
         if not bool(shader_display):
             if source.ndim >= 3 and source.shape[-1] in (3, 4):
                 texture_kind = TexturePlaneKind.RGB8
-            elif np.iscomplexobj(source) or (
-                source.ndim >= 3 and source.shape[-1] == 2
-            ):
+            elif np.iscomplexobj(source) or (source.ndim >= 3 and source.shape[-1] == 2):
                 texture_kind = TexturePlaneKind.COMPLEX_RG32F
             else:
                 texture_kind = TexturePlaneKind.SCALAR_R32F
@@ -184,9 +181,7 @@ def canonical_value_source_for_rendered(
     semantic = getattr(rendered, "semantic_data", None)
     if semantic is not None and np.iscomplexobj(semantic):
         return np.asarray(semantic)
-    source, _histogram, _kind = texture_source_for_rendered(
-        rendered, shader_display=shader_display
-    )
+    source, _histogram, _kind = texture_source_for_rendered(rendered, shader_display=shader_display)
     return np.asarray(source)
 
 
@@ -208,7 +203,10 @@ def component_for_rendered(rendered: RenderedTile, *, shader_display: bool = Tru
     texture_kind = getattr(rendered, "texture_kind", None)
     if texture_kind is None:
         return "scalar"
-    if TexturePlaneKind(getattr(texture_kind, "value", texture_kind)) == TexturePlaneKind.SCALAR_R32F:
+    if (
+        TexturePlaneKind(getattr(texture_kind, "value", texture_kind))
+        == TexturePlaneKind.SCALAR_R32F
+    ):
         return "scalar"
     return str(getattr(texture_kind, "value", texture_kind))
 
@@ -226,9 +224,7 @@ def page_set_key_for_rendered(
     resident levels for tiles that have not been rendered yet.
     """
 
-    source = canonical_value_source_for_rendered(
-        rendered, shader_display=shader_display
-    )
+    source = canonical_value_source_for_rendered(rendered, shader_display=shader_display)
     reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
     factor_x, factor_y = factor_xy_for_level(demand, int(level))
     reduction_yx = (int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1)
@@ -287,7 +283,9 @@ def page_set_key_for(
     )
 
 
-def _reducer_format_for_rendered(rendered: RenderedTile, source: np.ndarray) -> tuple[str, str, str]:
+def _reducer_format_for_rendered(
+    rendered: RenderedTile, source: np.ndarray
+) -> tuple[str, str, str]:
     mapping = getattr(rendered, "shader_mapping", None)
     component = getattr(mapping, "component", ShaderComponent.REAL)
     component = ShaderComponent(getattr(component, "value", component))
@@ -405,7 +403,11 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
         if channel == "abs":
             reducer, planned_dtype, representation = REDUCER_MEAN_ABS, "float32", SCALAR_R32F
         elif channel == "angle":
-            reducer, planned_dtype, representation = REDUCER_PHASE_VECTOR, "complex64", COMPLEX_RG32F
+            reducer, planned_dtype, representation = (
+                REDUCER_PHASE_VECTOR,
+                "complex64",
+                COMPLEX_RG32F,
+            )
         elif channel == "complex":
             reducer, planned_dtype, representation = REDUCER_MEAN, "complex64", COMPLEX_RG32F
         else:
@@ -457,6 +459,8 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
     if route_cache is not None:
         route_cache[cache_key] = key
     return key
+
+
 # --------------------------------------------------------------------------
 # Policy & demand (session-side)
 # --------------------------------------------------------------------------
@@ -464,8 +468,7 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
 
 def resident_lod_active(session) -> bool:
     return bool(
-        str(session.lod_policy_mode) == LOD_POLICY_RESIDENT
-        and session.lod_page_cache is not None
+        str(session.lod_policy_mode) == LOD_POLICY_RESIDENT and session.lod_page_cache is not None
     )
 
 
@@ -485,7 +488,9 @@ def selected_lod_factor(session) -> int:
             or 0
         )
         if base_preview > 0:
-            desired_level = int(getattr(session.lod_policy_decision.demand, "desired_level", 0) or 0)
+            desired_level = int(
+                getattr(session.lod_policy_decision.demand, "desired_level", 0) or 0
+            )
             session.lod_preview_level = max(base_preview, desired_level)
     else:
         session.lod_policy_decision = native_lod_policy(
@@ -537,17 +542,11 @@ def _demand_key_sig(demand) -> tuple:
 
 
 def _page_set_complete(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
-    return bool(
-        isinstance(cache, LodPageCache)
-        and cache.resolve_plans(key.plans) is not None
-    )
+    return bool(isinstance(cache, LodPageCache) and cache.resolve_plans(key.plans) is not None)
 
 
 def _page_set_exact(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
-    return bool(
-        isinstance(cache, LodPageCache)
-        and cache.exact_pages(key.plans) is not None
-    )
+    return bool(isinstance(cache, LodPageCache) and cache.exact_pages(key.plans) is not None)
 
 
 def _page_set_materialized_pages(
@@ -617,7 +616,9 @@ def tile_resident_levels(session, rendered: RenderedTile, *, demand) -> tuple[in
     guard = (int(pyramid.revision), demand_sig)
     memo_key = (
         int(rendered.tile.source_index),
-        component_for_rendered(rendered, shader_display=bool(getattr(session, "shader_display", True))),
+        component_for_rendered(
+            rendered, shader_display=bool(getattr(session, "shader_display", True))
+        ),
     )
     hit = memo.get(memo_key)
     if hit is not None and hit[0] == guard:
@@ -923,7 +924,9 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
             # busy timer loop.  Floor progress (a presentable or closer
             # resident level) only requests a commit; the build's floor
             # pass does the actual work.
-            if floor_can_progress(session, int(tile_number), tile=visible_by_number.get(int(tile_number))):
+            if floor_can_progress(
+                session, int(tile_number), tile=visible_by_number.get(int(tile_number))
+            ):
                 commit_needed = True
             continue
         payload = acknowledged_payloads.get(
@@ -932,7 +935,11 @@ def mark_ladder_swaps_for_current_demand(session) -> bool:
         )
         presented_level = _conservative_actual_level_for_payload(payload)
         resident = set(tile_resident_levels(session, rendered, demand=demand))
-        if payload is not None and presented_level > 0 and presented_level in demand.acceptable_levels:
+        if (
+            payload is not None
+            and presented_level > 0
+            and presented_level in demand.acceptable_levels
+        ):
             # The presented texture itself is materialized and resident;
             # keep it eligible even when the pyramid cache dropped it so a
             # transient cache miss never forces a native down-swap.
@@ -1002,9 +1009,7 @@ def admit_retained_preview_level(
         return None
     shader_display = bool(shader_display)
     level = int(preview_level)
-    source = canonical_value_source_for_rendered(
-        rendered, shader_display=shader_display
-    )
+    source = canonical_value_source_for_rendered(rendered, shader_display=shader_display)
     reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
     height, width = (int(value) for value in np.shape(source)[:2])
     plans = plan_source_grid_pages(
@@ -1158,9 +1163,9 @@ def _compute_best_floor_key(
 ):
     """Compute one floor verdict without the epoch memo."""
 
-    session._best_floor_key_compute_count = int(
-        getattr(session, "_best_floor_key_compute_count", 0) or 0
-    ) + 1
+    session._best_floor_key_compute_count = (
+        int(getattr(session, "_best_floor_key_compute_count", 0) or 0) + 1
+    )
 
     pyramid = session.lod_page_cache
     demand = session.lod_policy_decision.demand
@@ -1312,15 +1317,10 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
     if best_actual_level == presented_actual_level:
         current_backing = getattr(payload, "page_backing", None)
         current_resolved = getattr(current_backing, "resolved_page_set", None)
-        current_actual_keys = tuple(
-            getattr(current_resolved, "actual_keys", ()) or ()
-        )
-        current_requested_keys = tuple(
-            getattr(current_backing, "requested_keys", ()) or ()
-        )
-        if (
-            current_actual_keys != tuple(resolved.actual_keys)
-            or current_requested_keys != tuple(best[0].page_keys)
+        current_actual_keys = tuple(getattr(current_resolved, "actual_keys", ()) or ())
+        current_requested_keys = tuple(getattr(current_backing, "requested_keys", ()) or ())
+        if current_actual_keys != tuple(resolved.actual_keys) or current_requested_keys != tuple(
+            best[0].page_keys
         ):
             return True
     if str(getattr(payload, "quality", "exact")) != "preview":
@@ -1330,10 +1330,7 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
         # floor left the ladder with zero work (target resident) while the
         # backend stayed permanently coarse.
         desired = int(session.lod_policy_decision.demand.desired_level)
-        return bool(
-            presented_actual_level > desired
-            and best_actual_level < presented_actual_level
-        )
+        return bool(presented_actual_level > desired and best_actual_level < presented_actual_level)
     return bool(
         best_actual_level != presented_actual_level
         or best_quality != str(getattr(payload, "quality", "preview") or "preview")
@@ -1355,10 +1352,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
     cache = session.lod_page_cache
     if cache is None:
         return
-    by_number = {
-        int(tile.montage_index): tile
-        for tile in tuple(session.visible_tiles)
-    }
+    by_number = {int(tile.montage_index): tile for tile in tuple(session.visible_tiles)}
     built = 0
     for tile_number in tuple(dict.fromkeys(int(number) for number in tuple(tile_numbers))):
         if max_count is not None and built >= int(max_count):
@@ -1399,12 +1393,8 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             presented_actual_level = _conservative_actual_level_for_payload(existing)
             existing_backing = getattr(existing, "page_backing", None)
             existing_resolved = getattr(existing_backing, "resolved_page_set", None)
-            existing_actual_keys = tuple(
-                getattr(existing_resolved, "actual_keys", ()) or ()
-            )
-            existing_requested_keys = tuple(
-                getattr(existing_backing, "requested_keys", ()) or ()
-            )
+            existing_actual_keys = tuple(getattr(existing_resolved, "actual_keys", ()) or ())
+            existing_requested_keys = tuple(getattr(existing_backing, "requested_keys", ()) or ())
             if (
                 presented_actual_level == int(coarsest_actual_level)
                 and str(getattr(existing, "quality", "preview") or "preview")
@@ -1530,7 +1520,9 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         if lifecycle is not None and hasattr(lifecycle, "remember_presentable"):
             lifecycle.remember_presentable(tile_number, payload)
         session.pending_payload_upserts[tile_number] = None
-        session.lod_floor_presentations = int(getattr(session, "lod_floor_presentations", 0) or 0) + 1
+        session.lod_floor_presentations = (
+            int(getattr(session, "lod_floor_presentations", 0) or 0) + 1
+        )
         built += 1
 
 
@@ -1561,7 +1553,9 @@ def resident_texture_for_rendered_tile(
     """
 
     source_shape = tuple(int(value) for value in source.shape[:2])
-    native_lod = LodInfo(level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0)
+    native_lod = LodInfo(
+        level=0, factor=1, source_shape=source_shape, texture_shape=source_shape, gutter=0
+    )
     if source.ndim >= 3 and source.shape[-1] in (3, 4):
         native_texture_kind = TexturePlaneKind.RGB8
     elif np.iscomplexobj(source) or (source.ndim >= 3 and source.shape[-1] == 2):

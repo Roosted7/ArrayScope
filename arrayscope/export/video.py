@@ -1,11 +1,14 @@
-import numpy as np
-import os
 import logging
+import os
+
+import numpy as np
+
 from arrayscope.app.qt_binding import prefer_pyside6
 
 prefer_pyside6()
 
-from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
 from arrayscope.display.slice_engine import make_export_frame
 from arrayscope.operations.evaluator import evaluate_export_frame_snapshot
 
@@ -18,7 +21,8 @@ except AttributeError:
 # Try to import imageio for MP4/WebM support
 try:
     import imageio
-    import imageio_ffmpeg
+    import imageio_ffmpeg  # noqa: F401 -- probes that imageio's ffmpeg backend is importable
+
     HAS_IMAGEIO = True
 except ImportError:
     logging.getLogger(__name__).warning("imageio not available. MP4/WebM export will be disabled.")
@@ -27,13 +31,28 @@ except ImportError:
 
 class VideoExportWorker(QtCore.QThread):
     """Worker thread for video export with progress signals"""
+
     progress_updated = Signal(int, str)  # (current_frame, status_text)
     export_finished = Signal(bool, str)  # (success, message)
-    
-    def __init__(self, data=None, view_state=None, export_dim=0, output_path=None, fps=10, format_type="gif",
-                 levels=None, pixel_ratio_mode='square_pixels', display_mode='square_pixels',
-                 widget_ratio=1.0, colormap_lut=None, window_level_mode='displayed',
-                 evaluator=None, data_shape=None, document=None):
+
+    def __init__(
+        self,
+        data=None,
+        view_state=None,
+        export_dim=0,
+        output_path=None,
+        fps=10,
+        format_type="gif",
+        levels=None,
+        pixel_ratio_mode="square_pixels",
+        display_mode="square_pixels",
+        widget_ratio=1.0,
+        colormap_lut=None,
+        window_level_mode="displayed",
+        evaluator=None,
+        data_shape=None,
+        document=None,
+    ):
         super().__init__()
         self.pixel_ratio_mode = pixel_ratio_mode
         self.display_mode = display_mode
@@ -42,28 +61,30 @@ class VideoExportWorker(QtCore.QThread):
         self.data = data
         self.evaluator = evaluator
         self.document = document
-        self.data_shape = tuple(data_shape if data_shape is not None else getattr(data, "shape", ()))
+        self.data_shape = tuple(
+            data_shape if data_shape is not None else getattr(data, "shape", ())
+        )
         self.view_state = view_state
         self.export_dim = export_dim
         self.output_path = output_path
         self.fps = fps
         self.format_type = format_type
         self.levels = levels
-        self.window_level_mode = (window_level_mode or 'displayed')
+        self.window_level_mode = window_level_mode or "displayed"
         self._is_running = True
-        
+
     def run(self):
         """Main export routine"""
         try:
             total_frames = self.data_shape[self.export_dim]
             frames = []
-            
+
             # Generate all frames first to compute consistent levels if needed
             for frame_idx in range(total_frames):
                 if not self._is_running:
                     self.export_finished.emit(False, "Export cancelled")
                     return
-                
+
                 if self.evaluator is not None:
                     display_frame = self.evaluator.export_frame(
                         self.view_state,
@@ -93,28 +114,29 @@ class VideoExportWorker(QtCore.QThread):
                 # Apply pixel ratio scaling
                 frame_rgb = self._apply_pixel_ratio(frame_rgb)
 
-
                 frames.append(frame_rgb)
-                
+
                 status = f"Processing frame {frame_idx + 1}/{total_frames}"
                 self.progress_updated.emit(frame_idx + 1, status)
-            
+
             # Save video file
             self.progress_updated.emit(total_frames, "Encoding video...")
-            if self.format_type == 'gif':
+            if self.format_type == "gif":
                 self._save_gif(frames)
-            elif self.format_type == 'png':
+            elif self.format_type == "png":
                 self._save_png_frames(frames)
-            elif self.format_type in ('mp4', 'webm'):
+            elif self.format_type in ("mp4", "webm"):
                 if not HAS_IMAGEIO:
-                    raise RuntimeError(f"imageio not installed. Cannot save {self.format_type.upper()} files. "
-                                     f"Install with: pip install imageio[ffmpeg]")
+                    raise RuntimeError(
+                        f"imageio not installed. Cannot save {self.format_type.upper()} files. "
+                        f"Install with: pip install imageio[ffmpeg]"
+                    )
                 self._save_video(frames)
-            
+
             self.export_finished.emit(True, f"Video exported successfully to {self.output_path}")
-            
+
         except Exception as e:
-            self.export_finished.emit(False, f"Export failed: {str(e)}")
+            self.export_finished.emit(False, f"Export failed: {e!s}")
 
     def _display_image_to_rgb(self, display_image):
         frame_data = np.asarray(display_image.data)
@@ -122,7 +144,7 @@ class VideoExportWorker(QtCore.QThread):
         if frame_data.ndim == 3 and frame_data.shape[-1] in (3, 4):
             return np.ascontiguousarray(frame_data[..., :3].astype(np.uint8))
 
-        if (str(self.window_level_mode).lower() == 'displayed') and (self.levels is not None):
+        if (str(self.window_level_mode).lower() == "displayed") and (self.levels is not None):
             vmin, vmax = self.levels
         elif display_image.default_levels is not None:
             vmin, vmax = display_image.default_levels
@@ -154,22 +176,25 @@ class VideoExportWorker(QtCore.QThread):
     def _apply_view_flips(self, frame_rgb):
         try:
             primary, secondary = self.view_state.image_axes
-            if not self.view_state.axis_flipped[primary]:  # numpy uses matrix orientation by default
+            if not self.view_state.axis_flipped[
+                primary
+            ]:  # numpy uses matrix orientation by default
                 frame_rgb = np.flipud(frame_rgb)
             if self.view_state.axis_flipped[secondary]:
                 frame_rgb = np.fliplr(frame_rgb)
         except Exception:
             pass
         return frame_rgb
-    
+
     def _save_gif(self, frames):
         """Save frames as GIF using PIL"""
         try:
             from PIL import Image
-        except ImportError:
-            raise RuntimeError("PIL not available. GIF export requires Pillow. "
-                             "Install with: pip install Pillow")
-        
+        except ImportError as err:
+            raise RuntimeError(
+                "PIL not available. GIF export requires Pillow. Install with: pip install Pillow"
+            ) from err
+
         pil_frames = [Image.fromarray(frame) for frame in frames]
         pil_frames[0].save(
             self.output_path,
@@ -177,14 +202,14 @@ class VideoExportWorker(QtCore.QThread):
             append_images=pil_frames[1:],
             duration=int(1000 / self.fps),
             loop=0,
-            optimize=False
+            optimize=False,
         )
-    
+
     def _save_video(self, frames):
         """Save frames as MP4/WebM using imageio"""
-        
+
         try:
-        # Compute required padding so width/height are divisible by 16 (common macro_block_size)
+            # Compute required padding so width/height are divisible by 16 (common macro_block_size)
             mb = 16
             h, w = frames[0].shape[:2]
             pad_h = (mb - (h % mb)) % mb
@@ -199,7 +224,7 @@ class VideoExportWorker(QtCore.QThread):
                     left = pad_w // 2
                     right = pad_w - left
                     pad_cfg = ((top, bottom), (left, right), (0, 0))
-                    f_padded = np.pad(f, pad_cfg, mode='constant', constant_values=0)
+                    f_padded = np.pad(f, pad_cfg, mode="constant", constant_values=0)
                     padded_frames.append(f_padded)
                 frames_to_write = padded_frames
             else:
@@ -210,33 +235,42 @@ class VideoExportWorker(QtCore.QThread):
 
             # Select writer options by container to ensure compatible codecs
             writer = None
-            if self.format_type == 'mp4':
+            if self.format_type == "mp4":
                 # Use H.264 and set pixel format for widest compatibility
                 try:
                     # Use libx264, request yuv420p pixel format, and a reasonable CRF for quality
                     writer = imageio.get_writer(
                         self.output_path,
                         fps=self.fps,
-                        codec='libx264',
-                        ffmpeg_params=['-pix_fmt', 'yuv420p', '-preset', 'medium', '-crf', '23']
+                        codec="libx264",
+                        ffmpeg_params=["-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23"],
                     )
                 except Exception:
                     # Try without explicit codec if libx264 isn't available
-                    writer = imageio.get_writer(self.output_path, fps=self.fps, ffmpeg_params=['-pix_fmt', 'yuv420p', '-preset', 'medium', '-crf', '23'])
-            elif self.format_type == 'webm':
+                    writer = imageio.get_writer(
+                        self.output_path,
+                        fps=self.fps,
+                        ffmpeg_params=["-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "23"],
+                    )
+            elif self.format_type == "webm":
                 # WebM only supports VP8/VP9/AV1 — try VP9 then fall back to VP8
                 try:
                     # Prefer VP9 with constrained quality (CRF) and bitrate=0 for constant-quality mode
                     writer = imageio.get_writer(
                         self.output_path,
                         fps=self.fps,
-                        codec='libvpx-vp9',
-                        ffmpeg_params=['-crf', '30', '-b:v', '0']
+                        codec="libvpx-vp9",
+                        ffmpeg_params=["-crf", "30", "-b:v", "0"],
                     )
                 except Exception:
                     try:
                         # Fallback to VP8; give a reasonable target bitrate
-                        writer = imageio.get_writer(self.output_path, fps=self.fps, codec='libvpx', ffmpeg_params=['-b:v', '1M'])
+                        writer = imageio.get_writer(
+                            self.output_path,
+                            fps=self.fps,
+                            codec="libvpx",
+                            ffmpeg_params=["-b:v", "1M"],
+                        )
                     except Exception:
                         # Last-resort: default writer (may fail)
                         writer = imageio.get_writer(self.output_path, fps=self.fps)
@@ -256,18 +290,18 @@ class VideoExportWorker(QtCore.QThread):
                     writer.append_data(frame)
                 writer.close()
             except Exception as e:
-                raise RuntimeError(f"Failed to write video: {e}")
-
+                raise RuntimeError(f"Failed to write video: {e}") from e
 
     def _save_png_frames(self, frames):
         """Save each frame as an individual PNG file into the output directory."""
         try:
             from PIL import Image
-        except ImportError:
-            raise RuntimeError("PIL not available. PNG export requires Pillow. "
-                               "Install with: pip install Pillow")
+        except ImportError as err:
+            raise RuntimeError(
+                "PIL not available. PNG export requires Pillow. Install with: pip install Pillow"
+            ) from err
 
-        out_dir = getattr(self, 'output_path', None)
+        out_dir = getattr(self, "output_path", None)
         if not out_dir:
             raise RuntimeError("No output directory specified for PNG frames.")
 
@@ -275,7 +309,7 @@ class VideoExportWorker(QtCore.QThread):
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as e:
-            raise RuntimeError(f"Failed to create output directory: {e}")
+            raise RuntimeError(f"Failed to create output directory: {e}") from e
 
         total = len(frames)
         digits = max(4, len(str(total)))
@@ -287,9 +321,8 @@ class VideoExportWorker(QtCore.QThread):
                 out_path = os.path.join(out_dir, fname)
                 img.save(out_path)
             except Exception as e:
-                raise RuntimeError(f"Failed to save PNG frame {idx}: {e}")
+                raise RuntimeError(f"Failed to save PNG frame {idx}: {e}") from e
 
-    
     def stop(self):
         """Stop the export process"""
         self._is_running = False
@@ -300,10 +333,10 @@ class VideoExportWorker(QtCore.QThread):
             h, w = frame_rgb.shape[:2]
             target_w, target_h = w, h
 
-            mode = (self.pixel_ratio_mode or 'square_pixels').lower()
-            if mode == 'displayed':
-                dm = (self.display_mode or 'square_pixels').lower()
-                if dm == 'fit':
+            mode = (self.pixel_ratio_mode or "square_pixels").lower()
+            if mode == "displayed":
+                dm = (self.display_mode or "square_pixels").lower()
+                if dm == "fit":
                     # Match current widget aspect
                     ratio = self.widget_ratio if self.widget_ratio > 0 else 1.0
                     target_w = max(w, h)
@@ -318,13 +351,14 @@ class VideoExportWorker(QtCore.QThread):
 
             try:
                 from PIL import Image
+
                 img = Image.fromarray(frame_rgb)
                 img = img.resize((int(target_w), int(target_h)), Image.Resampling.BILINEAR)
                 return np.array(img)
             except Exception:
                 # Fallback: simple numpy repeat
-                scale_w = max(1, int(round(target_w / w)))
-                scale_h = max(1, int(round(target_h / h)))
+                scale_w = max(1, round(target_w / w))
+                scale_h = max(1, round(target_h / h))
                 return np.repeat(np.repeat(frame_rgb, scale_h, axis=0), scale_w, axis=1)
         except Exception:
             return frame_rgb
@@ -332,7 +366,7 @@ class VideoExportWorker(QtCore.QThread):
 
 class VideoExportDialog(QtWidgets.QDialog):
     """Progress dialog for video export"""
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Exporting Video")
@@ -340,24 +374,24 @@ class VideoExportDialog(QtWidgets.QDialog):
         self.setMinimumWidth(400)
         self.worker = None
         self.setup_ui()
-    
+
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout()
-        
+
         # Status label
         self.status_label = QtWidgets.QLabel("Initializing...")
         layout.addWidget(self.status_label)
-        
+
         # Progress bar
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
         layout.addWidget(self.progress_bar)
-        
+
         # Details text
         self.details_label = QtWidgets.QLabel("")
         self.details_label.setWordWrap(True)
         layout.addWidget(self.details_label)
-        
+
         # Cancel button
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.addStretch()
@@ -365,26 +399,26 @@ class VideoExportDialog(QtWidgets.QDialog):
         self.cancel_button.clicked.connect(self.cancel_export)
         button_layout.addWidget(self.cancel_button)
         layout.addLayout(button_layout)
-        
+
         self.setLayout(layout)
-    
+
     def start_export(self, worker, total_frames):
         """Start export with worker thread"""
         self.worker = worker
         self.total_frames = total_frames
         self.progress_bar.setRange(0, total_frames)
         self.progress_bar.setValue(0)
-        
+
         # Connect signals
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.export_finished.connect(self.on_export_finished)
-        
+
         # Start worker
         self.worker.start()
-        
+
         # Show dialog
         self.exec_()
-    
+
     def on_progress_updated(self, frame_idx, status_text):
         """Update progress display"""
         self.status_label.setText(status_text)
@@ -393,11 +427,11 @@ class VideoExportDialog(QtWidgets.QDialog):
         self.details_label.setText(f"{frame_idx}/{self.total_frames} frames ({percent}%)")
 
         QtWidgets.QApplication.processEvents()
-    
+
     def on_export_finished(self, success, message):
         """Handle export completion"""
         self.worker.wait()  # Wait for thread to finish
-        
+
         if success:
             # Show a message box with optional buttons to open dir or file
             mb = QtWidgets.QMessageBox(self)
@@ -411,7 +445,7 @@ class VideoExportDialog(QtWidgets.QDialog):
 
             clicked = mb.clickedButton()
             try:
-                out_path = getattr(self.worker, 'output_path', None)
+                out_path = getattr(self.worker, "output_path", None)
                 if clicked == open_dir_btn and out_path:
                     dir = QtCore.QFileInfo(out_path).absolutePath()
                     QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(dir))
@@ -423,7 +457,7 @@ class VideoExportDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Export Failed", message)
 
         self.accept()
-    
+
     def cancel_export(self):
         """Cancel the export"""
         if self.worker:
@@ -433,7 +467,7 @@ class VideoExportDialog(QtWidgets.QDialog):
 
 class VideoExportSettingsDialog(QtWidgets.QDialog):
     """Dialog to configure export settings"""
-    
+
     def __init__(self, parent=None, export_dim=None, data_shape=None):
         super().__init__(parent)
         self.setWindowTitle("Export Video Settings")
@@ -441,17 +475,17 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         self.export_dim = export_dim
         self.data_shape = data_shape
         self.setup_ui()
-    
+
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout()
-        
+
         # Format selection
         format_layout = QtWidgets.QHBoxLayout()
         format_layout.addWidget(QtWidgets.QLabel("Format:"))
         self.format_combo = QtWidgets.QComboBox()
-        
+
         # Offer PNG frames export (saves each frame as a separate PNG)
-        if (HAS_IMAGEIO):
+        if HAS_IMAGEIO:
             format_options = [
                 ("PNG frames", "png", True),
                 ("GIF", "gif", True),
@@ -465,7 +499,6 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
                 ("MP4 (requires imageio-ffmpeg)", "mp4", False),
                 ("WebM (requires imageio-ffmpeg)", "webm", False),
             ]
-
 
         for label, fmt, enabled in format_options:
             self.format_combo.addItem(label, fmt)
@@ -508,42 +541,44 @@ class VideoExportSettingsDialog(QtWidgets.QDialog):
         self.wl_combo.addItem("Rescale", "rescale")
         wl_layout.addWidget(self.wl_combo)
         layout.addLayout(wl_layout)
-        
+
         # Info
-        info_text = f"Exporting dimension {self.export_dim} ({self.data_shape[self.export_dim]} frames)"
+        info_text = (
+            f"Exporting dimension {self.export_dim} ({self.data_shape[self.export_dim]} frames)"
+        )
         info_label = QtWidgets.QLabel(info_text)
         info_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(info_label)
-        
+
         # Buttons
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.addStretch()
-        
+
         self.ok_button = QtWidgets.QPushButton("Export")
         self.ok_button.clicked.connect(self.accept)
         button_layout.addWidget(self.ok_button)
-        
+
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.reject)
         button_layout.addWidget(self.cancel_button)
-        
+
         layout.addLayout(button_layout)
         self.setLayout(layout)
-    
+
     def get_settings(self):
         """Get user-selected settings"""
         return {
-            'format': (self.format_combo.currentData() or 'gif'),
-            'fps': self.fps_spinbox.value(),
-            'pixel_ratio': self.ratio_combo.currentText().lower().replace(' ', '_'),
-            'window_level': (self.wl_combo.currentData() or 'displayed')
+            "format": (self.format_combo.currentData() or "gif"),
+            "fps": self.fps_spinbox.value(),
+            "pixel_ratio": self.ratio_combo.currentText().lower().replace(" ", "_"),
+            "window_level": (self.wl_combo.currentData() or "displayed"),
         }
 
     def _on_format_changed(self, *_args):
         """Adjust UI when format changes (disable FPS for PNG frames)."""
         try:
             fmt = self.format_combo.currentData()
-            if fmt == 'png':
+            if fmt == "png":
                 self.fps_spinbox.setEnabled(False)
             else:
                 self.fps_spinbox.setEnabled(True)

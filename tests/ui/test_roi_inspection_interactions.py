@@ -1,18 +1,15 @@
-import time
 from types import SimpleNamespace
+from typing import ClassVar
 
 import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
-    assert_panel_invariants as _assert_panel_invariants,
-    assert_size_close as _assert_size_close,
     clear_arrayscope_settings as _clear_arrayscope_settings,
-    panel_body as _panel_body,
+)
+from tests.ui.helpers import (
     process_events as _process_events,
-    view_action as _view_action,
-    wait_for_panel_preserve as _wait_for_panel_preserve,
 )
 
 
@@ -24,22 +21,30 @@ def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(mon
     from arrayscope.window.inspection import InspectionWorkflowMixin
 
     class FakeRoiController:
-        submissions = []
+        submissions: ClassVar[list] = []
 
         def start_latest(self, fn, **kwargs):
             self.submissions.append((fn, kwargs))
             return len(self.submissions)
 
-    selection = RoiSelection("roi-1", "ROI 1", RoiGeometry(RoiKind.RECTANGLE, rect=(50.0, 50.0, 4.0, 4.0)))
+    selection = RoiSelection(
+        "roi-1", "ROI 1", RoiGeometry(RoiKind.RECTANGLE, rect=(50.0, 50.0, 4.0, 4.0))
+    )
     win = InspectionWorkflowMixin()
     win.roi_store = RoiStore(selections=(selection,))
     win.document = ArrayDocument(np.zeros((4, 4, 8), dtype=np.float32))
     win.img_view = SimpleNamespace(roiSelections=lambda: (selection,))
-    win.inspection_dock = SimpleNamespace(set_rois=lambda _selections: None, isVisible=lambda: False)
-    win.view_state = ViewState.from_shape((4, 4, 8)).with_montage_axis(2, indices=tuple(range(8)), text=":")
+    win.inspection_dock = SimpleNamespace(
+        set_rois=lambda _selections: None, isVisible=lambda: False
+    )
+    win.view_state = ViewState.from_shape((4, 4, 8)).with_montage_axis(
+        2, indices=tuple(range(8)), text=":"
+    )
     win._montage_roi_values_pending = lambda: False
     win._gui_callback_budget_decision = lambda *args, **kwargs: None
-    win._hidden_roi_statistics = lambda _selections: (_ for _ in ()).throw(AssertionError("presented payloads are not authoritative"))
+    win._hidden_roi_statistics = lambda _selections: (_ for _ in ()).throw(
+        AssertionError("presented payloads are not authoritative")
+    )
     win.roi_evaluation_controller = FakeRoiController()
 
     win._schedule_refresh_inspection_dock("file-session-restore")
@@ -90,11 +95,13 @@ def test_roi_statistics_refresh_is_debounced(qtbot, monkeypatch):
         win,
         "_compute_roi_inspection_snapshot",
         lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
-        )
+    )
     try:
         _process_events(qtbot, count=20)
         _render_committed_tiled_frame(win, qtbot, reason="test-roi-inspection")
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
@@ -124,7 +131,9 @@ def test_hidden_inspection_panel_updates_overlay_without_dock_work(qtbot, monkey
     try:
         _process_events(qtbot, count=20)
         _render_committed_tiled_frame(win, qtbot, reason="test-hidden-roi-overlay")
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
@@ -157,7 +166,9 @@ def test_hidden_single_image_timed_roi_refresh_updates_overlay(qtbot, monkeypatc
     try:
         _process_events(qtbot, count=20)
         _render_committed_tiled_frame(win, qtbot, reason="test-hidden-timed-roi-overlay")
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
 
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
@@ -165,7 +176,10 @@ def test_hidden_single_image_timed_roi_refresh_updates_overlay(qtbot, monkeypatc
         calls.clear()
         win._refresh_inspection_dock_now()
 
-        qtbot.waitUntil(lambda: win.img_view._roi_info_panel is not None, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: win.img_view._roi_info_panel is not None,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         assert len(calls) == 1
         assert win._roi_inspection_priority.name == "HIDDEN_ROI"
         assert getattr(win, "_inspection_stale", False)
@@ -191,7 +205,9 @@ def test_hidden_roi_overlay_refreshes_when_tiled_frame_commits(qtbot, monkeypatc
     )
     try:
         _process_events(qtbot, count=20)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         win._committed_display_frame = None
         win.renderer._committed_display_request_key = None
@@ -214,7 +230,9 @@ def test_hidden_roi_overlay_refreshes_when_tiled_frame_commits(qtbot, monkeypatc
         win.close()
 
 
-def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates_dock(qtbot, monkeypatch):
+def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates_dock(
+    qtbot, monkeypatch
+):
     _clear_arrayscope_settings()
     from arrayscope.display.frame_planner import FramePlanner
     from arrayscope.window import ArrayScopeWindow
@@ -235,7 +253,9 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)
 
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
@@ -250,7 +270,10 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
-        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: win.inspection_dock.roi_model.rowCount() == 1,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
         _process_events(qtbot, count=10)
 
         model = win.inspection_dock.roi_model
@@ -262,7 +285,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         win.close()
 
 
-@pytest.mark.parametrize("backend", ("pyqtgraph", "vispy"))
+@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
 def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
     qtbot,
     backend,
@@ -271,8 +294,9 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
         pytest.importorskip("vispy")
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
-    from arrayscope.display.slice_engine import DisplayImage
+
     from arrayscope.display.montage import make_montage_plan
+    from arrayscope.display.slice_engine import DisplayImage
     from arrayscope.operations.evaluator import EvaluationResult
     from arrayscope.window import ArrayScopeWindow
 
@@ -285,7 +309,9 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
     try:
         _process_events(qtbot, count=20)
         first_state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text="0:2")
-        first_plan = make_montage_plan(first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
+        first_plan = make_montage_plan(
+            first_state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2
+        )
         for tile in first_plan.tiles:
             value = 10.0 + float(tile.source_index)
             image = np.full((2, 2), value, dtype=np.float32)
@@ -293,14 +319,24 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
                 tile,
                 montage_axis=2,
                 colormap_lut=None,
-                result=EvaluationResult(DisplayImage(image, histogram_data=image.copy()), 0.0, image.shape, int(image.nbytes)),
+                result=EvaluationResult(
+                    DisplayImage(image, histogram_data=image.copy()),
+                    0.0,
+                    image.shape,
+                    int(image.nbytes),
+                ),
                 shader_display=backend == "vispy",
             )
 
         win._set_view_state(first_state)
         win.update_image_view()
-        qtbot.waitUntil(lambda: getattr(win.renderer._frame_session, "display_committed", False), timeout=min(1000, INTERACTION_SETTLE_HARD_LIMIT_MS))
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        qtbot.waitUntil(
+            lambda: getattr(win.renderer._frame_session, "display_committed", False),
+            timeout=min(1000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         win.img_view.createRoi("rectangle", rect=(0, 0, 2, 2))
         _process_events(qtbot, count=20)
         # The committed cached payload owns the visible frame's value
@@ -351,7 +387,9 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)
 
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, False, reason="test", preserve_canvas=False
+        )
         win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
         _process_events(qtbot, count=20)
 
@@ -360,7 +398,10 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
         assert "µ=18" in win.img_view._roi_info_panel.text()
 
         win._show_inspection_dock()
-        qtbot.waitUntil(lambda: win.inspection_dock.roi_model.rowCount() == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: win.inspection_dock.roi_model.rowCount() == 1,
+            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
     finally:
         win.close()
         settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
@@ -369,8 +410,8 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
 
 def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot, monkeypatch):
     _clear_arrayscope_settings()
-    from arrayscope.window.panels import PanelLocation
     from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
 
     win = ArrayScopeWindow(np.arange(40 * 40, dtype=float).reshape(40, 40))
     qtbot.addWidget(win)
@@ -383,16 +424,22 @@ def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot,
     )
     try:
         _process_events(qtbot, count=20)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
-        win.layout_manager.detach_managed_dock(win.inspection_dock, reason="test", preserve_canvas=False)
+        win.layout_manager.detach_managed_dock(
+            win.inspection_dock, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=10)
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
         assert not win.inspection_dock.isVisible()
 
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
-        qtbot.waitUntil(lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+        )
         _process_events(qtbot, count=10)
 
         model = win.inspection_dock.roi_model
@@ -412,10 +459,18 @@ def test_render_with_hidden_profile_and_live_profile_off_skips_line_plot(qtbot, 
     qtbot.addWidget(win)
     try:
         _process_events(qtbot, count=20)
-        win.layout_manager.set_managed_dock_visible(win.profile_dock, False, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.profile_dock, False, reason="test", preserve_canvas=False
+        )
         win.widgets["buttons"]["display"]["live_profile"].setChecked(False)
         _process_events(qtbot, count=10)
-        monkeypatch.setattr(win, "update_line_plot", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hidden profile work ran")))
+        monkeypatch.setattr(
+            win,
+            "update_line_plot",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("hidden profile work ran")
+            ),
+        )
 
         win.render(reason="hidden-profile-test")
         _process_events(qtbot, count=10)
@@ -433,7 +488,11 @@ def test_render_refreshes_inspection_once_on_image_commit(qtbot, monkeypatch):
         _process_events(qtbot, count=20)
         calls = []
         original = win._refresh_inspection_dock
-        monkeypatch.setattr(win, "_refresh_inspection_dock", lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1])
+        monkeypatch.setattr(
+            win,
+            "_refresh_inspection_dock",
+            lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1],
+        )
 
         win.operation_evaluator.clear_cache()
         win.render(reason="inspection-refresh-test")
@@ -455,20 +514,32 @@ def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(q
     qtbot.addWidget(win)
     calls = []
     original = win._compute_roi_inspection_snapshot
-    monkeypatch.setattr(win, "_compute_roi_inspection_snapshot", lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1])
+    monkeypatch.setattr(
+        win,
+        "_compute_roi_inspection_snapshot",
+        lambda *args, **kwargs: (calls.append(args[0]), original(*args, **kwargs))[1],
+    )
     try:
         _process_events(qtbot, count=20)
-        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
+        )
         win.render(reason="test-montage")
         _process_events(qtbot, count=40)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         win.img_view.createRoi("rectangle", rect=(1, 1, 2, 2))
-        qtbot.waitUntil(lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: len(calls) == 1, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+        )
         _process_events(qtbot, count=10)
 
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(3, 6), padding=0)
         win.update_image_view()
-        qtbot.waitUntil(lambda: len(calls) >= 2, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        qtbot.waitUntil(
+            lambda: len(calls) >= 2, timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+        )
         _process_events(qtbot, count=40)
         calls_after_layout = len(calls)
         win.update_image_view()
@@ -480,7 +551,9 @@ def test_montage_viewport_updates_recompute_roi_stats_only_when_layout_changes(q
         win.close()
 
 
-def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_updates(qtbot, monkeypatch):
+def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_updates(
+    qtbot, monkeypatch
+):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -493,11 +566,18 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
     original_set_statistics = win.inspection_dock.set_statistics
     original_set_histograms = win.inspection_dock.set_histograms
     original_update_overlay = win._update_roi_info_overlay
-    monkeypatch.setattr(win.inspection_dock, "set_statistics", lambda stats: (table_updates.append(dict(stats)), original_set_statistics(stats))[1])
+    monkeypatch.setattr(
+        win.inspection_dock,
+        "set_statistics",
+        lambda stats: (table_updates.append(dict(stats)), original_set_statistics(stats))[1],
+    )
     monkeypatch.setattr(
         win.inspection_dock,
         "set_histograms",
-        lambda histograms: (histogram_updates.append(tuple(histograms)), original_set_histograms(histograms))[1],
+        lambda histograms: (
+            histogram_updates.append(tuple(histograms)),
+            original_set_histograms(histograms),
+        )[1],
     )
     monkeypatch.setattr(
         win,
@@ -506,10 +586,14 @@ def test_empty_inspection_dock_does_not_rewrite_table_on_montage_viewport_update
     )
     try:
         _process_events(qtbot, count=20)
-        win._set_view_state(win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":"))
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
+        )
         win.render(reason="test-montage")
         _process_events(qtbot, count=40)
-        win.layout_manager.set_managed_dock_visible(win.inspection_dock, True, reason="test", preserve_canvas=False)
+        win.layout_manager.set_managed_dock_visible(
+            win.inspection_dock, True, reason="test", preserve_canvas=False
+        )
         _process_events(qtbot, count=20)
         table_updates.clear()
         histogram_updates.clear()

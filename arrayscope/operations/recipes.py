@@ -7,9 +7,8 @@ import os
 import tempfile
 from dataclasses import fields, is_dataclass
 
-from arrayscope.operations.pipeline import OperationStep, evaluate_shape
+from arrayscope.operations.pipeline import OperationStep
 from arrayscope.operations.registry import create_operation, get_operation_entry, operation_id_for
-
 
 RECIPE_VERSION = 2
 LEGACY_RECIPE_VERSION = 1
@@ -41,7 +40,7 @@ def operation_to_recipe_item(operation_or_step):
     item = {"id": operation_id}
 
     if entry.requires_axis:
-        item["axis"] = int(getattr(operation, "axis"))
+        item["axis"] = int(operation.axis)
 
     parameters = {}
     for parameter in entry.parameters:
@@ -123,7 +122,9 @@ def loads_recipe_steps(text: str, base_shape):
 def save_recipe(path, operations):
     path = os.fspath(path)
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as recipe_file:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=directory, delete=False
+    ) as recipe_file:
         temporary_path = recipe_file.name
         recipe_file.write(dumps_recipe(operations))
         recipe_file.write("\n")
@@ -131,10 +132,10 @@ def save_recipe(path, operations):
 
 
 def load_recipe(path, base_shape):
-    with open(path, "r", encoding="utf-8") as recipe_file:
+    with open(path, encoding="utf-8") as recipe_file:
         return loads_recipe(recipe_file.read(), base_shape)
 
 
 def load_recipe_steps(path, base_shape):
-    with open(path, "r", encoding="utf-8") as recipe_file:
+    with open(path, encoding="utf-8") as recipe_file:
         return loads_recipe_steps(recipe_file.read(), base_shape)

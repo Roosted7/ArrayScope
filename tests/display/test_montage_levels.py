@@ -6,9 +6,9 @@ import pytest
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
     EXACT_TILE_SAMPLE_LIMIT,
-    LevelEvidenceQuality,
     PROVISIONAL_TILE_SAMPLE_LIMIT,
     REFINED_TILE_SAMPLE_LIMIT,
+    LevelEvidenceQuality,
     MontageLevelTracker,
     TileLevelStats,
     _aggregate_samples,
@@ -21,7 +21,12 @@ def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():
     key = "scope"
     tracker.ensure(key, (0, 1, 2))
     for index, value in enumerate((10.0, 20.0, 30.0)):
-        tracker.update_from_tile(key, index, np.full((4, 4), value, dtype=np.float32), np.full((4, 4), value, dtype=np.float32))
+        tracker.update_from_tile(
+            key,
+            index,
+            np.full((4, 4), value, dtype=np.float32),
+            np.full((4, 4), value, dtype=np.float32),
+        )
 
     first = tracker.stats_for(key)
     assert first.source_indices == frozenset({0, 1, 2})
@@ -32,7 +37,9 @@ def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():
     assert shifted.bounds == (19.5, 30.5)
     assert shifted.rank == LevelSourceRank.MONTAGE_VISIBLE_SUBSET
 
-    tracker.update_from_tile(key, 3, np.full((4, 4), 40.0, dtype=np.float32), np.full((4, 4), 40.0, dtype=np.float32))
+    tracker.update_from_tile(
+        key, 3, np.full((4, 4), 40.0, dtype=np.float32), np.full((4, 4), 40.0, dtype=np.float32)
+    )
     complete = tracker.stats_for(key)
     assert complete.source_indices == frozenset({1, 2, 3})
     assert complete.bounds == (19.5, 40.5)
@@ -44,7 +51,12 @@ def test_montage_level_tracker_does_not_downgrade_when_expected_set_shrinks():
     key = "scope"
     tracker.ensure(key, (0, 1, 2))
     for index in (0, 1, 2):
-        tracker.update_from_tile(key, index, np.full((4, 4), index, dtype=np.float32), np.full((4, 4), index, dtype=np.float32))
+        tracker.update_from_tile(
+            key,
+            index,
+            np.full((4, 4), index, dtype=np.float32),
+            np.full((4, 4), index, dtype=np.float32),
+        )
     complete = tracker.stats_for(key)
 
     zoomed = tracker.ensure(key, (1,))
@@ -72,8 +84,7 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
 
 def test_aggregate_sample_cap_preserves_conceptual_stride_across_many_tiles():
     samples = tuple(
-        np.arange(index * 10_000, (index + 1) * 10_000, dtype=np.float32)
-        for index in range(12)
+        np.arange(index * 10_000, (index + 1) * 10_000, dtype=np.float32) for index in range(12)
     )
 
     sample = _aggregate_samples(samples, 65_536)
@@ -242,7 +253,9 @@ def test_montage_level_key_ignores_requested_coverage_and_layout_but_keeps_selec
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.model.montage_levels import montage_level_key
 
-    state = ViewState.from_shape((8, 8, 6)).with_montage_axis(2, columns=2, indices=(0, 1, 2), text="0:3")
+    state = ViewState.from_shape((8, 8, 6)).with_montage_axis(
+        2, columns=2, indices=(0, 1, 2), text="0:3"
+    )
     relaid = state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text="0:3")
 
     first = montage_level_key("doc", state, (0, 1, 2), None)
@@ -323,13 +336,16 @@ def test_montage_level_tracker_can_defer_aggregate_rebuild():
     key = "scope"
     tracker.ensure(key, (0, 1))
 
-    assert tracker.update_from_tile(
-        key,
-        0,
-        np.ones((4, 4), dtype=np.float32),
-        np.ones((4, 4), dtype=np.float32),
-        aggregate=False,
-    ) is None
+    assert (
+        tracker.update_from_tile(
+            key,
+            0,
+            np.ones((4, 4), dtype=np.float32),
+            np.ones((4, 4), dtype=np.float32),
+            aggregate=False,
+        )
+        is None
+    )
     stats = tracker.stats_for(key)
 
     assert stats.source_indices == frozenset({0})

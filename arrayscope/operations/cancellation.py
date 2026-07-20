@@ -5,4 +5,3 @@ from __future__ import annotations
 
 class EvaluationCancelled(Exception):
     """Raised at cooperative cancellation points between bounded chunks."""
-

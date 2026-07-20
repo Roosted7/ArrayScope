@@ -4,9 +4,9 @@ import numpy as np
 
 from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
 from arrayscope.gpu import (
+    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
     ChunkLod,
     DataChunkKey,
-    HISTOGRAM_NORMALIZED_L1_TOLERANCE,
     aggregate_chunk_summaries,
     chunk_key_frontier,
     chunk_summary_frontier,
@@ -127,9 +127,7 @@ def test_aggregate_histogram_is_bounded_and_preserves_population_weight():
     assert aggregate.representative_sample.size <= 512
     assert aggregate.counts.size == 64
     cpu_counts, _edges = np.histogram(values, bins=aggregate.bin_edges)
-    normalized_l1 = float(np.sum(np.abs(cpu_counts - aggregate.counts))) / float(
-        values.size
-    )
+    normalized_l1 = float(np.sum(np.abs(cpu_counts - aggregate.counts))) / float(values.size)
     assert normalized_l1 <= HISTOGRAM_NORMALIZED_L1_TOLERANCE
     published_counts, _edges = np.histogram(
         aggregate.representative_sample,

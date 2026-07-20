@@ -151,7 +151,9 @@ _ICON_NAME_PROPERTY = "arrayscope_icon_name"
 _ICON_SIZE_PROPERTY = "arrayscope_icon_size"
 
 
-def glyph_icon(text: str, *, color: QtGui.QColor | str | None = None, size: int = 18) -> QtGui.QIcon:
+def glyph_icon(
+    text: str, *, color: QtGui.QColor | str | None = None, size: int = 18
+) -> QtGui.QIcon:
     """Render a short text glyph (e.g. 'ℝ', 'φ', 'log') as a tinted icon."""
     resolved = QtGui.QColor(color) if color is not None else _default_icon_color()
     key = (f"glyph:{text}", resolved.name())

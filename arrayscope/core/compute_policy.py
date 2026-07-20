@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
-import os
 
 from arrayscope.app.settings_state import FFTWorkersChoice, normalize_fft_workers_choice
 from arrayscope.core.memory_policy import MemoryProfileChoice, normalize_memory_profile_choice
@@ -100,9 +100,15 @@ def available_cpu_count() -> int:
 def compute_policy_from_settings(settings, *, cpu_count: int | None = None) -> ComputePolicy:
     count = max(1, int(cpu_count if cpu_count is not None else available_cpu_count()))
     choice = normalize_fft_workers_choice(getattr(settings, "fft_workers", FFTWorkersChoice.AUTO))
-    profile = normalize_memory_profile_choice(getattr(settings, "memory_profile", MemoryProfileChoice.BALANCED))
+    profile = normalize_memory_profile_choice(
+        getattr(settings, "memory_profile", MemoryProfileChoice.BALANCED)
+    )
     resolved = int(fft_backend.resolve_fft_workers(choice.value, cpu_count=count))
-    fft_cap = 4 if profile == MemoryProfileChoice.CONSERVATIVE else (12 if profile == MemoryProfileChoice.AGGRESSIVE else 8)
+    fft_cap = (
+        4
+        if profile == MemoryProfileChoice.CONSERVATIVE
+        else (12 if profile == MemoryProfileChoice.AGGRESSIVE else 8)
+    )
     visible_fft = max(1, min(fft_cap, resolved))
     stage_fft = max(1, min(fft_cap, resolved))
     explicit_aggressive = choice == FFTWorkersChoice.ALL_MINUS_ONE

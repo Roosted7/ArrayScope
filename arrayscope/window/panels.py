@@ -149,7 +149,9 @@ class PanelManager:
 
     def reset_panel_layout(self):
         for name in tuple(self._panels_by_name):
-            self.window.layout_manager.redock_managed_panel(self._panels_by_name[name].dock, reason="reset", preserve_canvas=False)
+            self.window.layout_manager.redock_managed_panel(
+                self._panels_by_name[name].dock, reason="reset", preserve_canvas=False
+            )
             self.hide_panel(name, reason="reset", preserve_canvas=False)
 
     def _hide_detached_from_dialog(self, name):
@@ -206,7 +208,9 @@ class PanelManager:
             self.window,
             panel.title,
             panel.body,
-            on_redock=lambda _checked=False, dock=panel.dock: self.window.layout_manager.redock_managed_panel(dock, reason="dialog"),
+            on_redock=lambda _checked=False, dock=panel.dock: (
+                self.window.layout_manager.redock_managed_panel(dock, reason="dialog")
+            ),
         )
         dialog.closedByUser.connect(lambda name=panel.name: self._hide_detached_from_dialog(name))
         panel.dialog = dialog
@@ -266,12 +270,15 @@ class _DetachedPanelDialog(QtWidgets.QDialog):
         super().closeEvent(event)
 
     def eventFilter(self, obj, event):
-        if obj is self.move_handle and event.type() == Qt.QtCore.QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.QtCore.Qt.MouseButton.LeftButton:
-                window = self.window().windowHandle()
-                if window is not None:
-                    window.startSystemMove()
-                return True
+        if (
+            obj is self.move_handle
+            and event.type() == Qt.QtCore.QEvent.Type.MouseButtonPress
+            and event.button() == Qt.QtCore.Qt.MouseButton.LeftButton
+        ):
+            window = self.window().windowHandle()
+            if window is not None:
+                window.startSystemMove()
+            return True
         return super().eventFilter(obj, event)
 
 
@@ -310,7 +317,9 @@ class _DockPanelTitleBar(QtWidgets.QWidget):
         elif self.panel.name == "operations":
             self.window.layout_manager.set_operation_dock_visible_from_user(False)
         else:
-            self.window.layout_manager.set_managed_dock_visible(self.panel.dock, False, reason="titlebar-close")
+            self.window.layout_manager.set_managed_dock_visible(
+                self.panel.dock, False, reason="titlebar-close"
+            )
 
     def mousePressEvent(self, event):
         if event.button() == Qt.QtCore.Qt.MouseButton.LeftButton:

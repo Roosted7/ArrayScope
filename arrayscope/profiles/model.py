@@ -8,4 +8,3 @@ def profile_y_range(mode: str, image_levels):
         low, high = image_levels
         return (float(low), float(high))
     return None
-

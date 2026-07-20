@@ -36,7 +36,7 @@ class TilePriorityContext:
         visible_tiles=(),
         near_tiles=(),
         priority_tiles=(),
-    ) -> "TilePriorityContext":
+    ) -> TilePriorityContext:
         return cls(
             view_range=view_range,
             focus=_normalize_focus(focus),
@@ -254,6 +254,7 @@ def prioritize_tiles(tiles, *, context: TilePriorityContext) -> tuple[object, ..
             ),
         )
     )
+
 
 def tile_numbers(tiles) -> tuple[int, ...]:
     return tuple(int(_tile_index(tile)) for tile in tuple(tiles or ()))

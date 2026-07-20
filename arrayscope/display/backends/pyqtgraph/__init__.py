@@ -5,4 +5,5 @@ def __getattr__(name: str):
         return PyQtGraphSurface
     raise AttributeError(name)
 
+
 __all__ = ["PyQtGraphSurface"]

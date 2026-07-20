@@ -2,7 +2,6 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
-
 from pyqtgraph.Qt import QtCore
 
 from arrayscope.core.frame_targets import FrameTarget
@@ -10,20 +9,6 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
 from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.slice_engine import DisplayImage
-from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
-from arrayscope.display.viewport import ViewportPolicy
-from arrayscope.display.model.frame import (
-    CommittedDisplayFrame,
-    DisplayFrameKey,
-    DisplayTilePayload,
-    TilePresentationDelta,
-    TilePresentationState,
-    TiledValueSource,
-)
-from arrayscope.display.model.tile_identity import TilePresentationIdentity
-from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
-from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.display.model.commit import (
     CommitKind,
     DisplayPayload,
@@ -31,6 +16,20 @@ from arrayscope.display.model.commit import (
     PresentationInput,
     RenderRequestContext,
 )
+from arrayscope.display.model.frame import (
+    CommittedDisplayFrame,
+    DisplayFrameKey,
+    DisplayTilePayload,
+    TiledValueSource,
+    TilePresentationDelta,
+    TilePresentationState,
+)
+from arrayscope.display.model.tile_identity import TilePresentationIdentity
+from arrayscope.display.planning import LevelSource, LevelSourceRank, decide_presentation
+from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
+from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.viewport import ViewportPolicy
+from arrayscope.window.display_presenter import DisplayPresentationMixin
 
 
 class _FakeTimer:
@@ -76,11 +75,21 @@ def _geometry(shape=(2, 2)):
 
 
 def _context():
-    return RenderRequestContext(document_key=("doc", 1), request_key=("image", 1), render_generation=1, semantic_key="levels")
+    return RenderRequestContext(
+        document_key=("doc", 1),
+        request_key=("image", 1),
+        render_generation=1,
+        semantic_key="levels",
+    )
 
 
 def _payload(data, *, histogram_data=None):
-    image = DisplayImage(np.asarray(data, dtype=np.float32), histogram_data=None if histogram_data is None else np.asarray(histogram_data, dtype=np.float32))
+    image = DisplayImage(
+        np.asarray(data, dtype=np.float32),
+        histogram_data=None
+        if histogram_data is None
+        else np.asarray(histogram_data, dtype=np.float32),
+    )
     frame_plan = FramePlanner().plan(
         target=FrameTarget(("test", image.data.shape), None, None, "exact-visible"),
         view_state=ViewState.from_shape(image.data.shape[:2]).with_image_axes(0, 1),
@@ -114,7 +123,16 @@ def _payload(data, *, histogram_data=None):
 
 def _frame(*, levels=(10.0, 20.0), histogram_range=(0.0, 100.0)):
     data = np.zeros((2, 2), dtype=np.float32)
-    payload = DisplayTilePayload(0, 0, data, data.copy(), ("frame", 0), semantic_data=data, semantic_histogram_data=data.copy(), source_shape=data.shape)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        data,
+        data.copy(),
+        ("frame", 0),
+        semantic_data=data,
+        semantic_histogram_data=data.copy(),
+        source_shape=data.shape,
+    )
     return CommittedDisplayFrame(
         data=data,
         histogram_data=data.copy(),
@@ -172,7 +190,14 @@ def _input(
 
 
 def _frame_level_source(bounds=(200.0, 300.0)):
-    return LevelSource(bounds, bounds, LevelSourceRank.MONTAGE_COMPLETE, source_count=1, expected_count=1, semantic_key="levels")
+    return LevelSource(
+        bounds,
+        bounds,
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="levels",
+    )
 
 
 def test_frame_relative_level_reuse_uses_committed_frame():
@@ -268,7 +293,14 @@ def test_explicit_auto_window_wins_over_queued_restore_levels():
 
 
 def test_explicit_auto_window_accepts_partial_montage_source():
-    source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+    source = LevelSource(
+        (100.0, 200.0),
+        (100.0, 200.0),
+        LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="levels",
+    )
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
@@ -284,7 +316,14 @@ def test_explicit_auto_window_accepts_partial_montage_source():
 
 
 def test_progressive_frame_patch_accepts_partial_implicit_source_monotonically():
-    source = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+    source = LevelSource(
+        (100.0, 200.0),
+        (100.0, 200.0),
+        LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="levels",
+    )
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
@@ -299,7 +338,14 @@ def test_progressive_frame_patch_accepts_partial_implicit_source_monotonically()
 
 
 def test_progressive_frame_patch_accepts_complete_source():
-    source = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    source = LevelSource(
+        (0.0, 300.0),
+        (0.0, 300.0),
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="levels",
+    )
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), 1000.0)),
@@ -314,7 +360,14 @@ def test_progressive_frame_patch_accepts_complete_source():
 
 
 def test_degenerate_complete_source_does_not_shrink_previous_levels():
-    source = LevelSource((5.0, 5.0), (float("nan"), float("nan")), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    source = LevelSource(
+        (5.0, 5.0),
+        (float("nan"), float("nan")),
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="levels",
+    )
     decision = decide_presentation(
         _input(
             _payload(np.full((2, 2), np.nan)),
@@ -329,8 +382,17 @@ def test_degenerate_complete_source_does_not_shrink_previous_levels():
 
 
 def test_user_locked_montage_levels_are_not_overridden_by_complete_source():
-    user = LevelSource((20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels")
-    complete = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    user = LevelSource(
+        (20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels"
+    )
+    complete = LevelSource(
+        (0.0, 300.0),
+        (0.0, 300.0),
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="levels",
+    )
 
     decision = decide_presentation(
         _input(
@@ -372,8 +434,17 @@ def test_montage_restore_levels_bind_to_the_current_semantic_source():
 
 
 def test_montage_absolute_preserves_numeric_levels_while_histogram_improves():
-    absolute = LevelSource((20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels")
-    complete = LevelSource((0.0, 300.0), (0.0, 300.0), LevelSourceRank.MONTAGE_COMPLETE, source_count=4, expected_count=4, semantic_key="levels")
+    absolute = LevelSource(
+        (20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels"
+    )
+    complete = LevelSource(
+        (0.0, 300.0),
+        (0.0, 300.0),
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="levels",
+    )
 
     decision = decide_presentation(
         _input(
@@ -390,8 +461,17 @@ def test_montage_absolute_preserves_numeric_levels_while_histogram_improves():
 
 
 def test_explicit_auto_clears_user_lock_and_uses_best_available_source():
-    user = LevelSource((20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels")
-    partial = LevelSource((100.0, 200.0), (100.0, 200.0), LevelSourceRank.MONTAGE_VISIBLE_SUBSET, source_count=1, expected_count=4, semantic_key="levels")
+    user = LevelSource(
+        (20.0, 40.0), (0.0, 100.0), LevelSourceRank.EXPLICIT_USER, semantic_key="levels"
+    )
+    partial = LevelSource(
+        (100.0, 200.0),
+        (100.0, 200.0),
+        LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=4,
+        semantic_key="levels",
+    )
 
     decision = decide_presentation(
         _input(
@@ -409,7 +489,9 @@ def test_explicit_auto_clears_user_lock_and_uses_best_available_source():
 
 
 def test_montage_dirty_tiles_pass_through_presentation():
-    payload = _payload(np.zeros((2, 2), dtype=np.float32), histogram_data=np.zeros((2, 2), dtype=np.float32))
+    payload = _payload(
+        np.zeros((2, 2), dtype=np.float32), histogram_data=np.zeros((2, 2), dtype=np.float32)
+    )
 
     decision = decide_presentation(
         _input(
@@ -423,7 +505,11 @@ def test_montage_dirty_tiles_pass_through_presentation():
 
 
 def test_typed_tile_payloads_create_first_class_tiled_presentation():
-    state = ViewState.from_shape((2, 2, 1)).with_image_axes(0, 1).with_montage_axis(2, columns=1, indices=(0,))
+    state = (
+        ViewState.from_shape((2, 2, 1))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=1, indices=(0,))
+    )
     geometry = DisplayGeometry(
         view_state=state,
         display_shape=(2, 2),
@@ -453,9 +539,7 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
         tile_residency_budget_bytes=64 * 1024 * 1024,
     )
 
-    decision = decide_presentation(
-        _input(payload, kind=CommitKind.FULL_FRAME_INITIAL)
-    )
+    decision = decide_presentation(_input(payload, kind=CommitKind.FULL_FRAME_INITIAL))
 
     presentation = decision.display_presentation
     assert isinstance(presentation, DisplayTiledPresentation)
@@ -470,7 +554,11 @@ def test_typed_tile_payloads_create_first_class_tiled_presentation():
 
 
 def test_tiled_presentation_owns_one_explicit_shader_mapping():
-    state = ViewState.from_shape((2, 2, 2)).with_image_axes(0, 1).with_montage_axis(2, columns=2, indices=(0, 1))
+    state = (
+        ViewState.from_shape((2, 2, 2))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=2, indices=(0, 1))
+    )
     geometry = DisplayGeometry(
         view_state=state,
         display_shape=(2, 4),
@@ -509,7 +597,9 @@ def test_tiled_presentation_owns_one_explicit_shader_mapping():
         tile_delta=tile_delta,
     )
 
-    presentation = decide_presentation(_input(payload, kind=CommitKind.FULL_FRAME_INITIAL)).display_presentation
+    presentation = decide_presentation(
+        _input(payload, kind=CommitKind.FULL_FRAME_INITIAL)
+    ).display_presentation
 
     assert presentation.shader_mapping is mapping
 
@@ -564,7 +654,11 @@ def test_tiled_presentation_binds_ordered_upserts_to_accepted_level_generation()
 
 
 def test_tiled_presentation_rejects_conflicting_payload_shader_mappings():
-    state = ViewState.from_shape((2, 2, 2)).with_image_axes(0, 1).with_montage_axis(2, columns=2, indices=(0, 1))
+    state = (
+        ViewState.from_shape((2, 2, 2))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=2, indices=(0, 1))
+    )
     geometry = DisplayGeometry(
         view_state=state,
         display_shape=(2, 4),
@@ -572,8 +666,22 @@ def test_tiled_presentation_rejects_conflicting_payload_shader_mappings():
         montage_tile_states=("loaded", "loaded"),
     )
     tiles = {
-        0: DisplayTilePayload(0, 0, np.ones((2, 2), dtype=np.float32), None, ("tile", 0), shader_mapping=ShaderMapping(component=ShaderComponent.REAL)),
-        1: DisplayTilePayload(1, 1, np.ones((2, 2), dtype=np.float32), None, ("tile", 1), shader_mapping=ShaderMapping(component=ShaderComponent.IMAG)),
+        0: DisplayTilePayload(
+            0,
+            0,
+            np.ones((2, 2), dtype=np.float32),
+            None,
+            ("tile", 0),
+            shader_mapping=ShaderMapping(component=ShaderComponent.REAL),
+        ),
+        1: DisplayTilePayload(
+            1,
+            1,
+            np.ones((2, 2), dtype=np.float32),
+            None,
+            ("tile", 1),
+            shader_mapping=ShaderMapping(component=ShaderComponent.IMAG),
+        ),
     }
     tile_state = TilePresentationState(tiles)
     tile_delta = TilePresentationDelta(

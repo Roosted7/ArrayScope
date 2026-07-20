@@ -9,9 +9,6 @@ from typing import Any
 import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry
-from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
-from arrayscope.display.slice_engine import DisplayImage
-from arrayscope.display.viewport import ViewportPolicy
 from arrayscope.display.model.frame import (
     CommittedDisplayFrame,
     DisplayFrameKey,
@@ -19,6 +16,9 @@ from arrayscope.display.model.frame import (
     TilePresentationState,
 )
 from arrayscope.display.model.tile_identity import TilePresentationIdentity
+from arrayscope.display.shader_mapping import ShaderMapping
+from arrayscope.display.slice_engine import DisplayImage
+from arrayscope.display.viewport import ViewportPolicy
 
 
 class CommitKind(Enum):

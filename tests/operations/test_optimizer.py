@@ -60,7 +60,9 @@ def test_reverse_and_conjugate_pairs_are_removed():
 
 
 def test_adjacent_same_axis_crops_compose():
-    plan = optimize_operations((4, 10, 6), np.float32, (Crop(axis=1, start=2, stop=9), Crop(axis=1, start=3, stop=5)))
+    plan = optimize_operations(
+        (4, 10, 6), np.float32, (Crop(axis=1, start=2, stop=9), Crop(axis=1, start=3, stop=5))
+    )
 
     assert _types(plan.operations) == ("Crop",)
     assert plan.operations[0].axis == 1
@@ -70,14 +72,18 @@ def test_adjacent_same_axis_crops_compose():
 
 
 def test_adjacent_casts_coalesce():
-    plan = optimize_operations((2, 3), np.float32, (CastDType("complex64"), CastDType("complex128")))
+    plan = optimize_operations(
+        (2, 3), np.float32, (CastDType("complex64"), CastDType("complex128"))
+    )
 
     assert plan.operations == (CastDType("complex128"),)
     assert np.dtype(plan.output_dtype) == np.dtype(np.complex128)
 
 
 def test_different_axis_or_non_adjacent_fft_ifft_do_not_simplify():
-    different_axis = optimize_operations((2, 3, 4), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=2)))
+    different_axis = optimize_operations(
+        (2, 3, 4), np.float32, (CenteredFFT(axis=1), CenteredIFFT(axis=2))
+    )
     separated = optimize_operations(
         (2, 3, 4),
         np.float32,

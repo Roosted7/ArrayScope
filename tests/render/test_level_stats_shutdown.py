@@ -21,9 +21,9 @@ import pytest
 
 from arrayscope.kernel import Kernel, ThreadWorkerBackend
 from arrayscope.operations.cancellation import EvaluationCancelled
-from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
 from arrayscope.render import level_stats
 from arrayscope.render.level_stats import LevelStatsService
+from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
 
 
 class _Verdict:
@@ -101,12 +101,10 @@ def _rendered_tile(index: int):
 
 
 @pytest.fixture
-def _sweep_environment(monkeypatch):
+def sweep_environment(monkeypatch):
     """A real kernel driving the real sweep scheduler over a slow sampler."""
 
-    kernel = Kernel(
-        ThreadWorkerBackend(workers=1, name="test-level-evidence-shutdown")
-    )
+    kernel = Kernel(ThreadWorkerBackend(workers=1, name="test-level-evidence-shutdown"))
     batch = tuple(_rendered_tile(index) for index in range(30))
     session = _fake_session(len(batch))
     renderer, calls = _fake_renderer(kernel, session, batch)
@@ -152,8 +150,8 @@ def _drain(kernel) -> list:
         outcomes.append((event.spec.key, kernel.dispatch_event(event)))
 
 
-def test_shutdown_during_level_evidence_batch_stops_at_tile_boundary(_sweep_environment):
-    kernel, renderer, session, calls, first_sample_started, sampled, batch = _sweep_environment
+def test_shutdown_during_level_evidence_batch_stops_at_tile_boundary(sweep_environment):
+    kernel, renderer, session, _calls, first_sample_started, sampled, _batch = sweep_environment
 
     LevelStatsService._process_montage_cached_level_stats(renderer)
     assert session.level_evidence_inflight is True
@@ -181,8 +179,8 @@ def test_shutdown_during_level_evidence_batch_stops_at_tile_boundary(_sweep_envi
     assert 1 <= len(sampled) <= 3
 
 
-def test_cancelled_level_evidence_batch_fires_stale_callback_exactly_once(_sweep_environment):
-    kernel, renderer, session, calls, first_sample_started, sampled, batch = _sweep_environment
+def test_cancelled_level_evidence_batch_fires_stale_callback_exactly_once(sweep_environment):
+    kernel, renderer, session, calls, first_sample_started, _sampled, _batch = sweep_environment
 
     LevelStatsService._process_montage_cached_level_stats(renderer)
     assert first_sample_started.wait(timeout=5.0)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gc
 
-
 # CPython 3.14 incrementally samples the old generation according to
 # threshold1. The default (10) repeatedly leads to a full old-generation
 # collection during a five-second montage gesture; the live R8 trace measured

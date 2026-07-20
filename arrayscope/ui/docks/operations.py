@@ -44,7 +44,9 @@ class ElidedLabel(QtWidgets.QLabel):
         super().__init__("", parent)
         self._full_text = str(text)
         self.setToolTip(self._full_text)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred
+        )
 
     def setFullText(self, text):
         self._full_text = str(text)
@@ -53,7 +55,9 @@ class ElidedLabel(QtWidgets.QLabel):
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
-        text = self.fontMetrics().elidedText(self._full_text, QtCore.Qt.TextElideMode.ElideRight, max(8, self.width()))
+        text = self.fontMetrics().elidedText(
+            self._full_text, QtCore.Qt.TextElideMode.ElideRight, max(8, self.width())
+        )
         painter.drawText(self.rect(), self.alignment() | QtCore.Qt.AlignmentFlag.AlignVCenter, text)
 
 
@@ -66,9 +70,13 @@ class OperationListWidget(QtWidgets.QListWidget):
         self._on_reorder = callback
 
     def dropEvent(self, event):
-        before = [self.item(row).data(Qt.QtCore.Qt.ItemDataRole.UserRole) for row in range(self.count())]
+        before = [
+            self.item(row).data(Qt.QtCore.Qt.ItemDataRole.UserRole) for row in range(self.count())
+        ]
         super().dropEvent(event)
-        after = [self.item(row).data(Qt.QtCore.Qt.ItemDataRole.UserRole) for row in range(self.count())]
+        after = [
+            self.item(row).data(Qt.QtCore.Qt.ItemDataRole.UserRole) for row in range(self.count())
+        ]
         if before != after and self._on_reorder is not None:
             accepted = self._on_reorder(tuple(after))
             if not accepted:
@@ -135,7 +143,9 @@ class OperationStackDock(StandardDockWidget):
         self.add_button = QtWidgets.QPushButton("Add operation")
         self.palette_button = QtWidgets.QToolButton()
         set_button_icon(self.add_button, "add")
-        set_button_icon(self.palette_button, "search", tooltip="Search operations and commands (Ctrl+K)")
+        set_button_icon(
+            self.palette_button, "search", tooltip="Search operations and commands (Ctrl+K)"
+        )
         header.addWidget(self.add_button)
         header.addWidget(self.palette_button)
         header.addStretch(1)
@@ -147,7 +157,9 @@ class OperationStackDock(StandardDockWidget):
             tooltip="Sync operations with other linked ArrayScope windows (also from separately started sessions)",
         )
         self.sync_button.toggled.connect(
-            lambda checked: self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+            lambda checked: (
+                self._on_sync_toggled(bool(checked)) if self._on_sync_toggled is not None else None
+            )
         )
         header.addWidget(self.sync_button)
         layout.addLayout(header)
@@ -156,7 +168,9 @@ class OperationStackDock(StandardDockWidget):
         self.operation_list.setAlternatingRowColors(True)
         self.operation_list.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.operation_list.setDefaultDropAction(Qt.QtCore.Qt.DropAction.MoveAction)
-        self.operation_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.operation_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.operation_list.setContextMenuPolicy(Qt.QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.operation_list.setSpacing(3)
         self.operation_list.set_reorder_callback(self._handle_reorder)
@@ -188,7 +202,13 @@ class OperationStackDock(StandardDockWidget):
         self.export_button = QtWidgets.QPushButton("Export Derived")
         self.save_view_button = QtWidgets.QPushButton("Save View")
         self.load_view_button = QtWidgets.QPushButton("Load View")
-        for button in (self.save_button, self.load_button, self.export_button, self.save_view_button, self.load_view_button):
+        for button in (
+            self.save_button,
+            self.load_button,
+            self.export_button,
+            self.save_view_button,
+            self.load_view_button,
+        ):
             button.setVisible(False)
 
         self.more_button = QtWidgets.QToolButton()
@@ -213,7 +233,9 @@ class OperationStackDock(StandardDockWidget):
             action.triggered.connect(lambda _checked=False, button=proxy: button.click())
         recent_menu = more_menu.addMenu(material_icon("folder_open"), "Recent Recipes")
         recent_menu.setToolTipsVisible(True)
-        recent_menu.aboutToShow.connect(lambda menu=recent_menu: self._populate_recent_recipes(menu))
+        recent_menu.aboutToShow.connect(
+            lambda menu=recent_menu: self._populate_recent_recipes(menu)
+        )
         self.more_button.setMenu(more_menu)
 
         button_layout = QtWidgets.QHBoxLayout()
@@ -235,12 +257,26 @@ class OperationStackDock(StandardDockWidget):
         self.save_button.clicked.connect(self._on_save_recipe)
         self.load_button.clicked.connect(self._on_load_recipe)
         self.materialize_button.clicked.connect(self._on_materialize)
-        self.delete_button.clicked.connect(lambda: self._on_delete_selected(self.current_operation_index()))
-        self.add_button.clicked.connect(lambda: self._on_add_operation() if self._on_add_operation is not None else None)
-        self.palette_button.clicked.connect(lambda: self._on_add_operation(search=True) if self._on_add_operation is not None else None)
-        self.export_button.clicked.connect(lambda: self._on_export_derived() if self._on_export_derived is not None else None)
-        self.save_view_button.clicked.connect(lambda: self._on_save_view_recipe() if self._on_save_view_recipe is not None else None)
-        self.load_view_button.clicked.connect(lambda: self._on_load_view_recipe() if self._on_load_view_recipe is not None else None)
+        self.delete_button.clicked.connect(
+            lambda: self._on_delete_selected(self.current_operation_index())
+        )
+        self.add_button.clicked.connect(
+            lambda: self._on_add_operation() if self._on_add_operation is not None else None
+        )
+        self.palette_button.clicked.connect(
+            lambda: (
+                self._on_add_operation(search=True) if self._on_add_operation is not None else None
+            )
+        )
+        self.export_button.clicked.connect(
+            lambda: self._on_export_derived() if self._on_export_derived is not None else None
+        )
+        self.save_view_button.clicked.connect(
+            lambda: self._on_save_view_recipe() if self._on_save_view_recipe is not None else None
+        )
+        self.load_view_button.clicked.connect(
+            lambda: self._on_load_view_recipe() if self._on_load_view_recipe is not None else None
+        )
         self.operation_list.currentRowChanged.connect(lambda _row: self._update_button_state())
         self.operation_list.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -316,7 +352,10 @@ class OperationStackDock(StandardDockWidget):
                 item.setSizeHint(Qt.QtCore.QSize(220, 58))
                 item.setToolTip("Drag to reorder. Right-click for operation actions.")
                 flags = item.flags()
-                flags |= Qt.QtCore.Qt.ItemFlag.ItemIsDragEnabled | Qt.QtCore.Qt.ItemFlag.ItemIsDropEnabled
+                flags |= (
+                    Qt.QtCore.Qt.ItemFlag.ItemIsDragEnabled
+                    | Qt.QtCore.Qt.ItemFlag.ItemIsDropEnabled
+                )
                 item.setFlags(flags)
                 self.operation_list.addItem(item)
                 self.operation_list.setItemWidget(item, self._row_widget(row, operation))
@@ -333,10 +372,14 @@ class OperationStackDock(StandardDockWidget):
         self.save_button.setEnabled(has_operations)
         self.export_button.setEnabled(True)
         self.save_view_button.setEnabled(True)
-        self.shape_label.setText(f"Output shape: {tuple(output_shape) if output_shape is not None else '-'}")
+        self.shape_label.setText(
+            f"Output shape: {tuple(output_shape) if output_shape is not None else '-'}"
+        )
         if derived_estimate is not None:
             shape, dtype, nbytes = derived_estimate
-            self.derived_estimate_label.setText(f"Full derived: {tuple(shape)} {dtype} {_format_nbytes(nbytes)}")
+            self.derived_estimate_label.setText(
+                f"Full derived: {tuple(shape)} {dtype} {_format_nbytes(nbytes)}"
+            )
             self.derived_estimate_label.setToolTip(
                 f"Estimated full materialized derived array\nshape: {tuple(shape)}\ndtype: {dtype}\nsize: {_format_nbytes(nbytes)}"
             )
@@ -375,7 +418,13 @@ class OperationStackDock(StandardDockWidget):
         enabled = QtWidgets.QCheckBox()
         enabled.setChecked(self._steps[index].enabled if self._steps else True)
         enabled.setToolTip("Enable operation")
-        enabled.toggled.connect(lambda checked, index=index: self._on_enabled_changed(index, checked) if self._on_enabled_changed is not None else None)
+        enabled.toggled.connect(
+            lambda checked, index=index: (
+                self._on_enabled_changed(index, checked)
+                if self._on_enabled_changed is not None
+                else None
+            )
+        )
         left_col.addWidget(enabled, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
         layout.addLayout(left_col)
 
@@ -402,7 +451,11 @@ class OperationStackDock(StandardDockWidget):
         edit.setFixedSize(24, 24)
         # Only operations with editable parameters get the button at all.
         edit.setVisible(type(operation).__name__ == "Crop")
-        edit.clicked.connect(lambda _checked=False, index=index: self._on_edit_operation(index) if self._on_edit_operation is not None else None)
+        edit.clicked.connect(
+            lambda _checked=False, index=index: (
+                self._on_edit_operation(index) if self._on_edit_operation is not None else None
+            )
+        )
         layout.addWidget(edit)
         delete = QtWidgets.QToolButton()
         set_button_icon(delete, "delete", tooltip="Delete operation")
@@ -464,9 +517,11 @@ class OperationStackDock(StandardDockWidget):
             action.setCheckable(True)
             action.setChecked(current_axis is not None and int(axis) == int(current_axis))
             action.triggered.connect(
-                lambda _checked=False, index=index, axis=axis: self._on_change_axis(index, int(axis))
-                if self._on_change_axis is not None
-                else None
+                lambda _checked=False, index=index, axis=axis: (
+                    self._on_change_axis(index, int(axis))
+                    if self._on_change_axis is not None
+                    else None
+                )
             )
         return bool(choices)
 
@@ -484,14 +539,18 @@ class OperationStackDock(StandardDockWidget):
             return
 
         operation = self._operation_at(index)
-        step_enabled = self._steps[index].enabled if self._steps and index < len(self._steps) else True
+        step_enabled = (
+            self._steps[index].enabled if self._steps and index < len(self._steps) else True
+        )
         menu = QtWidgets.QMenu(self.operation_list)
         toggle_action = menu.addAction(
             material_icon("close" if step_enabled else "done"),
             "Disable operation" if step_enabled else "Enable operation",
         )
         axis_menu = menu.addMenu(material_icon("call_split"), "Change dimension")
-        if getattr(operation, "axis", None) is None or not self._populate_axis_menu(axis_menu, index):
+        if getattr(operation, "axis", None) is None or not self._populate_axis_menu(
+            axis_menu, index
+        ):
             axis_menu.menuAction().setEnabled(False)
         edit_action = menu.addAction(material_icon("edit"), "Edit parameters…")
         edit_action.setEnabled(type(operation).__name__ == "Crop")
@@ -545,7 +604,9 @@ def _cache_status_style(status):
     if status in {"Cached", "Ready"}:
         return "QLabel { background: rgba(40, 140, 80, 45); padding: 2px 4px; border-radius: 3px; }"
     if status == "Computing":
-        return "QLabel { background: rgba(180, 140, 40, 50); padding: 2px 4px; border-radius: 3px; }"
+        return (
+            "QLabel { background: rgba(180, 140, 40, 50); padding: 2px 4px; border-radius: 3px; }"
+        )
     return "QLabel { background: rgba(128, 128, 128, 35); padding: 2px 4px; border-radius: 3px; }"
 
 
@@ -586,7 +647,9 @@ def _cache_status_tooltip(cache_status):
     if getattr(cache_status, "last_eval_ms", None) is not None:
         parts.append(f"Last evaluation: {cache_status.last_eval_ms:.1f} ms")
     if hasattr(cache_status, "bytes_used"):
-        parts.append(f"Memory: {_format_nbytes(cache_status.bytes_used)} / {_format_nbytes(cache_status.max_bytes)}")
+        parts.append(
+            f"Memory: {_format_nbytes(cache_status.bytes_used)} / {_format_nbytes(cache_status.max_bytes)}"
+        )
     return "\n".join(part for part in parts if part)
 
 

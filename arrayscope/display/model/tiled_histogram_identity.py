@@ -49,7 +49,7 @@ def tiled_histogram_key(histogram_range, *, histogram_plot_data, tile_delta, sem
     source = None if histogram_plot_data is None else np.asarray(histogram_plot_data)
     return (
         "revision",
-        int(getattr(tile_delta, "histogram_revision")),
+        int(tile_delta.histogram_revision),
         id(histogram_plot_data),
         semantic_identity,
         None if source is None else tuple(int(value) for value in source.shape),
@@ -61,6 +61,6 @@ def tiled_histogram_key(histogram_range, *, histogram_plot_data, tile_delta, sem
 
 __all__ = [
     "payload_histogram_source",
-    "tiled_semantic_histogram_identity",
     "tiled_histogram_key",
+    "tiled_semantic_histogram_identity",
 ]

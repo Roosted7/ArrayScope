@@ -14,7 +14,6 @@ import json
 from arrayscope.core.axis_utils import clamp_index
 from arrayscope.core.view_state import ViewState
 
-
 SYNC_PROTOCOL_VERSION = 1
 
 DEFAULT_GROUP = "default"
@@ -153,16 +152,23 @@ def dimension_state_payload(state: ViewState) -> dict[str, object]:
 
     return {
         "shape": [int(size) for size in state.shape],
-        "image_axes": None if state.image_axes is None else [int(axis) for axis in state.image_axes],
+        "image_axes": None
+        if state.image_axes is None
+        else [int(axis) for axis in state.image_axes],
         "line_axis": state.line_axis,
         "slice_indices": [int(index) for index in state.slice_indices],
         "axis_flipped": [bool(value) for value in state.axis_flipped],
         "axis_fftshifted": [bool(value) for value in state.axis_fftshifted],
         "montage_axis": state.montage_axis,
         "montage_columns": state.montage_columns,
-        "montage_indices": None if state.montage_indices is None else [int(index) for index in state.montage_indices],
+        "montage_indices": None
+        if state.montage_indices is None
+        else [int(index) for index in state.montage_indices],
         "montage_text": state.montage_text,
-        "axis_range_indices": [None if value is None else [int(index) for index in value] for value in state.axis_range_indices],
+        "axis_range_indices": [
+            None if value is None else [int(index) for index in value]
+            for value in state.axis_range_indices
+        ],
         "axis_range_text": list(state.axis_range_text),
     }
 
@@ -177,8 +183,14 @@ def merged_dimension_state(current_state: ViewState, payload) -> ViewState:
 
     if not isinstance(payload, dict):
         payload = {}
-    if not any(field in payload for field in DIMENSION_STATE_FIELDS if field not in {"shape", "slice_indices"}):
-        merged = merged_slice_indices(current_state.shape, current_state.slice_indices, payload.get("slice_indices", ()))
+    if not any(
+        field in payload
+        for field in DIMENSION_STATE_FIELDS
+        if field not in {"shape", "slice_indices"}
+    ):
+        merged = merged_slice_indices(
+            current_state.shape, current_state.slice_indices, payload.get("slice_indices", ())
+        )
         return current_state.with_slice_indices(merged)
 
     sender_shape = _shape_from_payload(payload.get("shape"), current_state.shape)
@@ -188,11 +200,17 @@ def merged_dimension_state(current_state: ViewState, payload) -> ViewState:
         shape=sender_shape,
         image_axes=_optional_axis_pair(payload.get("image_axes", base.image_axes)),
         line_axis=payload.get("line_axis", base.line_axis),
-        slice_indices=_fixed_int_sequence(payload.get("slice_indices"), base.slice_indices, len(sender_shape)),
+        slice_indices=_fixed_int_sequence(
+            payload.get("slice_indices"), base.slice_indices, len(sender_shape)
+        ),
         channel=current_state.channel,
         scale=current_state.scale,
-        axis_flipped=_fixed_bool_sequence(payload.get("axis_flipped"), base.axis_flipped, len(sender_shape)),
-        axis_fftshifted=_fixed_bool_sequence(payload.get("axis_fftshifted"), base.axis_fftshifted, len(sender_shape)),
+        axis_flipped=_fixed_bool_sequence(
+            payload.get("axis_flipped"), base.axis_flipped, len(sender_shape)
+        ),
+        axis_fftshifted=_fixed_bool_sequence(
+            payload.get("axis_fftshifted"), base.axis_fftshifted, len(sender_shape)
+        ),
         montage_axis=payload.get("montage_axis", base.montage_axis),
         montage_columns=payload.get("montage_columns", base.montage_columns),
         montage_indices=_optional_int_tuple(payload.get("montage_indices", base.montage_indices)),
@@ -249,12 +267,16 @@ def _fixed_bool_sequence(value, fallback, length: int) -> tuple[bool, ...]:
     return tuple(bool(item) for item in values[:length])
 
 
-def _fixed_optional_int_sequences(value, fallback, length: int) -> tuple[tuple[int, ...] | None, ...]:
+def _fixed_optional_int_sequences(
+    value, fallback, length: int
+) -> tuple[tuple[int, ...] | None, ...]:
     values = list(fallback if value is None else value)
     fallback_values = tuple(fallback)
     while len(values) < length:
         values.append(fallback_values[len(values)] if len(values) < len(fallback_values) else None)
-    return tuple(None if item is None else tuple(int(index) for index in item) for item in values[:length])
+    return tuple(
+        None if item is None else tuple(int(index) for index in item) for item in values[:length]
+    )
 
 
 def _fixed_optional_text_sequence(value, fallback, length: int) -> tuple[str | None, ...]:

@@ -3,17 +3,18 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.slice_engine import (
+    apply_channel,
     make_export_frame,
     make_image,
     make_image_from_slab,
     make_line,
     make_line_from_slab,
     make_scalar_from_slab,
-    apply_channel,
 )
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -26,11 +27,11 @@ from arrayscope.operations.pipeline import (
     Maximum,
     Mean,
     Minimum,
+    OperationStep,
     ReverseAxis,
     RootSumSquares,
     SplitComplexAxis,
     Sum,
-    OperationStep,
 )
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, apply_subregion
 from arrayscope.operations.slabs import (
@@ -67,17 +68,25 @@ def test_image_snapshot_plans_slab_once(monkeypatch):
 
 
 def test_stage_key_ignores_viewport_and_montage_layout_only_state():
-    document = ArrayDocument(np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6), operations=(CenteredFFT(axis=2),))
+    document = ArrayDocument(
+        np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6), operations=(CenteredFFT(axis=2),)
+    )
     base = ViewState.from_shape(document.current_shape)
     state_a = base.with_montage_axis(2, columns=1, indices=(0, 1, 2), text=":")
     state_b = base.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
     tile_state_a = state_a.with_slice(2, 1).with_montage_axis(None)
     tile_state_b = state_b.with_slice(2, 1).with_montage_axis(None)
 
-    candidate_a = plan_slab(document, request_for_image(tile_state_a)).region_plan.cache_candidates[0]
-    candidate_b = plan_slab(document, request_for_image(tile_state_b)).region_plan.cache_candidates[0]
+    candidate_a = plan_slab(document, request_for_image(tile_state_a)).region_plan.cache_candidates[
+        0
+    ]
+    candidate_b = plan_slab(document, request_for_image(tile_state_b)).region_plan.cache_candidates[
+        0
+    ]
 
-    assert stage_key_for_candidate(("doc",), candidate_a) == stage_key_for_candidate(("doc",), candidate_b)
+    assert stage_key_for_candidate(("doc",), candidate_a) == stage_key_for_candidate(
+        ("doc",), candidate_b
+    )
 
 
 def _assert_image_and_line_match(data, operations):
@@ -138,7 +147,9 @@ def test_materialized_stage_then_slab_matches_uncached():
     plan = plan_slab(document, request)
     candidate = plan.region_plan.cache_candidates[0]
 
-    stage = materialize_stage_candidate(document, plan.region_plan, candidate, document_key=("doc",))
+    stage = materialize_stage_candidate(
+        document, plan.region_plan, candidate, document_key=("doc",)
+    )
     staged = evaluate_slab_from_stage(document, request, plan, stage, candidate)
 
     np.testing.assert_allclose(staged, evaluate_slab(document, request))
@@ -199,19 +210,26 @@ def test_apply_subregion_extracts_from_slice_and_indices_sources():
     data = np.arange(10)
     source_slice = RegionSpec((AxisRegion(AxisRegionKind.SLICE, (2, 9, 2)),))
     target_point = RegionSpec((AxisRegion(AxisRegionKind.POINT, 6),))
-    np.testing.assert_array_equal(apply_subregion(data[2:9:2], source_region=source_slice, target_region=target_point, shape=(10,)), 6)
+    np.testing.assert_array_equal(
+        apply_subregion(
+            data[2:9:2], source_region=source_slice, target_region=target_point, shape=(10,)
+        ),
+        6,
+    )
 
     source_indices = RegionSpec((AxisRegion(AxisRegionKind.INDICES, (1, 3, 7)),))
     target_indices = RegionSpec((AxisRegion(AxisRegionKind.INDICES, (7, 1)),))
     np.testing.assert_array_equal(
-        apply_subregion(data[[1, 3, 7]], source_region=source_indices, target_region=target_indices, shape=(10,)),
+        apply_subregion(
+            data[[1, 3, 7]], source_region=source_indices, target_region=target_indices, shape=(10,)
+        ),
         np.asarray([7, 1]),
     )
 
 
 @pytest.mark.parametrize(
     "operations",
-    (
+    [
         (Crop(axis=1, start=1, stop=4),),
         (ReverseAxis(axis=0),),
         (FFTShift(axis=2),),
@@ -226,7 +244,7 @@ def test_apply_subregion_extracts_from_slice_and_indices_sources():
         (Crop(axis=1, start=1, stop=4), ReverseAxis(axis=0), CenteredFFT(axis=2)),
         (CenteredFFT(axis=2), Mean(axis=1)),
         (CenteredFFT(axis=2), CenteredIFFT(axis=2)),
-    ),
+    ],
 )
 def test_planner_backed_slab_matches_materialized_for_registered_operations(operations):
     data = (np.arange(4 * 5 * 6).reshape(4, 5, 6).astype(float) + 1j).astype(np.complex64)
@@ -244,7 +262,9 @@ def test_slab_matches_materialized_after_crop_reverse_same_axis():
     )
     state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1)
 
-    lazy = make_image_from_slab(evaluate_slab(document, request_for_image(state)), request_for_image(state))
+    lazy = make_image_from_slab(
+        evaluate_slab(document, request_for_image(state)), request_for_image(state)
+    )
     full = make_image(document.materialize(), state)
 
     np.testing.assert_array_equal(lazy.data, full.data)
@@ -375,10 +395,22 @@ def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_
     complex_singleton = (rng.normal(size=(4, 5)) + 1j * rng.normal(size=(4, 5))).reshape(4, 5, 1)
 
     documents = [
-        ArrayDocument(real_data, operations=(Crop(axis=1, start=1, stop=5), ReverseAxis(axis=0), CenteredFFT(axis=2), RootSumSquares(axis=1))),
-        ArrayDocument(real_data, operations=(Crop(axis=1, start=0, stop=4), Mean(axis=1), CenteredFFT(axis=1))),
+        ArrayDocument(
+            real_data,
+            operations=(
+                Crop(axis=1, start=1, stop=5),
+                ReverseAxis(axis=0),
+                CenteredFFT(axis=2),
+                RootSumSquares(axis=1),
+            ),
+        ),
+        ArrayDocument(
+            real_data, operations=(Crop(axis=1, start=0, stop=4), Mean(axis=1), CenteredFFT(axis=1))
+        ),
         ArrayDocument(complex_parts, operations=(CombineRealImagAxis(axis=2),)),
-        ArrayDocument(complex_singleton, operations=(SplitComplexAxis(axis=2), ReverseAxis(axis=0))),
+        ArrayDocument(
+            complex_singleton, operations=(SplitComplexAxis(axis=2), ReverseAxis(axis=0))
+        ),
         ArrayDocument(
             real_data,
             steps=(
@@ -387,7 +419,10 @@ def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_
                 OperationStep(CenteredFFT(axis=2), enabled=True),
             ),
         ),
-        ArrayDocument(real_data, operations=(CenteredFFT(axis=2), Crop(axis=1, start=1, stop=5), ReverseAxis(axis=0))),
+        ArrayDocument(
+            real_data,
+            operations=(CenteredFFT(axis=2), Crop(axis=1, start=1, stop=5), ReverseAxis(axis=0)),
+        ),
     ]
 
     for document in documents:
@@ -416,12 +451,21 @@ def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_
             )
 
             if state.image_axes is not None:
-                frame_axis = next((axis for axis in range(state.ndim) if axis not in state.image_axes and state.shape[axis] > 1), None)
+                frame_axis = next(
+                    (
+                        axis
+                        for axis in range(state.ndim)
+                        if axis not in state.image_axes and state.shape[axis] > 1
+                    ),
+                    None,
+                )
                 if frame_axis is not None:
                     frame_index = min(1, state.shape[frame_axis] - 1)
                     export_request = request_for_export_frame(state, frame_axis, frame_index)
                     np.testing.assert_allclose(
-                        make_image_from_slab(evaluate_slab(document, export_request), export_request).data,
+                        make_image_from_slab(
+                            evaluate_slab(document, export_request), export_request
+                        ).data,
                         make_export_frame(full, state, frame_axis, frame_index).data,
                         rtol=1e-6,
                         atol=1e-6,
@@ -431,7 +475,9 @@ def test_random_small_arrays_match_materialized_image_export_profile_and_scalar_
             scalar_request = request_for_scalar(state, scalar_index)
             np.testing.assert_allclose(
                 make_scalar_from_slab(evaluate_slab(document, scalar_request), scalar_request),
-                np.asarray(apply_channel(full[scalar_index if scalar_index else ()], channel)).item(),
+                np.asarray(
+                    apply_channel(full[scalar_index if scalar_index else ()], channel)
+                ).item(),
                 rtol=1e-6,
                 atol=1e-6,
             )
@@ -457,7 +503,7 @@ def _small_document_specs(draw):
             start = draw(st.integers(0, size - 1))
             stop = draw(st.integers(start + 1, size))
             operations.append(Crop(axis, start, stop))
-            current_shape = current_shape[:axis] + (stop - start,) + current_shape[axis + 1 :]
+            current_shape = (*current_shape[:axis], stop - start, *current_shape[axis + 1 :])
         elif kind == "fftshift":
             operations.append(FFTShift(axis))
         elif kind == "fft":
@@ -511,7 +557,14 @@ def test_hypothesis_lazy_slab_matches_materialized_image_line_scalar_and_export(
     )
 
     if state.image_axes is not None:
-        frame_axis = next((axis for axis in range(state.ndim) if axis not in state.image_axes and state.shape[axis] > 1), None)
+        frame_axis = next(
+            (
+                axis
+                for axis in range(state.ndim)
+                if axis not in state.image_axes and state.shape[axis] > 1
+            ),
+            None,
+        )
         if frame_axis is not None:
             frame_index = min(1, state.shape[frame_axis] - 1)
             export_request = request_for_export_frame(state, frame_axis, frame_index)
@@ -559,7 +612,9 @@ def test_concurrent_slab_evaluations_share_one_stage_computation(monkeypatch):
 
     def eval_slice(slice_index):
         request = request_for_image(state.with_slice(2, slice_index))
-        results[slice_index] = evaluate_slab(document, request, stage_cache=cache, document_key=("doc",))
+        results[slice_index] = evaluate_slab(
+            document, request, stage_cache=cache, document_key=("doc",)
+        )
 
     thread_a = threading.Thread(target=eval_slice, args=(0,))
     thread_a.start()
@@ -570,11 +625,16 @@ def test_concurrent_slab_evaluations_share_one_stage_computation(monkeypatch):
     release_first.set()
     thread_a.join(timeout=30)
     thread_b.join(timeout=30)
-    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
 
     shared_chain_starts = len(chain_starts)
     monkeypatch.setattr(dim_ops, "centered_fft", real_fft)
     assert shared_chain_starts == 1
 
-    np.testing.assert_allclose(results[0], evaluate_slab(document, request_for_image(state.with_slice(2, 0))))
-    np.testing.assert_allclose(results[1], evaluate_slab(document, request_for_image(state.with_slice(2, 1))))
+    np.testing.assert_allclose(
+        results[0], evaluate_slab(document, request_for_image(state.with_slice(2, 0)))
+    )
+    np.testing.assert_allclose(
+        results[1], evaluate_slab(document, request_for_image(state.with_slice(2, 1)))
+    )

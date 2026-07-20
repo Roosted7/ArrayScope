@@ -36,7 +36,6 @@ import sys
 import time
 
 import numpy as np
-
 import wgpu
 from wgpu.backends.wgpu_native.extras import set_instance_extras
 
@@ -223,9 +222,7 @@ class Harness:
 
         # CPU L1 reference (2x2 mean).
         p = self.plane
-        self.plane_l1 = (
-            p[0::2, 0::2] + p[1::2, 0::2] + p[0::2, 1::2] + p[1::2, 1::2]
-        ) / 4.0
+        self.plane_l1 = (p[0::2, 0::2] + p[1::2, 0::2] + p[0::2, 1::2] + p[1::2, 1::2]) / 4.0
 
         self.pool = d.create_texture(
             size=(PAGE, PAGE, POOL_LAYERS),
@@ -271,11 +268,19 @@ class Harness:
                 {"binding": 0, "resource": {"buffer": self.mapping_buf, "offset": 0, "size": 16}},
                 {
                     "binding": 1,
-                    "resource": {"buffer": self.table_buf, "offset": 0, "size": self.table_buf.size},
+                    "resource": {
+                        "buffer": self.table_buf,
+                        "offset": 0,
+                        "size": self.table_buf.size,
+                    },
                 },
                 {
                     "binding": 2,
-                    "resource": {"buffer": self.tiles_buf, "offset": 0, "size": self.tiles_buf.size},
+                    "resource": {
+                        "buffer": self.tiles_buf,
+                        "offset": 0,
+                        "size": self.tiles_buf.size,
+                    },
                 },
                 {"binding": 3, "resource": self.pool.create_view(dimension="2d-array")},
             ],
@@ -310,9 +315,7 @@ class Harness:
         """tiles: list of dict(dst=(x,y,w,h), src=(ox,oy,sw,sh), lod=int)."""
         buf = b""
         for t in tiles:
-            buf += struct.pack(
-                "8f4i", *t["dst"], *t["src"], t["lod"], 0, 0, 0
-            )
+            buf += struct.pack("8f4i", *t["dst"], *t["src"], t["lod"], 0, 0, 0)
         self.n_tiles = len(tiles)
         self.device.queue.write_buffer(self.tiles_buf, 0, buf)
 
@@ -357,10 +360,10 @@ class Harness:
         out = np.zeros((h, w, 4), np.uint8)
         out[..., 3] = 255
         for t in tiles:
-            x0 = int(round(t["dst"][0] * w))
-            y0 = int(round(t["dst"][1] * h))
-            tw = int(round(t["dst"][2] * w))
-            th = int(round(t["dst"][3] * h))
+            x0 = round(t["dst"][0] * w)
+            y0 = round(t["dst"][1] * h)
+            tw = round(t["dst"][2] * w)
+            th = round(t["dst"][3] * h)
             sx = t["src"][0] + (np.arange(tw, dtype=np.float64) + 0.5) / tw * t["src"][2]
             sy = t["src"][1] + (np.arange(th, dtype=np.float64) + 0.5) / th * t["src"][3]
             sxg, syg = np.meshgrid(sx, sy)
@@ -375,7 +378,7 @@ class Harness:
                 if absent_l0:
                     cx1 = np.clip(sxg / 2, 0, PLANE // 2 - 1).astype(np.int64)
                     cy1 = np.clip(syg / 2, 0, PLANE // 2 - 1).astype(np.int64)
-                    for (acx, acy) in absent_l0:
+                    for acx, acy in absent_l0:
                         m = (cx // PAGE == acx) & (cy // PAGE == acy)
                         v[m] = self.plane_l1[cy1[m], cx1[m]]
             re = v[..., 0].astype(np.float32)
@@ -389,9 +392,7 @@ class Harness:
             else:
                 x = im
             g = np.clip((x.astype(np.float64) - lo) / (hi - lo), 0, 1)
-            rgba = np.stack(
-                [g * 255, g * g * 255, np.sqrt(g) * 255, np.full_like(g, 255)], axis=-1
-            )
+            rgba = np.stack([g * 255, g * g * 255, np.sqrt(g) * 255, np.full_like(g, 255)], axis=-1)
             out[y0 : y0 + th, x0 : x0 + tw] = np.round(rgba).astype(np.uint8)
         return out
 
@@ -431,9 +432,7 @@ class Compute:
     def reduce_quad_to_l1(self, src_layers, dst_layer):
         """One compute pass: 2x2 quad of L0 pages -> one L1 page (in-pool)."""
         h, d = self.h, self.h.device
-        args = d.create_buffer(
-            size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
-        )
+        args = d.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         d.queue.write_buffer(args, 0, struct.pack("4i4i", *src_layers, 0, 0, 0, 0))
         # Disjoint subresource views: sampled = layers [0, dst), storage = [dst, dst+1).
         src_view = h.pool.create_view(
@@ -470,9 +469,7 @@ class Compute:
         """Two passes: per-page partials -> merge; returns (bins, wall_ms)."""
         h, d = self.h, self.h.device
         n = len(layers)
-        uargs = d.create_buffer(
-            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
-        )
+        uargs = d.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         d.queue.write_buffer(uargs, 0, struct.pack("2f2I", lo, hi, n, 0))
         layers_buf = d.create_buffer(
             size=4 * n, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
@@ -551,8 +548,7 @@ def main():
         h.set_mapping(mode, lo, hi)
         h.render()
         h.compare(name, h.readback(), h.cpu_reference(full_window, mode, lo, hi))
-    hashes = set()
-    for name in ("B_phase", "B_real", "B_imag", "B_mag_relevel"):
+    for _name in ("B_phase", "B_real", "B_imag", "B_mag_relevel"):
         pass  # distinctness is implied by each matching a distinct reference
     EV["oracles"]["B_zero_uploads"] = {"ok": EV["uploads"] == base_uploads}
 
@@ -628,9 +624,9 @@ def main():
     im = h.plane[..., 1]
     mag = np.sqrt(re * re + im * im, dtype=np.float32)
     t = (mag - 0.0) / 6.0
-    cpu_bins = np.bincount(
-        np.clip((t * 64).astype(np.int32), 0, 63).ravel(), minlength=64
-    ).astype(np.uint64)
+    cpu_bins = np.bincount(np.clip((t * 64).astype(np.int32), 0, 63).ravel(), minlength=64).astype(
+        np.uint64
+    )
     exact = bool((bins.astype(np.uint64) == cpu_bins).all())
     EV["oracles"]["G_histogram"] = {
         "ok": exact or int(np.abs(bins.astype(np.int64) - cpu_bins.astype(np.int64)).sum()) <= 4,

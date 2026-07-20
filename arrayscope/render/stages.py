@@ -92,7 +92,9 @@ class LodAdmissionScope:
             "near_tile_numbers",
             frozenset(int(tile) for tile in tuple(self.near_tile_numbers or ())),
         )
-        object.__setattr__(self, "visible_missing_count", max(0, int(self.visible_missing_count or 0)))
+        object.__setattr__(
+            self, "visible_missing_count", max(0, int(self.visible_missing_count or 0))
+        )
 
 
 @dataclass(frozen=True)

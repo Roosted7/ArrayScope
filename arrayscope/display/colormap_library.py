@@ -13,6 +13,7 @@ directory and can be imported from common native formats (MATLAB ``.mat``,
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass
@@ -220,7 +221,9 @@ def user_colormaps() -> tuple[ColormapInfo, ...]:
     return tuple(_load_user_cache().values())
 
 
-def list_colormaps(kind: str | None = None, *, include_hidden: bool = False) -> tuple[ColormapInfo, ...]:
+def list_colormaps(
+    kind: str | None = None, *, include_hidden: bool = False
+) -> tuple[ColormapInfo, ...]:
     """User maps first (they shadow built-ins by name), then built-ins."""
     seen = set()
     result = []
@@ -285,7 +288,7 @@ def apply_library_layout(group_order, map_groups, map_order) -> None:
 def rename_group(old: str, new: str) -> None:
     """Rename a group: reassign every member map and the order entry."""
     old, new = str(old), str(new).strip()
-    if not new or old == new or old == FAVORITES_GROUP:
+    if old in (new, FAVORITES_GROUP) or not new:
         return
     layout = dict(_load_layout())
     map_groups = dict(layout["map_groups"])
@@ -293,7 +296,9 @@ def rename_group(old: str, new: str) -> None:
         if effective_group(info) == old:
             map_groups[info.name] = new
     group_order = [new if g == old else g for g in layout["group_order"]]
-    _save_layout({"group_order": group_order, "map_groups": map_groups, "map_order": layout["map_order"]})
+    _save_layout(
+        {"group_order": group_order, "map_groups": map_groups, "map_order": layout["map_order"]}
+    )
 
 
 def grouped_colormaps(family: str | None = None, *, include_hidden: bool = False):
@@ -306,10 +311,12 @@ def grouped_colormaps(family: str | None = None, *, include_hidden: bool = False
         if kinds is not None and info.kind not in kinds:
             continue
         by_group.setdefault(effective_group(info), []).append(info)
-    for group, infos in by_group.items():
+    for infos in by_group.values():
         infos.sort(
             key=lambda info: (
-                layout["map_order"].get(info.name, 10_000 + default_positions.get(info.name, 20_000)),
+                layout["map_order"].get(
+                    info.name, 10_000 + default_positions.get(info.name, 20_000)
+                ),
                 info.name.lower(),
             )
         )
@@ -469,7 +476,7 @@ def colormap_stops(name: str, points: int = 9) -> tuple[tuple[float, tuple[int, 
     lut = colormap.getLookupTable(0.0, 1.0, int(points), alpha=False)
     return tuple(
         (float(pos), (int(rgb[0]), int(rgb[1]), int(rgb[2])))
-        for pos, rgb in zip(positions, lut)
+        for pos, rgb in zip(positions, lut, strict=False)
     )
 
 
@@ -485,10 +492,8 @@ def add_library_listener(callback) -> None:
 
 def _notify() -> None:
     for callback in tuple(_listeners):
-        try:
+        with contextlib.suppress(Exception):
             callback()
-        except Exception:
-            pass
 
 
 def user_colormap_directory() -> str:
@@ -579,7 +584,9 @@ def export_colormap(name: str, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def import_colormap_file(path: str, *, name: str | None = None, kind: str | None = None) -> ColormapInfo:
+def import_colormap_file(
+    path: str, *, name: str | None = None, kind: str | None = None
+) -> ColormapInfo:
     """Import a colormap from .json (ours), .mat (MATLAB), .csv/.txt or .npy.
 
     Tabular formats hold an N×3 (or N×4, alpha ignored) array in 0–1 floats
@@ -647,8 +654,8 @@ def _stops_from_table(table: np.ndarray):
         count = rgb.shape[0]
     positions = np.linspace(0.0, 1.0, count)
     return tuple(
-        (float(pos), (int(round(r)), int(round(g)), int(round(b))))
-        for pos, (r, g, b) in zip(positions, rgb)
+        (float(pos), (round(r), round(g), round(b)))
+        for pos, (r, g, b) in zip(positions, rgb, strict=False)
     )
 
 
@@ -719,7 +726,9 @@ def detect_colormap_kind(stops) -> tuple[str, float]:
 
     endpoint_l_delta = abs(float(lightness[0] - lightness[-1]))
     mid = len(lightness) // 2
-    center_zone = lightness[max(1, mid - max(1, len(lightness) // 4)) : mid + max(2, len(lightness) // 4)]
+    center_zone = lightness[
+        max(1, mid - max(1, len(lightness) // 4)) : mid + max(2, len(lightness) // 4)
+    ]
     center_extreme = max(
         float(center_zone.max() - max(lightness[0], lightness[-1])),
         float(min(lightness[0], lightness[-1]) - center_zone.min()),
@@ -757,7 +766,7 @@ def _colormap_from_stops(stops):
     import pyqtgraph as pg
 
     positions = [position for position, _color in stops]
-    colors = [tuple(color) + (255,) for _position, color in stops]
+    colors = [(*tuple(color), 255) for _position, color in stops]
     return pg.ColorMap(positions, colors)
 
 
@@ -784,7 +793,9 @@ def _info_from_json_file(path: str) -> ColormapInfo:
     if len(stops) < 2:
         raise ValueError(f"colormap file has fewer than two stops: {path}")
     builtin_group = builtin_group_for(name)
-    return ColormapInfo(name, kind, "user", stops, "User" if builtin_group is None else builtin_group)
+    return ColormapInfo(
+        name, kind, "user", stops, "User" if builtin_group is None else builtin_group
+    )
 
 
 def _safe_file_name(name: str) -> str:

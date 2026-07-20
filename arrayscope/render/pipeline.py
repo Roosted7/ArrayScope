@@ -22,8 +22,9 @@ acknowledgement.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
@@ -184,8 +185,7 @@ class FramePipeline:
             self.kernel.rerank_unstarted_tile_tasks(
                 session_id=session_id,
                 scheduling_ranks={
-                    int(state.tile_number): int(state.scheduling_rank)
-                    for state in states
+                    int(state.tile_number): int(state.scheduling_rank) for state in states
                 },
             )
         steps = self.ladder.plan(states, demand, verdict)
@@ -200,8 +200,7 @@ class FramePipeline:
             for state in states
         )
         self.last_plan_steps = tuple(
-            (int(step.tile_number), int(step.rung), int(step.level))
-            for step in steps
+            (int(step.tile_number), int(step.rung), int(step.level)) for step in steps
         )
         self.counters.ladder_plans += 1
         submitted = 0
@@ -215,10 +214,9 @@ class FramePipeline:
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
         for step in steps:
-            if (
-                self._defer_native_quality_during_interaction(intent, step, presented_preview_tiles)
-                and not self.effects.retained_native_source_available(intent, step)
-            ):
+            if self._defer_native_quality_during_interaction(
+                intent, step, presented_preview_tiles
+            ) and not self.effects.retained_native_source_available(intent, step):
                 self.counters.interactive_native_deferred += 1
                 continue
             self._pending_admissions.append((intent, step))
@@ -288,9 +286,7 @@ class FramePipeline:
         if not self.effects.prepare_rung(intent, step):
             return False
         session = getattr(self.effects, "session", None)
-        coverage_pass_open = bool(
-            self.effects.scheduling_verdict().coverage_open
-        )
+        coverage_pass_open = bool(self.effects.scheduling_verdict().coverage_open)
         # Phase follows the work's role, not its historical rung name.
         # DESIRED on a blank tile runs in DISPLAY_PREVIEW and is phase-1
         # coverage; the same rung on an already-covered tile runs in
@@ -310,9 +306,7 @@ class FramePipeline:
             scheduling_rank=int(step.scheduling_rank),
             presentation_phase=presentation_phase,
             coverage_pass_open=coverage_pass_open,
-            session_id=int(
-                getattr(session, "session_id", 0) or 0
-            ),
+            session_id=int(getattr(session, "session_id", 0) or 0),
             tile_number=int(step.tile_number),
             scope=self._scope(intent.semantic_key),
             deps=self.effects.rung_deps(intent, step),
@@ -329,10 +323,14 @@ class FramePipeline:
         )
         handle = self.kernel.submit(
             spec,
-            on_done=lambda payload, intent=intent, step=step: self._on_rung_done(intent, step, payload),
+            on_done=lambda payload, intent=intent, step=step: self._on_rung_done(
+                intent, step, payload
+            ),
             on_error=lambda exc, intent=intent, step=step: self._on_rung_error(intent, step, exc),
             on_stale=lambda intent=intent, step=step: self._on_rung_stale(intent, step),
-            on_reuse=lambda payload, intent=intent, step=step: self._on_rung_reusable(intent, step, payload),
+            on_reuse=lambda payload, intent=intent, step=step: self._on_rung_reusable(
+                intent, step, payload
+            ),
         )
         if handle is not None:
             self.effects.rung_admitted(intent, step, step_key)

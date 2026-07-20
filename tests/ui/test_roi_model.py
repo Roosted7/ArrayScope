@@ -1,7 +1,5 @@
 import os
 
-import numpy as np
-
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

@@ -55,7 +55,9 @@ class OperationCapabilities:
     lod_commuting: bool = False
 
 
-def normalize_capabilities(capabilities: OperationCapabilities, *, ndim: int) -> OperationCapabilities:
+def normalize_capabilities(
+    capabilities: OperationCapabilities, *, ndim: int
+) -> OperationCapabilities:
     ndim = int(ndim)
     return OperationCapabilities(
         kind=_normalize_kind(capabilities.kind),
@@ -76,7 +78,12 @@ def default_chunkable_axes(kind: OperationKind, *, ndim: int, blocking_axes=()) 
     blocked = set(_normalize_axes(blocking_axes, ndim=ndim))
     if kind == OperationKind.TRANSFORM:
         return tuple(axis for axis in range(ndim) if axis not in blocked)
-    if kind in {OperationKind.VIEW, OperationKind.ELEMENTWISE, OperationKind.RESHAPE, OperationKind.REDUCTION}:
+    if kind in {
+        OperationKind.VIEW,
+        OperationKind.ELEMENTWISE,
+        OperationKind.RESHAPE,
+        OperationKind.REDUCTION,
+    }:
         return tuple(axis for axis in range(ndim) if axis not in blocked)
     return ()
 
@@ -108,7 +115,9 @@ def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -
     return True
 
 
-def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None, *, display_axes=()) -> bool:
+def pipeline_supports_reduced_display_lod(
+    operations, base_shape, base_dtype=None, *, display_axes=()
+) -> bool:
     """True when display axes may be reduced before evaluating this pipeline.
 
     This is broader than ``pipeline_commutes_for_display_lod``.  It answers a
@@ -138,7 +147,9 @@ def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=Non
     return True
 
 
-def pipeline_windowable_display_axes(operations, base_shape, base_dtype=None, *, display_axes=()) -> tuple[int, ...]:
+def pipeline_windowable_display_axes(
+    operations, base_shape, base_dtype=None, *, display_axes=()
+) -> tuple[int, ...]:
     """Display axes whose subset window commutes with the whole pipeline.
 
     ADR 0055 G3 window-shift fast path: resident chunks may be reused across

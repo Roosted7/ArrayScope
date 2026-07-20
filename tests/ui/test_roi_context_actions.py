@@ -12,7 +12,9 @@ def _window(qtbot, data=None):
     from arrayscope.window import ArrayScopeWindow
 
     clear_arrayscope_settings()
-    win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32) if data is None else data)
+    win = ArrayScopeWindow(
+        np.arange(32 * 32, dtype=float).reshape(32, 32) if data is None else data
+    )
     qtbot.addWidget(win)
     win.resize(900, 640)
     win.show()
@@ -28,7 +30,8 @@ def test_roi_at_image_point_finds_topmost_roi(qtbot):
     process_events(qtbot)
 
     hit = win._roi_at_image_point((8.0, 8.0))
-    assert hit is not None and str(hit.id) == str(selection.id)
+    assert hit is not None
+    assert str(hit.id) == str(selection.id)
     assert win._roi_at_image_point((30.0, 30.0)) is None
     assert win._roi_at_image_point(None) is None
 
@@ -48,7 +51,8 @@ def test_update_roi_selection_renames_and_recolors(qtbot):
     assert updated.label == "Lesion"
     assert updated.color == (10, 200, 30)
     mirrored = [s for s in win.img_view.roiSelections() if str(s.id) == str(selection.id)]
-    assert mirrored and mirrored[0].label == "Lesion"
+    assert mirrored
+    assert mirrored[0].label == "Lesion"
 
 
 def test_hud_context_rows_describe_hovered_roi(qtbot):
@@ -61,7 +65,9 @@ def test_hud_context_rows_describe_hovered_roi(qtbot):
 
     controller = win.img_view.interaction_controller
     win.img_view.sync_interaction_state(
-        controller.set_hover(InteractionTarget("roi", object_id=str(selection.id)), point=(8.0, 8.0))
+        controller.set_hover(
+            InteractionTarget("roi", object_id=str(selection.id)), point=(8.0, 8.0)
+        )
     )
     rows = win._hud_context_rows()
     assert rows, "hovering a ROI should produce HUD context rows"
@@ -72,12 +78,15 @@ def test_hud_context_rows_describe_hovered_roi(qtbot):
 
 
 def test_pixel_hud_renders_multiple_rows(qtbot):
-    from arrayscope.ui.hud import PixelHud
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.ui.hud import PixelHud
 
     hud = PixelHud()
     qtbot.addWidget(hud)
-    hud.show_rows_near((("crop", "Rectangle 1 · rectangle"), (None, "(3, 4) = 1.5")), QtCore.QPointF(10, 10))
+    hud.show_rows_near(
+        (("crop", "Rectangle 1 · rectangle"), (None, "(3, 4) = 1.5")), QtCore.QPointF(10, 10)
+    )
     assert hud.isVisible()
     assert "Rectangle 1" in hud.text()
     assert "(3, 4) = 1.5" in hud.text()
@@ -87,8 +96,9 @@ def test_pixel_hud_renders_multiple_rows(qtbot):
 
 
 def test_line_edit_bubble_applies_text(qtbot):
-    from arrayscope.ui.bubbles import LineEditBubble
     from pyqtgraph.Qt import QtCore
+
+    from arrayscope.ui.bubbles import LineEditBubble
 
     accepted = []
     bubble = LineEditBubble(None, initial="old", on_accept=accepted.append)
@@ -100,15 +110,22 @@ def test_line_edit_bubble_applies_text(qtbot):
 
 
 def test_color_swatch_bubble_picks_color(qtbot):
-    from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
-    from arrayscope.ui.bubbles import ColorSwatchBubble
     from pyqtgraph.Qt import QtCore, QtWidgets
 
+    from arrayscope.core.roi_store import DEFAULT_ROI_COLORS
+    from arrayscope.ui.bubbles import ColorSwatchBubble
+
     picked = []
-    bubble = ColorSwatchBubble(None, colors=DEFAULT_ROI_COLORS, current=DEFAULT_ROI_COLORS[0], on_accept=picked.append)
+    bubble = ColorSwatchBubble(
+        None, colors=DEFAULT_ROI_COLORS, current=DEFAULT_ROI_COLORS[0], on_accept=picked.append
+    )
     qtbot.addWidget(bubble)
     bubble.open_at(QtCore.QPoint(100, 100))
-    swatches = [b for b in bubble.findChildren(QtWidgets.QToolButton) if b.objectName() == "ColorSwatchButton"]
+    swatches = [
+        b
+        for b in bubble.findChildren(QtWidgets.QToolButton)
+        if b.objectName() == "ColorSwatchButton"
+    ]
     assert len(swatches) == len(DEFAULT_ROI_COLORS)
     swatches[1].click()
     assert picked == [tuple(DEFAULT_ROI_COLORS[1][:3])]

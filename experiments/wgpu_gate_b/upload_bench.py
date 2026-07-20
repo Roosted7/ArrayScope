@@ -26,7 +26,6 @@ import sys
 import time
 
 import numpy as np
-
 import wgpu
 from wgpu.backends.wgpu_native.extras import set_instance_extras
 

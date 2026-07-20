@@ -33,8 +33,9 @@ import pyqtgraph.Qt as Qt
 # pyqtgraph selected so both stay on the same Qt library.
 QtNetwork = importlib.import_module(f"{Qt.QT_LIB}.QtNetwork")
 
-from arrayscope.sync.messages import decode_lines, encode_message
+import contextlib
 
+from arrayscope.sync.messages import decode_lines, encode_message
 
 SYNC_SERVER_NAME_ENV = "ARRAYSCOPE_SYNC_NAME"
 
@@ -153,10 +154,8 @@ class SyncBus(Qt.QtCore.QObject):
 
     def _listen_as_broker(self) -> bool:
         server = QtNetwork.QLocalServer(self)
-        try:
+        with contextlib.suppress(Exception):
             server.setSocketOptions(QtNetwork.QLocalServer.SocketOption.UserAccessOption)
-        except Exception:
-            pass
         if not server.listen(self.server_name):
             # A stale socket file (crashed broker on Unix) blocks listen even
             # though nobody is serving. Connecting already failed, so it is
