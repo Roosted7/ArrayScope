@@ -87,14 +87,23 @@ def synthetic_montage_data() -> np.ndarray:
 
 
 @pytest.fixture
-def montage_window():
+def montage_window(qt_app):
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
     from arrayscope.app.launch import _create_window
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from tests.ui.helpers import use_vispy_backend
 
-    app, win = _create_window(synthetic_montage_data(), title="gpu-harness")
+    # This fixture's lifecycle and framebuffer oracles are VisPy-specific.
+    # Requesting ``qt_app`` activates the suite's isolated QSettings namespace;
+    # pinning the backend here prevents a developer's persisted WGPU choice
+    # from redirecting the window while the test samples the Qt backing store.
+    use_vispy_backend(extra_settings={"first_run_hints_dismissed": True})
+    app = win = None
     try:
+        app, win = _create_window(synthetic_montage_data(), title="gpu-harness")
+        assert image_view_backend_capabilities(win.img_view).name == "vispy"
         harness = Harness(app, win)
         harness.pump(0.3)
         vs = win.view_state
@@ -103,9 +112,11 @@ def montage_window():
         assert harness.wait_settled(), "montage never settled after open"
         yield harness
     finally:
-        win.close()
-        for _ in range(50):
-            app.processEvents()
+        if win is not None:
+            win.close()
+        if app is not None:
+            for _ in range(50):
+                app.processEvents()
 
 
 class Harness:
