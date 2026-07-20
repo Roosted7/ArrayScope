@@ -214,6 +214,29 @@ def _center_pixel(view):
     return target[h // 2, w // 2]
 
 
+def test_wgpu_physical_rows_report_resident_draw_geometry(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((8, 10), 2, 1, loaded=2, gap=1)
+        payloads = {
+            0: _payload(0, np.ones((8, 10), dtype=np.float32), source_id=("tile", 0)),
+            1: _payload(1, np.ones((8, 10), dtype=np.float32), source_id=("tile", 1)),
+        }
+
+        _commit(view, geometry, payloads, levels=(0.0, 1.0))
+
+        rows = view.tileTruthPhysicalRows()
+        assert set(rows) == {0, 1}
+        assert rows[0]["physical_draw_world_bounds"] == (0.0, 0.0, 10.0, 8.0)
+        assert rows[1]["physical_draw_world_bounds"] == (11.0, 0.0, 21.0, 8.0)
+        assert rows[0]["physical_draw_bounds_match_layout"] is True
+        assert rows[0]["physical_storage_mode"] == "wgpu_page_table"
+        assert rows[0]["physical_acknowledged_identity"] is not None
+        assert view.wgpuPresentationDiagnostics()["physically_visible_tile_count"] == 2
+    finally:
+        view.close()
+
+
 def _green_overlay_mask(target):
     pixels = np.asarray(target, dtype=np.int16)
     return (

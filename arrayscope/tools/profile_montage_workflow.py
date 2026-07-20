@@ -3011,6 +3011,12 @@ class _VisualTimelineProbe:
         self._index += 1
         path = self._directory / f"{self._backend}-visual-{self._index:04d}.png"
         saved = _save_view_screenshot(self._win, path)
+        screenshot_capture_kind = str(
+            getattr(self._win, "_arrayscope_last_screenshot_capture_kind", "unknown")
+        )
+        screenshot_capture_error = str(
+            getattr(self._win, "_arrayscope_last_screenshot_capture_error", "") or ""
+        )
         session = getattr(self._win, "_frame_session", None)
         plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
         requested = frozenset(int(tile.montage_index) for tile in plan_tiles)
@@ -3124,6 +3130,8 @@ class _VisualTimelineProbe:
             "event_loop_freeze": bool(gap_ms > max(1500.0, self._interval_ms * 1.5)),
             "screenshot_path": str(path),
             "screenshot_saved": bool(saved),
+            "screenshot_capture_kind": screenshot_capture_kind,
+            "screenshot_capture_error": screenshot_capture_error,
             "session_id": None if session is None else int(getattr(session, "session_id", 0) or 0),
             "requested_tiles": sorted(requested),
             "visible_tiles": sorted(visible),
@@ -3278,6 +3286,7 @@ class _VisualTimelineProbe:
                 f"{record['sample']:04d} {record['elapsed_ms'] / 1000.0:.1f}s "
                 f"{record['phase']}\n"
                 f"{record['action']}\n"
+                f"capture {record['screenshot_capture_kind']} "
                 f"scene {record['drawn_count']}/{record['requested_count']} "
                 f"onscreen {record['onscreen_count']} "
                 f"+{len(record['appeared_tiles'])} -{len(record['disappeared_tiles'])} "
@@ -4983,14 +4992,60 @@ def _attach_phase_screenshot(
         return
     record["screenshot_path"] = str(path)
     record["screenshot_saved"] = ok
+    record["screenshot_capture_kind"] = str(
+        getattr(win, "_arrayscope_last_screenshot_capture_kind", "unknown")
+    )
+    record["screenshot_capture_error"] = str(
+        getattr(win, "_arrayscope_last_screenshot_capture_error", "") or ""
+    )
 
 
 def _save_view_screenshot(win, path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Screen-present wgpu pixels live in the compositor swapchain; a Qt
-    # widget grab rasterizes the paint-less native child as nothing and every
-    # pixel-diff oracle goes blind (all-red screen matrix, 2026-07-19).  The
-    # view re-renders its current physical state offscreen for the capture.
+    win._arrayscope_last_screenshot_capture_error = ""
+    present_method = getattr(win.img_view, "wgpuPresentMethod", lambda: "")()
+    if str(present_method) == "screen":
+        helper = os.environ.get("ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER", "").strip()
+        if helper:
+            desktop_path = path.with_name(f".{path.stem}-desktop{path.suffix}")
+            try:
+                subprocess.run(
+                    [helper, str(desktop_path)],
+                    check=True,
+                    timeout=3.0,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                from pyqtgraph.Qt import QtGui
+
+                desktop = QtGui.QImage(str(desktop_path))
+                geometry = win.frameGeometry()
+                if desktop.isNull():
+                    raise RuntimeError("compositor helper returned no image")
+                if desktop.size() != geometry.size():
+                    raise RuntimeError(
+                        "compositor helper must return the exact top-level window; "
+                        f"got {desktop.width()}x{desktop.height()}, expected "
+                        f"{geometry.width()}x{geometry.height()}"
+                    )
+                win._arrayscope_last_screenshot_capture_kind = "compositor-helper-window"
+                return bool(desktop.save(str(path)))
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                win._arrayscope_last_screenshot_capture_error = repr(exc)
+            finally:
+                desktop_path.unlink(missing_ok=True)
+        # The swapchain lives in a native Wayland child. QWidget.grab() omits
+        # it, so ask QScreen for the owned top-level's composited pixels first.
+        screen = win.screen()
+        pixmap = None if screen is None else screen.grabWindow(int(win.winId()))
+        if pixmap is not None and not pixmap.isNull():
+            win._arrayscope_last_screenshot_capture_kind = "qscreen-window-grab"
+            return bool(pixmap.save(str(path)))
+
+    # A screen-path fallback is an offscreen replay of the committed WGPU
+    # command state.  It is useful pixel evidence, but it is not a compositor
+    # or full-window screenshot and must be labelled as such in every record.
     grab_physical = getattr(win.img_view, "grabPresentedFramebuffer", None)
     if callable(grab_physical):
         frame = grab_physical()
@@ -5006,8 +5061,10 @@ def _save_view_screenshot(win, path: Path) -> bool:
                 width * 4,
                 QtGui.QImage.Format.Format_RGBA8888,
             )
+            win._arrayscope_last_screenshot_capture_kind = "wgpu-offscreen-replay"
             return bool(image.save(str(path)))
-    pixmap = win.img_view.grab()
+    pixmap = win.grab()
+    win._arrayscope_last_screenshot_capture_kind = "qt-window-grab"
     return bool(pixmap.save(str(path)))
 
 

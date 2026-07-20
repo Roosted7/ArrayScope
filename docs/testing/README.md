@@ -117,6 +117,21 @@ timeouts, and the 180 s whole-process watchdog are blocking. The matrix keeps
 its output oracles as the primary verdict, but it may not report green after a
 driver has already observed stale pixels or incomplete product state.
 
+Visual-timeline records name their screenshot source. `qt-window-grab` is a
+full Qt-window capture. Native-Wayland WGPU cannot be captured by Qt, so its
+portable fallback is explicitly named `wgpu-offscreen-replay`; that replay is
+useful command/pixel evidence but is **not** compositor or full-window truth.
+For unattended screen-path acceptance, set
+`ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER` to an executable that accepts one
+destination path and writes the exact composited top-level window there. A
+desktop-sized image is rejected rather than cropped using Qt coordinates,
+because Wayland intentionally withholds global window position. Without such
+a helper, retain a manual compositor screenshot alongside the replay collage.
+WGPU timeline tile counts and geometry come from the committed executor
+instances whose page-table spans are currently resident; an empty physical-row
+set is a failing diagnostic, not evidence that a visibly populated frame is
+empty.
+
 ## Known suite state (2026-07-17)
 
 - 2026-07-17 branch run: 2277 passed / 34 skipped / 1 xfailed (~116 s

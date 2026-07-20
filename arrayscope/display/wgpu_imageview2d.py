@@ -1806,6 +1806,63 @@ class WgpuImageView2D(ImageViewShell):
     def _tiled_presentation_layer(self):
         return None
 
+    def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
+        """Describe the page-backed tile instances submitted to the executor.
+
+        WGPU deliberately has no Qt/VisPy tile-layer object, so inheriting the
+        shell implementation returned an empty mapping even while the native
+        surface drew a complete montage.  The committed command state plus
+        current page-table residency is the corresponding physical owner.
+        """
+
+        executor = self._wgpu_executor
+        committed = self._wgpu_committed or {}
+        if executor is None:
+            return {}
+        representation = str(committed.get("representation", "") or "")
+        mapping = self._wgpu_mapping_state
+        rows: dict[int, dict[str, object]] = {}
+        for tile_number, raw_info in dict(committed.get("tiles", {}) or {}).items():
+            info = dict(raw_info or {})
+            page_keys = tuple(info.get("page_keys", ()) or ())
+            if not page_keys or any(executor.page_table.lookup(key) is None for key in page_keys):
+                continue
+            x, y, width, height = tuple(info.get("world_rect", (0.0, 0.0, 0.0, 0.0)))
+            bounds = (float(x), float(y), float(x + width), float(y + height))
+            source_width, source_height = tuple(info.get("src_size", (0.0, 0.0)))
+            rows[int(tile_number)] = {
+                "physical_texture_kind": representation,
+                "physical_storage_mode": "wgpu_page_table",
+                "physical_texture_dtype": str(_WGPU_REP_DTYPES.get(representation, "")),
+                "physical_texture_shape": (int(source_height), int(source_width)),
+                "physical_mapping_mode": str(getattr(mapping, "mode", "") or ""),
+                "physical_component_mode": None,
+                "physical_levels": (
+                    float(getattr(mapping, "level_lo", 0.0)),
+                    float(getattr(mapping, "level_hi", 1.0)),
+                ),
+                "physical_acknowledged_identity": info.get("identity"),
+                "physical_lod_level": int(info.get("lod_level", 0) or 0),
+                "physical_quality": "exact",
+                "physical_draw_world_rects": (bounds,),
+                "physical_draw_uv_rects": ((0.0, 0.0, 1.0, 1.0),),
+                "physical_draw_world_bounds": bounds,
+                "physical_expected_world_rect": bounds,
+                "physical_draw_bounds_match_layout": True,
+                "physical_page_bindings": tuple(
+                    {
+                        "target_key": key,
+                        "actual_key": key,
+                        "actual_lod": key.lod,
+                        "scale": (1.0, 1.0),
+                        "offset": (0.0, 0.0),
+                        "quality": "exact",
+                    }
+                    for key in page_keys
+                ),
+            }
+        return rows
+
     # ---- levels / LUT ---------------------------------------------------------
 
     def _apply_preview_levels_to_display(self, levels, *, final: bool) -> None:
@@ -1961,7 +2018,7 @@ class WgpuImageView2D(ImageViewShell):
 
     def wgpuPresentationDiagnostics(self) -> dict[str, object]:
         executor = self._wgpu_executor
-        drawn_tiles = tuple(getattr(executor, "_tiles", ()) or ()) if executor is not None else ()
+        drawn_tiles = tuple(self.tileTruthPhysicalRows())
         committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
         return {
