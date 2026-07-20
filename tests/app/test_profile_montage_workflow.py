@@ -52,27 +52,39 @@ def test_journey_end_sample_waits_for_pending_presentation_draw(monkeypatch):
     single repaint ran one scheduler tick after the last camera step, so the
     journey-end screenshot recorded the stale predecessor frame and the
     freshness oracle saw no pixel change ever. The end sample must key on
-    presentation-draw acks: capture only after pending draws execute."""
+    presentation-draw acks and the production quiet edge: capture only after
+    pending draws execute and the resulting COVERAGE pass closes."""
 
     import arrayscope.tools.profile_montage_workflow as workflow
 
-    pending = {"pumps_left": 3}
-    monkeypatch.setattr(
-        workflow,
-        "_process_events",
-        lambda *_args, **_kwargs: pending.update(pumps_left=max(0, pending["pumps_left"] - 1)),
-    )
+    pending = {"draws": 1, "quiet": 3}
     events = []
     monkeypatch.setattr(
         workflow, "emit_trace", lambda kind, **payload: events.append((kind, payload))
     )
     captures = []
-    win = _journey_gesture_win(lambda: pending["pumps_left"] > 0, captures)
+    win = _journey_gesture_win(lambda: pending["draws"] > 0, captures)
+    win._interaction_active_now = lambda: pending["quiet"] > 0
+    win._frame_session = SimpleNamespace(
+        scheduling_policy=SimpleNamespace(
+            verdict=SimpleNamespace(coverage_open=True),
+        ),
+    )
+
+    def process_events(*_args, **_kwargs):
+        pending.update(
+            draws=max(0, pending["draws"] - 1),
+            quiet=max(0, pending["quiet"] - 1),
+        )
+        if pending["quiet"] == 0:
+            win._frame_session.scheduling_policy.verdict.coverage_open = False
+
+    monkeypatch.setattr(workflow, "_process_events", process_events)
 
     workflow._finish_journey_gesture(win, "zoom_out-1", app=object(), QtCore=object())
 
     assert captures == ["journey-end"]
-    assert pending["pumps_left"] == 0  # the draw ran before the sample was taken
+    assert pending == {"draws": 0, "quiet": 0}
     assert events[-1][1]["presentation_drained"] is True
 
 

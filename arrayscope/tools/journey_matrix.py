@@ -351,7 +351,16 @@ def evaluate_gesture(
                 demand_fresh_ms = (transition_ns - start_ns) / 1_000_000.0
 
     close_event = next(
-        (event for event in commits if bool(event.get("coverage_pass_closed", False))),
+        (
+            event
+            for event in segment
+            if (event.get("kind") == "scheduling_phase" and event.get("event") == "coverage_closed")
+            or (
+                event.get("kind") == "commit_batch"
+                and event.get("phase") == "backend_complete"
+                and bool(event.get("coverage_pass_closed", False))
+            )
+        ),
         None,
     )
     coverage_open_observed = any(

@@ -125,6 +125,26 @@ def test_healthy_trajectory_fixture_exercises_all_oracles(tmp_path):
     assert result["coverage_pass_observed"]
 
 
+def test_scheduling_owner_close_event_satisfies_coverage_oracle(tmp_path):
+    trace, timeline, interval = _artifacts(tmp_path)
+    trace[1]["coverage_pass_closed"] = False
+    trace.insert(
+        2,
+        {
+            "kind": "scheduling_phase",
+            "event": "coverage_closed",
+            "ts_ns": 1_200_000_000,
+            "sequence": 15,
+        },
+    )
+
+    result = _evaluate(trace, timeline, interval)
+
+    assert result["coverage_pass_observed"]
+    assert result["level_convergence_ms_after_pass_close"] == 100.0
+    assert result["ok"]
+
+
 def test_wgpu_resident_zoom_in_does_not_require_a_payload_commit(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     interval["start"]["journey"] = "zoom_in"

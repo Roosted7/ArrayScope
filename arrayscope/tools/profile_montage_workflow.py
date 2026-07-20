@@ -1044,25 +1044,40 @@ def _drain_presentation_draw_for_journey_sample(
     *,
     timeout_s: float = min(2.0, INTERACTION_SETTLE_HARD_LIMIT_S),
 ) -> bool:
-    """Run the dispatcher until pending presentation draws have executed.
+    """Run the dispatcher until the journey's physical quiet edge.
 
     The journey freshness sampler keys on presented pixels.  A
     descriptor-only gesture (wgpu zoom-out over resident content commits
     nothing by design) produces exactly one repaint, which the on-demand
     scheduler may run a tick after the last camera step; capturing the
     journey-end sample synchronously recorded the stale predecessor frame
-    and reported first_new_pixels=None (matrix v6/v7, 2026-07-18).  Bounded
-    and non-raising: when an injected missed redraw never clears the
-    pending flag, the sample is still taken, still stale, and the freshness
-    oracle stays red.
+    and reported first_new_pixels=None (matrix v6/v7, 2026-07-18). The
+    production quiet edge also releases interaction-deferred residency and
+    histogram evidence. Sampling while that edge or the resulting COVERAGE
+    pass is still open can close the harness before preview evidence is ready.
+    Bounded and non-raising: when an injected missed redraw, interaction, or
+    coverage pass never clears, the sample is still taken and the oracle stays
+    red.
     """
 
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
     pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
     if not callable(pending_fn):
         return True
+    interaction_active = getattr(win, "_interaction_active_now", None)
+
+    def sample_edge_pending() -> bool:
+        session = getattr(win, "_frame_session", None)
+        policy = getattr(session, "scheduling_policy", None)
+        verdict = getattr(policy, "verdict", None)
+        return (
+            bool(pending_fn())
+            or bool(callable(interaction_active) and interaction_active())
+            or bool(getattr(verdict, "coverage_open", False))
+        )
+
     deadline = perf_counter() + max(0.05, timeout_s)
-    while bool(pending_fn()):
+    while sample_edge_pending():
         if perf_counter() >= deadline:
             return False
         _process_events(app, QtCore, count=2)
