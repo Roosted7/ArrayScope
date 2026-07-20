@@ -711,6 +711,10 @@ class ArrayScopeWindow(
         kernel = getattr(self, "kernel", None)
         if kernel is not None:
             kernel.shutdown()
+        image_view = getattr(self, "img_view", None)
+        teardown_surface = getattr(image_view, "teardown_surface", None)
+        if callable(teardown_surface):
+            teardown_surface()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
