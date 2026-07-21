@@ -427,7 +427,17 @@ class WgpuImageView2D(ImageViewShell):
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
         self._wgpu_overlay_geometry_dirty = True
+        # EVERY atlas upload-currency tracker belongs here: a fresh executor
+        # starts with a 1x1 transparent texture, and these versions are what
+        # decide whether the atlas is re-uploaded.  Leaving one behind makes
+        # its primitives sample transparency forever — the quads still draw,
+        # so the geometry looks perfectly healthy.  The widget line was the
+        # one missed when chips landed, which is why the floating chips
+        # vanished for the rest of a tiled montage fill (the incremental page
+        # budget trips a rebuild mid-fill) and only came back when something
+        # else happened to bump the compositor's version.
         self._wgpu_glyph_atlas_uploaded_version = None
+        self._wgpu_widget_atlas_uploaded_version = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
         return self._wgpu_executor

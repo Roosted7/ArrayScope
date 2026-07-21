@@ -1618,3 +1618,56 @@ def test_factory_auto_resolution_to_bitmap_is_not_a_warning(qt_app):
         assert not any("unavailable" in message for message in messages)
     finally:
         view.close()
+
+
+def test_executor_rebuild_resets_every_atlas_upload_tracker(qt_app):
+    """Dogfood bug 2026-07-21: the floating chips vanished for the whole of a
+    tiled FFT montage fill and came back only afterwards.
+
+    A tiled montage grows its page demand band by band, so it trips an
+    executor rebuild mid-fill.  A fresh executor starts every atlas as one
+    transparent texel, but the upload-currency trackers say what still needs
+    uploading -- and the widget (chip) tracker was not being reset, so the
+    chip quads kept drawing while sampling transparency.  The geometry stays
+    perfectly healthy throughout, which is exactly why this reads as
+    "overlays vanish" rather than as a crash.
+
+    Pinned as an invariant over ALL atlas trackers, not just the widget one:
+    the same line was already missed once for glyphs (b0c3699b) and once for
+    widgets (3656e91e), so the next atlas must not be able to repeat it.
+    """
+
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        view._wgpu_executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
+        )
+        trackers = [
+            name
+            for name in vars(view)
+            if name.startswith("_wgpu_") and name.endswith("_atlas_uploaded_version")
+        ]
+        # Guard the guard: if the trackers get renamed this test must not
+        # silently pass by checking nothing.
+        assert "_wgpu_widget_atlas_uploaded_version" in trackers
+        assert "_wgpu_glyph_atlas_uploaded_version" in trackers
+
+        for name in trackers:
+            setattr(view, name, 7)  # pretend every atlas is already uploaded
+
+        # Demand more pages than the pool holds -> a real rebuild.
+        rebuilt = view._ensure_wgpu_executor({"scalar_r32f": 8})
+        assert rebuilt is view._wgpu_executor
+        assert rebuilt.pool_budget("scalar_r32f") >= 8
+
+        stale = {name: getattr(view, name) for name in trackers}
+        assert stale == dict.fromkeys(trackers, None), (
+            "an atlas upload tracker survived the executor rebuild, so its "
+            f"atlas will never be re-uploaded and its primitives sample "
+            f"transparency: {stale}"
+        )
+    finally:
+        view.close()
