@@ -103,14 +103,42 @@ def test_disabled_file_view_session_load_shows_enable_action(qt_app, tmp_path, m
     assert not settings.contains(key)
 
 
-def test_file_view_session_config_dir_is_next_to_qsettings(qt_app):
+def test_nonproduction_file_view_sessions_are_scoped_by_application_name(qt_app):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.window.file_view_session import _file_view_session_config_dir
 
-    settings = QtCore.QSettings()
+    previous_organization = qt_app.organizationName()
+    previous_application = qt_app.applicationName()
+    try:
+        qt_app.setOrganizationName("ArrayScope")
+        qt_app.setApplicationName("ArrayScopeProfileMontage")
+        settings = QtCore.QSettings()
 
-    assert _file_view_session_config_dir() == Path(settings.fileName()).parent
+        assert _file_view_session_config_dir() == (
+            Path(settings.fileName()).parent / "ArrayScopeProfileMontage"
+        )
+    finally:
+        qt_app.setOrganizationName(previous_organization)
+        qt_app.setApplicationName(previous_application)
+
+
+def test_production_file_view_session_directory_remains_compatible(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window.file_view_session import _file_view_session_config_dir
+
+    previous_organization = qt_app.organizationName()
+    previous_application = qt_app.applicationName()
+    try:
+        qt_app.setOrganizationName("ArrayScope")
+        qt_app.setApplicationName("ArrayScope")
+        settings = QtCore.QSettings()
+
+        assert _file_view_session_config_dir() == Path(settings.fileName()).parent
+    finally:
+        qt_app.setOrganizationName(previous_organization)
+        qt_app.setApplicationName(previous_application)
 
 
 def test_restored_roi_session_schedules_semantic_stats_refresh(qt_app, tmp_path):
