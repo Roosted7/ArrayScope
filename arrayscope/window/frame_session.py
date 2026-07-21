@@ -2768,9 +2768,17 @@ class FrameSession:
                 # what the backend truth contradicts).
                 self.pending_payload_upserts[int(tile_number)] = None
             active = tuple(dict.fromkeys((*active, *sorted(stale_drawn))))
+        # A viewport can move after a payload becomes ready but before its
+        # queued upsert is emitted.  The result remains reusable in the tile
+        # and page caches; its old presentation obligation does not.  Keeping
+        # that obligation outside the new active scope leaves commit debt with
+        # no admissible backend transaction and wedges finalization at idle.
+        active_scope = {int(tile) for tile in active}
+        for tile_number in set(self.pending_payload_upserts) - active_scope:
+            self.dirty_payloads.pop(int(tile_number), None)
+            self.pending_payload_upserts.pop(int(tile_number), None)
         # ADR 0051: the lifecycle machine owns park/re-arm; this is its
         # rule-3 scope event.
-        active_scope = set(active)
         for tile_number in self.lifecycle.rearm_for_scope(active_scope):
             self.dirty_payloads[int(tile_number)] = None
         preview_upgrade_tiles = tuple(

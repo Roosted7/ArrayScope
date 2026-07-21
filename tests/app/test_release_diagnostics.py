@@ -182,6 +182,9 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
         "physical_draw_bounds_match_layout": True,
     }
     assert not presentation_is_settled(win)
+    session.visible_tile_numbers = frozenset({0, 1})
+    assert presentation_is_settled(win)
+    session.visible_tile_numbers = frozenset({0})
     image_view.rows.pop(1)
 
     image_view.rendering_capabilities = type(

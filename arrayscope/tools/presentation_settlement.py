@@ -151,6 +151,9 @@ def presentation_settlement_snapshot(
     unsettled_fn = _required_callable(session, "required_target_unsettled_tiles")
     required = tuple(sorted(int(tile) for tile in required_fn()))
     required_set = frozenset(required)
+    coverage_set = frozenset(
+        int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", required) or required)
+    ).union(required_set)
     target = presentation_target_token(window)
 
     commit_debt = _commit_debt(session)
@@ -169,6 +172,7 @@ def presentation_settlement_snapshot(
     physical_errors = _physical_truth_errors(
         backend=backend,
         required=required_set,
+        allowed=coverage_set,
         rows=rows,
         backend_identities=backend_identities,
     )
@@ -277,11 +281,13 @@ def _commit_debt(session) -> tuple[str, ...]:
     return tuple(debt)
 
 
-def _physical_truth_errors(*, backend, required, rows, backend_identities) -> tuple[str, ...]:
+def _physical_truth_errors(
+    *, backend, required, allowed, rows, backend_identities
+) -> tuple[str, ...]:
     errors = []
     physical = frozenset(rows)
     missing = tuple(sorted(required - physical))
-    extra = tuple(sorted(physical - required))
+    extra = tuple(sorted(physical - allowed))
     if missing:
         errors.append(f"physical_missing={missing!r}")
     if extra:

@@ -109,13 +109,13 @@ def test_first_pass_physical_completion_uses_required_tiles():
     assert session.first_pass_pixels_presented()
 
 
-def test_required_first_pixels_ignore_retained_active_rows_outside_viewport():
+def test_visible_first_pixels_use_the_canonical_required_scope():
     session = _session()
     session.visible_tile_numbers = frozenset({0, 1})
     _present_exact_tiles(session, 0, 1)
 
     assert session.required_first_pixels_presented()
-    assert not session.visible_first_pixels_presented()
+    assert session.visible_first_pixels_presented()
 
 
 def test_preview_first_pass_accepts_compatible_exact_overlap():
@@ -751,7 +751,7 @@ def test_montage_render_session_visible_plan_tracks_visible_work_only():
     assert session.visible_plan_complete()
 
 
-def test_montage_render_session_uses_one_required_set_despite_frame_plan_drift():
+def test_montage_render_session_uses_frame_plan_required_set_despite_coverage_drift():
     session = _session()
     session.loading_tiles.clear()
     session.visible_tiles = (session.plan.tiles[0], session.plan.tiles[1])
@@ -773,14 +773,32 @@ def test_montage_render_session_uses_one_required_set_despite_frame_plan_drift()
     assert session.frame_plan.active_region_ids == (0,)
     _present_exact_tiles(session, 0)
 
-    assert session.required_tile_numbers() == (0, 1)
-    assert not session.required_target_settled()
-    assert not session.visible_plan_complete()
-
-    _present_exact_tiles(session, 1)
-
+    assert session.required_tile_numbers() == (0,)
     assert session.required_target_settled()
     assert session.visible_plan_complete()
+
+
+def test_descoped_payload_completion_does_not_leave_unowned_commit_debt():
+    session = _session()
+    tile = session.plan.tiles[0]
+    image = np.ones((2, 2), dtype=np.float32)
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    state, delta = session.build_tile_presentation({0: ("tile", 0)})
+    session.acknowledge_tile_presentation(
+        delta, TileCommitReport(presented_tiles=state.active_payloads(delta))
+    )
+    session.mark_presented(state.active_payloads(delta))
+
+    session.visible_tiles = (session.plan.tiles[1],)
+    session.visible_tile_numbers = frozenset({1})
+    session.sync_lifecycle_scope()
+    session.dirty_payloads[0] = None
+    session.pending_payload_upserts[0] = None
+
+    session.build_tile_presentation({0: ("tile", 0)})
+
+    assert 0 not in session.dirty_payloads
+    assert 0 not in session.pending_payload_upserts
 
 
 def test_montage_render_session_replacement_materialization_reopens_visible_plan():
