@@ -1324,3 +1324,67 @@ def test_unbudgeted_pool_rejects_residency_loudly():
                 ),
             )
         )
+
+
+def test_widget_quads_blend_qt_chip_pixels_over_the_image():
+    """Screen-path chip oracle (queue row 3 correctness blocker).
+
+    Floating Qt chips are rasterized and composited *inside* the frame,
+    because the swapchain subsurface hides Qt pixels behind it and cannot be
+    restacked.  Two properties make that substitution honest, and both are
+    pinned here:
+
+    * a chip's straight-alpha pixels blend over the image with exactly one
+      source-over, so a chip authored at alpha 215 lands on 0.843*colour and
+      not the 0.975 a double-composite produced (the 2026-07-21 defect); and
+    * the quad is camera-independent — it is window furniture, so panning
+      the image must not move it, unlike ``screen_rect``/``glyph_quad``.
+    """
+
+    from arrayscope.gpu.command_protocol import UpdateWidgetAtlas
+
+    executor = WgpuPlaneExecutor(
+        target_size=(64, 32),
+        pool_layers={SCALAR_R32F: 1},
+        device=_shared_device(),
+    )
+    chip = np.zeros((8, 16, 4), np.uint8)
+    chip[..., :3] = 252
+    chip[..., 3] = 215  # the ROI-panel stylesheet's rgba(252, 253, 254, 215)
+    quad = OverlayPrimitive(
+        "widget_quad",
+        (0.0, 0.0),
+        screen_offset=(0.0, 0.0),
+        size=(16.0, 8.0),
+        uv_rect=(0.0, 0.0, 1.0, 1.0),
+    )
+    report = executor.submit(
+        FrameSubmission(
+            1,
+            (
+                UpdateWidgetAtlas(16, 8, chip.tobytes()),
+                SetOverlayCamera((0.0, 0.0, 1.0, 1.0)),
+                UpdateOverlayGeometry((quad,)),
+                PresentGeneration(1),
+            ),
+        )
+    )
+    assert report.widget_atlas_uploads == 1
+    frame = executor.read_target()
+    # Cleared to opaque black, so one source-over of alpha 215/255 gives
+    # 0.843 * 252 == 212.  A second composite would give 246.
+    assert tuple(frame[4, 8][:3]) == (212, 212, 212)
+    assert tuple(frame[20, 40][:3]) == (0, 0, 0)  # nothing outside the quad
+
+    # Camera-independence: the same quad under a panned camera stays put.
+    panned = executor.submit(
+        FrameSubmission(
+            2,
+            (
+                SetOverlayCamera((0.5, 0.5, 1.5, 1.5)),
+                PresentGeneration(2),
+            ),
+        )
+    )
+    assert panned.widget_atlas_uploads == 0  # unchanged chip re-uploads nothing
+    assert tuple(executor.read_target()[4, 8][:3]) == (212, 212, 212)

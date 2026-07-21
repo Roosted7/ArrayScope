@@ -32,7 +32,23 @@
   `textureLoad` for crispness); `FrameReport.glyph_atlas_uploads` is the
   zero-per-frame-upload oracle. Tile-truth labels render natively in the
   wgpu view (QLabels replaced — Qt widgets cannot composite over a native
-  child), which unblocked the screen-present-mode experiment. Screen
+  child), which unblocked the screen-present-mode experiment. The same
+  constraint later forced the FLOATING chips (first-run hints, evaluation
+  indicator, pixel HUD, ROI info panel) into the frame as well: a
+  `widget_quad` kind plus an `UpdateWidgetAtlas` command carry them as
+  straight-RGBA rasters of Qt's own painting
+  (`arrayscope/display/backends/wgpu/chip_compositor.py`), sampled through a
+  second `rgba8unorm` binding that REPLACES the primitive colour rather than
+  masking it, with `FrameReport.widget_atlas_uploads` as the
+  zero-per-frame-upload oracle. Unlike every other kind, `widget_quad` is
+  camera-independent — chips are window furniture and must not pan with the
+  image. The two alternatives are closed, not merely unattractive: a native
+  *child* window gets no ARGB visual from Qt (`alphaBufferSize() == 0`, so
+  translucent rounded chips flatten into opaque boxes), and the swapchain
+  subsurface cannot be restacked under the window because `QWindow.lower()`
+  emits no `wl_subsurface.place_below`. Chips stay ordinary Qt widgets and
+  keep painting normally, so a chip overhanging the canvas (the hints chip
+  overlaps the histogram) still shows there, from the same rendering. Screen
   presentation landed 2026-07-19 behind the `wgpu_present_method` setting
   (bitmap default, explicit opt-in): a bare `QWindow` embedded through
   `QWidget.createWindowContainer`
@@ -84,7 +100,8 @@ second one.
 1. **`arrayscope/gpu/command_protocol.py` is the only seam renderers
    implement.** Frozen command dataclasses — `EnsureChunkResident`,
    `EvictChunk`, `GenerateLodPages`, `UpdateTileInstances`,
-   `UpdateOverlayGeometry`, `UpdateGlyphAtlas`, `SetOverlayCamera`,
+   `UpdateOverlayGeometry`, `UpdateGlyphAtlas`, `UpdateWidgetAtlas`,
+   `SetOverlayCamera`,
    `SetDisplayMapping`, `DispatchHistogram`, `PresentGeneration` — carried
    by an ordered `FrameSubmission`, answered by an auditable `FrameReport`
    (uploads, overlay-buffer writes, glyph-atlas uploads, evictions,

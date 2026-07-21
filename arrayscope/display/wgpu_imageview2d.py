@@ -93,6 +93,7 @@ from arrayscope.gpu.command_protocol import (
     UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
+    UpdateWidgetAtlas,
 )
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
@@ -335,6 +336,16 @@ class WgpuImageView2D(ImageViewShell):
         # gap; Qt only bakes the atlas, never touches the frame path).
         self._wgpu_glyph_atlas = GlyphAtlas()
         self._wgpu_glyph_atlas_uploaded_version: int | None = None
+        # Floating Qt chips composited into the frame (screen path only).
+        from arrayscope.display.backends.wgpu.chip_compositor import (
+            FloatingChipCompositor,
+        )
+
+        self._wgpu_chip_compositor = FloatingChipCompositor(
+            lambda: getattr(self, "_wgpu_canvas", None),
+            on_invalidate=self._request_wgpu_canvas_draw,
+        )
+        self._wgpu_widget_atlas_uploaded_version: int | None = None
         self._wgpu_tile_truth_rows: tuple[dict[str, object], ...] = ()
         self._wgpu_tile_truth_visible_rows: tuple[dict[str, object], ...] = ()
         self._wgpu_text_dpr = 1.0
@@ -493,6 +504,14 @@ class WgpuImageView2D(ImageViewShell):
                 *commands,
                 UpdateGlyphAtlas(atlas.size, atlas.size, atlas.image_bytes()),
             )
+        # Same currency invariant for the chip atlas: a frame drawn against a
+        # revision the executor has not seen uploads it in this batch, before
+        # the present.  Unchanged chips emit no command at all
+        # (FrameReport.widget_atlas_uploads stays 0).
+        chips = self._wgpu_chip_compositor
+        chip_atlas = chips.atlas
+        if chip_atlas is not None and chips.version != self._wgpu_widget_atlas_uploaded_version:
+            commands = (*commands, UpdateWidgetAtlas(*chip_atlas))
         generation = self._next_wgpu_generation()
         submission = FrameSubmission(generation, (*commands, PresentGeneration(generation)))
         if present_to is None:
@@ -505,6 +524,7 @@ class WgpuImageView2D(ImageViewShell):
                 present_size=present_size,
             )
         self._wgpu_glyph_atlas_uploaded_version = atlas.version
+        self._wgpu_widget_atlas_uploaded_version = chips.version
         return report
 
     # ---- draw-ack discipline -------------------------------------------------
@@ -568,6 +588,15 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._wgpu_executor
         if executor is None:
             return
+        # A chip that moved or repainted (the HUD follows the cursor) changes
+        # geometry no shell seam reports, so refresh it before the frame is
+        # built.  Deliberately NOT via _sync_wgpu_overlay_geometry: that
+        # submits a whole extra frame (re-uploading tile instances) and then
+        # asks for yet another draw, so every pointer sample cost two
+        # submissions.  Here the new geometry simply rides along in the frame
+        # this draw is already about to present.
+        if self._wgpu_present_method == "screen" and self._wgpu_chip_compositor.is_dirty:
+            self._refresh_wgpu_overlay_geometry()
         # DPR is baked into glyph rasters and label pixel offsets; a monitor
         # move re-lays the text out at the new density before this frame.
         if self._wgpu_tile_truth_rows:
@@ -629,16 +658,21 @@ class WgpuImageView2D(ImageViewShell):
         acquire_start = perf_counter()
         texture = context.get_current_texture()
         acquire_ms = (perf_counter() - acquire_start) * 1000.0
+        # Overlay geometry refreshed for THIS frame (a moved chip) rides along
+        # here rather than costing its own submission.
+        overlay_dirty = bool(self._wgpu_overlay_geometry_dirty)
+        commands = [SetDisplayMapping(self._wgpu_mapping_state)]
+        if overlay_dirty:
+            commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
+        commands.extend((camera, UpdateTileInstances(self._wgpu_camera_tiles(camera))))
         self._submit_wgpu(
-            (
-                SetDisplayMapping(self._wgpu_mapping_state),
-                camera,
-                UpdateTileInstances(self._wgpu_camera_tiles(camera)),
-            ),
+            tuple(commands),
             present_to=texture.create_view(),
             present_format=self._wgpu_context_format,
             present_size=size,
         )
+        if overlay_dirty:
+            self._wgpu_overlay_geometry_dirty = False
         present_start = perf_counter()
         context.present()
         present_ms = (perf_counter() - present_start) * 1000.0
@@ -776,60 +810,23 @@ class WgpuImageView2D(ImageViewShell):
         return len(self._wgpu_montage_tile_overlays)
 
     def _prepare_display_overlay_widget(self, widget) -> None:
-        # Screen present: the swapchain subsurface composites above every
-        # backing-store pixel of the window, so a plain Qt overlay would be
-        # invisible over the canvas.  Give the overlay its own subsurface
-        # stacked above the canvas: reparent it to the top-level (whose
-        # window is the only native window in the tree — making a DEEP child
-        # native would drag its whole ancestor chain native and re-create
-        # the subsurface soup this recipe exists to avoid) and force its
-        # native window.  Qt still paints and routes input to it; overlay
-        # positions expressed in display-overlay coords go through
-        # ``_place_display_overlay_widget``, which maps into the actual
-        # parent.  Translucent background keeps rounded chip corners
-        # see-through now that the widget no longer shares the parent's
-        # backing store.  Reparenting hides the widget; every attach seam
-        # already shows it afterwards.
+        """Composite a floating chip inside the frame on the screen path.
+
+        The chip stays an ordinary Qt widget — it is neither reparented nor
+        promoted to a native window.  Only its *pixels* are additionally
+        drawn inside the wgpu frame, because the swapchain subsurface would
+        otherwise hide it over the canvas; see
+        :mod:`arrayscope.display.backends.wgpu.chip_compositor` for why the
+        two native-window routes cannot work.  Keeping the widget itself
+        untouched is what makes input, styling and the part of a chip that
+        overhangs the canvas (the hints chip overlaps the histogram) behave
+        exactly as on every other backend.
+        """
+
         if widget is None or self._wgpu_present_method != "screen":
             return
-        # Deferred one event-loop turn: attach seams run during window
-        # construction, when ``self.window()`` may still be the view itself.
-        # Promoting THEN would make the view native, and every later
-        # ancestor insertion would drag the whole chain native — recreating
-        # the subsurface soup (observed with the PixelHud, attached from
-        # the window's __init__).
-        QtCore.QTimer.singleShot(0, self, lambda: self._promote_display_overlay_widget(widget))
-
-    def _promote_display_overlay_widget(self, widget) -> None:
-        try:
-            parent = widget.parentWidget()
-        except RuntimeError:  # C++ side already deleted
-            return
-        top = self.window()
-        if top is None or top is self or not top.isWindow():
-            return
-        visible = widget.isVisible()
-        if parent is not top:
-            # Seams position chips before this deferred promotion runs, in
-            # old-parent coords; keep the on-screen spot across the reparent.
-            pos_in_top = parent.mapTo(top, widget.pos()) if parent is not None else widget.pos()
-            widget.setParent(top)  # hides the widget
-            widget.move(pos_in_top)
-        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_NativeWindow, True)
-        widget.winId()  # force the native window (and its subsurface) NOW
-        if widget.testAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents):
-            # Widget-level mouse transparency does not carry to the widget's
-            # own native window; without the window-level flag the promoted
-            # chip's surface would swallow pointer events (the cursor-chasing
-            # PixelHud would eat every move).  The flag gives the surface an
-            # empty Wayland input region, so events land on the top-level.
-            handle = widget.windowHandle()
-            if handle is not None:
-                handle.setFlag(QtCore.Qt.WindowType.WindowTransparentForInput, True)
-        if visible:
-            widget.show()
-            widget.raise_()
+        self._wgpu_chip_compositor.register(widget)
+        self._request_wgpu_canvas_draw()
 
     def setTileTruthOverlayRows(self, rows) -> None:
         # Native glyph quads replace the inherited QLabel layer entirely:
@@ -852,6 +849,20 @@ class WgpuImageView2D(ImageViewShell):
             self._sync_wgpu_overlay_geometry()
         self._request_wgpu_canvas_draw()
 
+    def _refresh_wgpu_overlay_geometry(self) -> bool:
+        """Rebuild the flat overlay buffer WITHOUT submitting a frame.
+
+        Returns whether the geometry changed; the caller folds the resulting
+        ``UpdateOverlayGeometry`` into the frame it is already building.
+        """
+
+        primitives = self._wgpu_overlay_primitives()
+        if primitives == self._wgpu_overlay_geometry:
+            return False
+        self._wgpu_overlay_geometry = primitives
+        self._wgpu_overlay_geometry_dirty = True
+        return True
+
     def _sync_wgpu_overlay_geometry(self) -> None:
         """Rebuild the one flat buffer from shell state after semantic change."""
 
@@ -866,6 +877,16 @@ class WgpuImageView2D(ImageViewShell):
             return
         self._wgpu_overlay_geometry = primitives
         self._wgpu_overlay_geometry_dirty = True
+        if self._wgpu_present_method == "screen" and bool(
+            getattr(self, "_wgpu_canvas_update_pending", False)
+        ):
+            # A draw is already scheduled and the screen present path folds
+            # pending overlay geometry into the frame it presents, so
+            # submitting here as well would render the same state twice.
+            # Hovering a ROI hit exactly this: the hover-state resync and the
+            # chip's own invalidation each drove a submission per sample.
+            self._request_wgpu_canvas_draw()
+            return
         if self._wgpu_executor is not None:
             commands = [UpdateOverlayGeometry(primitives)]
             camera = self._wgpu_camera_command()
@@ -968,8 +989,28 @@ class WgpuImageView2D(ImageViewShell):
                 )
 
         primitives.extend(self._wgpu_tile_truth_primitives())
+        # Last: floating chips are window furniture and must sit above every
+        # scene overlay, exactly as the Qt widgets they were rasterized from.
+        primitives.extend(self._wgpu_chip_primitives())
 
         return tuple(primitives)
+
+    def _wgpu_chip_primitives(self) -> tuple[OverlayPrimitive, ...]:
+        """Screen-anchored quads for the rasterized floating Qt chips."""
+
+        if self._wgpu_present_method != "screen":
+            return ()
+        self._wgpu_chip_compositor.rebuild_if_needed()
+        return tuple(
+            OverlayPrimitive(
+                "widget_quad",
+                (0.0, 0.0),  # unused: widget quads are camera-independent
+                screen_offset=placement.offset,
+                size=placement.size,
+                uv_rect=placement.uv_rect,
+            )
+            for placement in self._wgpu_chip_compositor.placements
+        )
 
     def _wgpu_tile_truth_primitives(self) -> tuple[OverlayPrimitive, ...]:
         """Tile-truth labels as atlas-textured glyph quads (screen-sized).

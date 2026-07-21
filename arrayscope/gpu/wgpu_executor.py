@@ -62,6 +62,7 @@ from arrayscope.gpu.command_protocol import (
     UpdateGlyphAtlas,
     UpdateOverlayGeometry,
     UpdateTileInstances,
+    UpdateWidgetAtlas,
 )
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
@@ -86,6 +87,7 @@ _OVERLAY_KIND_INDEX = {
     "handle_quad": 2,
     "screen_rect": 3,
     "glyph_quad": 4,
+    "widget_quad": 5,
 }
 #: Bytes per packed overlay instance (must mirror the WGSL Overlay struct).
 _OVERLAY_INSTANCE_BYTES = 96
@@ -353,6 +355,7 @@ struct Overlay {
 @group(0) @binding(0) var<uniform> camera: OverlayCamera;
 @group(0) @binding(1) var<storage, read> overlays: array<Overlay>;
 @group(0) @binding(2) var glyph_atlas: texture_2d<f32>;
+@group(0) @binding(3) var widget_atlas: texture_2d<f32>;
 
 struct OverlayOut {
     @builtin(position) pos: vec4<f32>,
@@ -392,6 +395,14 @@ fn vs_overlay(
         let center = world_to_ndc(primitive.p0);
         let pixel_offset = (q - vec2<f32>(0.5)) * primitive.width;
         ndc = center + pixel_offset * vec2<f32>(2.0) / camera.target_size;
+    } else if (primitive.kind == 5u) {
+        // Widget quad: window furniture, not scene content.  Placed purely
+        // from y-down physical pixels off the target's top-left, so it never
+        // moves with the camera the way an anchored screen_rect does.
+        let pixels = primitive.screen_offset + q * primitive.size;
+        ndc = vec2<f32>(-1.0, 1.0) + pixels * vec2<f32>(2.0, -2.0) / camera.target_size;
+        uv = mix(primitive.uv0, primitive.uv1, q);
+        textured = 2u;
     } else {
         // Screen-space-sized quad anchored at world p0: pixel offsets are
         // y-down physical pixels, so screen size is constant under zoom
@@ -421,7 +432,7 @@ fn vs_overlay(
 @fragment
 fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
     var color = in.color;
-    if (in.textured != 0u) {
+    if (in.textured == 1u) {
         // Nearest texel load: glyph quads are laid out 1:1 with their atlas
         // cells, so exact loads keep text crisp (no sampler filtering).
         let dims = textureDimensions(glyph_atlas);
@@ -431,6 +442,19 @@ fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
             vec2<i32>(dims) - vec2<i32>(1),
         );
         color.a = color.a * textureLoad(glyph_atlas, texel, 0).r;
+    } else if (in.textured == 2u) {
+        // Widget quads carry Qt's own rasterized pixels, so the atlas REPLACES
+        // the colour instead of masking it.  Straight (non-premultiplied)
+        // alpha, matching the pipeline's src-alpha/one-minus-src-alpha blend,
+        // so a translucent chip blends over the image exactly as Qt's painter
+        // would have blended it.  1:1 texel load keeps text crisp.
+        let dims = textureDimensions(widget_atlas);
+        let texel = clamp(
+            vec2<i32>(in.uv * vec2<f32>(dims)),
+            vec2<i32>(0),
+            vec2<i32>(dims) - vec2<i32>(1),
+        );
+        color = textureLoad(widget_atlas, texel, 0);
     }
     return color;
 }
@@ -950,6 +974,17 @@ class WgpuPlaneExecutor:
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
         )
         self._glyph_atlas_uploads_total = 0
+        # Widget atlas: CPU-rasterized Qt chips sampled by widget_quad
+        # instances (straight RGBA).  Same lifecycle as the glyph atlas —
+        # replaced wholesale by UpdateWidgetAtlas, starts as one transparent
+        # texel so the bind group is always valid.
+        self._widget_atlas_size = (1, 1)
+        self._widget_atlas_tex = d.create_texture(
+            size=(1, 1, 1),
+            format="rgba8unorm",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        self._widget_atlas_uploads_total = 0
         self._lut_tex = d.create_texture(
             size=(256, 1, 1),
             format="rgba8unorm",
@@ -1115,6 +1150,7 @@ class WgpuPlaneExecutor:
                         },
                     },
                     {"binding": 2, "resource": self._glyph_atlas_tex.create_view()},
+                    {"binding": 3, "resource": self._widget_atlas_tex.create_view()},
                 ],
             )
             self._overlay_binds[fmt] = bind
@@ -1176,6 +1212,26 @@ class WgpuPlaneExecutor:
             (*size, 1),
         )
         self._glyph_atlas_uploads_total += 1
+        return 1
+
+    def _update_widget_atlas(self, cmd: UpdateWidgetAtlas) -> int:
+        wgpu, d = self._wgpu, self.device
+        size = (int(cmd.width), int(cmd.height))
+        if size != self._widget_atlas_size:
+            self._widget_atlas_tex = d.create_texture(
+                size=(*size, 1),
+                format="rgba8unorm",
+                usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+            )
+            self._widget_atlas_size = size
+            self._overlay_binds.clear()
+        d.queue.write_texture(
+            {"texture": self._widget_atlas_tex},
+            cmd.data,
+            {"bytes_per_row": size[0] * 4, "rows_per_image": size[1]},
+            (*size, 1),
+        )
+        self._widget_atlas_uploads_total += 1
         return 1
 
     def _write_overlay_camera(self, target_size: tuple[int, int]) -> None:
@@ -1947,6 +2003,8 @@ class WgpuPlaneExecutor:
                     self._overlay_buffer_writes_total += writes
                 elif isinstance(cmd, UpdateGlyphAtlas):
                     report.glyph_atlas_uploads += self._update_glyph_atlas(cmd)
+                elif isinstance(cmd, UpdateWidgetAtlas):
+                    report.widget_atlas_uploads += self._update_widget_atlas(cmd)
                 elif isinstance(cmd, SetOverlayCamera):
                     self._overlay_camera = cmd
                 elif isinstance(cmd, SetDisplayMapping):
@@ -2018,6 +2076,10 @@ class WgpuPlaneExecutor:
     @property
     def glyph_atlas_uploads_total(self) -> int:
         return self._glyph_atlas_uploads_total
+
+    @property
+    def widget_atlas_uploads_total(self) -> int:
+        return self._widget_atlas_uploads_total
 
     @property
     def bound_planes(self) -> tuple:

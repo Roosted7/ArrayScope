@@ -103,3 +103,27 @@ def test_frame_submission_freezes_command_order():
     assert sub.generation == 7
     assert isinstance(sub.commands, tuple)
     assert sub.commands[-1] == PresentGeneration(7)
+
+
+def test_widget_atlas_rejects_data_that_is_not_rgba():
+    """The atlas carries RGBA8; a mis-sized buffer must not reach the GPU."""
+
+    from arrayscope.gpu.command_protocol import UpdateWidgetAtlas
+
+    payload = bytes(4 * 3 * 4)
+    assert UpdateWidgetAtlas(4, 3, payload).data == payload
+    with pytest.raises(ValueError, match="rgba8"):
+        UpdateWidgetAtlas(4, 3, bytes(4 * 3))  # alpha8-sized, as glyphs are
+    with pytest.raises(ValueError, match="non-empty"):
+        UpdateWidgetAtlas(0, 3, b"")
+
+
+def test_widget_quad_requires_a_pixel_size():
+    """A widget quad is sized in pixels; a zero size would draw nothing."""
+
+    from arrayscope.gpu.command_protocol import OverlayPrimitive
+
+    ok = OverlayPrimitive("widget_quad", (0.0, 0.0), screen_offset=(1.0, 2.0), size=(8.0, 4.0))
+    assert ok.size == (8.0, 4.0)
+    with pytest.raises(ValueError, match="positive pixel size"):
+        OverlayPrimitive("widget_quad", (0.0, 0.0), size=(0.0, 4.0))

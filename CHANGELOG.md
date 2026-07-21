@@ -23,6 +23,16 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- The experimental wgpu screen presentation mode (`wgpu_present_method:
+  screen`, native Wayland) now draws its floating overlays exactly as the
+  other backends do. The first-run tips, the "Updating image frame…"
+  indicator, the pixel readout and the ROI info panel previously appeared as
+  flat opaque boxes with square corners — and could clip the histogram —
+  because they were promoted to native child windows, which Qt never gives a
+  transparency-capable surface. They are now rendered from Qt's own painter
+  and composited into the image frame, so their translucency, rounded
+  corners and borders match the default presentation pixel for pixel.
+
 - Progressive `.npy`, `.cfl`, and Philips `.REC` viewers now read through a
   synchronized array source instead of aliasing the destination buffer while
   its loader thread mutates it. Unread regions start at zero, and each

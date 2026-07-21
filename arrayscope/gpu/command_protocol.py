@@ -22,6 +22,7 @@ Command → engine-seam mapping (from the endpoint doc):
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
 ``UpdateOverlayGeometry`` shell overlay state -> flat primitive buffer
 ``UpdateGlyphAtlas``      CPU-baked glyph alpha atlas -> sampled overlay texture
+``UpdateWidgetAtlas``     CPU-rasterized Qt chips -> sampled RGBA overlay texture
 ``SetOverlayCamera``      world-space overlay camera (uniform-only)
 ``SetDisplayMapping``     shader-mapping uniforms + physical-truth audit
 ``GenerateLodPages``      G6 resident-page reduction
@@ -55,6 +56,7 @@ OVERLAY_PRIMITIVE_KINDS = (
     "handle_quad",
     "screen_rect",
     "glyph_quad",
+    "widget_quad",
 )
 
 
@@ -198,6 +200,15 @@ class OverlayPrimitive:
     under pan because the anchor is world space.  ``glyph_quad``
     additionally samples the executor's glyph atlas over normalized
     ``uv_rect`` ``(u0, v0, u1, v1)`` as an alpha mask on ``rgba``.
+
+    ``widget_quad`` is the only fully camera-independent kind: it ignores
+    ``p0`` and places itself from ``screen_offset``/``size`` alone, measured
+    in physical pixels from the target's top-left.  It samples the
+    executor's widget atlas over ``uv_rect`` as straight (non-premultiplied)
+    RGBA and replaces the primitive colour, so a Qt chip rasterized with
+    ``QWidget.grab()`` composites over the image exactly as Qt would have
+    drawn it.  Screen-anchored is required: these chips are window
+    furniture, so panning the image must not move them.
     """
 
     kind: str
@@ -239,7 +250,9 @@ class OverlayPrimitive:
             raise ValueError("overlay screen offset/size must be 2-D")
         if len(uv_rect) != 4:
             raise ValueError("overlay uv rect must contain four values")
-        if kind in ("screen_rect", "glyph_quad") and (size[0] <= 0.0 or size[1] <= 0.0):
+        if kind in ("screen_rect", "glyph_quad", "widget_quad") and (
+            size[0] <= 0.0 or size[1] <= 0.0
+        ):
             raise ValueError(f"{kind} primitives need a positive pixel size")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "p0", p0)
@@ -379,6 +392,52 @@ class UpdateGlyphAtlas:
 
 
 @dataclass(frozen=True)
+class UpdateWidgetAtlas:
+    """Replace the executor's one RGBA widget atlas (rare, off the frame path).
+
+    ``data`` is a tightly-packed ``height`` x ``width`` RGBA8 image with
+    straight (non-premultiplied) alpha, holding the rasterized floating Qt
+    chips that must appear over the image — first-run hints, the evaluation
+    indicator, the pixel HUD, the ROI info panel.
+
+    Why the chips are rasterized at all: in the screen present path the
+    swapchain lives on its own Wayland subsurface stacked above the window,
+    so Qt pixels drawn behind it are invisible, and Qt cannot put them in
+    front — a native *child* window gets no ARGB visual (it renders the
+    translucent rounded chip as a flat opaque box) and the subsurface cannot
+    be restacked below (``QWindow.lower()`` emits no ``place_below``).
+    Compositing the chip's own Qt pixels inside the frame sidesteps both:
+    the source of truth stays Qt's renderer, so the result matches the
+    bitmap path exactly.
+
+    Re-uploaded only when the visible chip set or its pixels change;
+    :attr:`FrameReport.widget_atlas_uploads` is the oracle that an unchanged
+    frame uploaded nothing.  Widget quads reference this atlas via
+    normalized ``uv_rect``, so a re-upload must come with (or precede)
+    overlay geometry laid out against the same revision.
+    """
+
+    width: int
+    height: int
+    data: bytes
+
+    def __post_init__(self) -> None:
+        width = int(self.width)
+        height = int(self.height)
+        data = bytes(self.data)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"widget atlas must be non-empty, got {width}x{height}")
+        if len(data) != width * height * 4:
+            raise ValueError(
+                f"widget atlas data must be {width * height * 4} bytes "
+                f"({width}x{height} rgba8), got {len(data)}"
+            )
+        object.__setattr__(self, "width", width)
+        object.__setattr__(self, "height", height)
+        object.__setattr__(self, "data", data)
+
+
+@dataclass(frozen=True)
 class SetOverlayCamera:
     """Set the sorted world viewport and axis direction for overlay drawing.
 
@@ -469,6 +528,7 @@ Command = (
     | UpdateTileInstances
     | UpdateOverlayGeometry
     | UpdateGlyphAtlas
+    | UpdateWidgetAtlas
     | SetOverlayCamera
     | SetDisplayMapping
     | DispatchHistogram
@@ -498,6 +558,8 @@ class FrameReport:
     ``uploads`` counts texel uploads performed by THIS submission (the
     zero-upload oracles read it); ``glyph_atlas_uploads`` counts glyph-atlas
     texture writes the same way (zero once every drawn glyph is cached);
+    ``widget_atlas_uploads`` likewise counts widget-atlas writes (zero while
+    the visible chip set and its pixels are unchanged);
     ``lod_pages_generated`` names pages created
     wholly inside the resident pool; ``histograms`` maps DispatchHistogram
     order-index → bins array over the keys that were resident at dispatch;
@@ -514,6 +576,7 @@ class FrameReport:
     uploads: int = 0
     overlay_buffer_writes: int = 0
     glyph_atlas_uploads: int = 0
+    widget_atlas_uploads: int = 0
     evictions: int = 0
     lod_pages_generated: tuple[DataChunkKey, ...] = ()
     histograms: dict[int, object] = field(default_factory=dict)
