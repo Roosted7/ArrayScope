@@ -152,10 +152,22 @@ class ContentPlane:
 
 @dataclass(frozen=True)
 class TileInstance:
-    """One drawn tile: destination rect + source window + requested LOD.
+    """One drawn tile: world rect + source window + requested LOD.
 
-    ``dst_rect`` is ``(x, y, w, h)`` in normalized target space ([0, 1] with
-    y down); ``src_origin``/``src_size`` are in native (LOD-0) source pixels
+    ``dst_rect`` is ``(x, y, w, h)`` in WORLD space, with ``x``/``y`` the
+    minimum corner along each world axis.  The camera (``SetOverlayCamera``)
+    maps world to NDC in the vertex shader, so instances are independent of
+    the camera and a pure pan rewrites only the camera uniform instead of
+    every instance (the reason this field is world-space and not screen
+    normalized).  Axis inversion lives in the camera too, so ``src_origin``/
+    ``src_size`` are always positive-extent: the world-minimum corner maps
+    to ``src_origin`` under every combination of flipped axes.
+
+    The default camera — world rect ``(0, 0, 1, 1)``, ``y_inverted`` — makes
+    world space identical to the old normalized [0, 1] y-down target space,
+    so callers drawing into an unconfigured executor are unaffected.
+
+    ``src_origin``/``src_size`` are in native (LOD-0) source pixels
     of the bound content plane selected by ``plane_index``.  The backend
     resolves source pixels through its page table at ``lod_level``, falling
     back to coarser resident ancestors (never black, ADR 0056 §5); which

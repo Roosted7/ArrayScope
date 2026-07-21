@@ -205,7 +205,7 @@ def _rerender_internal(view):
     from arrayscope.gpu.command_protocol import UpdateTileInstances
 
     camera = view._wgpu_camera_command()
-    view._submit_wgpu((camera, UpdateTileInstances(view._wgpu_camera_tiles(camera))))
+    view._submit_wgpu((camera, UpdateTileInstances(view._wgpu_tile_instances())))
 
 
 def _center_pixel(view):
@@ -825,8 +825,8 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         assert report.texture_uploads == 1
         assert report.presented_identities == {0: coarse.tile_identity}
         assert view._wgpu_executor._bound_planes[0].max_lod == 4
-        assert view._wgpu_camera_tiles()[0].lod_level == 0
-        assert view._wgpu_camera_tiles()[0].src_size == (512.0, 512.0)
+        assert view._wgpu_tile_instances()[0].lod_level == 0
+        assert view._wgpu_tile_instances()[0].src_size == (512.0, 512.0)
         view.getView().setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
         _rerender_internal(view)
         assert np.allclose(_center_pixel(view)[:3], 64, atol=2)
@@ -1468,6 +1468,48 @@ def test_warm_tiled_residency_accepts_the_commit_plan_contract(qt_app):
         view.close()
 
 
+def test_pan_reuses_tile_instances_and_skips_the_instance_upload(qt_app):
+    """Panning must cost O(1), not O(tiles).
+
+    Instances are world-space, so only the camera uniform moves. Locking
+    identity (not equality) pins both halves: the view must not rebuild the
+    tuple, and the executor must not repack/re-upload it.
+    """
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((32, 32), 4, 4, loaded=16)
+        image = np.linspace(0.0, 1.0, 32 * 32, dtype=np.float32).reshape(32, 32)
+        payloads = {i: _payload(i, image, source_id=f"pan-src-{i}") for i in range(16)}
+        _commit(view, geometry, payloads, levels=(0.0, 1.0))
+        executor = view._wgpu_executor
+
+        vb = view.getView()
+        vb.setRange(xRange=(0, 128), yRange=(0, 128), padding=0)
+        instances = view._wgpu_tile_instances()
+        assert len(instances) == 16
+        # World space, straight off the montage layout: the second column of
+        # a 32-wide tile grid starts at world x=32, not at some [0, 1] share.
+        assert instances[1].dst_rect == (32.0, 0.0, 32.0, 32.0)
+        # Inversion lives in the camera now, so extents stay positive.
+        assert instances[1].src_size == (32.0, 32.0)
+        executor._set_tiles(instances)
+        writes_before = executor._tiles
+
+        for offset in (5.0, 17.5, 40.0):
+            vb.setRange(xRange=(offset, offset + 64), yRange=(0, 64), padding=0)
+            panned = view._wgpu_tile_instances()
+            assert panned is instances, "pan rebuilt the instance tuple"
+            executor._set_tiles(panned)
+            assert executor._tiles is writes_before, "pan re-uploaded the instance buffer"
+
+        # A real commit still refreshes them.
+        _commit(view, geometry, payloads, levels=(0.0, 0.5))
+        assert view._wgpu_tile_instances() is not instances
+    finally:
+        view.close()
+
+
 def test_axis_inversion_mirrors_content_and_redraws_without_commit(qt_app):
     """Dogfood bugs 2026-07-18: (1) flips only took effect after the next
     commit — the view listened to sigRangeChanged but not sigStateChanged;
@@ -1488,8 +1530,15 @@ def test_axis_inversion_mirrors_content_and_redraws_without_commit(qt_app):
         view.getView().setRange(xRange=(0, 64), yRange=(0, 32), padding=0)
 
         def render_columns():
+            # The camera now carries the inversion (instances are world
+            # space), so it is part of every draw exactly as production
+            # sends it — re-read per call to pick the flip up.
             view._submit_wgpu(
-                (UpdateTileInstances(view._wgpu_camera_tiles()), PresentGeneration(999))
+                (
+                    view._wgpu_camera_command(),
+                    UpdateTileInstances(view._wgpu_tile_instances()),
+                    PresentGeneration(999),
+                )
             )
             target = view._wgpu_executor.read_target().astype(np.float32)
             h, w = target.shape[:2]

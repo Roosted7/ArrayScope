@@ -316,6 +316,7 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_screen_present_ms_max = 0.0
         self._wgpu_mapping_state = DisplayMapping(mode="real")
         self._wgpu_committed: dict[str, object] | None = None
+        self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
         self._wgpu_last_report_uploads = 0
         self._wgpu_last_draw_error: str = ""
         self._wgpu_histogram_evidence_required = False
@@ -629,7 +630,7 @@ class WgpuImageView2D(ImageViewShell):
             (
                 SetDisplayMapping(self._wgpu_mapping_state),
                 camera,
-                UpdateTileInstances(self._wgpu_camera_tiles(camera)),
+                UpdateTileInstances(self._wgpu_tile_instances()),
             ),
             present_to=texture.create_view(),
             present_format=self._wgpu_context_format,
@@ -674,7 +675,7 @@ class WgpuImageView2D(ImageViewShell):
         commands = [SetDisplayMapping(self._wgpu_mapping_state)]
         if overlay_dirty:
             commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
-        commands.extend((camera, UpdateTileInstances(self._wgpu_camera_tiles(camera))))
+        commands.extend((camera, UpdateTileInstances(self._wgpu_tile_instances())))
         self._submit_wgpu(
             tuple(commands),
             present_to=texture.create_view(),
@@ -710,65 +711,45 @@ class WgpuImageView2D(ImageViewShell):
             y_inverted=bool(state.get("yInverted", True)),
         )
 
-    def _wgpu_camera_tiles(
-        self,
-        camera: SetOverlayCamera | None = None,
-    ) -> tuple[TileInstance, ...]:
-        """Map committed per-tile world rects through the ViewBox to dst space.
+    def _wgpu_tile_instances(self) -> tuple[TileInstance, ...]:
+        """Emit committed per-tile world rects verbatim, camera-free.
 
-        The executor's dst space is normalized [0, 1] with y down.  The
-        ViewBox is the camera truth: ``viewRange`` returns sorted world
-        bounds; ``yInverted`` (the image default) puts world y-min at the
-        top of the canvas, which is already dst-y-down order.  Tile world
-        rects come from the shared montage layout (``tile_layout_map``), so
-        both drawn geometry and interaction mapping share one owner.
+        Tile world rects come from the shared montage layout
+        (``tile_layout_map``), so drawn geometry and interaction mapping
+        share one owner.  The ViewBox is still the camera truth, but it now
+        reaches the GPU as a uniform (``_wgpu_camera_command``) rather than
+        being folded into every instance here: panning a 272-tile montage
+        used to rebuild and re-upload all 272 instances per frame.
+
+        Both inversion axes therefore live in the camera. That is also why
+        ``src_size`` is unconditionally positive now — the negative-extent
+        mirroring trick only ever compensated for the dst-space flip this
+        method used to perform, and dropping it changes no pixels (a flipped
+        axis must still mirror the ViewBox, or drags land on mirrored
+        features: dogfood bug 2026-07-18).
+
+        Cached on the committed-set identity: ``_wgpu_committed`` is only
+        ever replaced wholesale, never mutated in place.
         """
 
         committed = self._wgpu_committed
         if not committed or self._montage_display_mode != "wgpu_tile_layer":
             return ()
-        camera = self._wgpu_camera_command() if camera is None else camera
-        if camera is None:
-            return ()
-        x0, y0, x1, y1 = camera.world_rect
-        span_x = float(x1) - float(x0)
-        span_y = float(y1) - float(y0)
-        # Both inversion axes must mirror the ViewBox (the interaction
-        # truth): ignoring xInverted drew unmirrored content under flipped
-        # interaction coordinates, so drags/zooms landed on mirrored
-        # features (dogfood bug 2026-07-18). The negative-src-extent trick
-        # is the same one the y branch always used.
-        x_inverted = camera.x_inverted
-        y_inverted = camera.y_inverted
-        instances = []
-        for tile in sorted(committed["tiles"]):
-            info = committed["tiles"][tile]
-            wx, wy, ww, wh = info["world_rect"]
-            src_w, src_h = info["src_size"]
-            dst_w = ww / span_x
-            dst_h = wh / span_y
-            if x_inverted:
-                dst_x = (float(x1) - (wx + ww)) / span_x
-                src_x0, src_wx = float(src_w), -float(src_w)
-            else:
-                dst_x = (wx - float(x0)) / span_x
-                src_x0, src_wx = 0.0, float(src_w)
-            if y_inverted:
-                dst_y = (wy - float(y0)) / span_y
-                src_y0, src_hy = 0.0, float(src_h)
-            else:
-                dst_y = (float(y1) - (wy + wh)) / span_y
-                src_y0, src_hy = float(src_h), -float(src_h)
-            instances.append(
-                TileInstance(
-                    (dst_x, dst_y, dst_w, dst_h),
-                    (src_x0, src_y0),
-                    (src_wx, src_hy),
-                    0,
-                    plane_index=int(info["plane_index"]),
-                )
+        cached = self._wgpu_tile_instances_cache
+        if cached is not None and cached[0] is committed:
+            return cached[1]
+        instances = tuple(
+            TileInstance(
+                tuple(float(value) for value in committed["tiles"][tile]["world_rect"]),
+                (0.0, 0.0),
+                tuple(float(value) for value in committed["tiles"][tile]["src_size"]),
+                0,
+                plane_index=int(committed["tiles"][tile]["plane_index"]),
             )
-        return tuple(instances)
+            for tile in sorted(committed["tiles"])
+        )
+        self._wgpu_tile_instances_cache = (committed, instances)
+        return instances
 
     # ---- native overlay translation ----------------------------------------
 
@@ -901,7 +882,7 @@ class WgpuImageView2D(ImageViewShell):
             commands = [UpdateOverlayGeometry(primitives)]
             camera = self._wgpu_camera_command()
             if camera is not None:
-                commands.extend((camera, UpdateTileInstances(self._wgpu_camera_tiles(camera))))
+                commands.extend((camera, UpdateTileInstances(self._wgpu_tile_instances())))
             report = self._submit_wgpu(tuple(commands))
             if report is not None:
                 self._wgpu_overlay_geometry_dirty = False
@@ -1402,7 +1383,7 @@ class WgpuImageView2D(ImageViewShell):
                 submission_commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
             if camera is not None:
                 submission_commands.append(camera)
-            submission_commands.append(UpdateTileInstances(self._wgpu_camera_tiles(camera)))
+            submission_commands.append(UpdateTileInstances(self._wgpu_tile_instances()))
             histogram_indices = []
             for _tile, _source_index, _evidence_key, frontier_keys in histogram_specs:
                 histogram_indices.append(len(submission_commands))

@@ -203,6 +203,12 @@ struct Tile {
     plane: u32,
     _pad1: u32, _pad2: u32,
 };
+struct TileCamera {
+    scale: vec2<f32>,
+    offset: vec2<f32>,
+    target_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
 @group(0) @binding(0) var<uniform> mapping: Mapping;
 @group(0) @binding(1) var<storage, read> page_table: array<i32>;
 @group(0) @binding(2) var<storage, read> lod_info: array<LodInfo>;
@@ -213,6 +219,7 @@ struct Tile {
 @group(0) @binding(7) var rgb_pool: texture_2d_array<f32>;
 @group(0) @binding(8) var rgb_windowed_pool: texture_2d_array<f32>;
 @group(0) @binding(9) var lut: texture_2d<f32>;
+@group(0) @binding(10) var<uniform> camera: TileCamera;
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -228,9 +235,12 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0));
     let t = tiles[ii];
     let q = quad[vi];
-    let cpos = t.dst.xy + q * t.dst.zw;
+    // World space in, NDC out: a pure pan only rewrites the camera uniform,
+    // never the per-tile instances (O(1) instead of O(tiles) per frame).
+    let world = t.dst.xy + q * t.dst.zw;
+    let ndc = world * camera.scale + camera.offset;
     var out: VOut;
-    out.pos = vec4<f32>(cpos.x * 2.0 - 1.0, 1.0 - cpos.y * 2.0, 0.0, 1.0);
+    out.pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
     out.src = t.src.xy + q * t.src.zw;
     out.lod = t.lod;
     out.plane = t.plane;
@@ -961,7 +971,7 @@ class WgpuPlaneExecutor:
             size=_OVERLAY_INSTANCE_BYTES * self._overlay_cap,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
-        self._overlay_camera_buf = d.create_buffer(
+        self._camera_buf = d.create_buffer(
             size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         # Glyph atlas: CPU-baked alpha mask sampled by glyph_quad instances.
@@ -1094,6 +1104,14 @@ class WgpuPlaneExecutor:
                     {"binding": 7, "resource": self._pools[RGB8].view},
                     {"binding": 8, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
                     {"binding": 9, "resource": self._lut_tex.create_view()},
+                    {
+                        "binding": 10,
+                        "resource": {
+                            "buffer": self._camera_buf,
+                            "offset": 0,
+                            "size": 32,
+                        },
+                    },
                 ],
             )
             self._binds[fmt] = (bind, self._bind_epoch)
@@ -1136,7 +1154,7 @@ class WgpuPlaneExecutor:
                     {
                         "binding": 0,
                         "resource": {
-                            "buffer": self._overlay_camera_buf,
+                            "buffer": self._camera_buf,
                             "offset": 0,
                             "size": 32,
                         },
@@ -1234,7 +1252,13 @@ class WgpuPlaneExecutor:
         self._widget_atlas_uploads_total += 1
         return 1
 
-    def _write_overlay_camera(self, target_size: tuple[int, int]) -> None:
+    def _write_camera(self, target_size: tuple[int, int]) -> None:
+        """One world->NDC uniform, shared by the tile and overlay pipelines.
+
+        Both read the same 32 bytes, so a pan costs exactly one small write
+        no matter how many tiles or overlay primitives are drawn.
+        """
+
         x0, y0, x1, y1 = self._overlay_camera.world_rect
         span_x = x1 - x0
         span_y = y1 - y0
@@ -1252,7 +1276,7 @@ class WgpuPlaneExecutor:
             offset_y = -1.0 - 2.0 * y0 / span_y
         width, height = (max(1, int(value)) for value in target_size)
         self.device.queue.write_buffer(
-            self._overlay_camera_buf,
+            self._camera_buf,
             0,
             struct.pack(
                 "8f",
@@ -1679,6 +1703,11 @@ class WgpuPlaneExecutor:
     # ---- draw ----------------------------------------------------------------
 
     def _set_tiles(self, tiles) -> None:
+        # Instances are camera-independent, so a pan re-submits the very
+        # tuple already resident. Identity is the exact, O(1) test; a
+        # producer that rebuilds an equal tuple just repacks as before.
+        if tiles is self._tiles:
+            return
         if len(tiles) > self._tiles_cap:
             raise ValueError(f"tile count {len(tiles)} exceeds capacity {self._tiles_cap}")
         for t in tiles:
@@ -1919,8 +1948,10 @@ class WgpuPlaneExecutor:
     ) -> None:
         self._flush_table()
         pipe, bind = self._pipeline(fmt)
+        # The tile pipeline reads the same camera uniform, so it must be
+        # current for every present, not just the ones carrying overlays.
+        self._write_camera(target_size)
         if self._overlay_geometry:
-            self._write_overlay_camera(target_size)
             overlay_pipe, overlay_bind = self._overlay_pipeline(fmt)
         enc = self.device.create_command_encoder()
         rp = enc.begin_render_pass(
