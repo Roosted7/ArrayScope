@@ -613,10 +613,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return
         render_generation = self._capture_render_generation()
         lod_policy_mode = self._montage_quality_policy_mode()
+        allow_anisotropic_lod = bool(
+            image_view_backend_capabilities(self.win.img_view).anisotropic_lod_pages
+        )
         initial_demand = select_lod_demand(
             current_range,
             viewport_shape,
             plan.tile_shape,
+            allow_anisotropy=allow_anisotropic_lod,
         )
         # Interaction fast path: during a scrub/pan burst, supersedable stage
         # planning runs only for the step the user lands on. Native policy and
@@ -741,6 +745,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             priority_focus=viewport_plan.priority_focus,
             lod_policy_mode=lod_policy_mode,
             lod_native_reason=render_lod.native_policy_reason_for_renderer(self),
+            lod_anisotropic_pages=allow_anisotropic_lod,
             lod_preview_level=lod_preview_level,
             lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),

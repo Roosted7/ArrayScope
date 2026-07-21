@@ -44,6 +44,12 @@ class DisplayCommitter:
         """
 
         self._validate_presentation(presentation)
+        # A raised backend commit must not leave the previous transaction's
+        # acknowledgement readable.  Callers read ``last_tile_commit_report``
+        # after the fact, so a stale report would be acknowledged as if it
+        # described this delta.
+        self.last_tile_commit_report = None
+        self.last_tile_committed_state = None
         report = self.surface.present_tiled(presentation)
         if not isinstance(report, TileCommitReport):
             raise TypeError("tiled presentation commits require a TileCommitReport acknowledgement")

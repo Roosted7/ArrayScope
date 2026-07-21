@@ -4,6 +4,7 @@ from arrayscope.display.lod import (
     LOD_REASON_INVALID_VIEW,
     LOD_REASON_NATIVE_POLICY,
     LOD_REASON_NATIVE_SCALE,
+    factor_xy_for_level,
     inner_uv_for_gutter,
     native_lod_policy,
     select_lod_demand,
@@ -100,6 +101,39 @@ def test_lod_demand_records_anisotropic_extreme_aspect_case():
     assert demand.desired_factor_xy[0] > demand.desired_factor_xy[1]
     assert demand.source_texels_per_pixel_xy == (16.0, 0.5)
     assert "anisotropic" in demand.reason
+
+
+def test_isotropic_only_backend_squares_the_demand_off_at_its_dominant_axis():
+    """A backend whose ladder is one isotropic mip chain must never be
+    handed a (6, 7)-style page target.  ``desired_factor_xy`` is the single
+    input every pyramid key derives from, so the clamp belongs here rather
+    than at the presenter, which could only refuse the finished plan."""
+
+    view_range = ((0.0, 200 * 1024.0), (0.0, 100 * 512.0))
+    viewport_shape = (512, 1024)
+
+    anisotropic = select_lod_demand(view_range, viewport_shape, (512, 512))
+    isotropic = select_lod_demand(view_range, viewport_shape, (512, 512), allow_anisotropy=False)
+
+    assert anisotropic.desired_factor_xy == (128, 64)
+    assert isotropic.desired_factor_xy == (128, 128)
+    # The scalar rung label is the dominant axis either way, so clamping
+    # cannot silently change which level the session believes it demands.
+    assert isotropic.desired_level == anisotropic.desired_level
+    assert isotropic.desired_factor == anisotropic.desired_factor
+
+
+def test_isotropic_only_demand_stays_isotropic_at_every_applied_rung():
+    isotropic = select_lod_demand(
+        ((0.0, 200 * 1024.0), (0.0, 100 * 512.0)),
+        (512, 1024),
+        (512, 512),
+        allow_anisotropy=False,
+    )
+
+    for level in range(isotropic.desired_level + 2):
+        factor_x, factor_y = factor_xy_for_level(isotropic, level)
+        assert factor_x == factor_y, f"level {level} shifted into an anisotropic rung"
 
 
 def test_native_policy_reports_desired_and_applied_separately():

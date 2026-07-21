@@ -481,6 +481,7 @@ def selected_lod_factor(session) -> int:
             session.plan.tile_shape,
             previous_factor=previous,
             resident_levels=session_resident_levels(session, previous),
+            allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
         )
         base_preview = int(
             getattr(session, "lod_preview_min_level", 0)
@@ -499,6 +500,7 @@ def selected_lod_factor(session) -> int:
             session.plan.tile_shape,
             previous_factor=previous,
             deferred_reason=session.lod_native_reason,
+            allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
         )
     _trace_demand_transition(session)
     return int(session.lod_policy_decision.applied_factor)
@@ -652,6 +654,7 @@ def session_resident_levels(session, previous_factor: int) -> tuple[int, ...]:
         session.viewport_shape,
         session.plan.tile_shape,
         previous_factor=previous_factor,
+        allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
     )
     rendered = tuple(session.rendered_tiles.values())
     if not rendered:

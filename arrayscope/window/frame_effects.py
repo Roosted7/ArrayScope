@@ -2173,9 +2173,9 @@ class FramePipelineEffects:
             semantic_commit=semantic_commit,
             allow_uncommitted_persistent=True,
         ):
-            pass
+            applied = True
         elif first_display_commit:
-            renderer._apply_full_display_image(
+            applied = renderer._apply_full_display_image(
                 display_image,
                 geometry=geometry,
                 window_mode=session.window_mode,
@@ -2212,9 +2212,9 @@ class FramePipelineEffects:
             requested_levels=requested_levels,
             semantic_commit=semantic_commit,
         ):
-            pass
+            applied = True
         else:
-            renderer._apply_progressive_display_image(
+            applied = renderer._apply_progressive_display_image(
                 display_image,
                 geometry=geometry,
                 window_mode=session.window_mode,
@@ -2239,7 +2239,11 @@ class FramePipelineEffects:
                 semantic_commit=semantic_commit,
             )
         renderer._last_montage_tile_layer_apply_ms = (perf_counter() - apply_start) * 1000.0
-        return True
+        # A commit the presenter caught and reported must decline here rather
+        # than fall through to acknowledgement: there is no report describing
+        # this delta, and the caller would otherwise acknowledge whatever the
+        # previous transaction left behind.
+        return bool(applied)
 
     def _commit_direct_delta(
         self,

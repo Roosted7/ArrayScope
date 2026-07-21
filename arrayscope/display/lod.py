@@ -86,8 +86,17 @@ def select_lod_demand(
     target_max: float = 2.0,
     previous_factor: int | None = None,
     hysteresis: float = 0.15,
+    allow_anisotropy: bool = True,
 ) -> LodDemand:
-    """Return desired display quality without promising materialization."""
+    """Return desired display quality without promising materialization.
+
+    ``allow_anisotropy=False`` squares the per-axis factors off at the
+    dominant axis for backends that cannot bind an anisotropic page (see
+    ``ImageViewBackendCapabilities.anisotropic_lod_pages``).  Every pyramid
+    key derives from ``desired_factor_xy`` through ``factor_xy_for_level``,
+    so clamping the demand here is what keeps such a backend from planning
+    pages its presenter would then have to refuse.
+    """
 
     tile_height, tile_width = (max(1, int(value)) for value in tile_shape)
     native = LodDemand(
@@ -125,7 +134,11 @@ def select_lod_demand(
             target_min=target_min,
             hysteresis=hysteresis,
         )
-    desired_factor_xy = _hysteresis_adjusted_factor_xy((factor_x, factor_y), desired)
+    desired_factor_xy = (
+        _hysteresis_adjusted_factor_xy((factor_x, factor_y), desired)
+        if allow_anisotropy
+        else (desired, desired)
+    )
     level = _level_for_factor(desired)
     acceptable_levels = tuple(range(max(0, level - 1), level + 2))
     reason = _demand_reason((texels_x, texels_y), desired=desired)
@@ -146,6 +159,7 @@ def native_lod_policy(
     *,
     previous_factor: int | None = None,
     deferred_reason: str | None = None,
+    allow_anisotropy: bool = True,
 ) -> LodPolicyDecision:
     """Return the native-only policy: demand may exceed native; applied never does.
 
@@ -159,6 +173,7 @@ def native_lod_policy(
         viewport_shape,
         tile_shape,
         previous_factor=previous_factor,
+        allow_anisotropy=allow_anisotropy,
     )
     if demand.reason == LOD_REASON_INVALID_VIEW:
         reason = LOD_REASON_INVALID_VIEW
@@ -260,6 +275,7 @@ def resident_lod_policy(
     *,
     previous_factor: int | None = None,
     resident_levels=(),
+    allow_anisotropy: bool = True,
 ) -> LodPolicyDecision:
     """Apply resident data no coarser than the demanded semantic target.
 
@@ -274,6 +290,7 @@ def resident_lod_policy(
         viewport_shape,
         tile_shape,
         previous_factor=previous_factor,
+        allow_anisotropy=allow_anisotropy,
     )
     if demand.reason == LOD_REASON_INVALID_VIEW:
         return LodPolicyDecision(

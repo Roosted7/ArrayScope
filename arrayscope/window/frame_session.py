@@ -733,6 +733,10 @@ class FrameSession:
     # Why native-only applies when the desired factor exceeds 1 (user policy
     # choice vs. resident LOD not yet adopted on the active backend).
     lod_native_reason: str | None = None
+    # Whether the active backend can bind pages whose per-axis reduction
+    # differs.  False squares the demand off at its dominant axis so no
+    # anisotropic page key is ever minted for it.
+    lod_anisotropic_pages: bool = True
     lod_page_cache: object | None = None
     # Immutable canonical routes are reused across viewport retargets. Physical
     # residency has its own cache revision; changing it must not rebuild page

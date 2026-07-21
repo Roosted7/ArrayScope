@@ -228,6 +228,36 @@ def test_tiled_committer_rejects_missing_backend_acknowledgement():
         )
 
 
+def test_raised_backend_commit_leaves_no_readable_acknowledgement():
+    """Callers read ``last_tile_commit_report`` after the fact.  A backend
+    commit that raises must not leave the previous transaction's report
+    readable there, or the caller acknowledges a delta that never
+    presented."""
+
+    class _RaisingImageView(_FakeImageView):
+        def __init__(self):
+            super().__init__()
+            self.fail = False
+
+        def present_tiled(self, presentation):
+            if self.fail:
+                raise NotImplementedError("backend refused this payload")
+            return super().present_tiled(presentation)
+
+    view = _RaisingImageView()
+    committer = DisplayCommitter(view)
+    committer.commit_tile_layer(_presentation(), DisplayFrameKey(("doc",), ("view",), 1))
+
+    assert committer.last_tile_commit_report is not None
+
+    view.fail = True
+    with pytest.raises(NotImplementedError):
+        committer.commit_tile_layer(_presentation(), DisplayFrameKey(("doc",), ("view",), 2))
+
+    assert committer.last_tile_commit_report is None
+    assert committer.last_tile_committed_state is None
+
+
 def test_tiled_value_source_reads_exact_semantic_data_not_lod_texture():
     semantic = np.arange(16, dtype=np.float32).reshape(4, 4)
     lod_texture = np.array([[1000.0, 2000.0], [3000.0, 4000.0]], dtype=np.float32)

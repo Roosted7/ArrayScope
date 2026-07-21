@@ -171,9 +171,11 @@ class DisplayPresentationMixin:
             elif semantic_frame_commit:
                 self.win._refresh_inspection_dock()
 
+            return True
         except Exception as e:
             handle_ui_exception("image update", e)
             show_status_message(self.win, f"Image update failed: {e}")
+            return False
         finally:
             self._last_display_commit_ms = (perf_counter() - commit_start) * 1000.0
 
@@ -283,9 +285,11 @@ class DisplayPresentationMixin:
                 self._note_display_level_source(decision)
             self.win.apply_axis_flips()
             self.win.img_view.setImageStale(False)
+            return True
         except Exception as e:
             handle_ui_exception("progressive image update", e)
             show_status_message(self.win, f"Image update failed: {e}")
+            return False
         finally:
             self._last_progressive_commit_ms = (perf_counter() - commit_start) * 1000.0
             self._last_display_commit_ms = self._last_progressive_commit_ms

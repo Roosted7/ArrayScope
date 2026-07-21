@@ -1023,3 +1023,88 @@ def test_chunk_summary_levels_reuse_identity_mapped_scalar_summary(monkeypatch):
     )
 
     assert stats.bounds == (0.0, 3.0)
+
+
+def test_present_tile_delta_declines_when_the_presenter_reported_a_failure():
+    """A backend commit that raised is caught and reported by the presenter,
+    which returns False.  Declining here is what keeps the caller from
+    acknowledging the delta against whatever report the PREVIOUS transaction
+    left on the committer."""
+
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    session = _session()
+    session.window_mode = "auto"
+    session.frame_plan = None
+    session.key = ("session",)
+    session.render_generation = 1
+    session.level_key = ("levels",)
+    session.applied_level_source = None
+    session.defer_side_panels = False
+
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(_committed_display_frame=None),
+        _apply_full_display_image=lambda *_args, **_kwargs: False,
+        _last_montage_tile_layer_apply_ms=0.0,
+    )
+    effects_bridge = FramePipelineEffects(renderer, session)
+    effects_bridge._configure_wgpu_evidence_obligation = lambda *_a, **_k: None
+    effects_bridge._commit_direct_delta = lambda *_a, **_k: False
+
+    applied = effects_bridge._present_tile_delta(
+        None,
+        None,
+        tile_state=None,
+        base_tile_state=None,
+        tile_delta=None,
+        semantic_source=None,
+        applied_level_source=None,
+        histogram_plot_data=None,
+        first_display_commit=True,
+        explicit_auto=False,
+        requested_levels=None,
+        semantic_commit=True,
+        decision_force_auto=False,
+    )
+
+    assert applied is False
+
+
+def test_present_tile_delta_reports_applied_when_the_presenter_succeeded():
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    session = _session()
+    session.window_mode = "auto"
+    session.frame_plan = None
+    session.key = ("session",)
+    session.render_generation = 1
+    session.level_key = ("levels",)
+    session.applied_level_source = None
+    session.defer_side_panels = False
+
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(_committed_display_frame=None),
+        _apply_full_display_image=lambda *_args, **_kwargs: True,
+        _last_montage_tile_layer_apply_ms=0.0,
+    )
+    effects_bridge = FramePipelineEffects(renderer, session)
+    effects_bridge._configure_wgpu_evidence_obligation = lambda *_a, **_k: None
+    effects_bridge._commit_direct_delta = lambda *_a, **_k: False
+
+    applied = effects_bridge._present_tile_delta(
+        None,
+        None,
+        tile_state=None,
+        base_tile_state=None,
+        tile_delta=None,
+        semantic_source=None,
+        applied_level_source=None,
+        histogram_plot_data=None,
+        first_display_commit=True,
+        explicit_auto=False,
+        requested_levels=None,
+        semantic_commit=True,
+        decision_force_auto=False,
+    )
+
+    assert applied is True
