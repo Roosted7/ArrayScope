@@ -1401,12 +1401,545 @@ def _format_optional_ms(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.3f}ms"
 
 
+# ---- montage pan tile-count scaling sweep -----------------------------------
+#
+# A single fixed-size stress montage reports one point, and one point has no
+# slope.  This sweep re-runs the same pan at several tile counts so
+# "panning N tiles costs the same as panning 1 tile" becomes a measurable
+# gradient rather than an assertion.
+#
+# Run it through the headless compositor, not an attached session:
+#
+#     python -m arrayscope.tools.headless_display -- \
+#         env QT_QPA_PLATFORM=wayland \
+#         python -m arrayscope.display.rendering_benchmarks --tile-counts 1,16,64,256,512
+#
+# That launcher pins the Mesa EGL vendor file.  A bare headless Weston sorts
+# 10_nvidia.json first and silently measures the dGPU -- the slower path here
+# -- and an attached session puts desktop activity inside the timing loop.
+# Unset WAYLAND_DISPLAY first: the launcher reuses an active socket if it
+# finds one, which lands the run back on the session compositor.
+#
+# The controlled variable is the *committed* tile count.  Zoom is held fixed
+# (so the LOD level cannot move) and the camera is parked at the montage
+# centre, so the visible tile set and per-frame drawn area are constant once
+# the montage is larger than the viewport.  Only the total number of committed
+# tiles changes between rows, which is exactly the quantity the two chains
+# below iterate.
+
+DEFAULT_PAN_SCALING_TILE_COUNTS = (1, 16, 64, 256, 512)
+
+# Camera window measured in tile pitches; wide enough that the visible set is
+# interior (and therefore constant) for every row above ~9 tiles.
+_PAN_SCALING_VIEW_TILES = 2.5
+
+
+@dataclass(frozen=True)
+class MontagePanScalingRow:
+    """One tile count's pan measurement, keyed for slope reading."""
+
+    tile_count: int
+    columns: int
+    tile_shape: tuple[int, int]
+    committed_tiles: int
+    visible_tiles: int
+    lod_levels: tuple[int, ...]
+    frames: int
+    frame_ms_median: float
+    frame_ms_p95: float
+    camera_tiles_calls: int
+    camera_tiles_ms: float
+    set_tiles_calls: int
+    set_tiles_ms: float
+    viewport_only_calls: int
+    viewport_only_ms: float
+    present_method: str = "bitmap"
+    max_fps: float = 0.0
+    draw_error: str = ""
+
+    @property
+    def chain_a_ms(self) -> float:
+        """Per-presented-frame chain: camera mapping plus instance upload."""
+
+        return float(self.camera_tiles_ms) + float(self.set_tiles_ms)
+
+    @property
+    def chain_a_ms_per_frame(self) -> float:
+        return self.chain_a_ms / max(1, int(self.frames))
+
+    @property
+    def chain_b_ms(self) -> float:
+        """Coalesced drag-retarget chain (16 ms timer, controller-owned)."""
+
+        return float(self.viewport_only_ms)
+
+    @property
+    def chain_b_ms_per_frame(self) -> float:
+        return self.chain_b_ms / max(1, int(self.frames))
+
+
+class _PanChainProbe:
+    """Count and time the two pan chains without perturbing them.
+
+    Each hook is a pass-through wrapper installed on the unbound method for
+    the duration of one sweep: it adds two ``perf_counter`` reads and returns
+    the callee's value unchanged.  Nothing is rescheduled, coalesced, or
+    deferred, so draw pacing is whatever the unmodified code does.  The
+    alternative -- editing the measured modules -- would make results
+    unattributable while other work is in flight in those same files.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+        self._restore: list[tuple[object, str, object]] = []
+
+    def reset(self) -> None:
+        self.camera_tiles_calls = 0
+        self.camera_tiles_ms = 0.0
+        self.set_tiles_calls = 0
+        self.set_tiles_ms = 0.0
+        self.viewport_only_calls = 0
+        self.viewport_only_ms = 0.0
+
+    def __enter__(self) -> _PanChainProbe:
+        from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+        from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+        self._wrap(WgpuImageView2D, "_wgpu_camera_tiles", "camera_tiles")
+        self._wrap(WgpuPlaneExecutor, "_set_tiles", "set_tiles")
+        # Chain B lives on the controller mixin.  It is wrapped even when the
+        # active transport cannot reach it, so a zero reads as a measured zero
+        # rather than as missing instrumentation.
+        try:
+            from arrayscope.window.frame_controller import FrameControllerMixin
+
+            self._wrap(FrameControllerMixin, "_try_update_montage_viewport_only", "viewport_only")
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for owner, name, original in reversed(self._restore):
+            setattr(owner, name, original)
+        self._restore.clear()
+
+    def _wrap(self, owner, name: str, counter: str) -> None:
+        original = getattr(owner, name)
+        probe = self
+
+        def wrapper(*args, **kwargs):
+            start = perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                elapsed = (perf_counter() - start) * 1000.0
+                setattr(probe, f"{counter}_ms", getattr(probe, f"{counter}_ms") + elapsed)
+                setattr(probe, f"{counter}_calls", getattr(probe, f"{counter}_calls") + 1)
+
+        self._restore.append((owner, name, original))
+        setattr(owner, name, wrapper)
+
+
+def benchmark_montage_pan_scaling(
+    *,
+    tile_counts: tuple[int, ...] = DEFAULT_PAN_SCALING_TILE_COUNTS,
+    tile_shape: tuple[int, int] = (64, 64),
+    steps: int = 40,
+    pan_tile_pitches: float = 1.0,
+    present_method: str = "bitmap",
+    max_fps: float | None = None,
+) -> tuple[MontagePanScalingRow, ...]:
+    """Pan a montage of each tile count over a fixed world distance.
+
+    Every row pans the same world distance at the same zoom, so a rising
+    per-frame cost can only come from the tile count.
+
+    ``present_method`` selects the presentation path, and the two are paced
+    very differently.  ``"bitmap"`` goes through rendercanvas, whose
+    ``ondemand`` scheduler throttles to ``max_fps=30`` -- a ~33 ms floor that
+    swallows the chain cost whole.  ``"screen"`` bypasses rendercanvas for a
+    native child driving its own swapchain, so frame time reflects the
+    swapchain present mode instead.  Chain A per frame is comparable across
+    both; wall-clock frame time is not.
+
+    ``max_fps`` lifts that pace ceiling so frame time measures cost rather
+    than waiting -- pass something far above the display rate (1000) to make
+    this a throughput benchmark.  ``None`` keeps each path's shipping cadence,
+    which is what a user actually experiences.
+    """
+
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D, import_qrenderwidget
+
+    import_qrenderwidget()
+    rows: list[MontagePanScalingRow] = []
+    with _PanChainProbe() as probe:
+        for tile_count in tile_counts:
+            try:
+                rows.append(
+                    _measure_montage_pan(
+                        WgpuImageView2D,
+                        probe,
+                        tile_count=int(tile_count),
+                        tile_shape=tile_shape,
+                        steps=max(1, int(steps)),
+                        pan_tile_pitches=float(pan_tile_pitches),
+                        present_method=str(present_method),
+                        max_fps=max_fps,
+                    )
+                )
+            except Exception as exc:
+                # A row that cannot render (the executor caps tiles at 512) must
+                # be reported as failed, never dropped: an omitted row silently
+                # flattens the slope the sweep exists to measure.
+                rows.append(
+                    _failed_pan_scaling_row(
+                        tile_count=int(tile_count),
+                        tile_shape=tile_shape,
+                        error=f"{type(exc).__name__}: {exc}",
+                        present_method=str(present_method),
+                        max_fps=max_fps,
+                    )
+                )
+    return tuple(rows)
+
+
+def _failed_pan_scaling_row(
+    *,
+    tile_count: int,
+    tile_shape: tuple[int, int],
+    error: str,
+    present_method: str = "bitmap",
+    max_fps: float | None = None,
+) -> MontagePanScalingRow:
+    return MontagePanScalingRow(
+        tile_count=tile_count,
+        columns=max(1, int(np.ceil(np.sqrt(tile_count)))),
+        tile_shape=(int(tile_shape[0]), int(tile_shape[1])),
+        committed_tiles=0,
+        visible_tiles=0,
+        lod_levels=(),
+        frames=0,
+        frame_ms_median=0.0,
+        frame_ms_p95=0.0,
+        camera_tiles_calls=0,
+        camera_tiles_ms=0.0,
+        set_tiles_calls=0,
+        set_tiles_ms=0.0,
+        viewport_only_calls=0,
+        viewport_only_ms=0.0,
+        present_method=present_method,
+        max_fps=0.0 if max_fps is None else float(max_fps),
+        draw_error=error,
+    )
+
+
+def _measure_montage_pan(
+    view_type,
+    probe: _PanChainProbe,
+    *,
+    tile_count: int,
+    tile_shape: tuple[int, int],
+    steps: int,
+    pan_tile_pitches: float,
+    present_method: str = "bitmap",
+    max_fps: float | None = None,
+) -> MontagePanScalingRow:
+    from pyqtgraph.Qt import QtCore, QtWidgets
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        raise RuntimeError("the pan scaling sweep requires a QApplication")
+
+    columns = max(1, int(np.ceil(np.sqrt(tile_count))))
+    _placeholder, _histogram, geometry, _sources, payloads = _direct_tile_layer_inputs(
+        tile_shape=tile_shape, count=tile_count, columns=columns
+    )
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    rows_count = int(np.ceil(tile_count / columns))
+    pitch_x = tile_w + 1
+    pitch_y = tile_h + 1
+    span_x = _PAN_SCALING_VIEW_TILES * pitch_x
+    span_y = _PAN_SCALING_VIEW_TILES * pitch_y
+    pan_distance = float(pan_tile_pitches) * pitch_x
+    # Park the camera at the montage centre so the pan stays interior.
+    centre_x = 0.5 * columns * pitch_x
+    centre_y = 0.5 * rows_count * pitch_y
+    x_start = centre_x - 0.5 * span_x - 0.5 * pan_distance
+    y_range = (centre_y - 0.5 * span_y, centre_y + 0.5 * span_y)
+
+    view = view_type(present_method=present_method)
+    view.resize(900, 700)
+    view.show()
+    try:
+        # A screen request that quietly resolved to bitmap would be reported
+        # as a screen measurement while carrying rendercanvas's 30 fps cap.
+        active_present = str(view.wgpuPresentMethod())
+        if active_present != present_method:
+            raise RuntimeError(
+                f"requested present method {present_method!r} resolved to "
+                f"{active_present!r}: {view.wgpuPresentMethodFallbackReason()}"
+            )
+        applied_fps = _apply_pan_pace_ceiling(view, active_present, max_fps)
+        _present_benchmark_tiled(
+            view,
+            geometry=geometry,
+            payloads=payloads,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+        )
+        viewbox = view.view
+        viewbox.setRange(xRange=(x_start, x_start + span_x), yRange=y_range, padding=0)
+        _drain_pan_frames(app, QtCore, view, int(view._wgpu_draw_count))
+        for _ in range(5):
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+
+        probe.reset()
+        frame_ms: list[float] = []
+        step_distance = pan_distance / steps
+        for step in range(1, steps + 1):
+            x0 = x_start + step * step_distance
+            before = int(view._wgpu_draw_count)
+            start = perf_counter()
+            viewbox.setRange(xRange=(x0, x0 + span_x), yRange=y_range, padding=0)
+            _drain_pan_frames(app, QtCore, view, before)
+            frame_ms.append((perf_counter() - start) * 1000.0)
+
+        instances = view._wgpu_camera_tiles()
+        committed = len((view._wgpu_committed or {}).get("tiles", {}))
+        return MontagePanScalingRow(
+            tile_count=tile_count,
+            columns=columns,
+            tile_shape=(tile_h, tile_w),
+            committed_tiles=committed,
+            visible_tiles=_visible_instance_count(instances),
+            lod_levels=tuple(sorted({int(tile.lod_level) for tile in instances})),
+            frames=len(frame_ms),
+            frame_ms_median=_median(frame_ms),
+            frame_ms_p95=_percentile(frame_ms, 95.0),
+            camera_tiles_calls=probe.camera_tiles_calls,
+            camera_tiles_ms=probe.camera_tiles_ms,
+            set_tiles_calls=probe.set_tiles_calls,
+            set_tiles_ms=probe.set_tiles_ms,
+            viewport_only_calls=probe.viewport_only_calls,
+            viewport_only_ms=probe.viewport_only_ms,
+            present_method=active_present,
+            max_fps=applied_fps,
+            draw_error=str(getattr(view, "_wgpu_last_draw_error", "") or ""),
+        )
+    finally:
+        view.close()
+        view.deleteLater()
+        _collect_benchmark_widgets()
+
+
+def _apply_pan_pace_ceiling(view, present_method: str, max_fps: float | None) -> float:
+    """Lift the draw-pace ceiling so frame time measures cost, not waiting.
+
+    Each path throttles somewhere different, and both knobs are the ones the
+    code already exposes for this -- no scheduling logic is replaced, only the
+    rate it aims for.  Returns the pace actually applied (0.0 when the
+    shipping cadence is left alone) so the row records what produced it.
+    """
+
+    if max_fps is None:
+        return 0.0
+    rate = float(max_fps)
+    canvas = getattr(view, "_wgpu_canvas", None)
+    if canvas is None:
+        raise RuntimeError("pan pace override needs a wgpu canvas")
+    if present_method == "screen":
+        # Documented setter: "Pin the pace (benchmarks and tests)".
+        canvas.max_draws_per_second = rate
+        return rate
+    # Bitmap rides rendercanvas's ondemand scheduler; raise its max_fps and
+    # keep the mode, so coalescing behaviour is unchanged.
+    canvas.set_update_mode("ondemand", max_fps=rate)
+    return rate
+
+
+def _drain_pan_frames(app, QtCore, view, before: int, *, timeout_s: float = 2.0) -> bool:
+    """Wait for the draw the camera change requested, without forcing one."""
+
+    deadline = perf_counter() + timeout_s
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        if int(getattr(view, "_wgpu_draw_count", 0) or 0) > before:
+            return True
+    return False
+
+
+def _visible_instance_count(instances) -> int:
+    """Instances whose dst rect intersects the unit viewport."""
+
+    visible = 0
+    for tile in instances:
+        x, y, w, h = tile.dst_rect
+        if x + w > 0.0 and x < 1.0 and y + h > 0.0 and y < 1.0:
+            visible += 1
+    return visible
+
+
+def _median(values) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+
+def _percentile(values, percentile: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    index = round((percentile / 100.0) * len(ordered) + 0.5) - 1
+    return ordered[min(max(index, 0), len(ordered) - 1)]
+
+
+def _fit_ms_per_tile(points) -> float:
+    """Least-squares slope of cost against tile count."""
+
+    points = [(float(x), float(y)) for x, y in points]
+    count = len(points)
+    if count < 2:
+        return 0.0
+    sum_x = sum(x for x, _ in points)
+    sum_y = sum(y for _, y in points)
+    sum_xx = sum(x * x for x, _ in points)
+    sum_xy = sum(x * y for x, y in points)
+    denominator = count * sum_xx - sum_x * sum_x
+    if denominator == 0.0:
+        return 0.0
+    return (count * sum_xy - sum_x * sum_y) / denominator
+
+
+def pan_scaling_records(rows, *, environment=None) -> tuple[dict, ...]:
+    """JSONL records keyed by tile count so a regression reads as a slope."""
+
+    environment = rendering_benchmark_environment() if environment is None else environment
+    timestamp = time.time()
+    return tuple(
+        {
+            "benchmark": "montage_pan_scaling",
+            "timestamp": timestamp,
+            "tile_count": int(row.tile_count),
+            "environment": asdict(environment),
+            "row": asdict(row),
+            "chain_a_ms": row.chain_a_ms,
+            "chain_a_ms_per_frame": row.chain_a_ms_per_frame,
+            "chain_b_ms": row.chain_b_ms,
+            "chain_b_ms_per_frame": row.chain_b_ms_per_frame,
+        }
+        for row in rows
+    )
+
+
+def write_pan_scaling_jsonl(path, rows) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("a", encoding="utf-8") as handle:
+        for record in pan_scaling_records(rows):
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def format_pan_scaling_table(rows) -> str:
+    """Human-readable sweep summary ending in the figure under test."""
+
+    header = (
+        f"{'tiles':>6} {'commit':>6} {'vis':>4} {'lod':>5} {'frames':>6} "
+        f"{'frame_med':>10} {'frame_p95':>10} {'A_ms/frame':>11} {'A_calls':>8} "
+        f"{'B_ms/frame':>11} {'B_calls':>8}"
+    )
+    methods = sorted({str(row.present_method) for row in rows})
+    paces = sorted({float(row.max_fps) for row in rows})
+    pace = ", ".join("display native" if value <= 0.0 else f"{value:g} fps" for value in paces)
+    lines = [f"present: {', '.join(methods)}   pace: {pace}", header, "-" * len(header)]
+    for row in rows:
+        lod = ",".join(str(level) for level in row.lod_levels) or "-"
+        lines.append(
+            f"{row.tile_count:>6} {row.committed_tiles:>6} {row.visible_tiles:>4} "
+            f"{lod:>5} {row.frames:>6} {row.frame_ms_median:>10.3f} "
+            f"{row.frame_ms_p95:>10.3f} {row.chain_a_ms_per_frame:>11.4f} "
+            f"{row.camera_tiles_calls:>8} {row.chain_b_ms_per_frame:>11.4f} "
+            f"{row.viewport_only_calls:>8}"
+        )
+    lines.extend(f"  !! tiles={row.tile_count}: {row.draw_error}" for row in rows if row.draw_error)
+    # Only rows that actually rendered carry a cost; fitting a failed row's
+    # zeros would drag the slope toward the answer the sweep is testing for.
+    fitted = [row for row in rows if row.frames and not row.draw_error]
+    chain_a_slope = _fit_ms_per_tile([(row.tile_count, row.chain_a_ms_per_frame) for row in fitted])
+    frame_slope = _fit_ms_per_tile([(row.tile_count, row.frame_ms_median) for row in fitted])
+    lines.append("")
+    lines.append(f"chain A (per presented frame): {chain_a_slope * 1000.0:+.4f} us per added tile")
+    lines.append(f"wall-clock frame time:        {frame_slope * 1000.0:+.4f} us per added tile")
+    lines.append("chain A is the figure under test and should trend toward zero.")
+    if any(float(row.max_fps) > 0.0 for row in fitted):
+        lines.append(
+            "Pace ceiling lifted, so frame time measures cost rather than "
+            "waiting: it should track the chain A slope, and a gap between "
+            "them is per-frame work this sweep is not attributing."
+        )
+    else:
+        lines.append(
+            "Wall-clock frame time is pace-quantised at the shipping cadence "
+            "(~33 ms bitmap on rendercanvas's ondemand max_fps=30 cap, ~17 ms "
+            "screen on the display rate) and cannot show the growth. Re-run "
+            "with --pan-max-fps 1000 to make it a throughput measurement."
+        )
+    return "\n".join(lines)
+
+
+def _parse_tile_counts(raw: str) -> tuple[int, ...]:
+    counts = []
+    for chunk in str(raw).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        value = int(chunk)
+        if value < 1:
+            raise ValueError(f"tile counts must be positive, got {value}")
+        counts.append(value)
+    if not counts:
+        raise ValueError("no tile counts given")
+    return tuple(counts)
+
+
 def main(argv: tuple[str, ...] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--jsonl", type=str, default="")
     parser.add_argument("--stress", action="store_true")
     parser.add_argument("--presented", action="store_true")
+    parser.add_argument(
+        "--tile-counts",
+        type=str,
+        default="",
+        help=(
+            "comma-separated montage tile counts to sweep the pan cost over, "
+            "e.g. 1,16,64,256,512 (the executor caps tiles at 512)"
+        ),
+    )
+    parser.add_argument("--pan-steps", type=int, default=40)
+    parser.add_argument("--pan-tile-edge", type=int, default=64)
+    parser.add_argument(
+        "--pan-present-method",
+        choices=("bitmap", "screen"),
+        default="bitmap",
+        help=(
+            "presentation path for the pan sweep; bitmap carries "
+            "rendercanvas's 30 fps ondemand cap, screen drives its own swapchain"
+        ),
+    )
+    parser.add_argument(
+        "--pan-max-fps",
+        type=float,
+        default=0.0,
+        help=(
+            "lift the draw-pace ceiling (e.g. 1000) so frame time measures "
+            "cost instead of waiting; 0 keeps each path's shipping cadence"
+        ),
+    )
     args = parser.parse_args(argv)
 
     from arrayscope.app.qt_binding import prefer_pyside6
@@ -1415,6 +1948,18 @@ def main(argv: tuple[str, ...] | None = None) -> None:
     import pyqtgraph as pg
 
     pg.mkQApp()
+    if args.tile_counts:
+        rows = benchmark_montage_pan_scaling(
+            tile_counts=_parse_tile_counts(args.tile_counts),
+            tile_shape=(int(args.pan_tile_edge), int(args.pan_tile_edge)),
+            steps=int(args.pan_steps),
+            present_method=str(args.pan_present_method),
+            max_fps=float(args.pan_max_fps) if args.pan_max_fps > 0.0 else None,
+        )
+        if args.jsonl:
+            write_pan_scaling_jsonl(args.jsonl, rows)
+        print(format_pan_scaling_table(rows))
+        return
     stress = bool(args.stress or os.environ.get("ARRAYSCOPE_RUN_STRESS") == "1")
     presented = bool(args.presented or os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1")
     samples = collect_benchmark_samples(runs=args.runs, stress=stress, measure_presented=presented)
