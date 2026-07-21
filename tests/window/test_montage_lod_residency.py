@@ -3677,6 +3677,29 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     } == {1: ("exact", 0), 2: ("exact", 0), 3: ("exact", 0)}
 
 
+def test_atomic_successor_accepts_ordinary_typed_payload_identities():
+    """A production display source id must not hide its canonical tile identity."""
+
+    session = _session(count=2)
+    source_ids = {index: ("display-tile", index) for index in range(2)}
+    state, delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(
+            presented_tiles=state.active_payloads(delta),
+            committed_upserts=frozenset(delta.upserts),
+        ),
+    )
+    session.mark_presented(state.active_payloads(delta))
+    session.atomic_successor_pending = True
+
+    atomic = session.build_atomic_successor_presentation()
+
+    assert atomic is not None, session._atomic_fast_reject_reason
+    _state, successor = atomic
+    assert tuple(successor.upserts) == (0, 1)
+
+
 def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=2)

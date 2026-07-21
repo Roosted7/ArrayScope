@@ -4274,6 +4274,15 @@ def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles
         return False
     if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
         return False
+    payload_identity = getattr(payload, "tile_identity", None)
+    record = session.lifecycle.peek(int(tile_number))
+    target_identity = None if record is None or record.target is None else record.target.identity
+    if (
+        payload_identity is not None
+        and target_identity is not None
+        and payload_identity.satisfies_target(target_identity)
+    ):
+        return True
     base_source_id = _base_source_id(getattr(payload, "source_id", None))
     if base_source_id == session.tile_semantic_source_id(int(tile.source_index)):
         return True
