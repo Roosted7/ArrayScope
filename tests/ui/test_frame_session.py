@@ -1389,6 +1389,45 @@ def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     assert session.ensure_tile_states()[0].value == "loaded"
 
 
+def test_retarget_viewport_skips_target_settled_payload_tile_as_addition():
+    # A tile already settled at its target must not be re-proposed as an
+    # addition on a persistent-GPU-residency backend, where rendered_tiles is
+    # empty and every pan otherwise re-planned the whole viewport (the settled
+    # 400-tile pan slideshow). A tile whose payload does NOT satisfy its target
+    # still IS an addition -- on that backend the additions path is how a
+    # fallback tile gets its exact re-request, and dropping it strands the tile.
+    session = _session()
+    session.visible_tile_numbers = frozenset({0, 1, 2, 3})
+    # Tiles 0 and 1 are presented exact -> their records are target-settled.
+    # rendered_tiles stays empty, mimicking the GPU-resident backend.
+    _present_exact_tiles(session, 0, 1)
+    assert session.lifecycle.peek(0).target_settled
+    assert not session.rendered_tiles
+
+    additions, _changed = session.retarget_viewport(
+        view_range=None,
+        viewport_shape=(10, 10),
+        coverage_margin_tiles=0,
+        settled_payloads_are_known=True,
+    )
+
+    addition_numbers = {tile.montage_index for tile in additions}
+    assert addition_numbers.isdisjoint({0, 1}), (
+        "settled payload tiles must not re-enter as additions"
+    )
+    assert {2, 3} <= addition_numbers, "tiles without a settled payload remain additions"
+
+    # The CPU/nonpersistent path (flag off) leaves the settled tiles as
+    # additions -- widening ``known`` there dropped real refinement work.
+    cpu_additions, _ = session.retarget_viewport(
+        view_range=None,
+        viewport_shape=(10, 10),
+        coverage_margin_tiles=0,
+        settled_payloads_are_known=False,
+    )
+    assert {0, 1} <= {tile.montage_index for tile in cpu_additions}
+
+
 def test_retarget_viewport_requests_newly_required_unowned_tile():
     session = _session()
     session.visible_tiles = session.plan.tiles[:2]

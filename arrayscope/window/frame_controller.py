@@ -1330,6 +1330,29 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
         self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
 
+        # Threshold gate (persistent-GPU-residency backends only). A pan or zoom
+        # only needs to replan when it crosses a tile boundary or a zoom
+        # threshold; between crossings the camera moves entirely in the shader
+        # (tile instances hold world rects since 62f851f5) and there is nothing
+        # to compute. ``viewport_invariant_key`` is that boundary, evaluated in
+        # O(1); ``_viewport_converged_key`` records the key at which the last
+        # full pass proved convergence by submitting zero work. When they match,
+        # the retarget is provably a no-op, so skip it whole -- retarget_viewport,
+        # frame plan, lifecycle sync, ladder and all. Any tile-boundary or zoom
+        # crossing changes the key and takes the full path, which re-latches.
+        persistent_residency = montage_commit.persistent_gpu_tile_residency_backend(self, session)
+        invariant_key = (
+            session.viewport_invariant_key(
+                viewport_plan.plan, viewport_plan.view_range, viewport_plan.viewport_shape
+            )
+            if persistent_residency
+            else None
+        )
+        if invariant_key is not None and session._viewport_converged_key == invariant_key:
+            # Prefetch is interaction-gated: it no-ops mid-drag, runs at settle.
+            schedule_near_viewport_montage_prefetch(self, session)
+            return True
+
         # Hidden residency is keyed to the viewport that selected its near
         # payloads. Programmatic camera changes do not pass through the render
         # coordinator's interaction cancellation path, so cancel the queued
@@ -1346,7 +1369,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             coverage_margin_tiles=retarget_policy.coverage_margin_tiles,
             near_margin_tiles=retarget_policy.near_margin_tiles,
             priority_focus=viewport_plan.priority_focus,
+            settled_payloads_are_known=persistent_residency,
         )
+        # The key just changed (we did not take the early-out), so any prior
+        # convergence latch is stale; it is re-earned below only if this full
+        # pass submits nothing.
+        session._viewport_converged_key = None
+
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
             target=FrameTarget(
@@ -1375,7 +1404,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # finer tiles stay put unless visible residency pressure requires a
         # quality demotion. Demand math only; reduction stays on worker lanes.
         lod_swap_ready = session.mark_ladder_swaps_for_viewport(refresh_demand=False)
-        self.retarget_frame_pipeline(
+        submitted = self.retarget_frame_pipeline(
             session,
             prepared_lod_swap_ready=lod_swap_ready,
         )
@@ -1398,6 +1427,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             if presentation_changed or lod_swap_ready:
                 self.apply_montage_presentation(session)
             self._finish_frame_session_if_complete(session)
+            # This full pass submitted no kernel work and admitted no cached
+            # additions: convergence is OBSERVED, not predicted. Latch the
+            # invariant key so the next pan that stays within the same tile/zoom
+            # bounds short-circuits at the top. A lod swap or presentation change
+            # means the scene is still moving, so do not latch then. (Parked work
+            # drains via scheduler callbacks, never this path, so zero submissions
+            # here genuinely means nothing left to do.)
+            if (
+                invariant_key is not None
+                and int(submitted or 0) == 0
+                and not lod_swap_ready
+                and not presentation_changed
+            ):
+                session._viewport_converged_key = invariant_key
             schedule_near_viewport_montage_prefetch(self, session)
             return True
         additions_to_process = tuple(additions)

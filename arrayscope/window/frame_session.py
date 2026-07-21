@@ -642,6 +642,10 @@ class FrameSession:
     # non-windowable chains.
     source_anchoring: object | None = None
     active_tile_requests: set[int] = field(default_factory=set)
+    #: Viewport-invariant key (tile bounds + zoom) at which the last full
+    #: retarget observed zero submissions. While the live key matches this, a
+    #: retarget is a proven no-op and the persistent-backend fast path skips it.
+    _viewport_converged_key: object = None
     stage_fan_in: StageFanInState = field(default_factory=StageFanInState)
     tile_states: list[MontageTileState] = field(default_factory=list)
     dirty_tiles: list[int] = field(default_factory=list)
@@ -1150,6 +1154,34 @@ class FrameSession:
     def is_tile_loaded(self, tile) -> bool:
         return int(tile.montage_index) in self.rendered_tiles
 
+    def viewport_invariant_key(self, plan, view_range, viewport_shape):
+        """A cheap key that is stable exactly while a retarget would be a no-op.
+
+        The montage is a regular grid, so the visible tile set is derivable in
+        O(1) (``tiles_intersecting`` is grid arithmetic, not a scan). The zoom
+        is captured by the camera SPAN: a pan translates the range and leaves
+        the span bit-stable, while any zoom changes it -- and LOD levels are
+        power-of-two apart, far coarser than the rounding here, so a span that
+        rounds equal cannot hide a level change. The key therefore changes
+        precisely when the viewport crosses a tile boundary or a zoom
+        threshold, which is the only time planning has anything to do. Returns
+        ``None`` when there is no camera yet (nothing to compare).
+        """
+
+        if view_range is None or plan is None:
+            return None
+        (x0, x1), (y0, y1) = view_range
+        span_x = float(x1) - float(x0)
+        span_y = float(y1) - float(y0)
+        if not (span_x > 0.0 and span_y > 0.0):
+            return None
+        active = frozenset(
+            int(tile.montage_index) for tile in plan.tiles_intersecting(view_range, margin_tiles=0)
+        )
+        # Round the span generously: pan drift is ~1e-12, a real zoom step is
+        # >0.1%, and adjacent LOD levels are 2x apart.
+        return (id(plan), active, round(span_x, 4), round(span_y, 4))
+
     def retarget_viewport(
         self,
         *,
@@ -1159,6 +1191,7 @@ class FrameSession:
         coverage_margin_tiles: int = 1,
         near_margin_tiles: int = 2,
         priority_focus: tuple[float, float] | None = None,
+        settled_payloads_are_known: bool = False,
     ) -> tuple[tuple[MontageTile, ...], bool]:
         """Retarget draw and compute coverage without replacing the session.
 
@@ -1201,6 +1234,25 @@ class FrameSession:
         known.update(int(index) for index in self.loading_tiles)
         known.update(int(index) for index in self.skipped_tiles)
         known.update(int(index) for index in self.active_tile_requests)
+        # On a persistent-GPU-residency backend ``rendered_tiles`` stays
+        # near-empty (the tiles live in the GPU atlas, not this CPU map), so
+        # every pan re-proposed the whole viewport as fresh additions -- 399 of
+        # 400 on a montage that was fully settled and fully on screen -- which
+        # cost a cold fill's worth of planning per camera nudge and defeated the
+        # convergence latch. A tile already SETTLED at its target is known
+        # regardless of which map holds it. The predicate is target-SETTLED, not
+        # merely present: on this backend the additions path is also how a
+        # fallback tile gets its exact re-request, so excluding a fallback tile
+        # would strand it at a coarse level (ADR 0051 stall). The CPU backend
+        # passes this flag false -- its rendered_tiles IS the presented set, so
+        # the existing membership already covers it and widening it there
+        # dropped legitimate refinement work (montage-backend regressions).
+        if settled_payloads_are_known:
+            lifecycle = self.lifecycle
+            for index in self.display_tile_payloads:
+                rec = lifecycle.peek(int(index))
+                if rec is not None and rec.target_settled:
+                    known.add(int(index))
         additions = tuple(tile for tile in coverage if int(tile.montage_index) not in known)
         active_numbers = tuple(int(tile.montage_index) for tile in active)
         near_numbers = tuple(int(tile.montage_index) for tile in near)
