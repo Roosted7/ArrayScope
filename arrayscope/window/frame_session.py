@@ -852,9 +852,8 @@ class FrameSession:
         }
         for tile_number in required:
             payload = state_payloads.get(tile_number)
-            if (
-                payload is None
-                or int(getattr(payload, "source_index", -1)) != plan_sources.get(tile_number)
+            if payload is None or int(getattr(payload, "source_index", -1)) != plan_sources.get(
+                tile_number
             ):
                 return False
             if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(
