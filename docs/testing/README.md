@@ -125,17 +125,18 @@ WGPU draw acknowledgements may be much more frequent than a compositor grab;
 the probe therefore applies `--screenshot-interval-s` to acknowledgement
 captures too. Periodic WGPU trajectory samples use the explicitly labelled
 `wgpu-offscreen-replay`; they remain synchronous so each image and its trace
-metadata describe the same scene state. The compositor helper is reserved for
-phase-end exact-window evidence. A replay fences the GPU and can perturb
-settlement, so timing from any screenshot-enabled run is diagnostic: use a
-trace-only repeat to decide whether a photographed coverage delay belongs to
-the renderer or to capture.
-For unattended screen-path acceptance, set
-`ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER` to an executable that accepts one
-destination path and writes the exact composited top-level window there. A
-desktop-sized image is rejected rather than cropped using Qt coordinates,
-because Wayland intentionally withholds global window position. Without such
-a helper, retain a manual compositor screenshot alongside the replay collage.
+metadata describe the same scene state. For a WGPU screen-path run with
+`--screenshot-dir`, the profiler owns one private nested Weston compositor:
+it launches the child under the kiosk shell, captures the sole output once
+with `weston-screenshooter` for each phase-end exact-window image, then closes
+Weston and removes its private socket and capture temporaries. Callers do not
+provide a screenshot helper or pre-start a compositor. A replay fences the GPU
+and nested composition can perturb settlement, so timing from any
+screenshot-enabled run is diagnostic: use a trace-only repeat to decide
+whether a photographed coverage delay belongs to the renderer or to capture.
+The managed run fails loudly when Weston, `weston-screenshooter`, the private
+Wayland output, or its exact window geometry is unavailable; it never labels a
+Qt grab or renderer replay as compositor evidence.
 WGPU timeline tile counts and geometry come from the committed executor
 instances whose page-table spans are currently resident; an empty physical-row
 set is a failing diagnostic, not evidence that a visibly populated frame is

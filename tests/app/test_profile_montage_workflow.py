@@ -470,20 +470,21 @@ def test_visual_timeline_preserves_physical_draw_geometry():
     }
 
 
-def test_screen_screenshot_helper_must_return_exact_window(qt_app, tmp_path, monkeypatch):
+def test_managed_weston_capture_must_return_exact_window(qt_app, tmp_path, monkeypatch):
     import numpy as np
     from pyqtgraph.Qt import QtCore, QtGui
 
     import arrayscope.tools.profile_montage_workflow as workflow
 
-    monkeypatch.setenv("ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER", "/fake/helper")
+    monkeypatch.setenv("ARRAYSCOPE_MANAGED_WESTON", "1")
 
-    def run_helper(command, **_kwargs):
+    def capture_managed(path):
         image = QtGui.QImage(40, 30, QtGui.QImage.Format.Format_RGBA8888)
         image.fill(QtGui.QColor("magenta"))
-        assert image.save(command[1])
+        assert image.save(str(path))
+        return path
 
-    monkeypatch.setattr(workflow.subprocess, "run", run_helper)
+    monkeypatch.setattr(workflow, "capture_managed_weston_screenshot", capture_managed)
     geometry = SimpleNamespace(
         size=lambda: QtCore.QSize(40, 30),
         width=lambda: 40,
@@ -491,20 +492,21 @@ def test_screen_screenshot_helper_must_return_exact_window(qt_app, tmp_path, mon
     )
     win = SimpleNamespace(
         img_view=SimpleNamespace(wgpuPresentMethod=lambda: "screen"),
+        size=lambda: geometry.size(),
         frameGeometry=lambda: geometry,
     )
     path = tmp_path / "window.png"
 
     assert workflow._save_view_screenshot(win, path) is True
-    assert win._arrayscope_last_screenshot_capture_kind == "compositor-helper-window"
+    assert win._arrayscope_last_screenshot_capture_kind == "managed-weston-window"
     assert win._arrayscope_last_screenshot_capture_error == ""
     assert QtGui.QImage(str(path)).size() == geometry.size()
     frame = np.full((12, 18, 4), 127, dtype=np.uint8)
     win.img_view.grabPresentedFramebuffer = lambda: frame
     monkeypatch.setattr(
-        workflow.subprocess,
-        "run",
-        lambda *_args, **_kwargs: pytest.fail("timeline capture called compositor helper"),
+        workflow,
+        "capture_managed_weston_screenshot",
+        lambda *_args, **_kwargs: pytest.fail("timeline capture called managed Weston"),
     )
     timeline_path = tmp_path / "timeline.png"
 

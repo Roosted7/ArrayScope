@@ -30,6 +30,11 @@ from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
 )
+from arrayscope.tools.managed_weston import (
+    capture_managed_weston_screenshot,
+    is_managed_weston,
+    run_in_managed_weston,
+)
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
 DEFAULT_SESSION_FIXTURE = Path("tests/fixtures/profile_montage_session.json")
@@ -5109,44 +5114,30 @@ def _save_view_screenshot(win, path: Path, *, full_window: bool = True) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     win._arrayscope_last_screenshot_capture_error = ""
     present_method = getattr(win.img_view, "wgpuPresentMethod", lambda: "")()
-    if str(present_method) == "screen" and full_window:
-        helper = os.environ.get("ARRAYSCOPE_COMPOSITOR_SCREENSHOT_HELPER", "").strip()
-        if helper:
-            desktop_path = path.with_name(f".{path.stem}-desktop{path.suffix}")
-            try:
-                subprocess.run(
-                    [helper, str(desktop_path)],
-                    check=True,
-                    timeout=3.0,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                from pyqtgraph.Qt import QtGui
+    if str(present_method) == "screen" and full_window and is_managed_weston():
+        desktop_path = path.with_name(f".{path.stem}-weston{path.suffix}")
+        try:
+            capture_managed_weston_screenshot(desktop_path)
+            from pyqtgraph.Qt import QtGui
 
-                desktop = QtGui.QImage(str(desktop_path))
-                geometry = win.frameGeometry()
-                if desktop.isNull():
-                    raise RuntimeError("compositor helper returned no image")
-                if desktop.size() != geometry.size():
-                    raise RuntimeError(
-                        "compositor helper must return the exact top-level window; "
-                        f"got {desktop.width()}x{desktop.height()}, expected "
-                        f"{geometry.width()}x{geometry.height()}"
-                    )
-                win._arrayscope_last_screenshot_capture_kind = "compositor-helper-window"
-                return bool(desktop.save(str(path)))
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-                win._arrayscope_last_screenshot_capture_error = repr(exc)
-            finally:
-                desktop_path.unlink(missing_ok=True)
-        # The swapchain lives in a native Wayland child. QWidget.grab() omits
-        # it, so ask QScreen for the owned top-level's composited pixels first.
-        screen = win.screen()
-        pixmap = None if screen is None else screen.grabWindow(int(win.winId()))
-        if pixmap is not None and not pixmap.isNull():
-            win._arrayscope_last_screenshot_capture_kind = "qscreen-window-grab"
-            return bool(pixmap.save(str(path)))
+            desktop = QtGui.QImage(str(desktop_path))
+            accepted_sizes = {win.size(), win.frameGeometry().size()}
+            if desktop.isNull():
+                raise RuntimeError("managed Weston returned no image")
+            if desktop.size() not in accepted_sizes:
+                expected = ", ".join(f"{size.width()}x{size.height()}" for size in accepted_sizes)
+                raise RuntimeError(
+                    "managed Weston must return the sole kiosk window; "
+                    f"got {desktop.width()}x{desktop.height()}, expected one of {expected}"
+                )
+            win._arrayscope_last_screenshot_capture_kind = "managed-weston-window"
+            return bool(desktop.save(str(path)))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            win._arrayscope_last_screenshot_capture_kind = "managed-weston-failed"
+            win._arrayscope_last_screenshot_capture_error = repr(exc)
+            return False
+        finally:
+            desktop_path.unlink(missing_ok=True)
 
     # A screen-path fallback is an offscreen replay of the committed WGPU
     # command state.  It is useful pixel evidence, but it is not a compositor
@@ -7713,6 +7704,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _managed_weston_output_size(session_fixture: str | Path | None) -> tuple[int, int]:
+    default = (1400, 940)
+    if session_fixture is None or not str(session_fixture).strip():
+        return default
+    try:
+        payload = json.loads(Path(session_fixture).read_text(encoding="utf-8"))
+        width, height = payload["panels"]["window_size"]
+        return max(1, int(width)), max(1, int(height))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return default
+
+
+def _managed_weston_requested(args) -> bool:
+    return bool(
+        args.backend == "wgpu"
+        and str(args.wgpu_present_method) in {"screen", "auto"}
+        and args.screenshot_dir
+        and not is_managed_weston()
+    )
+
+
 def main(argv: tuple[str, ...] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -7732,6 +7744,18 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     if args.profile_suite:
         source_argv = tuple(argv if argv is not None else sys.argv[1:])
         return run_profile_suite(source_argv, args.profile_suite)
+    if _managed_weston_requested(args):
+        source_argv = tuple(argv if argv is not None else sys.argv[1:])
+        return run_in_managed_weston(
+            (
+                sys.executable,
+                "-m",
+                "arrayscope.tools.profile_montage_workflow",
+                *source_argv,
+            ),
+            artifact_dir=args.screenshot_dir,
+            output_size=_managed_weston_output_size(args.session_fixture),
+        )
 
     jsonl = None if args.jsonl is None else Path(args.jsonl)
     if jsonl is not None and jsonl.exists():
