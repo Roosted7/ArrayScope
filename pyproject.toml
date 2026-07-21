@@ -44,6 +44,17 @@ dependencies = [
 [project.scripts]
 arrayscope = "arrayscope.__main__:main"
 
+# Third-party packages contribute Tier-1 (opaque, whole-array) operations by
+# advertising an entry point in this group.  The entry-point NAME is the
+# namespaced, stable operation id (it must contain a ":"), and the value points
+# at a zero-argument factory returning an
+# ``arrayscope.operations.plugins.PluginOperationSpec``.  Discovery is lazy:
+# ArrayScope enumerates these names without importing the plugin and only loads
+# the module on first use.  See docs/plugin-operations.md.
+#
+# [project.entry-points."arrayscope.operations"]
+# "mypkg:reverse_rows" = "mypkg.arrayscope_ops:make_reverse_rows"
+
 [project.optional-dependencies]
 vispy = [
     "vispy>=0.14.0",

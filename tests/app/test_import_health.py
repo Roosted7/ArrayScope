@@ -1,6 +1,8 @@
 import ast
 import importlib
 import pkgutil
+import sys
+from importlib.metadata import EntryPoint
 from pathlib import Path
 
 import arrayscope
@@ -35,6 +37,50 @@ def test_every_arrayscope_module_imports():
         except BaseException as exc:
             failures.append(f"{module_name}: {type(exc).__name__}: {exc}")
     assert failures == []
+
+
+def test_building_the_operation_registry_does_not_import_a_plugin(tmp_path, monkeypatch):
+    """Lazy proof: enumerating plugin ops must not import any plugin module.
+
+    A plugin op is discovered by entry-point *name* at registry-build time;
+    the plugin module is imported only on first actual use.  This guards that
+    contract with a sentinel module: discovery must leave it out of
+    ``sys.modules``, and the guard is falsifiable because loading the spec
+    (below) genuinely imports it.
+    """
+
+    from arrayscope.operations import plugins, registry
+
+    sentinel = "arrayscope_import_health_plugin_sentinel"
+    (tmp_path / f"{sentinel}.py").write_text(
+        "from arrayscope.operations.plugins import PluginOperationSpec\n"
+        "IMPORTED = True\n"
+        "def make():\n"
+        "    return PluginOperationSpec(id='sentinel:op', label='sentinel', fn=lambda a: a)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entry = EntryPoint(
+        name="sentinel:op", value=f"{sentinel}:make", group=plugins.PLUGIN_ENTRY_POINT_GROUP
+    )
+    monkeypatch.setattr(
+        plugins,
+        "entry_points",
+        lambda *, group=None: [entry] if group == plugins.PLUGIN_ENTRY_POINT_GROUP else [],
+    )
+    plugins._reset_plugin_cache()
+    sys.modules.pop(sentinel, None)
+    try:
+        # Enumerating names and resolving the registry entry list stays lazy.
+        assert "sentinel:op" in plugins.plugin_operation_ids()
+        registry.operation_entries()
+        assert sentinel not in sys.modules, "building the registry must not import a plugin"
+
+        # Falsifiable: actual use DOES import the plugin module.
+        plugins.load_plugin_spec("sentinel:op")
+        assert sentinel in sys.modules
+    finally:
+        plugins._reset_plugin_cache()
+        sys.modules.pop(sentinel, None)
 
 
 def _handler_swallows_imports(handler: ast.ExceptHandler) -> bool:

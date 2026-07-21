@@ -41,6 +41,9 @@ Organized by the question you're asking. Stop at the first useful level.
   loading, the launcher window, and native shell registration
   (`--install-desktop`).
 - [Current state](current-state.md) — maturity snapshot and material risks.
+- [Plugin operations](plugin-operations.md) — how a third-party pip package
+  contributes a Tier-1 (opaque, whole-array) operation via the
+  `arrayscope.operations` entry-point group.
 
 ## "Why is it this way?"
 

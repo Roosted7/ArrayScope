@@ -126,13 +126,29 @@ def operation_entries():
 
 
 def get_operation_entry(operation_id: str) -> OperationEntry:
-    try:
-        return OPERATION_REGISTRY[operation_id]
-    except KeyError as exc:
-        raise ValueError(f"unknown operation id: {operation_id}") from exc
+    entry = OPERATION_REGISTRY.get(operation_id)
+    if entry is not None:
+        return entry
+
+    from arrayscope.operations import plugins
+
+    if plugins.is_plugin_operation_id(operation_id):
+        return plugins.plugin_operation_entry(operation_id)
+    if plugins.NAMESPACE_SEPARATOR in operation_id:
+        raise ValueError(
+            f"unknown or uninstalled plugin operation: {operation_id} "
+            "(is the providing package installed?)"
+        )
+    raise ValueError(f"unknown operation id: {operation_id}")
 
 
 def create_operation(operation_id: str, axis=None, parameters: Mapping[str, object] | None = None):
+    if operation_id not in OPERATION_REGISTRY:
+        from arrayscope.operations import plugins
+
+        if plugins.is_plugin_operation_id(operation_id):
+            return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)
+
     entry = get_operation_entry(operation_id)
     parameters = dict(parameters or {})
     kwargs = {}
@@ -154,6 +170,11 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
 
 
 def operation_id_for(operation) -> str:
+    from arrayscope.operations.plugins import PluginOperation
+
+    if isinstance(operation, PluginOperation):
+        return operation.plugin_id
+
     operation_type = type(operation)
     for entry in OPERATION_REGISTRY.values():
         if entry.operation_type is operation_type:

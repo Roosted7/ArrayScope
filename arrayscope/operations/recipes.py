@@ -32,6 +32,11 @@ def operation_to_recipe_item(operation_or_step):
         enabled = operation_or_step.enabled
         operation = operation_or_step.operation
 
+    from arrayscope.operations.plugins import PluginOperation, recipe_item_for_plugin_operation
+
+    if isinstance(operation, PluginOperation):
+        return recipe_item_for_plugin_operation(operation, enabled=enabled)
+
     if not is_dataclass(operation):
         raise ValueError(f"operation is not serializable: {operation!r}")
 
