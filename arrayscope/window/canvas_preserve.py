@@ -75,6 +75,10 @@ class CanvasPreserveController:
         self._strong_available = False
         self._mode = PanelResizeBehavior.BEST_EFFORT.value
         self._platform = ""
+        # Canvas pixels the screen ceiling forced the canvas to give up and
+        # that it is still owed.  See `_settle_canvas_debt`.
+        self._canvas_debt = Qt.QtCore.QSize(0, 0)
+        self._clamp_bound = False
 
     @property
     def generation(self) -> int:
@@ -137,7 +141,16 @@ class CanvasPreserveController:
 
         self._release_strong_preserve_constraints(force=True)
         central = self.window.centralWidget()
-        target_canvas_size = Qt.QtCore.QSize(central.size())
+        # Aim at the size the canvas is OWED, not merely the size it has: if
+        # the screen ceiling made an earlier transition shrink it, this is
+        # the transition that can hand those pixels back (closing that dock
+        # frees exactly the room that was missing).  Without this the clamp
+        # is lossy in one direction and the canvas ratchets down every
+        # show/hide cycle -- measured 662 -> 392 px across a single one.
+        target_canvas_size = Qt.QtCore.QSize(
+            int(central.width()) + int(self._canvas_debt.width()),
+            int(central.height()) + int(self._canvas_debt.height()),
+        )
         start_window_size = Qt.QtCore.QSize(self.window.size())
         dock_extents = self.layout_manager._visible_managed_dock_extents()
         size_constraints = self._capture_window_size_constraints()
@@ -151,6 +164,7 @@ class CanvasPreserveController:
         self._last_delta = None
         self._attempts_used = 0
         self._strong_used = False
+        self._clamp_bound = False
         self._record(
             "start",
             (
@@ -159,6 +173,9 @@ class CanvasPreserveController:
             ),
         )
         transition()
+        # A dock this transition just revealed has to join the replay list,
+        # or it is sized once against the pre-growth window and never again.
+        dock_extents = self.layout_manager.extents_including_newly_shown_docks(dock_extents)
         self.layout_manager._activate_main_window_layout()
         self.layout_manager._restore_visible_dock_extents(dock_extents)
         # Qt event-turn barrier guarded by `generation`. The correction needs
@@ -238,6 +255,12 @@ class CanvasPreserveController:
             self._finish(generation, "unsettled")
             return
         if attempts <= 0:
+            # Out of attempts.  If the SCREEN CEILING is why the canvas never
+            # reached its target, book the shortfall as debt so the next
+            # transition can repay it; anything else (a widget minimum, a
+            # compositor that refused the size) is not ours to remember and
+            # would inflate every later target.
+            self._book_canvas_debt(generation)
             self._finish(generation, "best_effort_unsettled")
             self._release_strong_preserve_constraints(generation)
             return
@@ -263,6 +286,8 @@ class CanvasPreserveController:
             ),
         )
         if abs(dx) <= _CANVAS_PRESERVE_TOLERANCE_PX and abs(dy) <= _CANVAS_PRESERVE_TOLERANCE_PX:
+            # Target met: whatever was owed has been repaid.
+            self._canvas_debt = Qt.QtCore.QSize(0, 0)
             self.layout_manager.refresh_view_geometry()
             if (
                 self._strong_path_allowed(allow_strong)
@@ -285,6 +310,44 @@ class CanvasPreserveController:
         minimum = win.minimumSize()
         new_width = max(int(minimum.width()), int(win.width()) + dx)
         new_height = max(int(minimum.height()), int(win.height()) + dy)
+        # Preserving the canvas means growing the window by whatever the dock
+        # took.  Unbounded, that walks the window straight off the screen --
+        # measured 1000x700 -> 1658x700 on a 1400x900 work area when the
+        # inspection dock opened, and -> 1000x1267 for the profile dock.
+        # The screen is a hard ceiling: past it the "preserved" pixels are
+        # ones the user cannot see.  Clamping here (BEFORE the QSize handed
+        # to the strong-preserve pin, or Wayland would re-assert the
+        # off-screen size against the compositor) makes the canvas yield
+        # only once there is genuinely nowhere left to grow -- the correction
+        # then simply stops converging and finishes best-effort, which is
+        # exactly the intended "shrink the viewport, but only then".
+        clamped_width, clamped_height = self.layout_manager.clamp_to_available_screen(
+            new_width, new_height, minimum=minimum
+        )
+        if (clamped_width, clamped_height) != (new_width, new_height):
+            self._record(
+                "clamp",
+                (
+                    f"gen={generation} wanted={new_width}x{new_height} "
+                    f"clamped={clamped_width}x{clamped_height}"
+                ),
+            )
+            self._clamp_bound = True
+            new_width, new_height = clamped_width, clamped_height
+        if self._clamp_bound and (new_width, new_height) == (
+            int(win.width()),
+            int(win.height()),
+        ):
+            # Pinned at the screen ceiling with the canvas still short: the
+            # window cannot grow and no number of retries will change that.
+            # Stop now instead of burning the remaining attempts (4 x 16 ms)
+            # re-measuring an unreachable target, and say so honestly rather
+            # than reporting the generic best-effort failure.
+            self._book_canvas_debt(generation)
+            self._finish(generation, "clamped")
+            self._release_strong_preserve_constraints(generation)
+            self.layout_manager.refresh_view_geometry()
+            return
         if new_width != win.width() or new_height != win.height():
             use_strong = (
                 self._strong_path_allowed(allow_strong) and attempts == 1 and not strong_used
@@ -326,6 +389,22 @@ class CanvasPreserveController:
                 allow_strong=allow_strong,
             ),
         )
+
+    def _book_canvas_debt(self, generation: int) -> None:
+        """Remember canvas pixels the SCREEN CEILING withheld, so they can be
+        handed back by a later transition.
+
+        Only the ceiling creates debt.  Any other reason the canvas fell
+        short -- a widget minimum, a compositor that refused the size -- is
+        not ours to remember, and booking it would inflate every later
+        target.
+        """
+
+        if not self._clamp_bound:
+            return
+        dx_left, dy_left = self._last_delta or (0, 0)
+        self._canvas_debt = Qt.QtCore.QSize(max(0, int(dx_left)), max(0, int(dy_left)))
+        self._record("debt", f"gen={generation} owed={_size_text(self._canvas_debt)}")
 
     def _strong_path_allowed(self, allow_strong: bool) -> bool:
         return (

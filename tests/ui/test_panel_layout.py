@@ -10,6 +10,9 @@ from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
 from tests.ui.helpers import (
+    give_generous_work_area as _give_generous_work_area,
+)
+from tests.ui.helpers import (
     panel_body as _panel_body,
 )
 from tests.ui.helpers import (
@@ -29,6 +32,7 @@ def test_dock_show_hide_preserves_image_view_size(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.resize(700, 420)
         _process_events(qtbot)
@@ -68,6 +72,7 @@ def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(q
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.resize(900, 620)
         _process_events(qtbot, count=20)
@@ -90,6 +95,7 @@ def test_canvas_preserve_controller_records_diagnostics(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.resize(900, 620)
         _process_events(qtbot, count=20)
@@ -116,6 +122,7 @@ def test_panel_preserve_transaction_does_not_move_window_position(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.move(100, 80)
         win.resize(900, 620)
@@ -142,6 +149,7 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.resize(900, 620)
         _process_events(qtbot, count=20)
@@ -171,6 +179,7 @@ def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot, count=20)
         win.app_settings = AppSettingsState(
@@ -211,6 +220,7 @@ def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot, count=20)
         target = QtCore.QSize(win.size().width() + 12, win.size().height())
@@ -243,6 +253,7 @@ def test_strong_wayland_skips_strong_path_off_wayland(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot, count=20)
         win.app_settings = AppSettingsState(
@@ -288,6 +299,7 @@ def test_view_menu_panel_resize_behavior_persists(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot, count=20)
         off_action = _view_submenu_action(win, "Panel Resize Behavior", "Off")
@@ -324,6 +336,7 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_clos
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
 
@@ -358,6 +371,7 @@ def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapsho
 
     win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.resize(900, 620)
         _process_events(qtbot)
@@ -391,6 +405,7 @@ def test_profile_dock_defaults_bottom_when_opened_from_view_menu(qtbot):
 
     win = ArrayScopeWindow(np.arange(32 * 32, dtype=float).reshape(32, 32))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.move(0, 0)
         win.resize(700, 420)
@@ -410,6 +425,7 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
 
     win = ArrayScopeWindow(np.arange(24 * 24, dtype=float).reshape(24, 24))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         win.setGeometry(420, 20, 320, 500)
         _process_events(qtbot, count=20)
@@ -435,6 +451,7 @@ def test_docks_have_size_grips_and_managed_detach(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         for dock in (win.inspection_dock, win.profile_dock, win.operation_dock):
             assert dock.features() & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -453,6 +470,7 @@ def test_view_menu_uses_managed_dock_actions(qtbot):
 
     win = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -471,6 +489,7 @@ def test_operations_dock_does_not_auto_reopen_after_user_close(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         win.request_operation("reverse", 0)
@@ -497,6 +516,7 @@ def test_stale_queued_dock_visibility_does_not_override_newer_layout_decision(qt
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
 
@@ -520,6 +540,7 @@ def test_queued_dock_visibility_is_latest_only_per_dock(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
 
@@ -540,6 +561,7 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot, count=20)
         win.resize(920, 620)
@@ -620,6 +642,7 @@ def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -649,6 +672,7 @@ def test_reset_layout_redocks_managed_docks(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         win.layout_manager.set_managed_dock_visible(
@@ -675,6 +699,7 @@ def test_closing_detached_dialog_unchecks_view_action(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -713,6 +738,7 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         win.layout_manager.set_managed_dock_visible(
@@ -767,6 +793,7 @@ def test_managed_dock_title_drag_detaches_panel(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         win.layout_manager.set_managed_dock_visible(
@@ -799,6 +826,7 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -855,6 +883,7 @@ def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -892,6 +921,7 @@ def test_reset_layout_after_detached_hidden_panel_has_no_stale_dialog(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Inspection")
@@ -926,6 +956,7 @@ def test_managed_title_close_is_authoritative_hide_path(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         for name, dock, action_text in (
@@ -962,6 +993,7 @@ def test_operation_dock_view_menu_grows_and_hides_window(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Operations")
@@ -986,6 +1018,7 @@ def test_operation_dock_grows_without_prior_manual_resize(qtbot):
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         action = _view_action(win, "Operations")
@@ -1006,6 +1039,7 @@ def test_hiding_operation_dock_with_inspection_open_shrinks_window_not_inspectio
 
     win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(win)
+    _give_generous_work_area(win)
     try:
         _process_events(qtbot)
         inspection_action = _view_action(win, "Inspection")

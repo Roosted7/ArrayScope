@@ -9,6 +9,7 @@ from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
 )
+from tests.ui.helpers import give_generous_work_area as _give_generous_work_area
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -75,6 +76,8 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(_make_data())
+
+    _give_generous_work_area(win)
     try:
         win.resize(900, 720)
         win.show()
@@ -141,6 +144,8 @@ def test_progressive_view_configuration_artifacts(qt_app):
     from arrayscope.window import ArrayScopeWindow
 
     quick = ArrayScopeWindow(np.arange(64 * 64, dtype=float).reshape(64, 64))
+
+    _give_generous_work_area(quick)
     try:
         quick.resize(900, 620)
         quick.show()
@@ -171,6 +176,8 @@ def test_progressive_view_configuration_artifacts(qt_app):
         _process_events(qt_app)
 
     one_d = ArrayScopeWindow(np.linspace(0, 1, 128))
+
+    _give_generous_work_area(one_d)
     try:
         one_d.resize(760, 420)
         one_d.show()
@@ -182,6 +189,8 @@ def test_progressive_view_configuration_artifacts(qt_app):
         _process_events(qt_app)
 
     complex_win = ArrayScopeWindow(np.ones((16, 16)) + 1j * np.ones((16, 16)))
+
+    _give_generous_work_area(complex_win)
     try:
         complex_win.show()
         _process_events(qt_app)
@@ -219,6 +228,8 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         settings.sync()
 
         win = ArrayScopeWindow(data)
+
+        _give_generous_work_area(win)
         win.resize(900, 640)
         win.show()
         _process_events(qt_app, count=20)
@@ -258,6 +269,7 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
 
     data = np.zeros((2, 3, 4, 5, 6, 7), dtype=float)
     win = ArrayScopeWindow(data)
+    _give_generous_work_area(win)
     try:
         win.resize(560, 520)
         win.show()
@@ -306,6 +318,7 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
 
     data = np.arange(24 * 24, dtype=float).reshape(24, 24)
     win = ArrayScopeWindow(data)
+    _give_generous_work_area(win)
     try:
         win.resize(940, 640)
         win.show()
@@ -370,6 +383,7 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
     base = np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6)
     data = base + 1j * (base + 1)
     win = ArrayScopeWindow(data)
+    _give_generous_work_area(win)
     try:
         win.resize(980, 700)
         win.show()
@@ -457,6 +471,8 @@ def test_diagnostics_dialog_artifact_is_compact(qt_app):
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((32, 32, 4), dtype=np.float32))
+
+    _give_generous_work_area(win)
     try:
         win.show()
         _process_events(qt_app)

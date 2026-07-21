@@ -21,11 +21,33 @@ class ManagedDockState:
     last_area: Qt.QtCore.Qt.DockWidgetArea | None = None
 
 
+#: Share of the window a managed dock claims when it FIRST opens, with an
+#: absolute floor in px, and the axis it is measured along.
+#:
+#: Qt sizes a freshly shown dock from its ``sizeHint()``, and pyqtgraph's
+#: ``PlotWidget`` reports 600x480 regardless of content -- which made the
+#: profile dock open at 561 px (44% of the window) instead of its intended
+#: 23%, and then dragged the whole window 367 px off a 900 px screen.  These
+#: fractions were already written down; nothing was applying them on the
+#: path that actually opens a dock.
+_DEFAULT_DOCK_EXTENTS = {
+    "profile_dock": (0.23, 140, Qt.QtCore.Qt.Orientation.Vertical),
+    "operation_dock": (0.24, 220, Qt.QtCore.Qt.Orientation.Horizontal),
+    "inspection_dock": (0.24, 240, Qt.QtCore.Qt.Orientation.Horizontal),
+}
+
+
 class WindowLayoutManager:
     def __init__(self, window):
         self.window = window
         self._dock_states = {}
         self._dock_visibility_generations = {}
+        # Work area to clamp against, for tests that need a DETERMINISTIC one.
+        # The offscreen QPA reports 800x800, which is smaller than several
+        # legacy layout fixtures' own windows -- so without this the clamp
+        # fires in scenarios that cannot happen on a real desktop, and the
+        # tests measure the platform rather than the behaviour.
+        self._available_size_override = None
         self.canvas_preserver = CanvasPreserveController(self)
 
     def restore_window_settings(
@@ -288,6 +310,10 @@ class WindowLayoutManager:
                 dock.raise_()
             return
 
+        if not visible:
+            # Latch the size the user is leaving behind, before it is gone.
+            self.remember_dock_extent(dock)
+
         def transition():
             if visible:
                 self._add_dock_to_panel_area(dock)
@@ -298,8 +324,12 @@ class WindowLayoutManager:
                     panel.location = PanelLocation.DOCKED if visible else PanelLocation.HIDDEN
                     if not visible:
                         win.removeDockWidget(dock)
-                if visible and raise_dock:
-                    dock.raise_()
+                if visible:
+                    # Before the canvas-preserve correction measures anything:
+                    # otherwise the window grows to fit the dock's sizeHint.
+                    self.apply_default_dock_extent(dock)
+                    if raise_dock:
+                        dock.raise_()
             finally:
                 self._visibility_preserve_active = False
             if not visible:
@@ -479,6 +509,30 @@ class WindowLayoutManager:
                 extents.append((dock, int(size), orientation))
         return tuple(extents)
 
+    def extents_including_newly_shown_docks(self, dock_extents):
+        """Add docks that this transition just revealed, at their target extent.
+
+        The correction loop replays ``dock_extents`` after every window
+        resize, which is what stops a dock from absorbing the growth meant
+        for the canvas.  A dock being SHOWN is not in that list (it was not
+        visible when the snapshot was taken), so it was sized once inside the
+        transition -- against the pre-growth window, which capped it -- and
+        never re-applied.  A dock reopened at a remembered 345 px came back
+        at 320 px for exactly this reason.
+        """
+
+        known = {dock for dock, _size, _orientation in dock_extents}
+        extra = []
+        for dock in self._managed_docks():
+            if dock is None or dock in known or not dock.isVisible():
+                continue
+            spec = self._default_dock_extent_spec(dock)
+            target = self.default_dock_extent(dock)
+            if spec is None or not target:
+                continue
+            extra.append((dock, int(target), spec[2]))
+        return tuple(dock_extents) + tuple(extra)
+
     def _window_size_excluding_docked_panels(self):
         win = self.window
         size = Qt.QtCore.QSize(win.size())
@@ -603,6 +657,11 @@ class WindowLayoutManager:
         minimum = win.minimumSize()
         new_width = max(int(minimum.width()), int(win.width()) + int(dx))
         new_height = max(int(minimum.height()), int(win.height()) + int(dy))
+        # Same ceiling as the dock-transition growth path: a restored
+        # viewport shape must not push the window off the work area either.
+        new_width, new_height = self.clamp_to_available_screen(
+            new_width, new_height, minimum=minimum
+        )
         if new_width == win.width() and new_height == win.height():
             return False
         win.resize(new_width, new_height)
@@ -699,6 +758,73 @@ class WindowLayoutManager:
             return max(220, int(hint.width()))
         return max(140, int(hint.height()))
 
+    def available_client_size(self):
+        """Largest client-area size that still fits the screen's work area.
+
+        ``availableGeometry`` already excludes the shell's reserved strips
+        (top bar, dock, taskbar), but it describes the FRAME while
+        ``QWidget.resize`` sets the CLIENT area — so the decorations have to
+        come off the budget too, or a clamped window still hangs off the
+        bottom by exactly the titlebar.
+
+        Returns ``None`` when no screen can be resolved (offscreen QPA in
+        some CI shapes), which callers must read as "do not clamp" rather
+        than as a zero budget.
+        """
+
+        win = self.window
+        override = self._available_size_override
+        if override is not None:
+            return Qt.QtCore.QSize(override)
+        screen = win.screen()
+        if screen is None:
+            app = Qt.QtWidgets.QApplication.instance()
+            screen = None if app is None else app.primaryScreen()
+        if screen is None:
+            return None
+        available = screen.availableGeometry()
+        if available.width() <= 0 or available.height() <= 0:
+            return None
+        frame = win.frameGeometry().size()
+        current = win.size()
+        # Decoration overhead; negative/absurd values mean the frame is not
+        # known yet (never mapped), in which case charge nothing for it.
+        frame_width = max(0, int(frame.width()) - int(current.width()))
+        frame_height = max(0, int(frame.height()) - int(current.height()))
+        return Qt.QtCore.QSize(
+            max(1, int(available.width()) - frame_width),
+            max(1, int(available.height()) - frame_height),
+        )
+
+    def clamp_to_available_screen(self, width, height, *, minimum=None):
+        """Ceiling a proposed window size at the screen's work area.
+
+        This blocks GROWTH past the screen; it never forces a shrink.  A
+        window can legitimately already be larger than the work area -- the
+        user dragged it there, it straddles two monitors, or the platform
+        reports a conservative work area -- and yanking it smaller because a
+        dock happened to open would be a worse bug than the one being fixed.
+        So the ceiling is the work area OR the current size, whichever is
+        larger, which still lets a closing dock shrink the window back down.
+
+        The minimum always wins over the ceiling: a window whose own minimum
+        exceeds the work area is a different problem, and returning something
+        below it would just make Qt resize back up.
+        """
+
+        available = self.available_client_size()
+        if available is None:
+            return int(width), int(height)
+        current = self.window.size()
+        ceiling_width = max(int(available.width()), int(current.width()))
+        ceiling_height = max(int(available.height()), int(current.height()))
+        clamped_width = min(int(width), ceiling_width)
+        clamped_height = min(int(height), ceiling_height)
+        if minimum is not None:
+            clamped_width = max(clamped_width, int(minimum.width()))
+            clamped_height = max(clamped_height, int(minimum.height()))
+        return clamped_width, clamped_height
+
     def _dock_separator_extent(self):
         try:
             return int(
@@ -715,36 +841,68 @@ class WindowLayoutManager:
             Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
         )
 
-    def resize_profile_dock_default(self):
+    def _default_dock_extent_spec(self, dock):
+        if dock is None:
+            return None
         win = self.window
-        if not hasattr(win, "profile_dock") or not win.profile_dock.isVisible():
-            return
-        target_height = max(140, int(win.height() * 0.23))
+        for name, spec in _DEFAULT_DOCK_EXTENTS.items():
+            if dock is getattr(win, name, None):
+                return spec
+        return None
+
+    def default_dock_extent(self, dock):
+        """Opening extent for ``dock``: remembered user size, else the share."""
+
+        spec = self._default_dock_extent_spec(dock)
+        if spec is None:
+            return None
+        remembered = self._state_for(dock).reserved_extent
+        if remembered:
+            return int(remembered)
+        fraction, floor, orientation = spec
+        win = self.window
+        span = win.width() if orientation == Qt.QtCore.Qt.Orientation.Horizontal else win.height()
+        return max(int(floor), int(span * float(fraction)))
+
+    def apply_default_dock_extent(self, dock):
+        """Size a freshly shown dock, instead of letting its sizeHint decide.
+
+        Called from inside the show transition so the canvas-preserve
+        correction measures the delta for the SIZE WE WANT -- sizing the dock
+        afterwards would let the window grow to fit the sizeHint first and
+        then leave it oversized.
+        """
+
+        spec = self._default_dock_extent_spec(dock)
+        if spec is None or dock is None or not dock.isVisible():
+            return False
+        target = self.default_dock_extent(dock)
+        if target is None:
+            return False
         try:
-            win.resizeDocks([win.profile_dock], [target_height], Qt.QtCore.Qt.Orientation.Vertical)
+            self.window.resizeDocks([dock], [int(target)], spec[2])
         except Exception as exc:
-            handle_ui_exception("resize profile dock", exc)
+            handle_ui_exception("apply default dock extent", exc)
+            return False
+        return True
+
+    def remember_dock_extent(self, dock):
+        """Latch the dock's current extent so a reopen restores the user's size."""
+
+        spec = self._default_dock_extent_spec(dock)
+        if spec is None or dock is None or not dock.isVisible():
+            return
+        orientation = spec[2]
+        extent = (
+            dock.width() if orientation == Qt.QtCore.Qt.Orientation.Horizontal else dock.height()
+        )
+        if int(extent) > 0:
+            self._state_for(dock).reserved_extent = int(extent)
 
     def resize_default_docks(self):
-        win = self.window
         try:
-            if win.profile_dock.isVisible():
-                win.resizeDocks(
-                    [win.profile_dock],
-                    [max(140, int(win.height() * 0.23))],
-                    Qt.QtCore.Qt.Orientation.Vertical,
-                )
-            if win.operation_dock.isVisible():
-                win.resizeDocks(
-                    [win.operation_dock],
-                    [max(220, int(win.width() * 0.24))],
-                    Qt.QtCore.Qt.Orientation.Horizontal,
-                )
-            if hasattr(win, "inspection_dock") and win.inspection_dock.isVisible():
-                win.resizeDocks(
-                    [win.inspection_dock],
-                    [max(240, int(win.width() * 0.24))],
-                    Qt.QtCore.Qt.Orientation.Horizontal,
-                )
+            for dock in self._managed_docks():
+                if dock is not None and dock.isVisible():
+                    self.apply_default_dock_extent(dock)
         except Exception as exc:
             handle_ui_exception("resize default docks", exc)

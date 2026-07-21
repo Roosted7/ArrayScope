@@ -180,3 +180,22 @@ def committed_value(win, view_x, view_y):
     if context is None:
         return None
     return win.renderer._hover_value_from_display(context.mapping)
+
+
+def give_generous_work_area(win, width=4096, height=4096):
+    """Pin a work area far larger than any fixture window.
+
+    The offscreen QPA reports an 800x800 screen -- SMALLER than several of
+    these fixtures' own windows.  The screen clamp (added so an opening dock
+    can no longer push the window off the desktop) would therefore fire in
+    situations a real desktop cannot produce, and the affected tests would be
+    measuring the platform rather than the behaviour they exist to pin.
+
+    Tests about canvas-preservation MECHANICS call this so the clamp stays
+    out of the way.  The clamp's own behaviour is pinned separately, with a
+    deliberately small work area, in test_dock_screen_fit.py.
+    """
+
+    from pyqtgraph.Qt import QtCore
+
+    win.layout_manager._available_size_override = QtCore.QSize(int(width), int(height))
