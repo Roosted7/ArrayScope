@@ -55,14 +55,94 @@ to the cumulative duration of a scenario with several steps. Profile CLI
 values above the limit are clamped, and the architecture guard rejects local
 settlement-timeout owners.
 
-**Enforcement gap, stated honestly:** rings 3–4 are machine-bound (real
-Wayland, real GPU where applicable, local data) and cannot run in CI — CI is
-entirely offscreen software-GL. The rule is therefore personal, not scheduled:
-**whoever (human or agent) changes a display/render/kernel/window lane
-runs rings 3–4 themselves before claiming the change works**, and records
-the run in the commit or PR description. No background runner will catch
-it for you; an unrecorded ring-3/4 run means the claim is "compiles",
-not "fixed".
+**Enforcement gap, stated honestly:** rings 3–4 need a real compositor and
+real GL, and CI is entirely offscreen software-GL. The rule is therefore
+personal, not scheduled: **whoever (human or agent) changes a
+display/render/kernel/window lane runs rings 3–4 themselves before claiming
+the change works**, and records the run in the commit or PR description. No
+background runner will catch it for you; an unrecorded ring-3/4 run means
+the claim is "compiles", not "fixed".
+
+What *has* changed (2026-07-21): those rings no longer need an **attached
+display**. `arrayscope.tools.headless_display` owns a headless Weston with
+the real GL renderer, so ring 3–4 commands run on a machine with no logged-in
+session — see [Headless real rendering](#headless-real-rendering-rings-34-without-an-attached-display).
+They still need a real GPU and local data, so this widens *where* the rings
+can run; it does not make them automatic, and it does not make an offscreen
+run into evidence.
+
+### Headless real rendering (rings 3–4 without an attached display)
+
+Prefix any ring-3/4 or harness command with the launcher; it exports
+`WAYLAND_DISPLAY` and `QT_QPA_PLATFORM=wayland` for the child:
+
+```
+python -m arrayscope.tools.headless_display -- \
+    env ARRAYSCOPE_GPU_TESTS=1 python -m pytest tests/gpu_interaction -n 0 -q
+```
+
+The journey matrix and the profiler run the same way, and the matrix labels
+its report `"ring": "headless-weston"` so a verdict is never filed as if it
+came from the developer's own session:
+
+```
+python -m arrayscope.tools.headless_display -- \
+    python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/...
+```
+
+**One compositor per batch, not per test.** A whole batch — including
+parallel xdist workers, which inherit the socket — shares one Weston.
+Separate *activities* get separate compositors, so a profiler's full-output
+screenshots never photograph another activity's windows.
+
+**Screen evidence owns its compositor.** `profile_montage_workflow`'s wgpu
+screen path starts its own compositor in `exact_window` mode and never joins
+a batch — a batch has its own output size and keeps its panel, which would
+offset the window and quietly break the capture == window identity. This
+replaced the kiosk shell: the profiler reads the **session fixture first**,
+sizes the sole output to the `panels.window_size` that session restores, and
+runs with no panel and no window decoration. The window then fills the
+output at (0, 0), so one capture is the window, byte for byte — the same
+identity kiosk provided, without kiosk's effect on viewport aspect and
+montage layout. A capture whose size is not the window's is still a hard
+failure; it is never saved as window evidence.
+
+**Measured parity on the reference laptop (2026-07-21, quiet machine):**
+
+| Ring / suite | Real session | Headless Weston |
+|---|---|---|
+| `tests/gpu_interaction` (ring 4, `-n 0`) | 28 passed, 72.9 s | 28 passed, 72.9 s |
+| window / viewport geometry | 600x800 / 447x553 | 600x800 / 447x553 |
+| full suite failure set | 11 failures | same 11 (+1 xdist load flake) |
+
+The full-suite failures are the same tests in both environments because they
+assert *offscreen* behaviour (`test_..._falls_back_to_bitmap_off_wayland`,
+the diagnostics/prefetch/window-sync dialogs). **They belong in the offscreen
+ring and must not be "converted"** — a test that pins the offscreen fallback
+path is only meaningful offscreen. Default `pytest` still runs offscreen.
+
+Traps the launcher pins (all field-proven here, all silent if unhandled):
+
+1. **EGL vendor order.** `10_nvidia.json` sorts before `50_mesa.json`, so a
+   headless compositor with no parent session resolves to the NVIDIA GPU
+   while the real session uses Intel — the documented *slower* path, which
+   would move every performance bar for a reason nobody would look for. The
+   launcher pins the Mesa vendor file.
+2. **Capture orientation.** On that NVIDIA path `weston-screenshooter` returns
+   a **y-flipped** image, which would silently invert every pixel oracle
+   while leaving it green. Pinning trap 1 also fixes this; prove orientation
+   with a known asymmetric scene rather than assuming it.
+3. **Never the kiosk shell.** Kiosk force-fullscreens every window to the
+   output size, changing viewport aspect and therefore montage layout: at
+   1600x1000 it turned
+   `test_one_index_boundary_scroll_has_pixels_and_trace_clean[pyqtgraph]`
+   red through geometry alone. The desktop shell gives natural window sizes,
+   matching the real session exactly.
+4. **`--debug` is required** for `weston-screenshooter` to be authorized;
+   without it capture returns "unauthorized" and a black image.
+5. **Missing Weston fails loudly.** The launcher never degrades to the
+   offscreen platform, because an offscreen run labelled as compositor
+   evidence is exactly the vacuous oracle law #5 forbids.
 
 ### Journey-matrix trajectory gate
 
@@ -126,12 +206,14 @@ the probe therefore applies `--screenshot-interval-s` to acknowledgement
 captures too. Periodic WGPU trajectory samples use the explicitly labelled
 `wgpu-offscreen-replay`; they remain synchronous so each image and its trace
 metadata describe the same scene state. For a WGPU screen-path run with
-`--screenshot-dir`, the profiler owns one private nested Weston compositor:
-it launches the child under the kiosk shell, captures the sole output once
-with `weston-screenshooter` for each phase-end exact-window image, then closes
-Weston and removes its private socket and capture temporaries. Callers do not
-provide a screenshot helper or pre-start a compositor. A replay fences the GPU
-and nested composition can perturb settlement, so timing from any
+`--screenshot-dir`, the profiler owns one private headless Weston compositor:
+it sizes the sole output to the session's window, launches the child with no
+panel and no window decoration, captures that output once with
+`weston-screenshooter` for each phase-end exact-window image, then closes
+Weston and removes its private socket, config, and capture temporaries.
+Callers do not provide a screenshot helper or pre-start a compositor. A
+replay fences the GPU and nested composition can perturb settlement, so
+timing from any
 screenshot-enabled run is diagnostic: use a trace-only repeat to decide
 whether a photographed coverage delay belongs to the renderer or to capture.
 The managed run fails loudly when Weston, `weston-screenshooter`, the private
