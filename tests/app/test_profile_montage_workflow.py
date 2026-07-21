@@ -1020,6 +1020,24 @@ def test_r8_certification_reports_but_does_not_gate_cold_fill_heartbeat():
     assert result["r8_gate_passed"] is True
 
 
+def test_r8_certification_gates_deep_zoom_far_scroll_convergence():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record.update(
+        phase="montage_zoompan_scalar",
+        deep_zoom_far_scroll_available=True,
+        deep_zoom_far_scroll_precondition_reached_target_lod=True,
+        deep_zoom_far_scroll_reached_target_lod=False,
+        deep_zoom_far_scroll_target_evidence={"atomic_successor_pending": True},
+    )
+
+    result = _r8_certification(record)
+    failed = {failure["gate"] for failure in result["r8_gate_failures"]}
+
+    assert "deep_zoom_far_scroll_reaches_target_lod" in failed
+
+
 def test_r8_certification_skips_timing_only_for_profiled_or_smoke_runs():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
@@ -1464,9 +1482,7 @@ def test_presentation_continuity_probe_times_topology_successor_without_committe
 
     probe.start()
     visible_state.visible = False
-    session.plan = SimpleNamespace(
-        tile_shape=(4, 4), columns=2, rows=1, gap=1, tiles=(0, 1)
-    )
+    session.plan = SimpleNamespace(tile_shape=(4, 4), columns=2, rows=1, gap=1, tiles=(0, 1))
     probe._sample()
     visible_state.visible = True
     visible_state.source_array_id = "new"
@@ -1567,6 +1583,11 @@ def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
     )
     monkeypatch.setattr(
         workflow,
+        "_few_tile_view_range",
+        lambda *_args, **_kwargs: ((20.0, 30.0), (20.0, 30.0)),
+    )
+    monkeypatch.setattr(
+        workflow,
         "_wait_for_visible_target_then_observe_near",
         lambda *_args: {
             "visible_target_reached": True,
@@ -1578,6 +1599,7 @@ def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
         },
     )
     monkeypatch.setattr(workflow, "_wait_for_target_lod", lambda *args, **kwargs: (True, 0.0))
+    monkeypatch.setattr(workflow, "_wait_for_tile_presentation_draw", lambda *args, **kwargs: True)
     scroll_calls = []
     monkeypatch.setattr(
         workflow, "_scroll_montage_window", lambda *args, **kwargs: scroll_calls.append(kwargs)
@@ -1610,6 +1632,10 @@ def test_apply_montage_zoom_pan_targets_bounded_factors(monkeypatch):
     assert record["combined_full_grid_scroll_pause_frames"] == 3
     assert record["combined_zoom_scroll_pause_frames"] == 3
     assert record["combined_pan_scroll_pause_frames"] == 3
+    assert record["deep_zoom_far_scroll_available"] is True
+    assert record["deep_zoom_far_scroll_precondition_reached_target_lod"] is True
+    assert record["deep_zoom_far_scroll_reached_target_lod"] is True
+    assert record["deep_zoom_far_scroll_index_distance"] > 0
     assert scroll_calls
     assert all(call["size"] == 60 and call["interactive"] is True for call in scroll_calls)
     assert all(0 < call["window_start"] < 212 for call in scroll_calls)

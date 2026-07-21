@@ -2553,6 +2553,56 @@ def _apply_montage_zoom_pan_stress(
         record["combined_recovery_reached_target_lod"] = bool(combined_reached)
         record["combined_recovery_settle_ms"] = float(combined_settle_ms)
 
+        # Field regression 2026-07-21: populate reduced LODs, settle one
+        # center tile at native resolution, then replace the source window by
+        # a distant one while that deep camera remains fixed.  The old broad
+        # storm zoomed out before settlement and therefore missed the
+        # all-slot atomic wait that stranded the ready center behind two
+        # ownerless offscreen shell slots.
+        far_scroll_range = _few_tile_view_range(win, center_fraction=0.5)
+        record["deep_zoom_far_scroll_available"] = far_scroll_range is not None
+        if far_scroll_range is not None:
+            _glide("deep_zoom_far_scroll_prep", far_scroll_range, frames=3)
+            pre_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+            pre_reached = bool(pre_checkpoint.get("visible_target_reached", False))
+            pre_settle_ms = float(pre_checkpoint.get("visible_settle_ms", 0.0) or 0.0)
+            far_start = (
+                high
+                if abs(high - int(scroll_state["current"]))
+                >= abs(int(scroll_state["current"]) - low)
+                else low
+            )
+            gesture_id = _start_journey_gesture(win, "deep_zoom_far_scroll")
+            _scroll_montage_window(
+                win,
+                montage_axis=montage_axis,
+                columns=columns,
+                indices=source_indices,
+                window_start=far_start,
+                size=combined_size,
+                interactive=True,
+            )
+            post_checkpoint = _wait_for_visible_target_then_observe_near(win, app, QtCore)
+            post_reached = bool(post_checkpoint.get("visible_target_reached", False))
+            post_settle_ms = float(post_checkpoint.get("visible_settle_ms", 0.0) or 0.0)
+            _finish_journey_gesture(
+                win,
+                gesture_id,
+                reached=bool(post_reached),
+                app=app,
+                QtCore=QtCore,
+            )
+            record["deep_zoom_far_scroll_precondition_reached_target_lod"] = bool(pre_reached)
+            record["deep_zoom_far_scroll_precondition_settle_ms"] = float(pre_settle_ms)
+            record["deep_zoom_far_scroll_precondition_evidence"] = pre_checkpoint
+            record["deep_zoom_far_scroll_start"] = int(far_start)
+            record["deep_zoom_far_scroll_index_distance"] = abs(
+                int(far_start) - int(scroll_state["current"])
+            )
+            record["deep_zoom_far_scroll_reached_target_lod"] = bool(post_reached)
+            record["deep_zoom_far_scroll_settle_ms"] = float(post_settle_ms)
+            record["deep_zoom_far_scroll_target_evidence"] = post_checkpoint
+
     # 9) A deterministic correctness checkpoint catches the visually subtle
     # failure where the storm ends with all slots populated but a few visible
     # tiles permanently stuck at fallback LOD. Zoom to only a few tiles, pause
@@ -6003,6 +6053,19 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             bool(record.get("final_reached_target_lod", False)),
             evidence=record.get("final_settle_ms"),
             target="target LOD reached after the interaction storm",
+        )
+    if bool(record.get("deep_zoom_far_scroll_available", False)):
+        require(
+            "deep_zoom_far_scroll_precondition_reaches_native",
+            bool(record.get("deep_zoom_far_scroll_precondition_reached_target_lod", False)),
+            evidence=record.get("deep_zoom_far_scroll_precondition_settle_ms"),
+            target="the center reaches its deep-zoom target before the distant source scroll",
+        )
+        require(
+            "deep_zoom_far_scroll_reaches_target_lod",
+            bool(record.get("deep_zoom_far_scroll_reached_target_lod", False)),
+            evidence=record.get("deep_zoom_far_scroll_target_evidence"),
+            target="the distant successor replaces the retained center at target LOD",
         )
     if bool(record.get("lod_full_grid_checkpoint_available", False)):
         full_grid_checkpoint = dict(record.get("lod_full_grid_checkpoint", {}) or {})
