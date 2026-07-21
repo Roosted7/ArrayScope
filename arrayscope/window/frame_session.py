@@ -1961,21 +1961,26 @@ class FrameSession:
             if previous is None:
                 continue
             retargeted = int(previous.tile_number) != tile_number
-            if not retargeted and int(previous.source_index) == int(rendered.tile.source_index):
+            current_identity = self.tile_payload_identity(
+                rendered.tile,
+                texture_data=previous.texture_data,
+                texture_kind=previous.texture_kind,
+                shader_mapping=previous.shader_mapping,
+                lod=previous.lod,
+                quality=previous.quality,
+            )
+            if (
+                not retargeted
+                and int(previous.source_index) == int(rendered.tile.source_index)
+                and previous.tile_identity == current_identity
+            ):
                 payload = previous
             else:
                 payload = replace(
                     previous,
                     tile_number=tile_number,
                     source_index=int(rendered.tile.source_index),
-                    tile_identity=self.tile_payload_identity(
-                        rendered.tile,
-                        texture_data=previous.texture_data,
-                        texture_kind=previous.texture_kind,
-                        shader_mapping=previous.shader_mapping,
-                        lod=previous.lod,
-                        quality=previous.quality,
-                    ),
+                    tile_identity=current_identity,
                 )
             self.display_tile_payloads[tile_number] = payload
             self.record_tile_payload(payload)

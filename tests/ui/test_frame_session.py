@@ -1078,6 +1078,55 @@ def test_retargeted_seed_rebuilds_typed_identity_for_current_source():
     assert 0 in current.pending_payload_upserts
 
 
+def test_same_source_seed_rebuilds_typed_identity_for_current_axes():
+    """Wrapper seeding must not preserve predecessor view semantics."""
+
+    original = _session()
+    image = np.full((2, 2), 3.0, dtype=np.float32)
+    original.mark_materialized(
+        RenderedTile(
+            original.plan.tiles[0],
+            image,
+            image,
+            0.0,
+            image.shape,
+            image.nbytes,
+        )
+    )
+    source_ids = {0: ("tile-source", 0)}
+    predecessor = original.snapshot_display_tile_payloads(source_ids)[0]
+
+    current = _session()
+    current.view_state = current.view_state.with_axis_flipped(0, True)
+    current.plan = make_montage_plan(
+        current.view_state,
+        axis=2,
+        indices=(0, 1, 2, 3),
+        tile_shape=(2, 2),
+        columns=4,
+    )
+    current.visible_tiles = current.plan.tiles
+    current.visible_tile_numbers = frozenset(range(4))
+    current.mark_materialized(
+        RenderedTile(
+            current.plan.tiles[0],
+            image,
+            image,
+            0.0,
+            image.shape,
+            image.nbytes,
+        )
+    )
+
+    current.seed_display_tile_payloads({0: predecessor}, source_ids, tile_numbers=(0,))
+
+    seeded = current.display_tile_payloads[0]
+    assert seeded is not predecessor
+    assert seeded.texture_data is predecessor.texture_data
+    assert seeded.source_id == predecessor.source_id
+    assert seeded.tile_identity.axis_flips == current.view_state.axis_flipped
+
+
 def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
     session = _zoomed_out_session(dtype=np.complex64, rgb=True)
     real = np.arange(8 * 8, dtype=np.float32).reshape(8, 8)
