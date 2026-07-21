@@ -4930,6 +4930,36 @@ def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
     assert decision.reason == "montage-compatible"
 
 
+def test_partial_viewport_rebirth_retains_without_all_slot_atomic_handoff():
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    view_state = (
+        ViewState.from_shape((7, TILE, TILE))
+        .with_image_axes(1, 2)
+        .with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    )
+    previous.view_state = view_state
+    successor.view_state = view_state
+    previous.frame_plan = SimpleNamespace(active_region_ids=(1,))
+    successor.frame_plan = SimpleNamespace(active_region_ids=(1,))
+    _state, delta = previous.build_tile_presentation({})
+    _acknowledge(previous, delta)
+    previous.mark_presented(tuple(delta.upserts))
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert not decision.atomic_successor
+    assert decision.reason == "montage-partial-viewport"
+
+
 def test_atomic_handoff_has_one_owner_after_transition_arms_it():
     """Semantic-frame lag cannot override a physical handoff obligation."""
 
@@ -5000,6 +5030,44 @@ def test_index_window_retarget_arms_atomic_successor_pending():
     assert tuple(
         successor_delta.upserts[index].source_index for index in successor_delta.upserts
     ) == (1, 2, 3, 0)
+
+
+def test_index_window_retarget_does_not_atomically_wait_for_offscreen_shell():
+    """Reproduce stall 16: a deep-zoom far scroll must publish its center.
+
+    The frame plan requires one on-screen slot while the margin-expanded
+    session owns four.  Scheduling intentionally produces only the required
+    successor, so an all-slot atomic handoff would have no owner for the three
+    shell replacements and could never commit the ready exact center.
+    """
+
+    session = _session(count=4)
+    session.semantic_key = ("semantic", "stable")
+    session.frame_plan = SimpleNamespace(active_region_ids=(1,))
+    session.sync_lifecycle_scope()
+    old_source_ids = {index: session.tile_semantic_source_id(index) for index in range(4)}
+    _state, predecessor = session.build_tile_presentation(old_source_ids)
+    _acknowledge(session, predecessor)
+    session.mark_presented(tuple(predecessor.upserts))
+    session.tile_source_ids = dict(old_source_ids)
+
+    successor = _shifted_plan(count=4, offset=100)
+    center = replace(session.rendered_tiles[1], tile=successor.tiles[1])
+    _retarget(
+        session,
+        successor,
+        new_source_ids={
+            index: session.tile_semantic_source_id(tile.source_index)
+            for index, tile in enumerate(successor.tiles)
+        },
+        cached_tiles={1: center},
+        semantic_key=session.semantic_key,
+    )
+
+    assert not session.atomic_successor_pending
+    _state, delta = session.build_tile_presentation({})
+    assert 1 in delta.upserts
+    assert delta.upserts[1].quality == "exact"
 
 
 def test_atomic_successor_requires_complete_backend_acknowledgement():

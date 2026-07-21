@@ -1404,9 +1404,15 @@ class FrameSession:
             # new geometry behind hidden residency for every successor tile
             # (field failure: 60 visible predecessors, 272 successor slots),
             # so neither backend could publish the honest progressive frame.
-            # Same-topology source-window swaps retain the atomic guarantee.
+            # Same-topology source-window swaps retain the atomic guarantee
+            # only when the scheduler owns every slot in that transaction.
+            # At deep zoom the frame plan intentionally requires fewer tiles
+            # than the margin-expanded session; an all-slot handoff there
+            # would wait for offscreen successors that have no producer.
             self.atomic_successor_pending = bool(
-                had_complete_predecessor and old_plan_topology == _montage_plan_topology(plan)
+                had_complete_predecessor
+                and old_plan_topology == _montage_plan_topology(plan)
+                and set(self.required_tile_numbers()) == planned_numbers
             )
             retained_state = {
                 int(tile): payload
@@ -4218,6 +4224,18 @@ def plan_presentation_transition(
             False,
             "montage-topology-change",
         )
+    handoff_scope = {
+        int(tile.montage_index)
+        for tile in tuple(getattr(session, "visible_tiles", ()) or ())
+        if int(tile.montage_index) not in session.skipped_tiles
+    }
+    if set(session.required_tile_numbers()) != handoff_scope:
+        # The backend's atomic transaction covers every declared slot, while
+        # deep-zoom scheduling intentionally owns only the physical frame-plan
+        # subset. Retain the predecessor as a bridge, but let the required
+        # successor stream normally instead of waiting on ownerless shell
+        # replacements.
+        return PresentationTransitionDecision(True, False, "montage-partial-viewport")
     # A montage rebirth has a cold lifecycle even though the physical surface
     # still owns a compatible predecessor. Arm the existing all-slot handoff
     # so no partial successor can replace that complete coverage.
