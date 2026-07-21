@@ -687,8 +687,13 @@ class DisplayControlBuildMixin:
         self.display_toolbar.oneToOneRequested.connect(self.one_to_one_image)
         self.display_toolbar.windowModeChanged.connect(self._on_window_mode_changed)
         self.display_toolbar.autoWindowRequested.connect(self.auto_window_levels)
+        # The window "Sync" link controls the shared window view: window/level
+        # and the camera (pan/zoom) travel together across linked windows.
         self.display_toolbar.syncWindowToggled.connect(
             lambda checked: self._on_sync_facet_toggled("levels", checked)
+        )
+        self.display_toolbar.syncWindowToggled.connect(
+            lambda checked: self._on_sync_facet_toggled("camera", checked)
         )
         # Stretch priority: the toolbar claims spare row width before the
         # (eliding) pixel/array status labels, so it only compacts when the

@@ -175,7 +175,8 @@ class DisplayToolbar(QtWidgets.QToolBar):
         self.sync_window_action.setCheckable(True)
         set_action_icon(self.sync_window_action, "link")
         self.sync_window_action.setToolTip(
-            "Sync window/level with other linked ArrayScope windows (also from separately started sessions)"
+            "Sync window/level and pan/zoom with other linked ArrayScope windows "
+            "(also from separately started sessions)"
         )
         self.sync_window_action.toggled.connect(
             lambda checked: self.syncWindowToggled.emit(bool(checked))

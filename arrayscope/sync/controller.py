@@ -32,9 +32,11 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.core.view_session import roi_from_mapping, roi_to_mapping
 from arrayscope.core.window_levels import LevelSourceRank, normalize_bounds
+from arrayscope.display.viewport import view_ranges_near
 from arrayscope.operations.recipes import recipe_from_steps, steps_from_recipe
 from arrayscope.sync.bus import SyncBus
 from arrayscope.sync.messages import (
+    FACET_CAMERA,
     FACET_DIMS,
     FACET_LEVELS,
     FACET_OPERATIONS,
@@ -42,7 +44,9 @@ from arrayscope.sync.messages import (
     FACETS,
     KIND_REQUEST,
     KIND_STATE,
+    camera_state_payload,
     dimension_state_payload,
+    merged_camera_state,
     merged_dimension_state,
     request_message,
     state_message,
@@ -194,6 +198,11 @@ class WindowSyncController(Qt.QtCore.QObject):
                 "rois": [roi_to_mapping(selection) for selection in store.selections],
                 "selected_roi_id": store.selected_id,
             }
+        if facet == FACET_CAMERA:
+            view_box = self._camera_view_box()
+            if view_box is None:
+                return None
+            return camera_state_payload(view_box.viewRange())
         return None
 
     # ------------------------------------------------------------------
@@ -244,6 +253,8 @@ class WindowSyncController(Qt.QtCore.QObject):
             self._apply_operations(payload)
         elif facet == FACET_ROIS:
             self._apply_rois(payload)
+        elif facet == FACET_CAMERA:
+            self._apply_camera(payload)
 
     def _apply_levels(self, payload) -> None:
         win = self.win
@@ -281,6 +292,33 @@ class WindowSyncController(Qt.QtCore.QObject):
         selections = tuple(roi_from_mapping(mapping) for mapping in payload.get("rois", ()))
         self.win._restore_roi_session(selections, selected_id=payload.get("selected_roi_id"))
 
+    def _apply_camera(self, payload) -> None:
+        view_box = self._camera_view_box()
+        if view_box is None:
+            return
+        current = view_box.viewRange()
+        merged = merged_camera_state(current, payload)
+        # Skip no-op applies: the peer's aspect-adjusted range only has to land
+        # near ours, and re-setting an equivalent range would churn the
+        # ViewBox and the LOD demand it drives (mirrors _apply_levels).
+        if view_ranges_near(current, merged):
+            return
+        # setRange is the same programmatic path the viewport model uses. It
+        # emits sigRangeChanged synchronously, but this runs inside the
+        # ``_applying`` window opened by _on_message, so schedule_publish is
+        # suppressed and the change is not echoed back to the group.
+        view_box.setRange(xRange=merged[0], yRange=merged[1], padding=0)
+
+    def _camera_view_box(self):
+        img_view = getattr(self.win, "img_view", None)
+        get_view = getattr(img_view, "getView", None)
+        if not callable(get_view):
+            return None
+        try:
+            return get_view()
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------
     # Local change sources
 
@@ -295,6 +333,14 @@ class WindowSyncController(Qt.QtCore.QObject):
                 lambda _roi_id, _geometry: self.schedule_publish(FACET_ROIS)
             )
             img_view.roiDeleted.connect(lambda _roi_id: self.schedule_publish(FACET_ROIS))
+            view_box = self._camera_view_box()
+            if view_box is not None:
+                # Every user pan/zoom (mouse drag, wheel) flows through the
+                # ViewBox range signal. schedule_publish's leading-edge +
+                # trailing coalesce reuses the shared publish timers; no new
+                # scheduler is introduced. Programmatic replays are gated by
+                # ``_applying`` inside schedule_publish.
+                view_box.sigRangeChanged.connect(lambda *_a: self.schedule_publish(FACET_CAMERA))
         toolbar = getattr(win, "display_toolbar", None)
         if toolbar is not None:
             toolbar.windowModeChanged.connect(lambda _mode: self.schedule_publish(FACET_LEVELS))

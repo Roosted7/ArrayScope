@@ -391,6 +391,70 @@ def test_dimension_axis_flip_syncs_without_slice_change(qtbot, make_window):
     assert any("sync-dims" in (reason or "") for reason in rendered_reasons)
 
 
+def _view_center(view_box):
+    (x0, x1), (y0, y1) = view_box.viewRange()
+    return ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+
+
+def test_camera_pan_zoom_syncs_between_windows(qtbot, make_window):
+    from arrayscope.sync.messages import FACET_CAMERA
+
+    win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_a.sync_controller.set_facet_enabled(FACET_CAMERA, True)
+    win_b.sync_controller.set_facet_enabled(FACET_CAMERA, True)
+    qtbot.wait(300)
+
+    vb_a = win_a.img_view.getView()
+    vb_b = win_b.img_view.getView()
+    initial_b_center = _view_center(vb_b)
+
+    # Zoom into a sub-region that stays inside the image content, so the
+    # viewport-constraint pass does not reshape the target out from under the
+    # assertion. Data/world-space coordinates: the two windows must land on the
+    # same region regardless of their individual viewport pixel sizes.
+    vb_a.setRange(xRange=(1.0, 5.0), yRange=(1.0, 5.0), padding=0)
+
+    def _b_follows_a():
+        bx, by = _view_center(vb_b)
+        ax, ay = _view_center(vb_a)
+        return abs(bx - ax) < 0.75 and abs(by - ay) < 0.75
+
+    _settled(qtbot, _b_follows_a)
+    # Oracle can fail: the receiver must actually have moved off its initial
+    # fit, not merely match A because nothing changed.
+    moved_x = abs(_view_center(vb_b)[0] - initial_b_center[0])
+    moved_y = abs(_view_center(vb_b)[1] - initial_b_center[1])
+    assert moved_x > 0.5 or moved_y > 0.5
+
+
+def test_camera_apply_does_not_echo_a_republish(qtbot, make_window):
+    """Applying a peer camera state must move this window without republishing.
+
+    Loop prevention is the same layering the other facets rely on: the apply
+    runs inside the controller's ``_applying`` window, so the ViewBox range
+    signal it triggers is suppressed and the receiver's revision does not
+    advance (mirrors test_sync_does_not_feedback_loop for dims).
+    """
+    from arrayscope.sync.messages import FACET_CAMERA
+
+    win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
+    win_a.sync_controller.set_facet_enabled(FACET_CAMERA, True)
+    win_b.sync_controller.set_facet_enabled(FACET_CAMERA, True)
+    qtbot.wait(300)
+
+    win_a.img_view.getView().setRange(xRange=(15.0, 45.0), yRange=(5.0, 35.0), padding=0)
+    _settled(
+        qtbot,
+        lambda: win_b.sync_controller._last_applied.get(FACET_CAMERA) is not None,
+    )
+    revision_b = win_b.sync_controller._revisions[FACET_CAMERA]
+    # Let any (incorrectly) scheduled republish fire.
+    qtbot.wait(500)
+    assert win_b.sync_controller._revisions[FACET_CAMERA] == revision_b
+
+
 def test_dimension_role_change_publishes_payload_when_slices_are_unchanged(qtbot, make_window):
     from arrayscope.sync.messages import FACET_DIMS
 

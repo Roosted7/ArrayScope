@@ -2,12 +2,15 @@ import pytest
 
 from arrayscope.core.view_state import ChannelMode, ScaleMode, ViewState
 from arrayscope.sync.messages import (
+    FACET_CAMERA,
     FACET_DIMS,
     FACET_LEVELS,
     FACETS,
+    camera_state_payload,
     decode_lines,
     dimension_state_payload,
     encode_message,
+    merged_camera_state,
     merged_dimension_state,
     merged_slice_indices,
     parse_message,
@@ -147,3 +150,46 @@ def test_merged_dimension_state_accepts_legacy_slice_only_payload():
     assert merged.image_axes == (1, 0)
     assert merged.axis_flipped == current.axis_flipped
     assert merged.channel == ChannelMode.ABS
+
+
+def test_camera_facet_is_registered():
+    assert FACET_CAMERA in FACETS
+    message = state_message(
+        FACET_CAMERA, "origin-a", 1, camera_state_payload(((0.0, 8.0), (0.0, 6.0)))
+    )
+    assert parse_message(message) is message
+
+
+def test_camera_state_payload_is_json_plain_and_data_space():
+    payload = camera_state_payload(((-1.5, 8.0), (2.0, 6.5)))
+    assert payload == {"view_range": [[-1.5, 8.0], [2.0, 6.5]]}
+    # JSON-plain: survives the wire codec unchanged.
+    messages, remainder = decode_lines(encode_message(state_message(FACET_CAMERA, "o", 4, payload)))
+    assert remainder == b""
+    assert messages[0]["payload"] == payload
+
+
+def test_merged_camera_state_round_trips_incoming_range():
+    incoming = ((10.0, 42.0), (-3.0, 17.0))
+    merged = merged_camera_state(((0.0, 1.0), (0.0, 1.0)), camera_state_payload(incoming))
+    assert merged == incoming
+
+
+def test_merged_camera_state_keeps_current_when_range_missing():
+    current = ((0.0, 8.0), (0.0, 6.0))
+    # A payload without a usable view_range must not move the receiver, and a
+    # merge that dropped the incoming range would fail the round-trip test
+    # above -- the two together pin the merge in both directions (law #5).
+    assert merged_camera_state(current, {}) == current
+    assert merged_camera_state(current, {"view_range": None}) == current
+
+
+def test_merged_camera_state_rejects_non_finite_range():
+    current = ((0.0, 8.0), (0.0, 6.0))
+    merged = merged_camera_state(current, {"view_range": [[0.0, float("inf")], [0.0, 6.0]]})
+    assert merged == current
+
+
+def test_camera_state_payload_rejects_non_finite_input():
+    with pytest.raises(ValueError):
+        camera_state_payload(((0.0, float("nan")), (0.0, 6.0)))

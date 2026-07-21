@@ -10,6 +10,7 @@ them (feedback-loop prevention through origin/revision ids, per the roadmap
 from __future__ import annotations
 
 import json
+import math
 
 from arrayscope.core.axis_utils import clamp_index
 from arrayscope.core.view_state import ViewState
@@ -22,7 +23,8 @@ FACET_LEVELS = "levels"
 FACET_DIMS = "dims"
 FACET_OPERATIONS = "operations"
 FACET_ROIS = "rois"
-FACETS = (FACET_LEVELS, FACET_DIMS, FACET_OPERATIONS, FACET_ROIS)
+FACET_CAMERA = "camera"
+FACETS = (FACET_LEVELS, FACET_DIMS, FACET_OPERATIONS, FACET_ROIS, FACET_CAMERA)
 
 KIND_STATE = "state"
 KIND_REQUEST = "request"
@@ -285,3 +287,48 @@ def _fixed_optional_text_sequence(value, fallback, length: int) -> tuple[str | N
     while len(values) < length:
         values.append(fallback_values[len(values)] if len(values) < len(fallback_values) else None)
     return tuple(None if item is None else str(item) for item in values[:length])
+
+
+def camera_state_payload(view_range) -> dict[str, object]:
+    """Serialize a data-space view range for the camera facet.
+
+    The payload is the world/data-space rectangle ``((x0, x1), (y0, y1))`` the
+    window is currently showing, never pixel coordinates, so linked windows
+    with different viewport sizes converge on the same data region rather than
+    on the same pixel box. JSON-plain: a nested list of floats.
+    """
+
+    (x0, x1), (y0, y1) = _coerce_view_range(view_range)
+    return {"view_range": [[x0, x1], [y0, y1]]}
+
+
+def merged_camera_state(
+    current_view_range, payload
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Merge a peer's camera state into this window's data-space view range.
+
+    A full payload replaces the current range with the peer's rectangle. A
+    payload without a usable ``view_range`` (or one carrying non-finite values)
+    leaves the current range untouched, mirroring how the dims facet keeps its
+    own value for fields the sender did not carry.
+    """
+
+    if not isinstance(payload, dict):
+        payload = {}
+    incoming = payload.get("view_range")
+    if incoming is not None:
+        try:
+            return _coerce_view_range(incoming)
+        except (TypeError, ValueError, IndexError):
+            pass
+    return _coerce_view_range(current_view_range)
+
+
+def _coerce_view_range(view_range) -> tuple[tuple[float, float], tuple[float, float]]:
+    x0 = float(view_range[0][0])
+    x1 = float(view_range[0][1])
+    y0 = float(view_range[1][0])
+    y1 = float(view_range[1][1])
+    if not all(math.isfinite(value) for value in (x0, x1, y0, y1)):
+        raise ValueError("camera view range must be finite")
+    return ((x0, x1), (y0, y1))
