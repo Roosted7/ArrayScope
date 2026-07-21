@@ -1563,45 +1563,13 @@ class FramePipelineEffects:
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
             cpu_backend = not bool(capabilities.shader_windowing)
             atomic_successor_pending = _atomic_successor_handoff_pending(session)
-            if cpu_backend and atomic_successor_pending:
-                # PyQtGraph presents a compatible successor cumulatively in
-                # bounded ImageItem batches. Retaining the old atomic marker
-                # until COVERAGE closed let a later, viewport-narrow batch
-                # reuse the prepared transaction as a complete handoff: the
-                # backend then hid every non-batch item and lifecycle lost 28
-                # physical identities at idle. Atomic handoff remains a
-                # shader-backend contract; the CPU backend consumes this
-                # transition as bounded progressive presentation.
-                session.atomic_successor_pending = False
-                session._atomic_prepared_transaction = None
-                atomic_successor_pending = False
             refinement_admissible = bool(session.scheduling_policy.verdict.refinement_admissible)
-            cpu_atomic_successor = False
+            cpu_atomic_successor = bool(cpu_backend and atomic_successor_pending)
             shader_atomic_successor = bool(
                 capabilities.shader_windowing and atomic_successor_pending and refinement_admissible
             )
             renderer._last_montage_atomic_successor_pending_before = bool(atomic_successor_pending)
             renderer._last_montage_shader_atomic_successor = bool(shader_atomic_successor)
-            if cpu_atomic_successor:
-                lod_factor = int(session._selected_lod_factor())
-                for tile_number in tuple(getattr(session, "visible_tile_numbers", ()) or ()):
-                    rendered = session.rendered_tiles.get(int(tile_number))
-                    if rendered is not None:
-                        session._ensure_display_tile_payload(
-                            int(tile_number),
-                            rendered,
-                            tile_source_ids,
-                            lod_factor=lod_factor,
-                        )
-                if not _cpu_successor_payloads_ready(session):
-                    session.final_commit_pending = False
-                    session.flush_pending = False
-                    renderer._last_montage_tile_payload_build_ms = (
-                        perf_counter() - payload_start
-                    ) * 1000.0
-                    self._note_commit_bail("cpu-compatible-successor-wait", wakeup="replan")
-                    renderer.request_montage_replan(session)
-                    return
             requested_levels = session_requested_levels(session)
             if cpu_backend and requested_levels is None:
                 # Automatic widget synchronization is deliberately silent: it
@@ -1752,7 +1720,7 @@ class FramePipelineEffects:
                 session._atomic_prepared_transaction = None
                 fast_atomic = (
                     session.build_atomic_successor_presentation()
-                    if shader_atomic_successor
+                    if cpu_atomic_successor or shader_atomic_successor
                     else None
                 )
                 renderer._last_montage_atomic_fast_reject_reason = str(
@@ -1767,7 +1735,7 @@ class FramePipelineEffects:
                         cold_deadline_ms=cold_deadline_ms,
                         **limits,
                     )
-                    if shader_atomic_successor:
+                    if cpu_atomic_successor or shader_atomic_successor:
                         tile_delta = replace(tile_delta, atomic_handoff=True)
             tile_delta = _priority_ordered_tile_delta(session, tile_delta)
             active_payloads = tile_state.active_payloads(tile_delta)
@@ -1779,7 +1747,7 @@ class FramePipelineEffects:
                 dirty_tiles = tuple(
                     int(tile) for tile in dirty_tiles if int(tile) in upserted_tiles
                 )
-            if shader_atomic_successor and len(active_payloads) < len(
+            if (cpu_atomic_successor or shader_atomic_successor) and len(active_payloads) < len(
                 tuple(tile_delta.active_tiles)
             ):
                 session.final_commit_pending = False
@@ -1788,7 +1756,7 @@ class FramePipelineEffects:
                     perf_counter() - payload_start
                 ) * 1000.0
                 self._note_commit_bail(
-                    "shader-atomic-successor-wait",
+                    "atomic-successor-wait",
                     wakeup="replan",
                     active_payloads=len(active_payloads),
                     active_tiles=len(tuple(tile_delta.active_tiles)),
@@ -3946,22 +3914,6 @@ def _atomic_successor_handoff_pending(session) -> bool:
     """
 
     return bool(getattr(session, "atomic_successor_pending", False))
-
-
-def _cpu_successor_payloads_ready(session) -> bool:
-    required = {int(tile) for tile in session.required_tile_numbers()}
-    required.difference_update(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
-    plan_tiles = {
-        int(tile.montage_index): tile
-        for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-    }
-    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
-    return bool(required) and all(
-        int(tile_number) in payloads
-        and int(getattr(payloads[int(tile_number)], "source_index", -1))
-        == int(plan_tiles[int(tile_number)].source_index)
-        for tile_number in required
-    )
 
 
 def _cpu_transaction_payload_marker(payload) -> tuple:

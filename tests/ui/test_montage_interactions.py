@@ -1725,19 +1725,7 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
             assert getattr(current, "_atomic_prepared_transaction", None) is None
         assert observations
         visible_counts = [visible for _phase, visible, _compatible, _bad in observations]
-        assert all(visible > 0 for visible in visible_counts), observations
-        assert visible_counts == sorted(visible_counts), observations
-        assert visible_counts[-1] == 60, observations
-        assert len(visible_counts) > 1, observations
-        assert (
-            max(
-                current_count - previous_count
-                for previous_count, current_count in zip(
-                    (0, *visible_counts), visible_counts, strict=False
-                )
-            )
-            < 60
-        ), observations
+        assert all(visible == 60 for visible in visible_counts), observations
         assert all(
             incompatible == 0 for _phase, _visible, _compatible, incompatible in observations
         ), observations
