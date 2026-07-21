@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -718,3 +719,25 @@ def test_missing_coverage_close_oracle_fault_injection(tmp_path):
     assert not result["ok"]
     assert not result["coverage_pass_observed"]
     assert not result["level_converged_within_budget"]
+
+
+def test_journey_report_names_the_ring_it_actually_ran_in(monkeypatch):
+    """A headless-Weston verdict must not be filed as the developer's session.
+
+    Both are real compositors with real GL, so both satisfy ground rule #1 —
+    but a reader adjudicating a red row has to know which machine state
+    produced it.
+    """
+
+    from arrayscope.tools.journey_matrix import _journey_ring
+
+    offscreen = SimpleNamespace(offscreen_smoke=True)
+    real = SimpleNamespace(offscreen_smoke=False)
+
+    monkeypatch.delenv("ARRAYSCOPE_HEADLESS_DISPLAY", raising=False)
+    assert _journey_ring(offscreen) == "offscreen-smoke"
+    assert _journey_ring(real) == "real-wayland"
+
+    monkeypatch.setenv("ARRAYSCOPE_HEADLESS_DISPLAY", "arrayscope-headless-1")
+    assert _journey_ring(real) == "headless-weston"
+    assert _journey_ring(offscreen) == "offscreen-smoke"

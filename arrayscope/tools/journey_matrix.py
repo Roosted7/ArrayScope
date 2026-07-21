@@ -609,6 +609,23 @@ def _classify_reference_blocked_wgpu_rows(
     wgpu["ok"] = True
 
 
+def _journey_ring(args) -> str:
+    """Name the ring this report was produced in — never flatter it.
+
+    A headless-Weston run is a real compositor with the real GL renderer, so
+    it satisfies ground rule #1 where an offscreen run does not.  It is still
+    not the developer's own session, so it gets its own name rather than
+    borrowing ``real-wayland``: a reader must be able to tell which machine
+    state produced a verdict.
+    """
+
+    if getattr(args, "offscreen_smoke", False):
+        return "offscreen-smoke"
+    from arrayscope.tools.headless_display import is_headless_display
+
+    return "headless-weston" if is_headless_display() else "real-wayland"
+
+
 def _profile_driver_command(
     *,
     backend: str,
@@ -737,7 +754,7 @@ def run_matrix(args) -> int:
     report = evaluate_artifact_dir(artifact_dir)
     report["driver_failures"] = failures
     report["driver_unsupported"] = unsupported_runs
-    report["ring"] = "offscreen-smoke" if args.offscreen_smoke else "real-wayland"
+    report["ring"] = _journey_ring(args)
     report["wgpu_present_method"] = str(getattr(args, "wgpu_present_method", "bitmap") or "bitmap")
     report["ok"] = bool(
         report["ok"]
