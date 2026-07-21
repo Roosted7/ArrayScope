@@ -461,6 +461,15 @@ class TileLifecycle:
         self._identity_rejection_counts: dict[tuple[int, object, object], int] = {}
         self._level_order = 0
         self._level_revision = 0
+        #: Incrementally maintained mirror of the records' backend slot ids.
+        #: Rebuilding it per read made ``backend_presented_identities`` O(N)
+        #: inside per-tile callers such as
+        #: ``FrameSession._tile_presentation_matches_current_plan``, which is
+        #: itself called once per tile — quadratic on every viewport
+        #: retarget (measured: 133k rebuilds across 120 pan events on a
+        #: 400-tile montage). Every write goes through
+        #: ``_set_backend_source_id``; records are never removed.
+        self._backend_identities: dict[int, object] = {}
 
     #: After this many identical rejections the machine records the backend's
     #: identity as the presented truth and stops the re-emit loop: a backend
@@ -483,13 +492,23 @@ class TileLifecycle:
 
     @property
     def backend_presented_identities(self) -> dict[int, object]:
-        """Latest backend slot identity snapshot, owned by the lifecycle."""
+        """Latest backend slot identity snapshot, owned by the lifecycle.
 
-        return {
-            int(rec.tile_number): rec.backend_source_id
-            for rec in self._records.values()
-            if rec.backend_source_id is not None
-        }
+        The returned mapping is the live mirror, not a fresh copy — callers
+        that keep or mutate it must copy first (nearly all already wrap it in
+        ``dict(...)``).
+        """
+
+        return self._backend_identities
+
+    def _set_backend_source_id(self, rec: TileRecord, identity: object) -> None:
+        """Sole writer for a record's backend slot id, keeping the mirror true."""
+
+        rec.backend_source_id = identity
+        if identity is None:
+            self._backend_identities.pop(int(rec.tile_number), None)
+        else:
+            self._backend_identities[int(rec.tile_number)] = identity
 
     # -- record access -----------------------------------------------------
 
@@ -966,7 +985,7 @@ class TileLifecycle:
         self._unpark(rec)
         rec.presentation = Presentation.PRESENTED
         rec.presented_source_id = payload_identity
-        rec.backend_source_id = payload_identity
+        self._set_backend_source_id(rec, payload_identity)
         rec.presented_quality = normalized_quality
         rec.presented_level = normalized_level
         self._presented.add(rec.tile_number)
@@ -1385,9 +1404,9 @@ class TileLifecycle:
         normalized = {int(tile): identity for tile, identity in dict(identities).items()}
         for rec in self._records.values():
             if int(rec.tile_number) not in normalized:
-                rec.backend_source_id = None
+                self._set_backend_source_id(rec, None)
         for tile, identity in normalized.items():
-            self.record(tile).backend_source_id = identity
+            self._set_backend_source_id(self.record(tile), identity)
 
     def commit_acknowledged(
         self,
@@ -1496,7 +1515,7 @@ class TileLifecycle:
             rec.presented_quality = ""
             rec.presented_level = None
             rec.emitted_source_id = None
-            rec.backend_source_id = None
+            self._set_backend_source_id(rec, None)
         return frozenset(confirmed)
 
     def presentation_confirmed(self, tile_numbers: Iterable[int]) -> None:

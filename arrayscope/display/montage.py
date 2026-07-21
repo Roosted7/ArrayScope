@@ -6,6 +6,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 
 import numpy as np
 
@@ -125,6 +126,26 @@ class MontagePlan:
         y1 = max(int(tile.y0 + tile.height) for tile in tiles)
         return x0, y0, x1, y1
 
+    def _axis_span(self, lo: float, hi: float, *, axis: int) -> tuple[int, int]:
+        """Inclusive row/column range covering ``[lo, hi]`` on one axis.
+
+        The montage is a regular grid — ``x0 = col * (width + gap)`` — so the
+        covered range is arithmetic, not a search.  Solving the membership
+        test ``tile_x1 >= lo and tile.x0 <= hi`` for the integer index gives
+        ``ceil((lo - extent) / stride) <= index <= floor(hi / stride)``.
+        Returns an empty range (``lo > hi``) when nothing is covered.
+        """
+
+        extent = self.tile_shape[1] if axis else self.tile_shape[0]
+        limit = (self.columns if axis else self.rows) - 1
+        stride = extent + self.gap
+        if stride <= 0 or limit < 0:
+            return 0, limit
+        return (
+            max(0, math.ceil((lo - extent) / stride)),
+            min(limit, math.floor(hi / stride)),
+        )
+
     def tiles_intersecting(self, view_range, *, margin_tiles=1) -> tuple[MontageTile, ...]:
         if view_range is None:
             return self.tiles[: min(len(self.tiles), max(1, self.columns * 2))]
@@ -137,26 +158,74 @@ class MontagePlan:
         x1 += margin_x
         y0 -= margin_y
         y1 += margin_y
-        visible = []
-        for tile in self.tiles:
-            tile_x1 = tile.x0 + tile.width
-            tile_y1 = tile.y0 + tile.height
-            # View ranges and tile geometry are expressed on pixel-center
-            # coordinates. A tile landing exactly on the range boundary can
-            # therefore contribute the boundary pixel and is a render
-            # obligation, not speculative coverage.
-            if tile_x1 >= x0 and tile.x0 <= x1 and tile_y1 >= y0 and tile.y0 <= y1:
-                visible.append(tile)
+        # View ranges and tile geometry are expressed on pixel-center
+        # coordinates. A tile landing exactly on the range boundary can
+        # therefore contribute the boundary pixel and is a render obligation,
+        # not speculative coverage — hence the inclusive bounds above.
+        col0, col1 = self._axis_span(x0, x1, axis=1)
+        row0, row1 = self._axis_span(y0, y1, axis=0)
+        if col0 > col1 or row0 > row1:
+            return ()
+        count = len(self.tiles)
+        columns = self.columns
+        visible: list[MontageTile] = []
+        for row in range(row0, row1 + 1):
+            start = row * columns + col0
+            if start >= count:
+                # A partially filled last row ends the grid; later rows cannot
+                # contribute tiles that do not exist.
+                break
+            visible.extend(self.tiles[start : min(row * columns + col1 + 1, count)])
         return tuple(visible)
 
 
 def make_montage_plan(
     view_state, *, axis, indices, tile_shape, columns=None, viewport_shape=None, gap=1
 ):
+    """Build the montage layout, reusing the previous plan when unchanged.
+
+    A pan or zoom leaves the layout — indices, tile shape, columns, gap —
+    completely untouched, yet this is called on every viewport retarget.
+    Rebuilding allocated one ``MontageTile`` per source index each time, and
+    the fresh object also missed every downstream cache keyed on ``id(plan)``
+    (near-tile numbers, per-tile source ids, plan-tile maps), so the O(N)
+    cost landed several times over. The plan is a pure function of the
+    normalized arguments, so returning the identical object lets those caches
+    hit. ``MontagePlan`` is frozen; callers compare layouts by ``geometry``
+    value, never by identity.
+    """
+
     indices = tuple(int(index) for index in indices)
-    count = len(indices)
     tile_shape = (int(tile_shape[0]), int(tile_shape[1]))
     gap = max(0, int(gap))
+    axis = None if axis is None else int(axis)
+    columns = None if columns is None else int(columns)
+    viewport_shape = (
+        None if viewport_shape is None else tuple(int(value) for value in viewport_shape)
+    )
+    try:
+        return _make_montage_plan_cached(
+            view_state, axis, indices, tile_shape, columns, viewport_shape, gap
+        )
+    except TypeError:
+        # An unhashable stand-in view state (test doubles) still gets a plan;
+        # it just does not get the reuse.
+        return _build_montage_plan(
+            view_state, axis, indices, tile_shape, columns, viewport_shape, gap
+        )
+
+
+@lru_cache(maxsize=4)
+def _make_montage_plan_cached(
+    view_state, axis, indices, tile_shape, columns, viewport_shape, gap
+) -> MontagePlan:
+    return _build_montage_plan(view_state, axis, indices, tile_shape, columns, viewport_shape, gap)
+
+
+def _build_montage_plan(
+    view_state, axis, indices, tile_shape, columns, viewport_shape, gap
+) -> MontagePlan:
+    count = len(indices)
     if count == 0:
         return MontagePlan(None if axis is None else int(axis), tile_shape, (0, 1), 1, 0, gap, ())
     if columns is None:
@@ -356,22 +425,42 @@ def montage_rect_for_viewport(
 
 def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int, int]:
     full_height, full_width = plan.display_shape
-    selected = []
-    for tile in plan.tiles:
-        tile_rect = (
-            int(tile.x0),
-            int(tile.y0),
-            int(tile.x0 + tile.width),
-            int(tile.y0 + tile.height),
-        )
-        if _intersect_rect(tile_rect, rect) is not None:
-            selected.append(tile_rect)
-    if not selected:
+    tile_height, tile_width = plan.tile_shape
+    stride_x = tile_width + plan.gap
+    stride_y = tile_height + plan.gap
+    count = len(plan.tiles)
+    columns = plan.columns
+    if not count or stride_x <= 0 or stride_y <= 0:
         return rect
-    x0 = min(tile_rect[0] for tile_rect in selected)
-    y0 = min(tile_rect[1] for tile_rect in selected)
-    x1 = max(tile_rect[2] for tile_rect in selected)
-    y1 = max(tile_rect[3] for tile_rect in selected)
+    rx0, ry0, rx1, ry1 = (int(value) for value in rect)
+    if rx1 <= rx0 or ry1 <= ry0:
+        return rect
+    # ``_intersect_rect`` demands POSITIVE overlap area (``x1 <= x0`` is a
+    # miss), unlike ``tiles_intersecting``'s inclusive pixel-center bounds.
+    # Solving ``tile_x1 > rx0 and tile_x0 < rx1`` for the integer grid index
+    # gives the strict form below — do not unify these two conventions.
+    col0 = max(0, math.floor((rx0 - tile_width) / stride_x) + 1)
+    col1 = min(columns - 1, math.ceil(rx1 / stride_x) - 1)
+    row0 = max(0, math.floor((ry0 - tile_height) / stride_y) + 1)
+    row1 = min(plan.rows - 1, math.ceil(ry1 / stride_y) - 1)
+    if col0 > col1 or row0 > row1:
+        return rect
+    x0 = y0 = x1 = y1 = None
+    for row in range(row0, row1 + 1):
+        base = row * columns
+        if base + col0 >= count:
+            # Partially filled last row: no further row holds real tiles.
+            break
+        # The last row can stop short of ``col1``, which narrows the bound.
+        end_col = min(col1, count - 1 - base)
+        if end_col < col0:
+            continue
+        if x0 is None:
+            x0, y0 = col0 * stride_x, row * stride_y
+        x1 = max(x1 or 0, end_col * stride_x + tile_width)
+        y1 = row * stride_y + tile_height
+    if x0 is None:
+        return rect
     return _intersect_rect((x0, y0, x1, y1), (0, 0, full_width, full_height)) or rect
 
 

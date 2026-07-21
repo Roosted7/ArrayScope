@@ -1,3 +1,4 @@
+import dataclasses
 from collections import deque
 from types import SimpleNamespace
 
@@ -1404,12 +1405,17 @@ def test_retarget_viewport_requests_newly_required_unowned_tile():
 def test_retarget_viewport_adopts_replacement_plan_with_same_geometry():
     session = _session()
     previous = session.plan
-    replacement = make_montage_plan(
-        session.view_state,
-        axis=2,
-        indices=(0, 1, 2, 3),
-        tile_shape=(2, 2),
-        columns=4,
+    # ``make_montage_plan`` memoizes identical layouts and would hand back the
+    # very object already on the session. This test is about adopting a
+    # DIFFERENT object whose geometry is EQUAL, so force the distinct instance.
+    replacement = dataclasses.replace(
+        make_montage_plan(
+            session.view_state,
+            axis=2,
+            indices=(0, 1, 2, 3),
+            tile_shape=(2, 2),
+            columns=4,
+        )
     )
 
     session.retarget_viewport(

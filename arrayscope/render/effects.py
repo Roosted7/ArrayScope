@@ -509,7 +509,17 @@ def tile_lod_states(
     presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
     preview_cache = getattr(session, "lod_page_cache", None)
     plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-    for tile in plan_tiles:
+    # Walk the ALLOWED tiles, not the whole montage. Filtering inside the loop
+    # made a 12-tile viewport on a 4000-tile montage pay for all 4000. Tile
+    # ``montage_index`` is its position in ``plan_tiles``, and sorting keeps
+    # the original plan-order output.
+    if allowed is None:
+        scoped_tiles: tuple = plan_tiles
+    else:
+        scoped_tiles = tuple(
+            plan_tiles[number] for number in sorted(allowed) if 0 <= number < len(plan_tiles)
+        )
+    for tile in scoped_tiles:
         tile_number = int(tile.montage_index)
         if allowed is not None and tile_number not in allowed:
             continue
@@ -643,7 +653,10 @@ def _resident_levels_from_lifecycle(
     if record is None:
         return ()
     levels = []
-    for key, entry in dict(getattr(record, "levels", {}) or {}).items():
+    # Read the mapping in place: this runs once per tile per ladder snapshot,
+    # so copying it made the copy itself the dominant cost. The loop body only
+    # reads, so there is no mutate-during-iteration hazard.
+    for key, entry in (getattr(record, "levels", None) or {}).items():
         if getattr(entry, "phase", None) is not LevelPhase.RESIDENT:
             continue
         # Scope residency to the tile's CURRENT source.  After a scroll each
