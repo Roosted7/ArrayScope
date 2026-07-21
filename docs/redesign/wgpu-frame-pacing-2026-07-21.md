@@ -1,8 +1,11 @@
 # wgpu screen present — frame pacing has frequency but no phase (2026-07-21)
 
-**Status:** phase 1 landed (`c67a4730`) — the cadence is now observable and
-input latching is confirmed. Nothing is measured on real hardware yet, and
-the claim below stands unadjudicated until phase 2 reads it.
+**Status: the premise below is REFUTED as stated, and redirected.** Phase 1
+landed (`c67a4730`); phase 2 measured it on real hardware and found the
+pacer is not the binding constraint. **Do not implement phases 3–4.** The
+measurement and the verdict are in "Phase 2 result" near the end; everything
+between here and there is the original reasoning, preserved because the
+refutation only makes sense against it.
 
 **Scope:** the wgpu `present_method: screen` path only
 (`arrayscope/display/backends/wgpu/screen_canvas.py`). The bitmap path and
@@ -251,6 +254,77 @@ drive a real pointer gesture so chain B becomes measurable on wgpu. Any
 baseline captured before that lands is not comparable with one captured
 after — record which side of it every run sits on.
 
+## Phase 2 result (2026-07-21) — refuted, and redirected at the event loop
+
+Three paired runs, headless Weston, Intel iGPU, current tip
+(`6bb0a321`, i.e. after the vertex-shader pan fix), wgpu screen present,
+Mailbox. Artifacts: `tests/artifacts/frame-pacing-baseline-2026-07-21/`
+(gitignored; `baseline-run{1,2,3}.jsonl`).
+
+Medians of three, with the per-run spread where it matters:
+
+| metric | `montage_scroll_scalar` | `montage_zoompan_scalar` |
+|---|---:|---:|
+| interval p50 | **40.2 ms** (37–59) | **63.6 ms** (60–66) |
+| interval p95 | 330.6 ms | 320.5 ms |
+| **schedule slip p50** | **12.7 ms** (7.5–14.1) | **18.4 ms** (17.9–21.7) |
+| schedule slip p95 | 70.4 ms | 125.9 ms |
+| frame cost p50 | 1.8 ms | 1.3 ms |
+| acquire p50 | 0.13 ms | 0.13 ms |
+| phase R | 0.06 | 0.09 |
+| advance spread | 8.4 ms | 7.9 ms |
+| drift ms/s | 47.6 / 58.4 / **−0.9** | 6.3 / 26.1 / 5.4 |
+
+**1. The pacer is not what is limiting the frame rate.** The target period
+is 16.67 ms; the observed interval is 40–64 ms. Frames are not arriving
+late because they are mis-phased, they are arriving late because they are
+not being *run*. Schedule slip — the gap between the wakeup the pacer asked
+for and the one it got — is 12.7–18.4 ms at the median, i.e. **as large as
+the entire refresh period**, and 70–126 ms at p95.
+
+**2. So defect 1's fix cannot help.** An absolute-grid deadline removes
+accumulated drift, but you cannot land on a vblank boundary you are already
+18 ms late for; the new deadline would be missed by exactly the same
+margin. Phases 3–4 as written would have been effort spent on the smallest
+term.
+
+**3. The GPU side is genuinely cheap now.** Frame cost 1.3–1.8 ms p50 and
+acquire 0.13 ms confirm the vertex-shader pan fix (`62f851f5`) removed the
+per-tile CPU term, and that Mailbox acquire never blocks. The remaining
+cost is not in producing a frame.
+
+**4. Drift was never resolvable here, and the instrument said so.** Advance
+spread is 7.9–8.4 ms against a quarter-period threshold of 4.17 ms, so the
+drift column should be read as noise — and the runs prove it: scroll drift
+came out 47.6, 58.4, and **−0.9 ms/s** on identical code, a sign flip. Had
+phase 1 shipped drift without `phase_advance_spread_ms` beside it, run 1
+alone would have "confirmed" a 47 ms/s drift and sent phase 3 chasing it.
+This is the one design decision from phase 1 that paid for itself
+immediately.
+
+### What this redirects to
+
+The dominant term is **event-loop occupancy**: the Qt event loop is not
+free to run the paced draw when it is due. That is the same root as the
+standing `gui_callbacks_below_50ms` / `event_loop_heartbeat` reds this
+workload already carries, which means frame pacing was a symptom-level
+reading of a scheduling problem — precisely the mistake the graveyard rows
+below warn about. The next question is *what occupies the loop between
+draws*, answered with a callback-attribution profile rather than a pacer.
+
+### Limits of this measurement
+
+- One workload family (montage scalar scroll/zoompan) on one machine.
+  These stages mix cold fill with interaction, so some of the slip is fill
+  work rather than steady-state interaction cost. A settled-montage,
+  pure-interaction case has NOT been measured and could look different.
+- Mailbox only. Under Mailbox there is no vblank clock at all, so `phase R`
+  here measures our own emission times against an assumed period — it
+  cannot distinguish "unlocked" from "unlockable". This is a limit of the
+  isolation constraint, not a defect in it.
+- Captured before the pan sweep was changed to drive a real pointer
+  gesture; not comparable with runs taken after that lands.
+
 ## Why this is not the pacing the graveyard rejected
 
 The graveyard buries several pacing changes with "Never — fix labels/owners,
@@ -267,13 +341,18 @@ simply false and the work stops.
 | # | Step | Exit gate | Status |
 |---|---|---|---|
 | 1 | Frame-cadence instrumentation (interval, schedule slip, frame cost, phase) through `wgpuPresentationDiagnostics()`; confirm input latching | Metrics visible on a real-Wayland run; no measurable frame-path cost | **DONE** `c67a4730`; latching confirmed by test |
-| 2 | Baseline capture on the current tip | Recorded drift + advance spread under `tests/artifacts/`; **the claim is confirmed or the dossier is closed as refuted** | next |
-| 3 | Absolute-schedule pacer, no-lock fallback, stall guard | Unit-tested on synthetic sequences: lock, no-lock, drift rejection, occlusion clamp. **Does not land without the no-lock fallback.** Existing pacing tests stay green | |
-| 4 | Paired re-measurement, ≥3 runs/cell | Frame-interval p95 and phase drift improve with no event-loop or acquire regression; **journey matrix green — this does not land without it** | |
+| 2 | Baseline capture on the current tip | Recorded drift + advance spread under `tests/artifacts/`; **the claim is confirmed or the dossier is closed as refuted** | **DONE — REFUTED.** See "Phase 2 result" |
+| 3 | Absolute-schedule pacer, no-lock fallback, stall guard | — | **CANCELLED** by phase 2: slip ≫ period, so the fix cannot reach the defect |
+| 4 | Paired re-measurement, ≥3 runs/cell | — | **CANCELLED** with phase 3 |
 
-The Fifo/clock-source question is deliberately *not* a phase here; it is a
-separate dossier gated on what phase 2 finds (see "The Fifo question is now
-downstream").
+The Fifo/clock-source question was gated on phase 2 finding residual
+misalignment worth chasing. It did not, so that dossier is **not opened**:
+there is no point acquiring a better clock for a draw that cannot be
+scheduled on time.
+
+Phase 1 stands on its own regardless — the instrumentation is what produced
+this verdict, and it stays as the readout for whatever addresses the event
+loop.
 
 ## Open questions
 
