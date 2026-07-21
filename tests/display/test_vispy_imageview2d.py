@@ -601,7 +601,7 @@ def test_vispy_histogram_drag_flushes_preview_without_debounce(qt_app):
         view.close()
 
 
-def test_vispy_tile_redraw_coalesces_canvas_updates_but_keeps_draw_wait(qt_app, monkeypatch):
+def test_vispy_tile_redraw_never_latches_away_a_later_update(qt_app, monkeypatch):
     from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     view = VisPyImageView2D()
@@ -619,10 +619,10 @@ def test_vispy_tile_redraw_coalesces_canvas_updates_but_keeps_draw_wait(qt_app, 
         diagnostics = view.vispyPresentationDiagnostics()
         assert diagnostics["tile_presentation_request_count"] == 2
         assert diagnostics["tile_presentation_draw_pending"] is True
-        assert diagnostics["canvas_update_request_count"] == 1
+        assert diagnostics["canvas_update_request_count"] == 2
         for _ in range(5):
             qt_app.processEvents()
-        assert update_calls == [((), {})]
+        assert update_calls == [((), {}), ((), {})]
 
         view._on_vispy_draw()
         diagnostics = view.vispyPresentationDiagnostics()
@@ -1029,7 +1029,10 @@ def test_vispy_tiled_overlay_clear_waits_for_presenting_draw(qt_app, monkeypatch
 
         assert view.montageTileOverlayCount() == 0
         assert view._vispy_pending_overlay_clear_request_count is None
-        assert update_calls == []
+        # The deferred clear is a later legitimate visual request. It must
+        # reach Qt even while an earlier canvas draw remains pending; native
+        # update coalescing is safe, ArrayScope-side suppression is not.
+        assert update_calls == [((), {})]
         assert all(
             not bool(getattr(visual, "visible", False)) for visual in view._vispy_overlay_visuals
         )

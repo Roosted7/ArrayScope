@@ -1657,8 +1657,12 @@ class VisPyImageView2D(ImageViewShell):
         canvas = getattr(self, "_vispy_canvas", None)
         if canvas is None:
             return
-        if bool(getattr(self, "_vispy_canvas_update_pending", False)):
-            return
+        # Do not use our draw-pending observation as an update-request latch.
+        # Qt/VisPy may coalesce native update calls, but a request made while
+        # painting can also be dropped.  Suppressing every later request until
+        # a draw then creates an absorbing state: the draw is the only event
+        # that can clear the flag, while the flag prevents the request that
+        # would produce that draw.
         self._vispy_canvas_update_pending = True
         self._vispy_canvas_update_request_count = (
             int(getattr(self, "_vispy_canvas_update_request_count", 0) or 0) + 1
