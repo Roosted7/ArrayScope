@@ -1158,14 +1158,7 @@ class FrameSession:
         active_numbers = tuple(int(tile.montage_index) for tile in active)
         near_numbers = tuple(int(tile.montage_index) for tile in near)
         previous_visible_numbers = tuple(int(tile.montage_index) for tile in self.visible_tiles)
-        has_presented_payloads = bool(
-            getattr(self.tile_presentation_state, "payloads", None)
-            or self.lifecycle.presented_tiles
-        )
-        presentation_changed = bool(
-            layout_changed
-            or (not has_presented_payloads and active_numbers != previous_visible_numbers)
-        )
+        presentation_changed = bool(layout_changed or active_numbers != previous_visible_numbers)
         self.visible_tiles = active
         self.visible_tile_numbers = frozenset(active_numbers)
         self.sync_lifecycle_scope()

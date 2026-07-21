@@ -1277,6 +1277,44 @@ def test_retarget_viewport_range_change_with_same_tiles_is_camera_only():
     assert delta.viewport_revision == first_viewport_revision + 1
     assert not session.presentation_geometry_changed
 
+    additions, changed = session.retarget_viewport(
+        view_range=((0.0, 8.0), (0.0, 2.0)),
+        viewport_shape=(2, 8),
+        coverage_margin_tiles=0,
+        near_margin_tiles=0,
+    )
+
+    assert additions == ()
+    assert changed, "a resident active-set expansion still needs a visibility commit"
+    expanded_state, expanded_delta = session.build_tile_presentation(source_ids)
+    assert set(expanded_delta.active_tiles) > set(first_active)
+    session.acknowledge_tile_presentation(
+        expanded_delta,
+        TileCommitReport(
+            presented_tiles=expanded_state.active_payloads(expanded_delta),
+            committed_upserts=frozenset(expanded_delta.upserts),
+        ),
+    )
+    session.mark_presented(expanded_state.active_payloads(expanded_delta))
+
+    session.retarget_viewport(
+        view_range=((0.1, 3.9), (0.0, 2.0)),
+        viewport_shape=(2, 4),
+        coverage_margin_tiles=0,
+        near_margin_tiles=0,
+    )
+    session.build_tile_presentation(source_ids)
+    _additions, changed = session.retarget_viewport(
+        view_range=((0.0, 8.0), (0.0, 2.0)),
+        viewport_shape=(2, 8),
+        coverage_margin_tiles=0,
+        near_margin_tiles=0,
+    )
+    _state, resident_expand = session.build_tile_presentation(source_ids)
+
+    assert changed
+    assert resident_expand.upserts == {}
+
 
 def test_temporary_materialization_gap_does_not_remove_committed_payloads():
     session = _session()
