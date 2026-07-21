@@ -52,13 +52,21 @@ this file says *what, in what order, and when it counts as done*.
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **Progressive-load publication correctness (2026-07-20 integration
-  blocker).** The new asynchronous `.npy`/`.cfl`/Philips `.REC` flow must keep
-  viewer-before-completion, but may not expose the raw destination while its
-  reader thread mutates it. Owner: the progressive array source at the
-  existing budgeted `read_region` seam; no renderer-specific locks or cache
-  exceptions. Exit gate: deterministic atomic-read test, open-flow suite,
-  full combined suite, and real-Wayland visual opens showing zero unread
-  regions and correct final pixels/levels on WGPU then PyQtGraph then VisPy.
+  blocker) — CORE LANDED `447cbe42`, offscreen gate closed; residual is the
+  real-Wayland visual only.** The asynchronous `.npy`/`.cfl`/Philips `.REC`
+  flow keeps viewer-before-completion without exposing the raw destination:
+  `ProgressiveArraySource` (arrayscope/io/progressive.py) owns the backing
+  array, mutates it only inside `write_transaction`, and `read_region` copies
+  under the same lock — a reader observes either the old zero-fill or a
+  completed write, never an in-place mutation. Offscreen gate proven and
+  green in `tests/io/test_progressive.py`:
+  `test_progressive_source_read_cannot_observe_an_inflight_write` (deterministic
+  concurrent-write atomicity) and `test_npy_progressive_publishes_detached_region_reads`,
+  plus the open-flow/combined offscreen suites. **Residual (still open):** the
+  real-Wayland visual opens showing zero unread regions and correct final
+  pixels/levels on WGPU then PyQtGraph then VisPy — the ring that can actually
+  see a torn/unread tile (testing law #1). No renderer-specific locks or cache
+  exceptions were introduced; owner stays the budgeted `read_region` seam.
 - **Demand-freshness unit-gate fixture** (live path FIXED 2026-07-19 `6fd0c262`,
   [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md); full history in the
   [Done ledger](queue-done.md)): the unit gate's fixture carries no committed display
