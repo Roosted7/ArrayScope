@@ -3569,6 +3569,7 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
     assert required
     assert required == set(session.frame_plan.active_region_ids)
     assert len(required) < len(plan.tiles), "the fixture needs a non-required coverage shell"
+    assert set(session.scheduling_policy.verdict.required_tiles) == required
     assert len(win.resolved_batches) == len(required)
     resolved = [tile for batch in win.resolved_batches for tile in batch]
     assert set(resolved) == required

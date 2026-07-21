@@ -820,9 +820,7 @@ class FrameSession:
             else tuple(self.visible_tile_numbers)
         )
         return tuple(
-            sorted(
-                {int(tile) for tile in required} - {int(tile) for tile in self.skipped_tiles}
-            )
+            sorted({int(tile) for tile in required} - {int(tile) for tile in self.skipped_tiles})
         )
 
     def required_target_unsettled_tiles(self) -> tuple[int, ...]:
@@ -1039,13 +1037,15 @@ class FrameSession:
 
     def sync_lifecycle_scope(self) -> None:
         targets = self._sync_lifecycle_targets()
+        required = {int(tile) for tile in self.required_tile_numbers()}
         scheduling_scope_signature = tuple(
             (tile, target.source_index, target.semantic_source_id)
             for tile, target in sorted(targets.items())
+            if int(tile) in required
         )
         self.scheduling_policy.retarget(
             scheduling_scope_signature,
-            tuple(sorted(targets)),
+            tuple(sorted(required.intersection(targets))),
             progressive=bool(self.shader_display or self._resident_lod_active()),
         )
 
