@@ -1504,18 +1504,16 @@ class _PanChainProbe:
     def __enter__(self) -> _PanChainProbe:
         from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
         from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+        from arrayscope.window.frame_controller import FrameControllerMixin
 
         self._wrap(WgpuImageView2D, "_wgpu_camera_tiles", "camera_tiles")
         self._wrap(WgpuPlaneExecutor, "_set_tiles", "set_tiles")
         # Chain B lives on the controller mixin.  It is wrapped even when the
         # active transport cannot reach it, so a zero reads as a measured zero
-        # rather than as missing instrumentation.
-        try:
-            from arrayscope.window.frame_controller import FrameControllerMixin
-
-            self._wrap(FrameControllerMixin, "_try_update_montage_viewport_only", "viewport_only")
-        except Exception:
-            pass
+        # rather than as missing instrumentation.  The import is unconditional
+        # like the two above: this module is always present, and swallowing an
+        # internal ImportError would hide real breakage (import-health guard).
+        self._wrap(FrameControllerMixin, "_try_update_montage_viewport_only", "viewport_only")
         return self
 
     def __exit__(self, *_exc) -> None:
