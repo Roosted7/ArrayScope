@@ -1561,13 +1561,12 @@ class FramePipelineEffects:
                 getattr(renderer, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
             ) + int(bool(fast_drain))
             capabilities = image_view_backend_capabilities(renderer.win.img_view)
-            cpu_backend = not bool(capabilities.shader_windowing)
             atomic_successor_pending = _atomic_successor_handoff_pending(session)
-            refinement_admissible = bool(session.scheduling_policy.verdict.refinement_admissible)
-            cpu_atomic_successor = bool(cpu_backend and atomic_successor_pending)
-            shader_atomic_successor = bool(
-                capabilities.shader_windowing and atomic_successor_pending and refinement_admissible
+            cpu_atomic_successor, shader_atomic_successor = _atomic_successor_commit_modes(
+                capabilities,
+                pending=atomic_successor_pending,
             )
+            cpu_backend = not bool(capabilities.shader_windowing)
             renderer._last_montage_atomic_successor_pending_before = bool(atomic_successor_pending)
             renderer._last_montage_shader_atomic_successor = bool(shader_atomic_successor)
             requested_levels = session_requested_levels(session)
@@ -3925,6 +3924,19 @@ def _atomic_successor_handoff_pending(session) -> bool:
         session._atomic_prepared_transaction = None
         return False
     return True
+
+
+def _atomic_successor_commit_modes(capabilities, *, pending: bool) -> tuple[bool, bool]:
+    """Classify one semantic handoff without weakening it by render phase.
+
+    A compatible predecessor is the complete visible frame. Shader windowing
+    can refine that frame in place, but it cannot make a mixed-source successor
+    semantically valid. Both renderer classes therefore wait for the same
+    complete successor scope once the transition owner arms it.
+    """
+
+    shader = bool(getattr(capabilities, "shader_windowing", False))
+    return bool(pending and not shader), bool(pending and shader)
 
 
 def _cpu_transaction_payload_marker(payload) -> tuple:

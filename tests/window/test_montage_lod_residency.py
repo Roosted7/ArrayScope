@@ -5071,6 +5071,18 @@ def test_atomic_handoff_has_one_owner_after_transition_arms_it():
     assert not _atomic_successor_handoff_pending(session)
 
 
+def test_atomic_successor_commit_is_not_gated_by_refinement_phase():
+    """Every backend retains the old frame until a full successor is ready."""
+
+    from arrayscope.display.backend_contract import VISPY_CAPABILITIES, WGPU_CAPABILITIES
+    from arrayscope.window.frame_effects import _atomic_successor_commit_modes
+
+    assert _atomic_successor_commit_modes(PYQTGRAPH_CAPABILITIES, pending=True) == (True, False)
+    assert _atomic_successor_commit_modes(VISPY_CAPABILITIES, pending=True) == (False, True)
+    assert _atomic_successor_commit_modes(WGPU_CAPABILITIES, pending=True) == (False, True)
+    assert _atomic_successor_commit_modes(WGPU_CAPABILITIES, pending=False) == (False, False)
+
+
 def test_atomic_handoff_revalidates_required_subset_of_coverage():
     """A camera change cannot carry a handoff outside presentation coverage."""
 
@@ -5155,6 +5167,45 @@ def test_index_window_retarget_arms_atomic_successor_pending():
     assert tuple(
         successor_delta.upserts[index].source_index for index in successor_delta.upserts
     ) == (1, 2, 3, 0)
+
+
+def test_index_window_retarget_retains_atomic_floor_while_lod_target_reopens():
+    """A new LOD target must not erase the complete physical predecessor.
+
+    Rapid source scrolling can supersede a session while its exact target is
+    still refining.  The already acknowledged fallback pixels remain a full
+    frame and must keep the next same-topology successor atomic.
+    """
+
+    session = _session(count=4)
+    session.semantic_key = ("semantic", "stable")
+    source_ids = {index: session.tile_semantic_source_id(index) for index in range(4)}
+    _state, predecessor = session.build_tile_presentation(source_ids)
+    _acknowledge(session, predecessor)
+    session.mark_presented(tuple(predecessor.upserts))
+    session.tile_source_ids = dict(source_ids)
+
+    for tile in range(4):
+        # Target refinement reopens the lifecycle row before replacement
+        # pixels arrive; the acknowledged tile-presentation state remains the
+        # physical predecessor drawn by the backend.
+        session.lifecycle.presentation_discarded(tile)
+
+    assert not session.required_first_pixels_presented()
+    assert session.required_presentation_coverage_complete()
+
+    successor = _shifted_plan(count=4, offset=40)
+    _retarget(
+        session,
+        successor,
+        new_source_ids={
+            index: session.tile_semantic_source_id(tile.source_index)
+            for index, tile in enumerate(successor.tiles)
+        },
+        semantic_key=session.semantic_key,
+    )
+
+    assert session.atomic_successor_pending
 
 
 def test_index_window_retarget_atomically_hands_off_only_required_center():

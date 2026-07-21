@@ -834,6 +834,35 @@ class FrameSession:
 
         return self.lifecycle.first_pixels_presented(self.required_tile_numbers())
 
+    def required_presentation_coverage_complete(self) -> bool:
+        """Whether every required slot still owns acknowledged screen pixels.
+
+        Lifecycle first-pixel state follows the current quality/LOD target and
+        can therefore reopen while an already complete fallback frame remains
+        physically presented. Successor retention needs that physical floor,
+        not target-convergence state.
+        """
+
+        required = tuple(int(tile) for tile in self.required_tile_numbers())
+        state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        backend_identities = dict(self.lifecycle.backend_presented_identities)
+        plan_sources = {
+            int(tile.montage_index): int(tile.source_index)
+            for tile in tuple(getattr(self.plan, "tiles", ()) or ())
+        }
+        for tile_number in required:
+            payload = state_payloads.get(tile_number)
+            if (
+                payload is None
+                or int(getattr(payload, "source_index", -1)) != plan_sources.get(tile_number)
+            ):
+                return False
+            if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(
+                payload
+            ):
+                return False
+        return bool(required)
+
     def atomic_successor_required_scope(self) -> tuple[int, ...]:
         """Required on-screen slots eligible for one atomic handoff.
 
@@ -1232,7 +1261,7 @@ class FrameSession:
         old_display_payloads = dict(self.display_tile_payloads)
         old_state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
         had_complete_predecessor = bool(
-            self.atomic_successor_pending or self.required_first_pixels_presented()
+            self.atomic_successor_pending or self.required_presentation_coverage_complete()
         )
         old_indices_by_source = {
             source_id: int(index)
