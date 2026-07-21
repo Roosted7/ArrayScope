@@ -3973,9 +3973,14 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
         getattr(getattr(session, "tile_presentation_state", None), "revision", -2)
     ):
         return False
-    planned = {int(tile) for tile in getattr(session, "visible_tile_numbers", ()) or ()}
-    planned.difference_update(int(tile) for tile in getattr(session, "skipped_tiles", ()) or ())
-    if {int(tile) for tile in getattr(delta, "active_tiles", ()) or ()} != planned:
+    required_scope = getattr(session, "atomic_successor_required_scope", None)
+    required = (
+        {int(tile) for tile in required_scope()}
+        if callable(required_scope)
+        else {int(tile) for tile in getattr(session, "visible_tile_numbers", ()) or ()}
+        - {int(tile) for tile in getattr(session, "skipped_tiles", ()) or ()}
+    )
+    if {int(tile) for tile in getattr(delta, "active_tiles", ()) or ()} != required:
         return False
     markers = dict(prepared.get("payload_markers", {}) or {})
     payloads = dict(getattr(session, "display_tile_payloads", {}) or {})

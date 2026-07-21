@@ -450,6 +450,35 @@ def test_prepared_atomic_transaction_expires_when_level_generation_changes():
     assert not _prepared_atomic_transaction_current(session, prepared)
 
 
+def test_prepared_atomic_transaction_uses_required_not_coverage_scope():
+    """An offscreen retained shell cannot invalidate an on-screen handoff."""
+
+    from arrayscope.window.frame_effects import (
+        _prepared_atomic_transaction_current,
+        _shader_successor_transaction_payload_marker,
+    )
+
+    payload = SimpleNamespace(source_id=("source", 0), source_index=0)
+    session = SimpleNamespace(
+        session_id=7,
+        level_generation=SimpleNamespace(revision=3),
+        tile_presentation_state=SimpleNamespace(revision=11),
+        visible_tile_numbers=(0, 1),
+        skipped_tiles=(),
+        atomic_successor_required_scope=lambda: (0,),
+        display_tile_payloads={0: payload},
+    )
+    prepared = {
+        "session_id": 7,
+        "level_revision": 3,
+        "marker_kind": "shader-successor",
+        "tile_delta": SimpleNamespace(base_revision=11, active_tiles=(0,)),
+        "payload_markers": {0: _shader_successor_transaction_payload_marker(payload)},
+    }
+
+    assert _prepared_atomic_transaction_current(session, prepared)
+
+
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     import arrayscope.render.level_stats as level_stats
     from arrayscope.display.model.montage_levels import MontageLevelTracker
