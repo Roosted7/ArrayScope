@@ -320,3 +320,64 @@ def test_pacing_override_restores_the_display_rate(qt_app, screen_view):
     assert canvas.max_draws_per_second == 5.0
     canvas.max_draws_per_second = None
     assert canvas.max_draws_per_second == display_rate
+
+
+def test_resize_coalesces_into_one_paced_reconfigure(qt_app, screen_view):
+    """Dogfood bug 2026-07-21: resizing the window was a sluggish slideshow.
+
+    Every resize event ran a FULL synchronous render+present, deliberately
+    bypassing the draw pace -- and ``set_physical_size`` marks the swapchain
+    for reconfiguration, so an interactive drag rebuilt the image chain and
+    repainted once per event.  Measured over a 4 s synthetic drag: 249 resize
+    events produced 736 draws (184 fps against a 60 Hz display) and 2380 ms
+    of the 4008 ms was spent *inside* the resize events.
+
+    Resize events must instead fold into the next paced frame.  The property
+    under test is the absence of the synchronous draw, so the oracle counts
+    draws at the draw callback rather than trusting wall-clock.
+    """
+
+    view = screen_view
+    _commit_ramp(view)
+    assert wait_for_qt_condition(
+        qt_app,
+        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1,
+        timeout_s=10.0,
+    ), "swapchain never warmed"
+
+    canvas = view._wgpu_canvas
+    # A slow pace makes the coalescing window unambiguous: 20 resize events
+    # inside one 100 ms frame must not become 20 frames.
+    canvas.max_draws_per_second = 10.0
+    try:
+        before = int(view._wgpu_draw_count)
+        for _ in range(20):
+            canvas._on_surface_resized()
+
+        # THE regression oracle: not one of those events drew synchronously.
+        assert int(view._wgpu_draw_count) == before, (
+            "a resize event drew synchronously, bypassing the pace: "
+            f"{int(view._wgpu_draw_count) - before} draws for 20 resize events"
+        )
+
+        # They must still all be honoured -- by exactly one coalesced frame.
+        assert wait_for_qt_condition(
+            qt_app,
+            lambda: int(view._wgpu_draw_count) > before,
+            timeout_s=10.0,
+        ), "the coalesced resize never drew"
+        assert int(view._wgpu_draw_count) == before + 1, (
+            f"20 resize events collapsed into {int(view._wgpu_draw_count) - before} "
+            "frames, expected 1"
+        )
+    finally:
+        canvas.max_draws_per_second = None
+
+    # Stale-buffer spill guard: a subsurface is NOT clipped by its parent, so
+    # the swapchain must never be left configured larger than the widget.
+    # (The synchronous draw existed to enforce this; coalescing must keep it.)
+    context = canvas._context
+    assert (context._wgpu_config.width, context._wgpu_config.height) == tuple(
+        canvas.get_physical_size()
+    )
+    assert view.wgpuPresentationDiagnostics()["wgpu_last_draw_error"] == ""

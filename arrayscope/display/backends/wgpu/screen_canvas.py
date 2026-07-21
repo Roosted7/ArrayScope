@@ -111,8 +111,8 @@ class _ScreenSurfaceWindow(QtGui.QWindow):
         # old-size buffer against Qt's already-resized window, which reads
         # as flicker between the old and new sizes (and spill, since
         # subsurfaces are not clipped to the parent).  This event fires when
-        # the embedded window's real geometry changed, so reconfigure and
-        # present at the new size NOW, bypassing the draw-rate cap.
+        # the embedded window's real geometry changed, so arm a swapchain
+        # reconfigure and let the canvas present it on the next paced frame.
         super().resizeEvent(event)
         self._canvas._on_surface_resized()
 
@@ -202,6 +202,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._present_mode: str = ""
         self._present_modes_available: tuple[str, ...] = ()
         self._max_draws_per_second_override: float | None = None
+        self._resize_pending = False
 
     # ---- draw scheduling (rendercanvas request_draw seam) -------------------
 
@@ -220,7 +221,9 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._draw_scheduled = False
         callback = self._draw_callback
         if callback is None or not self.isVisible():
+            # Leave a pending resize armed: a later show/expose draws it.
             return
+        self._apply_pending_resize()
         self._last_draw_started = perf_counter()
         callback()
 
@@ -233,9 +236,58 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._container.setGeometry(self.rect())
 
     def _on_surface_resized(self) -> None:
+        """Fold this resize into the next paced frame.
+
+        A compositor delivers resize events during an interactive drag far
+        faster than the display refreshes — and Qt emits several per drag
+        step.  Reconfiguring the swapchain and presenting synchronously on
+        each one measured 249 resize events -> 736 draws (184 fps against a
+        60 Hz pace) with 2380 ms of a 4008 ms drag spent *inside* the resize
+        events themselves: the drag could not keep up with the pointer, which
+        is the sluggishness.
+
+        Coalescing onto the normal paced path fixes that (428 events -> 186
+        draws, 4.0 ms p50 inside the event), and
+        ``test_resize_coalesces_into_one_paced_reconfigure`` pins it.
+
+        KNOWN TRADE, not yet adjudicated on pixels: the synchronous draw was
+        added to stop stale-buffer spill — a subsurface is NOT clipped by its
+        parent, so while shrinking, an old larger buffer hangs outside the
+        window until a correctly-sized one is presented.  Coalescing widens
+        that window from ~0 to a measured 16.8 ms mean / 29.0 ms max, i.e.
+        one to two compositor frames.  Whether that is visible has NOT been
+        settled with a bitmap diff on a windowed, decorated compositor.  A
+        conservative variant that keeps the shrink direction synchronous was
+        measured too — spill 6.3 ms mean / 17.1 ms max, but 551 draws instead
+        of 186, so it gives back most of the responsiveness win.
+        """
+
+        self._resize_pending = True
+        if self._last_draw_started == float("-inf"):
+            # Nothing has ever been drawn: this is the show/expose-time resize
+            # that establishes the surface size, not an interactive drag.
+            # Configuring the swapchain and taking the first (cold) acquire
+            # here keeps that one-off ~15 ms cost off the first *content*
+            # frame — deferring it measured 16-26 ms on the commit that
+            # follows, against 0.9 ms warm.  There is no pacing concern
+            # before the first frame, and nothing to coalesce with.
+            self._invoke_draw()
+            return
+        self.request_draw()
+
+    def _apply_pending_resize(self) -> None:
+        """Reconfigure the swapchain for the latest size, once, at draw time.
+
+        ``set_physical_size`` marks the chain for reconfiguration, so calling
+        it per event rebuilt the image chain repeatedly mid-drag.  Every
+        resize event since the last frame collapses into this one call.
+        """
+
+        if not self._resize_pending:
+            return
+        self._resize_pending = False
         if self._context is not None:
             self._context.set_physical_size(*self.get_physical_size())
-        self._invoke_draw()
 
     # ---- physical geometry ---------------------------------------------------
 
