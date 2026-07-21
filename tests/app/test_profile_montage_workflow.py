@@ -547,13 +547,13 @@ def test_visual_timeline_preserves_physical_draw_geometry():
     }
 
 
-def test_managed_weston_capture_must_return_exact_window(qt_app, tmp_path, monkeypatch):
+def test_headless_capture_must_return_exact_window(qt_app, tmp_path, monkeypatch):
     import numpy as np
     from pyqtgraph.Qt import QtCore, QtGui
 
     import arrayscope.tools.profile_montage_workflow as workflow
 
-    monkeypatch.setenv("ARRAYSCOPE_MANAGED_WESTON", "1")
+    monkeypatch.setenv("ARRAYSCOPE_HEADLESS_DISPLAY", "arrayscope-headless-test")
 
     def capture_managed(path):
         image = QtGui.QImage(40, 30, QtGui.QImage.Format.Format_RGBA8888)
@@ -561,7 +561,7 @@ def test_managed_weston_capture_must_return_exact_window(qt_app, tmp_path, monke
         assert image.save(str(path))
         return path
 
-    monkeypatch.setattr(workflow, "capture_managed_weston_screenshot", capture_managed)
+    monkeypatch.setattr(workflow, "capture_output", capture_managed)
     geometry = SimpleNamespace(
         size=lambda: QtCore.QSize(40, 30),
         width=lambda: 40,
@@ -582,7 +582,7 @@ def test_managed_weston_capture_must_return_exact_window(qt_app, tmp_path, monke
     win.img_view.grabPresentedFramebuffer = lambda: frame
     monkeypatch.setattr(
         workflow,
-        "capture_managed_weston_screenshot",
+        "capture_output",
         lambda *_args, **_kwargs: pytest.fail("timeline capture called managed Weston"),
     )
     timeline_path = tmp_path / "timeline.png"

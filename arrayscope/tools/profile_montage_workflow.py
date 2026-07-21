@@ -26,14 +26,14 @@ import numpy as np
 
 from arrayscope.core.trace import emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.tools.headless_display import (
+    capture_output,
+    is_headless_display,
+    run_in_headless_display,
+)
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
-)
-from arrayscope.tools.managed_weston import (
-    capture_managed_weston_screenshot,
-    is_managed_weston,
-    run_in_managed_weston,
 )
 
 DEFAULT_DATA_PATH = Path("data/_WIPDelRec-tT2_20260223150234_14.nii")
@@ -5117,10 +5117,10 @@ def _save_view_screenshot(win, path: Path, *, full_window: bool = True) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     win._arrayscope_last_screenshot_capture_error = ""
     present_method = getattr(win.img_view, "wgpuPresentMethod", lambda: "")()
-    if str(present_method) == "screen" and full_window and is_managed_weston():
+    if str(present_method) == "screen" and full_window and is_headless_display():
         desktop_path = path.with_name(f".{path.stem}-weston{path.suffix}")
         try:
-            capture_managed_weston_screenshot(desktop_path)
+            capture_output(desktop_path)
             from pyqtgraph.Qt import QtGui
 
             desktop = QtGui.QImage(str(desktop_path))
@@ -5128,9 +5128,13 @@ def _save_view_screenshot(win, path: Path, *, full_window: bool = True) -> bool:
             if desktop.isNull():
                 raise RuntimeError("managed Weston returned no image")
             if desktop.size() not in accepted_sizes:
+                # The exact-window compositor is sized to the session's window,
+                # with no panel and no decoration, so the sole output IS the
+                # window.  A mismatch means that identity broke — never save a
+                # desktop-sized image as window evidence.
                 expected = ", ".join(f"{size.width()}x{size.height()}" for size in accepted_sizes)
                 raise RuntimeError(
-                    "managed Weston must return the sole kiosk window; "
+                    "managed Weston must return exactly the profiled window; "
                     f"got {desktop.width()}x{desktop.height()}, expected one of {expected}"
                 )
             win._arrayscope_last_screenshot_capture_kind = "managed-weston-window"
@@ -7738,6 +7742,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _managed_weston_output_size(session_fixture: str | Path | None) -> tuple[int, int]:
+    """Size the compositor output to the window the session will restore.
+
+    Screen evidence is exact-window evidence, and a Wayland client cannot ask
+    where it sits on screen.  So we read the session FIRST, size the sole
+    output to the window it asks for, and run with no panel and no window
+    decoration — then the window fills the output and one capture is the
+    window.  This replaces the kiosk shell, which achieved the same identity
+    by force-fullscreening and in doing so changed viewport aspect and
+    montage layout.
+    """
+
     default = (1400, 940)
     if session_fixture is None or not str(session_fixture).strip():
         return default
@@ -7754,7 +7769,7 @@ def _managed_weston_requested(args) -> bool:
         args.backend == "wgpu"
         and str(args.wgpu_present_method) in {"screen", "auto"}
         and args.screenshot_dir
-        and not is_managed_weston()
+        and not is_headless_display()
     )
 
 
@@ -7779,15 +7794,17 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         return run_profile_suite(source_argv, args.profile_suite)
     if _managed_weston_requested(args):
         source_argv = tuple(argv if argv is not None else sys.argv[1:])
-        return run_in_managed_weston(
+        return run_in_headless_display(
             (
                 sys.executable,
                 "-m",
                 "arrayscope.tools.profile_montage_workflow",
                 *source_argv,
             ),
-            artifact_dir=args.screenshot_dir,
+            log_dir=args.screenshot_dir,
             output_size=_managed_weston_output_size(args.session_fixture),
+            # Screen evidence owns its compositor: never share a batch's.
+            exact_window=True,
         )
 
     jsonl = None if args.jsonl is None else Path(args.jsonl)
