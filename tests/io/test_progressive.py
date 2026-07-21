@@ -87,6 +87,33 @@ def test_progressive_source_read_cannot_observe_an_inflight_write():
     np.testing.assert_array_equal(observed[0], np.ones(4, dtype=np.int32))
 
 
+def test_progressive_source_never_silently_drops_a_noncontiguous_write():
+    """A non-contiguous destination must be visible-or-refused, never a silent no-op.
+
+    ``write_flat``/``write_bytes`` mutate through ``ravel(order="K")``, which
+    returns a *copy* for a non-contiguous array -- so on unfixed code the write
+    lands in a throwaway buffer and ``read_region`` still returns all zeros
+    (silent data loss). The contract is: either the source refuses the backing
+    array at construction, or the write is genuinely visible afterwards. This
+    test fails on the pre-fix code (the ValueError is not raised and the write
+    is lost) and passes once the gap is closed.
+    """
+    from arrayscope.io.progressive import ProgressiveArraySource
+
+    backing = np.zeros((4, 4))[:, ::2]  # non-contiguous view (a strided slice)
+    assert not backing.flags.forc
+
+    try:
+        source = ProgressiveArraySource(backing)
+    except ValueError:
+        return  # refused loudly at construction -- acceptable, no silent loss
+
+    # If construction was allowed, the write MUST be visible (not a silent no-op).
+    source.write_flat(0, np.arange(8))
+    result = source.read_region((slice(None), slice(None)))
+    assert np.any(result), "non-contiguous write was silently discarded"
+
+
 def test_npy_progressive_rejects_truncated_file(tmp_path):
     arr = np.zeros((64, 64), dtype=np.float64)
     path = tmp_path / "data.npy"

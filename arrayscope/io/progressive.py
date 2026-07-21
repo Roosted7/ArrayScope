@@ -67,6 +67,22 @@ class ProgressiveArraySource(NdArraySource):
     """
 
     def __init__(self, array, *, label="progressive load"):
+        flags = getattr(array, "flags", None)
+        if flags is not None and not flags.forc:
+            # ``write_flat``/``write_bytes`` mutate the backing store through a
+            # flat view obtained with ``ravel(order="K")``. That returns a view
+            # only for a C- or F-contiguous array; for a non-contiguous backing
+            # store it silently returns a *copy*, so the writes would land in a
+            # throwaway buffer and be lost with no error. Reject such arrays at
+            # construction rather than lose data later. Every real loader
+            # (.npy/.cfl/.rec) allocates a contiguous destination, so this is a
+            # loud contract, not a restriction on any current caller.
+            raise ValueError(
+                "ProgressiveArraySource requires a C- or F-contiguous backing "
+                "array so flat in-place writes are not silently discarded; got a "
+                f"non-contiguous array with shape {tuple(array.shape)} and "
+                f"strides {array.strides}."
+            )
         super().__init__(array, label=label)
         self._lock = threading.RLock()
 
