@@ -73,11 +73,24 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
         return None
     image_axes = tuple(int(axis) for axis in image_axes)
     operations = tuple(getattr(document, "enabled_operations", ()) or ())
-    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
+    base_data = getattr(document, "base_data", None)
+    dtype = getattr(base_data, "dtype", None)
+    # pipeline_windowable_display_axes walks the operation chain forward from
+    # its INPUT shape, so it must receive the pre-pipeline base-data shape, not
+    # ``view_state.shape`` (which is the post-operation display shape). They are
+    # equal for shape-preserving chains, but a reduction/reshape on a non-display
+    # axis (e.g. Mean over the slider axis) makes view_state.shape lower-rank —
+    # and asking a Mean(axis=2) step for output_shape of a 2D shape raised
+    # "axis 2 out of bounds for 2D data". With the base shape the chain instead
+    # disqualifies every axis on the first shape change, which is the correct
+    # windowability answer.
+    base_shape = getattr(base_data, "shape", None)
+    if base_shape is None:
+        base_shape = view_state.shape
     windowable = set(
         pipeline_windowable_display_axes(
             operations,
-            tuple(int(size) for size in view_state.shape),
+            tuple(int(size) for size in base_shape),
             dtype,
             display_axes=image_axes,
         )

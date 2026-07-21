@@ -11,7 +11,7 @@ from arrayscope.display.source_anchoring import (
     contiguous_range_start,
     source_anchoring_for_view,
 )
-from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate
+from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate, Mean
 from tests.display.vispy_test_utils import FakeDisplayImage
 
 TARGET = FrameTarget(
@@ -82,6 +82,23 @@ class TestAnchoringDecision:
         anchoring = source_anchoring_for_view(document, state)
         assert anchoring is not None
         assert anchoring.any_anchored
+
+    def test_reduction_on_a_non_display_axis_does_not_raise(self):
+        # Regression (ring: default offscreen; pins the render-path crash where
+        # source_anchoring_for_view fed the POST-operation 2D display shape to
+        # the windowability walk, so Mean(axis=2).output_shape raised
+        # "axis 2 out of bounds for 2D data"). The document keeps its 3D base
+        # data; the display view is the 2D result of the reduction.
+        document = ArrayDocument(
+            np.arange(8 * 6 * 4, dtype=np.float32).reshape(8, 6, 4),
+            operations=(Mean(axis=2),),
+        )
+        display_state = ViewState.from_shape((8, 6)).with_image_axes(0, 1)
+        anchoring = source_anchoring_for_view(document, display_state)
+        # A reduction disqualifies windowability, so no axis anchors — but it
+        # must return a valid anchoring, never crash the render.
+        assert anchoring is not None
+        assert anchoring.anchored_starts == (None, None)
 
     def test_non_contiguous_window_does_not_anchor_its_axis(self):
         document = ArrayDocument(np.zeros((512, 512), dtype=np.float32))
