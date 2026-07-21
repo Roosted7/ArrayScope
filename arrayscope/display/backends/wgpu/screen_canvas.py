@@ -46,6 +46,7 @@ from time import perf_counter
 
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.core.trace import emit_trace
+from arrayscope.display.backends.wgpu.frame_timing import FrameTimingRecorder
 
 prefer_pyside6()
 
@@ -260,6 +261,9 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._cached_draws_per_second: float | None = None
         self._watched_screen = None
         self._resize_pending = False
+        # Pacing lives here, so the timings do too: relating a slipped wakeup
+        # to a late frame needs both halves under one owner.
+        self.frame_timing = FrameTimingRecorder()
         # A move between monitors changes which display the pace must match.
         with contextlib.suppress(Exception):
             self._surface_window.screenChanged.connect(self._invalidate_pace_cache)
@@ -277,8 +281,12 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         # the pinned-at-30 era and could only ever have masked a zero the
         # property cannot return.
         interval = 1000.0 / float(self.max_draws_per_second)
-        elapsed_ms = (perf_counter() - self._last_draw_started) * 1000.0
+        now = perf_counter()
+        elapsed_ms = (now - self._last_draw_started) * 1000.0
         delay_ms = 0 if elapsed_ms >= interval else round(interval - elapsed_ms)
+        # Record the wakeup this pacer INTENDED, so the gap against the one
+        # it got is attributable to the platform rather than to us.
+        self.frame_timing.note_scheduled(now + delay_ms / 1000.0)
         QtCore.QTimer.singleShot(delay_ms, self, self._invoke_draw)
 
     def _invoke_draw(self) -> None:
@@ -289,6 +297,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
             return
         self._apply_pending_resize()
         self._last_draw_started = perf_counter()
+        self.frame_timing.note_draw_started(self._last_draw_started)
         callback()
 
     def showEvent(self, event) -> None:
@@ -417,6 +426,9 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
             raise
         self._context = context
         self._configured_format = fmt
+        # Timings taken before the chain existed (or under a different
+        # present mode) do not describe this swapchain; start clean.
+        self.frame_timing.reset()
         emit_trace(
             "wgpu_screen_swapchain_configured",
             format=fmt,
@@ -467,6 +479,17 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     @property
     def present_modes_available(self) -> tuple[str, ...]:
         return self._present_modes_available
+
+    def frame_timing_snapshot(self) -> dict[str, object]:
+        """Frame cadence against the period this canvas is pacing to.
+
+        The period comes from the same property the pacer uses, so the phase
+        statistics are always read against the rate actually being targeted
+        — including a benchmark's pinned override, where measuring phase
+        against the physical display instead would be meaningless.
+        """
+
+        return self.frame_timing.snapshot(period_ms=1000.0 / float(self.max_draws_per_second))
 
     def teardown(self) -> None:
         context, self._context = self._context, None

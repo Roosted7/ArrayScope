@@ -686,7 +686,13 @@ class WgpuImageView2D(ImageViewShell):
             self._wgpu_overlay_geometry_dirty = False
         present_start = perf_counter()
         context.present()
-        present_ms = (perf_counter() - present_start) * 1000.0
+        presented_at = perf_counter()
+        present_ms = (presented_at - present_start) * 1000.0
+        # The canvas owns pacing, so it owns the cadence record: this is the
+        # real wgpuSurfacePresent edge the draw-ack contract already keys on.
+        canvas.frame_timing.note_presented(
+            presented_at, acquire_ms=acquire_ms, present_ms=present_ms
+        )
         self._wgpu_screen_presents = int(self._wgpu_screen_presents) + 1
         self._wgpu_screen_acquire_ms_last = acquire_ms
         self._wgpu_screen_acquire_ms_max = max(self._wgpu_screen_acquire_ms_max, acquire_ms)
@@ -2065,7 +2071,7 @@ class WgpuImageView2D(ImageViewShell):
         drawn_tiles = tuple(self.tileTruthPhysicalRows())
         committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
-        return {
+        diagnostics: dict[str, object] = {
             "draw_count": int(getattr(self, "_wgpu_draw_count", 0) or 0),
             "tile_presentation_request_count": int(
                 getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0
@@ -2111,6 +2117,13 @@ class WgpuImageView2D(ImageViewShell):
                 getattr(self, "_wgpu_screen_present_ms_max", 0.0) or 0.0
             ),
         }
+        # Frame cadence: distributions and phase, not just last+max.  Only the
+        # screen path paces its own frames, so only it can answer this; the
+        # bitmap canvas has no such record and contributes nothing.
+        snapshot = getattr(self._wgpu_canvas, "frame_timing_snapshot", None)
+        if callable(snapshot):
+            diagnostics.update({f"wgpu_screen_{key}": value for key, value in snapshot().items()})
+        return diagnostics
 
     def presentation_diagnostics(self) -> dict[str, object]:
         diagnostics = super().presentation_diagnostics()

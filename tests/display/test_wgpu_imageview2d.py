@@ -1720,3 +1720,90 @@ def test_executor_rebuild_resets_every_atlas_upload_tracker(qt_app):
         )
     finally:
         view.close()
+
+
+def test_camera_is_latched_when_the_paced_draw_runs_not_when_it_is_requested(qt_app, monkeypatch):
+    """Input arriving inside the pacer's deferral window still makes the frame.
+
+    The frame-pacing design in docs/redesign/wgpu-frame-pacing-2026-07-21.md
+    only pays off if moving the draw later in the refresh cycle also moves
+    the input sample later.  That is true iff the camera is read when the
+    draw RUNS rather than when it is REQUESTED — otherwise deferring a draw
+    to just before vblank would present state that is now a frame stale, and
+    the pacer would trade smoothness for latency instead of winning both.
+
+    This asserts the property directly rather than by reading the call
+    graph: hold the pacer's deferral window open, move the camera inside it,
+    and check which range reached the executor.
+    """
+
+    from arrayscope.gpu.command_protocol import SetOverlayCamera
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.zeros((64, 64), dtype=np.float32)
+        image[16:48, 16:48] = 1.0
+        geometry = _montage_geometry(image.shape, 1, 1, loaded=1)
+        _commit(
+            view,
+            geometry,
+            {0: _payload(0, image, source_id="latch-oracle")},
+            levels=(0.0, 1.0),
+        )
+
+        # Stand in for the paced timer: capture the draw instead of running
+        # it, so the window between "redraw requested" and "draw runs" can be
+        # held open for as long as the test needs.
+        deferred = []
+        monkeypatch.setattr(
+            view._wgpu_canvas,
+            "request_draw",
+            lambda *args, **kwargs: deferred.append(view._on_wgpu_draw),
+        )
+        submitted = []
+        real_submit = view._submit_wgpu
+        monkeypatch.setattr(
+            view,
+            "_submit_wgpu",
+            lambda commands, **kwargs: (
+                submitted.append(commands),
+                real_submit(commands, **kwargs),
+            )[1],
+        )
+
+        at_request = (0.0, 64.0)
+        at_draw = (12.0, 76.0)
+
+        # A camera move schedules a frame through sigRangeChanged...
+        view._wgpu_canvas_update_pending = False
+        view.getView().setRange(xRange=at_request, yRange=(0, 64), padding=0)
+        assert deferred, "the camera move never reached the canvas pacer"
+
+        # ...and the user keeps panning while that frame is still only
+        # scheduled.  This second move is deliberately COALESCED into the
+        # already-pending draw rather than scheduling its own, which is the
+        # case that matters: if the coalesced move were lost, a fast pan
+        # would present a trail of stale cameras.
+        view.getView().setRange(xRange=at_draw, yRange=(0, 64), padding=0)
+        assert len(deferred) == 1, "the second move should coalesce, not queue"
+        submitted.clear()
+        deferred.pop()()
+
+        cameras = [
+            command
+            for commands in submitted
+            for command in commands
+            if isinstance(command, SetOverlayCamera)
+        ]
+        assert cameras, "the paced draw submitted no camera"
+        x0, _y0, x1, _y1 = (float(value) for value in cameras[-1].world_rect)
+
+        assert (x0, x1) == pytest.approx(at_draw, abs=0.51), (
+            f"the frame presented the camera as it was when the draw was "
+            f"REQUESTED ({at_request}), not as it was when the draw RAN "
+            f"({at_draw}): got ({x0}, {x1}). Latching at request time would "
+            f"make every paced frame one input late, and deferring the draw "
+            f"toward vblank would then add latency instead of removing it."
+        )
+    finally:
+        view.close()
