@@ -13,12 +13,25 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-JOURNEYS = ("cold_fill", "zoom_in", "zoom_out", "scroll_shuffle", "index_scroll")
-BACKENDS = ("vispy", "pyqtgraph", "wgpu")
+JOURNEYS = (
+    "cold_fill",
+    "zoom_in",
+    "zoom_out",
+    "scroll_shuffle",
+    "index_scroll",
+    "deep_zoom_far_scroll",
+)
+BACKENDS = ("wgpu", "pyqtgraph", "vispy")
 DRIVER_RUNS = {
     "cold": ("raw_full_tiled_montage", ("cold_fill",)),
-    "scroll": ("montage_scroll_scalar", ("scroll_shuffle", "index_scroll")),
-    "zoom": ("montage_zoompan_scalar", ("zoom_in", "zoom_out")),
+    "scroll": (
+        "montage_scroll_scalar",
+        ("scroll_shuffle", "index_scroll"),
+    ),
+    "zoom": (
+        "montage_zoompan_scalar",
+        ("zoom_in", "zoom_out", "deep_zoom_far_scroll"),
+    ),
 }
 FIRST_NEW_PIXELS_BUDGET_MS = 2_000.0
 DEMAND_FRESHNESS_BUDGET_MS = 5_000.0
@@ -44,6 +57,9 @@ MIN_COMMITS = {
     ("wgpu", "zoom_out"): 0,
     ("wgpu", "scroll_shuffle"): 2,
     ("wgpu", "index_scroll"): 1,
+    ("vispy", "deep_zoom_far_scroll"): 1,
+    ("pyqtgraph", "deep_zoom_far_scroll"): 1,
+    ("wgpu", "deep_zoom_far_scroll"): 1,
 }
 
 _WGPU_UNSUPPORTED_SIGNATURES = (
