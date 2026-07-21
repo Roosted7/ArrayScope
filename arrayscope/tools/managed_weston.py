@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -109,7 +111,14 @@ def _run_child(command: tuple[str, ...], status_path: Path) -> int:
         returncode = int(subprocess.run(command, check=False).returncode)
         return returncode
     finally:
-        status_path.write_text(f"{returncode}\n", encoding="utf-8")
+        try:
+            status_path.write_text(f"{returncode}\n", encoding="utf-8")
+        finally:
+            # Weston deliberately survives its kiosk client. This wrapper is
+            # launched directly by Weston, so release that owning compositor
+            # after every child outcome, including an abort or crash.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(os.getppid(), signal.SIGTERM)
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:

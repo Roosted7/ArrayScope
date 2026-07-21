@@ -48,6 +48,28 @@ def test_managed_weston_runs_child_once_and_cleans_private_socket(tmp_path, monk
     assert not tuple(runtime.glob("arrayscope-profile-*"))
 
 
+def test_managed_weston_child_exit_terminates_owning_compositor(tmp_path, monkeypatch):
+    """Weston kiosk remains alive after its client crashes unless told to exit."""
+
+    from arrayscope.tools.managed_weston import _run_child
+
+    status = tmp_path / "child-status"
+    signals = []
+    monkeypatch.setattr(
+        "arrayscope.tools.managed_weston.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(("child",), 134),
+    )
+    monkeypatch.setattr("arrayscope.tools.managed_weston.os.getppid", lambda: 4321)
+    monkeypatch.setattr(
+        "arrayscope.tools.managed_weston.os.kill",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+    )
+
+    assert _run_child(("child",), status) == 134
+    assert status.read_text(encoding="utf-8") == "134\n"
+    assert signals, "the child wrapper must release Weston after any child exit"
+
+
 def test_managed_weston_capture_moves_one_screenshot_and_cleans_temp(tmp_path, monkeypatch):
     from PIL import Image
 
