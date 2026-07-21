@@ -209,6 +209,133 @@ class ScaledArraySource:
             self._close()
 
 
+# Elementwise ops a :class:`CompositeArraySource` can apply. Each entry is
+# ``(ufunc, symbol)``; the symbol only feeds the derived label. Extending the
+# set (add / multiply / divide) is a one-line addition here, but we only expose
+# what is tested — v1 ships subtraction (A - B, the "difference" compare).
+_COMPOSITE_OPS = {
+    "subtract": (np.subtract, "-"),
+}
+
+
+def _as_array_source(obj) -> ArraySource:
+    """Coerce a plain ndarray to :class:`NdArraySource`; pass sources through."""
+
+    if hasattr(obj, "read_region"):
+        return obj
+    return NdArraySource(np.asarray(obj))
+
+
+class CompositeArraySource:
+    """Combine two :class:`ArraySource`s elementwise into a derived source.
+
+    The composite *is* an :class:`ArraySource`: it exposes the same
+    ``shape``/``dtype``/``read_region`` surface, so a difference (A - B) flows
+    through the unchanged unary pipeline and tile engine as if it were any other
+    source. It never materializes either input — :meth:`read_region` reads the
+    *same* ``index_spec`` from both sub-sources (delegating to their
+    ``read_region`` so a progressive/lazy input still streams), applies the op,
+    and returns only that region. The ``cancellation_token`` is forwarded to
+    both sub-reads. It is stateless beyond its two inputs and the op.
+
+    v1 requires **equal input shapes** (rejecting anything else at
+    construction). That matches the A - B difference use case and keeps the
+    read path a plain per-region op with no broadcasting; broadcast support can
+    be layered on later without changing callers.
+    """
+
+    def __init__(
+        self,
+        a,
+        b,
+        *,
+        op: str = "subtract",
+        label: str | None = None,
+        chunk_shape: tuple[int, ...] | None = None,
+    ) -> None:
+        if op not in _COMPOSITE_OPS:
+            raise ValueError(
+                f"unsupported composite op {op!r}; known ops: {sorted(_COMPOSITE_OPS)}"
+            )
+        self._a = _as_array_source(a)
+        self._b = _as_array_source(b)
+        self._op_name = op
+        self._op, symbol = _COMPOSITE_OPS[op]
+
+        shape_a = tuple(int(size) for size in self._a.shape)
+        shape_b = tuple(int(size) for size in self._b.shape)
+        if shape_a != shape_b:
+            raise ValueError(
+                f"composite source requires equal input shapes, got {shape_a} and {shape_b}"
+            )
+        self._shape = shape_a
+
+        # Derive the result dtype from a zero-size dry run so promotion (and
+        # complex-stays-complex) exactly matches what read_region produces.
+        self._dtype = self._op(
+            np.empty(0, dtype=self._a.dtype), np.empty(0, dtype=self._b.dtype)
+        ).dtype
+
+        self._chunk_shape = (
+            None if chunk_shape is None else tuple(int(size) for size in chunk_shape)
+        )
+        self._label = (
+            str(label) if label is not None else f"{self._a.label} {symbol} {self._b.label}"
+        )
+        self._closed = False
+
+    @property
+    def a(self) -> ArraySource:
+        return self._a
+
+    @property
+    def b(self) -> ArraySource:
+        return self._b
+
+    @property
+    def op(self) -> str:
+        return self._op_name
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+    @property
+    def ndim(self) -> int:
+        return len(self._shape)
+
+    @property
+    def nbytes(self) -> int:
+        return int(np.prod(self._shape, dtype=np.int64)) * self._dtype.itemsize
+
+    @property
+    def chunk_shape(self) -> tuple[int, ...] | None:
+        return self._chunk_shape
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    def read_region(
+        self, index_spec: tuple, *, cancellation_token: object | None = None
+    ) -> np.ndarray:
+        spec = tuple(index_spec)
+        region_a = self._a.read_region(spec, cancellation_token=cancellation_token)
+        region_b = self._b.read_region(spec, cancellation_token=cancellation_token)
+        return self._op(region_a, region_b, dtype=self._dtype)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._a.close()
+        self._b.close()
+
+
 class LazySourceArray:
     """Document base-data proxy backed by an :class:`ArraySource`.
 
@@ -335,6 +462,7 @@ __all__ = [
     "DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES",
     "DEFAULT_SOURCE_READ_BUDGET_BYTES",
     "ArraySource",
+    "CompositeArraySource",
     "LazySourceArray",
     "NdArraySource",
     "ScaledArraySource",
