@@ -128,13 +128,49 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     rendercanvas's ``ondemand`` update mode.
     """
 
-    #: Draw-rate cap, mirroring rendercanvas's ``max_fps=30`` default that the
-    #: bitmap canvas runs under.  Without a cap, a 60 fps camera glide requests
-    #: a present per input event, exhausts the mailbox swapchain, and every
-    #: subsequent acquire blocks the GUI thread — measured as consistently
-    #: ~1.5-2x worse zoompan event-loop gaps than bitmap (2026-07-19 paired
-    #: controls) until this pacing landed.
-    max_draws_per_second = 30.0
+    #: Fallback pace when the platform will not say what the display does.
+    fallback_draws_per_second = 60.0
+
+    @property
+    def max_draws_per_second(self) -> float:
+        """Draws per second to aim for: whatever THIS display refreshes at.
+
+        Any fixed number is wrong somewhere — 60 stutters a 144 Hz panel and
+        wastes half its frames on a 30 Hz one — so the pace is read from the
+        screen the surface currently sits on, live, which also means dragging
+        the window to a different monitor re-paces it with no extra wiring.
+
+        This path shipped pinned at 30, which made a pan visibly step.  The
+        rationale for that cap (unpaced presents exhaust the mailbox chain
+        until acquire blocks) re-measured backwards: with the embedded
+        QWindow recipe and the view's draw coalescing, 30 gave an 11.23 ms
+        worst acquire against 0.91 ms at 60, so the cap was causing the
+        stall it existed to prevent.
+
+        Pacing above the refresh rate is pure waste under Mailbox — the
+        compositor drops the extra frames — so the display rate IS the
+        optimum, not a compromise.
+        """
+
+        override = self._max_draws_per_second_override
+        if override is not None:
+            return override
+        screen = None
+        window = self._surface_window
+        if window is not None:
+            screen = window.screen()
+        if screen is None:
+            app = QtWidgets.QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        rate = float(screen.refreshRate()) if screen is not None else 0.0
+        # Qt reports 0 when the platform does not know; never divide by it.
+        return rate if rate >= 1.0 else self.fallback_draws_per_second
+
+    @max_draws_per_second.setter
+    def max_draws_per_second(self, value) -> None:
+        """Pin the pace (benchmarks and tests); ``None`` restores the display."""
+
+        self._max_draws_per_second_override = None if value is None else float(value)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -165,6 +201,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._configured_format: str | None = None
         self._present_mode: str = ""
         self._present_modes_available: tuple[str, ...] = ()
+        self._max_draws_per_second_override: float | None = None
 
     # ---- draw scheduling (rendercanvas request_draw seam) -------------------
 

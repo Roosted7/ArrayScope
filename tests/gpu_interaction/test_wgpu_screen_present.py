@@ -270,3 +270,53 @@ def test_axis_flip_successors_keep_the_single_tile_presented(qt_app):
         win.close()
         for _ in range(20):
             app.processEvents()
+
+
+def test_draw_pacing_follows_the_display_refresh_rate(qt_app, screen_view):
+    """Pace must come from the display, not from a constant.
+
+    Any fixed cap is wrong on some machine: this path shipped pinned at 30,
+    which made a pan visibly step on a 60 Hz panel, and 60 would equally
+    stutter a 144 Hz one and waste half the frames on a 30 Hz one.  The
+    rationale for the original cap re-measured backwards — at 30 the mailbox
+    acquire blocked ~11 ms against ~0.9 ms at 60 — so the cap was causing the
+    stall it existed to prevent.
+    """
+
+    view = screen_view
+    canvas = view._wgpu_canvas
+    screen = canvas._surface_window.screen() or qt_app.primaryScreen()
+    expected = float(screen.refreshRate())
+
+    if expected >= 1.0:
+        assert canvas.max_draws_per_second == pytest.approx(expected, rel=0.01), (
+            "screen present is not paced at this display's refresh rate"
+        )
+    else:  # platform declined to report a rate
+        assert canvas.max_draws_per_second == canvas.fallback_draws_per_second
+
+    # Never zero or negative: request_draw divides by this.
+    assert canvas.max_draws_per_second >= 1.0
+
+    _commit_ramp(view)
+    assert wait_for_qt_condition(
+        qt_app,
+        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1,
+        timeout_s=10.0,
+    )
+    # Mailbox acquire must stay off the blocking path at this pacing; that is
+    # the guard rail the fixed cap used to stand in for.
+    diagnostics = view.wgpuPresentationDiagnostics()
+    if diagnostics["wgpu_screen_present_mode"] == "mailbox":
+        assert diagnostics["wgpu_screen_acquire_ms_max"] < 10.0, diagnostics
+
+
+def test_pacing_override_restores_the_display_rate(qt_app, screen_view):
+    """Benchmarks pin the pace; clearing the pin must return to the display."""
+
+    canvas = screen_view._wgpu_canvas
+    display_rate = canvas.max_draws_per_second
+    canvas.max_draws_per_second = 5.0
+    assert canvas.max_draws_per_second == 5.0
+    canvas.max_draws_per_second = None
+    assert canvas.max_draws_per_second == display_rate
