@@ -102,7 +102,11 @@ def montage_window(qt_app):
     use_vispy_backend(extra_settings={"first_run_hints_dismissed": True})
     app = win = None
     try:
-        app, win = _create_window(synthetic_montage_data(), title="gpu-harness")
+        app, win = _create_window(
+            synthetic_montage_data(),
+            title="gpu-harness",
+            application_name="ArrayScopeTests",
+        )
         assert image_view_backend_capabilities(win.img_view).name == "vispy"
         harness = Harness(app, win)
         harness.pump(0.3)
@@ -268,7 +272,9 @@ class Harness:
 
     def settlement_diagnostics(self) -> dict[str, object]:
         session = self.session
-        pending_draw = getattr(self.win.img_view, "presentationDrawPending", None)
+        image_view = self.win.img_view
+        pending_draw = getattr(image_view, "presentationDrawPending", None)
+        presentation_diagnostics = getattr(image_view, "presentation_diagnostics", None)
         return {
             "visible_complete": session.visible_plan_complete(),
             "required_unsettled": session.required_target_unsettled_tiles(),
@@ -277,6 +283,9 @@ class Harness:
             "upserts": tuple(session.pending_payload_upserts),
             "level_snapshot": session.level_presentation_snapshot(),
             "draw_pending": bool(pending_draw()) if callable(pending_draw) else False,
+            "presentation": (
+                dict(presentation_diagnostics()) if callable(presentation_diagnostics) else {}
+            ),
             "lifecycle": session.lifecycle.counters(),
         }
 

@@ -40,7 +40,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
     trace_path = tmp_path / f"v1-boundary-{backend}.trace.jsonl"
     app = pg.mkQApp()
     app.setOrganizationName("ArrayScope")
-    app.setApplicationName("ArrayScope")
+    app.setApplicationName("ArrayScopeTests")
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend")
     previous_hints = settings.value("first_run_hints_dismissed")
@@ -53,7 +53,11 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
     count = 37
     frames = np.repeat(np.arange(count, dtype=np.float32), TILE * TILE)
     data = frames.reshape(count, TILE, TILE).transpose(1, 2, 0).copy()
-    app, win = _create_window(data, title=f"gpu-harness-v1-{backend}")
+    app, win = _create_window(
+        data,
+        title=f"gpu-harness-v1-{backend}",
+        application_name="ArrayScopeTests",
+    )
     try:
         if image_view_backend_capabilities(win.img_view).name != backend:
             pytest.skip(f"{backend} backend unavailable in this Qt environment")
@@ -167,7 +171,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     trace_path = tmp_path / f"v2-center-out-{backend}.trace.jsonl"
     app = pg.mkQApp()
     app.setOrganizationName("ArrayScope")
-    app.setApplicationName("ArrayScope")
+    app.setApplicationName("ArrayScopeTests")
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend")
     previous_hints = settings.value("first_run_hints_dismissed")
@@ -180,7 +184,11 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     count = 72
     frames = np.repeat(np.arange(count, dtype=np.float32), TILE * TILE)
     data = frames.reshape(count, TILE, TILE).transpose(1, 2, 0).copy()
-    app, win = _create_window(data, title=f"gpu-harness-v2-{backend}")
+    app, win = _create_window(
+        data,
+        title=f"gpu-harness-v2-{backend}",
+        application_name="ArrayScopeTests",
+    )
     expected_order = ()
     try:
         if image_view_backend_capabilities(win.img_view).name != backend:
@@ -278,7 +286,11 @@ def test_view_fits_montage_when_enabled_after_settle():
     prefer_pyside6()
     from arrayscope.app.launch import _create_window
 
-    app, win = _create_window(synthetic_montage_data(), title="gpu-harness-late-montage")
+    app, win = _create_window(
+        synthetic_montage_data(),
+        title="gpu-harness-late-montage",
+        application_name="ArrayScopeTests",
+    )
     try:
         h = Harness(app, win)
         h.pump(3.0)  # let the single-frame view settle completely

@@ -109,12 +109,13 @@ def _create_window(
     dataset_path=None,
     selector_class_name=None,
     axes=None,
+    application_name="ArrayScope",
 ):
     _prepare_qt_environment()
 
     app = pg.mkQApp()
     app.setOrganizationName("ArrayScope")
-    app.setApplicationName("ArrayScope")
+    app.setApplicationName(str(application_name))
     app.setStyle("Fusion")
 
     win = ArrayScopeWindow(
