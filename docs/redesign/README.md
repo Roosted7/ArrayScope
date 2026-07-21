@@ -46,6 +46,7 @@ These are **not archive**: queue steps and tests cite them.
 | [fill-throughput-2026-07-18.md](fill-throughput-2026-07-18.md) | 272-tile raw-fill "stall" adjudication: O(tiles²) throughput collapse, not a lost wakeup (fixed at the roots) |
 | [wgpu-field-stalls-2026-07-18.md](wgpu-field-stalls-2026-07-18.md) | wgpu field stalls 259-1/1-1: physical first-pass quality drift (fixed `43287f8`) |
 | [demand-freshness-cold-fill-2026-07-19.md](demand-freshness-cold-fill-2026-07-19.md) | AUTO-camera demand-freshness cold_fill red: ViewportBridge dropped entry camera intent (live path fixed `6fd0c262`; unit-gate fixture still open) |
+| [wgpu-frame-pacing-2026-07-21.md](wgpu-frame-pacing-2026-07-21.md) | wgpu screen present paces to display *frequency* with free-running *phase*: design for a phase-locked deadline scheduler, and why the Fifo/Mailbox choice is coupled to it (design only, unmeasured) |
 
 **Dossier convention:** a dossier is created when a field defect or design
 slice needs evidence that outlives one commit. It records symptom → trace
