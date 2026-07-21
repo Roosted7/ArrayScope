@@ -1506,7 +1506,7 @@ class _PanChainProbe:
         from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
         from arrayscope.window.frame_controller import FrameControllerMixin
 
-        self._wrap(WgpuImageView2D, "_wgpu_camera_tiles", "camera_tiles")
+        self._wrap(WgpuImageView2D, "_wgpu_tile_instances", "camera_tiles")
         self._wrap(WgpuPlaneExecutor, "_set_tiles", "set_tiles")
         # Chain B lives on the controller mixin.  It is wrapped even when the
         # active transport cannot reach it, so a zero reads as a measured zero
@@ -1702,7 +1702,7 @@ def _measure_montage_pan(
             _drain_pan_frames(app, QtCore, view, before)
             frame_ms.append((perf_counter() - start) * 1000.0)
 
-        instances = view._wgpu_camera_tiles()
+        instances = view._wgpu_tile_instances()
         committed = len((view._wgpu_committed or {}).get("tiles", {}))
         return MontagePanScalingRow(
             tile_count=tile_count,
