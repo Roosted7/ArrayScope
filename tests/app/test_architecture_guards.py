@@ -390,6 +390,12 @@ _EVENTUAL_SETTLEMENT_BUDGET_ALLOWLIST = (
     # Build-time cold-fill wait; the per-gesture wait uses the capped owner.
     ("tests/ui/test_lod_demand_freshness.py", "_FILL_TIMEOUT_MS"),
     ("tests/ui/test_lod_demand_freshness.py", "waitUntil"),
+    # Compositor process-startup deadline, not a settlement budget: nothing
+    # user-visible waits on it, no gesture can be greened by widening it, and
+    # exceeding it raises instead of degrading to the offscreen platform.
+    # Same category as the thread-guard joins this guard's own unit test
+    # deliberately accepts.
+    ("arrayscope/tools/headless_display.py", "STARTUP_TIMEOUT_S"),
 )
 
 
