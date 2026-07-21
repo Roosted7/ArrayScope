@@ -28,13 +28,14 @@ this file says *what, in what order, and when it counts as done*.
 
 ## Next — the product turn (queued behind rows 3d/4; rationale in [roadmap.md](roadmap.md) and [reviews/2026-07-19-course-review.md](reviews/2026-07-19-course-review.md))
 
+Steps 5 (camera sync facet) and 8 (plugin-ops Tier-1 registry) LANDED
+2026-07-22 — see the [Done ledger](queue-done.md).
+
 | # | Step | Exit gate |
 |---|---|---|
-| 5 | **Compare v1a — camera/viewport sync facet.** Add a `camera` facet to `sync/messages.py` + controller (existing revision/loop guards; leading-edge coalesce). | Two linked windows pan/zoom together on real Wayland; sync suite green; no new scheduler/timer (ground rule "one scheduler") |
-| 6 | **Compare v1b — "Compare with…" launcher + linked complex cursor.** Second window pre-linked on dims+camera+levels; hover reports value of A and B (mag+phase for complex) at the linked cursor. | Journey-style two-window scenario green on real Wayland; cursor values exact vs NumPy oracle |
-| 7 | **Compare v1c — difference as derived source.** `CompositeArraySource(A, B, op=subtract)` array-like flowing through the unchanged unary pipeline/tile engine; opened as a third linked window. Multi-input pipeline *ops* stay rejected. | A−B window renders progressively on real data; values exact vs NumPy oracle; recipes/sessions unaffected |
-| 8 | **Plugin ops v1 — Tier-1 registry.** Entry-point group `arrayscope.operations`, namespaced stable ids, lazy import on first use; pure `fn(ndarray)->ndarray` + shape/dtype adapter (OPAQUE, whole-array, cache-stage-able). | Third-party pip package contributes a working reversible op incl. recipe round-trip; import-health guard stays green |
-| 9 | **Plugin ops v2 — sigpy pack + Tier-2 conformance harness.** sigpy fft/nufft/espirit as an optional in-process pack; Tier-2 capability claims honored only after property-test `apply(whole)[region] == region-path`. | sigpy ops usable in the dock; harness rejects a deliberately mis-declared capability (red-first) |
+| 6 | **Compare v1b — "Compare with…" launcher + linked complex cursor.** Second window pre-linked on dims+camera+levels (camera facet now exists, step 5); hover reports value of A and B (mag+phase for complex) at the linked cursor. | Journey-style two-window scenario green on real Wayland; cursor values exact vs NumPy oracle |
+| 7 | **Compare v1c — difference as derived source.** `CompositeArraySource(A, B, op=subtract)` array-like (implements the `ArraySource` protocol: `shape`/`dtype`/`ndim`/`read_region`, reads both inputs at the same `index_spec` and combines, propagating the cancellation token) flowing through the unchanged unary pipeline/tile engine; opened as a third linked window. Multi-input pipeline *ops* stay rejected. | A−B window renders progressively on real data; values exact vs NumPy oracle; recipes/sessions unaffected |
+| 9 | **Plugin ops v2 — sigpy pack + Tier-2 conformance harness.** sigpy fft/nufft/espirit as an optional in-process pack; Tier-2 capability claims honored only after property-test `apply(whole)[region] == region-path` (builds on the step-8 registry). | sigpy ops usable in the dock; harness rejects a deliberately mis-declared capability (red-first) |
 | 10 | **Plugin ops v3 — BART subprocess pack.** cfl temp-file handoff at the stage-materialization seam; `CancellationToken` → SIGTERM; honest cost hints for admission. Requires the queue's shutdown/cancellation item closed first. | BART fft/pics run as ops on real data; cancel mid-op kills the child <1 s; process exit stays bounded |
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
@@ -51,22 +52,31 @@ this file says *what, in what order, and when it counts as done*.
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **Progressive-load publication correctness (2026-07-20 integration
-  blocker) — CORE LANDED `447cbe42`, offscreen gate closed; residual is the
-  real-Wayland visual only.** The asynchronous `.npy`/`.cfl`/Philips `.REC`
-  flow keeps viewer-before-completion without exposing the raw destination:
-  `ProgressiveArraySource` (arrayscope/io/progressive.py) owns the backing
-  array, mutates it only inside `write_transaction`, and `read_region` copies
-  under the same lock — a reader observes either the old zero-fill or a
-  completed write, never an in-place mutation. Offscreen gate proven and
-  green in `tests/io/test_progressive.py`:
-  `test_progressive_source_read_cannot_observe_an_inflight_write` (deterministic
-  concurrent-write atomicity) and `test_npy_progressive_publishes_detached_region_reads`,
-  plus the open-flow/combined offscreen suites. **Residual (still open):** the
-  real-Wayland visual opens showing zero unread regions and correct final
-  pixels/levels on WGPU then PyQtGraph then VisPy — the ring that can actually
-  see a torn/unread tile (testing law #1). No renderer-specific locks or cache
-  exceptions were introduced; owner stays the budgeted `read_region` seam.
+- **Progressive-load publication correctness — DONE 2026-07-22** (core
+  `447cbe42`, ring-4 residual `db1c5393`). Full evidence in the
+  [Done ledger](queue-done.md). Two adjacent gaps surfaced while writing the
+  ring-4 gate remain open (below).
+- **`ProgressiveArraySource.write_flat`/`write_bytes` silently no-op on a
+  non-contiguous backing array** (found 2026-07-22). `array.ravel(order="K")`
+  returns a *copy*, not a view, so the flat writes land nowhere. Latent only —
+  every current loader builds the source over a contiguous `np.empty`
+  destination and the `.rec` loader writes via in-place `write_transaction`
+  indexing — but it is a footgun waiting for the next streaming format. Repro:
+  `ProgressiveArraySource(np.zeros((4,4))[:, ::2]).write_flat(0, np.arange(8))`
+  then `read_region` returns all zeros. Fix: write through a real flat view or
+  reject a non-contiguous destination loudly. Exit gate: a deterministic test
+  in `tests/io/test_progressive.py` that a non-contiguous write is either
+  visible or refused, never a silent no-op.
+- **Closing the streaming viewer mid-load does not cancel the reader thread**
+  (found 2026-07-22). `open_flow.FileOpenSession` wires cancel only to the
+  loading window and `LoadStatusWidget` buttons, never to the viewer window's
+  close/destroyed; the reader keeps reading the whole file into a detached
+  array nobody views, and `_on_finished` then touches a closed (not
+  `WA_DeleteOnClose`) window (`setWindowTitle`/`show_status_message`). Exit
+  gate: closing the viewer mid-load cancels the load within the interaction
+  budget and no callback runs against a destroyed window — pinned in the ring
+  that owns window lifecycle (`tests/ui`), and a real-Wayland open-then-close
+  leaves no live reader thread.
 - **Demand-freshness unit-gate fixture** (live path FIXED 2026-07-19 `6fd0c262`,
   [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md); full history in the
   [Done ledger](queue-done.md)): the unit gate's fixture carries no committed display

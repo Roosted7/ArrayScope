@@ -6,6 +6,52 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **Compare v1a — camera/viewport sync facet (queue step 5):**
+  new `FACET_CAMERA` in `sync/messages.py` (world/data-space view range,
+  JSON-plain) with symmetric `camera_state_payload`/`merged_camera_state`;
+  `WindowSyncController` publishes on the ViewBox `sigRangeChanged` through the
+  existing leading-edge+coalesce `schedule_publish` (no new scheduler/timer) and
+  applies peer ranges via `setRange` guarded by `view_ranges_near`, with echo
+  suppression by the existing `_applying` window; the "Sync" toolbar link now
+  couples window/level **and** pan/zoom. Evidence: `30b2d25e`; real-Wayland
+  `tests/ui/test_window_sync.py::test_camera_pan_zoom_syncs_between_windows` +
+  `::test_camera_apply_does_not_echo_a_republish` (2/2 headless-weston);
+  `tests/sync/test_messages.py` round-trip/keep-current/non-finite pins; full
+  offscreen suite 2708 passed.
+
+- 2026-07-22 — **Plugin ops v1 — Tier-1 registry (queue step 8):** entry-point
+  group `arrayscope.operations`, entry-point name = namespaced stable id
+  (must contain `:`), lazy `entry_point.load()` on first use + cache;
+  un-namespaced/built-in-collision/duplicate ids rejected loudly. `PluginOperation`
+  wraps a pure `fn(ndarray)->ndarray` (or `build` factory) as an `OPAQUE`
+  whole-array, cache-stage-able step reusing the existing region engine; recipe
+  round-trip via the namespaced id, uninstalled ids raise a clear caught error.
+  Evidence: `327aa80f`; `arrayscope/operations/plugins.py`,
+  `tests/operations/test_plugin_operations.py` (12 tests, in-test fake entry
+  point with real `EntryPoint.load()`), lazy proof in
+  `tests/app/test_import_health.py`; `docs/plugin-operations.md` is the author
+  contract; operations+import-health 293 passed, ruff clean.
+
+- 2026-07-22 — **Progressive-load publication correctness — residual closed
+  (standing lane):** the real-Wayland gate the offscreen atomic-read test
+  (`447cbe42`) could not see now exists —
+  `tests/gpu_interaction/test_progressive_open_reference.py` drives the
+  production window over a `ProgressiveArraySource` on VisPy (real GL) and
+  PyQtGraph (real Qt raster), proving zero unread/zero-fill regions at
+  completion with a truth-anchored full-coverage gate, plus a red-then-green
+  fault-injection (a torn/partial fill fails the gate) that also exposed that
+  the payload pixel-oracle passes *vacuously* on an unread tile. Evidence:
+  `db1c5393`; ring-4 4/4 under headless-weston.
+
+- 2026-07-22 — **Render crash fixed: windowability anchored on base shape
+  (found while integrating step 5):** `source_anchoring_for_view` fed the
+  post-operation display shape into `pipeline_windowable_display_axes`, so a
+  reduction on a non-display axis (e.g. Mean over the slider axis) raised
+  `axis 2 out of bounds for 2D data` and crashed the render. Now passes the
+  document base-data shape. Evidence: `14dc44a7`; two UI sync tests red on
+  `main` → green, new
+  `tests/display/test_source_anchoring.py::...::test_reduction_on_a_non_display_axis_does_not_raise`.
+
 - 2026-07-19 — **Kernel completed-key memory bounded (redesign-R1 TODO
   close-out):** `Kernel._completed_keys` now maps key → completion scope;
   `clear_scope` purges the cleared scope's entries (a cleared result no
