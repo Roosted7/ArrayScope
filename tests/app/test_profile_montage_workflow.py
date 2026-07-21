@@ -153,6 +153,50 @@ def test_tile_presentation_draw_wait_fails_loudly_when_camera_draw_is_pending(mo
         )
 
 
+def test_tile_presentation_draw_wait_accepts_qgraphics_draw_edge_during_active_fill(
+    monkeypatch, qt_app
+):
+    """A cold fill may re-arm paint debt in the same dispatcher turn.
+
+    The screenshot gate needs proof that pixels painted after its milestone;
+    it must not require the whole producer stream to become idle first.
+    """
+
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    class DrawEmitter(QtCore.QObject):
+        drawn = QtCore.Signal()
+
+    emitter = DrawEmitter()
+    pumps = {"count": 0}
+
+    def process_events(*_args, **_kwargs):
+        pumps["count"] += 1
+        if pumps["count"] == 1:
+            emitter.drawn.emit()
+
+    monkeypatch.setattr(workflow, "_process_events", process_events)
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            _paints_qgraphics_scene=lambda: True,
+            presentationDrawn=emitter.drawn,
+            presentationDrawPending=lambda: True,
+        )
+    )
+
+    workflow._wait_for_tile_presentation_draw(
+        win,
+        qt_app,
+        QtCore,
+        timeout_s=0.02,
+        target_s=0.01,
+    )
+
+    assert pumps["count"] == 1
+
+
 def test_coverage_pass_wait_fails_loudly_when_evidence_never_closes(monkeypatch):
     import arrayscope.tools.profile_montage_workflow as workflow
 
@@ -323,6 +367,39 @@ def test_visual_sampler_throttles_wgpu_draw_ack_screenshots(monkeypatch):
     )
     probe._capture_presentation_draw_ack()
     assert reasons == ["presentation-draw-ack"]
+
+
+def test_visual_sampler_never_grabs_recursively_inside_paint(qt_app, tmp_path):
+    from pyqtgraph.Qt import QtCore, QtWidgets
+
+    from arrayscope.tools.profile_montage_workflow import _VisualTimelineProbe
+
+    class DrawEmitter(QtCore.QObject):
+        drawn = QtCore.Signal()
+
+    emitter = DrawEmitter()
+    win = QtWidgets.QWidget()
+    win.img_view = SimpleNamespace(presentationDrawn=emitter.drawn)
+    win._arrayscope_active_gesture_id = "index_scroll-1"
+    probe = _VisualTimelineProbe(
+        QtCore,
+        None,
+        win,
+        backend="pyqtgraph",
+        directory=tmp_path,
+        interval_s=1.0,
+    )
+    reasons = []
+    probe.capture = lambda reason: reasons.append(reason)
+    probe.start()
+    probe._last_sample_ns = 0
+
+    emitter.drawn.emit()
+
+    assert reasons == ["start"], "capture must not re-enter the emitting paint stack"
+    qt_app.processEvents()
+    assert reasons == ["start", "presentation-draw-ack"]
+    probe.stop()
 
 
 def test_preview_floor_physical_rows_preserve_page_shader_evidence():

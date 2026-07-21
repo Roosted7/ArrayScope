@@ -3056,7 +3056,10 @@ class _VisualTimelineProbe:
         if self.timeline_path.exists():
             self.timeline_path.unlink()
         if self._presentation_drawn is not None:
-            self._presentation_drawn.connect(self._capture_presentation_draw_ack)
+            self._presentation_drawn.connect(
+                self._capture_presentation_draw_ack,
+                self._QtCore.Qt.ConnectionType.QueuedConnection,
+            )
         self.capture("start")
         self._timer.start()
 
@@ -5199,37 +5202,66 @@ def _wait_for_tile_presentation_draw(
     timeout_s: float = 10.0,
     target_s: float = min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
 ) -> None:
-    """Wait for the draw count to catch its request count.
+    """Wait until the screenshot milestone has physical draw evidence.
 
     Correctness is EVENTUAL settlement — a run that reaches it late is slow,
     not wrong. The strict ``target_s`` bound is recorded as a perf
     observation instead of aborting the whole workflow: a 0.5 s hard abort
     at 35/36 draws killed runs whose pipeline was demonstrably alive (202
     tiles acknowledged after the aborted step, 2026-07-17).
+
+    GPU backends expose cumulative request/draw counts and must settle the
+    requested generation.  QGraphics paints an actively filling scene and can
+    re-arm its single pending bit in the same dispatcher turn that clears it;
+    for that backend, one ``presentationDrawn`` edge after this milestone is
+    the physical proof the following grab needs.  Requiring global idleness
+    there can starve forever even while every paint is succeeding.
     """
+
+    view = getattr(win, "img_view", None)
+    paints_qgraphics_fn = getattr(view, "_paints_qgraphics_scene", None)
+    paints_qgraphics = bool(callable(paints_qgraphics_fn) and paints_qgraphics_fn())
+    presentation_drawn = getattr(view, "presentationDrawn", None)
+    draw_edges = 0
+
+    def record_draw_edge() -> None:
+        nonlocal draw_edges
+        draw_edges += 1
+
+    observing_draw_edges = bool(paints_qgraphics and presentation_drawn is not None)
+    if observing_draw_edges:
+        presentation_drawn.connect(record_draw_edge)
 
     start = time.monotonic()
     deadline = start + max(float(timeout_s), float(target_s))
-    while time.monotonic() < deadline:
-        draw_pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
-        draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
-        if (
-            _vispy_tile_presentation_draw_count(win) >= _vispy_tile_presentation_request_count(win)
-            and not draw_pending
-        ):
+    try:
+        while time.monotonic() < deadline:
+            draw_pending_fn = getattr(view, "presentationDrawPending", None)
+            draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
+            if (
+                _vispy_tile_presentation_draw_count(win)
+                >= _vispy_tile_presentation_request_count(win)
+                and not draw_pending
+            ):
+                _process_events(app, QtCore, count=2)
+                elapsed = time.monotonic() - start
+                if elapsed > float(target_s):
+                    print(
+                        f"[perf] tile presentation draw settled in {elapsed:.3f}s "
+                        f"(target {float(target_s):.3f}s)"
+                    )
+                return
             _process_events(app, QtCore, count=2)
-            elapsed = time.monotonic() - start
-            if elapsed > float(target_s):
-                print(
-                    f"[perf] tile presentation draw settled in {elapsed:.3f}s "
-                    f"(target {float(target_s):.3f}s)"
-                )
-            return
-        _process_events(app, QtCore, count=2)
-        time.sleep(0.005)
+            if draw_edges:
+                return
+            time.sleep(0.005)
+    finally:
+        if observing_draw_edges:
+            with contextlib.suppress(RuntimeError, TypeError):
+                presentation_drawn.disconnect(record_draw_edge)
     requested = _vispy_tile_presentation_request_count(win)
     drawn = _vispy_tile_presentation_draw_count(win)
-    draw_pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
+    draw_pending_fn = getattr(view, "presentationDrawPending", None)
     draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
     raise TimeoutError(
         "tile presentation draw did not settle within "
