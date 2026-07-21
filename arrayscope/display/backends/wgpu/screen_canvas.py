@@ -150,27 +150,82 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         Pacing above the refresh rate is pure waste under Mailbox — the
         compositor drops the extra frames — so the display rate IS the
         optimum, not a compromise.
+
+        The rate is cached rather than re-read per draw request: this is on
+        the pacing hot path, and the two things that can change it (the
+        window moving to another screen, that screen changing mode) both
+        announce themselves with a signal.  Polling Qt every frame for an
+        answer that changes maybe twice a session is the wrong shape, and
+        the signals keep the "drag it to a 144 Hz panel and it re-paces"
+        behaviour exactly as before.
         """
 
         override = self._max_draws_per_second_override
         if override is not None:
             return override
-        screen = None
-        window = self._surface_window
-        if window is not None:
-            screen = window.screen()
-        if screen is None:
-            app = QtWidgets.QApplication.instance()
-            screen = app.primaryScreen() if app is not None else None
+        cached = self._cached_draws_per_second
+        if cached is not None:
+            return cached
+        screen = self._current_screen()
         rate = float(screen.refreshRate()) if screen is not None else 0.0
         # Qt reports 0 when the platform does not know; never divide by it.
-        return rate if rate >= 1.0 else self.fallback_draws_per_second
+        rate = rate if rate >= 1.0 else self.fallback_draws_per_second
+        self._cached_draws_per_second = rate
+        self._watch_screen(screen)
+        return rate
+
+    def _current_screen(self):
+        """The screen the surface sits on, or the primary as a stand-in."""
+
+        window = self._surface_window
+        screen = window.screen() if window is not None else None
+        if screen is not None:
+            return screen
+        app = QtWidgets.QApplication.instance()
+        return app.primaryScreen() if app is not None else None
+
+    def _watch_screen(self, screen) -> None:
+        """Re-arm the invalidation signals for whichever screen we just read.
+
+        A mode change on the *current* screen and a move to a *different*
+        screen are separate signals, so both are tracked; the old screen's
+        connection is dropped so a background monitor's mode change cannot
+        keep invalidating a cache it no longer describes.
+        """
+
+        if screen is self._watched_screen:
+            return
+        previous = self._watched_screen
+        if previous is not None:
+            with contextlib.suppress(Exception, RuntimeError):
+                previous.refreshRateChanged.disconnect(self._invalidate_pace_cache)
+        self._watched_screen = screen
+        if screen is not None:
+            with contextlib.suppress(Exception):
+                screen.refreshRateChanged.connect(self._invalidate_pace_cache)
+
+    def _invalidate_pace_cache(self, *_args) -> None:
+        """Next ``request_draw`` re-reads the display rate."""
+
+        self._cached_draws_per_second = None
 
     @max_draws_per_second.setter
     def max_draws_per_second(self, value) -> None:
-        """Pin the pace (benchmarks and tests); ``None`` restores the display."""
+        """Pin the pace (benchmarks and tests); ``None`` restores the display.
 
-        self._max_draws_per_second_override = None if value is None else float(value)
+        A non-positive pin is rejected rather than silently substituted: it
+        has no meaning as a pace, and the interval maths divides by it.  The
+        old divide-site `or 30.0` guard hid exactly this mistake behind a
+        number nobody chose.
+        """
+
+        if value is None:
+            self._max_draws_per_second_override = None
+            return
+        rate = float(value)
+        if rate <= 0.0:
+            raise ValueError(f"max_draws_per_second must be positive, got {rate!r}")
+        self._max_draws_per_second_override = rate
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -202,7 +257,12 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._present_mode: str = ""
         self._present_modes_available: tuple[str, ...] = ()
         self._max_draws_per_second_override: float | None = None
+        self._cached_draws_per_second: float | None = None
+        self._watched_screen = None
         self._resize_pending = False
+        # A move between monitors changes which display the pace must match.
+        with contextlib.suppress(Exception):
+            self._surface_window.screenChanged.connect(self._invalidate_pace_cache)
 
     # ---- draw scheduling (rendercanvas request_draw seam) -------------------
 
@@ -212,7 +272,11 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         if self._draw_scheduled or self._draw_callback is None:
             return
         self._draw_scheduled = True
-        interval = 1000.0 / float(self.max_draws_per_second or 30.0)
+        # No `or <n>` guard: the property already floors the rate at 1.0 via
+        # fallback_draws_per_second.  The old `or 30.0` was a leftover from
+        # the pinned-at-30 era and could only ever have masked a zero the
+        # property cannot return.
+        interval = 1000.0 / float(self.max_draws_per_second)
         elapsed_ms = (perf_counter() - self._last_draw_started) * 1000.0
         delay_ms = 0 if elapsed_ms >= interval else round(interval - elapsed_ms)
         QtCore.QTimer.singleShot(delay_ms, self, self._invoke_draw)
