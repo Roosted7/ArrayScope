@@ -4070,3 +4070,23 @@ def test_noop_tile_layer_timing_does_not_arm_physical_draw(qt_app):
         assert not view.presentationDrawPending()
     finally:
         view.close()
+
+
+def test_pyqtgraph_pending_presentation_requests_its_own_paint(qt_app, monkeypatch):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    view = ImageView2D()
+    updates = []
+    try:
+        monkeypatch.setattr(
+            view.graphicsView.viewport(),
+            "update",
+            lambda: updates.append(True),
+        )
+
+        view._mark_presentation_draw_pending()
+
+        assert view.presentationDrawPending()
+        assert updates == [True]
+    finally:
+        view.close()

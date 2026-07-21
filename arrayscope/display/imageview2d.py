@@ -620,6 +620,11 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _mark_presentation_draw_pending(self) -> None:
         self._presentation_draw_pending = True
+        if self._paints_qgraphics_scene():
+            # The paint acknowledgement clears this debt. Own the matching
+            # request explicitly instead of assuming every item/camera update
+            # invalidated the viewport after the debt was armed.
+            self.graphicsView.viewport().update()
 
     def _mark_presentation_drawn(self) -> None:
         if not bool(getattr(self, "_presentation_draw_pending", False)):
