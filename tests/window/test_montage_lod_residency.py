@@ -8,7 +8,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ChannelMode, ViewState
+from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
+from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
     LOD_POLICY_RESIDENT,
@@ -5002,7 +5005,7 @@ def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
     assert decision.reason == "montage-compatible"
 
 
-def test_partial_viewport_rebirth_retains_without_all_slot_atomic_handoff():
+def test_partial_viewport_rebirth_atomically_hands_off_required_scope():
     previous = _session(count=4)
     successor = _session(count=4)
     document = ArrayDocument(np.zeros((7, TILE, TILE), dtype=np.float32))
@@ -5028,8 +5031,27 @@ def test_partial_viewport_rebirth_retains_without_all_slot_atomic_handoff():
     )
 
     assert decision.retain_pixels
-    assert not decision.atomic_successor
-    assert decision.reason == "montage-partial-viewport"
+    assert decision.atomic_successor
+    assert decision.reason == "montage-compatible"
+
+
+def _real_frame_plan(session, view_range):
+    state = (
+        ViewState.from_shape((TILE, TILE, 4))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=4, indices=tuple(range(4)))
+    )
+    session.view_state = state
+    session.frame_plan = FramePlanner().plan(
+        target=FrameTarget(("semantic",), view_range, ("levels",), "exact-visible"),
+        view_state=state,
+        display_shape=session.plan.display_shape,
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+        viewport_shape=VIEWPORT,
+        view_range=view_range,
+        montage_plan=session.plan,
+    )
+    return session.frame_plan
 
 
 def test_atomic_handoff_has_one_owner_after_transition_arms_it():
@@ -5047,6 +5069,37 @@ def test_atomic_handoff_has_one_owner_after_transition_arms_it():
     assert _atomic_successor_handoff_pending(session)
     session.atomic_successor_pending = False
     assert not _atomic_successor_handoff_pending(session)
+
+
+def test_atomic_handoff_revalidates_required_subset_of_coverage():
+    """A camera change cannot carry a handoff outside presentation coverage."""
+
+    from arrayscope.window.frame_effects import _atomic_successor_handoff_pending
+
+    session = _session(count=4)
+    _real_frame_plan(session, ((0.0, 8.0), (0.0, 8.0)))
+    assert session.frame_plan.active_region_ids == (0,)
+    session.visible_tiles = session.plan.tiles[1:2]
+    session.visible_tile_numbers = frozenset({1})
+    session.atomic_successor_pending = True
+
+    assert not _atomic_successor_handoff_pending(session)
+    assert not session.atomic_successor_pending
+
+
+def test_atomic_handoff_never_arms_for_empty_real_frame_plan():
+    """An off-montage camera has no successor transaction to hand off."""
+
+    from arrayscope.window.frame_effects import _atomic_successor_handoff_pending
+
+    session = _session(count=4)
+    outside = ((10_000.0, 10_008.0), (10_000.0, 10_008.0))
+    _real_frame_plan(session, outside)
+    assert session.frame_plan.active_region_ids == ()
+    session.atomic_successor_pending = True
+
+    assert not _atomic_successor_handoff_pending(session)
+    assert not session.atomic_successor_pending
 
 
 def test_index_window_retarget_arms_atomic_successor_pending():
@@ -5104,7 +5157,7 @@ def test_index_window_retarget_arms_atomic_successor_pending():
     ) == (1, 2, 3, 0)
 
 
-def test_index_window_retarget_does_not_atomically_wait_for_offscreen_shell():
+def test_index_window_retarget_atomically_hands_off_only_required_center():
     """Reproduce stall 16: a deep-zoom far scroll must publish its center.
 
     The frame plan requires one on-screen slot while the margin-expanded
@@ -5136,9 +5189,12 @@ def test_index_window_retarget_does_not_atomically_wait_for_offscreen_shell():
         semantic_key=session.semantic_key,
     )
 
-    assert not session.atomic_successor_pending
-    _state, delta = session.build_tile_presentation({})
-    assert 1 in delta.upserts
+    assert session.atomic_successor_pending
+    atomic = session.build_atomic_successor_presentation()
+    assert atomic is not None, session._atomic_fast_reject_reason
+    _state, delta = atomic
+    assert tuple(delta.active_tiles) == (1,)
+    assert tuple(delta.upserts) == (1,)
     assert delta.upserts[1].quality == "exact"
 
 

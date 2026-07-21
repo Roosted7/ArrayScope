@@ -834,6 +834,21 @@ class FrameSession:
 
         return self.lifecycle.first_pixels_presented(self.required_tile_numbers())
 
+    def atomic_successor_required_scope(self) -> tuple[int, ...]:
+        """Required on-screen slots eligible for one atomic handoff.
+
+        ``visible_tile_numbers`` is legacy terminology for the broader
+        presentation-coverage set. FramePlan owns the actual on-screen
+        requirement. Offscreen coverage may retain predecessor payloads, but
+        every required tile must belong to coverage and cross atomically.
+        """
+
+        required = tuple(int(tile) for tile in self.required_tile_numbers())
+        coverage = {int(tile) for tile in self.visible_tile_numbers}.difference(
+            int(tile) for tile in self.skipped_tiles
+        )
+        return required if required and set(required).issubset(coverage) else ()
+
     def note_first_pass_quality(self, quality: str) -> bool:
         """Latch the one display quality allowed to contribute rough evidence."""
 
@@ -1397,15 +1412,13 @@ class FrameSession:
             # new geometry behind hidden residency for every successor tile
             # (field failure: 60 visible predecessors, 272 successor slots),
             # so neither backend could publish the honest progressive frame.
-            # Same-topology source-window swaps retain the atomic guarantee
-            # only when the scheduler owns every slot in that transaction.
-            # At deep zoom the frame plan intentionally requires fewer tiles
-            # than the margin-expanded session; an all-slot handoff there
-            # would wait for offscreen successors that have no producer.
+            # Same-topology source-window swaps hand off the frame-plan's
+            # required on-screen scope atomically. Broader coverage slots are
+            # not part of that completeness barrier.
             self.atomic_successor_pending = bool(
                 had_complete_predecessor
                 and old_plan_topology == _montage_plan_topology(plan)
-                and set(self.required_tile_numbers()) == planned_numbers
+                and bool(self.atomic_successor_required_scope())
             )
             retained_state = {
                 int(tile): payload
@@ -3279,8 +3292,8 @@ class FrameSession:
 
         The general builder repairs arbitrary lifecycle, visibility, removal,
         and level states. A VisPy scroll successor has a narrower contract:
-        unchanged slots and one current payload for every visible tile. After
-        validating that contract, construct the immutable all-slot delta
+        unchanged slots and one current payload for every required on-screen
+        tile. After validating that contract, construct that immutable delta
         directly. Ambiguous cases return ``None`` to the general builder.
         """
 
@@ -3288,14 +3301,8 @@ class FrameSession:
         if bool(getattr(self, "_layout_geometry_changed_pending", False)):
             self._atomic_fast_reject_reason = "layout"
             return None
-        planned = tuple(
-            dict.fromkeys(
-                int(tile.montage_index)
-                for tile in tuple(self.visible_tiles)
-                if int(tile.montage_index) not in self.skipped_tiles
-            )
-        )
-        if not planned or planned != tuple(self._last_planned_tiles):
+        required = tuple(self.atomic_successor_required_scope())
+        if not required or not set(required).issubset(self._last_planned_tiles):
             self._atomic_fast_reject_reason = "planned"
             return None
         plan_tiles_by_number = {
@@ -3308,7 +3315,7 @@ class FrameSession:
         # erased the fast path's benefit.
         missing_floor = tuple(
             int(tile_number)
-            for tile_number in planned
+            for tile_number in required
             if not _payload_matches_current_tile(
                 self,
                 int(tile_number),
@@ -3324,8 +3331,30 @@ class FrameSession:
         )
         if missing_floor:
             self._ensure_floor_payloads(missing_floor)
+            # A cache-hit successor can own an exact native result without a
+            # resident reduced floor or payload wrapper. Materialize only the
+            # still-missing required wrappers; scanning the broader coverage
+            # set here would restore the old O(all visible slots) prepass.
+            lod_factor = int(self._selected_lod_factor())
+            for tile_number in missing_floor:
+                current = self.display_tile_payloads.get(int(tile_number))
+                if _payload_matches_current_tile(
+                    self,
+                    int(tile_number),
+                    current,
+                    plan_tiles_by_number,
+                ):
+                    continue
+                rendered = self.rendered_tiles.get(int(tile_number))
+                if rendered is not None:
+                    self._ensure_display_tile_payload(
+                        int(tile_number),
+                        rendered,
+                        self.tile_source_ids,
+                        lod_factor=lod_factor,
+                    )
         payloads = {}
-        for tile_number in planned:
+        for tile_number in required:
             payload = self.display_tile_payloads.get(int(tile_number))
             if not _payload_matches_current_tile(
                 self,
@@ -3344,10 +3373,6 @@ class FrameSession:
                 return None
             self.display_tile_payloads[int(tile_number)] = payload
             payloads[int(tile_number)] = payload
-        previous_tiles = {int(tile) for tile in previous_state.payloads}
-        if previous_tiles and previous_tiles != set(planned):
-            self._atomic_fast_reject_reason = "previous-scope"
-            return None
         self.payload_revision += 1
         near = tuple(
             tile
@@ -3370,11 +3395,11 @@ class FrameSession:
             target_revision=int(previous_state.revision) + 1,
             transaction_generation=int(self.session_id),
             upserts=payloads,
-            active_tiles=planned,
-            planned_tiles=planned,
+            active_tiles=required,
+            planned_tiles=required,
             near_tiles=near,
             near_tile_source_ids=near_source_ids,
-            target_identities=self.tile_target_identities(planned),
+            target_identities=self.tile_target_identities(required),
             atomic_handoff=True,
         )
         return previous_state.apply_delta(delta), delta
@@ -4243,21 +4268,14 @@ def plan_presentation_transition(
             False,
             "montage-topology-change",
         )
-    handoff_scope = {
-        int(tile.montage_index)
-        for tile in tuple(getattr(session, "visible_tiles", ()) or ())
-        if int(tile.montage_index) not in session.skipped_tiles
-    }
-    if set(session.required_tile_numbers()) != handoff_scope:
-        # The backend's atomic transaction covers every declared slot, while
-        # deep-zoom scheduling intentionally owns only the physical frame-plan
-        # subset. Retain the predecessor as a bridge, but let the required
-        # successor stream normally instead of waiting on ownerless shell
-        # replacements.
+    if not session.atomic_successor_required_scope():
+        # A required tile outside presentation coverage has no physical slot
+        # in this transaction. Retain the predecessor, but do not arm an
+        # impossible handoff.
         return PresentationTransitionDecision(True, False, "montage-partial-viewport")
     # A montage rebirth has a cold lifecycle even though the physical surface
-    # still owns a compatible predecessor. Arm the existing all-slot handoff
-    # so no partial successor can replace that complete coverage.
+    # still owns a compatible predecessor. Hand off every required on-screen
+    # slot together so no partial successor replaces that complete frame.
     return PresentationTransitionDecision(True, True, "montage-compatible")
 
 

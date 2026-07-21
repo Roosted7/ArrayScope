@@ -3913,7 +3913,18 @@ def _atomic_successor_handoff_pending(session) -> bool:
     already-armed handoff.
     """
 
-    return bool(getattr(session, "atomic_successor_pending", False))
+    if not bool(getattr(session, "atomic_successor_pending", False)):
+        return False
+    required_scope = getattr(session, "atomic_successor_required_scope", None)
+    if callable(required_scope) and not tuple(required_scope()):
+        # Camera/plan changes may supersede the scope after the transition
+        # owner armed the handoff.  Revalidate at the consumption boundary so
+        # an obsolete all-slot transaction cannot wait on tiles the current
+        # frame no longer requires.
+        session.atomic_successor_pending = False
+        session._atomic_prepared_transaction = None
+        return False
+    return True
 
 
 def _cpu_transaction_payload_marker(payload) -> tuple:
