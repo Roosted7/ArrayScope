@@ -8,8 +8,41 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.view_session import ViewportSession, viewport_from_mapping, viewport_to_mapping
+from arrayscope.display.viewport import ViewportMode
 from arrayscope.window.canvas_preserve import CanvasPreserveController
 from arrayscope.window.panels import PanelLocation
+
+
+def viewport_size_only(viewport: ViewportSession) -> ViewportSession:
+    """Strip a viewport session down to the one field that is global.
+
+    The application-wide ``viewport_session`` setting exists to reopen the
+    next window with the render viewport the user last sized -- a property of
+    the *window*, which is why both of its tests assert the restored viewport
+    size and neither asserts a restored range.  ``view_range``, ``mode`` and
+    ``montage_columns`` describe where the camera sits in ONE dataset's
+    coordinates; they are per-file state and belong to the file-view session,
+    which stores them already.
+
+    Carrying them globally is not merely redundant, it is actively wrong:
+    world coordinates from one array applied to the next are meaningless, and
+    a single bad capture poisons every file the user opens afterwards.  That
+    is not hypothetical -- a stored range of x(-0.32, 1.32) y(0, 1) (a
+    ViewBox's pristine no-content default) was replayed onto a 336x336 slice,
+    parking the camera on data pixels (0,0)-(1,1) -- background, so the window
+    went black -- and the restore then promoted the viewport to USER mode, so
+    closing re-saved the collapse and it never recovered.
+
+    Applied on read as well as on write, so an already-poisoned settings file
+    heals itself the next time the app starts.
+    """
+
+    return ViewportSession(
+        mode=ViewportMode.AUTO_UNTOUCHED.value,
+        view_range=None,
+        viewport_shape=viewport.viewport_shape,
+        montage_columns=None,
+    )
 
 
 @dataclass
@@ -90,8 +123,10 @@ class WindowLayoutManager:
         win = self.window
         win._settings.setValue("window_state", win.saveState())
         viewport = self._current_viewport_session()
-        if viewport is not None:
-            win._settings.setValue("viewport_session", viewport_to_mapping(viewport))
+        if viewport is not None and viewport.viewport_shape is not None:
+            win._settings.setValue(
+                "viewport_session", viewport_to_mapping(viewport_size_only(viewport))
+            )
 
     def _reset_session_dock_visibility_preferences(self):
         win = self.window
@@ -575,7 +610,7 @@ class WindowLayoutManager:
         if value is None:
             return None
         try:
-            return viewport_from_mapping(value)
+            return viewport_size_only(viewport_from_mapping(value))
         except Exception:
             return None
 

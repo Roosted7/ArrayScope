@@ -427,6 +427,104 @@ def test_settings_viewport_session_uses_viewport_continuity_transaction(qtbot, m
     _clear_arrayscope_settings()
 
 
+def test_global_viewport_setting_stores_size_without_content_position(qtbot):
+    """The app-wide viewport setting carries the render viewport SIZE only.
+
+    ``view_range``/``mode``/``montage_columns`` locate a camera inside ONE
+    dataset's world coordinates.  Replayed onto the next file they are
+    meaningless, and a single bad capture poisons every file opened after it.
+    The per-file view session already stores them, per file, where they mean
+    something.
+    """
+
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window import ArrayScopeWindow
+
+    _clear_arrayscope_settings()
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    try:
+        qtbot.wait(20)
+        win.layout_manager.save_window_settings()
+    finally:
+        win.close()
+
+    stored = QtCore.QSettings().value("viewport_session")
+    assert stored is not None
+    assert stored["viewport_shape"] is not None, "the viewport size IS the global setting"
+    assert stored["view_range"] is None
+    assert stored["montage_columns"] is None
+    _clear_arrayscope_settings()
+
+
+def test_poisoned_global_viewport_range_never_reaches_the_camera(qtbot):
+    """A stored no-content default must not park the camera on pixel (0, 0).
+
+    Field defect (2026-07-21): x(-0.32, 1.32) y(0, 1) -- a ViewBox's pristine
+    range before any content gives it bounds -- reached the global setting and
+    was replayed onto a 336x336 slice.  The camera landed on data pixels
+    (0,0)-(1,1), which are background, so the window rendered black on every
+    backend and every present method.  Nothing was desynchronized: the hover
+    readout said ``(0,0) = 0.0`` and the tile overlay sat where that camera
+    put it, both truthfully.  Only the restored range was wrong.
+    """
+
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_session import ViewportSession, viewport_to_mapping
+    from arrayscope.window import ArrayScopeWindow
+
+    _clear_arrayscope_settings()
+    settings = QtCore.QSettings()
+    settings.setValue(
+        "viewport_session",
+        viewport_to_mapping(
+            ViewportSession(
+                mode="user",
+                view_range=((-0.32274011299435035, 1.3227401129943503), (0.0, 1.0)),
+                viewport_shape=(708, 1165),
+                montage_columns=None,
+            )
+        ),
+    )
+    settings.sync()
+
+    data = np.arange(64 * 64, dtype=np.float32).reshape(64, 64)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        qtbot.wait(200)
+        (x0, x1), (y0, y1) = win.img_view.getView().viewRange()
+    finally:
+        win.close()
+        _clear_arrayscope_settings()
+
+    # The collapse showed 2 of 64 columns.  Anything that still frames the
+    # data spans a large part of it; the exact fit depends on window aspect.
+    assert (x1 - x0) > 16.0, f"camera collapsed to {(x1 - x0):.3f} of 64 columns"
+    assert (y1 - y0) > 16.0, f"camera collapsed to {(y1 - y0):.3f} of 64 rows"
+
+
+def test_viewport_session_omits_range_when_the_view_has_no_content_bounds(qt_app):
+    """A ViewBox with nothing in it still reports a range; never store it.
+
+    That placeholder range is what a saved viewport must never be made of --
+    it is how the collapse above got recorded as though a user had chosen it.
+    """
+
+    window = _FakeFileSessionWindow("unused.npy", np.zeros((4, 5), dtype=np.float32), None)
+    window.img_view = SimpleNamespace(
+        getView=lambda: SimpleNamespace(
+            viewRange=lambda: [[-0.32274011299435035, 1.3227401129943503], [0.0, 1.0]]
+        ),
+    )
+    window._committed_display_frame = None
+
+    assert window._viewport_continuity_content_rect() is None
+    assert window._current_viewport_session().view_range is None
+
+
 def test_restored_file_session_defers_progressive_docks_until_window_is_visible(qtbot, monkeypatch):
     from arrayscope.core.view_session import ViewportSession
     from arrayscope.window.layout_controller import WindowLayoutManager

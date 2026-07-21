@@ -121,6 +121,15 @@ class FileViewSessionMixin:
             )
         except Exception:
             normalized = None
+        if normalized is not None and self._viewport_continuity_content_rect() is None:
+            # A ViewBox with no content bounds still reports a range: its
+            # pristine default, x spanning the viewport aspect and y 0..1.
+            # That is a placeholder for content that never arrived, not a
+            # viewport anyone chose, and recording it as one is how a saved
+            # view becomes a camera parked on data pixels (0,0)-(1,1) of
+            # whatever is opened next.  Store no range; every restore path
+            # already fits when the range is absent.
+            normalized = None
         controller = getattr(self.img_view, "viewport_controller", None)
         mode = (
             getattr(getattr(controller, "mode", None), "value", None)
