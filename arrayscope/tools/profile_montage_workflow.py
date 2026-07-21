@@ -3307,6 +3307,15 @@ class _VisualTimelineProbe:
                 getattr(getattr(session, "tile_presentation_state", None), "revision", 0) or 0
             ),
             "lod_level_counts": _visual_lod_level_counts(payloads, requested),
+            # Frame cadence (wgpu screen path only; absent elsewhere).  Passed
+            # through wholesale rather than cherry-picked: this is the readout
+            # the frame-pacing dossier's phase 2 exists to capture, and a
+            # baseline that silently dropped a key would have to be re-run.
+            **{
+                key: value
+                for key, value in presentation_diagnostics.items()
+                if key.startswith("wgpu_screen_")
+            },
             **journey_lod_state,
         }
         with self.timeline_path.open("a", encoding="utf-8") as stream:
@@ -4801,6 +4810,25 @@ def _montage_level_presentation_state(win) -> dict[str, object]:
     }
 
 
+def _wgpu_frame_cadence(win) -> dict[str, object]:
+    """Per-phase frame-cadence readout, or nothing on paths that lack one.
+
+    Sampled per phase rather than once per run: the recorder holds a rolling
+    window, so a run-level sample would describe whichever phase happened to
+    end last instead of the interaction being measured.
+    """
+
+    view = getattr(win, "img_view", None)
+    diagnostics = getattr(view, "presentation_diagnostics", None)
+    if not callable(diagnostics):
+        return {}
+    try:
+        sampled = diagnostics() or {}
+    except Exception:  # diagnostics must never fail a profiling phase
+        return {}
+    return {key: value for key, value in sampled.items() if key.startswith("wgpu_screen_")}
+
+
 def _phase_record(
     win,
     *,
@@ -4932,6 +4960,11 @@ def _phase_record(
         "montage_repeated_expensive_stage_per_tile": bool(
             montage.repeated_expensive_stage_per_tile
         ),
+        # Frame cadence, wgpu screen path only (absent on every other path).
+        # Passed through wholesale rather than cherry-picked: this is the
+        # readout the frame-pacing dossier's phase 2 exists to capture, and a
+        # baseline that silently dropped a key would have to be re-run.
+        **_wgpu_frame_cadence(win),
         "presentation_revision": int(level_state["revision"]),
         "presentation_target_levels": level_state["target_levels"],
         "presentation_stale_count": int(level_state["stale_tiles"]),
