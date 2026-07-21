@@ -218,3 +218,55 @@ def test_auto_present_method_activates_screen_on_wayland(qt_app):
         view.teardown_surface()
         for _ in range(20):
             qt_app.processEvents()
+
+
+def test_axis_flip_successors_keep_the_single_tile_presented(qt_app):
+    """Ring 4: resident XY/flip successors must rebind current identity."""
+
+    from arrayscope.app.launch import _create_window
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from tests.gpu_interaction.conftest import Harness
+    from tests.ui.helpers import use_wgpu_backend
+
+    qt_app.setOrganizationName("ArrayScope")
+    qt_app.setApplicationName("ArrayScopeTests")
+    use_wgpu_backend(
+        extra_settings={
+            "wgpu_present_method": "screen",
+            "first_run_hints_dismissed": True,
+        }
+    )
+    data = np.arange(336 * 336 * 8, dtype=np.float32).reshape(336, 336, 8)
+    app, win = _create_window(
+        data,
+        title="wgpu-axis-flip-successors",
+        application_name="ArrayScopeTests",
+    )
+    try:
+        assert image_view_backend_capabilities(win.img_view).name == "wgpu"
+        harness = Harness(app, win)
+        harness.pump(0.2)
+        assert harness.wait_settled(), harness.settlement_diagnostics()
+        base = win.view_state
+        transposed = base.transposed_image_axes()
+        y_axis, x_axis = transposed.image_axes
+        successors = (
+            transposed,
+            transposed.with_axis_flipped(y_axis, True),
+            transposed.with_axis_flipped(x_axis, True),
+            transposed.with_axis_flipped(y_axis, True).with_axis_flipped(x_axis, True),
+            base,
+        )
+        for step, state in enumerate(successors, 1):
+            win._set_view_state(state)
+            win.render(reason=f"gpu-wgpu-axis-flip-{step}")
+            assert harness.wait_settled(), {
+                "step": step,
+                **harness.settlement_diagnostics(),
+            }
+            diagnostics = win.img_view.wgpuPresentationDiagnostics()
+            assert diagnostics["physically_visible_tile_count"] == 1, diagnostics
+    finally:
+        win.close()
+        for _ in range(20):
+            app.processEvents()

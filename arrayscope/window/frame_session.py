@@ -1769,6 +1769,24 @@ class FrameSession:
             and previous.level_stats is level_stats
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
+            current_identity = self.tile_payload_identity(
+                rendered.tile,
+                texture_data=texture_data,
+                texture_kind=(
+                    TexturePlaneKind.RGB8
+                    if not bool(self.shader_display)
+                    and texture_kind == TexturePlaneKind.COMPLEX_RG32F
+                    else texture_kind
+                ),
+                shader_mapping=mapping,
+                lod=lod,
+                quality="exact",
+            )
+            if previous.tile_identity != current_identity:
+                # Axis/flip changes reuse the same materialized plane, but the
+                # backend acknowledgement must describe the new semantic view.
+                previous = replace(previous, tile_identity=current_identity)
+                self.display_tile_payloads[tile_number] = previous
             self.lifecycle.remember_presentable(tile_number, previous)
             self.record_tile_payload(previous)
             return previous
@@ -4270,12 +4288,11 @@ def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles
     payload_identity = getattr(payload, "tile_identity", None)
     record = session.lifecycle.peek(int(tile_number))
     target_identity = None if record is None or record.target is None else record.target.identity
-    if (
-        payload_identity is not None
-        and target_identity is not None
-        and payload_identity.satisfies_target(target_identity)
-    ):
-        return True
+    if payload_identity is not None and target_identity is not None:
+        # Typed semantic truth is authoritative once both sides provide it.
+        # Falling through to the materialization source id would let a cached
+        # plane minted for old axes/flips masquerade as the current mapping.
+        return bool(payload_identity.satisfies_target(target_identity))
     base_source_id = _base_source_id(getattr(payload, "source_id", None))
     if base_source_id == session.tile_semantic_source_id(int(tile.source_index)):
         return True

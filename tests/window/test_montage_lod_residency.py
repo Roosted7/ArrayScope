@@ -45,6 +45,7 @@ from arrayscope.window.frame_effects import FramePipelineEffects, _priority_orde
 from arrayscope.window.frame_session import (
     FrameSession,
     _base_source_id,
+    _payload_matches_current_tile,
     page_set_key_for_rendered,
     plan_presentation_transition,
     texture_source_for_rendered,
@@ -2787,6 +2788,54 @@ def test_unacknowledged_first_frame_payload_remains_pending_when_seeded_as_fallb
     assert 0 in delta.upserts
     assert 0 in session.pending_payload_upserts
     assert 0 not in session.lifecycle.presented_tiles
+
+
+def test_same_plane_flip_rebinds_payload_semantic_identity():
+    """A resident plane may be reused, but its wrapper must describe this view."""
+
+    session = _session(mode=LOD_POLICY_NATIVE_ONLY, count=1)
+    state = ViewState.from_shape((TILE, TILE, 8)).with_image_axes(0, 1)
+    tile = replace(session.plan.tiles[0], view_state=state)
+    rendered = replace(session.rendered_tiles[0], tile=tile)
+    source_ids = {0: session.tile_semantic_source_id(0)}
+
+    first = session._ensure_display_tile_payload(0, rendered, source_ids, lod_factor=1)
+    flipped_state = state.with_axis_flipped(1, True)
+    flipped_tile = replace(tile, view_state=flipped_state)
+    expected = session.tile_payload_identity(
+        flipped_tile,
+        texture_data=first.texture_data,
+        texture_kind=first.texture_kind,
+        shader_mapping=first.shader_mapping,
+        lod=first.lod,
+        quality=first.quality,
+    )
+    from arrayscope.presentation.tile_lifecycle import TileTarget
+
+    session.lifecycle.retarget(
+        {
+            0: TileTarget(
+                tile_number=0,
+                source_index=0,
+                semantic_source_id=session.tile_semantic_source_id(0),
+                lod_level=0,
+                identity=expected,
+            )
+        }
+    )
+    assert not _payload_matches_current_tile(session, 0, first, {0: flipped_tile})
+    flipped = session._ensure_display_tile_payload(
+        0,
+        replace(rendered, tile=flipped_tile),
+        source_ids,
+        lod_factor=1,
+    )
+
+    assert flipped.source_id == first.source_id
+    assert flipped.texture_data is first.texture_data
+    assert flipped is not first
+    assert flipped.tile_identity.axis_flips == flipped_state.axis_flipped
+    assert flipped.tile_identity != first.tile_identity
 
 
 def test_lod_refresh_owns_its_supersession_counter_not_viewport_revision():
