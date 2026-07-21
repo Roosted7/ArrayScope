@@ -1500,11 +1500,20 @@ class _PanChainProbe:
         self.set_tiles_ms = 0.0
         self.viewport_only_calls = 0
         self.viewport_only_ms = 0.0
+        self.retarget_calls = 0
+        self.retarget_ms = 0.0
+        self.interactive_schedule_calls = 0
+        self.interactive_schedule_ms = 0.0
+        self.ladder_calls = 0
+        self.ladder_ms = 0.0
 
     def __enter__(self) -> _PanChainProbe:
         from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
         from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+        from arrayscope.window.display_presenter import DisplayPresentationMixin
         from arrayscope.window.frame_controller import FrameControllerMixin
+        from arrayscope.window.frame_effects import FramePipelineEffects
+        from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
         self._wrap(WgpuImageView2D, "_wgpu_tile_instances", "camera_tiles")
         self._wrap(WgpuPlaneExecutor, "_set_tiles", "set_tiles")
@@ -1514,6 +1523,21 @@ class _PanChainProbe:
         # like the two above: this module is always present, and swallowing an
         # internal ImportError would hide real breakage (import-health guard).
         self._wrap(FrameControllerMixin, "_try_update_montage_viewport_only", "viewport_only")
+        # ``retarget`` is chain B's real entry point; ``viewport_only`` is the
+        # fast path it *tries* first.  Wrapping both keeps a retarget that fell
+        # through to a full session rebuild from being reported as free.
+        self._wrap(FrameRuntimeMixin, "retarget_montage_viewport", "retarget")
+        # Non-zero only on the coalesced (pointer-gesture) bridge branch, which
+        # is how the emitted table names the path it actually measured.
+        self._wrap(
+            DisplayPresentationMixin,
+            "_schedule_interactive_montage_viewport_update",
+            "interactive_schedule",
+        )
+        # The ladder snapshot under chain B -- the memoization target.  Sub-
+        # attributing it here is what makes "how much of chain B is the
+        # snapshot" answerable without touching the measured modules.
+        self._wrap(FramePipelineEffects, "tile_states", "ladder")
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -1709,7 +1733,7 @@ def _measure_montage_pan(
             columns=columns,
             tile_shape=(tile_h, tile_w),
             committed_tiles=committed,
-            visible_tiles=_visible_instance_count(instances),
+            visible_tiles=_visible_instance_count(instances, viewbox.viewRange()),
             lod_levels=tuple(sorted({int(tile.lod_level) for tile in instances})),
             frames=len(frame_ms),
             frame_ms_median=_median(frame_ms),
@@ -1766,13 +1790,23 @@ def _drain_pan_frames(app, QtCore, view, before: int, *, timeout_s: float = 2.0)
     return False
 
 
-def _visible_instance_count(instances) -> int:
-    """Instances whose dst rect intersects the unit viewport."""
+def _visible_instance_count(instances, view_range) -> int:
+    """Instances whose world rect intersects the camera's view range.
 
+    ``TileInstance.dst_rect`` stopped being a viewport-relative rect when
+    panning moved to the camera uniform (62f851f5): it is now the tile's
+    camera-free WORLD rect.  Testing it against the unit viewport therefore
+    counted only the tile straddling the world origin and reported ``vis = 1``
+    for every montage size -- a constant column cannot show a cost that scales
+    with the visible set, which is the whole question here.  The camera is the
+    ViewBox's range, so visibility is the intersection against that.
+    """
+
+    (x_lo, x_hi), (y_lo, y_hi) = view_range
     visible = 0
     for tile in instances:
         x, y, w, h = tile.dst_rect
-        if x + w > 0.0 and x < 1.0 and y + h > 0.0 and y < 1.0:
+        if x + w > x_lo and x < x_hi and y + h > y_lo and y < y_hi:
             visible += 1
     return visible
 
@@ -1888,6 +1922,425 @@ def format_pan_scaling_table(rows) -> str:
     return "\n".join(lines)
 
 
+# ---- montage pan chain B (viewport retarget) sweep --------------------------
+#
+# The sweep above measures chain A -- the per-presented-frame instance build --
+# on a bare ``WgpuImageView2D``.  A bare widget has no controller, so chain B
+# (``retarget_montage_viewport`` and the ladder snapshot under it) could never
+# run there and reported a structural ``B_calls = 0``.  Chain B needs the real
+# object graph: window, document, view state, and a live frame session.
+#
+# So this sweep opens an actual ArrayScope window per row and pans it with real
+# Qt mouse press/move/release on the graphics viewport.  That matters for more
+# than realism: ``ViewportBridge`` routes on ``QApplication.mouseButtons()``
+# (viewport_bridge.py:83), so a programmatic ``setRange`` takes the IMMEDIATE
+# uncoalesced branch while a user's drag takes the 16 ms COALESCED one.  Those
+# are different code paths with different retarget counts, and a drag is the
+# gesture the reported slideshow comes from.  QTest-posted button state does
+# reach ``mouseButtons()`` on this platform (verified: 1 through the drag, 0
+# after release), so no simulation or monkeypatch is needed -- the measured
+# path is the shipping one.  ``bridge_path`` in the emitted table is derived
+# from the probe, not asserted, so a future platform where this stops holding
+# reports "immediate" rather than silently mislabelling a coalesced number.
+#
+# Two visibility regimes, because they answer different questions and the
+# reported symptom lives in only one of them:
+#
+#   fit    -- the whole montage on screen (visible == committed).  This is the
+#             reported slideshow: cost should track the VISIBLE set.
+#   window -- a few tiles on screen out of a large montage.  This is the "only
+#             compute what is needed" claim: if chain B is truly visible-scoped,
+#             cost here stays flat as the montage grows behind the viewport.
+#
+# A per-retarget cost that is flat in committed tiles but linear in visible
+# tiles is a completely different finding from one that is linear in both,
+# which is why the table reports both counts on every row.
+
+DEFAULT_CHAIN_B_TILE_COUNTS = (16, 64, 144, 256, 400)
+CHAIN_B_REGIMES = ("fit", "window")
+
+# Tile pitches across the viewport in the ``window`` regime -- small enough
+# that the visible set stays a handful of tiles at every montage size.
+_CHAIN_B_WINDOW_VIEW_TILES = 3.0
+# QSettings namespace for the benchmark window.  Deliberately NOT the shipping
+# application name: the sweep pins a backend and present method, and must not
+# rewrite the developer's own persisted choices to do it.
+_CHAIN_B_APPLICATION_NAME = "ArrayScopePanBench"
+
+
+@dataclass(frozen=True)
+class MontagePanChainBRow:
+    """One (tile count, visibility regime) chain B measurement."""
+
+    tile_count: int
+    regime: str
+    tile_shape: tuple[int, int]
+    committed_tiles: int
+    visible_tiles: int
+    drag_steps: int
+    retarget_calls: int
+    retarget_ms: float
+    viewport_only_calls: int
+    viewport_only_ms: float
+    interactive_schedule_calls: int
+    ladder_calls: float
+    ladder_ms: float
+    present_method: str = "screen"
+    error: str = ""
+
+    @property
+    def bridge_path(self) -> str:
+        """Which ``ViewportBridge`` branch the measured retargets came from."""
+
+        if not self.retarget_calls:
+            return "none"
+        return "coalesced" if self.interactive_schedule_calls else "immediate"
+
+    @property
+    def chain_b_ms_per_retarget(self) -> float:
+        return float(self.retarget_ms) / max(1, int(self.retarget_calls))
+
+    @property
+    def ladder_ms_per_retarget(self) -> float:
+        return float(self.ladder_ms) / max(1, int(self.retarget_calls))
+
+    @property
+    def ladder_calls_per_retarget(self) -> float:
+        return float(self.ladder_calls) / max(1, int(self.retarget_calls))
+
+
+def benchmark_montage_pan_chain_b(
+    *,
+    tile_counts: tuple[int, ...] = DEFAULT_CHAIN_B_TILE_COUNTS,
+    regimes: tuple[str, ...] = CHAIN_B_REGIMES,
+    tile_shape: tuple[int, int] = (64, 64),
+    drag_steps: int = 12,
+    present_method: str = "screen",
+) -> tuple[MontagePanChainBRow, ...]:
+    """Drag a real montage window and time the viewport-retarget chain."""
+
+    rows: list[MontagePanChainBRow] = []
+    with _PanChainProbe() as probe:
+        for regime in regimes:
+            for tile_count in tile_counts:
+                try:
+                    rows.append(
+                        _measure_montage_pan_chain_b(
+                            probe,
+                            tile_count=int(tile_count),
+                            regime=str(regime),
+                            tile_shape=tile_shape,
+                            drag_steps=max(1, int(drag_steps)),
+                            present_method=str(present_method),
+                        )
+                    )
+                except Exception as exc:
+                    # Same rule as the chain A sweep: a row that could not be
+                    # measured is reported as failed, never dropped.
+                    rows.append(
+                        MontagePanChainBRow(
+                            tile_count=int(tile_count),
+                            regime=str(regime),
+                            tile_shape=(int(tile_shape[0]), int(tile_shape[1])),
+                            committed_tiles=0,
+                            visible_tiles=0,
+                            drag_steps=0,
+                            retarget_calls=0,
+                            retarget_ms=0.0,
+                            viewport_only_calls=0,
+                            viewport_only_ms=0.0,
+                            interactive_schedule_calls=0,
+                            ladder_calls=0,
+                            ladder_ms=0.0,
+                            present_method=str(present_method),
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    )
+    return tuple(rows)
+
+
+def _chain_b_montage_data(*, tile_shape: tuple[int, int], count: int) -> np.ndarray:
+    """(H, W, N) stack whose frames differ, so no tile can alias another."""
+
+    tile_h, tile_w = int(tile_shape[0]), int(tile_shape[1])
+    ramp = np.linspace(0.0, 1.0, tile_h * tile_w, dtype=np.float32).reshape(tile_h, tile_w)
+    stack = np.empty((tile_h, tile_w, int(count)), dtype=np.float32)
+    for index in range(int(count)):
+        stack[:, :, index] = ramp + float(index)
+    return stack
+
+
+def _open_chain_b_window(data: np.ndarray, *, present_method: str):
+    """Open a real ArrayScope window pinned to wgpu at ``present_method``."""
+
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.launch import _create_window
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+
+    pg.mkQApp()
+    QtCore.QCoreApplication.setOrganizationName("ArrayScope")
+    QtCore.QCoreApplication.setApplicationName(_CHAIN_B_APPLICATION_NAME)
+    settings = QtCore.QSettings()
+    settings.clear()
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
+    settings.setValue("wgpu_present_method", str(present_method))
+    settings.setValue("first_run_hints_dismissed", True)
+    settings.sync()
+    return _create_window(
+        data,
+        title="pan-chain-b",
+        application_name=_CHAIN_B_APPLICATION_NAME,
+    )
+
+
+def _pump(app, QtCore, seconds: float) -> None:
+    deadline = perf_counter() + float(seconds)
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+
+
+def _wait_for_committed_tiles(app, QtCore, view, expected: int, *, timeout_s: float) -> int:
+    """Pump until every tile is committed, so rows compare like with like."""
+
+    deadline = perf_counter() + float(timeout_s)
+    committed = 0
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        committed = len((getattr(view, "_wgpu_committed", None) or {}).get("tiles", {}))
+        if committed >= int(expected):
+            return committed
+    return committed
+
+
+def _measure_montage_pan_chain_b(
+    probe: _PanChainProbe,
+    *,
+    tile_count: int,
+    regime: str,
+    tile_shape: tuple[int, int],
+    drag_steps: int,
+    present_method: str,
+) -> MontagePanChainBRow:
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+    app, win = _open_chain_b_window(
+        _chain_b_montage_data(tile_shape=tile_shape, count=tile_count),
+        present_method=present_method,
+    )
+    try:
+        _pump(app, QtCore, 0.4)
+        win._set_view_state(win.view_state.with_montage_axis(2, text=":"))
+        win.render(reason="pan-chain-b")
+        view = win.img_view
+        backend = image_view_backend_capabilities(view).name
+        if backend != "wgpu":
+            raise RuntimeError(f"expected the wgpu backend, got {backend!r}")
+        active_present = str(view.wgpuPresentMethod())
+        if active_present != present_method:
+            raise RuntimeError(
+                f"requested present method {present_method!r} resolved to "
+                f"{active_present!r}: {view.wgpuPresentMethodFallbackReason()}"
+            )
+        committed = _wait_for_committed_tiles(app, QtCore, view, tile_count, timeout_s=30.0)
+        _pump(app, QtCore, 0.5)
+
+        viewbox = view.view
+        _apply_chain_b_regime(viewbox, regime, tile_shape=tile_shape, tile_count=tile_count)
+        _pump(app, QtCore, 1.0)
+
+        probe.reset()
+        _drag_viewport(app, QtCore, view, probe, steps=drag_steps)
+
+        instances = view._wgpu_tile_instances()
+        return MontagePanChainBRow(
+            tile_count=tile_count,
+            regime=regime,
+            tile_shape=(int(tile_shape[0]), int(tile_shape[1])),
+            committed_tiles=committed,
+            visible_tiles=_visible_instance_count(instances, viewbox.viewRange()),
+            drag_steps=drag_steps,
+            retarget_calls=probe.retarget_calls,
+            retarget_ms=probe.retarget_ms,
+            viewport_only_calls=probe.viewport_only_calls,
+            viewport_only_ms=probe.viewport_only_ms,
+            interactive_schedule_calls=probe.interactive_schedule_calls,
+            ladder_calls=probe.ladder_calls,
+            ladder_ms=probe.ladder_ms,
+            present_method=active_present,
+        )
+    finally:
+        win.close()
+        _pump(app, QtCore, 0.2)
+        _collect_benchmark_widgets()
+
+
+def _apply_chain_b_regime(viewbox, regime: str, *, tile_shape, tile_count: int) -> None:
+    """Park the camera so the visible tile set is the regime's controlled variable."""
+
+    if regime == "fit":
+        # Whole montage on screen: visible == committed, the reported symptom.
+        viewbox.autoRange(padding=0.02)
+        return
+    if regime != "window":
+        raise ValueError(f"unknown chain B visibility regime: {regime!r}")
+    # A few tiles on screen at the montage centre, independent of montage size.
+    (x_lo, x_hi), (y_lo, y_hi) = viewbox.viewRange()
+    centre_x = 0.5 * (x_lo + x_hi)
+    centre_y = 0.5 * (y_lo + y_hi)
+    span_x = _CHAIN_B_WINDOW_VIEW_TILES * (int(tile_shape[1]) + 1)
+    span_y = _CHAIN_B_WINDOW_VIEW_TILES * (int(tile_shape[0]) + 1)
+    viewbox.setRange(
+        xRange=(centre_x - 0.5 * span_x, centre_x + 0.5 * span_x),
+        yRange=(centre_y - 0.5 * span_y, centre_y + 0.5 * span_y),
+        padding=0,
+    )
+
+
+def _drag_viewport(app, QtCore, view, probe: _PanChainProbe, *, steps: int) -> None:
+    """Pan by a real left-button drag on the graphics viewport.
+
+    Each move is followed by a bounded pump rather than a fixed sleep: the
+    coalescing timer is 16 ms and single-shot, so waiting for the retarget it
+    scheduled is what makes one move cost one retarget.  Nothing here changes
+    the pacing -- the wait only observes it.
+    """
+
+    from PySide6.QtTest import QTest
+
+    target = view.getView().scene().views()[0].viewport()
+    centre = QtCore.QPoint(target.width() // 2, target.height() // 2)
+    left = QtCore.Qt.MouseButton.LeftButton
+    no_modifier = QtCore.Qt.KeyboardModifier.NoModifier
+    QTest.mousePress(target, left, no_modifier, centre)
+    app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+    try:
+        for step in range(1, int(steps) + 1):
+            before = probe.retarget_calls
+            QTest.mouseMove(target, centre + QtCore.QPoint(4 * step, 0))
+            deadline = perf_counter() + 1.0
+            while perf_counter() < deadline:
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+                if probe.retarget_calls > before:
+                    break
+    finally:
+        QTest.mouseRelease(target, left, no_modifier, centre + QtCore.QPoint(4 * int(steps), 0))
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+
+
+def chain_b_records(rows, *, environment=None) -> tuple[dict, ...]:
+    """JSONL records keyed by regime and tile count."""
+
+    environment = rendering_benchmark_environment() if environment is None else environment
+    timestamp = time.time()
+    return tuple(
+        {
+            "benchmark": "montage_pan_chain_b",
+            "timestamp": timestamp,
+            "tile_count": int(row.tile_count),
+            "regime": str(row.regime),
+            "environment": asdict(environment),
+            "row": asdict(row),
+            "bridge_path": row.bridge_path,
+            "chain_b_ms_per_retarget": row.chain_b_ms_per_retarget,
+            "ladder_ms_per_retarget": row.ladder_ms_per_retarget,
+        }
+        for row in rows
+    )
+
+
+def write_chain_b_jsonl(path, rows) -> None:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("a", encoding="utf-8") as handle:
+        for record in chain_b_records(rows):
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _slope_or_held(points) -> str:
+    """Slope text, or an explicit refusal when the variable was held fixed.
+
+    A regime that deliberately pins one variable (``window`` holds the visible
+    set constant while the montage grows) yields a denominator near zero, and
+    least squares will happily return a large, meaningless number for it.
+    Publishing that alongside a real slope invites reading noise as a finding,
+    so the degenerate case is named instead of dressed up.
+    """
+
+    # Ratio, not absolute spread: the ``window`` regime's visible set drifts
+    # 16 -> 20 while the montage grows 25x, and that 1.25x wobble is nowhere
+    # near enough leverage to attribute a per-tile cost to.
+    spread = {round(float(x)) for x, _ in points}
+    if len(spread) < 2 or max(spread) < 2 * max(1, min(spread)):
+        return "n/a (held ~constant)"
+    return f"{_fit_ms_per_tile(points) * 1000.0:+.2f} us"
+
+
+def format_chain_b_table(rows) -> str:
+    """Chain B summary: cost per retarget against committed and visible tiles."""
+
+    header = (
+        f"{'regime':>7} {'tiles':>6} {'commit':>6} {'vis':>5} {'B_calls':>8} "
+        f"{'B_ms/retgt':>11} {'vp_only':>8} {'ladder/rt':>10} "
+        f"{'ladder_ms':>10} {'path':>10}"
+    )
+    methods = sorted({str(row.present_method) for row in rows})
+    lines = [f"present: {', '.join(methods)}   backend: wgpu", header, "-" * len(header)]
+    lines.extend(
+        f"{row.regime:>7} {row.tile_count:>6} {row.committed_tiles:>6} "
+        f"{row.visible_tiles:>5} {row.retarget_calls:>8} "
+        f"{row.chain_b_ms_per_retarget:>11.3f} {row.viewport_only_calls:>8} "
+        f"{row.ladder_calls_per_retarget:>10.2f} "
+        f"{row.ladder_ms_per_retarget:>10.3f} {row.bridge_path:>10}"
+        for row in rows
+    )
+    lines.extend(f"  !! {row.regime}/{row.tile_count}: {row.error}" for row in rows if row.error)
+    lines.append("")
+    measured = [row for row in rows if row.retarget_calls and not row.error]
+    for regime in sorted({row.regime for row in measured}):
+        scoped = [row for row in measured if row.regime == regime]
+        if len(scoped) < 2:
+            continue
+        commit_slope = _slope_or_held(
+            [(row.committed_tiles, row.chain_b_ms_per_retarget) for row in scoped]
+        )
+        visible_slope = _slope_or_held(
+            [(row.visible_tiles, row.chain_b_ms_per_retarget) for row in scoped]
+        )
+        costs = [row.chain_b_ms_per_retarget for row in scoped]
+        lines.append(
+            f"chain B [{regime}]: {commit_slope} per added COMMITTED tile, "
+            f"{visible_slope} per added VISIBLE tile "
+            f"({min(costs):.2f} -> {max(costs):.2f} ms/retarget across the sweep)"
+        )
+    lines.append("")
+    lines.append(
+        "B_calls > 0 is the acceptance signal: chain B is the coalesced "
+        "drag-retarget path, reached here by real Qt mouse events rather than "
+        "by setRange, which would take the bridge's immediate branch instead."
+    )
+    lines.append(
+        "Flat in committed but linear in visible means chain B is already "
+        "visible-scoped and the cost is the visible set; linear in both means "
+        "it still walks the whole montage."
+    )
+    lines.append(
+        "The fitted slopes are a summary, not a model: if the fit regime's "
+        "cost rises faster than its own slope predicts, the growth is "
+        "superlinear in the visible set and the endpoint ratio above is the "
+        "honest figure to quote."
+    )
+    lines.append(
+        "ladder_ms is the snapshot's share of B_ms/retgt -- the memoization "
+        "target's own cost, sub-attributed so the surgery can be judged "
+        "against what it actually removes."
+    )
+    return "\n".join(lines)
+
+
 def _parse_tile_counts(raw: str) -> tuple[int, ...]:
     counts = []
     for chunk in str(raw).split(","):
@@ -1938,6 +2391,33 @@ def main(argv: tuple[str, ...] | None = None) -> None:
             "cost instead of waiting; 0 keeps each path's shipping cadence"
         ),
     )
+    parser.add_argument(
+        "--chain-b-tile-counts",
+        type=str,
+        default="",
+        help=(
+            "comma-separated montage tile counts for the chain B "
+            "(viewport-retarget) sweep, e.g. 16,64,144,256,400; opens a real "
+            "window per row and pans it with real Qt mouse events"
+        ),
+    )
+    parser.add_argument(
+        "--chain-b-regimes",
+        type=str,
+        default=",".join(CHAIN_B_REGIMES),
+        help=(
+            "comma-separated visibility regimes for the chain B sweep: "
+            "'fit' puts the whole montage on screen, 'window' leaves a few "
+            "tiles visible on a large montage"
+        ),
+    )
+    parser.add_argument("--chain-b-drag-steps", type=int, default=12)
+    parser.add_argument("--chain-b-tile-edge", type=int, default=64)
+    parser.add_argument(
+        "--chain-b-present-method",
+        choices=("bitmap", "screen"),
+        default="screen",
+    )
     args = parser.parse_args(argv)
 
     from arrayscope.app.qt_binding import prefer_pyside6
@@ -1946,6 +2426,21 @@ def main(argv: tuple[str, ...] | None = None) -> None:
     import pyqtgraph as pg
 
     pg.mkQApp()
+    if args.chain_b_tile_counts:
+        regimes = tuple(
+            chunk.strip() for chunk in str(args.chain_b_regimes).split(",") if chunk.strip()
+        )
+        rows = benchmark_montage_pan_chain_b(
+            tile_counts=_parse_tile_counts(args.chain_b_tile_counts),
+            regimes=regimes or CHAIN_B_REGIMES,
+            tile_shape=(int(args.chain_b_tile_edge), int(args.chain_b_tile_edge)),
+            drag_steps=int(args.chain_b_drag_steps),
+            present_method=str(args.chain_b_present_method),
+        )
+        if args.jsonl:
+            write_chain_b_jsonl(args.jsonl, rows)
+        print(format_chain_b_table(rows))
+        return
     if args.tile_counts:
         rows = benchmark_montage_pan_scaling(
             tile_counts=_parse_tile_counts(args.tile_counts),
