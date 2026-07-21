@@ -2204,6 +2204,50 @@ def test_session_fixture_shape_mismatch_raises_actionable_error(tmp_path):
     assert "--session-fixture ''" in message
 
 
+def test_profile_session_fixture_uses_file_view_session_directory_owner(
+    qt_app, tmp_path, monkeypatch
+):
+    from dataclasses import dataclass
+
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.tools.profile_montage_workflow import _install_profile_session_fixture
+
+    @dataclass(frozen=True)
+    class _Session:
+        metadata: object
+
+    fixture = tmp_path / "profile-session.json"
+    fixture.write_text("{}", encoding="utf-8")
+    owned_directory = tmp_path / "owned-file-view-sessions"
+    written_directories = []
+
+    def save_session_file(config_dir, _session):
+        written_directories.append(Path(config_dir))
+        return Path(config_dir) / "stored-session.json"
+
+    assert qt_app.applicationName() == "ArrayScopeTests"
+    monkeypatch.setattr(
+        "arrayscope.window.file_view_session._file_view_session_config_dir",
+        lambda: owned_directory,
+    )
+    settings = QtCore.QSettings()
+
+    _install_profile_session_fixture(
+        QtCore,
+        data_path=tmp_path / "data.npy",
+        data=object(),
+        session_fixture=fixture,
+        settings=settings,
+        loads_session=lambda _text, _shape: _Session(metadata=None),
+        metadata_for_file=lambda _path, **_kwargs: "metadata",
+        save_session_file=save_session_file,
+        settings_key_for_metadata=lambda _metadata: "profile-session-key",
+    )
+
+    assert written_directories == [owned_directory]
+
+
 def test_montage_work_in_flight_counts_semantic_evidence_owner():
     from arrayscope.tools.profile_montage_workflow import _montage_work_in_flight
 

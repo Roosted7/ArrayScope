@@ -5590,6 +5590,8 @@ def _install_profile_session_fixture(
     a user session.
     """
 
+    from arrayscope.window.file_view_session import _file_view_session_config_dir
+
     if session_fixture is None:
         return None
     path = Path(session_fixture)
@@ -5607,8 +5609,7 @@ def _install_profile_session_fixture(
         ) from exc
     metadata = metadata_for_file(data_path, data=data)
     session = replace(template, metadata=metadata)
-    config_dir = Path(settings.fileName()).parent
-    stored = save_session_file(config_dir, session)
+    stored = save_session_file(_file_view_session_config_dir(), session)
     settings.setValue(settings_key_for_metadata(metadata), stored.name)
     settings.sync()
     return session
