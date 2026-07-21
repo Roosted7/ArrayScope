@@ -2283,6 +2283,8 @@ class FrameSession:
 
         if not self._resident_lod_active():
             return False
+        if not self.scheduling_policy.verdict.coverage_open:
+            return False
         planned = tuple(int(tile) for tile in tuple(planned_numbers or ()))
         if not planned:
             return False

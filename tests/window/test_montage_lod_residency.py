@@ -3699,6 +3699,67 @@ def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
     assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
 
 
+def test_offscreen_floor_claim_cannot_block_required_exact_atomic_successor():
+    """Reproduce session 39: required L4 pixels must advance in REFINE.
+
+    The margin-expanded session can still own an offscreen preview producer
+    after the physical frame-plan scope has completed coverage.  That shell
+    work must not keep the atomic presentation builder in floor-first mode and
+    suppress the already-rendered exact wrappers for the required center.
+    """
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=4)
+    session.frame_plan = SimpleNamespace(active_region_ids=(1, 2))
+    session.sync_lifecycle_scope()
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+
+    for tile_number in (1, 2):
+        rendered = session.rendered_tiles[tile_number]
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=2,
+            semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        _claim_preview_resident(session, tile_number, key)
+
+    # Tile 0 models a margin-shell floor producer that is still live but is
+    # not part of FramePlan.active_region_ids.  It has no ready payload yet.
+    shell = session.rendered_tiles.pop(0)
+    session.rendered_tiles.pop(3)
+    session.dirty_payloads.pop(0, None)
+    session.dirty_payloads.pop(3, None)
+    shell_key = page_set_key_for_rendered(
+        shell,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(shell.tile.source_index),
+    )
+    session.lifecycle.level_claimed(
+        0,
+        shell_key,
+        ClaimOwner.PREVIEW,
+        request=("offscreen-preview", shell_key),
+    )
+    session.lifecycle.level_materializing(0, shell_key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
+    assert set(preview_delta.upserts) == {1, 2}
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+    assert session.scheduling_policy.observe(session.lifecycle)
+    assert not session.scheduling_policy.verdict.coverage_open
+
+    session.atomic_successor_pending = True
+    session.mark_preview_refinements_dirty((1, 2))
+    _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
+
+    assert set(exact_delta.upserts) == {1, 2}
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
+
+
 def test_backend_confirmed_preview_does_not_settle_when_exact_exists():
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=2)
