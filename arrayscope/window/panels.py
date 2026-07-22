@@ -29,6 +29,13 @@ class ManagedPanel:
     placeholder: QtWidgets.QWidget | None = None
     user_visible: bool | None = None
     auto_visible: bool = False
+    #: Where the panel was last OPEN (docked vs detached), remembered across a
+    #: hide so a reopen restores the same presentation. Session-only, in memory
+    #: -- deliberately never written to QSettings (a fresh window opens docked).
+    last_open_location: PanelLocation = PanelLocation.DOCKED
+    #: Geometry of the detached dialog when it was last closed, restored onto
+    #: the recreated dialog on reopen. Session-only, never persisted.
+    float_geometry: Qt.QtCore.QRect | None = None
 
 
 def _set_body_size_grips_visible(body, visible: bool) -> None:
@@ -89,6 +96,45 @@ class PanelManager:
     def location(self, name):
         return self._panels_by_name[str(name)].location
 
+    def _remember_open_location(self, panel: ManagedPanel) -> None:
+        """Latch how the panel is currently open, so a reopen restores it.
+
+        Detached panels also remember their dialog geometry so the floating
+        window comes back where the user left it. Docked panels clear no
+        geometry -- a docked reopen ignores ``float_geometry`` entirely.
+        """
+        if panel.location == PanelLocation.DETACHED:
+            panel.last_open_location = PanelLocation.DETACHED
+            if panel.dialog is not None:
+                panel.float_geometry = Qt.QtCore.QRect(panel.dialog.geometry())
+        elif panel.location == PanelLocation.DOCKED:
+            panel.last_open_location = PanelLocation.DOCKED
+
+    def show_panel(self, name, *, reason, preserve_canvas=True):
+        """Single reopen entry point: restore to the last OPEN presentation.
+
+        A panel hidden while detached reopens detached (with its remembered
+        geometry); a panel hidden while docked reopens docked. Routing every
+        show through here is what makes the three managed docks behave
+        identically instead of every reopen collapsing to DOCKED.
+        """
+        panel = self._panels_by_name[str(name)]
+        if panel.location == PanelLocation.DETACHED:
+            if panel.dialog is not None:
+                panel.dialog.show()
+                panel.dialog.raise_()
+            self._sync_view_action(panel)
+            return
+        if panel.location == PanelLocation.DOCKED:
+            self._sync_view_action(panel)
+            return
+        if panel.last_open_location == PanelLocation.DETACHED:
+            self.detach_panel(name, reason=reason, preserve_canvas=preserve_canvas)
+            if panel.float_geometry is not None and panel.dialog is not None:
+                panel.dialog.setGeometry(Qt.QtCore.QRect(panel.float_geometry))
+            return
+        self.show_docked(name, reason=reason, preserve_canvas=preserve_canvas)
+
     def show_docked(self, name, *, reason, preserve_canvas=True):
         self._last_transition_reason = str(reason)
         self._last_transition_preserve_canvas = bool(preserve_canvas)
@@ -107,6 +153,7 @@ class PanelManager:
         self._last_transition_reason = str(reason)
         self._last_transition_preserve_canvas = bool(preserve_canvas)
         panel = self._panels_by_name[str(name)]
+        self._remember_open_location(panel)
         if panel.dialog is not None:
             self._destroy_dialog_and_take_body(panel)
             self._store_body_in_hidden_dock(panel)
@@ -156,10 +203,14 @@ class PanelManager:
 
     def _hide_detached_from_dialog(self, name):
         panel = self._panels_by_name[str(name)]
+        self._remember_open_location(panel)
         self._destroy_dialog_and_take_body(panel)
         self._store_body_in_hidden_dock(panel)
         panel.location = PanelLocation.HIDDEN
         self._sync_view_action(panel)
+        notify = getattr(self.window, "_on_managed_panel_closed_by_user", None)
+        if callable(notify):
+            notify(panel.name)
 
     def _destroy_dialog_and_take_body(self, panel: ManagedPanel) -> QtWidgets.QWidget | None:
         if panel.dialog is None:

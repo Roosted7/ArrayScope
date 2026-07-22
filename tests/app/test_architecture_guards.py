@@ -1136,6 +1136,12 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
                 "QTimer",
                 "UI cosmetic",
             ): 2,
+            (
+                "arrayscope/window/inspection.py",
+                "InspectionWorkflowMixin._schedule_hidden_roi_inspection_refresh",
+                "QTimer",
+                "UI cosmetic",
+            ): 1,
         }
     )
     found = Counter()

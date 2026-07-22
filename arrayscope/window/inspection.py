@@ -141,6 +141,20 @@ class InspectionWorkflowMixin:
                 pass
         return bool(self.inspection_dock.isVisible())
 
+    #: How long commit-driven hidden refreshes wait before submitting, so a
+    #: burst of frame commits collapses to one ROI evaluation.
+    _HIDDEN_ROI_REFRESH_COALESCE_MS = 50
+
+    #: Refresh reasons that originate from a display/montage frame commit. A
+    #: live montage fires these continuously while refining; submitting one ROI
+    #: job per commit pins a worker thread at ~100% (BUG 3), because the dedup
+    #: key changes every commit and never holds. These are coalesced behind a
+    #: single-shot timer. ROI edits and other reasons stay immediate so the
+    #: on-image overlay reacts promptly to user changes.
+    _COMMIT_DRIVEN_ROI_REFRESH_REASONS = frozenset(
+        {"display-commit", "montage-semantic-commit", "montage-layout-reflow"}
+    )
+
     def _schedule_refresh_inspection_dock(self, reason):
         if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
             return
@@ -154,10 +168,82 @@ class InspectionWorkflowMixin:
             self._inspection_stale = True
             if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
                 return
+            if str(reason) in self._COMMIT_DRIVEN_ROI_REFRESH_REASONS:
+                self._schedule_hidden_roi_inspection_refresh(reason)
+                return
+            self._roi_refresh_reason = reason
+            self._queue_roi_inspection_refresh(selections, panel_visible=False)
+            return
         self._roi_refresh_reason = reason
-        self._queue_roi_inspection_refresh(
-            selections, panel_visible=self._inspection_panel_is_visible()
+        self._queue_roi_inspection_refresh(selections, panel_visible=True)
+
+    def _schedule_hidden_roi_inspection_refresh(self, reason):
+        """Coalesce a commit-driven hidden refresh behind a single-shot timer."""
+        # No consumer at all: the dock is user-closed and nothing on-image
+        # needs keeping current. Do not wake the ROI worker lane.
+        if getattr(self, "_inspection_dock_user_visible", None) is False:
+            selections_fn = getattr(self.img_view, "roiSelections", None)
+            selections = tuple(selections_fn()) if callable(selections_fn) else ()
+            if not any(selection.enabled for selection in selections):
+                return
+        self._pending_hidden_roi_refresh_reason = str(reason)
+        timer = getattr(self, "_hidden_roi_refresh_timer", None)
+        if timer is None:
+            # Timer category: UI cosmetic. Debounces a burst of frame commits
+            # into a single hidden ROI refresh; the callback re-derives
+            # everything from the current selections, so this is pure
+            # rescheduling, not an ordering source for any frame semantics.
+            timer = Qt.QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._drain_hidden_roi_inspection_refresh)
+            self._hidden_roi_refresh_timer = timer
+        timer.start(int(self._HIDDEN_ROI_REFRESH_COALESCE_MS))
+
+    @Qt.QtCore.Slot()
+    def _drain_hidden_roi_inspection_refresh(self):
+        if not hasattr(self, "inspection_dock") or not hasattr(self, "img_view"):
+            return
+        if self._inspection_panel_is_visible():
+            return
+        selections = tuple(self.img_view.roiSelections())
+        if not any(selection.enabled for selection in selections):
+            self._update_roi_info_overlay(OrderedDict())
+            return
+        if self._roi_uses_montage_demand(selections) and self._montage_roi_values_pending():
+            self._inspection_stale = True
+            return
+        self._roi_refresh_reason = getattr(
+            self, "_pending_hidden_roi_refresh_reason", "display-commit"
         )
+        self._queue_roi_inspection_refresh(selections, panel_visible=False)
+
+    def _quiesce_hidden_roi_refresh(self):
+        """Stop all hidden-ROI background work when the dock is closed.
+
+        A live/refining source would otherwise keep feeding the ROI worker
+        lane after the panel that consumes the result is gone. Stops the
+        coalescing timer and cancels any in-flight/queued ROI evaluation. A
+        later ROI edit or a reopen wakes the pipeline again.
+        """
+        timer = getattr(self, "_hidden_roi_refresh_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._pending_hidden_roi_refresh_reason = None
+        controller = getattr(self, "roi_evaluation_controller", None)
+        if controller is not None:
+            controller.clear_group("roi-inspection")
+        self._roi_inspection_in_flight = False
+        self._roi_inspection_request_key = None
+
+    def _on_managed_panel_closed_by_user(self, name):
+        """Panel-manager hook: the user closed a detached panel's dialog.
+
+        Mirrors the docked-close path so a floating inspection dock that is
+        closed also quiesces the ROI pipeline.
+        """
+        if str(name) == "inspection":
+            self._inspection_dock_user_visible = False
+            self._quiesce_hidden_roi_refresh()
 
     def _queue_roi_inspection_refresh(self, selections, *, panel_visible: bool) -> None:
         self._pending_roi_inspection_refresh = SimpleNamespace(

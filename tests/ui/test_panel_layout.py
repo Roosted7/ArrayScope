@@ -635,8 +635,13 @@ def test_operation_dock_manual_close_is_not_persistent_across_launches(qtbot):
         _clear_arrayscope_settings()
 
 
-def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
+def test_detached_inspection_show_restores_float_not_dock(qtbot):
+    # BUG 2: a dock hidden while floating must reopen floating (its float
+    # state is remembered for the session), not silently collapse to docked.
+    # Redocking still happens only on an explicit request (the Dock button).
     _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtWidgets
+
     from arrayscope.window import ArrayScopeWindow
     from arrayscope.window.panels import PanelLocation
 
@@ -660,6 +665,14 @@ def test_detached_inspection_show_does_not_redock_until_requested(qtbot):
         action.trigger()
         _process_events(qtbot, count=15)
 
+        # Reopen restored the float, not a dock.
+        assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
+
+        # An explicit redock is still available and returns it to the dock.
+        dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
+        redock_button = dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
+        redock_button.click()
+        _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
     finally:
         win.close()
@@ -722,9 +735,12 @@ def test_closing_detached_dialog_unchecks_view_action(qtbot):
 
         action.trigger()
         _process_events(qtbot, count=15)
-        assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
+        # BUG 2: reopening a dock that was floating when closed restores the
+        # float, with its body intact in the recreated dialog.
+        assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
         assert (
-            win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
+            dialog.findChild(type(win.inspection_dock.stats_table))
             is win.inspection_dock.stats_table
         )
     finally:
@@ -851,12 +867,9 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
         action.trigger()
         _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
-        _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
+        # BUG 2: closed while floating -> reopens floating, body intact.
+        _assert_panel_invariants(win, "inspection", PanelLocation.DETACHED)
 
-        win.layout_manager.detach_managed_dock(
-            win.inspection_dock, reason="test", preserve_canvas=False
-        )
-        _process_events(qtbot, count=15)
         redock_button = panel.dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         redock_button.click()
         _process_events(qtbot, count=15)
@@ -905,9 +918,11 @@ def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
         action.trigger()
         _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
-        _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
+        # BUG 2: hidden while detached -> reopens detached, body recovered
+        # into the recreated dialog.
+        _assert_panel_invariants(win, "inspection", PanelLocation.DETACHED)
         assert (
-            win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
+            panel.dialog.findChild(type(win.inspection_dock.stats_table))
             is win.inspection_dock.stats_table
         )
     finally:

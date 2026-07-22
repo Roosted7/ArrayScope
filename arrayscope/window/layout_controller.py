@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import pyqtgraph.Qt as Qt
 
@@ -178,23 +179,72 @@ class WindowLayoutManager:
         # widgets being present in the main window layout.
         Qt.QtCore.QTimer.singleShot(0, self.window, self.resize_default_docks)
 
-    def set_operation_dock_visible_from_user(self, visible):
+    #: Managed docks whose visibility is remembered per session, keyed by the
+    #: window attribute holding the dock. Each entry is the window flag that
+    #: records the user's last explicit choice and the transition reason. This
+    #: table is the single source of truth so every dock -- including
+    #: inspection, which used to be an implicit special case -- follows one
+    #: code path rather than three hand-duplicated method triplets.
+    _USER_VISIBLE_DOCKS: ClassVar[dict[str, tuple[str, str]]] = {
+        "operation_dock": ("_operation_dock_user_visible", "user-operation"),
+        "profile_dock": ("_profile_dock_user_visible", "user-profile"),
+        "inspection_dock": ("_inspection_dock_user_visible", "user-inspection"),
+    }
+
+    def _user_visible_binding_for(self, dock):
         win = self.window
-        win._operation_dock_user_visible = bool(visible)
-        self._state_for(win.operation_dock).user_visible = bool(visible)
-        self.set_managed_dock_visible(win.operation_dock, bool(visible), reason="user-operation")
+        for attr, binding in self._USER_VISIBLE_DOCKS.items():
+            if dock is getattr(win, attr, None):
+                return binding
+        return None
+
+    def _set_dock_visible_from_user(self, dock, visible):
+        """Shared implementation for every user-driven managed-dock toggle."""
+        win = self.window
+        binding = self._user_visible_binding_for(dock)
+        if binding is None:
+            self.set_managed_dock_visible(dock, bool(visible), reason="user-managed")
+            return
+        flag_attr, reason = binding
+        setattr(win, flag_attr, bool(visible))
+        self._state_for(dock).user_visible = bool(visible)
+        panel_manager = getattr(win, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        if panel is not None:
+            panel.user_visible = bool(visible)
+        if not visible:
+            self._notify_managed_dock_user_closed(dock)
+        self.set_managed_dock_visible(dock, bool(visible), reason=reason)
+
+    def _notify_managed_dock_user_closed(self, dock):
+        """Let the window quiesce any background work a closed dock outlives.
+
+        Only the inspection dock spawns compute (ROI evaluation) that survives
+        its own visibility, so closing it must stop the pipeline rather than
+        leave it churning on a live source.
+        """
+        win = self.window
+        if dock is getattr(win, "inspection_dock", None):
+            quiesce = getattr(win, "_quiesce_hidden_roi_refresh", None)
+            if callable(quiesce):
+                quiesce()
+
+    def set_operation_dock_visible_from_user(self, visible):
+        self._set_dock_visible_from_user(self.window.operation_dock, visible)
 
     def set_profile_dock_visible_from_user(self, visible):
-        win = self.window
-        win._profile_dock_user_visible = bool(visible)
-        self._state_for(win.profile_dock).user_visible = bool(visible)
-        self.set_managed_dock_visible(win.profile_dock, bool(visible), reason="user-profile")
+        self._set_dock_visible_from_user(self.window.profile_dock, visible)
 
     def set_inspection_dock_visible_from_user(self, visible):
-        win = self.window
-        win._inspection_dock_user_visible = bool(visible)
-        self._state_for(win.inspection_dock).user_visible = bool(visible)
-        self.set_managed_dock_visible(win.inspection_dock, bool(visible), reason="user-inspection")
+        self._set_dock_visible_from_user(self.window.inspection_dock, visible)
+
+    def _panel_is_detached(self, dock) -> bool:
+        """A detached (floating) panel is open; the progressive sync policy
+        must treat it as visible and NEVER tear it down. Without this the
+        auto-hide path destroys the floating dialog behind the user's back."""
+        panel_manager = getattr(self.window, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        return panel is not None and panel.location == PanelLocation.DETACHED
 
     def sync_progressive_docks(self, *, preserve_canvas=True):
         win = self.window
@@ -204,7 +254,7 @@ class WindowLayoutManager:
             getattr(win, "_progressive_preserve_enabled", True)
         )
         changed = False
-        if hasattr(win, "operation_dock"):
+        if hasattr(win, "operation_dock") and not self._panel_is_detached(win.operation_dock):
             has_steps = bool(win.document.steps)
             # Adding an operation auto-opens the dock, EXCEPT when the user
             # closed it earlier in this session (user_visible False): that
@@ -224,7 +274,7 @@ class WindowLayoutManager:
                 self.set_dock_visible_later(
                     win.operation_dock, False, preserve_canvas=preserve_canvas
                 )
-        if hasattr(win, "profile_dock"):
+        if hasattr(win, "profile_dock") and not self._panel_is_detached(win.profile_dock):
             live_profile = win.widgets["buttons"]["display"]["live_profile"].isChecked()
             user_visible = getattr(win, "_profile_dock_user_visible", None)
             should_show_profile = (
@@ -276,6 +326,12 @@ class WindowLayoutManager:
         ):
             return
         if not visible:
+            # A detached panel is open and must never be auto-hidden: the
+            # DETACHED branch of set_managed_dock_visible would tear down its
+            # floating dialog. This is the choke point every progressive-sync
+            # hide flows through, so guarding it here protects all three docks.
+            if self._panel_is_detached(dock):
+                return
             if (
                 dock is getattr(win, "operation_dock", None)
                 and win.document.steps
@@ -324,6 +380,29 @@ class WindowLayoutManager:
         if (
             panel is not None
             and visible
+            and panel.location == PanelLocation.HIDDEN
+            and getattr(panel, "last_open_location", PanelLocation.DOCKED) == PanelLocation.DETACHED
+        ):
+            # Reopen restores the last OPEN presentation: a dock the user
+            # hid while floating comes back floating (at its remembered
+            # geometry), instead of every reopen collapsing to DOCKED.
+
+            def transition():
+                panel_manager.show_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+                if raise_dock and panel.dialog is not None:
+                    panel.dialog.raise_()
+
+            self.run_panel_transition_preserving_canvas(
+                transition,
+                preserve_canvas=preserve_canvas,
+                strong_preserve=False,
+                transition_name="show-detached",
+            )
+            self.schedule_view_geometry_refresh()
+            return
+        if (
+            panel is not None
+            and visible
             and Qt.QtWidgets.QDockWidget.widget(dock) is not panel.body
         ):
 
@@ -356,6 +435,10 @@ class WindowLayoutManager:
             try:
                 self._apply_dock_visibility_raw(dock, bool(visible))
                 if panel is not None:
+                    if not visible:
+                        # Still DOCKED at this point: record it so a later
+                        # reopen restores docked (not a stale float state).
+                        panel_manager._remember_open_location(panel)
                     panel.location = PanelLocation.DOCKED if visible else PanelLocation.HIDDEN
                     if not visible:
                         win.removeDockWidget(dock)
@@ -452,12 +535,26 @@ class WindowLayoutManager:
         if panel is None:
             return
         was_docked = panel.location == PanelLocation.DOCKED
-        if was_docked:
 
-            def transition():
+        def do_detach():
+            # Detach hides the dock, which synchronously emits
+            # visibilityChanged(False). Without this guard that signal is read
+            # as a user close and flips the dock's user-visible flag off, so a
+            # later progressive sync tears the floating panel down. It is a
+            # layout transition, not a user hide -- reuse the same guard the
+            # show/hide transitions already set.
+            self._visibility_preserve_active = True
+            try:
                 panel_manager.detach_panel(
                     panel.name, reason=reason, preserve_canvas=preserve_canvas
                 )
+            finally:
+                self._visibility_preserve_active = False
+
+        if was_docked:
+
+            def transition():
+                do_detach()
                 self._activate_main_window_layout()
 
             self.run_panel_transition_preserving_canvas(
@@ -467,7 +564,7 @@ class WindowLayoutManager:
                 transition_name="detach",
             )
         else:
-            panel_manager.detach_panel(panel.name, reason=reason, preserve_canvas=preserve_canvas)
+            do_detach()
         self.schedule_view_geometry_refresh()
 
     def redock_managed_panel(self, dock, *, reason, preserve_canvas=True):

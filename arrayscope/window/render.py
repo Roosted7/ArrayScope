@@ -30,6 +30,7 @@ from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.frame_controller import FrameControllerMixin
 from arrayscope.window.interaction_mode import InteractionMode
+from arrayscope.window.panels import PanelLocation
 from arrayscope.window.render_contract import RenderGeneration, generation_is_current
 from arrayscope.window.render_prefetch import RenderPrefetchMixin
 from arrayscope.window.render_resources import RenderResourceMixin
@@ -606,6 +607,25 @@ class RenderOrchestrator(
             self.win.img_view.getView().unsetCursor()
             self.update_line_plot()
 
+    def _managed_dock_visibility_is_user_driven(self, dock, visible) -> bool:
+        """Shared gate for the three managed-dock ``visibilityChanged`` handlers.
+
+        ``False`` means the signal is a layout-transition artifact that must be
+        ignored: either the canvas-preserve guard is active, or a DETACHED
+        panel is emitting the transient hide it always fires while its dock is
+        removed from the main window. That detached case is exactly the
+        asymmetry that let detaching a dock flip its user-visible flag off (and
+        the progressive sync then destroy the floating panel). Handling it here
+        keeps all three docks on one code path instead of three.
+        """
+        if getattr(self.win, "_closing", False):
+            return False
+        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
+            return False
+        panel_manager = getattr(self.win, "panel_manager", None)
+        panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
+        return panel is None or panel.location != PanelLocation.DETACHED
+
     def _on_profile_dock_visibility_changed(self, visible):
         if getattr(self.win, "_closing", False):
             return
@@ -613,7 +633,7 @@ class RenderOrchestrator(
         # canvas-preserve guard below skips user-driven show/hide, which is
         # exactly when the chips need to (un)highlight.
         self._sync_profile_strip_availability(bool(visible))
-        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
+        if not self._managed_dock_visibility_is_user_driven(self.win.profile_dock, visible):
             return
         if not visible:
             self.win._profile_dock_user_visible = False
@@ -638,9 +658,7 @@ class RenderOrchestrator(
         )
 
     def _on_inspection_dock_visibility_changed(self, visible):
-        if getattr(self.win, "_closing", False):
-            return
-        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
+        if not self._managed_dock_visibility_is_user_driven(self.win.inspection_dock, visible):
             return
         if not visible:
             self.win._inspection_dock_user_visible = False
@@ -648,9 +666,7 @@ class RenderOrchestrator(
             self.win._refresh_inspection_dock_now()
 
     def _on_operation_dock_visibility_changed(self, visible):
-        if getattr(self.win, "_closing", False):
-            return
-        if getattr(self.win.layout_manager, "_visibility_preserve_active", False):
+        if not self._managed_dock_visibility_is_user_driven(self.win.operation_dock, visible):
             return
         if not visible:
             self.win._operation_dock_user_visible = False
