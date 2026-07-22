@@ -356,6 +356,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             self._set_montage_view_range(active_continuity_range)
             self.retarget_montage_viewport()
             return
+        if getattr(self.win.view_state, "montage_axis", None) is None:
+            # A single (non-montage) image has no tiles to re-flow: the image
+            # view's own resize (_apply_viewport_resize) already preserved the
+            # camera. Running the montage retarget below would re-apply a
+            # second, conflicting camera and visibly rescale the content -- the
+            # reason a manual single-image view shrinks on resize while montages
+            # (which take ONLY this path via _viewport_resize_owned_by_parent)
+            # do not. Continuity restores above still run for single images.
+            return
         self._montage_live_layout_reflow = True
         self.win._montage_viewport_update_pending = False
         viewport_plan = self._retarget_montage_resize_camera(

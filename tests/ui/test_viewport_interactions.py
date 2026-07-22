@@ -30,6 +30,53 @@ def test_render_preserves_viewport_for_same_display_shape(qtbot):
         win.close()
 
 
+@pytest.mark.parametrize("span", [40.0, 600.0], ids=["zoomed-in", "zoomed-out"])
+def test_single_image_manual_resize_preserves_content_scale(qtbot, span):
+    # A manual (USER) single-image view must keep its content scale (world
+    # units per viewport pixel) across a window resize -- only the amount of
+    # content revealed changes. Regression: the montage retarget was running
+    # for non-montage images too and re-applied a conflicting camera, shrinking
+    # the content. Covered zoomed IN and OUT because the bug hit both.
+    _clear_arrayscope_settings()
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.random.default_rng(0).random((200, 200)).astype(np.float32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(1000, 800)
+        win.show()
+        qtbot.waitExposed(win)
+        _process_events(qtbot, count=30)
+        view = win.img_view.getView()
+        center = 100.0
+        view.setRange(
+            xRange=(center - span / 2, center + span / 2),
+            yRange=(center - span / 2, center + span / 2),
+            padding=0,
+        )
+        _process_events(qtbot, count=8)
+        win.img_view.viewport_controller.mode = ViewportMode.USER
+
+        def units_per_pixel():
+            vp = win.img_view.graphicsView.viewport().size()
+            r = view.viewRange()
+            return (
+                (r[0][1] - r[0][0]) / max(1, vp.width()),
+                (r[1][1] - r[1][0]) / max(1, vp.height()),
+            )
+
+        before = units_per_pixel()
+        win.resize(600, 780)
+        _process_events(qtbot, count=30)
+        after = units_per_pixel()
+
+        assert after[0] == pytest.approx(before[0], rel=0.02)
+        assert after[1] == pytest.approx(before[1], rel=0.02)
+    finally:
+        win.close()
+
+
 def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.display.viewport import ViewportMode
