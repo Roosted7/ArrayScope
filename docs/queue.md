@@ -66,16 +66,15 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   reject a non-contiguous destination loudly. Exit gate: a deterministic test
   in `tests/io/test_progressive.py` that a non-contiguous write is either
   visible or refused, never a silent no-op.
-- **Closing the streaming viewer mid-load does not cancel the reader thread**
-  (found 2026-07-22). `open_flow.FileOpenSession` wires cancel only to the
-  loading window and `LoadStatusWidget` buttons, never to the viewer window's
-  close/destroyed; the reader keeps reading the whole file into a detached
-  array nobody views, and `_on_finished` then touches a closed (not
-  `WA_DeleteOnClose`) window (`setWindowTitle`/`show_status_message`). Exit
-  gate: closing the viewer mid-load cancels the load within the interaction
-  budget and no callback runs against a destroyed window — pinned in the ring
-  that owns window lifecycle (`tests/ui`), and a real-Wayland open-then-close
-  leaves no live reader thread.
+- **Closing the streaming viewer mid-load does not cancel the reader thread —
+  DONE 2026-07-22** (`977a86bb`). `FileOpenSession` now installs itself as an
+  event filter on the viewer window (ArrayScopeWindow emits no close signal and
+  has no `WA_DeleteOnClose`, so `destroyed` never fires on user close); a
+  `QEvent.Close` sets `_window_closed` + `cancel()`, and every terminal/progress
+  handler (`_on_progress`/`_on_finished`/`_on_cancelled`/`_on_failed`/
+  `_refresh_viewer_data`) is guarded against touching the closed window. Evidence:
+  red-first `tests/app/test_open_flow.py::test_closing_viewer_mid_load_cancels_reader`
+  + `::test_finished_handler_ignores_closed_viewer`; full parallel suite 2754 passed.
 - **Demand-freshness unit-gate fixture** (live path FIXED 2026-07-19 `6fd0c262`,
   [dossier](redesign/demand-freshness-cold-fill-2026-07-19.md); full history in the
   [Done ledger](queue-done.md)): the unit gate's fixture carries no committed display
