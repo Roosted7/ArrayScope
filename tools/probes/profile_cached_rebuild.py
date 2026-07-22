@@ -54,10 +54,20 @@ timer = QtCore.QTimer(win)
 timer.setInterval(100)
 
 
-def enable_fft():
+def _montage_axis(default: int = 2) -> int:
+    """Current montage axis, or ``default`` when no montage is active.
+
+    ``montage_axis`` is ``None`` whenever the montage view is off, so guarding
+    only on ``current is not None`` still yields ``int(None)``.
+    """
+
     current = win._frame_session
-    axis = current.montage_axis if current is not None else 2
-    win.operation_coordinator.load_operations((CenteredFFT(axis=int(axis)),))
+    axis = getattr(current, "montage_axis", None) if current is not None else None
+    return int(axis) if axis is not None else default
+
+
+def enable_fft():
+    win.operation_coordinator.load_operations((CenteredFFT(axis=_montage_axis()),))
     win._set_document(win.operation_coordinator.document)
     win._coerce_channel_for_current_dtype()
     win.render(reason="probe-fft")
@@ -78,8 +88,7 @@ def scrub_step():
         QtCore.QTimer.singleShot(100, win, wait_settle)
         return
     vs = win.view_state
-    current = win._frame_session
-    axis = current.montage_axis if current is not None else 2
+    axis = _montage_axis()
     i = INDICES[state["i"]]
     state["i"] += 1
     warm = state["pass"] == 2
@@ -87,9 +96,7 @@ def scrub_step():
     if warm:
         prof.enable()
     win._note_viewport_interaction("dimension-scrub")
-    win._set_view_state(
-        vs.with_montage_axis(int(axis), indices=range(i, i + 64), text=f"{i}:{i + 64}")
-    )
+    win._set_view_state(vs.with_montage_axis(axis, indices=range(i, i + 64), text=f"{i}:{i + 64}"))
     win.render(reason="probe-scrub")
     if warm:
         prof.disable()
