@@ -149,6 +149,11 @@ class RenderOrchestrator(
             value = self._hover_value_from_display(mapping)
             if value is not None:
                 self._commit_pixel_value(value, x_i, y_i, context, pos)
+            # Linked compare cursor: overrides the HUD on this window (and its
+            # sibling) with the exact source value of every group member at the
+            # shared source index. Works even when the display value is a
+            # coarse-LOD preview (value is None) since it reads base_data.
+            self.win._broadcast_compare_cursor(mapping)
             return
         if hasattr(self.win, "img_view"):
             self.win.img_view.hideHud()
@@ -323,6 +328,9 @@ class RenderOrchestrator(
         hide_hud = getattr(view, "hideHud", None)
         if callable(hide_hud):
             hide_hud()
+        clear_compare = getattr(self.win, "_clear_compare_cursor", None)
+        if callable(clear_compare):
+            clear_compare()
 
     def _refresh_hover_after_display_commit(self) -> None:
         pos = getattr(self, "_last_image_mouse_scene_pos", None)

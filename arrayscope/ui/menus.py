@@ -116,6 +116,15 @@ class WindowMenuMixin:
         command_palette_action.triggered.connect(self.open_command_palette)
         view_menu.addAction(command_palette_action)
         view_menu.addSeparator()
+        compare_action = QtGui.QAction("Compare with…", self)
+        set_action_icon(compare_action, "open_in_new")
+        compare_action.setToolTip(
+            "Open a second window over this array, pre-linked on dimensions, "
+            "pan/zoom and window/level, with a linked value cursor."
+        )
+        compare_action.triggered.connect(lambda _checked=False: self.open_compare_window())
+        view_menu.addAction(compare_action)
+        view_menu.addSeparator()
         panel_resize_menu = QtWidgets.QMenu("Panel Resize Behavior", self)
         view_menu.addMenu(panel_resize_menu)
         self._panel_resize_actions = {}

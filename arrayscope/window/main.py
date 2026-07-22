@@ -34,6 +34,7 @@ from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
 from arrayscope.ui.menus import WindowMenuMixin
 from arrayscope.ui.toasts import show_status_message
+from arrayscope.window.compare_launcher import CompareLauncherMixin
 from arrayscope.window.file_reload import FileReloadMixin
 from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
@@ -49,6 +50,7 @@ class ArrayScopeWindow(
     DisplayControlBuildMixin,
     StateSyncMixin,
     OperationActionsMixin,
+    CompareLauncherMixin,
     FileViewSessionMixin,
     InspectionWorkflowMixin,
     DimensionControlMixin,
@@ -238,6 +240,12 @@ class ArrayScopeWindow(
         self.line_plot_dimension = self.view_state.line_axis or 0
         self.profile_axes = (self.line_plot_dimension,)
         self.roi_store = RoiStore()
+        # Linked-compare state: shared cursor group + last combined readout.
+        self._compare_group = None
+        self.compare_label = "A"
+        self._last_compare_hud_text = None
+        self._last_compare_values = {}
+        self._last_compare_array_index = None
         self.interaction_mode = InteractionMode.CURSOR
         # Dropping supported files onto the viewer opens them in new windows.
         self.setAcceptDrops(True)
@@ -686,6 +694,7 @@ class ArrayScopeWindow(
         controller = getattr(self, "sync_controller", None)
         if controller is not None:
             controller.shutdown()
+        self._teardown_compare()
         layout_manager = getattr(self, "layout_manager", None)
         if layout_manager is not None:
             layout_manager.canvas_preserver.cancel()
