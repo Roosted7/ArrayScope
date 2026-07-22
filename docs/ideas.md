@@ -46,6 +46,26 @@ Measure whether bounded sampling/binning actually violates budget. When it does,
 
 Record device limits, attempt representative allocations conservatively, and cache proven-compatible texture classes for the session. Treat allocation failure as recoverable evidence, not a crash.
 
+### Capacity-triggered compression
+
+Keep the G7 codecs as experimental mechanisms, not an active optimization.
+Revive them only when field diagnostics repeatedly show one of three user
+problems: GPU pool exhaustion/eviction churn, costly `StageCache` misses under a
+measured RSS cap, or remote/storage bandwidth dominating first pixels. The
+candidate must attack that owner directly: source chunks compressed at rest,
+an off-thread lossless tier under `StageCache`, or GPU-native/pre-encoded
+presentation pages with on-GPU LOD and one physically bounded pool. Lossy
+display pages never own exact histogram, levels, or cursor values. The
+[2026-07-22 live review](reviews/2026-07-22-compression-live-benefit-review.md)
+is the baseline and revival gate. The active retention audit must keep the
+evaluator's exact ROI-demand cache distinct from GPU page storage and compare
+only the physical owner selected by the current backend. If StageCache pressure
+triggers the work,
+prototype raw-hot/compressed-cold demotion on the kernel's lowest-priority lane:
+compression happens from an immutable evicted value outside the cache lock,
+is cancelled by visible demand, and admits by expected recompute latency saved
+per compressed byte. Idle CPU alone is not an admission signal.
+
 ### Elastic preview residency
 
 Experiment with a retained preview LOD tier that uses otherwise-unused CPU/GPU memory for nearby
@@ -175,8 +195,10 @@ Starred items were judged highest-leverage.
 
 ### Reach
 
-- ★ **Command protocol as wire protocol.** ADR 0057 + G7 compression =
-  run kernel+engine near the data, stream commits to a thin client;
+- ★ **Command protocol as wire protocol.** ADR 0057 can run kernel+engine near
+  the data and stream commits to a thin client. G7's current CPU codecs are not
+  yet the wire format: the live-benefit audit measured a NO for CPU transport and
+  parked encoding until a real remote-bandwidth trace triggers the bounded design;
   remote viewing falls out of architecture already being built (browser/
   WebGPU client is the far end). Reframes "PyQtGraph targets remote."
 - **Watch mode / recon debugger.** `--watch out.cfl` or

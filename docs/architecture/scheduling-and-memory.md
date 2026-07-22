@@ -118,6 +118,36 @@ Cancellation protects correctness and scarce resources; it is not a substitute f
 - reusable stage cache;
 - speculative/prefetch allowance.
 
+### Retention hierarchy
+
+Budgets are not a reason to retain arbitrary derivatives. Retention follows the
+cost and authority hierarchy:
+
+- authoritative inputs stay lazy/chunked where possible; an eager source is a
+  deliberate full resident copy;
+- `StageCache` owns exact reusable operation-prefix values whose misses can
+  repeat expensive work;
+- the evaluator display cache owns upstream CPU display payloads for every
+  backend;
+- the evaluator region cache separately owns exact ROI-demand subregions; it is
+  not GPU source-grid/page residency and does not share display-cache eviction;
+- profile/scalar results stay small and exact;
+- LOD pages are presentation-qualified derived data with their own bounded
+  cache; retained cross-session payload references are capped by the same tile
+  residency budget that authorizes their physical successors;
+- PyQtGraph raster backing and GPU page pools are alternative backend physical
+  residency owners, not simultaneous cache tiers or semantic cache truth.
+
+A future compressed tier is a **cold demotion state**, not another full cache.
+It engages only under measured memory pressure at an owner with expensive
+misses, runs off the GUI thread and cache lock on the low-priority kernel lane,
+shares one total physical budget with the raw hot state, and ranks candidates
+by expected latency saved per compressed byte. Idle CPU is permission to do
+the work, not evidence that the work has value. Lossy presentation pages never
+own histogram, levels, cursor, ROI, or export semantics. Use
+`arrayscope.tools.memory_retention_audit` to inspect the configured ownership
+envelope before adding a cache or tier.
+
 `memory_budget` contains estimation/formatting helpers; it is not the source of runtime policy.
 
 Estimates are conservative admission inputs, not proof that allocation will succeed. Diagnostics should record estimated versus observed bytes and refusal/degradation reasons.

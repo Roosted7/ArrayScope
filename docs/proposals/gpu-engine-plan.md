@@ -408,6 +408,29 @@ they measurably beat the software page table.
 (compress + transfer + decompress < raw transfer) per dtype/scenario before
 any default flips on.
 
+**Live-benefit audit (2026-07-22; supersedes the product verdict below).** The
+codec ratios and sampler closure remain valid component evidence. They did not
+measure the live topology: production allocated full raw and compressed pools,
+CPU-encoded and reference-decoded every cold page synchronously, and read
+compressed LOD sources back to the CPU. The host benchmark used one split budget
+while production added a second full budget, retained aliased arrays, double-
+counted overlapping keys, and substituted a stage FFT for a display-cache miss.
+The [matched live review](../reviews/2026-07-22-compression-live-benefit-review.md)
+measured cold submission 8.5–138× slower and LOD 8.4–42.5× slower; configured
+pool bytes grew 9–18%. RAW/OFF defaults are restored and G7 closes with a
+measured NO. It is revived only by evidence of a real capacity/I/O bottleneck;
+the tables below are codec/component history, not proof that AUTO wins.
+
+The same audit found retention ownership questions that precede codec choice.
+The evaluator display cache feeds every backend; its separately budgeted region
+cache serves exact ROI demand and is not GPU page storage. VisPy/wgpu page pools
+and PyQtGraph raster backing are alternative physical backend owners. The
+cross-session retained-payload store really was entry-bounded but byte-unbounded
+and now has a tile-residency byte cap. The only plausible host compression
+continuation is raw-hot/compressed-cold demotion at the actual expensive
+`StageCache` owner, off-thread and under one total budget; it is an ideas-list
+experiment until real pressure/miss telemetry triggers it.
+
 *Status (2026-07-22, first ZFP-class step).* Landed the codec abstraction
 (`arrayscope/gpu/chunk_codec.py`: `raw`/`zfp`/`blosc2`, lossless-by-default,
 dtype-driven `resolve_codec` that falls back to `raw` for dtypes a codec
@@ -479,26 +502,25 @@ Benchmark (`arrayscope/tools/g7_cache_benchmark.py`, real 336×336×272 volume,
 | complex64 | 2.09×     | 40 → 91 chunks               | 520 → 388                | ~4.5 ms                  |
 | int16     | 2.21×     | 40 → 91 chunks               | 520 → 357                | ~5.4 ms                  |
 
-The RAM/eviction win is **unconditional** (~2.2× working set retained per byte
-budget, ~26–34 % fewer expensive misses). The **end-to-end time** win is
+The original model suggested a RAM/eviction win. The **modelled time** result is
 miss-cost dependent: for a *cheap* 256² fft2 miss (~8 ms) the tier wins RAM but
 not wall time (encode+decode > the tiny recompute); above the crossover
 recompute cost (~2–5 ms) it wins both. In the owner's target regime — a
 **large-matrix** stage miss (1024² fft2, ~50–64 ms, or a disk re-read) — the
-measured end-to-end speedup is **2.0–2.7×** (recomputes 168 → 60, 168 misses
-served by decode). This justifies auto-enabling under RAM pressure on large data
-even though the *transfer-time* inequality did not hold: the RAM/eviction win is
-a different, measured axis. Default remains `raw` (off); the policy engages the
-tier per-workload. **Phase B (not this change): GPU-side decode for the discrete
-PCIe transfer win — the `discrete_transfer_candidate` seam is left for it.**
+modelled at **2.0–2.7×** by charging a 1024² FFT to each cache miss. The live
+audit found that expensive work belongs to the separate StageCache, so this does
+not justify AUTO. The repaired wrapper now uses one total budget and preserves
+real payload aliases, but remains explicit until off-GUI work at the actual miss
+owner passes the queue gate.
 
-*Phase B (2026-07-22, the transfer/VRAM win — native block-compressed textures).*
+*Phase B (2026-07-22, component transfer/page-size experiment — native
+block-compressed textures).*
 The transfer-side win does **not** come from a compute decode of a byte-stream
 codec (that keeps decode near the CPU critical path and, byte-stream-in-VRAM,
 never reaches the sampler). It comes from a format the GPU decompresses **for
 free in the texture sampler**: a native **BC / ASTC** texture. There is **no
 decode pass at all** — the compressed bytes cross PCIe, stay compressed resident
-in VRAM (an 8× cut vs r32float for BC4, which matters on the A2000's 4 GB), and
+in its codec pool (an 8× page-size cut vs r32float for BC4), and
 the hardware sampler returns usable values at sample time. The cost is *lossy*
 compression, acceptable on the display path (window/level is applied at sample
 time regardless) and **measured**, never assumed.
@@ -547,15 +569,16 @@ phase RMSE):
 | Intel UHD | complex | astc-4x4 | ASTC | 524288 | 65536 | 8.0× | magPSNR 42.3 dB, phase-RMSE 0.034 rad |
 | Intel UHD | complex | astc-6x6 | ASTC | 524288 | 29584 | **17.7×** | magPSNR 36.1 dB, phase-RMSE 0.068 rad |
 
-**Verdict (topology-dependent, as expected).** On the **discrete A2000 (PCIe)** BC
-wins twice — the compressed bytes are what cross the bus (an 8× smaller transfer)
-*and* stay 8× smaller resident in VRAM — with a free hardware decode; BC is
+**Component verdict (not live pool capacity).** On the **discrete A2000 (PCIe)**
+one BC page is 8× smaller and the hardware decode is correct; BC is
 NVIDIA's only compressed-texture family. On **integrated Intel (unified memory)**
-there is no distinct PCIe transfer to shrink, but the **VRAM-residency** win still
-applies and **ASTC's block-size knob dominates BC** (astc-6x6 gives higher PSNR
+there is no distinct PCIe transfer to shrink; **ASTC's block-size knob** can beat
+BC for an isolated page (astc-6x6 gives higher PSNR
 *and* a better ratio than BC4). Complex tiles use BC5/ASTC-2ch holding (re,im)
 with **no phase-wrap artifact** (magnitude-weighted phase error ≤ 0.07 rad). The
-render path stays byte-identical (default OFF); a lossless narrow-int `bitpack`
+live executor uses ASTC 4×4 and retains a full raw fallback pool, so isolated
+page bytes are not allocated-pool bytes. The render path stays byte-identical
+(default OFF); a lossless narrow-int `bitpack`
 codec is retained in `chunk_codec.py` as the documented lossless fallback (CPU
 round-trip tested). **Follow-up:** wiring the atlas/page textures in
 `wgpu_executor` to sample BC/ASTC (tile-pipeline integration — the encoders,

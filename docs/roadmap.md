@@ -37,9 +37,18 @@ matrix reached its first 15/15; wgpu leads fast-scroll. What "Now" means
 until further notice: **promotion evidence** (queue row 3d — shared row-1
 callback bars, dogfood hours, the FFT-scroll headline) on the VisPy
 decision ladder (perf bars → AUTO backend flip at field parity → VisPy
-demotion review at G7 start → removal one release later; PyQtGraph keeps
-the headless/interaction-host role), then **G7 compressed transport**,
-whose decompress-on-GPU form compounds only on wgpu.
+demotion review only after field evidence; PyQtGraph keeps the
+headless/interaction-host role). **G7 compression closed with a measured NO**:
+component codecs exist, but the 2026-07-22 live audit restored RAW/OFF after
+cold latency, LOD, and physical-allocation gates failed. It is not a current
+engine task: revive it only after telemetry proves a capacity/I/O bottleneck,
+then place compression at the source/StageCache or GPU-resident seam rather
+than on the interactive display-admission path. Queue row 4 owns the
+prerequisite retention audit: distinguish the evaluator's upstream display
+cache from its exact ROI-demand cache; distinguish selected-backend raster/page
+residency from both; byte-bound physical successor stores; prefer lazy sources
+for large authoritative data; and measure which evictions actually repeat
+costly work before resizing or compressing anything.
 
 As of 2026-07-16, `main` **is** the GPU engine (ADR 0055/0056). The
 direction record is

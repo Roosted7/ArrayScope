@@ -6,6 +6,19 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **G7 live compression benefit CLOSED — measured NO:** the
+  [matched live and architecture review](reviews/2026-07-22-compression-live-benefit-review.md)
+  found 8.5–138× slower cold submission, 8.4–42.5× slower compressed-source
+  LOD, 9–18% larger configured raw+codec pools, synchronous host-cache work at
+  the wrong miss owner, and no established capacity/transfer bottleneck.
+  Correctness, alias, one-budget, physical-truth, and byte-accounting defects are
+  repaired. Cross-session retained payloads are now byte-bounded, while the
+  evaluator display cache, exact ROI-demand cache, and selected backend's
+  physical storage remain correctly distinct. Production defaults are RAW/OFF.
+  The codec paths remain explicit experiments until telemetry shows
+  GPU-pool pressure, costly StageCache eviction, or remote/storage bandwidth as
+  a real user-visible constraint.
+
 - 2026-07-22 — **Montage-relevel stall (the "reds") FIXED — pyqtgraph level-only
   fast-path (`cca02e74`):** the profiler-gated fix corrected the diagnosis (the
   ~1.2 s/commit cost was the backend re-resolving ALL 272 resident payloads each
@@ -24,7 +37,12 @@ blocks graduated during cleanups are preserved after it.
   suite 2837 passed. Supersedes the diagnosis in
   [`redesign/pyqtgraph-level-convergence-2026-07-22.md`](redesign/pyqtgraph-level-convergence-2026-07-22.md).
 
-- 2026-07-22 — **G7 Phase B — native BC/ASTC compressed textures: the discrete
+- 2026-07-22 audit note — the following G7 entries are **component history, not a
+  completed live-benefit win**. The matched review found hidden cold/LOD costs,
+  duplicate physical pools, and host-budget/alias defects. The product gate
+  completed honestly with the NO above.
+
+- 2026-07-22 — **G7 Phase B — native BC/ASTC compressed texture components
   transfer + VRAM win (`27ac87e9`):** the GPU's texture sampler decompresses
   BC/ASTC in hardware for free at sample time — no decode pass. Our own BC4
   (scalar) + BC5 (complex, stored as **(real, imag)** to match `rg32float` and
@@ -37,11 +55,10 @@ blocks graduated during cleanups are preserved after it.
   41.5 dB mag / 0.027 rad phase**, GPU-encoder == CPU quality, hardware-sampler
   == CPU-decode oracle (57.5 dB); Intel ASTC-6×6 **8.9× @ 42.0 dB** (4×4 → 53 dB).
   Quality measured in the DISPLAY domain (post window/level mapping). Full suite
-  2857 passed; real-GPU BC tests pass on the A2000. Follow-ups: wire the
-  atlas/page textures to sample BC/ASTC (tile-pipeline integration), BC6H for
-  float tiles, lossless NVIDIA raw-buffer transfer via CUDA↔Vulkan interop.
+  2857 passed; real-GPU BC tests pass on the A2000. Later commits wired the live
+  pools, but the audit shows this did not yet create an end-to-end win.
 
-- 2026-07-22 — **G7 Phase A — compressed host-cache RAM win, topology-aware
+- 2026-07-22 — **G7 Phase A — compressed host-cache component, topology-aware
   (`6e767001`):** two-level cache (large compressed backing tier under the raw
   cache via a default-None `BoundedCache.on_evict` hook — byte-identical for
   existing callers); a raw-cache miss is served by a decode (µs) instead of a
@@ -50,8 +67,9 @@ blocks graduated during cleanups are preserved after it.
   `cache_policy.py` engages the tier only under RAM pressure, best lossless codec
   per dtype, off for small data, with a `discrete_transfer_candidate` seam for
   Phase B. Measured (real 336³): 2.1–2.2× compression, **40→91 chunks per RAM
-  budget (~2.28× working set)**, recomputes 520→387; large-matrix regime (1024²
-  fft2 misses) **2.0–2.7× end-to-end speedup**. Default OFF. Full suite 2833 passed.
+  budget** in the original model. The audit later found raw/tier overlap was
+  double-counted and the synthetic FFT did not belong to the live display-cache
+  miss; treat the 2.0–2.7× number as superseded, not product evidence.
 
 - 2026-07-22 — **G7 compressed transport — codec + benchmark, default OFF
   (queue step 4):** `arrayscope/gpu/chunk_codec.py` (raw/zfp/blosc2, lossless by
