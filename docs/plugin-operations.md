@@ -1,8 +1,10 @@
-# Plugin operations (Tier-1)
+# Plugin operations (Tier-1 and Tier-2)
 
 ArrayScope discovers external operations contributed by third-party pip
 packages through a Python entry-point group. This page is the contract a
-plugin author writes against.
+plugin author writes against. Most of it describes **Tier-1** (opaque,
+whole-array) ops; the final section covers the **Tier-2** windowable claim and
+the conformance test that gates it.
 
 ## What a Tier-1 plugin op is
 
@@ -124,3 +126,66 @@ Loading a recipe that references an **uninstalled** plugin id fails with a
 clear error (`unknown or uninstalled plugin operation: …`) rather than
 crashing. A mathematically invertible op plus its inverse round-trips the data
 (e.g. `roll` +k then −k), and the recipe→steps→recipe cycle is stable.
+
+## Tier-2 (windowable ops): a claim that is conformance-tested
+
+A Tier-1 op is **OPAQUE**: producing any output requires the whole input, so
+the engine always materializes the whole array on CPU. A **Tier-2** op is an op
+that additionally *claims* it is **windowable** — that it commutes with
+sub-region reads:
+
+```
+fn(whole)[region] == fn(whole[region])   for a window `region` on any axis
+```
+
+When that holds the engine may run the op **per-region** and never materialize
+the whole array — a real performance win for large volumes. This is the same
+shape the built-in pointwise ops (`Conjugate`, scalar arithmetic) already have:
+each output element depends only on the co-located input element.
+
+Declare the claim with a single opt-in flag on the spec:
+
+```python
+PluginOperationSpec(
+    id="mypkg:scale",
+    label="Scale",
+    fn=lambda a: a * 2 + 1,   # elementwise -> genuinely commutes with windowing
+    region_capable=True,      # Tier-2 claim
+)
+```
+
+A Tier-2 op **must be shape-preserving** (windowing an axis only makes sense if
+that axis still exists and lines up in the output). Tier-2 v1 covers the
+**elementwise-windowable** class — the op reads exactly the output sub-region
+(identity input-region map). Ops that need a wider input than they emit (halo /
+neighborhood kernels, declaring a non-identity `required_input_region`) are a
+future extension: honoring them needs input-shape context at region-apply time,
+which is engine surface beyond the plugin contract.
+
+### The claim is never trusted on your word
+
+A **false** windowable claim yields plausible-but-wrong pixels at interactive
+speed — the exact silent-corruption class ArrayScope guards hardest against
+(e.g. a global roll, a global normalization `x - x.mean()`, or an FFT dressed up
+to look elementwise). So a Tier-2 claim is **honored only after it passes a
+conformance property test**
+(`arrayscope.operations.plugin_conformance.verify_region_conformance`):
+
+1. build a deterministic seeded test array;
+2. compute the whole-array result `fn(whole)` once;
+3. for many sampled sub-regions (a partial slice and a point on **every** axis,
+   plus random windows), compare the region path `fn(whole[region])` against the
+   oracle `fn(whole)[region]`;
+4. equality is **exact** by default (a truthful per-element op is bit-exact
+   whether or not the input was windowed); an explicit tolerance is available
+   only for float ops that legitimately reorder arithmetic.
+
+If every sampled region matches, the op is honored: it runs per-region and
+reports `ELEMENTWISE` capabilities with a `SHADER_ON_READ` execution class. If
+**any** region disagrees, the claim is **downgraded to the OPAQUE whole-array
+path** — the op still produces correct pixels (it just runs whole-array, not the
+fast path) — and the downgrade is made observable: a loud `WARNING` is logged and
+a `region_conformance_stats()` tally (`verified` / `honored` / `rejected`) is
+incremented. Downgrade-not-refuse is deliberate: the underlying `fn` is still a
+valid Tier-1 op, so we never break a user's pipeline over a performance
+annotation — we only refuse to trust the fast path.
