@@ -663,8 +663,93 @@ fn fs_overlay(in: OverlayOut) -> @location(0) vec4<f32> {
 }
 """
 
-_HISTO_WGSL = """
-struct HArgs {
+#: Path A of the G7 levels/histogram work: the GPU histogram/bounds compute
+#: shaders sample the BC pools directly, mirroring the render fragment's
+#: codec-flag + ``(lo, span)``-unscale branch.  A compressed page is sampled
+#: with the nearest/clamp ``codec_samp`` (reproducing the raw ``textureLoad``
+#: texel centre) then unscaled by the SAME affine the render path applies,
+#: sourced from ``_page_codec`` -- so no second scale source exists.  These
+#: results come from the *lossy* decoded texels (measured against the exact
+#: Path B raw-semantic reference by ``tools/g7_levels_histogram_benchmark.py``).
+#: The raw (``compressed=False``) variant declares no BC bindings, so the
+#: OFF/raw compute layout and every number stay byte-identical.
+
+
+def _build_histo_wgsl(compressed: bool) -> str:
+    # Histogram (``partial``) group BC bindings, appended after the raw pools
+    # (7-9); empty when off so the raw layout is untouched.
+    histo_bc_bindings = (
+        """
+@group(0) @binding(7) var scalar_bc_pool: texture_2d_array<f32>;
+@group(0) @binding(8) var complex_bc_pool: texture_2d_array<f32>;
+@group(0) @binding(9) var codec_samp: sampler;
+"""
+        if compressed
+        else ""
+    )
+    # Bounds (``bounds_partial``) group BC bindings (6-8).
+    bounds_bc_bindings = (
+        """
+@group(0) @binding(6) var bscalar_bc_pool: texture_2d_array<f32>;
+@group(0) @binding(7) var bcomplex_bc_pool: texture_2d_array<f32>;
+@group(0) @binding(8) var bcodec_samp: sampler;
+"""
+        if compressed
+        else ""
+    )
+
+    if compressed:
+        histo_scalar = (
+            "if (page.codec == 1u) {\n"
+            "            let uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / 256.0;\n"
+            "            value = textureSampleLevel(scalar_bc_pool, codec_samp, uv, page.layer,"
+            " 0.0).r * page.span_r + page.lo_r;\n"
+            "        } else {\n"
+            "            value = textureLoad(scalar_pool, coord, page.layer, 0).r;\n"
+            "        }"
+        )
+        histo_complex = (
+            "var pair: vec2<f32>;\n"
+            "        if (page.codec == 1u) {\n"
+            "            let uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / 256.0;\n"
+            "            let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, page.layer,"
+            " 0.0).rg;\n"
+            "            pair = vec2<f32>(s.r * page.span_r + page.lo_r,"
+            " s.g * page.span_g + page.lo_g);\n"
+            "        } else {\n"
+            "            pair = textureLoad(complex_pool, coord, page.layer, 0).rg;\n"
+            "        }"
+        )
+        bounds_scalar = (
+            "if (page.codec == 1u) {\n"
+            "            let uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / 256.0;\n"
+            "            value = textureSampleLevel(bscalar_bc_pool, bcodec_samp, uv, page.layer,"
+            " 0.0).r * page.span_r + page.lo_r;\n"
+            "        } else {\n"
+            "            value = textureLoad(bscalar_pool, coord, page.layer, 0).r;\n"
+            "        }"
+        )
+        bounds_complex = (
+            "var pair: vec2<f32>;\n"
+            "        if (page.codec == 1u) {\n"
+            "            let uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / 256.0;\n"
+            "            let s = textureSampleLevel(bcomplex_bc_pool, bcodec_samp, uv, page.layer,"
+            " 0.0).rg;\n"
+            "            pair = vec2<f32>(s.r * page.span_r + page.lo_r,"
+            " s.g * page.span_g + page.lo_g);\n"
+            "        } else {\n"
+            "            pair = textureLoad(bcomplex_pool, coord, page.layer, 0).rg;\n"
+            "        }"
+        )
+    else:
+        histo_scalar = "value = textureLoad(scalar_pool, coord, page.layer, 0).r;"
+        histo_complex = "let pair = textureLoad(complex_pool, coord, page.layer, 0).rg;"
+        bounds_scalar = "value = textureLoad(bscalar_pool, coord, page.layer, 0).r;"
+        bounds_complex = "let pair = textureLoad(bcomplex_pool, coord, page.layer, 0).rg;"
+
+    return (
+        f"""
+struct HArgs {{
     lo: f32,
     hi: f32,
     n_pages: u32,
@@ -673,17 +758,21 @@ struct HArgs {
     scale: u32,
     symlog_constant: f32,
     dynamic_bounds: u32,
-};
-struct HPage {
+}};
+struct HPage {{
     layer: i32,
     rep: i32,
     source_h: u32,
     source_w: u32,
     factor: u32,
+    codec: u32,
+    lo_r: f32,
+    span_r: f32,
+    lo_g: f32,
+    span_g: f32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
-};
+}};
 @group(0) @binding(0) var<uniform> args: HArgs;
 @group(0) @binding(1) var<storage, read> pages: array<HPage>;
 @group(0) @binding(2) var scalar_pool: texture_2d_array<f32>;
@@ -691,62 +780,62 @@ struct HPage {
 @group(0) @binding(4) var rgb_windowed_pool: texture_2d_array<f32>;
 @group(0) @binding(5) var<storage, read_write> partials: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read> final_bounds: array<u32>;
-
+{histo_bc_bindings}
 var<workgroup> local_bins: array<atomic<u32>, 512>;
 
-fn ordered_float(value: f32) -> u32 {
+fn ordered_float(value: f32) -> u32 {{
     let bits = bitcast<u32>(value);
     return select(bits ^ 0x80000000u, ~bits, (bits & 0x80000000u) != 0u);
-}
+}}
 
-fn float_from_ordered(value: u32) -> f32 {
+fn float_from_ordered(value: u32) -> f32 {{
     let bits = select(value ^ 0x80000000u, ~value, value < 0x80000000u);
     return bitcast<f32>(bits);
-}
+}}
 
-fn finite_value(value: f32) -> bool {
+fn finite_value(value: f32) -> bool {{
     return value == value && abs(value) <= 3.402823466e+38;
-}
+}}
 
-fn mapped_value(page: HPage, coord: vec2<i32>) -> f32 {
+fn mapped_value(page: HPage, coord: vec2<i32>) -> f32 {{
     var value: f32;
-    if (page.rep == 0) {
-        value = textureLoad(scalar_pool, coord, page.layer, 0).r;
-    } else if (page.rep == 1) {
-        let pair = textureLoad(complex_pool, coord, page.layer, 0).rg;
-        switch args.mode {
-            case 0u: { value = length(pair); }
-            case 1u: { value = atan2(pair.y, pair.x); }
-            case 2u: { value = pair.x; }
-            default: { value = pair.y; }
-        }
-    } else {
+    if (page.rep == 0) {{
+        {histo_scalar}
+    }} else if (page.rep == 1) {{
+        {histo_complex}
+        switch args.mode {{
+            case 0u: {{ value = length(pair); }}
+            case 1u: {{ value = atan2(pair.y, pair.x); }}
+            case 2u: {{ value = pair.x; }}
+            default: {{ value = pair.y; }}
+        }}
+    }} else {{
         value = textureLoad(rgb_windowed_pool, coord, page.layer, 0).a;
-    }
-    switch args.scale {
-        case 0u: { return value; }
-        case 1u: { return log(max(value, 0.0)) / log(10.0); }
-        default: {
+    }}
+    switch args.scale {{
+        case 0u: {{ return value; }}
+        case 1u: {{ return log(max(value, 0.0)) / log(10.0); }}
+        default: {{
             return sign(value) * log(
                 1.0 + abs(value) / pow(10.0, args.symlog_constant)
             ) / log(10.0);
-        }
-    }
-}
+        }}
+    }}
+}}
 
-fn stored_h(page: HPage) -> u32 {
+fn stored_h(page: HPage) -> u32 {{
     return (page.source_h + page.factor - 1u) / page.factor;
-}
+}}
 
-fn stored_w(page: HPage) -> u32 {
+fn stored_w(page: HPage) -> u32 {{
     return (page.source_w + page.factor - 1u) / page.factor;
-}
+}}
 
-fn source_weight(page: HPage, y: u32, x: u32) -> u32 {
+fn source_weight(page: HPage, y: u32, x: u32) -> u32 {{
     let y0 = y * page.factor;
     let x0 = x * page.factor;
     return min(page.factor, page.source_h - y0) * min(page.factor, page.source_w - x0);
-}
+}}
 
 @group(0) @binding(0) var<uniform> bargs: HArgs;
 @group(0) @binding(1) var<storage, read> bpages: array<HPage>;
@@ -754,35 +843,37 @@ fn source_weight(page: HPage, y: u32, x: u32) -> u32 {
 @group(0) @binding(3) var bcomplex_pool: texture_2d_array<f32>;
 @group(0) @binding(4) var brgb_windowed_pool: texture_2d_array<f32>;
 @group(0) @binding(5) var<storage, read_write> page_bounds: array<u32>;
-
+{bounds_bc_bindings}
 var<workgroup> local_low: atomic<u32>;
 var<workgroup> local_high: atomic<u32>;
 
-fn bounds_mapped_value(page: HPage, coord: vec2<i32>) -> f32 {
+fn bounds_mapped_value(page: HPage, coord: vec2<i32>) -> f32 {{
     var value: f32;
-    if (page.rep == 0) {
-        value = textureLoad(bscalar_pool, coord, page.layer, 0).r;
-    } else if (page.rep == 1) {
-        let pair = textureLoad(bcomplex_pool, coord, page.layer, 0).rg;
-        switch bargs.mode {
-            case 0u: { value = length(pair); }
-            case 1u: { value = atan2(pair.y, pair.x); }
-            case 2u: { value = pair.x; }
-            default: { value = pair.y; }
-        }
-    } else {
+    if (page.rep == 0) {{
+        {bounds_scalar}
+    }} else if (page.rep == 1) {{
+        {bounds_complex}
+        switch bargs.mode {{
+            case 0u: {{ value = length(pair); }}
+            case 1u: {{ value = atan2(pair.y, pair.x); }}
+            case 2u: {{ value = pair.x; }}
+            default: {{ value = pair.y; }}
+        }}
+    }} else {{
         value = textureLoad(brgb_windowed_pool, coord, page.layer, 0).a;
-    }
-    switch bargs.scale {
-        case 0u: { return value; }
-        case 1u: { return log(max(value, 0.0)) / log(10.0); }
-        default: {
+    }}
+    switch bargs.scale {{
+        case 0u: {{ return value; }}
+        case 1u: {{ return log(max(value, 0.0)) / log(10.0); }}
+        default: {{
             return sign(value) * log(
                 1.0 + abs(value) / pow(10.0, bargs.symlog_constant)
             ) / log(10.0);
-        }
-    }
-}
+        }}
+    }}
+}}
+"""
+        """
 
 @compute @workgroup_size(256)
 fn bounds_partial(
@@ -890,6 +981,7 @@ fn merge(@builtin(local_invocation_index) li: u32) {
     }
 }
 """
+    )
 
 
 def _reduce_wgsl(*, value_type: str, load_suffix: str, storage_format: str) -> str:
@@ -1059,6 +1151,7 @@ class WgpuPlaneExecutor:
         device: object = None,
         compressed_textures: str | bool = "off",
         codec_min_psnr_db: float = 40.0,
+        histogram_codec_mode: str = "gpu_compressed",
     ) -> None:
         import wgpu  # deferred: module import stays wgpu-free
 
@@ -1077,9 +1170,28 @@ class WgpuPlaneExecutor:
         else:
             mode = str(compressed_textures).lower()
         if mode not in ("off", "on", "auto"):
-            raise ValueError(f"compressed_textures must be off/on/auto, got {compressed_textures!r}")
+            raise ValueError(
+                f"compressed_textures must be off/on/auto, got {compressed_textures!r}"
+            )
         self._codec_mode = mode
         self._codec_min_psnr_db = float(codec_min_psnr_db)
+        # How the GPU histogram/bounds compute treats a page that lives in a BC
+        # pool (only reachable when compression is engaged):
+        #   "gpu_compressed" -- Path A: the compute shaders sample the BC pool
+        #       (lossy decoded texels) with the render path's codec branch, so a
+        #       compressed page contributes present-but-lossy auto-levels.
+        #   "skip" -- Path B posture: the compute excludes compressed pages and
+        #       reports them partial (``histogram_missing``); their exact stats
+        #       come from the CPU semantic plane / full-population refinement.
+        # OFF has no compressed pages so the knob is inert; the raw path is
+        # byte-identical regardless.
+        histogram_codec_mode = str(histogram_codec_mode).lower()
+        if histogram_codec_mode not in ("gpu_compressed", "skip"):
+            raise ValueError(
+                "histogram_codec_mode must be 'gpu_compressed' or 'skip', "
+                f"got {histogram_codec_mode!r}"
+            )
+        self._histogram_codec_mode = histogram_codec_mode
 
         if device is None:
             from wgpu.backends.wgpu_native.extras import set_instance_extras
@@ -1146,6 +1258,7 @@ class WgpuPlaneExecutor:
         self._page_codec: dict[DataChunkKey, tuple[int, tuple[float, float, float, float]]] = {}
         self._compressed_uploads_total = 0
         self._compressed_fallbacks_total = 0
+        self._lod_compressed_source_reductions_total = 0
         self._table_dirty = True
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
@@ -1201,7 +1314,14 @@ class WgpuPlaneExecutor:
                 texture = d.create_texture(
                     size=(PAGE, PAGE, budget),
                     format=fmt,
-                    usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+                    # COPY_SRC so a BC page can be read back and reference-decoded
+                    # (the read_resident_page oracle and the CPU LOD-from-
+                    # compressed reduce path both copy blocks out of the pool).
+                    usage=(
+                        wgpu.TextureUsage.TEXTURE_BINDING
+                        | wgpu.TextureUsage.COPY_DST
+                        | wgpu.TextureUsage.COPY_SRC
+                    ),
                 )
                 self._codec_pools[rep] = _Pool(
                     representation=rep,
@@ -1315,7 +1435,14 @@ class WgpuPlaneExecutor:
         self._overlay_shader = d.create_shader_module(code=_OVERLAY_WGSL)
         self._overlay_pipelines: dict[str, object] = {}
         self._overlay_binds: dict[str, object] = {}
-        self._histo_mod = d.create_shader_module(code=_HISTO_WGSL)
+        # Engaged compiles the BC-sampling histo/bounds variant (Path A bindings
+        # present); OFF compiles the raw variant with no BC bindings, so the
+        # compute layout and every histogram/auto-range number stay identical to
+        # a build without this feature.  When engaged but the histogram mode is
+        # "skip", the BC branch is simply never reached (no compressed entries).
+        self._histo_mod = d.create_shader_module(
+            code=_build_histo_wgsl(compressed=self._codec_engaged)
+        )
         self._partial_pipe = d.create_compute_pipeline(
             layout="auto", compute={"module": self._histo_mod, "entry_point": "partial"}
         )
@@ -1424,11 +1551,19 @@ class WgpuPlaneExecutor:
         return [
             {
                 "binding": 11,
-                "resource": {"buffer": self._codec_flag_buf, "offset": 0, "size": self._codec_flag_buf.size},
+                "resource": {
+                    "buffer": self._codec_flag_buf,
+                    "offset": 0,
+                    "size": self._codec_flag_buf.size,
+                },
             },
             {
                 "binding": 12,
-                "resource": {"buffer": self._codec_norm_buf, "offset": 0, "size": self._codec_norm_buf.size},
+                "resource": {
+                    "buffer": self._codec_norm_buf,
+                    "offset": 0,
+                    "size": self._codec_norm_buf.size,
+                },
             },
             {"binding": 13, "resource": self._codec_sampler},
             {"binding": 14, "resource": self._codec_pool_view(SCALAR_R32F)},
@@ -1994,20 +2129,25 @@ class WgpuPlaneExecutor:
             slot = self.page_table.lookup(key)
             if slot is None:
                 raise KeyError(f"LOD generation source is not resident: {key}")
-            if slot.pool_id in _CODEC_POOL_IDS.values():
-                # The reduce compute pass reads source pages by integer coord
-                # from the RAW pool only.  A compressed source would silently
-                # read the wrong raw layer, so refuse loudly.  GPU-encoding LOD
-                # pages from compressed sources is the staged follow-up.
-                raise NotImplementedError(
-                    "wgpu LOD generation from a BC-compressed source page is not "
-                    f"yet supported (source {key} is in pool {slot.pool_id!r})"
-                )
             ordered[index] = (key, slot)
 
         present = [item for item in ordered if item is not None]
         if not present:  # command shape already prevents this
             raise ValueError("wgpu LOD generation requires resident children")
+
+        # The GPU reduce pass reads source pages by integer coord from the RAW
+        # pool only; a BC-pool source layer would alias a different raw page.
+        # So when any child is compressed (aggressive AUTO), decode the children
+        # to raw on the CPU, box-reduce there, and store the destination as a raw
+        # page.  Never a crash once compression is on — the destination is exact
+        # w.r.t. the (already lossy) decoded children, and counted as a codec
+        # LOD reduction.
+        if any(
+            item is not None and item[1].pool_id in _CODEC_POOL_IDS.values() for item in ordered
+        ):
+            return self._generate_lod_page_from_compressed(
+                destination, ordered, present, representation
+            )
         pool = self._pools[representation]
         if pool.layer_count == 0:
             raise RuntimeError(f"no layer budget configured for representation {representation!r}")
@@ -2092,6 +2232,103 @@ class WgpuPlaneExecutor:
             self._flat_codec[flat] = 0
             self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
             self._table_dirty = True
+        return True
+
+    def _generate_lod_page_from_compressed(
+        self,
+        destination: DataChunkKey,
+        ordered: list,
+        present: list,
+        representation: str,
+    ) -> bool:
+        """CPU decode -> 2x2 mean box-reduce -> store the destination as a raw page.
+
+        The GPU reduce shader cannot read BC pools by integer coord, so a LOD
+        whose children are compressed is reduced on the CPU from the reference-
+        decoded child texels (the same decode ``read_resident_page`` performs).
+        The result is bound in the raw pool (codec 0) exactly like the GPU path,
+        so downstream residency/rendering is oblivious to how it was produced.
+        """
+
+        d = self.device
+        components = 1 if representation == SCALAR_R32F else 2
+        super_shape = (2 * PAGE, 2 * PAGE) + ((components,) if components > 1 else ())
+        super_tile = np.zeros(super_shape, np.float32)
+        valid = np.zeros((2 * PAGE, 2 * PAGE), bool)
+        for index, item in enumerate(ordered):
+            if item is None:
+                continue
+            key, slot = item
+            dy, dx = index // 2, index % 2
+            factor = 1 << int(key.lod.level)
+            valid_h = -(-int(key.chunk_shape[0]) // factor)
+            valid_w = -(-int(key.chunk_shape[1]) // factor)
+            if slot.pool_id in _CODEC_POOL_IDS.values():
+                page = self._read_compressed_page(key, slot)
+            else:
+                page = self.read_resident_page(key)
+            r0, c0 = dy * PAGE, dx * PAGE
+            super_tile[r0 : r0 + valid_h, c0 : c0 + valid_w] = page[:valid_h, :valid_w]
+            valid[r0 : r0 + valid_h, c0 : c0 + valid_w] = True
+
+        # 2x2 box mean honouring the per-child valid extents (matches the GPU
+        # reduce shader: mean over the valid contributors, zero where none).
+        blocks = super_tile.reshape(PAGE, 2, PAGE, 2, *((components,) if components > 1 else ()))
+        mask = valid.reshape(PAGE, 2, PAGE, 2)
+        axes = (1, 3)
+        count = mask.sum(axis=axes)
+        if components > 1:
+            acc = (blocks * mask[..., None]).sum(axis=axes)
+            reduced = np.zeros((PAGE, PAGE, components), np.float32)
+            nz = count > 0
+            reduced[nz] = acc[nz] / count[nz][..., None]
+        else:
+            acc = (blocks * mask).sum(axis=axes)
+            reduced = np.zeros((PAGE, PAGE), np.float32)
+            nz = count > 0
+            reduced[nz] = acc[nz] / count[nz]
+        reduced = reduced.astype(np.float32)
+
+        pool = self._pools[representation]
+        self.page_table.replace_pin_set(
+            _LOD_GENERATION_PIN_OWNER, tuple(key for key, _slot in present)
+        )
+        destination_layer = None
+        try:
+            if not pool.free_layers:
+                self._evict_one_unpinned(representation, pool_id=_POOL_IDS[representation])
+            destination_layer = pool.free_layers.pop()
+            payload, bytes_per_row = self._coerce_payload(destination, reduced)
+            d.queue.write_texture(
+                {"texture": pool.texture, "origin": (0, 0, destination_layer)},
+                payload,
+                {"bytes_per_row": bytes_per_row, "rows_per_image": PAGE},
+                (PAGE, PAGE, 1),
+            )
+        except Exception:
+            if destination_layer is not None:
+                pool.free_layers.append(destination_layer)
+            raise
+        finally:
+            self.page_table.replace_pin_set(_LOD_GENERATION_PIN_OWNER, ())
+
+        slot = PageSlot(
+            pool_id=_POOL_IDS[representation],
+            page_index=destination_layer,
+            slot_index=0,
+        )
+        self.page_table.bind(
+            destination,
+            slot,
+            nbytes=PAGE * PAGE * _POOL_TEXEL_BYTES[representation],
+        )
+        self._page_codec.pop(destination, None)
+        for flat in self._flat_indices(destination):
+            self._flat_table[flat] = destination_layer
+            self._flat_codec[flat] = 0
+            self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
+            self._table_dirty = True
+        self._lod_compressed_source_reductions_total += 1
         return True
 
     def _evict_one_unpinned(self, representation: str, *, pool_id: str | None = None) -> None:
@@ -2185,12 +2422,8 @@ class WgpuPlaneExecutor:
         if self._table_dirty:
             self.device.queue.write_buffer(self._table_buf, 0, self._flat_table.tobytes())
             if self._codec_engaged:
-                self.device.queue.write_buffer(
-                    self._codec_flag_buf, 0, self._flat_codec.tobytes()
-                )
-                self.device.queue.write_buffer(
-                    self._codec_norm_buf, 0, self._flat_norm.tobytes()
-                )
+                self.device.queue.write_buffer(self._codec_flag_buf, 0, self._flat_codec.tobytes())
+                self.device.queue.write_buffer(self._codec_norm_buf, 0, self._flat_norm.tobytes())
             self._table_dirty = False
 
     def _histogram(
@@ -2211,16 +2444,25 @@ class WgpuPlaneExecutor:
                 # this result partial, never abort the whole submission.
                 missing.append(key)
                 continue
-            if slot.pool_id in _CODEC_POOL_IDS.values():
-                # The histogram compute path still samples only the raw pools
-                # (textureLoad by integer coord).  A page stored in a BC pool is
-                # therefore reported partial here rather than read from the wrong
-                # raw layer — correct and loud.  Extending the histogram shader to
-                # sample the BC pools (so auto-range is complete under aggressive
-                # AUTO) is the staged follow-up.
+            is_compressed = slot.pool_id in _CODEC_POOL_IDS.values()
+            if is_compressed and self._histogram_codec_mode == "skip":
+                # Path B posture: the compute never reads BC/ASTC texels.  A
+                # compressed page is reported partial; its exact stats come from
+                # the CPU semantic plane / full-population refinement.  (This is
+                # also the only path when compression is off, where no page is
+                # ever compressed and this branch is unreachable.)
                 missing.append(key)
                 continue
             factor = 1 << int(key.lod.level)
+            # Path A: a compressed page carries codec 1 and the SAME (lo, span)
+            # affine the render path applies, sourced from ``_page_codec`` (the
+            # single scale source); the shader samples the BC pool and unscales.
+            # A raw page carries codec 0 and an identity affine (exact
+            # textureLoad).
+            if is_compressed:
+                codec_flag, norm = self._page_codec.get(key, (1, (0.0, 1.0, 0.0, 1.0)))
+            else:
+                codec_flag, norm = 0, (0.0, 0.0, 0.0, 0.0)
             entries.append(
                 (
                     slot.page_index,
@@ -2228,9 +2470,11 @@ class WgpuPlaneExecutor:
                     int(key.chunk_shape[0]),
                     int(key.chunk_shape[1]),
                     factor,
-                    0,
-                    0,
-                    0,
+                    int(codec_flag),
+                    float(norm[0]),
+                    float(norm[1]),
+                    float(norm[2]),
+                    float(norm[3]),
                 )
             )
         self._histogram_dispatches_total += 1
@@ -2254,10 +2498,17 @@ class WgpuPlaneExecutor:
             ),
             usage=wgpu.BufferUsage.UNIFORM,
         )
+        # HPage is 48 bytes (two trailing pad words keep the size a multiple of
+        # 16, matching naga's storage-array stride): layer(i32) rep(i32)
+        # source_h(u32) source_w(u32) factor(u32) codec(u32) then the
+        # (lo_r, span_r, lo_g, span_g) f32 affine (identity for a raw page; the
+        # render path's norm for a BC page) and two pad words.
+        pages_bytes = b"".join(struct.pack("<iiIIIIffffII", *entry, 0, 0) for entry in entries)
         pages_buf = d.create_buffer_with_data(
-            data=np.asarray(entries, np.int32).tobytes(),
+            data=pages_bytes,
             usage=wgpu.BufferUsage.STORAGE,
         )
+        page_stride = 48
         partials = d.create_buffer(size=4 * cmd.bins * n, usage=wgpu.BufferUsage.STORAGE)
         final = d.create_buffer(
             size=4 * cmd.bins, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
@@ -2282,7 +2533,10 @@ class WgpuPlaneExecutor:
             layout=self._partial_pipe.get_bind_group_layout(0),
             entries=[
                 {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
-                {"binding": 1, "resource": {"buffer": pages_buf, "offset": 0, "size": 32 * n}},
+                {
+                    "binding": 1,
+                    "resource": {"buffer": pages_buf, "offset": 0, "size": page_stride * n},
+                },
                 {"binding": 2, "resource": self._pools[SCALAR_R32F].view},
                 {"binding": 3, "resource": self._pools[COMPLEX_RG32F].view},
                 {"binding": 4, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
@@ -2291,6 +2545,17 @@ class WgpuPlaneExecutor:
                     "resource": {"buffer": partials, "offset": 0, "size": 4 * cmd.bins * n},
                 },
                 {"binding": 6, "resource": {"buffer": bounds, "offset": 0, "size": 8}},
+                # Path A BC bindings 7-9 (present whenever engaged; the shader's
+                # codec branch only samples them for a compressed entry).
+                *(
+                    [
+                        {"binding": 7, "resource": self._codec_pool_view(SCALAR_R32F)},
+                        {"binding": 8, "resource": self._codec_pool_view(COMPLEX_RG32F)},
+                        {"binding": 9, "resource": self._codec_sampler},
+                    ]
+                    if self._codec_engaged
+                    else []
+                ),
             ],
         )
         bind2 = d.create_bind_group(
@@ -2323,11 +2588,24 @@ class WgpuPlaneExecutor:
                 layout=self._bounds_partial_pipe.get_bind_group_layout(0),
                 entries=[
                     {"binding": 0, "resource": {"buffer": uargs, "offset": 0, "size": 32}},
-                    {"binding": 1, "resource": {"buffer": pages_buf, "offset": 0, "size": 32 * n}},
+                    {
+                        "binding": 1,
+                        "resource": {"buffer": pages_buf, "offset": 0, "size": page_stride * n},
+                    },
                     {"binding": 2, "resource": self._pools[SCALAR_R32F].view},
                     {"binding": 3, "resource": self._pools[COMPLEX_RG32F].view},
                     {"binding": 4, "resource": self._pools[RGB_WINDOWED_RGBA32F].view},
                     {"binding": 5, "resource": {"buffer": page_bounds, "offset": 0, "size": 8 * n}},
+                    # Path A BC bindings 6-8 (present whenever engaged).
+                    *(
+                        [
+                            {"binding": 6, "resource": self._codec_pool_view(SCALAR_R32F)},
+                            {"binding": 7, "resource": self._codec_pool_view(COMPLEX_RG32F)},
+                            {"binding": 8, "resource": self._codec_sampler},
+                        ]
+                        if self._codec_engaged
+                        else []
+                    ),
                 ],
             )
             bounds_bind2 = d.create_bind_group(
@@ -2611,6 +2889,34 @@ class WgpuPlaneExecutor:
         slot = self.page_table.lookup(key)
         return slot is not None and slot.pool_id in _CODEC_POOL_IDS.values()
 
+    @property
+    def lod_compressed_source_reductions_total(self) -> int:
+        """LOD pages generated via the CPU decode+reduce path (compressed children)."""
+
+        return int(self._lod_compressed_source_reductions_total)
+
+    @property
+    def histogram_codec_mode(self) -> str:
+        """How the GPU histogram/bounds compute treats compressed pages.
+
+        ``"gpu_compressed"`` (Path A) samples the BC pool's lossy texels;
+        ``"skip"`` (Path B posture) excludes compressed pages and reports them
+        ``histogram_missing`` so their exact stats come from the CPU semantic
+        plane / full-population refinement.
+        """
+
+        return self._histogram_codec_mode
+
+    def set_histogram_codec_mode(self, mode: str) -> None:
+        """Switch the compressed-page histogram/bounds path (see the property)."""
+
+        mode = str(mode).lower()
+        if mode not in ("gpu_compressed", "skip"):
+            raise ValueError(
+                f"histogram_codec_mode must be 'gpu_compressed' or 'skip', got {mode!r}"
+            )
+        self._histogram_codec_mode = mode
+
     def pool_budget(self, representation: str) -> int:
         return int(self._pool_budgets[representation])
 
@@ -2670,15 +2976,18 @@ class WgpuPlaneExecutor:
         representation = key.representation
         pool = self._codec_pools[representation]
         block_bytes = _CODEC_BLOCK_BYTES[representation]
+        block_row = (PAGE // 4) * block_bytes
         raw = self.device.queue.read_texture(
             {"texture": pool.texture, "origin": (0, 0, slot.page_index)},
-            {"bytes_per_row": (PAGE // 4) * block_bytes, "rows_per_image": PAGE // 4},
+            {"bytes_per_row": block_row, "rows_per_image": PAGE // 4},
             (PAGE, PAGE, 1),
         )
-        data = bytes(raw)
-        _flag, (lo_r, span_r, lo_g, span_g) = self._page_codec.get(
-            key, (1, (0.0, 1.0, 0.0, 1.0))
-        )
+        # read_texture sizes the readback by texel height (PAGE rows of
+        # ``block_row`` bytes) even for a block-compressed texture; the block
+        # data occupies only the first ``PAGE // 4`` rows.  Slice them out so the
+        # reference decoder sees exactly the encoded blocks.
+        data = np.frombuffer(bytes(raw), np.uint8).reshape(PAGE, block_row)[: PAGE // 4].tobytes()
+        _flag, (lo_r, span_r, lo_g, span_g) = self._page_codec.get(key, (1, (0.0, 1.0, 0.0, 1.0)))
         if representation == SCALAR_R32F:
             unit = bc_codec.bc4_decode(data, PAGE, PAGE)
             return (unit * np.float32(span_r) + np.float32(lo_r)).astype(np.float32)

@@ -75,9 +75,11 @@ class TextureCodecChoice(Enum):
     # (the owner wants this dogfooded); OFF forces the byte-identical raw pools;
     # BC is the explicit pin.  Resolution to a WgpuPlaneExecutor mode string is
     # done by ``texture_codec_executor_mode`` once the device's BC support is
-    # known.  NOTE: the live view stays on the raw path until the histogram
-    # compute shader also samples BC pools (else GPU auto-range regresses); the
-    # executor + real-GPU parity test already exercise the engaged path.
+    # known.  The live view engages BC under AUTO on a capable device: the GPU
+    # histogram/auto-level compute now samples the BC pools too (Path A,
+    # ``histogram_codec_mode="gpu_compressed"``), so auto-range has full coverage
+    # under aggressive AUTO; the exact settled owner stays the CPU full-
+    # population refinement.  Measured by ``tools/g7_levels_histogram_benchmark``.
     AUTO = "auto"
     OFF = "off"
     BC = "bc"
@@ -98,8 +100,10 @@ class AppSettingsState:
     # byte-identical; the default only flips behind a proven benchmark win.
     chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
     # G7 Phase B: native BC display-texture codec.  AUTO is the aggressive
-    # dogfood default (engages wherever the device supports BC); the live view
-    # threading is gated on the histogram-samples-BC follow-up.
+    # dogfood default: it engages BC wherever the device supports it, and the GPU
+    # histogram/auto-level compute samples the BC pools so auto-range stays
+    # correct under compression.  Explicit OFF restores the byte-identical raw
+    # path.
     texture_codec: TextureCodecChoice = TextureCodecChoice.AUTO
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
@@ -243,9 +247,7 @@ def normalize_texture_codec_choice(value) -> TextureCodecChoice:
         return TextureCodecChoice.AUTO
 
 
-def texture_codec_executor_mode(
-    choice: TextureCodecChoice, *, bc_available: bool
-) -> str:
+def texture_codec_executor_mode(choice: TextureCodecChoice, *, bc_available: bool) -> str:
     """Resolve the display-codec setting to a WgpuPlaneExecutor mode string.
 
     Returns ``"off"``/``"on"``/``"auto"`` for the ``compressed_textures``

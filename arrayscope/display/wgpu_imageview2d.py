@@ -193,6 +193,13 @@ def import_qrenderwidget():
     return QRenderWidget
 
 
+# Native texture-codec device features: BC (NVIDIA/AMD and Intel too) and ASTC
+# (Intel iGPUs).  Requested whenever the adapter advertises them so the shared
+# device can host block-compressed pools; a device without either simply keeps
+# the raw path (AUTO degrades silently).
+_TEXTURE_CODEC_FEATURES = ("texture-compression-bc", "texture-compression-astc")
+
+
 def _shared_wgpu_device():
     global _SHARED_WGPU_DEVICE
     if _SHARED_WGPU_DEVICE is None:
@@ -204,8 +211,19 @@ def _shared_wgpu_device():
             # Wayland (gate-B Tier 0).  Harmless if the instance already exists.
             set_instance_extras(backends=["Vulkan"])
         adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
-        _SHARED_WGPU_DEVICE = adapter.request_device_sync()
+        # Enable the block-compression features the adapter actually has, so the
+        # G7 Phase B BC/ASTC texture pools can be created on this shared device.
+        available = {str(f) for f in adapter.features}
+        wanted = [f for f in _TEXTURE_CODEC_FEATURES if f in available]
+        _SHARED_WGPU_DEVICE = adapter.request_device_sync(required_features=wanted)
     return _SHARED_WGPU_DEVICE
+
+
+def _device_supports_texture_compression(device) -> bool:
+    """Whether the shared device enables a block-compression feature (BC/ASTC)."""
+
+    have = {str(f) for f in device.features}
+    return any(f in have for f in _TEXTURE_CODEC_FEATURES)
 
 
 class WgpuImageView2D(ImageViewShell):
@@ -358,14 +376,28 @@ class WgpuImageView2D(ImageViewShell):
 
         self._wgpu_canvas.request_draw(self._on_wgpu_draw)
 
-    def __init__(self, parent=None, view=None, imageItem=None, present_method="bitmap"):
-        from arrayscope.app.settings_state import normalize_wgpu_present_method_choice
+    def __init__(
+        self,
+        parent=None,
+        view=None,
+        imageItem=None,
+        present_method="bitmap",
+        texture_codec="auto",
+    ):
+        from arrayscope.app.settings_state import (
+            normalize_texture_codec_choice,
+            normalize_wgpu_present_method_choice,
+        )
 
         # setupUI (called by the shell constructor) reads the request, so it
         # must be normalized and stored before super().__init__ runs.
         self._wgpu_present_method_requested = normalize_wgpu_present_method_choice(
             present_method
         ).value
+        # G7 Phase B display-codec choice (AUTO/OFF/BC).  Resolved to an executor
+        # ``compressed_textures`` mode string against the device's real BC/ASTC
+        # support at executor-build time (``_ensure_wgpu_executor``).
+        self._wgpu_texture_codec_choice = normalize_texture_codec_choice(texture_codec)
         super().__init__(parent=parent, view=view, imageItem=imageItem)
         self._view_navigation = QtViewNavigationDriver(self)
         self.imageItem.setVisible(False)
@@ -421,9 +453,20 @@ class WgpuImageView2D(ImageViewShell):
             )
             if budget:
                 budgets[representation] = budget
+        # Resolve the display-codec choice to an executor mode against this
+        # device's real block-compression support.  AUTO engages aggressively
+        # ("auto") wherever the device has BC/ASTC (the owner's dogfood default),
+        # OFF forces the byte-identical raw pools, BC is the explicit force-on.
+        from arrayscope.app.settings_state import texture_codec_executor_mode
+
+        codec_mode = texture_codec_executor_mode(
+            self._wgpu_texture_codec_choice,
+            bc_available=_device_supports_texture_compression(device),
+        )
         self._wgpu_executor = WgpuPlaneExecutor(
             pool_layers=budgets or {SCALAR_R32F: 8},
             device=device,
+            compressed_textures=codec_mode,
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None

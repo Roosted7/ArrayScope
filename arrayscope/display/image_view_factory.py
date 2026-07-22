@@ -8,6 +8,7 @@ import platform
 
 from arrayscope.app.settings_state import (
     ImageRenderingBackendChoice,
+    TextureCodecChoice,
     WgpuPresentMethodChoice,
 )
 from arrayscope.display.backends.pyqtgraph import PyQtGraphSurface
@@ -39,10 +40,15 @@ def create_image_view(settings=None, *, notify=None):
     if choice_value == ImageRenderingBackendChoice.WGPU.value:
         present_method = getattr(settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP)
         present_method_value = getattr(present_method, "value", present_method)
+        texture_codec = getattr(settings, "texture_codec", TextureCodecChoice.AUTO)
+        texture_codec_value = getattr(texture_codec, "value", texture_codec)
         try:
             from arrayscope.display.backends.wgpu import WgpuSurface
 
-            view = WgpuSurface(present_method=present_method_value)
+            view = WgpuSurface(
+                present_method=present_method_value,
+                texture_codec=texture_codec_value,
+            )
             view._notify_status = notify
             # Only an EXPLICIT screen pin warrants a warning; AUTO resolving
             # to bitmap is the resolution rule working as designed.
