@@ -38,9 +38,12 @@ Represent a small image as one tile and a huge plane/montage as several regions,
 
 Extract one narrow capability at a time from `ImageView2D`: teardown, camera, tiled commit, overlays, pointer mapping. Avoid creating a giant new abstract base class that merely mirrors both current widgets.
 
-### Off-thread histogram refinement
+### Source/stage summaries and batched evidence readback
 
-Measure whether bounded sampling/binning actually violates budget. When it does, move only the expensive refinement to an immutable worker request; preserve immediate level feedback and target-key guards.
+Prototype mergeable source/stage summaries for exact evidence and one packed
+WGPU submission/readback for rough evidence. Gate both on identical final
+levels/histograms, less work, and no unbounded display-payload cache. Baseline:
+[`2026-07-22 compression follow-up`](reviews/2026-07-22-compression-live-benefit-review.md).
 
 ### Real GPU budget probe
 
@@ -65,6 +68,14 @@ prototype raw-hot/compressed-cold demotion on the kernel's lowest-priority lane:
 compression happens from an immutable evicted value outside the cache lock,
 is cancelled by visible demand, and admits by expected recompute latency saved
 per compressed byte. Idle CPU alone is not an admission signal.
+
+Already-encoded BC transfers faster, but current encoding costs more than the
+saved upload time. If retention pressure later justifies compression, race one
+bounded off-thread artifact against the raw upload and never delay visible work;
+measure prevented evictions/re-uploads, wasted preparation, physical tile rate,
+and byte-capped residency. Prefer pre-encoded or on-device paths. Keep the 40 dB
+gate unless a display-aware quality contract passes physical-framebuffer tests.
+Detailed baseline: [compression follow-up](reviews/2026-07-22-compression-live-benefit-review.md).
 
 ### Elastic preview residency
 

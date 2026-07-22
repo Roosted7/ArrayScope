@@ -6,18 +6,26 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **Exact semantic-evidence sparse-read stall FIXED:** point/slice
+  selectors now collapse axes before sparse image gathers; the production-shaped
+  272-source sweep fell to 0.16 s. See the
+  [compression follow-up](reviews/2026-07-22-compression-live-benefit-review.md).
+
 - 2026-07-22 — **G7 live compression benefit CLOSED — measured NO:** the
   [matched live and architecture review](reviews/2026-07-22-compression-live-benefit-review.md)
-  found 8.5–138× slower cold submission, 8.4–42.5× slower compressed-source
+  found 8.5–138× slower **16-page synchronous** submission, 8.4–42.5× slower compressed-source
   LOD, 9–18% larger configured raw+codec pools, synchronous host-cache work at
   the wrong miss owner, and no established capacity/transfer bottleneck.
   Correctness, alias, one-budget, physical-truth, and byte-accounting defects are
   repaired. Cross-session retained payloads are now byte-bounded, while the
   evaluator display cache, exact ROI-demand cache, and selected backend's
   physical storage remain correctly distinct. Production defaults are RAW/OFF.
-  The codec paths remain explicit experiments until telemetry shows
-  GPU-pool pressure, costly StageCache eviction, or remote/storage bandwidth as
-  a real user-visible constraint.
+  Follow-up added optional GIL-free Numba encoding, removed the full raw+codec
+  allocation mirror, and timed physical tile presentation separately from
+  evidence settlement. AUTO is still slower and a framebuffer counterexample
+  keeps the safe gate at 40 dB. Codec paths remain explicit experiments until
+  one physical byte cap and retention telemetry show prevented eviction/re-upload,
+  or another real transfer bottleneck is established.
 
 - 2026-07-22 — **Montage-relevel stall (the "reds") FIXED — pyqtgraph level-only
   fast-path (`cca02e74`):** the profiler-gated fix corrected the diagnosis (the

@@ -50,6 +50,13 @@ residency from both; byte-bound physical successor stores; prefer lazy sources
 for large authoritative data; and measure which evictions actually repeat
 costly work before resizing or compressing anything.
 
+The 2026-07-22 follow-up fixed sparse exact-evidence reads and removed eager
+raw-plus-codec pool mirroring. Compression remains explicit/off: matched physical
+tile evidence is still slower at the safe 40 dB gate. Program A next measures
+retention ownership, then tests one physical byte cap and lazy codec activation;
+the [evidence review](reviews/2026-07-22-compression-live-benefit-review.md) owns
+the benchmark details.
+
 As of 2026-07-16, `main` **is** the GPU engine (ADR 0055/0056). The
 direction record is
 [`proposals/tensor-engine-endpoint.md`](proposals/tensor-engine-endpoint.md).

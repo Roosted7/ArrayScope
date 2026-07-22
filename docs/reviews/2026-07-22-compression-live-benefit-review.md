@@ -8,10 +8,12 @@ not establish a product benefit. The live AUTO defaults were premature.
 - Lossless ZFP/Blosc2 compress real chunks well, but CPU encode + decode still
   loses the transport inequality by orders of magnitude.
 - BC/ASTC reduce the bytes of an *active compressed page*, and the hardware
-  sampler decodes them correctly, but the live executor also allocates the full
-  raw fallback pool. Configured pool memory therefore grows rather than shrinks.
-- Cold WGPU submission pays CPU encode plus a reference decode/quality pass for
-  every page. Compressed-source LOD additionally leaves the GPU for readback,
+  sampler decodes them correctly. The audited executor initially allocated full
+  raw and codec arrays; the follow-up replaces that eager mirror with separately
+  demand-sized arrays. Compression still needs a real pressure/reuse win.
+- Cold WGPU submission originally paid CPU encode plus reference decode for
+  every page. Scalar BC quality is now accumulated inside the GIL-free encoder
+  without decoding; compressed-source LOD still leaves the GPU for readback,
   CPU decode/reduce, and re-upload.
 - The host tier can retain more keys under one byte budget, but production had
   been given the full raw budget plus an equally large tier, real display aliases
@@ -22,6 +24,31 @@ This review restores host `RAW` and texture `OFF` as defaults. Explicit codec
 choices remain as experimental mechanisms. G7 closes with a measured NO rather
 than consuming the active queue: compression is revived only when telemetry
 shows a capacity or I/O bottleneck that it can actually remove.
+
+### Follow-up measurement correction: tile arrival was not 8–138× slower
+
+The original cold-submit ratios below are real, but their scope was too easy to
+misread. `g7_live_compression_benchmark` submitted 16 pages in one synchronous
+executor call. It did **not** present a frame, acknowledge a draw, run the live
+per-source rough histogram topology, or run post-visible exact semantic
+evidence. It therefore measures codec batch throughput on the GUI-thread seam,
+not perceived time to the first useful tile.
+
+The user's observation that tiles remained reasonably quick while “semantic
+evidence” drained slowly exposed a separate owner-level bug. Sparse exact
+evidence requests have two sampled image axes followed by one point-selected
+montage axis. The shared reader applied `np.take` left-to-right, so it copied a
+roughly 90×336×272 intermediate before selecting one source plane. Basic point
+and slice indexing now runs first, in one view-like operation, before the two
+sparse gathers. Eager region evaluation delegates to the same canonical reader.
+
+On the real 336×336×272 volume, the historical one-source selection took 163.5
+ms median versus 0.22 ms after the fix (744× in the regression probe). The full
+production-shaped raw sweep—272 sources, 8,192 pixels/source, two sources per
+batch—now takes 156 ms median eager and 163 ms lazy, with a 2.50/2.63 ms maximum
+worker batch. This defect predates G7 and exact semantic evidence does not read
+either compressed cache; compression can delay when the sweep starts, but not
+its document/stage evaluation once running.
 
 ## Pipeline diagnosis: the wrong work at the wrong seam
 
@@ -37,9 +64,10 @@ That implication is false here:
   `StageCache`, so the tier paid encode/decode while usually avoiding only a
   cheap payload rebuild.
 - Texture AUTO generated BC/ASTC from every dynamic tile on the CPU, decoded it
-  again for a quality check, and kept a complete raw fallback pool. It optimized
-  encoded page length while worsening the two resources that matter now: the
-  callback/first-pixel critical path and configured physical allocation.
+  again for a quality check, and kept a complete raw fallback pool. Those two
+  implementation defects are now removed for scalar BC: quality is fused into
+  encode, and physical raw/codec arrays follow measured demand. Synchronous
+  encoding and compressed-source LOD remain on the wrong latency/dataflow seam.
 - The histogram and window/level expansion was mostly **format plumbing tax**.
   Once lossy normalized texture pages became another physical representation,
   histogram compute, auto-level bounds, LOD, page identity, and diagnostics all
@@ -206,7 +234,8 @@ cache wrapper and `WgpuPlaneExecutor`. Each result below is the median and range
 of three fresh processes on AC power, native Wayland, the real 336×336×272 T2
 volume, 16 × 256² pages, and an eight-raw-page total host budget. OFF/RAW and
 AUTO/AUTO are separate processes. Intel selects live ASTC 4×4; the RTX A2000
-selects BC. Timings are milliseconds.
+selects BC. Timings are milliseconds. “Cold submit” is the one synchronous
+16-page batch described above; it is not a full-viewer latency measurement.
 
 | Adapter / data | Mode | cold submit | histogram | LOD | host admit | host revisit |
 |---|---:|---:|---:|---:|---:|---:|
@@ -219,13 +248,116 @@ selects BC. Timings are milliseconds.
 | A2000 complex | OFF/RAW | 15.7 [14.1, 15.8] | 132.8 [124.3, 133.3] | 1.1 [1.0, 1.2] | 0.1 | 0.0 |
 | A2000 complex | AUTO/AUTO | 274.6 [266.0, 357.8] | 147.7 [128.5, 159.4] | 46.8 [43.6, 49.8] | 38.2 [37.7, 44.1] | 37.0 [36.4, 38.7] |
 
-Resident-hot histogram dispatch is approximately neutral; it was the only GPU
-timing in the previous histogram tool. Cold submission is 8.5–138× slower and
-compressed-source LOD is 8.4–42.5× slower. Intel complex AUTO reaches roughly
-2.0 seconds for only 16 pages, consuming the whole interaction target before
-presentation work is counted.
+Resident histogram dispatch is approximately codec-neutral. Cold submission is
+8.5–138× slower for the 16-page synchronous cell and compressed-source LOD is
+8.4–42.5× slower. Intel complex AUTO reaches roughly 2.0 seconds for that batch,
+which proves that a large callback would consume the interaction target; it
+does not prove that incremental tile presentation is 138× slower.
+
+The extended benchmark explains why individual tiles can still feel reasonable:
+Intel OFF/AUTO submission was 12.3/21.6 ms for one page, but 13.8/507.7 ms for
+16. The fixed raw overhead is nearly constant while ASTC work scales per page.
+The discrete-GPU premise is nevertheless correct. An ABBA cell that excludes
+encoding and quality measured A2000 `write_texture` plus completion as follows:
+
+| Accepted pages | Raw → BC bytes | Raw → BC transfer | Speedup | Absolute saving |
+|---:|---:|---:|---:|---:|
+| 1 | 256 → 32 KiB | 0.13 → 0.09 ms | 1.48× | 0.04 ms |
+| 4 | 1,024 → 128 KiB | 0.24 → 0.14 ms | 1.73× | 0.10 ms |
+| 14 | 3,584 → 448 KiB | 0.67 → 0.31 ms | 2.18× | 0.36 ms |
+| 59 | 15,104 → 1,888 KiB | 3.18 → 1.29 ms | 2.47× | 1.89 ms |
+
+Fewer bytes therefore cross faster, but the roughly 0.03 ms/page saving is much
+smaller than current preparation. Threads already help native/NumPy work. The
+optional byte-identical Numba BC4 path releases the GIL, fuses scalar quality,
+and improves the live 16-page A2000 AUTO submit from 127.7 to 36.5 ms; raw is
+still roughly 12 ms. Its 357–403 ms prewarm runs through the speculative lane
+after the first physical draw, and AUTO stays raw until it is ready. Only that
+safe infrastructure lands: per-page artifacts and raw-to-compressed demotion
+remain experiments requiring cancellation and shared byte accounting.
+
+### Later montage pages: the opportunity is real, but it is mostly capacity
+
+The full montage does provide preparation time: a replay of 544 matched
+materialization/upload windows found 19.2 ms minimum and 2.01 s median lead.
+One worker prepared every one of the 89 pages that passed 40 dB before its
+deadline; peak queued artifacts were 68 pages / 2.23 MB. That validates the
+prefetch premise, but chiefly as a future retention tool.
+
+The earlier 538.71 MB OFF / 605.81 MB AUTO allocations were an allocator bug,
+not a WebGPU requirement. Formats need separate arrays; their extents need not
+match. Demand-sized arrays now grow independently while preserving layer
+indices. On the same A2000 workload OFF allocates 150.21 MB; AUTO allocates
+146.54 MB, owns 122.26 MB active, and copies 4.33 MB across two growths. A shared
+ResourceGovernor byte cap and optional idle compaction remain future work.
+
+The profiler also now records **physical draw edges** and page-backed tile rows,
+separate from histogram/semantic/level settlement. In an interleaved
+OFF/AUTO/OFF/AUTO fresh-process set, medians were:
+
+| Mode | first physical tile | all 272 preview tiles drawn | new-tile rate | final LOD transition | active / allocated |
+|---|---:|---:|---:|---:|---:|
+| OFF | 0.587 s | 3.503 s | 93.0 tiles/s | 8.646 s | 143.13 / 150.21 MB |
+| AUTO 40 dB | 1.063 s | 4.582 s | 77.5 tiles/s | 10.417 s | 122.26 / 146.54 MB |
+
+These samples are recorded in the WGPU draw callback after presenting the page
+table, excluding histogram and semantic settlement. AUTO is about 17% lower in
+preview throughput, not 8–138× slower. Its first-tile penalty precedes any
+compressed page, pointing to eager codec resource/pipeline activation. A future
+artifact race must therefore prove avoided eviction/re-upload, not merely move
+roughly 3 ms of aggregate A2000 transfer saving to another thread.
+
+Lowering the gate was tested rather than assumed. The trace curve admitted
+89/544 pages at 40 dB, 152/544 at 38 dB, and 408/544 at 35 dB. Under the
+representative full-volume auto window those sets measured 54.84/48.57/42.69 dB
+display PSNR, with 0.18%/1.24%/6.07% of pixels differing by more than four
+display levels. More decisively, a deterministic 39.99 dB page that 38 or 39
+would admit rendered at only 39.91 dB in the physical framebuffer under a valid
+window, below the existing 45 dB oracle. The global gate therefore remains 40
+dB. A better endpoint-search encoder or a carefully specified display-aware
+policy—not a silent threshold reduction—is the route to more accepted pages.
+
+The production `low-power` choice selects Intel/ASTC on this machine; one matched
+montage was 8.91 s OFF versus 15.29 s AUTO. The profiler now records and can
+select the adapter in a fresh process, keeping A2000 evidence distinct from the
+default topology.
+
+The old approximately 130 ms histogram column was dominated by first-use GPU
+pipeline compilation. The corrected cold first-source cell is 121–130 ms for
+both OFF and AUTO; a warm aggregate over all 16 sources is only 7–8 ms. Live
+code, however, requests one dynamic-bounds histogram per source. Warm 1/4/16
+source totals were 5.5/21.9/89.2 ms OFF and 6.9/18.9/77.1 ms AUTO. For the
+16-source raw cell, submit/fence/readback were 10.3/23.5/55.3 ms. The linear
+per-source submissions and two readbacks—not the codec—are the remaining rough
+evidence scaling problem. A G6 timestamp-query stress run makes that shape even
+larger, but adds a third readback and pre-residents all 272 sources, so it is
+protocol evidence rather than a production-latency headline.
+
+An isolated replay of the exact CPU phase, using the same production reader and
+level-stat functions, gave the following results in addition to the 156–163 ms
+raw measurements above:
+
+| Document case | Sources / batch | Full sweep | Max batch | Stage/RSS interpretation |
+|---|---:|---:|---:|---|
+| eager raw | 272 / 2 | 156 ms median | 2.50 ms | 17.8 MB sampled slabs; ~1.7 MB first-run RSS delta |
+| lazy raw | 272 / 2 | 163 ms median | 2.63 ms | same work; no eager-copy penalty in this cell |
+| FFT over image axis | 60 / 2 | 403 ms median | 24 ms warm-run max | one distinct retained stage/source |
+| FFT over image axis | 272 / 2 | 3.10 s | 136 ms | 272 stores, 208 evictions under the bounded StageCache |
+| FFT over montage axis | 60 / 2 | 277 ms median | 178–334 ms first batch | one 35.6 MB stage then 59 cache hits |
+
+The indexing bug is fixed, but the operation-backed rows identify a legitimate
+architectural cost: exact levels currently re-evaluate the full selected
+population after visible pixels settle. Conventional large-image pipelines
+precompute or incrementally retain exact min/max/histogram summaries beside
+source/stage chunks, then combine that small metadata tree for the requested
+population. ArrayScope should move toward that shape. It should not infer exact
+semantic truth by rereading lossy display textures, and it should not keep every
+display payload merely to avoid summary recomputation.
 
 ## Byte and residency interpretation
+
+The small 16-page table below records the audited eager-allocation implementation
+and is retained to explain the defect. It is not the current allocator result.
 
 | Adapter / data | Mode | submitted / active bytes | configured pool bytes | unique host keys |
 |---|---:|---:|---:|---:|
@@ -238,13 +370,15 @@ presentation work is counted.
 | A2000 complex | OFF/RAW | 8,388,608 | 12,058,624 | 8 |
 | A2000 complex | AUTO/AUTO | 1,507,328 (15 compressed, 1 raw fallback) | 13,369,344 | 8 |
 
-The active-page saving is real. The claimed 8× live VRAM-capacity saving is not:
-full raw fallback arrays remain allocated beside full codec arrays, producing a
-9–18% configured-pool increase in these cells. Host AUTO retained only zero or
-one extra unique key while adding synchronous work; a larger, compressible
-working set can improve retention, but the prior `40→91` figure double-counted
-raw/tier overlap and its time win substituted a synthetic FFT for a display-cache
-miss while the expensive StageCache remained separate.
+The active-page saving was real; the eager configured-capacity result was not a
+fundamental limit. Demand-sized physical arrays now remove that full+full mirror,
+as the montage result above demonstrates. They remain separate because WebGPU
+textures have one immutable format, and they retain independent high-water marks;
+future shrink/compaction and one shared physical-byte cap remain open. Host AUTO
+retained only zero or one extra unique key while adding synchronous work; a
+larger, compressible working set can improve retention, but the prior `40→91`
+figure double-counted raw/tier overlap and its time win substituted a synthetic
+FFT for a display-cache miss while the expensive StageCache remained separate.
 
 The lossless transport microbenchmark still gives a measured NO: on the same real
 volume, 80 chunks compressed 2.69–5.23×, but break-even bandwidth was only
@@ -266,19 +400,20 @@ remote/storage bandwidth limit. A bounded design must then satisfy all of these:
    display contract;
 3. cold first pixels and each interaction settle within 2 s (hard failure 5 s),
    GUI callback under 50 ms, heartbeat gap at or below 16 ms;
-4. configured pool allocation, not encoded payload length, demonstrates a memory
-   win; mixed raw fallbacks cannot strand required pages;
+4. current physical pool allocation, growth-copy bytes, and high-water slack—not
+   encoded payload length—demonstrate a memory win; mixed raw fallbacks cannot
+   strand required pages;
 5. resident-to-resident LOD stays on GPU with zero readback;
 6. host compression runs off the GUI thread and proves that tier recoveries avoid
    misses at the actual expensive owner under one measured RSS budget.
 
 If revived, candidate work belongs in this order: consolidate the live
-codec-policy owner; prepare/encode payloads off the GUI thread; add
-compressed-pool sampling to GPU LOD; replace parallel full pools with one
-physically bounded capacity design; then evaluate a compressed tier at the
-StageCache/materialization owner. Until a trigger exists, optimizing these
-mechanisms would solve a hypothetical problem and compete with the measured
-first-pixel/promotion work.
+codec-policy owner; lazily activate codec pipelines after first pixels;
+prepare/encode payloads off the GUI thread; add compressed-pool sampling to GPU
+LOD; make the demand-sized arrays obey one ResourceGovernor byte cap and compact
+at safe idle points; then evaluate a compressed tier at the StageCache/
+materialization owner. Until a trigger exists, deeper optimization would solve
+a hypothetical problem and compete with the measured first-pixel/promotion work.
 
 ## Validation record
 
