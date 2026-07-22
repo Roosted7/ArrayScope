@@ -92,6 +92,10 @@ class AppSettingsState:
     chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
     # G7: explicit lossy display-cache experiment; OFF is the exact path.
     texture_codec: TextureCodecChoice = TextureCodecChoice.OFF
+    # wgpu display legibility aids (shader Stage A). Both default off so the
+    # default render is byte-identical; the pixel grid is zoom-gated even on.
+    wgpu_pixel_grid: bool = False
+    wgpu_clip_indicator: bool = False
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -120,6 +124,8 @@ def settings_from_mapping(values) -> AppSettingsState:
             values.get("chunk_transport_codec")
         ),
         texture_codec=normalize_texture_codec_choice(values.get("texture_codec")),
+        wgpu_pixel_grid=_to_bool(values.get("wgpu_pixel_grid", False)),
+        wgpu_clip_indicator=_to_bool(values.get("wgpu_clip_indicator", False)),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(
             values.get("render_memory_budget_mb", 512)
@@ -141,6 +147,8 @@ def settings_to_mapping(settings: AppSettingsState):
         "montage_quality_policy": settings.montage_quality_policy.value,
         "chunk_transport_codec": settings.chunk_transport_codec.value,
         "texture_codec": settings.texture_codec.value,
+        "wgpu_pixel_grid": bool(settings.wgpu_pixel_grid),
+        "wgpu_clip_indicator": bool(settings.wgpu_clip_indicator),
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,

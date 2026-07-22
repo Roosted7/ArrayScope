@@ -32,7 +32,7 @@ pages is actually resident in the executor page table after the submit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter, perf_counter_ns
 
 import numpy as np
@@ -384,7 +384,11 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_screen_acquire_ms_max = 0.0
         self._wgpu_screen_present_ms_last = 0.0
         self._wgpu_screen_present_ms_max = 0.0
-        self._wgpu_mapping_state = DisplayMapping(mode="real")
+        self._wgpu_mapping_state = DisplayMapping(
+            mode="real",
+            pixel_grid=self._pixel_grid_enabled,
+            clip_indicator=self._clip_indicator_enabled,
+        )
         self._wgpu_committed: dict[str, object] | None = None
         self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
         self._wgpu_last_report_uploads = 0
@@ -437,6 +441,8 @@ class WgpuImageView2D(ImageViewShell):
         imageItem=None,
         present_method="bitmap",
         texture_codec="auto",
+        pixel_grid=False,
+        clip_indicator=False,
     ):
         from arrayscope.app.settings_state import (
             normalize_texture_codec_choice,
@@ -452,6 +458,13 @@ class WgpuImageView2D(ImageViewShell):
         # ``compressed_textures`` mode string against the device's real BC/ASTC
         # support at executor-build time (``_ensure_wgpu_executor``).
         self._wgpu_texture_codec_choice = normalize_texture_codec_choice(texture_codec)
+        # Shader Stage-A legibility aids (zoom-gated pixel grid + clip markers).
+        # Pure shader-uniform flags carried on every DisplayMapping this view
+        # builds; toggling them live only re-submits SetDisplayMapping (no
+        # residency change).  Stored before super().__init__ because setupUI
+        # builds the initial mapping.
+        self._pixel_grid_enabled = bool(pixel_grid)
+        self._clip_indicator_enabled = bool(clip_indicator)
         super().__init__(parent=parent, view=view, imageItem=imageItem)
         self._view_navigation = QtViewNavigationDriver(self)
         self.imageItem.setVisible(False)
@@ -1554,6 +1567,8 @@ class WgpuImageView2D(ImageViewShell):
                 scale=scale,
                 symlog_constant=symlog_constant,
                 phase_color=phase_color,
+                pixel_grid=self._pixel_grid_enabled,
+                clip_indicator=self._clip_indicator_enabled,
             )
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
@@ -2125,6 +2140,8 @@ class WgpuImageView2D(ImageViewShell):
             scale=self._wgpu_mapping_state.scale,
             symlog_constant=self._wgpu_mapping_state.symlog_constant,
             phase_color=self._wgpu_mapping_state.phase_color,
+            pixel_grid=self._pixel_grid_enabled,
+            clip_indicator=self._clip_indicator_enabled,
         )
         start = perf_counter()
         report = self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
@@ -2157,8 +2174,49 @@ class WgpuImageView2D(ImageViewShell):
             scale=self._wgpu_mapping_state.scale,
             symlog_constant=self._wgpu_mapping_state.symlog_constant,
             phase_color=self._wgpu_mapping_state.phase_color,
+            pixel_grid=self._pixel_grid_enabled,
+            clip_indicator=self._clip_indicator_enabled,
         )
         if self._montage_display_mode == "wgpu_tile_layer":
+            self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
+            self._request_wgpu_canvas_draw(count_presentation=True)
+
+    # ---- shader legibility aids (Stage A) -------------------------------------
+
+    def wgpuPixelGridEnabled(self) -> bool:
+        return bool(self._pixel_grid_enabled)
+
+    def wgpuClipIndicatorEnabled(self) -> bool:
+        return bool(self._clip_indicator_enabled)
+
+    def setWgpuPixelGridEnabled(self, enabled: bool) -> None:
+        """Toggle the zoom-gated per-texel pixel grid on the live view."""
+
+        self._set_legibility_flag("pixel_grid", bool(enabled))
+
+    def setWgpuClipIndicatorEnabled(self, enabled: bool) -> None:
+        """Toggle the out-of-window clip markers on the live view."""
+
+        self._set_legibility_flag("clip_indicator", bool(enabled))
+
+    def _set_legibility_flag(self, name: str, enabled: bool) -> None:
+        """Update one legibility flag and, if live, re-submit the mapping.
+
+        These are pure shader-uniform flags: no residency, no upload — a
+        ``SetDisplayMapping`` re-submit plus a redraw is the whole cost, so the
+        toggle is felt immediately without rebuilding the view.
+        """
+
+        if name == "pixel_grid":
+            if self._pixel_grid_enabled == enabled:
+                return
+            self._pixel_grid_enabled = enabled
+        else:
+            if self._clip_indicator_enabled == enabled:
+                return
+            self._clip_indicator_enabled = enabled
+        self._wgpu_mapping_state = replace(self._wgpu_mapping_state, **{name: enabled})
+        if self._wgpu_executor is not None and self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
             self._request_wgpu_canvas_draw(count_presentation=True)
 

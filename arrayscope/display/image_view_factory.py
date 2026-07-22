@@ -154,12 +154,16 @@ def create_image_view(settings=None, *, notify=None):
         present_method_value = getattr(present_method, "value", present_method)
         texture_codec = getattr(settings, "texture_codec", TextureCodecChoice.AUTO)
         texture_codec_value = getattr(texture_codec, "value", texture_codec)
+        pixel_grid = bool(getattr(settings, "wgpu_pixel_grid", False))
+        clip_indicator = bool(getattr(settings, "wgpu_clip_indicator", False))
         try:
             from arrayscope.display.backends.wgpu import WgpuSurface
 
             view = WgpuSurface(
                 present_method=present_method_value,
                 texture_codec=texture_codec_value,
+                pixel_grid=pixel_grid,
+                clip_indicator=clip_indicator,
             )
             view._notify_status = notify
             # Only an EXPLICIT screen pin warrants a warning; AUTO resolving

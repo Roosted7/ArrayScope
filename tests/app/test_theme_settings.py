@@ -129,6 +129,8 @@ def test_settings_round_trip_defaults_and_values():
             "montage_quality_policy": "resident",
             "chunk_transport_codec": "zfp",
             "texture_codec": "bc",
+            "wgpu_pixel_grid": "true",
+            "wgpu_clip_indicator": "true",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
             "qt_platform": "xcb",
@@ -148,12 +150,16 @@ def test_settings_round_trip_defaults_and_values():
         "montage_quality_policy": "resident",
         "chunk_transport_codec": "zfp",
         "texture_codec": "bc",
+        "wgpu_pixel_grid": True,
+        "wgpu_clip_indicator": True,
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
         "qt_platform": "xcb",
         "python_free_threading": "force_disabled",
     }
     defaults = settings_state.settings_from_mapping({})
+    assert defaults.wgpu_pixel_grid is False
+    assert defaults.wgpu_clip_indicator is False
     assert defaults.theme == theme.ThemeChoice.SYSTEM
     assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO

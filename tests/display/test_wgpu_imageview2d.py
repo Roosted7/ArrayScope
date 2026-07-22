@@ -961,6 +961,65 @@ def test_partial_residency_acknowledges_only_resident_tiles(qt_app):
         view.close()
 
 
+def test_display_aid_flags_ride_every_mapping_rebuild_and_toggle_live(qt_app):
+    """Stage-A pixel-grid / clip flags must survive every DisplayMapping rebuild
+    (full commit AND the partial level/LUT rebuilds) and toggle live without an
+    upload — the regression the copy-forward rebuild sites would otherwise hit."""
+
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+    )
+
+    view = _view_class("wgpu")(pixel_grid=True)
+    view.resize(320, 260)
+    view.show()
+    try:
+        # Constructor flag seeds the initial mapping.
+        assert view._wgpu_mapping_state.pixel_grid is True
+        assert view._wgpu_mapping_state.clip_indicator is False
+
+        image = np.full((16, 24), 3.0 + 4.0j, dtype=np.complex64)
+        geometry = _montage_geometry((16, 24), 1, 1, loaded=1)
+        payloads = {
+            0: _payload(
+                0,
+                image,
+                source_id=("wgpu-aids", 1),
+                shader_mapping=ShaderMapping(
+                    component=ShaderComponent.ABS, display_mode=ShaderDisplayMode.COMPLEX
+                ),
+            )
+        }
+        # A full commit rebuilds the mapping from scratch — the flag must ride it.
+        _commit(view, geometry, payloads, levels=(0.0, 10.0))
+        assert view._wgpu_mapping_state.pixel_grid is True
+
+        # Live toggle of the clip indicator: shader-uniform only, zero upload.
+        before = view._wgpu_executor.uploads_total
+        view.setWgpuClipIndicatorEnabled(True)
+        assert view._wgpu_executor.uploads_total == before
+        assert view._wgpu_mapping_state.clip_indicator is True
+        assert view._wgpu_mapping_state.pixel_grid is True
+
+        # A level change goes through the PARTIAL copy-forward rebuild; both
+        # flags must survive it (they were dropped before the wiring fix).
+        view._apply_preview_levels_to_display((0.0, 5.0), final=True)
+        assert view._wgpu_mapping_state.level_hi == pytest.approx(5.0)
+        assert view._wgpu_mapping_state.pixel_grid is True
+        assert view._wgpu_mapping_state.clip_indicator is True
+
+        # Turning the grid off live flips exactly that flag.
+        view.setWgpuPixelGridEnabled(False)
+        assert view._wgpu_mapping_state.pixel_grid is False
+        assert view._wgpu_mapping_state.clip_indicator is True
+        assert view.wgpuPixelGridEnabled() is False
+        assert view.wgpuClipIndicatorEnabled() is True
+    finally:
+        view.close()
+
+
 def test_complex_tile_mode_switch_is_zero_upload_with_physical_truth(qt_app):
     from arrayscope.display.shader_mapping import (
         ShaderComponent,

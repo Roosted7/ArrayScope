@@ -59,6 +59,8 @@ class WindowMenuMixin:
                 "texture_codec": self._settings.value(
                     "texture_codec", TextureCodecChoice.OFF.value
                 ),
+                "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
+                "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
                 "chunk_transport_codec": self._settings.value(
                     "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
                 ),
@@ -193,6 +195,35 @@ class WindowMenuMixin:
             theme_menu.addAction(action)
             self._theme_actions[choice] = action
         self._sync_theme_actions()
+
+        # Shader display aids (wgpu backend). Legibility toggles, not perf
+        # tuning: the pixel grid only appears when zoomed past whole-texel size,
+        # and the clip indicator marks values outside the window while windowing.
+        display_aids_menu = QtWidgets.QMenu("Display Aids", self)
+        display_aids_menu.setToolTipsVisible(True)
+        view_menu.addMenu(display_aids_menu)
+        self._display_aids_menu = display_aids_menu
+        pixel_grid_action = QtGui.QAction("Pixel Grid (when zoomed in)", self, checkable=True)
+        pixel_grid_action.setToolTip(
+            "Draw a subtle per-texel grid once texels are large on screen, so you "
+            "can see individual data pixels. wgpu backend."
+        )
+        pixel_grid_action.setChecked(bool(getattr(self.app_settings, "wgpu_pixel_grid", False)))
+        pixel_grid_action.toggled.connect(self._set_wgpu_pixel_grid_enabled)
+        display_aids_menu.addAction(pixel_grid_action)
+        self._wgpu_pixel_grid_action = pixel_grid_action
+        clip_indicator_action = QtGui.QAction("Clipping Indicator", self, checkable=True)
+        clip_indicator_action.setToolTip(
+            "Mark values below the window low (cool) and above the window high "
+            "(warm) distinctly, so clipping is visible while windowing. wgpu backend."
+        )
+        clip_indicator_action.setChecked(
+            bool(getattr(self.app_settings, "wgpu_clip_indicator", False))
+        )
+        clip_indicator_action.toggled.connect(self._set_wgpu_clip_indicator_enabled)
+        display_aids_menu.addAction(clip_indicator_action)
+        self._wgpu_clip_indicator_action = clip_indicator_action
+
         performance_menu = QtWidgets.QMenu("Performance", self)
         self.menuBar().addMenu(performance_menu)
         self._performance_menu = performance_menu
@@ -505,6 +536,37 @@ class WindowMenuMixin:
         if callable(setter):
             setter(bool(enabled))
 
+    def _set_wgpu_pixel_grid_enabled(self, enabled: bool) -> None:
+        self.app_settings = self._updated_app_settings(wgpu_pixel_grid=bool(enabled))
+        self._save_app_settings()
+        self._apply_wgpu_display_aid("setWgpuPixelGridEnabled", bool(enabled), "Pixel grid")
+
+    def _set_wgpu_clip_indicator_enabled(self, enabled: bool) -> None:
+        self.app_settings = self._updated_app_settings(wgpu_clip_indicator=bool(enabled))
+        self._save_app_settings()
+        self._apply_wgpu_display_aid(
+            "setWgpuClipIndicatorEnabled", bool(enabled), "Clipping indicator"
+        )
+
+    def _apply_wgpu_display_aid(self, setter_name: str, enabled: bool, label: str) -> None:
+        """Apply a display-aid toggle to the live view, loudly (no silent no-op).
+
+        The flag is a pure shader uniform, so the current wgpu view re-renders
+        immediately; other backends have no such setter, and we say so rather
+        than swallowing the toggle.
+        """
+
+        setter = getattr(getattr(self, "img_view", None), setter_name, None)
+        if callable(setter):
+            setter(enabled)
+            show_status_message(self, f"{label}: {'on' if enabled else 'off'}.", timeout=2500)
+        else:
+            show_status_message(
+                self,
+                f"{label} applies to the wgpu image backend; the current view does not use it.",
+                timeout=3500,
+            )
+
     def _sync_performance_actions(self):
         if not hasattr(self, "_fft_backend_actions"):
             return
@@ -548,6 +610,22 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.chunk_transport_codec == choice)
             action.blockSignals(False)
+        for action_attr, setting_attr in (
+            ("_wgpu_pixel_grid_action", "wgpu_pixel_grid"),
+            ("_wgpu_clip_indicator_action", "wgpu_clip_indicator"),
+        ):
+            action = getattr(self, action_attr, None)
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(bool(getattr(self.app_settings, setting_attr, False)))
+                action.blockSignals(False)
+        if hasattr(self, "_display_aids_menu"):
+            # Display aids are a wgpu-backend concern; grey out on other backends
+            # (choice preserved), mirroring the texture-compression submenu.
+            self._display_aids_menu.setEnabled(
+                self.app_settings.image_rendering_backend
+                in (ImageRenderingBackendChoice.WGPU, ImageRenderingBackendChoice.AUTO)
+            )
         for choice, action in getattr(self, "_montage_quality_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.montage_quality_policy == choice)
