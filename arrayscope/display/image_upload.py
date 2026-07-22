@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.display import shader_kernels
+
 
 def rgb_display_for_levels(base, histogram_data, levels) -> np.ndarray:
     low, high = levels
     span = max(float(high) - float(low), 1e-12)
+    if shader_kernels.ready():
+        base_f32 = np.asarray(base, dtype=np.float32)
+        if base_f32.ndim == 3 and base_f32.shape[-1] == 3:
+            return shader_kernels.rgb_window(
+                np.ascontiguousarray(base_f32), histogram_data, low, span
+            )
+    else:
+        shader_kernels.ensure_prewarming()
     intensity = np.array(histogram_data, dtype=np.float32, copy=True)
     intensity -= np.float32(low)
     intensity /= np.float32(span)

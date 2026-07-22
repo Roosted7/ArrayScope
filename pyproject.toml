@@ -59,6 +59,14 @@ arrayscope = "arrayscope.__main__:main"
 vispy = [
     "vispy>=0.14.0",
 ]
+# Optional JIT accelerator for the CPU (pyqtgraph) display kernels and other
+# compute-dense hot paths. The app is fully functional without it: every
+# accelerated function keeps its NumPy reference as a fallback and numba is
+# imported lazily on a background thread, so it never affects startup or the
+# wgpu path.
+accel = [
+    "numba>=0.60.0",
+]
 installer = [
     "pyinstaller>=6.10.0",
 ]

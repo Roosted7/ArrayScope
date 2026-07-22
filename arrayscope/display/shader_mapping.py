@@ -12,6 +12,8 @@ from typing import Any
 
 import numpy as np
 
+from arrayscope.display import shader_kernels
+
 
 class _ValueEnum(Enum):
     def __eq__(self, other):
@@ -242,7 +244,55 @@ def apply_phase_lut(data, lut: np.ndarray | None = None) -> tuple[np.ndarray, np
     )
 
 
+_SCALE_CODES = {
+    ShaderScale.LINEAR: shader_kernels._SCALE_LINEAR,
+    ShaderScale.LOG: shader_kernels._SCALE_LOG,
+    ShaderScale.SYMLOG: shader_kernels._SCALE_SYMLOG,
+}
+
+
+def _numba_cpu_display_rgba(data, mapping: ShaderMapping):
+    """Fused numba fast path for the two dominant CPU display branches.
+
+    Returns the RGBA result, or ``None`` (so the caller runs the NumPy
+    reference) when numba is not yet warm or the mapping is one of the branches
+    we deliberately leave on NumPy: a scalar mapping without explicit levels
+    (needs ``finite_default_levels``), the phase-color magnitude branch, a
+    size-1 LUT, or any non-SCALAR/PHASE display mode.
+    """
+
+    if not shader_kernels.ready():
+        shader_kernels.ensure_prewarming()
+        return None
+    mode = mapping.display_mode
+    if mode == ShaderDisplayMode.SCALAR:
+        if mapping.levels is None:
+            return None
+        component = extract_component(data, mapping.component)
+        lut = normalize_lut_rgb(mapping.lut_data, phase_default=False)
+        low, high = mapping.levels
+    elif mode == ShaderDisplayMode.PHASE_COLOR and mapping.component in {
+        ShaderComponent.ANGLE,
+        ShaderComponent.COMPLEX_PHASE,
+    }:
+        component = extract_component(data, ShaderComponent.ANGLE)
+        lut = _lut_rgb_uint8(mapping.lut_data)
+        low, high = mapping.levels if mapping.levels is not None else (-np.pi, np.pi)
+    else:
+        return None
+    lut = np.asarray(lut, dtype=np.float32)
+    if lut.ndim != 2 or lut.shape[0] < 2 or lut.shape[1] != 3:
+        return None  # _sample_lut_rgb broadcasts a size-1 LUT; leave to NumPy
+    span = max(float(high) - float(low), 1e-12)
+    return shader_kernels.scalar_rgba(
+        component, _SCALE_CODES[mapping.scale], mapping.symlog_constant, low, span, lut
+    )
+
+
 def cpu_display_rgba(data, mapping: ShaderMapping) -> np.ndarray:
+    fast = _numba_cpu_display_rgba(data, mapping)
+    if fast is not None:
+        return fast
     if mapping.display_mode == ShaderDisplayMode.PHASE_COLOR:
         scalar = mapped_scalar(data, mapping)
         levels = mapping.levels
