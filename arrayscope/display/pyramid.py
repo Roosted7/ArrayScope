@@ -15,6 +15,7 @@ from threading import RLock
 import numpy as np
 
 from arrayscope.core.bounded_cache import BoundedCache
+from arrayscope.display import _numba_pyramid
 from arrayscope.gpu.chunk_summary import ChunkHistogramSummary, summarize_chunk
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
@@ -882,12 +883,16 @@ def _reduce_planned_bins(
             )
         else:
             raise ValueError(f"unsupported source-grid reducer {reducer!r}")
-    sums_y = np.add.reduceat(accumulated, y_starts, axis=0, dtype=accumulated.dtype)
-    sums = np.add.reduceat(sums_y, x_starts, axis=1, dtype=accumulated.dtype)
-    counts = y_counts[:, None] * x_counts[None, :]
-    if sums.ndim > 2:
-        counts = counts.reshape((*counts.shape, *((1,) * (sums.ndim - 2))))
-    result = sums / counts
+    result = _numba_pyramid.reduce_accumulated_if_ready(
+        accumulated, y_starts, y_counts, x_starts, x_counts
+    )
+    if result is None:
+        sums_y = np.add.reduceat(accumulated, y_starts, axis=0, dtype=accumulated.dtype)
+        sums = np.add.reduceat(sums_y, x_starts, axis=1, dtype=accumulated.dtype)
+        counts = y_counts[:, None] * x_counts[None, :]
+        if sums.ndim > 2:
+            counts = counts.reshape((*counts.shape, *((1,) * (sums.ndim - 2))))
+        result = sums / counts
     if reducer == REDUCER_RMS:
         result = np.sqrt(result, dtype=np.float32)
     elif reducer == REDUCER_PHASE_VECTOR:
