@@ -421,6 +421,7 @@ class WindowMenuMixin:
             )
             chunk_codec_menu.addAction(action)
             self._chunk_transport_codec_actions[choice] = action
+        self._grey_unavailable_chunk_codecs()
 
         # Operation packs / plugins: point at a BART toolbox and inspect which
         # built-in / pack / third-party plugin operations are loaded.
@@ -692,6 +693,38 @@ class WindowMenuMixin:
         self.app_settings = self._updated_app_settings(texture_codec=choice)
         self._apply_performance_settings(persist=True)
         show_status_message(self, "GPU texture compression changes apply to newly opened windows.")
+
+    def _grey_unavailable_chunk_codecs(self):
+        """Disable host-cache codec choices whose backing library is absent.
+
+        ``zfp`` needs the ``zfpy`` binding and ``blosc2`` needs the ``blosc2``
+        package; ``auto`` can only engage the compressed tier when at least one
+        of them is importable, and ``raw`` (off) always works.  Availability is
+        fixed for the process, so this runs once at build time.  The choice is
+        preserved (a stored-but-unavailable codec stays checked-yet-greyed, and
+        the evaluator degrades it to ``raw``), mirroring the backend-gated
+        submenus.
+        """
+
+        from arrayscope.gpu.chunk_codec import available_codec_names
+
+        available = set(available_codec_names())
+        # choice value -> (codec name in available_codec_names(), pip/conda pkg)
+        requirements = {"zfp": ("zfp", "zfpy"), "blosc2": ("blosc2", "blosc2")}
+        any_codec = bool(available & {"zfp", "blosc2"})
+        for choice, action in self._chunk_transport_codec_actions.items():
+            if choice.value in requirements:
+                codec_name, package = requirements[choice.value]
+                available_here = codec_name in available
+                reason = f"the '{package}' package is not installed"
+            elif choice.value == "auto":
+                available_here = any_codec
+                reason = "install zfpy or blosc2 to enable the compressed backing tier"
+            else:
+                continue  # "raw" / off is always available
+            action.setEnabled(available_here)
+            if not available_here:
+                action.setToolTip(f"{action.toolTip()}\n\nUnavailable: {reason}.")
 
     def _set_chunk_transport_codec_choice(self, choice):
         self.app_settings = self._updated_app_settings(chunk_transport_codec=choice)

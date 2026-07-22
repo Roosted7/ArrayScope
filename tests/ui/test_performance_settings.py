@@ -343,3 +343,55 @@ def test_host_cache_compression_menu_switches_and_persists(qtbot):
         assert zfp.isChecked()
     finally:
         win.close()
+
+
+def test_host_cache_compression_greys_out_unavailable_codec(qtbot, monkeypatch):
+    """A codec whose backing library is absent is disabled; the rest stay usable."""
+    _clear_arrayscope_settings()
+    import arrayscope.gpu.chunk_codec as chunk_codec
+    from arrayscope.window import ArrayScopeWindow
+
+    # Simulate an environment where zfpy is missing but blosc2 is importable.
+    monkeypatch.setattr(chunk_codec, "available_codec_names", lambda: ("raw", "blosc2", "bitpack"))
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        sub = "Host Cache Compression"
+        off = _submenu_action(win, "Performance", sub, "Off (uncompressed)")
+        auto = _submenu_action(win, "Performance", sub, "Auto (experimental)")
+        zfp = _submenu_action(win, "Performance", sub, "ZFP (lossless)")
+        blosc2 = _submenu_action(win, "Performance", sub, "Blosc2 (lossless)")
+        assert off.isEnabled()  # off is always available
+        assert blosc2.isEnabled()  # blosc2 importable
+        assert auto.isEnabled()  # at least one codec available
+        assert not zfp.isEnabled()  # zfpy missing -> greyed
+        assert "zfpy" in zfp.toolTip()
+    finally:
+        win.close()
+
+
+def test_host_cache_compression_greys_out_auto_when_no_codec(qtbot, monkeypatch):
+    """With no codec library importable, auto/zfp/blosc2 are all disabled."""
+    _clear_arrayscope_settings()
+    import arrayscope.gpu.chunk_codec as chunk_codec
+    from arrayscope.window import ArrayScopeWindow
+
+    monkeypatch.setattr(chunk_codec, "available_codec_names", lambda: ("raw", "bitpack"))
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        sub = "Host Cache Compression"
+        off = _submenu_action(win, "Performance", sub, "Off (uncompressed)")
+        auto = _submenu_action(win, "Performance", sub, "Auto (experimental)")
+        zfp = _submenu_action(win, "Performance", sub, "ZFP (lossless)")
+        blosc2 = _submenu_action(win, "Performance", sub, "Blosc2 (lossless)")
+        assert off.isEnabled()  # off is always available
+        assert not auto.isEnabled()
+        assert not zfp.isEnabled()
+        assert not blosc2.isEnabled()
+    finally:
+        win.close()
