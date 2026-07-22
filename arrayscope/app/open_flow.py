@@ -93,6 +93,7 @@ class FileOpenSession(QtCore.QObject):
         self._show_loading_window = show_loading_window
         self._cancel = threading.Event()
         self._probe = None
+        self._window_closed = False
         self._status_widget = None
         self._last_refresh_time = 0.0
         self._last_refresh_fraction = 0.0
@@ -137,9 +138,26 @@ class FileOpenSession(QtCore.QObject):
         if self._terminal:
             return
         self._terminal = True
+        # Stop watching the viewer for close events; the load is over.
+        if self.window is not None:
+            with contextlib.suppress(RuntimeError):
+                self.window.removeEventFilter(self)
         with contextlib.suppress(ValueError):
             _ACTIVE_SESSIONS.remove(self)
         self.done.emit()
+
+    def eventFilter(self, obj, event):
+        # The viewer window opens before the load completes; if the user closes
+        # it mid-load we must cancel the reader thread (so it stops streaming
+        # the whole file into a detached array nobody is viewing) and stop the
+        # terminal/progress GUI handlers from touching the closed window.
+        # ArrayScopeWindow emits no close signal and has no WA_DeleteOnClose, so
+        # ``destroyed`` never fires on a user close — a Close-event filter is
+        # the reliable observation point.
+        if obj is self.window and event.type() == QtCore.QEvent.Type.Close:
+            self._window_closed = True
+            self.cancel()
+        return super().eventFilter(obj, event)
 
     # -- reader thread -----------------------------------------------------
 
@@ -191,6 +209,9 @@ class FileOpenSession(QtCore.QObject):
         )
         _retain_window_reference(app, win)
         self.window = win
+        # Watch for the user closing the viewer while the load is still in
+        # flight so we can cancel the reader and guard the terminal handlers.
+        win.installEventFilter(self)
         if self.loading_window is not None:
             self.loading_window.close_quietly()
             self.loading_window = None
@@ -220,6 +241,10 @@ class FileOpenSession(QtCore.QObject):
             self._latest_fraction = event.fraction
         if self.loading_window is not None:
             self.loading_window.apply_progress(event)
+        if self._window_closed:
+            # The viewer the user was watching is gone; do not touch its
+            # status widget or trigger a refresh against a closed window.
+            return
         if self._status_widget is not None:
             self._status_widget.apply_progress(event)
         self._maybe_refresh_streaming_viewer(event)
@@ -239,7 +264,7 @@ class FileOpenSession(QtCore.QObject):
 
     def _refresh_viewer_data(self):
         win = self.window
-        if win is None:
+        if win is None or self._window_closed:
             return
         try:
             win.notify_data_changed(force_autolevel=True)
@@ -257,6 +282,12 @@ class FileOpenSession(QtCore.QObject):
 
     def _on_finished(self, loaded):
         if self._terminal:
+            return
+        if self._window_closed:
+            # The user closed the viewer mid-load and the reader raced to
+            # completion; the array is complete but there is no live window to
+            # refresh or retitle. Retire quietly.
+            self._finish()
             return
         if self.window is None:
             try:
@@ -281,7 +312,7 @@ class FileOpenSession(QtCore.QObject):
     def _on_cancelled(self):
         if self._terminal:
             return
-        if self.window is not None:
+        if self.window is not None and not self._window_closed:
             self._remove_status_widget()
             self._refresh_viewer_data()
             from arrayscope.ui.toasts import show_status_message
@@ -305,7 +336,7 @@ class FileOpenSession(QtCore.QObject):
         print(traceback_text, file=sys.stderr)
         if self.loading_window is not None:
             self.loading_window.show_error(summary)
-        elif self.window is not None:
+        elif self.window is not None and not self._window_closed:
             self._remove_status_widget()
             QtWidgets.QMessageBox.warning(
                 self.window,

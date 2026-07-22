@@ -4,7 +4,9 @@ These are offscreen Qt tests; they drive real reader threads against small
 files and pump the event loop until the session reaches a terminal state.
 """
 
+import threading
 import time
+import types
 
 import numpy as np
 import pytest
@@ -164,6 +166,132 @@ def test_open_any_path_rejects_unknown_suffix(open_app, tmp_path, capsys):
 
     assert not open_any_path(path)
     assert "Unsupported file type" in capsys.readouterr().err
+
+
+def test_closing_viewer_mid_load_cancels_reader(open_app, tmp_path, monkeypatch):
+    """Closing the streaming viewer window mid-load must cancel the reader
+    thread (so it stops streaming into a detached array) and must not let any
+    terminal handler mutate the closed window.
+
+    Red-first: on the pre-fix code, closing the viewer does not set the cancel
+    event, so the reader stays blocked forever and ``session.wait`` returns
+    False (the thread never joins). The fix wires the viewer's Close event to
+    ``cancel`` so the reader observes cancellation and exits.
+    """
+    from arrayscope.app.open_flow import open_path_async
+    from arrayscope.io import progressive
+
+    arr = np.zeros((32, 32), dtype=np.float32)
+    path = tmp_path / "vol.npy"
+    np.save(path, arr)
+
+    # Block the reader deterministically right after the streaming probe has
+    # opened the viewer: the first cancel poll parks until the cancel event is
+    # set, then re-raises through the real check as LoadCancelled.
+    reader_parked = threading.Event()
+    original_check = progressive._check_cancel
+
+    def blocking_check(cancel):
+        reader_parked.set()
+        if cancel is not None:
+            cancel.wait()  # released only when the load is cancelled
+        original_check(cancel)
+
+    monkeypatch.setattr(progressive, "_check_cancel", blocking_check)
+
+    session = open_path_async(path)
+    _pump_until(open_app, lambda: session.window is not None and reader_parked.is_set())
+    win = session.window
+
+    # Spy on the window mutations a terminal handler would perform.
+    title_calls = []
+    original_set_title = win.setWindowTitle
+    monkeypatch.setattr(
+        win, "setWindowTitle", lambda t: (title_calls.append(t), original_set_title(t))[1]
+    )
+    notify_calls = []
+    original_notify = win.notify_data_changed
+    monkeypatch.setattr(
+        win,
+        "notify_data_changed",
+        lambda **k: (notify_calls.append(k), original_notify(**k))[1],
+    )
+
+    win.close()
+    open_app.processEvents()
+
+    # (a) The reader thread is cancelled and joins promptly.
+    assert session.wait(timeout=10.0)
+    # Let any queued terminal signal (cancelled/finished) be delivered.
+    _pump_until(open_app, lambda: session._terminal)
+    # (b) No terminal handler ran against the closed window.
+    assert title_calls == []
+    assert notify_calls == []
+
+
+def test_finished_handler_ignores_closed_viewer(open_app, tmp_path, monkeypatch):
+    """A ``finished`` signal that races in after the user closed the viewer must
+    not retitle/refresh the closed window.
+
+    Red-first: pre-fix, ``_on_finished`` unconditionally sets the window title
+    and refreshes; here we assert it does neither once the viewer is closed.
+    """
+    from arrayscope.app.open_flow import open_path_async
+    from arrayscope.io import progressive
+
+    arr = np.zeros((32, 32), dtype=np.float32)
+    path = tmp_path / "vol.npy"
+    np.save(path, arr)
+
+    # Park the reader on a test-controlled gate (independent of cancel) so the
+    # session stays non-terminal while we drive the closed-window handler.
+    reader_parked = threading.Event()
+    release = threading.Event()
+    original_check = progressive._check_cancel
+
+    def gated_check(cancel):
+        reader_parked.set()
+        release.wait()
+        original_check(cancel)
+
+    monkeypatch.setattr(progressive, "_check_cancel", gated_check)
+
+    session = open_path_async(path)
+    try:
+        _pump_until(open_app, lambda: session.window is not None and reader_parked.is_set())
+        win = session.window
+
+        title_calls = []
+        original_set_title = win.setWindowTitle
+        monkeypatch.setattr(
+            win, "setWindowTitle", lambda t: (title_calls.append(t), original_set_title(t))[1]
+        )
+        notify_calls = []
+        original_notify = win.notify_data_changed
+        monkeypatch.setattr(
+            win,
+            "notify_data_changed",
+            lambda **k: (notify_calls.append(k), original_notify(**k))[1],
+        )
+
+        win.close()
+        open_app.processEvents()
+        assert session._window_closed
+
+        # Simulate the reader's finished signal arriving after the close.
+        loaded = types.SimpleNamespace(
+            data=np.zeros((32, 32), dtype=np.float32),
+            axes=None,
+            metadata={"detected_format": "numpy"},
+        )
+        session._on_finished(loaded)
+
+        assert title_calls == []
+        assert notify_calls == []
+    finally:
+        release.set()
+        session.cancel()
+        session.wait(timeout=10.0)
 
 
 def test_streaming_rec_updates_viewer_before_completion(open_app, tmp_path, monkeypatch):
