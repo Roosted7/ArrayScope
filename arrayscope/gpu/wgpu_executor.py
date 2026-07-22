@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from arrayscope.gpu import bc_codec
+from arrayscope.gpu import astc_codec, bc_codec
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     DispatchHistogram,
@@ -116,18 +116,82 @@ _POOL_TEXEL_BYTES = {
 _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
 
-#: Native block-compressed pool ids/formats, parallel to the raw pools above.
-#: A scalar page compresses to BC4 (one channel), a complex page to BC5 (two
-#: BC4 channels holding real, imag).  These live in *separate* textures (a
+#: Native block-compressed pool ids, parallel to the raw pools above.  A scalar
+#: page compresses to one channel (BC4 / ASTC R), a complex page to two channels
+#: (BC5, or ASTC R,G holding real, imag).  These live in *separate* textures (a
 #: texture has one format), so the page table's ``pool_id`` is what tells the
-#: render/histogram shaders which pool actually holds a page.
+#: render/histogram shaders which pool actually holds a page.  The pool id is
+#: family-agnostic ("-bc-pool" is historical); the format the pool was created
+#: with (``codec_pool_format``) is the loud channel proving BC vs ASTC.
 _CODEC_POOL_IDS = {rep: f"wgpu-{rep}-bc-pool" for rep in (SCALAR_R32F, COMPLEX_RG32F)}
 _REP_BY_POOL_ID.update({pool_id: rep for rep, pool_id in _CODEC_POOL_IDS.items()})
-_CODEC_POOL_FORMATS = {SCALAR_R32F: "bc4-r-unorm", COMPLEX_RG32F: "bc5-rg-unorm"}
-#: Bytes per 4x4 block (BC4 = 8, BC5 = 16); a 256² page is 64×64 blocks.
-_CODEC_BLOCK_BYTES = {SCALAR_R32F: 8, COMPLEX_RG32F: 16}
-#: wgpu device feature that must be enabled for BC pools to exist.
+
+#: wgpu device features that must be enabled for the two codec families to exist.
 _BC_FEATURE = "texture-compression-bc"
+_ASTC_FEATURE = "texture-compression-astc"
+
+#: BC family: scalar->BC4 (8 bytes / 4x4 block), complex->BC5 (16 bytes / block).
+#: A 256² page is 64×64 blocks.  The discrete (NVIDIA) adapter exposes only BC.
+_BC_POOL_FORMATS = {SCALAR_R32F: "bc4-r-unorm", COMPLEX_RG32F: "bc5-rg-unorm"}
+_BC_BLOCK = (4, 4)
+_BC_BLOCK_BYTES = {SCALAR_R32F: 8, COMPLEX_RG32F: 16}
+
+#: ASTC family (integrated/Intel): a single ``astc-BxB-unorm`` format carries
+#: both scalar (value in R, replicated) and complex (real, imag in R, G) — every
+#: ASTC block is 16 bytes regardless of size.  wgpu rejects a compressed texture
+#: whose width/height is not a multiple of the block, and the 256² page geometry
+#: (uv = (texel+0.5)/256) assumes a 256² texture, so the block MUST divide 256:
+#: 4x4 (default; highest quality, scalar 4x / complex 8x) or 8x8 (higher ratio,
+#: scalar 16x / complex 32x, lower quality).  6x6 does NOT divide 256 and is
+#: unavailable for the display pool even though the policy may name it.
+_ASTC_DEFAULT_BLOCK = (4, 4)
+def _adapter_info(adapter_or_none) -> dict:
+    """Best-effort ``adapter.info`` dict; ``{}`` when unavailable (never raises)."""
+
+    if adapter_or_none is None:
+        return {}
+    try:
+        return dict(adapter_or_none.info)
+    except Exception:
+        return {}
+
+
+def _adapter_is_integrated(info: dict) -> bool:
+    """True unless the adapter is explicitly discrete (unknown -> integrated).
+
+    Mirrors :mod:`arrayscope.gpu.device_topology`: only a ``DiscreteGPU`` (the
+    NVIDIA A2000) is treated as discrete; integrated/CPU/virtual/unknown are the
+    ASTC-eligible, unified-memory side.
+    """
+
+    return "discrete" not in str(info.get("adapter_type", "")).lower()
+
+
+def _decide_codec_family(mode: str, device_features: set[str], integrated: bool) -> str:
+    """Pick the display-pool codec family for a device.  Mirrors the topology
+    policy in :func:`arrayscope.gpu.cache_policy.decide_texture_codec`:
+
+    * ``off`` -> ``"none"`` (render path byte-identical);
+    * integrated + ASTC feature + ``astc_encoder`` available -> ``"astc"``
+      (Intel: ASTC is the better fit and only offered there);
+    * else BC when the device advertises it (discrete NVIDIA, or integrated
+      without ASTC);
+    * else ``"none"`` (no compressed format at all -> degrade to raw).
+    """
+
+    if mode == "off":
+        return "none"
+    astc_ok = _ASTC_FEATURE in device_features and astc_codec.astc_available()
+    bc_ok = _BC_FEATURE in device_features
+    if integrated and astc_ok:
+        return "astc"
+    if bc_ok:
+        return "bc"
+    if astc_ok:
+        return "astc"
+    return "none"
+
+
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
 _LOD_GENERATION_PIN_OWNER = "wgpu-lod-generation-sources"
 _HISTOGRAM_SHIELD_PIN_OWNER = "wgpu-histogram-frontier-shield"
@@ -1152,6 +1216,7 @@ class WgpuPlaneExecutor:
         compressed_textures: str | bool = "off",
         codec_min_psnr_db: float = 40.0,
         histogram_codec_mode: str = "gpu_compressed",
+        astc_block: tuple[int, int] = _ASTC_DEFAULT_BLOCK,
     ) -> None:
         import wgpu  # deferred: module import stays wgpu-free
 
@@ -1193,6 +1258,18 @@ class WgpuPlaneExecutor:
             )
         self._histogram_codec_mode = histogram_codec_mode
 
+        # The ASTC block for the compressed display pool must tile the 256² page
+        # exactly (wgpu rejects a block-compressed texture whose dimensions are
+        # not a multiple of the block, and uv = (texel+0.5)/256 assumes 256²).
+        bx, by = int(astc_block[0]), int(astc_block[1])
+        if PAGE % bx or PAGE % by:
+            raise ValueError(
+                f"astc_block {astc_block} must divide the {PAGE}px page (wgpu "
+                "requires block-aligned compressed-texture dimensions); use "
+                "(4,4) or (8,8) — 6x6 does not divide 256"
+            )
+        self._astc_block = (bx, by)
+
         if device is None:
             from wgpu.backends.wgpu_native.extras import set_instance_extras
 
@@ -1203,24 +1280,61 @@ class WgpuPlaneExecutor:
             with contextlib.suppress(RuntimeError):
                 set_instance_extras(backends=["Vulkan"])
             adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
-            # Request the BC feature when the adapter has it and the caller did
-            # not force compression off, so a self-owned device can host BC
-            # pools.  A device the caller hands in must already enable it.
+            # Pick the codec family the policy prefers for this adapter (ASTC on
+            # an integrated/ASTC-capable device, BC otherwise) and request only
+            # that family's feature, so a self-owned device hosts the right pools.
+            family = _decide_codec_family(
+                mode,
+                {str(f) for f in adapter.features},
+                _adapter_is_integrated(_adapter_info(adapter)),
+            )
             wanted = []
-            if mode != "off" and _BC_FEATURE in {str(f) for f in adapter.features}:
+            if family == "bc":
                 wanted.append(_BC_FEATURE)
+            elif family == "astc":
+                wanted.append(_ASTC_FEATURE)
             device = adapter.request_device_sync(required_features=wanted)
         self.device = device
 
-        device_has_bc = _BC_FEATURE in {str(f) for f in self.device.features}
-        if mode == "on" and not device_has_bc:
+        # Re-derive the effective family from the DEVICE's actual features and
+        # its own adapter topology (a caller-supplied device may enable only one
+        # family, or be the discrete adapter): integrated + ASTC -> ASTC, else BC
+        # if available, else nothing.  Discrete NVIDIA never advertises ASTC, so
+        # it always lands on BC — the existing BC path is unchanged there.
+        device_features = {str(f) for f in self.device.features}
+        family = _decide_codec_family(
+            mode,
+            device_features,
+            _adapter_is_integrated(_adapter_info(getattr(self.device, "adapter", None))),
+        )
+        if mode == "on" and family == "none":
             raise RuntimeError(
-                "compressed_textures forced on but the device does not enable "
-                f"{_BC_FEATURE!r} (create the device with that required feature)"
+                "compressed_textures forced on but the device enables neither "
+                f"{_BC_FEATURE!r} nor a usable {_ASTC_FEATURE!r} "
+                "(create the device with a compressed-texture feature; ASTC also "
+                "needs the astc_encoder library)"
             )
-        #: Whether BC pools are live this session.  AUTO degrades silently to
-        #: the raw path when the device lacks BC; a forced "on" already raised.
-        self._codec_engaged = mode != "off" and device_has_bc
+        #: The codec family live this session: "bc", "astc", or "none".  AUTO
+        #: degrades silently to the raw path ("none") when the device supports no
+        #: compressed format; a forced "on" already raised.
+        self._codec_family = family
+        self._codec_engaged = mode != "off" and family != "none"
+        # Per-family format / block geometry the pool, encode, upload and read
+        # paths consult.  Left at BC defaults (inert) when nothing is engaged.
+        if family == "astc":
+            fmt = astc_codec.wgpu_format_for_block(self._astc_block)
+            self._codec_feature = _ASTC_FEATURE
+            self._codec_block = self._astc_block
+            self._codec_pool_formats = {SCALAR_R32F: fmt, COMPLEX_RG32F: fmt}
+            self._codec_block_bytes = {
+                SCALAR_R32F: astc_codec.ASTC_BLOCK_BYTES,
+                COMPLEX_RG32F: astc_codec.ASTC_BLOCK_BYTES,
+            }
+        else:
+            self._codec_feature = _BC_FEATURE
+            self._codec_block = _BC_BLOCK
+            self._codec_pool_formats = dict(_BC_POOL_FORMATS)
+            self._codec_block_bytes = dict(_BC_BLOCK_BYTES)
 
         if plane_shape is not None:
             h, w = (int(v) for v in plane_shape)
@@ -1307,7 +1421,7 @@ class WgpuPlaneExecutor:
         self._codec_pools: dict[str, _Pool] = {}
         self._codec_sampler = None
         if self._codec_engaged:
-            for rep, fmt in _CODEC_POOL_FORMATS.items():
+            for rep, fmt in self._codec_pool_formats.items():
                 budget = self._pool_budgets[rep]
                 if budget <= 0:
                     continue
@@ -1980,11 +2094,12 @@ class WgpuPlaneExecutor:
             if not codec_pool.free_layers:
                 self._evict_one_unpinned(rep, pool_id=codec_pool_id)
             layer = codec_pool.free_layers.pop()
-            block_bytes = _CODEC_BLOCK_BYTES[rep]
+            bx, by = self._codec_block
+            block_bytes = self._codec_block_bytes[rep]
             self.device.queue.write_texture(
                 {"texture": codec_pool.texture, "origin": (0, 0, layer)},
                 data,
-                {"bytes_per_row": (PAGE // 4) * block_bytes, "rows_per_image": PAGE // 4},
+                {"bytes_per_row": (PAGE // bx) * block_bytes, "rows_per_image": PAGE // by},
                 (PAGE, PAGE, 1),
             )
             slot = PageSlot(pool_id=codec_pool_id, page_index=layer, slot_index=0)
@@ -2022,30 +2137,44 @@ class WgpuPlaneExecutor:
     def _encode_compressed(
         self, key: DataChunkKey, payload: np.ndarray
     ) -> tuple[bytes, tuple[float, float, float, float]] | None:
-        """Encode a scalar/complex page to BC, or None to decline (keep raw).
+        """Encode a scalar/complex page to the live codec (BC or ASTC), or None
+        to decline (keep raw).
 
-        Declines when the representation has no BC pool or when the measured BC
+        Declines when the representation has no codec pool or when the measured
         round-trip is below the quality gate — so quality is never silently
         sacrificed and a poorly-compressible tile falls back to the exact pool.
+        Both families carry the SAME per-tile (lo, span) normalization (the
+        render/compute shaders unscale by it), and complex stores (real, imag),
+        never (magnitude, phase), so block compression never smears the ±pi wrap.
         """
 
         rep = key.representation
         if rep not in self._codec_reps:
             return None
+        astc = self._codec_family == "astc"
         if rep == SCALAR_R32F:
             unit, norm = bc_codec.normalize_tile(payload)
-            data, h, w = bc_codec.bc4_encode(unit)
-            quality = bc_codec.quality_of(unit, bc_codec.bc4_decode(data, h, w))
+            if astc:
+                res = astc_codec.encode_scalar(unit, block=self._codec_block)
+                data, decoded = res.data, res.decoded[0]
+            else:
+                data, h, w = bc_codec.bc4_encode(unit)
+                decoded = bc_codec.bc4_decode(data, h, w)
+            quality = bc_codec.quality_of(unit, decoded)
             if quality.psnr_db < self._codec_min_psnr_db:
                 self._compressed_fallbacks_total += 1
                 return None
             return data, (float(norm.lo), float(norm.span), 0.0, 0.0)
-        # complex_rg32f: two BC4 channels holding (real, imag).
+        # complex_rg32f: two channels holding (real, imag) -- BC5, or ASTC R,G.
         re, im = payload[..., 0], payload[..., 1]
         unit_re, norm_re = bc_codec.normalize_tile(re)
         unit_im, norm_im = bc_codec.normalize_tile(im)
-        data, h, w = bc_codec.bc5_encode(unit_re, unit_im)
-        d0, d1 = bc_codec.bc5_decode(data, h, w)
+        if astc:
+            res = astc_codec.encode_two_channel(unit_re, unit_im, block=self._codec_block)
+            data, d0, d1 = res.data, res.decoded[0], res.decoded[1]
+        else:
+            data, h, w = bc_codec.bc5_encode(unit_re, unit_im)
+            d0, d1 = bc_codec.bc5_decode(data, h, w)
         re_dec = bc_codec.denormalize_channel(d0, norm_re)
         im_dec = bc_codec.denormalize_channel(d1, norm_im)
         quality = bc_codec.complex_display_quality(re, im, re_dec, im_dec)
@@ -2867,9 +2996,33 @@ class WgpuPlaneExecutor:
 
     @property
     def codec_engaged(self) -> bool:
-        """Whether native BC pools are live and taking eligible tiles this session."""
+        """Whether native compressed pools (BC or ASTC) are live and taking
+        eligible tiles this session."""
 
         return bool(self._codec_engaged)
+
+    @property
+    def codec_family(self) -> str:
+        """The live codec family: ``"bc"`` (discrete/NVIDIA), ``"astc"``
+        (integrated/Intel), or ``"none"`` when compression is not engaged."""
+
+        return self._codec_family if self._codec_engaged else "none"
+
+    @property
+    def codec_block(self) -> tuple[int, int]:
+        """The block size of the live codec (BC is always 4x4; ASTC is the
+        configured ``astc_block``)."""
+
+        return tuple(self._codec_block)
+
+    def codec_pool_format(self, representation: str) -> str | None:
+        """The wgpu ``TextureFormat`` a representation's compressed pool was
+        created with (e.g. ``"bc4-r-unorm"`` or ``"astc-4x4-unorm"``) — the loud
+        channel proving ASTC vs BC — or None when that pool is not live."""
+
+        if not self._codec_engaged or representation not in self._codec_pools:
+            return None
+        return self._codec_pool_formats[representation]
 
     @property
     def compressed_uploads_total(self) -> int:
@@ -2967,31 +3120,43 @@ class WgpuPlaneExecutor:
         return np.frombuffer(data, dtype=dtype).reshape(shape).copy()
 
     def _read_compressed_page(self, key: DataChunkKey, slot: PageSlot) -> np.ndarray:
-        """Read a BC page's blocks back and reference-decode + denormalize them.
+        """Read a codec page's blocks back and reference-decode + denormalize them.
 
         Returns the same shape/dtype as the raw-pool oracle, so a parity test can
-        compare a compressed page against the raw page it stands in for.
+        compare a compressed page against the raw page it stands in for.  Handles
+        both codec families: the block grid depends on the family's block size,
+        the decode dispatches to BC or ASTC.
         """
 
         representation = key.representation
         pool = self._codec_pools[representation]
-        block_bytes = _CODEC_BLOCK_BYTES[representation]
-        block_row = (PAGE // 4) * block_bytes
+        bx, by = self._codec_block
+        block_bytes = self._codec_block_bytes[representation]
+        nbx, nby = PAGE // bx, PAGE // by
+        block_row = nbx * block_bytes
         raw = self.device.queue.read_texture(
             {"texture": pool.texture, "origin": (0, 0, slot.page_index)},
-            {"bytes_per_row": block_row, "rows_per_image": PAGE // 4},
+            {"bytes_per_row": block_row, "rows_per_image": nby},
             (PAGE, PAGE, 1),
         )
         # read_texture sizes the readback by texel height (PAGE rows of
         # ``block_row`` bytes) even for a block-compressed texture; the block
-        # data occupies only the first ``PAGE // 4`` rows.  Slice them out so the
-        # reference decoder sees exactly the encoded blocks.
-        data = np.frombuffer(bytes(raw), np.uint8).reshape(PAGE, block_row)[: PAGE // 4].tobytes()
+        # data occupies only the first ``nby`` rows (verified on Intel ASTC and
+        # NVIDIA BC).  Slice them out so the reference decoder sees exactly the
+        # encoded blocks.
+        data = np.frombuffer(bytes(raw), np.uint8).reshape(-1, block_row)[:nby].tobytes()
         _flag, (lo_r, span_r, lo_g, span_g) = self._page_codec.get(key, (1, (0.0, 1.0, 0.0, 1.0)))
+        astc = self._codec_family == "astc"
         if representation == SCALAR_R32F:
-            unit = bc_codec.bc4_decode(data, PAGE, PAGE)
+            if astc:
+                (unit,) = astc_codec.astc_decode(data, self._codec_block, PAGE, PAGE, 1)
+            else:
+                unit = bc_codec.bc4_decode(data, PAGE, PAGE)
             return (unit * np.float32(span_r) + np.float32(lo_r)).astype(np.float32)
-        d0, d1 = bc_codec.bc5_decode(data, PAGE, PAGE)
+        if astc:
+            d0, d1 = astc_codec.astc_decode(data, self._codec_block, PAGE, PAGE, 2)
+        else:
+            d0, d1 = bc_codec.bc5_decode(data, PAGE, PAGE)
         out = np.empty((PAGE, PAGE, 2), np.float32)
         out[..., 0] = d0 * np.float32(span_r) + np.float32(lo_r)
         out[..., 1] = d1 * np.float32(span_g) + np.float32(lo_g)

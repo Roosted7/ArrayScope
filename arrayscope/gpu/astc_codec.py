@@ -29,6 +29,7 @@ __all__ = [
     "AstcResult",
     "astc_available",
     "astc_block_bytes",
+    "astc_decode",
     "encode_scalar",
     "encode_two_channel",
     "wgpu_format_for_block",
@@ -90,11 +91,41 @@ def _compress(rgba_bytes: bytes, w: int, h: int, block: tuple[int, int]):
     ctx = ae.ASTCContext(cfg)
     sw = ae.ASTCSwizzle.from_str("RGBA")
     img = ae.ASTCImage(ae.ASTCType.U8, w, h, 1, data=rgba_bytes)
-    comp = ctx.compress(img, sw)
+    comp = bytes(ctx.compress(img, sw))
+    arr = _decompress(comp, w, h, block)
+    return comp, arr
+
+
+def _decompress(comp: bytes, w: int, h: int, block: tuple[int, int]) -> np.ndarray:
+    """Decode ASTC block bytes to an (h, w, 4) float32 [0, 1] RGBA image."""
+
+    import astc_encoder as ae
+
+    bx, by = block
+    cfg = ae.ASTCConfig(ae.ASTCProfile.LDR, bx, by, quality=ae.ASTCQualityPreset.MEDIUM)
+    ctx = ae.ASTCContext(cfg)
+    sw = ae.ASTCSwizzle.from_str("RGBA")
     out = ae.ASTCImage(ae.ASTCType.U8, w, h, 1)
     dec = ctx.decompress(comp, out, sw)
-    arr = np.frombuffer(dec.data, dtype=np.uint8).reshape(h, w, 4).astype(np.float32) / 255.0
-    return comp, arr
+    return np.frombuffer(dec.data, dtype=np.uint8).reshape(h, w, 4).astype(np.float32) / 255.0
+
+
+def astc_decode(
+    comp: bytes,
+    block: tuple[int, int],
+    width: int,
+    height: int,
+    n_channels: int = 1,
+) -> tuple[np.ndarray, ...]:
+    """Decode ASTC block bytes to ``n_channels`` [0, 1] float32 fields (R, then G).
+
+    The hardware sampler on an ASTC-capable device produces the same decoded
+    texels (verified to match this CPU reference within ~60 dB), so this is the
+    reference oracle for a page read back out of an ASTC GPU pool.
+    """
+
+    arr = _decompress(comp, width, height, block)
+    return tuple(arr[..., i] for i in range(int(n_channels)))
 
 
 def encode_scalar(unit_field: np.ndarray, block: tuple[int, int] = (4, 4)) -> AstcResult:

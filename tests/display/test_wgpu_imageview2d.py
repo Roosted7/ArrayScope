@@ -179,8 +179,8 @@ def _lod_payload(
     )
 
 
-def _shown_view(qt_app):
-    view = _view_class("wgpu")()
+def _shown_view(qt_app, *, texture_codec="auto"):
+    view = _view_class("wgpu")(texture_codec=texture_codec)
     view.resize(320, 260)
     view.show()
     return view
@@ -851,7 +851,12 @@ def test_coarser_mean_payload_generates_from_resident_fine_pages_zero_upload(qt_
     from arrayscope.display.pyramid import reduce_box_mean
     from arrayscope.gpu.keys import REDUCER_MEAN
 
-    view = _shown_view(qt_app)
+    # Pin the codec OFF: this asserts the GPU LOD-reduction of resident fine
+    # pages is bit-exact (rtol 1e-6).  On an ASTC-capable device AUTO now
+    # compresses even this random-noise source (ASTC 4x4 clears the 40 dB gate
+    # where BC4 declined), so the reduction would be codec-lossy — irrelevant to
+    # what this test checks (raw GPU reduce, zero upload).
+    view = _shown_view(qt_app, texture_codec="off")
     try:
         source_shape = (512, 512)
         rng = np.random.default_rng(606)
