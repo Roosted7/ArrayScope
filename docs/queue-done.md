@@ -6,6 +6,51 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **G7 compressed transport — codec + benchmark, default OFF
+  (queue step 4):** `arrayscope/gpu/chunk_codec.py` (raw/zfp/blosc2, lossless by
+  default, dtype-driven `resolve_codec` with safe fallback so a lossy request or
+  unsupported dtype can never silently lose pixels); `chunk_transport_codec`
+  setting defaults to `RAW` and the wgpu upload path is untouched (production is
+  byte-identical). Benchmark `arrayscope/tools/g7_transport_benchmark.py` on real
+  data: compression is 1.7–2.6× but the inequality (compress+transfer+decompress
+  < raw) **does NOT hold for CPU decode** (break-even ~0.01–0.04 GB/s vs ~12 GB/s
+  PCIe), so **default correctly stays off** — the gate ("prove before flipping")
+  satisfied with an honest "no CPU-decode win; the transfer win needs GPU-side
+  decode (nvCOMP/wgpu compute) — recorded follow-up." Evidence: `3450b75f`;
+  lossless-exactness + default-off tests, 121 gpu+import-health passed.
+
+- 2026-07-22 — **Plugin ops v3 — BART subprocess pack (queue step 10):**
+  `bart:fft`/`ifft`/`cabs` run as ops via a self-contained cfl temp-file handoff
+  + `bart <cmd>` subprocess (working child env: BART_TOOLBOX_PATH + MKL);
+  cancellation SIGTERMs the child's process group then SIGKILLs after a 0.25 s
+  grace — **measured 22 ms kill** (<1 s gate), no orphan, temp dir always cleaned;
+  OPAQUE heaviest-admission cost class. `bart:pics` deferred (multi-input, doesn't
+  fit unary `fn`). Evidence: `6973c134` (+ arch-guard barrier fix `4c7ad83f`);
+  16 tests run against the live bart binary. bart installed at `~/projects/bart/`
+  (MKL from the conda pkgs cache).
+
+- 2026-07-22 — **Plugin ops v2 — sigpy pack (queue step 9):** `sigpy:fft`/`ifft`
+  as an optional in-process pack (lazy via `find_spec`, contributes nothing when
+  sigpy is absent), honestly OPAQUE/Tier-1 (a centered FFT is not windowable, so
+  it does not claim `region_capable` — a mis-declared one is downgraded, red-first
+  tested). Added the first-party pack-registry seam (`register_pack_operation` /
+  `load_operation_packs` / `_PACK_MODULES`) reused by the BART pack; dock/palette/
+  export now enumerate via `all_operations()`. `nufft`/`espirit` deferred
+  (coordinate/calibration args + dim changes don't fit unary `fn`). Evidence:
+  `2e4c7202`; 320 operations+import-health passed. sigpy installed this session.
+
+- 2026-07-22 — **Montage-relevel "red" DIAGNOSED — pyqtgraph throughput fork,
+  not a bug (reds investigation):** the `level_stale` timeout is real and
+  reproducible (trace-only, both harness backends) but is NOT a convergence
+  defect — pyqtgraph bakes levels into pixels, so relevelling 272 complex FFT
+  tiles is ~180 ms/commit of fixed O(N) overhead ≈ 45 s vs the 5 s budget. vispy
+  passes the level phase (~447 ms, GPU-uniform levels); wgpu is 6/6 in the matrix.
+  So the red is confined to the CPU-windowing (headless/remote) backend and does
+  not affect the GPU backends. It is an ADR-level fork (level-only fast-path vs
+  accept-slow vs VisPy/wgpu-only) — full diagnosis + fix locations in
+  [`redesign/pyqtgraph-level-convergence-2026-07-22.md`](redesign/pyqtgraph-level-convergence-2026-07-22.md).
+  No engine change committed (awaiting the fork decision).
+
 - 2026-07-22 — **Compare v1c — open A−B as a third linked window (queue step 7
   complete):** `open_difference_window()` builds `CompositeArraySource(A.base_data,
   B.base_data, op="subtract", own_inputs=False)` (wrapped in `LazySourceArray`
