@@ -142,9 +142,28 @@ Shared code asks for capabilities such as:
 - persistent residency;
 - shader windowing for scalar/complex data;
 - native pointer/viewport interaction;
+- whether an X/Y axis-order swap is applied as a display transform
+  (`display_axis_transpose`, see below);
 - diagnostics and acknowledgement.
 
 It must not branch on `isinstance(...VisPy...)` to decide semantic meaning.
+
+### Canonical orientation and display-only axis swap
+
+A backend that declares `display_axis_transpose` renders tiles that are
+materialized, cached, uploaded, and identified **once in canonical
+(sorted-image-axes) orientation**; an X/Y axis-order swap (transpose) is then a
+pure display transform — the same cost as an axis flip — instead of
+re-materializing tiles ([ADR 0058](../decisions/0058-canonical-tile-orientation-and-display-transpose.md)).
+The per-window evaluator's `canonical_orientation` flag (set per frame from the
+capability) gates canonical extraction and sorts `image_axes`/`keep_axes` in
+cache keys and semantic identities, so a transposed view reuses the unswapped
+view's payloads and GPU residency. wgpu applies the swap with a swapped UV walk
+in the vertex shader; PyQtGraph feeds the `ImageItem` a transposed view of the
+canonical buffer. Value readout indexes the canonical array with swapped
+coordinates. LOD **factor** selection and montage layout stay display-oriented,
+but page **source** rectangles are canonical. A non-capable backend (VisPy)
+keeps the legacy re-render-on-swap path.
 
 Concrete backend code may own:
 

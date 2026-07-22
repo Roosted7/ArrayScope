@@ -14,6 +14,11 @@ This document describes the authoritative array-view state and the reversible op
 - complex component/channel and scale mode;
 - per-axis flip and FFT-shift flags.
 
+The order of the two image axes selects X/Y. On a backend that declares
+`display_axis_transpose`, swapping that order is a pure display transform (like
+an axis flip) rather than new pixel content: tiles stay canonically oriented and
+the render applies the swap ([ADR 0058](../decisions/0058-canonical-tile-orientation-and-display-transpose.md)).
+
 UI controls create a new state and hand it to a focused window/controller method. A spinbox, button, or menu is never the only copy of a semantic choice.
 
 ### Selection parsing
