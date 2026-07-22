@@ -6,6 +6,53 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **Montage-relevel stall (the "reds") FIXED — pyqtgraph level-only
+  fast-path (`cca02e74`):** the profiler-gated fix corrected the diagnosis (the
+  ~1.2 s/commit cost was the backend re-resolving ALL 272 resident payloads each
+  level commit, not the O(N) prioritization). `build_tile_presentation` now flags
+  a `level_only_drain` delta when every upsert is a rewindow of an already-
+  resident/presented tile; the pyqtgraph backend then resolves ONLY the committed
+  slice and skips the cold-deadline bail → **~1.2 s → ~73 ms per commit (17×),
+  12/12 committed**, and `fft_level_refinement_preview` now SETTLES
+  (`level_stale`→0, 272/272, zero TimeoutError, well under the 5 s budget;
+  verified trace-only, 3 runs). Correctness unchanged; vispy/wgpu untouched.
+  Residual: the `gui_callbacks_below_50ms` bar on that phase stays red — but that
+  is pre-existing/cross-backend (wgpu fails it too; ~4 s full-frame composite
+  windowing), a parked "merely-slow" item (#1), NOT the stall. Owner chose this
+  fast-path over accept-slow / GPU-only. Red-first tests in
+  `tests/ui/test_frame_session.py` + `tests/window/test_montage_backend.py`; full
+  suite 2837 passed. Supersedes the diagnosis in
+  [`redesign/pyqtgraph-level-convergence-2026-07-22.md`](redesign/pyqtgraph-level-convergence-2026-07-22.md).
+
+- 2026-07-22 — **G7 Phase B — native BC/ASTC compressed textures: the discrete
+  transfer + VRAM win (`27ac87e9`):** the GPU's texture sampler decompresses
+  BC/ASTC in hardware for free at sample time — no decode pass. Our own BC4
+  (scalar) + BC5 (complex, stored as **(real, imag)** to match `rg32float` and
+  avoid ±π phase-wrap smear) CPU encoders + a **WGSL on-GPU BC4 encoder** (for
+  compressing GPU-derived tiles on-device), plus ASTC via `astc_encoder` for the
+  Intel block-size quality knob. Topology policy (`decide_texture_codec`):
+  discrete→BC, integrated→ASTC-or-BC; **default OFF**, wgpu render path
+  byte-identical. **Measured on real hardware** (`tools/g7_gpu_texture_benchmark.py`):
+  NVIDIA A2000 BC4 scalar **8.0× VRAM/transfer @ 40.7 dB**, BC5 complex **8.0× @
+  41.5 dB mag / 0.027 rad phase**, GPU-encoder == CPU quality, hardware-sampler
+  == CPU-decode oracle (57.5 dB); Intel ASTC-6×6 **8.9× @ 42.0 dB** (4×4 → 53 dB).
+  Quality measured in the DISPLAY domain (post window/level mapping). Full suite
+  2857 passed; real-GPU BC tests pass on the A2000. Follow-ups: wire the
+  atlas/page textures to sample BC/ASTC (tile-pipeline integration), BC6H for
+  float tiles, lossless NVIDIA raw-buffer transfer via CUDA↔Vulkan interop.
+
+- 2026-07-22 — **G7 Phase A — compressed host-cache RAM win, topology-aware
+  (`6e767001`):** two-level cache (large compressed backing tier under the raw
+  cache via a default-None `BoundedCache.on_evict` hook — byte-identical for
+  existing callers); a raw-cache miss is served by a decode (µs) instead of a
+  recompute/re-read (ms–s). `device_topology.py` detects integrated/discrete +
+  unified memory from the wgpu adapter (confirmed: Intel UHD = integrated/unified);
+  `cache_policy.py` engages the tier only under RAM pressure, best lossless codec
+  per dtype, off for small data, with a `discrete_transfer_candidate` seam for
+  Phase B. Measured (real 336³): 2.1–2.2× compression, **40→91 chunks per RAM
+  budget (~2.28× working set)**, recomputes 520→387; large-matrix regime (1024²
+  fft2 misses) **2.0–2.7× end-to-end speedup**. Default OFF. Full suite 2833 passed.
+
 - 2026-07-22 — **G7 compressed transport — codec + benchmark, default OFF
   (queue step 4):** `arrayscope/gpu/chunk_codec.py` (raw/zfp/blosc2, lossless by
   default, dtype-driven `resolve_codec` with safe fallback so a lossy request or

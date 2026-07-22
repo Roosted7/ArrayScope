@@ -1,5 +1,17 @@
 # The montage-relevel "red" — diagnosed 2026-07-22 (NOT a bug; a pyqtgraph throughput fork)
 
+> **RESOLVED 2026-07-22 (`cca02e74`).** Owner chose the level-only fast-path
+> (option 1). Implementation corrected this diagnosis's cost breakdown: the
+> ~1.2 s/commit cost was the pyqtgraph backend re-resolving ALL 272 resident
+> payloads per level commit (not the O(N) prioritization, which was ~1 ms).
+> A `level_only_drain` delta now makes the backend resolve only the committed
+> slice and skip the cold-deadline bail → ~1.2 s → ~73 ms/commit (17×), 12/12
+> committed, and `fft_level_refinement_preview` settles (`level_stale`→0, no
+> TimeoutError, <5 s). The residual `gui_callbacks_below_50ms` on that phase is
+> pre-existing/cross-backend (wgpu fails it too) and belongs to parked item #1.
+> Details in the Done ledger. The fork analysis below is kept for history.
+
+
 Answers "is the level_stale red accurate?" — yes, but the premise that it is a
 convergence *bug* is wrong. This is a definitive diagnosis (headless-Weston
 trace-only, instrumented per-commit); no engine change was committed.
