@@ -767,6 +767,11 @@ class ImageViewShell(QtWidgets.QWidget):
             same_object = (
                 tuple(previous.shape) == tuple(data.shape)
                 and np.dtype(previous.dtype) == np.dtype(data.dtype)
+                # Strides must match too: a TRANSPOSED view of the same buffer
+                # shares memory and shape (for a square tile) but is different
+                # pixels, so skipping the upload would leave the pre-swap
+                # orientation on screen.
+                and tuple(previous.strides) == tuple(data.strides)
                 and np.shares_memory(previous, data)
             )
         start = perf_counter()
@@ -2878,7 +2883,21 @@ class ImageView2D(ImageViewShell):
             tile_delta=tile_delta,
             tile_residency_budget_bytes=tile_residency_budget_bytes,
             frame_plan=frame_plan,
+            transposed=self._montage_display_transposed(geometry),
         )
+
+    def _montage_display_transposed(self, geometry) -> bool:
+        """Whether canonical tiles are displayed X/Y transposed for ``geometry``.
+
+        Resolved here because the backend capability lives on the image view,
+        not on the tile layer's ``ViewLayerOwner``.
+        """
+
+        if not bool(self.capabilities.display_axis_transpose):
+            return False
+        axes = getattr(getattr(geometry, "view_state", None), "image_axes", None) or ()
+        axes = tuple(int(axis) for axis in axes)
+        return len(axes) == 2 and axes[0] > axes[1]
 
     def warmTiledResidency(
         self,

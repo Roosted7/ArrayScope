@@ -39,6 +39,9 @@ PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
     tile_residency_kind="cpu_item",
     shader_windowing=False,
     native_pointer_interaction=True,
+    # ImageItems read a transposed VIEW of the canonical tile buffer, so an X/Y
+    # axis-order swap re-lays-out existing items instead of re-materializing.
+    display_axis_transpose=True,
 )
 
 VISPY_CAPABILITIES = ImageViewBackendCapabilities(

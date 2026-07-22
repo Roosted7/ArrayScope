@@ -1514,7 +1514,15 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         current = win.renderer._frame_session
-        assert current.semantic_key != previous.semantic_key
+        if transition == "axes":
+            # An X/Y swap is a pure display transform on a canonical backend: the
+            # tile TEXELS are unchanged, so their semantic identity is
+            # transpose-invariant (equal) even when a non-square layout forces a
+            # fresh session object.  The point of this test -- no stale tiles
+            # left visible -- is still enforced by the identity checks below.
+            assert current.semantic_key == previous.semantic_key
+        else:
+            assert current.semantic_key != previous.semantic_key
         for tile_number, acknowledged_identity in _visible_backend_acknowledgements(
             win,
             backend,

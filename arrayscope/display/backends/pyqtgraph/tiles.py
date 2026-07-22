@@ -531,6 +531,7 @@ class MontageTileLayer:
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
+        transposed: bool = False,
     ) -> TileLayerUpdateStats:
         if tile_payloads is not None:
             return self._update_direct_payload_presentation(
@@ -543,6 +544,7 @@ class MontageTileLayer:
                 tile_delta=tile_delta,
                 tile_residency_budget_bytes=tile_residency_budget_bytes,
                 frame_plan=frame_plan,
+                transposed=transposed,
             )
         raise ValueError("PyQtGraph tiled presentation requires typed tile payloads")
 
@@ -558,6 +560,7 @@ class MontageTileLayer:
         tile_delta=None,
         tile_residency_budget_bytes: int = 0,
         frame_plan=None,
+        transposed: bool = False,
     ) -> TileLayerUpdateStats:
         layout = tile_layout_map(geometry, frame_plan=frame_plan)
         if not layout:
@@ -757,6 +760,12 @@ class MontageTileLayer:
             if tile_data.ndim < 2:
                 self._hide_tile(tile_number)
                 continue
+            if transposed:
+                # Canonical payload + X/Y display swap: a cheap transposed VIEW
+                # (no copy, shares the canonical buffer) makes the item read
+                # display-oriented, so all downstream dims/crop/world-rect logic
+                # is unchanged -- the swap costs nothing to materialize.
+                tile_data = np.swapaxes(tile_data, 0, 1)
             width, height, crop_w, crop_h, scale_x, scale_y = _payload_direct_dims(
                 region, tile_data, payload
             )
@@ -767,11 +776,13 @@ class MontageTileLayer:
                 tile_data = tile_data[:crop_h, :crop_w, ...]
             # Histogram/level planes stay native-resolution regardless of the
             # display LOD (ADR 0050 semantic identity): crop in world texels.
-            tile_hist = (
-                None
-                if payload.histogram_data is None
-                else np.asarray(payload.histogram_data)[:height, :width]
-            )
+            if payload.histogram_data is None:
+                tile_hist = None
+            else:
+                hist_plane = np.asarray(payload.histogram_data)
+                if transposed:
+                    hist_plane = np.swapaxes(hist_plane, 0, 1)
+                tile_hist = hist_plane[:height, :width]
 
             world_x = int(region.x)
             world_y = int(region.y)
@@ -787,6 +798,12 @@ class MontageTileLayer:
                 levels=levels,
             )
             source_id = _direct_payload_source_id(base_source_id, payload)
+            if transposed:
+                # The transposed VIEW is a distinct display array over the same
+                # canonical source, so key item/source residency on it: an X/Y
+                # swap that keeps the source id (canonical) still re-images the
+                # item with the swapped view instead of reusing the stale one.
+                source_id = ("axes-transposed", source_id)
             hist_id = ("tile-source", source_id) if tile_hist is not None else None
             local_rect = (0, 0, int(crop_w), int(crop_h))
             item_state = self._states.get(tile_number)

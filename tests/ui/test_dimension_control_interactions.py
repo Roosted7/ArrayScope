@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
@@ -316,26 +317,27 @@ def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
         win.close()
 
 
-def test_montage_x_y_swap_reorients_all_cached_tiles(qtbot):
-    """A montage X/Y swap must transpose ALL committed tiles, not just newly
-    scrolled-in ones.
+def test_montage_x_y_swap_is_an_instant_display_transform(qtbot):
+    """A montage X/Y swap is a pure DISPLAY transform, like an axis flip.
 
-    Regression for the montage tile-staleness defect: an image_axes ORDER
-    change (transpose) kept the montage axis, layout, and source indices, so
-    the index-window retarget path re-presented already-materialized tiles in
-    their OLD orientation.  Only freshly materialized tiles picked up the new
-    orientation, leaving correctly-oriented tiles beside stale ones.  Existing
-    dimension tests only assert ``view_state.image_axes`` -- they never checked
-    that the displayed tiles actually transposed, which is where the bug hid.
+    On a backend that renders canonical tiles (``display_axis_transpose``) an
+    X/Y axis-order swap must NOT re-materialize or re-orient the cached tile
+    payloads: they stay in canonical (sorted-image-axes) orientation and are
+    reused verbatim, while the backend applies the swap at draw time and the
+    hover/ROI value-readout indexes the canonical array with swapped
+    coordinates.  Regression guard for two failure modes: (1) re-rendering the
+    tiles on a swap (the payload would transpose / eval count would climb), and
+    (2) leaving the pre-swap orientation on screen (hover would read the old
+    value).  Runs on the default pyqtgraph backend, which is canonical.
     """
 
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     # A SQUARE image plane (N, N, K): a transpose keeps tile shape and slice
-    # indices identical, so an order-blind reuse key collides.  Per-plane data
-    # is asymmetric within a plane so a stale (non-transposed) tile is
-    # detectable: value = x + 10*y + 100*k.
+    # indices identical, so nothing but the display transform changes.  Per-plane
+    # data is asymmetric so a stale (non-transposed) readout is detectable:
+    # value = x + 10*y + 100*k.
     n_side, n_tiles = 5, 4
     yy, xx, kk = np.mgrid[0:n_side, 0:n_side, 0:n_tiles]
     data = (xx + 10 * yy + 100 * kk).astype(np.float32)
@@ -354,6 +356,25 @@ def test_montage_x_y_swap_reorients_all_cached_tiles(qtbot):
         assert len(before) == n_tiles
         assert win.view_state.image_axes == (0, 1)
 
+        # Hover at a fixed, asymmetric tile-local pixel BEFORE the swap.  Tile 0,
+        # local (col=1, row=0) -> value x=1, y=0 -> 1.
+        tile0 = win.renderer._frame_session.plan.tiles[0]
+
+        def _hover_value():
+            _process_events(qtbot, count=5)
+            context = win.display_geometry.context_for_view_point(tile0.x0 + 1, tile0.y0 + 0)
+            if context is None:
+                return None
+            return win.renderer._hover_value_from_display(context.mapping)
+
+        qtbot.waitUntil(
+            lambda: _hover_value() is not None,
+            timeout=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
+        assert _hover_value() == pytest.approx(1.0)
+
+        evals_before = int(win.operation_evaluator.image_evaluations)
+
         # Swap X/Y: click Y on the axis currently acting as X.
         x_axis = win.view_state.image_axes[1]
         win.set_dimension_role("y", x_axis)
@@ -362,17 +383,96 @@ def test_montage_x_y_swap_reorients_all_cached_tiles(qtbot):
         _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
         after = _committed_montage_tile_images(win)
 
-        # EVERY committed tile -- including retained/cached ones -- must now be
-        # the transpose of its pre-swap payload.  A stale tile would compare
-        # equal to its old (un-transposed) self.
-        stale = [i for i in before if i in after and np.array_equal(after[i], before[i])]
-        assert not stale, f"tiles kept their old orientation after the swap: {stale}"
+        # 1) Tile payloads are CANONICAL and reused verbatim -- unchanged across
+        #    the swap (never transposed into the payload), and no tile was
+        #    re-evaluated (a display transform costs no compute).
         for index, old_image in before.items():
             assert index in after, f"tile {index} dropped after swap"
             np.testing.assert_array_equal(
                 after[index],
-                old_image.T,
-                err_msg=f"tile {index} did not transpose on the X/Y swap",
+                old_image,
+                err_msg=f"tile {index} payload changed on the swap (should stay canonical)",
             )
+        assert int(win.operation_evaluator.image_evaluations) == evals_before, (
+            "an X/Y swap re-evaluated tiles instead of reusing canonical payloads"
+        )
+
+        # 2) The DISPLAY transposed: the same screen pixel now reads the
+        #    transposed value.  local (col=1, row=0) under image_axes=(1,0)
+        #    maps screen-col->axis0, screen-row->axis1 -> value 10.
+        qtbot.waitUntil(
+            lambda: _hover_value() == pytest.approx(10.0),
+            timeout=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
+    finally:
+        win.close()
+
+
+def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
+    """On wgpu an X/Y swap rebinds resident textures -- zero new uploads.
+
+    The strongest form of the instant-transpose contract: the GPU upload count
+    is flat across the swap (existing textures are re-sampled with a swapped UV
+    walk), the canonical payloads are unchanged, and hover reads the transposed
+    value.
+    """
+
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", "wgpu")
+    settings.sync()
+    from arrayscope.window import ArrayScopeWindow
+
+    n_side, n_tiles = 5, 4
+    yy, xx, kk = np.mgrid[0:n_side, 0:n_side, 0:n_tiles]
+    data = (xx + 10 * yy + 100 * kk).astype(np.float32)
+
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        if type(win.img_view).__name__ != "WgpuSurface":
+            pytest.skip("wgpu backend unavailable in this environment")
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
+        )
+        win.render(reason="test-montage")
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        before = _committed_montage_tile_images(win)
+        assert len(before) == n_tiles
+
+        tile0 = win.renderer._frame_session.plan.tiles[0]
+
+        def _hover_value():
+            _process_events(qtbot, count=5)
+            context = win.display_geometry.context_for_view_point(tile0.x0 + 1, tile0.y0 + 0)
+            if context is None:
+                return None
+            return win.renderer._hover_value_from_display(context.mapping)
+
+        qtbot.waitUntil(
+            lambda: _hover_value() is not None,
+            timeout=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
+        uploads_before = int(win.img_view._wgpu_executor.uploads_total)
+
+        x_axis = win.view_state.image_axes[1]
+        win.set_dimension_role("y", x_axis)
+        assert win.view_state.image_axes == (1, 0)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+
+        # No new GPU uploads: the swap re-sampled resident textures.
+        assert int(win.img_view._wgpu_executor.uploads_total) == uploads_before, (
+            "an X/Y swap re-uploaded tiles instead of rebinding GPU residency"
+        )
+        after = _committed_montage_tile_images(win)
+        for index, old_image in before.items():
+            np.testing.assert_array_equal(after[index], old_image)
+        qtbot.waitUntil(
+            lambda: _hover_value() == pytest.approx(10.0),
+            timeout=min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
     finally:
         win.close()
