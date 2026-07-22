@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from arrayscope.gpu import bc_codec
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     DispatchHistogram,
@@ -114,6 +115,19 @@ _POOL_TEXEL_BYTES = {
 }
 _POOL_IDS = {rep: f"wgpu-{rep}-pool" for rep in REPRESENTATIONS}
 _REP_BY_POOL_ID = {pool_id: rep for rep, pool_id in _POOL_IDS.items()}
+
+#: Native block-compressed pool ids/formats, parallel to the raw pools above.
+#: A scalar page compresses to BC4 (one channel), a complex page to BC5 (two
+#: BC4 channels holding real, imag).  These live in *separate* textures (a
+#: texture has one format), so the page table's ``pool_id`` is what tells the
+#: render/histogram shaders which pool actually holds a page.
+_CODEC_POOL_IDS = {rep: f"wgpu-{rep}-bc-pool" for rep in (SCALAR_R32F, COMPLEX_RG32F)}
+_REP_BY_POOL_ID.update({pool_id: rep for rep, pool_id in _CODEC_POOL_IDS.items()})
+_CODEC_POOL_FORMATS = {SCALAR_R32F: "bc4-r-unorm", COMPLEX_RG32F: "bc5-rg-unorm"}
+#: Bytes per 4x4 block (BC4 = 8, BC5 = 16); a 256² page is 64×64 blocks.
+_CODEC_BLOCK_BYTES = {SCALAR_R32F: 8, COMPLEX_RG32F: 16}
+#: wgpu device feature that must be enabled for BC pools to exist.
+_BC_FEATURE = "texture-compression-bc"
 _BOUND_PLANES_PIN_OWNER = "wgpu-bound-content-planes"
 _LOD_GENERATION_PIN_OWNER = "wgpu-lod-generation-sources"
 _HISTOGRAM_SHIELD_PIN_OWNER = "wgpu-histogram-frontier-shield"
@@ -335,6 +349,185 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         return vec4<f32>(color.rgb * g, color.a);
     }
     // Nearest-entry LUT indexing, mirroring the CPU display reference.
+    let idx = clamp(i32(round(g * 255.0)), 0, 255);
+    return textureLoad(lut, vec2<i32>(idx, 0), 0);
+}
+"""
+
+#: Render shader with native block-compressed pools wired in.  Identical to
+#: ``_RENDER_WGSL`` except: (a) three extra bindings — a per-flat-entry codec
+#: flag buffer, a per-flat-entry (lo, span) normalization buffer, a nearest
+#: sampler, and the BC4/BC5 pools; (b) ``resolve`` also returns the flat index
+#: it hit so the fragment can look up that page's codec + norm; (c) scalar and
+#: complex reads branch: a compressed page is decoded by the *hardware sampler*
+#: (``textureSampleLevel``, normalized coords) and unscaled by the page's per-
+#: tile (lo, span), while a raw page keeps the exact integer ``textureLoad``.
+#: The compressed path is only ever selected for pages the executor actually
+#: stored compressed (codec flag == 1); every raw page renders byte-identically
+#: to the base shader.
+_RENDER_WGSL_COMPRESSED = """
+struct Mapping {
+    mode: u32,
+    scale: u32,
+    level_lo: f32,
+    level_hi: f32,
+    symlog_constant: f32,
+    phase_color: u32,
+    _pad2: u32,
+    _pad3: u32,
+};
+struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
+struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
+struct Tile {
+    dst: vec4<f32>,
+    src: vec4<f32>,
+    lod: u32,
+    plane: u32,
+    _pad1: u32, _pad2: u32,
+};
+struct TileCamera {
+    scale: vec2<f32>,
+    offset: vec2<f32>,
+    target_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
+@group(0) @binding(0) var<uniform> mapping: Mapping;
+@group(0) @binding(1) var<storage, read> page_table: array<i32>;
+@group(0) @binding(2) var<storage, read> lod_info: array<LodInfo>;
+@group(0) @binding(3) var<storage, read> planes: array<PlaneInfo>;
+@group(0) @binding(4) var<storage, read> tiles: array<Tile>;
+@group(0) @binding(5) var scalar_pool: texture_2d_array<f32>;
+@group(0) @binding(6) var complex_pool: texture_2d_array<f32>;
+@group(0) @binding(7) var rgb_pool: texture_2d_array<f32>;
+@group(0) @binding(8) var rgb_windowed_pool: texture_2d_array<f32>;
+@group(0) @binding(9) var lut: texture_2d<f32>;
+@group(0) @binding(10) var<uniform> camera: TileCamera;
+@group(0) @binding(11) var<storage, read> page_codec: array<u32>;
+@group(0) @binding(12) var<storage, read> page_norm: array<vec4<f32>>;
+@group(0) @binding(13) var codec_samp: sampler;
+@group(0) @binding(14) var scalar_bc_pool: texture_2d_array<f32>;
+@group(0) @binding(15) var complex_bc_pool: texture_2d_array<f32>;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) src: vec2<f32>,
+    @location(1) @interpolate(flat) lod: u32,
+    @location(2) @interpolate(flat) plane: u32,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+    var quad = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0));
+    let t = tiles[ii];
+    let q = quad[vi];
+    let world = t.dst.xy + q * t.dst.zw;
+    let ndc = world * camera.scale + camera.offset;
+    var out: VOut;
+    out.pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
+    out.src = t.src.xy + q * t.src.zw;
+    out.lod = t.lod;
+    out.plane = t.plane;
+    return out;
+}
+
+struct Resolved { layer: i32, texel: vec2<i32>, fidx: i32 };
+
+fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
+    let p = planes[plane_index];
+    for (var lod = lod_req; lod <= p.max_lod; lod = lod + 1u) {
+        let info = lod_info[p.lod_base + lod];
+        let scale = f32(1u << lod);
+        let limit = vec2<f32>(f32(info.grid_w * 256u) - 1.0, f32(info.grid_h * 256u) - 1.0);
+        let coord = vec2<u32>(clamp(src_l0 / scale, vec2<f32>(0.0), limit));
+        let chunk = coord / 256u;
+        let fi = info.base + chunk.y * info.grid_w + chunk.x;
+        let entry = page_table[fi];
+        if (entry >= 0) {
+            return Resolved(entry, vec2<i32>(coord % 256u), i32(fi));
+        }
+    }
+    return Resolved(-1, vec2<i32>(0, 0), -1);
+}
+
+fn apply_scale(value: f32) -> f32 {
+    switch mapping.scale {
+        case 0u: { return value; }
+        case 1u: { return log(max(value, 0.0)) / log(10.0); }
+        default: {
+            return sign(value) * log(
+                1.0 + abs(value) / pow(10.0, mapping.symlog_constant)
+            ) / log(10.0);
+        }
+    }
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    let p = planes[in.plane];
+    let r = resolve(in.plane, in.src, in.lod);
+    if (p.rep == 2u) {
+        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+        let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
+        return vec4<f32>(c.rgb, 1.0);
+    }
+    if (p.rep == 3u) {
+        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+        let scalar = apply_scale(c.a);
+        let intensity = clamp(
+            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+            0.0,
+            1.0,
+        );
+        return vec4<f32>(c.rgb * intensity, 1.0);
+    }
+    var v = vec2<f32>(0.0, 0.0);
+    if (r.layer >= 0) {
+        let compressed = page_codec[r.fidx] == 1u;
+        let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
+        let nrm = page_norm[r.fidx];
+        if (p.rep == 0u) {
+            if (compressed) {
+                let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
+                v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
+            } else {
+                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+            }
+        } else {
+            if (compressed) {
+                let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
+                v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
+            } else {
+                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+            }
+        }
+    }
+    var x: f32;
+    if (p.rep == 0u) {
+        x = v.x;
+    } else {
+        switch mapping.mode {
+            case 0u: { x = length(v); }
+            case 1u: { x = atan2(v.y, v.x); }
+            case 2u: { x = v.x; }
+            default: { x = v.y; }
+        }
+    }
+    x = apply_scale(x);
+    let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
+    if (mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u) {
+        let phase = atan2(v.y, v.x);
+        let phase_g = clamp(
+            (phase + 3.141592653589793) / 6.283185307179586,
+            0.0,
+            1.0,
+        );
+        let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
+        let color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        return vec4<f32>(color.rgb * g, color.a);
+    }
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
     return textureLoad(lut, vec2<i32>(idx, 0), 0);
 }
@@ -864,10 +1057,30 @@ class WgpuPlaneExecutor:
         pool_layers: int | dict[str, int] = 64,
         target_size: tuple[int, int] = (768, 768),
         device: object = None,
+        compressed_textures: str | bool = "off",
+        codec_min_psnr_db: float = 40.0,
     ) -> None:
         import wgpu  # deferred: module import stays wgpu-free
 
         self._wgpu = wgpu
+        # Normalize the compression mode: "off"/False (default: the render path
+        # is byte-identical), "on"/True (force it, raise if the device cannot),
+        # or "auto" (engage aggressively whenever the device advertises BC).
+        # The AUTO that turns this on by default lives at the settings/capability
+        # layer (see arrayscope.app.settings_state.TextureCodecChoice); the
+        # executor default stays OFF so every existing exact-framebuffer oracle
+        # and histogram test renders through the unchanged path.
+        if compressed_textures is True:
+            mode = "on"
+        elif compressed_textures is False:
+            mode = "off"
+        else:
+            mode = str(compressed_textures).lower()
+        if mode not in ("off", "on", "auto"):
+            raise ValueError(f"compressed_textures must be off/on/auto, got {compressed_textures!r}")
+        self._codec_mode = mode
+        self._codec_min_psnr_db = float(codec_min_psnr_db)
+
         if device is None:
             from wgpu.backends.wgpu_native.extras import set_instance_extras
 
@@ -878,8 +1091,24 @@ class WgpuPlaneExecutor:
             with contextlib.suppress(RuntimeError):
                 set_instance_extras(backends=["Vulkan"])
             adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
-            device = adapter.request_device_sync()
+            # Request the BC feature when the adapter has it and the caller did
+            # not force compression off, so a self-owned device can host BC
+            # pools.  A device the caller hands in must already enable it.
+            wanted = []
+            if mode != "off" and _BC_FEATURE in {str(f) for f in adapter.features}:
+                wanted.append(_BC_FEATURE)
+            device = adapter.request_device_sync(required_features=wanted)
         self.device = device
+
+        device_has_bc = _BC_FEATURE in {str(f) for f in self.device.features}
+        if mode == "on" and not device_has_bc:
+            raise RuntimeError(
+                "compressed_textures forced on but the device does not enable "
+                f"{_BC_FEATURE!r} (create the device with that required feature)"
+            )
+        #: Whether BC pools are live this session.  AUTO degrades silently to
+        #: the raw path when the device lacks BC; a forced "on" already raised.
+        self._codec_engaged = mode != "off" and device_has_bc
 
         if plane_shape is not None:
             h, w = (int(v) for v in plane_shape)
@@ -905,6 +1134,18 @@ class WgpuPlaneExecutor:
         self._plane_family_indices: dict[tuple[object, ...], tuple[int, ...]] = {}
         self._plane_lookup_candidates_total = 0
         self._flat_table = np.full(1, -1, dtype=np.int32)
+        # Parallel per-flat-entry codec metadata (only consulted when the
+        # compressed shader is live).  ``_flat_codec[i] == 1`` means the page at
+        # flat slot ``i`` lives in a BC pool; ``_flat_norm[i] = (lo_r, span_r,
+        # lo_g, span_g)`` is the affine the shader applies to the sampler's
+        # [0,1] output to recover raw values.  Kept dirty-flushed with the table.
+        self._flat_codec = np.zeros(1, dtype=np.uint32)
+        self._flat_norm = np.zeros((1, 4), dtype=np.float32)
+        #: key -> (codec_flag, (lo_r, span_r, lo_g, span_g)); the persistent
+        #: source of truth _bind_planes rebuilds the flat codec arrays from.
+        self._page_codec: dict[DataChunkKey, tuple[int, tuple[float, float, float, float]]] = {}
+        self._compressed_uploads_total = 0
+        self._compressed_fallbacks_total = 0
         self._table_dirty = True
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
@@ -945,11 +1186,63 @@ class WgpuPlaneExecutor:
                 layer_count=self._pool_budgets[rep],
             )
 
+        # Native block-compressed pools, parallel to the raw ones and sharing
+        # the same per-representation layer budget.  A page is stored in EITHER
+        # its raw pool OR its BC pool (never both); the page table's pool_id is
+        # the loud channel that records which.  Only created when compression is
+        # engaged AND the representation has a BC format (scalar/complex).
+        self._codec_pools: dict[str, _Pool] = {}
+        self._codec_sampler = None
+        if self._codec_engaged:
+            for rep, fmt in _CODEC_POOL_FORMATS.items():
+                budget = self._pool_budgets[rep]
+                if budget <= 0:
+                    continue
+                texture = d.create_texture(
+                    size=(PAGE, PAGE, budget),
+                    format=fmt,
+                    usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+                )
+                self._codec_pools[rep] = _Pool(
+                    representation=rep,
+                    texture=texture,
+                    view=texture.create_view(dimension="2d-array"),
+                    free_layers=list(range(budget)),
+                    layer_count=budget,
+                )
+            # Nearest + clamp: the compressed sampler must reproduce the exact
+            # texel-centre decode textureLoad gives on the raw path (no filtering
+            # across texels), so raw vs compressed differ only by BC's own loss.
+            self._codec_sampler = d.create_sampler(
+                mag_filter="nearest",
+                min_filter="nearest",
+                mipmap_filter="nearest",
+                address_mode_u="clamp-to-edge",
+                address_mode_v="clamp-to-edge",
+                address_mode_w="clamp-to-edge",
+            )
+        # A rep whose BC pool could not be created (no layer budget) must never
+        # take the compressed path even when engaged globally.  With no BC pool
+        # at all (e.g. an RGB-only executor) there is nothing to compress, so the
+        # unchanged base shader is used.
+        self._codec_reps = frozenset(self._codec_pools)
+        self._codec_engaged = self._codec_engaged and bool(self._codec_pools)
+
         # Bind-group epoch: bumped whenever a bound buffer is recreated
         # (plane rebind, table growth) so cached bind groups are rebuilt.
         self._bind_epoch = 0
         self._table_buf = d.create_buffer(
             size=max(16, self._flat_table.nbytes),
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+        # Codec side buffers mirror the flat table's length (only bound by the
+        # compressed pipeline).  Start at one entry; grown with the table.
+        self._codec_flag_buf = d.create_buffer(
+            size=max(16, self._flat_codec.nbytes),
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+        self._codec_norm_buf = d.create_buffer(
+            size=max(16, self._flat_norm.nbytes),
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self._lod_info_buf = d.create_buffer(
@@ -1011,7 +1304,12 @@ class WgpuPlaneExecutor:
             usage=wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.COPY_SRC,
         )
 
-        self._shader = d.create_shader_module(code=_RENDER_WGSL)
+        # The compressed variant is byte-for-byte the base shader plus the BC
+        # bindings and branch, so when compression is off we compile the
+        # unchanged source and the default render path is provably identical.
+        self._shader = d.create_shader_module(
+            code=_RENDER_WGSL_COMPRESSED if self._codec_engaged else _RENDER_WGSL
+        )
         self._pipelines: dict[str, object] = {}
         self._binds: dict[str, tuple[object, int]] = {}
         self._overlay_shader = d.create_shader_module(code=_OVERLAY_WGSL)
@@ -1112,10 +1410,44 @@ class WgpuPlaneExecutor:
                             "size": 32,
                         },
                     },
+                    *self._codec_bind_entries(),
                 ],
             )
             self._binds[fmt] = (bind, self._bind_epoch)
         return pipe, self._binds[fmt][0]
+
+    def _codec_bind_entries(self) -> list[dict]:
+        """Render bind-group entries 11-15 for the BC pools (empty when off)."""
+
+        if not self._codec_engaged:
+            return []
+        return [
+            {
+                "binding": 11,
+                "resource": {"buffer": self._codec_flag_buf, "offset": 0, "size": self._codec_flag_buf.size},
+            },
+            {
+                "binding": 12,
+                "resource": {"buffer": self._codec_norm_buf, "offset": 0, "size": self._codec_norm_buf.size},
+            },
+            {"binding": 13, "resource": self._codec_sampler},
+            {"binding": 14, "resource": self._codec_pool_view(SCALAR_R32F)},
+            {"binding": 15, "resource": self._codec_pool_view(COMPLEX_RG32F)},
+        ]
+
+    def _codec_pool_view(self, rep: str):
+        """View of the BC pool for ``rep``, or the scalar BC pool as a stand-in.
+
+        The bind group must supply a valid array view for both compressed pool
+        bindings even when a representation has no BC budget; the shader never
+        samples a pool it did not store a page into, so any live BC view is a
+        safe filler for an unused binding slot.
+        """
+
+        pool = self._codec_pools.get(rep)
+        if pool is None:
+            pool = next(iter(self._codec_pools.values()))
+        return pool.view
 
     def _overlay_pipeline(self, fmt: str):
         if fmt not in self._overlay_pipelines:
@@ -1369,12 +1701,17 @@ class WgpuPlaneExecutor:
         self.page_table.replace_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
 
         self._flat_table = np.full(max(base, 1), -1, dtype=np.int32)
+        self._flat_codec = np.zeros(max(base, 1), dtype=np.uint32)
+        self._flat_norm = np.zeros((max(base, 1), 4), dtype=np.float32)
         for key in self.page_table.resident_keys():
             slot = self.page_table.lookup(key)
             if slot is None:  # pragma: no cover - resident keys always resolve
                 continue
+            codec_flag, norm = self._page_codec.get(key, (0, (0.0, 0.0, 0.0, 0.0)))
             for flat in self._flat_indices(key):
                 self._flat_table[flat] = slot.page_index
+                self._flat_codec[flat] = codec_flag
+                self._flat_norm[flat] = norm
 
         d = self.device
         lod_info = np.asarray(lod_rows or [(0, 0, 0, 0)], np.uint32)
@@ -1390,6 +1727,17 @@ class WgpuPlaneExecutor:
                 size=self._flat_table.nbytes,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
+        if self._codec_engaged:
+            if self._flat_codec.nbytes > self._codec_flag_buf.size:
+                self._codec_flag_buf = d.create_buffer(
+                    size=self._flat_codec.nbytes,
+                    usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+                )
+            if self._flat_norm.nbytes > self._codec_norm_buf.size:
+                self._codec_norm_buf = d.create_buffer(
+                    size=self._flat_norm.nbytes,
+                    usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+                )
         self._bind_epoch += 1
         self._table_dirty = True
 
@@ -1479,14 +1827,45 @@ class WgpuPlaneExecutor:
         if self.page_table.lookup(cmd.key) is not None:
             self.page_table.touch(cmd.key)
             return 0
+        rep = cmd.key.representation
         payload, bytes_per_row = self._coerce_payload(cmd.key, cmd.payload)
-        pool = self._pools[cmd.key.representation]
+        pool = self._pools[rep]
         if pool.layer_count == 0:
-            raise RuntimeError(
-                f"no layer budget configured for representation {cmd.key.representation!r}"
+            raise RuntimeError(f"no layer budget configured for representation {rep!r}")
+
+        # Compression is attempted only when engaged AND the tile's BC round-trip
+        # clears the quality gate; otherwise the raw pool takes it (the always-
+        # correct fallback).  The page table's pool_id records which path won —
+        # the loud channel a parity test asserts on.
+        encoded = self._encode_compressed(cmd.key, payload) if self._codec_engaged else None
+        if encoded is not None:
+            data, norm4 = encoded
+            codec_pool = self._codec_pools[rep]
+            codec_pool_id = _CODEC_POOL_IDS[rep]
+            if not codec_pool.free_layers:
+                self._evict_one_unpinned(rep, pool_id=codec_pool_id)
+            layer = codec_pool.free_layers.pop()
+            block_bytes = _CODEC_BLOCK_BYTES[rep]
+            self.device.queue.write_texture(
+                {"texture": codec_pool.texture, "origin": (0, 0, layer)},
+                data,
+                {"bytes_per_row": (PAGE // 4) * block_bytes, "rows_per_image": PAGE // 4},
+                (PAGE, PAGE, 1),
             )
+            slot = PageSlot(pool_id=codec_pool_id, page_index=layer, slot_index=0)
+            self.page_table.bind(cmd.key, slot, nbytes=len(data), pinned=cmd.pinned)
+            self._page_codec[cmd.key] = (1, norm4)
+            for flat in self._flat_indices(cmd.key):
+                self._flat_table[flat] = layer
+                self._flat_codec[flat] = 1
+                self._flat_norm[flat] = norm4
+                self._table_dirty = True
+            self._uploads_total += 1
+            self._compressed_uploads_total += 1
+            return 1
+
         if not pool.free_layers:
-            self._evict_one_unpinned(cmd.key.representation)
+            self._evict_one_unpinned(rep, pool_id=_POOL_IDS[rep])
         layer = pool.free_layers.pop()
         self.device.queue.write_texture(
             {"texture": pool.texture, "origin": (0, 0, layer)},
@@ -1494,13 +1873,64 @@ class WgpuPlaneExecutor:
             {"bytes_per_row": bytes_per_row, "rows_per_image": PAGE},
             (PAGE, PAGE, 1),
         )
-        slot = PageSlot(pool_id=_POOL_IDS[cmd.key.representation], page_index=layer, slot_index=0)
+        slot = PageSlot(pool_id=_POOL_IDS[rep], page_index=layer, slot_index=0)
         self.page_table.bind(cmd.key, slot, nbytes=payload.nbytes, pinned=cmd.pinned)
+        self._page_codec.pop(cmd.key, None)
         for flat in self._flat_indices(cmd.key):
             self._flat_table[flat] = layer
+            self._flat_codec[flat] = 0
+            self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
             self._table_dirty = True
         self._uploads_total += 1
         return 1
+
+    def _encode_compressed(
+        self, key: DataChunkKey, payload: np.ndarray
+    ) -> tuple[bytes, tuple[float, float, float, float]] | None:
+        """Encode a scalar/complex page to BC, or None to decline (keep raw).
+
+        Declines when the representation has no BC pool or when the measured BC
+        round-trip is below the quality gate — so quality is never silently
+        sacrificed and a poorly-compressible tile falls back to the exact pool.
+        """
+
+        rep = key.representation
+        if rep not in self._codec_reps:
+            return None
+        if rep == SCALAR_R32F:
+            unit, norm = bc_codec.normalize_tile(payload)
+            data, h, w = bc_codec.bc4_encode(unit)
+            quality = bc_codec.quality_of(unit, bc_codec.bc4_decode(data, h, w))
+            if quality.psnr_db < self._codec_min_psnr_db:
+                self._compressed_fallbacks_total += 1
+                return None
+            return data, (float(norm.lo), float(norm.span), 0.0, 0.0)
+        # complex_rg32f: two BC4 channels holding (real, imag).
+        re, im = payload[..., 0], payload[..., 1]
+        unit_re, norm_re = bc_codec.normalize_tile(re)
+        unit_im, norm_im = bc_codec.normalize_tile(im)
+        data, h, w = bc_codec.bc5_encode(unit_re, unit_im)
+        d0, d1 = bc_codec.bc5_decode(data, h, w)
+        re_dec = bc_codec.denormalize_channel(d0, norm_re)
+        im_dec = bc_codec.denormalize_channel(d1, norm_im)
+        quality = bc_codec.complex_display_quality(re, im, re_dec, im_dec)
+        if quality.magnitude_psnr_db < self._codec_min_psnr_db:
+            self._compressed_fallbacks_total += 1
+            return None
+        return data, (
+            float(norm_re.lo),
+            float(norm_re.span),
+            float(norm_im.lo),
+            float(norm_im.span),
+        )
+
+    def _pool_for_slot(self, slot: PageSlot) -> _Pool:
+        """The raw or BC pool object that owns ``slot``'s layer."""
+
+        rep = _REP_BY_POOL_ID[slot.pool_id]
+        if slot.pool_id in _CODEC_POOL_IDS.values():
+            return self._codec_pools[rep]
+        return self._pools[rep]
 
     def _generate_lod_page(self, cmd: GenerateLodPages) -> bool:
         """Run one resident 2x2 component-mean pass and bind its parent."""
@@ -1564,6 +1994,15 @@ class WgpuPlaneExecutor:
             slot = self.page_table.lookup(key)
             if slot is None:
                 raise KeyError(f"LOD generation source is not resident: {key}")
+            if slot.pool_id in _CODEC_POOL_IDS.values():
+                # The reduce compute pass reads source pages by integer coord
+                # from the RAW pool only.  A compressed source would silently
+                # read the wrong raw layer, so refuse loudly.  GPU-encoding LOD
+                # pages from compressed sources is the staged follow-up.
+                raise NotImplementedError(
+                    "wgpu LOD generation from a BC-compressed source page is not "
+                    f"yet supported (source {key} is in pool {slot.pool_id!r})"
+                )
             ordered[index] = (key, slot)
 
         present = [item for item in ordered if item is not None]
@@ -1647,14 +2086,28 @@ class WgpuPlaneExecutor:
             slot,
             nbytes=PAGE * PAGE * _POOL_TEXEL_BYTES[representation],
         )
+        self._page_codec.pop(destination, None)
         for flat in self._flat_indices(destination):
             self._flat_table[flat] = destination_layer
+            self._flat_codec[flat] = 0
+            self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
             self._table_dirty = True
         return True
 
-    def _evict_one_unpinned(self, representation: str) -> None:
-        for key in self.page_table.eviction_candidates():
+    def _evict_one_unpinned(self, representation: str, *, pool_id: str | None = None) -> None:
+        # ``pool_id`` (when given) confines eviction to one physical pool: the
+        # raw and BC pools of a representation have independent layer budgets, so
+        # a caller that needs a free BC layer must not be handed a freed raw one.
+        def _matches(key: DataChunkKey) -> bool:
             if key.representation != representation:
+                return False
+            if pool_id is None:
+                return True
+            slot = self.page_table.lookup(key)
+            return slot is not None and slot.pool_id == pool_id
+
+        for key in self.page_table.eviction_candidates():
+            if not _matches(key):
                 continue
             self._evict(EvictChunk(key))
             return
@@ -1666,7 +2119,7 @@ class WgpuPlaneExecutor:
         # coverage, LOD sources) stay hard, so genuine exhaustion still
         # raises loudly below.
         for key in sorted(
-            (key for key in self._histogram_shield_pins if key.representation == representation),
+            (key for key in self._histogram_shield_pins if _matches(key)),
             key=self.page_table.last_use,
         ):
             self._histogram_shield_pins.discard(key)
@@ -1694,9 +2147,11 @@ class WgpuPlaneExecutor:
         slot = self.page_table.unbind(cmd.key)
         if slot is None:
             return 0
-        self._pools[_REP_BY_POOL_ID[slot.pool_id]].free_layers.append(slot.page_index)
+        self._pool_for_slot(slot).free_layers.append(slot.page_index)
+        self._page_codec.pop(cmd.key, None)
         for flat in self._flat_indices(cmd.key):
             self._flat_table[flat] = -1
+            self._flat_codec[flat] = 0
             self._table_dirty = True
         return 1
 
@@ -1729,6 +2184,13 @@ class WgpuPlaneExecutor:
     def _flush_table(self) -> None:
         if self._table_dirty:
             self.device.queue.write_buffer(self._table_buf, 0, self._flat_table.tobytes())
+            if self._codec_engaged:
+                self.device.queue.write_buffer(
+                    self._codec_flag_buf, 0, self._flat_codec.tobytes()
+                )
+                self.device.queue.write_buffer(
+                    self._codec_norm_buf, 0, self._flat_norm.tobytes()
+                )
             self._table_dirty = False
 
     def _histogram(
@@ -1747,6 +2209,15 @@ class WgpuPlaneExecutor:
                 # Correct refusal, wrong blast radius as a raise (2026-07-19
                 # dogfood crash): a key sacrificed to pool pressure must mark
                 # this result partial, never abort the whole submission.
+                missing.append(key)
+                continue
+            if slot.pool_id in _CODEC_POOL_IDS.values():
+                # The histogram compute path still samples only the raw pools
+                # (textureLoad by integer coord).  A page stored in a BC pool is
+                # therefore reported partial here rather than read from the wrong
+                # raw layer — correct and loud.  Extending the histogram shader to
+                # sample the BC pools (so auto-range is complete under aggressive
+                # AUTO) is the staged follow-up.
                 missing.append(key)
                 continue
             factor = 1 << int(key.lod.level)
@@ -2116,11 +2587,39 @@ class WgpuPlaneExecutor:
     def bound_planes(self) -> tuple:
         return self._bound_planes
 
+    @property
+    def codec_engaged(self) -> bool:
+        """Whether native BC pools are live and taking eligible tiles this session."""
+
+        return bool(self._codec_engaged)
+
+    @property
+    def compressed_uploads_total(self) -> int:
+        """Pages actually stored in a BC pool (the loud 'compression was used' channel)."""
+
+        return int(self._compressed_uploads_total)
+
+    @property
+    def compressed_fallbacks_total(self) -> int:
+        """Eligible tiles that declined BC (quality gate) and stayed raw."""
+
+        return int(self._compressed_fallbacks_total)
+
+    def page_is_compressed(self, key: DataChunkKey) -> bool:
+        """Whether ``key``'s resident page lives in a BC pool (page-table truth)."""
+
+        slot = self.page_table.lookup(key)
+        return slot is not None and slot.pool_id in _CODEC_POOL_IDS.values()
+
     def pool_budget(self, representation: str) -> int:
         return int(self._pool_budgets[representation])
 
     def pool_free_layers(self, representation: str) -> int:
         return len(self._pools[representation].free_layers)
+
+    def codec_pool_free_layers(self, representation: str) -> int:
+        pool = self._codec_pools.get(representation)
+        return 0 if pool is None else len(pool.free_layers)
 
     def read_target(self) -> np.ndarray:
         """Physical-truth oracle: the offscreen target as (h, w, 4) uint8."""
@@ -2140,6 +2639,8 @@ class WgpuPlaneExecutor:
         if slot is None:
             raise KeyError(f"cannot read non-resident page {key}")
         representation = key.representation
+        if slot.pool_id in _CODEC_POOL_IDS.values():
+            return self._read_compressed_page(key, slot)
         pool = self._pools[representation]
         data = self.device.queue.read_texture(
             {"texture": pool.texture, "origin": (0, 0, slot.page_index)},
@@ -2158,3 +2659,31 @@ class WgpuPlaneExecutor:
         else:
             shape, dtype = (PAGE, PAGE, 4), np.float32
         return np.frombuffer(data, dtype=dtype).reshape(shape).copy()
+
+    def _read_compressed_page(self, key: DataChunkKey, slot: PageSlot) -> np.ndarray:
+        """Read a BC page's blocks back and reference-decode + denormalize them.
+
+        Returns the same shape/dtype as the raw-pool oracle, so a parity test can
+        compare a compressed page against the raw page it stands in for.
+        """
+
+        representation = key.representation
+        pool = self._codec_pools[representation]
+        block_bytes = _CODEC_BLOCK_BYTES[representation]
+        raw = self.device.queue.read_texture(
+            {"texture": pool.texture, "origin": (0, 0, slot.page_index)},
+            {"bytes_per_row": (PAGE // 4) * block_bytes, "rows_per_image": PAGE // 4},
+            (PAGE, PAGE, 1),
+        )
+        data = bytes(raw)
+        _flag, (lo_r, span_r, lo_g, span_g) = self._page_codec.get(
+            key, (1, (0.0, 1.0, 0.0, 1.0))
+        )
+        if representation == SCALAR_R32F:
+            unit = bc_codec.bc4_decode(data, PAGE, PAGE)
+            return (unit * np.float32(span_r) + np.float32(lo_r)).astype(np.float32)
+        d0, d1 = bc_codec.bc5_decode(data, PAGE, PAGE)
+        out = np.empty((PAGE, PAGE, 2), np.float32)
+        out[..., 0] = d0 * np.float32(span_r) + np.float32(lo_r)
+        out[..., 1] = d1 * np.float32(span_g) + np.float32(lo_g)
+        return out

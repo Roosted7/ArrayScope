@@ -128,6 +128,7 @@ def test_settings_round_trip_defaults_and_values():
             "wgpu_present_method": "screen",
             "montage_quality_policy": "resident",
             "chunk_transport_codec": "zfp",
+            "texture_codec": "bc",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
             "qt_platform": "xcb",
@@ -146,6 +147,7 @@ def test_settings_round_trip_defaults_and_values():
         "wgpu_present_method": "screen",
         "montage_quality_policy": "resident",
         "chunk_transport_codec": "zfp",
+        "texture_codec": "bc",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
         "qt_platform": "xcb",
@@ -181,6 +183,39 @@ def test_settings_round_trip_defaults_and_values():
             {"chunk_transport_codec": "unknown"}
         ).chunk_transport_codec
         == settings_state.ChunkTransportCodecChoice.RAW
+    )
+    # G7 Phase B: the native BC display codec is AUTO by default (aggressive
+    # dogfood — engages wherever the device supports BC), unknown values
+    # normalize back to AUTO, and the resolution helper maps choices to the
+    # executor's compressed_textures mode gated on device BC availability.
+    assert defaults.texture_codec == settings_state.TextureCodecChoice.AUTO
+    assert (
+        settings_state.settings_from_mapping({"texture_codec": "unknown"}).texture_codec
+        == settings_state.TextureCodecChoice.AUTO
+    )
+    assert (
+        settings_state.texture_codec_executor_mode(
+            settings_state.TextureCodecChoice.AUTO, bc_available=True
+        )
+        == "auto"
+    )
+    assert (
+        settings_state.texture_codec_executor_mode(
+            settings_state.TextureCodecChoice.AUTO, bc_available=False
+        )
+        == "off"
+    )
+    assert (
+        settings_state.texture_codec_executor_mode(
+            settings_state.TextureCodecChoice.BC, bc_available=False
+        )
+        == "on"
+    )
+    assert (
+        settings_state.texture_codec_executor_mode(
+            settings_state.TextureCodecChoice.OFF, bc_available=True
+        )
+        == "off"
     )
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT

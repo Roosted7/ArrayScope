@@ -68,6 +68,21 @@ class ChunkTransportCodecChoice(Enum):
     BLOSC2 = "blosc2"
 
 
+class TextureCodecChoice(Enum):
+    # G7 Phase B display path: native block-compressed (BC4/BC5) VRAM textures
+    # sampled by the render shader's hardware decoder.  AUTO engages it
+    # aggressively whenever the wgpu device advertises texture-compression-bc
+    # (the owner wants this dogfooded); OFF forces the byte-identical raw pools;
+    # BC is the explicit pin.  Resolution to a WgpuPlaneExecutor mode string is
+    # done by ``texture_codec_executor_mode`` once the device's BC support is
+    # known.  NOTE: the live view stays on the raw path until the histogram
+    # compute shader also samples BC pools (else GPU auto-range regresses); the
+    # executor + real-GPU parity test already exercise the engaged path.
+    AUTO = "auto"
+    OFF = "off"
+    BC = "bc"
+
+
 @dataclass(frozen=True)
 class AppSettingsState:
     theme: ThemeChoice = ThemeChoice.SYSTEM
@@ -82,6 +97,10 @@ class AppSettingsState:
     # G7: host-cache chunk-transport codec.  RAW (off) keeps the transport path
     # byte-identical; the default only flips behind a proven benchmark win.
     chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
+    # G7 Phase B: native BC display-texture codec.  AUTO is the aggressive
+    # dogfood default (engages wherever the device supports BC); the live view
+    # threading is gated on the histogram-samples-BC follow-up.
+    texture_codec: TextureCodecChoice = TextureCodecChoice.AUTO
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -109,6 +128,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         chunk_transport_codec=normalize_chunk_transport_codec_choice(
             values.get("chunk_transport_codec")
         ),
+        texture_codec=normalize_texture_codec_choice(values.get("texture_codec")),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(
             values.get("render_memory_budget_mb", 512)
@@ -129,6 +149,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "wgpu_present_method": settings.wgpu_present_method.value,
         "montage_quality_policy": settings.montage_quality_policy.value,
         "chunk_transport_codec": settings.chunk_transport_codec.value,
+        "texture_codec": settings.texture_codec.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,
@@ -208,6 +229,36 @@ def normalize_chunk_transport_codec_choice(value) -> ChunkTransportCodecChoice:
         # Unknown/absent -> RAW: the transport codec is off by default and any
         # unrecognized value falls back to the byte-identical raw path.
         return ChunkTransportCodecChoice.RAW
+
+
+def normalize_texture_codec_choice(value) -> TextureCodecChoice:
+    if isinstance(value, TextureCodecChoice):
+        return value
+    value = getattr(value, "value", value)
+    try:
+        return TextureCodecChoice(str(value))
+    except Exception:
+        # Unknown/absent -> AUTO: the aggressive dogfood default that engages BC
+        # wherever the device supports it and stays raw otherwise.
+        return TextureCodecChoice.AUTO
+
+
+def texture_codec_executor_mode(
+    choice: TextureCodecChoice, *, bc_available: bool
+) -> str:
+    """Resolve the display-codec setting to a WgpuPlaneExecutor mode string.
+
+    Returns ``"off"``/``"on"``/``"auto"`` for the ``compressed_textures``
+    constructor argument.  AUTO engages (``"auto"``) whenever the device has BC;
+    BC is the explicit force-on; OFF (or a machine without BC) stays raw.
+    """
+
+    if choice == TextureCodecChoice.OFF:
+        return "off"
+    if choice == TextureCodecChoice.BC:
+        return "on"
+    # AUTO: aggressive when BC exists, raw fallback otherwise.
+    return "auto" if bc_available else "off"
 
 
 def normalize_render_memory_budget_mb(value) -> int:
