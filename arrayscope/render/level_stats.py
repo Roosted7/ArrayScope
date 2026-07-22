@@ -115,6 +115,48 @@ class LevelStatsService:
             return None
         return stats if int(getattr(stats, "evidence_quality", 0) or 0) >= int(quality) else None
 
+    def _rehydrate_montage_level_from_family_cache(self, session) -> int:
+        """Seed the current level_key with retained per-source stats on retarget.
+
+        The semantic ``level_key`` embeds the selected montage window, so a
+        scroll retarget starts a fresh per-key ``by_source`` map even though the
+        family-keyed memory cache still holds best-available stats for every
+        source that stayed on screen.  Without an explicit bulk seed the new key
+        is repopulated one bounded evidence batch at a time; the display reads
+        the aggregate with ``allow_partial=True`` during the first pass and shows
+        the window/level + histogram computed over the first few sources (a rough
+        dip toward one tile's range) before the retained population trickles back
+        in.  Rehydrating here is pure retention — every stat is one already
+        sampled for this family — so the settled aggregate is unchanged while the
+        transient stops dipping.  ``update_from_stats`` only ever improves a
+        source (quality-ordered), so provisional preview evidence is never
+        promoted over refined and genuinely departed sources (absent from
+        ``expected``) are never reintroduced.
+        """
+
+        tracker = self._montage_level_tracker()
+        expected = self._montage_level_expected_indices(session)
+        if not expected:
+            return 0
+        tracker.ensure_expected(session.level_key, expected)
+        cache = self._montage_source_level_cache()
+        family = _montage_level_family_key(session.level_key)
+        rehydrated = 0
+        for source_index in expected:
+            source_index = int(source_index)
+            cached = cache.peek((family, source_index))
+            if cached is None:
+                continue
+            if tracker.has_source_quality(
+                session.level_key,
+                source_index,
+                int(getattr(cached, "evidence_quality", 0) or 0),
+            ):
+                continue
+            tracker.update_from_stats(session.level_key, cached, aggregate=False)
+            rehydrated += 1
+        return rehydrated
+
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
         return montage_level_key(
             _document_key(document),
@@ -129,7 +171,8 @@ class LevelStatsService:
         )
         if expected:
             return expected
-        return tuple(int(tile.source_index) for tile in getattr(session.plan, "tiles", ()))
+        plan = getattr(session, "plan", None)
+        return tuple(int(tile.source_index) for tile in getattr(plan, "tiles", ()))
 
     def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
         tracker = self._montage_level_tracker()
@@ -459,6 +502,7 @@ class LevelStatsService:
     def _montage_level_stats_for_session(self, session) -> MontageLevelStats:
         expected = self._montage_level_expected_indices(session)
         self._montage_level_tracker().ensure_expected(session.level_key, expected)
+        self._rehydrate_montage_level_from_family_cache(session)
         stats = self._montage_level_tracker().summary_for(session.level_key)
         if stats is None:
             return self._ensure_montage_level_stats(session.level_key, expected_indices=expected)
@@ -473,6 +517,7 @@ class LevelStatsService:
         # It must not be confused with viewport pixels; the level key is semantic
         # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
         tracker = self._montage_level_tracker()
+        self._rehydrate_montage_level_from_family_cache(session)
         stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
@@ -485,6 +530,7 @@ class LevelStatsService:
 
     def _montage_histogram_plot_data_for_session(self, session, *, allow_partial: bool = False):
         tracker = self._montage_level_tracker()
+        self._rehydrate_montage_level_from_family_cache(session)
         stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None
