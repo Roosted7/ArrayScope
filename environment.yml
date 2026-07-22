@@ -2,7 +2,7 @@ name: arrayscope
 channels:
   - conda-forge
 dependencies:
-  - python=3.14
+  - python-jit>=3.14
   - numpy>=1.20
   - numba>=0.66
   - pyside6>=6.4
