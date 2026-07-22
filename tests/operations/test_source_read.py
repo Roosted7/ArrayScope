@@ -169,7 +169,7 @@ def test_base_data_reads_go_through_the_source_seam():
     for path in package_root.rglob("*.py"):
         if path.name == "source_read.py":
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if re.search(r"apply_region\(\s*(document|self)\.base_data", text):
             offenders.append(str(path))
         if re.search(r"(document|self)\.base_data\[", text):

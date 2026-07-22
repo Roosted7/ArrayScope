@@ -145,12 +145,9 @@ def _cpu_display_backend_active() -> bool:
     image-view factory.  Fail-open: if the backend cannot be determined, warm.
     """
 
-    try:
-        from arrayscope.display.image_view_factory import cpu_display_backend_likely
+    from arrayscope.display.image_view_factory import cpu_display_backend_likely
 
-        return cpu_display_backend_likely()
-    except Exception:
-        return True
+    return cpu_display_backend_likely()
 
 
 _GROUP = numba_runtime.register(
