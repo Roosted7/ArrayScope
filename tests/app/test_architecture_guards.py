@@ -1582,10 +1582,16 @@ def test_window_render_uses_memory_policy_not_static_budget_constants():
 
 def test_operation_evaluator_owns_unified_display_cache():
     text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
-    assert "self._display_cache = BoundedArrayCache" in text
-    assert ("self._" + "image_" + "cache = BoundedArrayCache") not in text
-    assert ("self._" + "tile_" + "cache = BoundedArrayCache") not in text
-    assert "self._profile_cache = BoundedArrayCache" in text
+    # The evaluator owns a single unified display cache, built through the
+    # ``_build_array_cache`` factory (G7 host-cache compression): RAW yields a
+    # plain BoundedArrayCache byte-identical to before, any other codec backs it
+    # with a compressed tier.  Separate image_/tile_ display caches stay banned.
+    assert "self._display_cache = _build_array_cache(" in text
+    assert "self._profile_cache = _build_array_cache(" in text
+    assert "def _build_array_cache" in text
+    assert "return BoundedArrayCache(int(max_bytes), int(max_entries))" in text
+    assert ("self._" + "image_" + "cache = ") not in text
+    assert ("self._" + "tile_" + "cache = ") not in text
 
 
 def test_scheduler_v2_pure_modules_are_qt_free():

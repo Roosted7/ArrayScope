@@ -23,10 +23,12 @@ from arrayscope.operations.stack import (
 
 
 class OperationCoordinator:
-    def __init__(self, base_data, operations=(), *, axes=None):
+    def __init__(self, base_data, operations=(), *, axes=None, chunk_transport_codec="raw"):
         self.base_data = base_data
         self.document = ArrayDocument(base_data, operations=tuple(operations), axes=axes)
-        self.evaluator = OperationEvaluator(self.document)
+        self.evaluator = OperationEvaluator(
+            self.document, chunk_transport_codec=str(chunk_transport_codec)
+        )
         self._reject_scalar(self.document)
 
     @property

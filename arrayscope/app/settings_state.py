@@ -58,11 +58,16 @@ class MontageQualityPolicyChoice(Enum):
 
 
 class ChunkTransportCodecChoice(Enum):
-    # G7 codec-aware chunk transport.  RAW is the default and the reference:
-    # the host cache stores chunk bytes uncompressed and the transport path is
-    # byte-for-byte identical to a build without this setting.  ZFP/BLOSC2 are
-    # opt-in lossless host-cache compression; per the G7 gate the default only
-    # flips once a benchmark proves compress+transfer+decompress < raw transfer.
+    # G7 host-cache compression.  AUTO is the aggressive dogfood default: the
+    # live operation-evaluator caches (display/region/profile) back their small
+    # raw cache with a large *compressed* tier, choosing the best LOSSLESS codec
+    # per dtype (zfp's transform for float/complex/int16, blosc2's byte codec for
+    # the rest).  Aggressive only affects WHEN the tier engages (readily, on the
+    # big caches), never WHAT it returns -- every value recovered through the
+    # tier is bit-identical to the uncompressed path.  RAW is the byte-identical
+    # reference (tier off; the caches are plain BoundedArrayCache, exactly as
+    # before this setting existed).  ZFP/BLOSC2 force that single lossless codec.
+    AUTO = "auto"
     RAW = "raw"
     ZFP = "zfp"
     BLOSC2 = "blosc2"
@@ -96,9 +101,11 @@ class AppSettingsState:
     # wgpu backend only; screen is an explicit experimental pin (queue row 3).
     wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
-    # G7: host-cache chunk-transport codec.  RAW (off) keeps the transport path
-    # byte-identical; the default only flips behind a proven benchmark win.
-    chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
+    # G7: host-cache compression codec.  AUTO is the aggressive dogfood default
+    # -- it engages the compressed backing tier readily on the big evaluator
+    # caches, best lossless codec per dtype, values bit-identical.  Explicit RAW
+    # restores the byte-identical plain-cache path.
+    chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.AUTO
     # G7 Phase B: native BC display-texture codec.  AUTO is the aggressive
     # dogfood default: it engages BC wherever the device supports it, and the GPU
     # histogram/auto-level compute samples the BC pools so auto-range stays
@@ -230,9 +237,9 @@ def normalize_chunk_transport_codec_choice(value) -> ChunkTransportCodecChoice:
     try:
         return ChunkTransportCodecChoice(str(value))
     except Exception:
-        # Unknown/absent -> RAW: the transport codec is off by default and any
-        # unrecognized value falls back to the byte-identical raw path.
-        return ChunkTransportCodecChoice.RAW
+        # Unknown/absent -> AUTO: the aggressive dogfood default that engages the
+        # compressed tier readily (best lossless codec per dtype, bit-identical).
+        return ChunkTransportCodecChoice.AUTO
 
 
 def normalize_texture_codec_choice(value) -> TextureCodecChoice:

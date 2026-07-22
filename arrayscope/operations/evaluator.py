@@ -30,6 +30,11 @@ from arrayscope.display.slice_engine import (
 )
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.cancellation import EvaluationCancelled
+from arrayscope.operations.compressed_tier import (
+    CompressedBackingTier,
+    TwoLevelArrayCache,
+    split_payload_for_tier,
+)
 from arrayscope.operations.cost import operation_output_dtype
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.slabs import (
@@ -48,6 +53,33 @@ DEFAULT_PROFILE_CACHE_BYTES = 64 * 1024 * 1024
 DEFAULT_STAGE_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_STAGE_CACHE_ENTRIES = 64
 LARGE_MATERIALIZE_BYTES = 512 * 1024 * 1024
+
+
+def _build_array_cache(max_bytes: int, max_entries: int, codec: str | None):
+    """Build a display/region/profile cache, tier-backed unless codec is RAW.
+
+    ``codec`` RAW (or empty/None) -> a plain ``BoundedArrayCache``, byte-for-byte
+    identical to before this feature existed.  Otherwise a ``TwoLevelArrayCache``:
+    the same raw cache at its full byte budget (the hot path is unchanged -- raw
+    hits are identical and un-regressed), backed by an *additional* compressed
+    tier of equal byte budget.  Values evicted from the raw cache are compressed
+    into the tier (best lossless codec per dtype under ``auto``) and recovered by
+    a decode on a later revisit instead of an expensive recompute.  The tier only
+    ever does work on eviction (background) and on a raw miss (a decode replacing
+    a recompute -- strictly cheaper), so there is no hot-path regression; the
+    cost is the tier's extra RAM, which the memory policy resizes.
+    """
+
+    codec = (codec or "raw").strip().lower()
+    if codec == "raw":
+        return BoundedArrayCache(int(max_bytes), int(max_entries))
+    tier = CompressedBackingTier(max_bytes=int(max_bytes), codec_name=codec)
+    return TwoLevelArrayCache.build(
+        raw_max_bytes=int(max_bytes),
+        raw_max_entries=int(max_entries),
+        tier=tier,
+        store_adapter=split_payload_for_tier,
+    )
 
 
 @dataclass(frozen=True)
@@ -111,6 +143,12 @@ _NO_EVALUATION_STATUS = CacheStatusSnapshot(CacheStatus.COLD, "No evaluation yet
 @dataclass
 class OperationEvaluator:
     document: ArrayDocument
+    # G7 host-cache compression codec name ("auto"/"raw"/"zfp"/"blosc2").  RAW
+    # keeps the evaluator's caches byte-identical plain BoundedArrayCaches; any
+    # other value backs the big display/region/profile caches with a compressed
+    # tier (see ``_build_display_cache``).  Threaded from the app settings via
+    # the coordinator; defaults to raw so headless/library use is unchanged.
+    chunk_transport_codec: str = "raw"
     _derived_key: tuple | None = None
     _derived_data: object | None = None
     _line_key: tuple | None = None
@@ -135,9 +173,20 @@ class OperationEvaluator:
     last_region_plan: object | None = None
 
     def __post_init__(self):
-        self._display_cache = BoundedArrayCache(DEFAULT_DISPLAY_CACHE_BYTES, 512)
-        self._profile_cache = BoundedArrayCache(DEFAULT_PROFILE_CACHE_BYTES, 256)
-        self._region_cache = BoundedArrayCache(DEFAULT_DISPLAY_CACHE_BYTES, 512)
+        self._display_cache = _build_array_cache(
+            DEFAULT_DISPLAY_CACHE_BYTES, 512, self.chunk_transport_codec
+        )
+        self._profile_cache = _build_array_cache(
+            DEFAULT_PROFILE_CACHE_BYTES, 256, self.chunk_transport_codec
+        )
+        self._region_cache = _build_array_cache(
+            DEFAULT_DISPLAY_CACHE_BYTES, 512, self.chunk_transport_codec
+        )
+        # StageCache is intentionally NOT wired to the compressed tier here: its
+        # retention scoring, in-flight-compute claims and lock-free resident
+        # snapshots make it materially riskier than the BoundedArrayCache-based
+        # caches above.  It stays a plain StageCache; adopting the tier is a
+        # bounded follow-up (the tier is value-generic for exactly that).
         self._stage_cache = StageCache(
             max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES
         )

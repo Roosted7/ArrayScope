@@ -50,6 +50,19 @@ class CacheDiagnosticsSnapshot:
     scheduler_running: int = 0
     scheduler_cancelled: int = 0
     scheduler_stale: int = 0
+    # G7 host-cache compression (two-level cache).  All zero/False when the
+    # compressed backing tier is off (RAW), so a plain BoundedArrayCache reports
+    # the same snapshot it always did.  ``tier_recoveries`` is the payoff signal:
+    # raw-cache misses served by a decode instead of an expensive recompute.
+    tier_engaged: bool = False
+    tier_codec: str = ""
+    tier_entries: int = 0
+    tier_compressed_bytes: int = 0
+    tier_resident_uncompressed_bytes: int = 0
+    tier_recoveries: int = 0
+    tier_decode_hits: int = 0
+    tier_stores: int = 0
+    tier_evictions: int = 0
 
 
 def cache_status_for_hit(hit: bool, has_error: bool = False) -> CacheStatusSnapshot:

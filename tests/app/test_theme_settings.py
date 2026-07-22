@@ -175,14 +175,15 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
     # ADR 0050: resident LOD is the montage default once validated on hardware.
     assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
-    # G7: the chunk-transport codec is off by default (raw = byte-identical
-    # transport), and any unknown value normalizes back to raw.
-    assert defaults.chunk_transport_codec == settings_state.ChunkTransportCodecChoice.RAW
+    # G7 host-cache AUTO: the compression codec defaults to AUTO (aggressive
+    # dogfood — the compressed tier engages readily on the big evaluator caches,
+    # best lossless codec per dtype), and any unknown value normalizes to AUTO.
+    assert defaults.chunk_transport_codec == settings_state.ChunkTransportCodecChoice.AUTO
     assert (
         settings_state.settings_from_mapping(
             {"chunk_transport_codec": "unknown"}
         ).chunk_transport_codec
-        == settings_state.ChunkTransportCodecChoice.RAW
+        == settings_state.ChunkTransportCodecChoice.AUTO
     )
     # G7 Phase B: the native BC display codec is AUTO by default (aggressive
     # dogfood — engages wherever the device supports BC), unknown values

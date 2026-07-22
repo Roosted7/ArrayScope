@@ -96,7 +96,11 @@ class ArrayScopeWindow(
         self._apply_performance_settings(persist=False)
         self.compute_policy = compute_policy_from_settings(self.app_settings)
 
-        self.operation_coordinator = OperationCoordinator(data, axes=axes)
+        self.operation_coordinator = OperationCoordinator(
+            data,
+            axes=axes,
+            chunk_transport_codec=self.app_settings.chunk_transport_codec.value,
+        )
         self.profile_coordinator = ProfileCoordinator()
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
