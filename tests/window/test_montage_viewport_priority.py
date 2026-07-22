@@ -170,6 +170,62 @@ def test_effective_montage_columns_ignores_latch_when_auto_or_fit():
         assert columns != 3
 
 
+def _reflow_decision(view_range, **overrides):
+    from arrayscope.window.montage_viewport import montage_manual_reflow_decision
+
+    # A 6x5 grid of 20x20 tiles with a 1px gap (30 tiles).  stride = 21;
+    # display_shape = (5*20+4, 6*20+5) = (104, 125).
+    kwargs = {
+        "display_shape": (104, 125),
+        "tile_shape": (20, 20),
+        "gap": 1,
+        "columns": 6,
+        "rows": 5,
+        "count": 30,
+    }
+    kwargs.update(overrides)
+    return montage_manual_reflow_decision(view_range, **kwargs)
+
+
+def test_montage_reflow_when_grid_mostly_fits_viewport():
+    # The whole 125x104 grid sits inside a 200x200 world window -> zoomed out
+    # -> re-flow so more tiles pack in.
+    assert _reflow_decision(((0.0, 200.0), (0.0, 200.0))) is True
+
+
+def test_montage_no_reflow_in_the_middle():
+    # ~2.5 tiles visible, centred on an interior tile: the grid does not fit
+    # and the neighbouring rows are well over half visible -> hold the layout.
+    assert _reflow_decision(((37.0, 87.0), (27.0, 77.0))) is False
+
+
+def test_montage_reflow_when_zoomed_deep_into_one_tile():
+    # ~1.25 tiles visible on tile (2,2): the rows above/below are barely in
+    # view, so re-flowing them is unseen -> re-flow.
+    assert _reflow_decision(((39.5, 64.5), (39.5, 64.5))) is True
+
+
+def test_montage_edge_side_tile_blocks_deep_zoom_reflow():
+    # Deep vertical zoom near the RIGHT edge (col 5), but wide enough to show
+    # the same-row neighbour (col 4) at ~75%.  That side tile can wrap to
+    # another row on a column change, so it counts and blocks the re-flow.
+    assert _reflow_decision(((84.0, 126.0), (45.0, 60.0))) is False
+
+
+def test_montage_single_row_never_reflows_via_deep_zoom():
+    # One row: nothing a re-flow would move, and the grid does not fit the
+    # narrow window -> hold.
+    assert (
+        _reflow_decision(
+            ((100.0, 130.0), (0.0, 20.0)),
+            display_shape=(20, 20 * 30 + 29),
+            columns=30,
+            rows=1,
+        )
+        is False
+    )
+
+
 def test_effective_montage_columns_auto_without_latch_reflows():
     from arrayscope.window.montage_viewport import (
         effective_montage_columns,
@@ -240,6 +296,46 @@ def test_remap_montage_view_range_keeps_tile_anchor_and_manual_zoom_scale():
         (remapped[1][0] + remapped[1][1]) * 0.5,
     )
     assert remapped_center == (next_tile.x0 + 4.0, next_tile.y0 + 6.0)
+
+
+def test_remap_montage_view_range_frame_center_anchor_keeps_frame_centered():
+    from arrayscope.window.montage_viewport import remap_montage_view_range
+
+    # 6 tiles of 10x10, gap 1: 2 columns (3 rows) -> 3 columns (2 rows).
+    previous = _plan_with_columns(2)
+    next_plan = _plan_with_columns(3)
+    prev_h, prev_w = previous.display_shape
+    prev_center = (prev_w * 0.5, prev_h * 0.5)
+    # A view centred on the whole grid's centre.
+    view_range = (
+        (prev_center[0] - 20.0, prev_center[0] + 20.0),
+        (prev_center[1] - 20.0, prev_center[1] + 20.0),
+    )
+
+    # Tile anchoring (default) chases the tile under the centre, so the frame's
+    # own centre drifts off the view centre.
+    tile_anchored = remap_montage_view_range(previous, next_plan, view_range, (50, 50), (50, 50))
+    next_h, next_w = next_plan.display_shape
+    next_center = (next_w * 0.5, next_h * 0.5)
+    tile_center = (
+        (tile_anchored[0][0] + tile_anchored[0][1]) * 0.5,
+        (tile_anchored[1][0] + tile_anchored[1][1]) * 0.5,
+    )
+
+    # Frame-centre anchoring keeps the montage frame centre at the view centre.
+    frame_anchored = remap_montage_view_range(
+        previous, next_plan, view_range, (50, 50), (50, 50), frame_center_anchor=True
+    )
+    frame_center = (
+        (frame_anchored[0][0] + frame_anchored[0][1]) * 0.5,
+        (frame_anchored[1][0] + frame_anchored[1][1]) * 0.5,
+    )
+    assert frame_center == next_center
+    # Screen zoom preserved (viewport unchanged -> spans unchanged).
+    assert frame_anchored[0][1] - frame_anchored[0][0] == 40.0
+    assert frame_anchored[1][1] - frame_anchored[1][0] == 40.0
+    # And it genuinely differs from the tile-anchored result.
+    assert frame_center != tile_center
 
 
 def test_remap_montage_view_range_preserves_screen_zoom_without_layout_change():

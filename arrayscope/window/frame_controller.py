@@ -66,6 +66,7 @@ from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
     frame_session_key,
+    montage_latched_columns_for_plan,
     montage_tile_semantic_key,
     montage_viewport_intent,
     montage_viewport_retarget_policy,
@@ -230,14 +231,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 )
             )
         )
-        # A montage already committed on this axis carries its applied column
-        # count forward, so a manual (panned/zoomed) view holds that layout
-        # across resizes instead of re-flowing to the viewport aspect.
-        committed_columns = (
-            getattr(getattr(current_session, "plan", None), "columns", None)
-            if camera_on_montage
-            else None
-        )
+        # A committed montage holds its column layout forward under a manual
+        # view, except at the zoom extremes (montage_latched_columns_for_plan).
+        committed_plan = getattr(current_session, "plan", None) if camera_on_montage else None
+        latched_columns = montage_latched_columns_for_plan(committed_plan, current_range)
         columns = self._effective_montage_columns(
             view_state,
             all_indices=all_indices,
@@ -245,7 +242,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             viewport_shape=viewport_shape,
             view_range=current_range,
             restored_columns=pending_restore_columns,
-            latched_columns=committed_columns,
+            latched_columns=latched_columns,
         )
         plan = make_montage_plan(
             view_state,

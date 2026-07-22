@@ -228,6 +228,152 @@ def effective_montage_columns(
     return automatic
 
 
+def montage_grid_mostly_fits(view_range, display_shape, *, grid_fit_fraction: float = 0.8) -> bool:
+    """Whether >= ``grid_fit_fraction`` of the whole grid fits the viewport.
+
+    Pan-independent (measured from the view span vs the grid extent), this is
+    the "zoomed out" test: true when the montage is small enough relative to
+    the view that seeing more tiles matters more than tile-relative shifts.
+    """
+
+    try:
+        (x0, x1), (y0, y1) = view_range
+        view_w = abs(float(x1) - float(x0))
+        view_h = abs(float(y1) - float(y0))
+    except (TypeError, ValueError):
+        return False
+    grid_h = max(1, int(display_shape[0]))
+    grid_w = max(1, int(display_shape[1]))
+    fits_w = min(1.0, view_w / grid_w)
+    fits_h = min(1.0, view_h / grid_h)
+    return fits_w >= grid_fit_fraction and fits_h >= grid_fit_fraction
+
+
+def montage_manual_reflow_decision(
+    view_range,
+    *,
+    display_shape: tuple[int, int],
+    tile_shape: tuple[int, int],
+    gap: int,
+    columns: int,
+    rows: int,
+    count: int,
+    grid_fit_fraction: float = 0.8,
+    moving_visible_fraction: float = 0.5,
+) -> bool:
+    """Should a *manual* montage RE-FLOW (recompute columns) on a resize?
+
+    A manual (panned/zoomed) montage normally holds its committed column
+    layout so the tiles do not rearrange under the user.  But at the two ends
+    of the zoom range re-flowing is worth more than holding position, so this
+    returns ``True`` (re-flow) when either applies -- and ``False`` (hold the
+    layout) in the disorienting middle:
+
+    * **Zoomed out** -- at least ``grid_fit_fraction`` (80%) of the whole grid
+      fits in the viewport at this zoom, regardless of pan.  Seeing more tiles
+      at once outweighs tile-relative shifts, so re-pack.
+    * **Zoomed deep into one tile** -- every tile that a re-flow would move is
+      at most ``moving_visible_fraction`` (50%) visible, so the shift is not
+      seen.  The tiles that move are the rows above/below the centre; the
+      side (same-row) tiles hold their place UNLESS the centre sits against an
+      L/R edge, where a side tile can wrap to another row and must count too.
+
+    ``view_range`` is ``((x0, x1), (y0, y1))`` in the montage's display/world
+    coordinates, where tile ``(row, col)`` sits at ``col*(tw+gap),
+    row*(th+gap)``.  Auto/Fit poses re-flow unconditionally and never reach
+    this function.
+    """
+
+    try:
+        (x0, x1), (y0, y1) = view_range
+        x0, x1 = sorted((float(x0), float(x1)))
+        y0, y1 = sorted((float(y0), float(y1)))
+    except (TypeError, ValueError):
+        return False
+    columns = max(1, int(columns))
+    rows = max(1, int(rows))
+    count = max(1, int(count))
+    grid_h, grid_w = (max(1, int(display_shape[0])), max(1, int(display_shape[1])))
+    tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
+    gap = max(0, int(gap))
+    view_w = max(0.0, x1 - x0)
+    view_h = max(0.0, y1 - y0)
+
+    # Criterion 1: the grid nearly fits the viewport -> zoomed out -> re-flow.
+    fits_w = min(1.0, view_w / grid_w)
+    fits_h = min(1.0, view_h / grid_h)
+    if fits_w >= grid_fit_fraction and fits_h >= grid_fit_fraction:
+        return True
+
+    # Criterion 2: zoomed so deep that every tile a re-flow would move is
+    # barely visible -> re-flow (the shift is not seen).
+    stride_x = tile_w + gap
+    stride_y = tile_h + gap
+    center_x = (x0 + x1) * 0.5
+    center_y = (y0 + y1) * 0.5
+    center_col = min(columns - 1, max(0, int(center_x // stride_x)))
+    center_row = min(rows - 1, max(0, int(center_y // stride_y)))
+
+    def _exists(row: int, col: int) -> bool:
+        return 0 <= row < rows and 0 <= col < columns and (row * columns + col) < count
+
+    def _visible_fraction(row: int, col: int) -> float:
+        tx0 = col * stride_x
+        ty0 = row * stride_y
+        overlap_x = max(0.0, min(tx0 + tile_w, x1) - max(float(tx0), x0))
+        overlap_y = max(0.0, min(ty0 + tile_h, y1) - max(float(ty0), y0))
+        return (overlap_x * overlap_y) / float(tile_w * tile_h)
+
+    moving = [
+        (row, center_col) for row in (center_row - 1, center_row + 1) if _exists(row, center_col)
+    ]
+    # Near an L/R edge the same-row neighbours can wrap to another row on a
+    # column change, so they move too and must be checked for visibility.
+    near_edge = center_col <= 0 or center_col >= columns - 1
+    if near_edge:
+        moving.extend(
+            (center_row, col)
+            for col in (center_col - 1, center_col + 1)
+            if _exists(center_row, col)
+        )
+
+    if not moving:
+        # A single row/column has nothing that a re-flow would move; criterion
+        # 2 cannot apply (criterion 1 already handled the zoomed-out case).
+        return False
+    return max(_visible_fraction(row, col) for row, col in moving) <= moving_visible_fraction
+
+
+def montage_latched_columns_for_plan(committed_plan, view_range) -> int | None:
+    """Column count a manual montage should hold across this update, or None.
+
+    Returns the committed plan's column count so the layout is held, except at
+    the zoom extremes where ``montage_manual_reflow_decision`` says to re-flow
+    (then None, letting the automatic aspect-based count take over). None too
+    when there is no committed plan/geometry to hold.
+    """
+
+    columns = getattr(committed_plan, "columns", None)
+    rows = getattr(committed_plan, "rows", None)
+    tile_shape = getattr(committed_plan, "tile_shape", None)
+    display_shape = getattr(committed_plan, "display_shape", None)
+    if committed_plan is None or view_range is None or columns is None or rows is None:
+        return None
+    if tile_shape is None or display_shape is None:
+        return None
+    tiles = getattr(committed_plan, "tiles", None)
+    reflow = montage_manual_reflow_decision(
+        view_range,
+        display_shape=display_shape,
+        tile_shape=tile_shape,
+        gap=getattr(committed_plan, "gap", 0),
+        columns=columns,
+        rows=rows,
+        count=len(tiles) if tiles is not None else int(rows) * int(columns),
+    )
+    return None if reflow else int(columns)
+
+
 def square_montage_fit_view_range(
     plan, viewport_shape
 ) -> tuple[tuple[float, float], tuple[float, float]]:

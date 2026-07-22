@@ -679,36 +679,81 @@ def test_montage_manual_resize_is_single_camera_transaction(qtbot):
         win.close()
 
 
-def test_montage_manual_resize_preserves_column_layout(qtbot):
-    _clear_arrayscope_settings()
+def _committed_montage(qtbot, win):
     from arrayscope.display.viewport import ViewportMode
+
+    win.resize(900, 700)
+    win.show()
+    _process_events(qtbot, count=20)
+    win._set_view_state(
+        win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":")
+    )
+    win.render(reason="test-montage-resize")
+    _process_events(qtbot, count=80)
+    win.img_view.viewport_controller.mode = ViewportMode.USER
+    return win.renderer._frame_session.plan
+
+
+def test_montage_manual_middle_zoom_holds_column_layout(qtbot):
+    _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
     win = ArrayScopeWindow(np.zeros((20, 20, 30), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        win.resize(900, 700)
-        win.show()
-        _process_events(qtbot, count=20)
-        win._set_view_state(
-            win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":")
-        )
-        win.render(reason="test-montage-resize")
-        _process_events(qtbot, count=80)
+        plan = _committed_montage(qtbot, win)
+        columns, rows = int(plan.columns), int(plan.rows)
+        tile_h, tile_w = (int(v) for v in plan.tile_shape)
+        stride_x, stride_y = tile_w + plan.gap, tile_h + plan.gap
+        # Centre on an interior tile (away from the L/R edges) and frame ~3
+        # tiles: the grid does not fit and the neighbouring rows stay well over
+        # half visible -- the disorienting middle, where the layout must hold.
+        col = min(columns - 2, max(1, columns // 2))
+        row = min(rows - 1, max(0, rows // 2))
+        cx = col * stride_x + tile_w / 2
+        cy = row * stride_y + tile_h / 2
         view = win.img_view.getView()
-        # Enter a manual pose: pan/zoom the camera off the automatic fit.
-        view.setRange(xRange=(-100.0, 300.0), yRange=(-100.0, 300.0), padding=0)
+        view.setRange(
+            xRange=(cx - 1.5 * tile_w, cx + 1.5 * tile_w),
+            yRange=(cy - 1.5 * tile_h, cy + 1.5 * tile_h),
+            padding=0,
+        )
         _process_events(qtbot, count=5)
-        win.img_view.viewport_controller.mode = ViewportMode.USER
         before_columns = int(win.renderer._frame_session.plan.columns)
 
-        # A manual montage must keep its committed layout across a resize --
-        # the tiles reveal more/less, they do not re-flow to a new grid.
         win.resize(500, 700)
         _process_events(qtbot, count=30)
 
-        after_columns = int(win.renderer._frame_session.plan.columns)
-        assert after_columns == before_columns
+        assert int(win.renderer._frame_session.plan.columns) == before_columns
+    finally:
+        win.close()
+
+
+def test_montage_manual_zoomed_out_reflows_column_layout(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((20, 20, 30), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        plan = _committed_montage(qtbot, win)
+        gh, gw = (int(v) for v in plan.display_shape)
+        view = win.img_view.getView()
+        # Zoom out so the whole grid sits well inside the window (still a manual
+        # pose): here seeing more tiles wins, so a resize should re-pack.
+        view.setRange(
+            xRange=(-gw, 2 * gw),
+            yRange=(-gh, 2 * gh),
+            padding=0,
+        )
+        _process_events(qtbot, count=5)
+        before_columns = int(win.renderer._frame_session.plan.columns)
+
+        win.resize(500, 700)
+        _process_events(qtbot, count=30)
+
+        # Narrower window -> re-flow to fewer columns.
+        assert int(win.renderer._frame_session.plan.columns) != before_columns
     finally:
         win.close()
 
