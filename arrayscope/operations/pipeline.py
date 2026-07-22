@@ -10,7 +10,7 @@ import numpy as np
 
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
-from arrayscope.operations import dim_ops
+from arrayscope.operations import _numba_reductions, dim_ops
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
     OperationKind,
@@ -680,6 +680,25 @@ def _validate_axis(shape, axis) -> int:
     return validate_axis(shape, axis)
 
 
+def _root_sum_squares(data, axis: int):
+    """Root-sum-squares reduction over ``axis``.
+
+    Integer/boolean inputs are widened to float32 before squaring (an int16
+    square silently wraps for |v| > 181), matching the float32 reduction policy
+    for integer inputs. An optional fused numba kernel avoids the full-volume
+    ``np.abs(data) ** 2`` temporary; the numpy expression below is the always-
+    correct fallback used whenever the accelerator is unavailable, not yet warm,
+    or the input is outside the accelerated (contiguous last-axis) case.
+    """
+    array = np.asarray(data)
+    if np.issubdtype(array.dtype, np.integer) or array.dtype == np.bool_:
+        array = array.astype(np.float32)
+    accelerated = _numba_reductions.rss_if_ready(array, axis)
+    if accelerated is not None:
+        return accelerated
+    return np.sqrt(np.sum(np.abs(array) ** 2, axis=axis))
+
+
 def _validate_crop_bounds(axis_size, start, stop):
     start = int(start)
     stop = int(stop)
@@ -782,16 +801,6 @@ def _mean(data, axis):
     if dtype is not None and _is_integer_dtype(dtype):
         return np.mean(data, axis=axis, dtype=np.float32)
     return np.mean(data, axis=axis)
-
-
-def _root_sum_squares(data, axis):
-    # Integer inputs must widen before squaring: e.g. int16 ** 2 wraps
-    # silently for |value| > 181. float32 also matches the integer-reduction
-    # policy used by _mean.
-    dtype = getattr(data, "dtype", None)
-    if dtype is not None and _is_integer_dtype(dtype):
-        data = np.asarray(data, dtype=np.float32)
-    return np.sqrt(np.sum(np.abs(data) ** 2, axis=axis))
 
 
 def _capabilities(
