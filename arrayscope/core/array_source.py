@@ -242,6 +242,14 @@ class CompositeArraySource:
     construction). That matches the A - B difference use case and keeps the
     read path a plain per-region op with no broadcasting; broadcast support can
     be layered on later without changing callers.
+
+    ``own_inputs`` controls close propagation. When the two inputs are shared
+    with *other* live windows (the "difference" compare case: A and B stay open
+    in their own windows), the composite must NOT tear their sources down when
+    the derived window closes. Constructing with ``own_inputs=False`` makes
+    :meth:`close` a no-op on the inputs, so closing A - B never disturbs A or B.
+    Default ``True`` preserves the owning behavior for sources the composite is
+    the sole holder of.
     """
 
     def __init__(
@@ -252,6 +260,7 @@ class CompositeArraySource:
         op: str = "subtract",
         label: str | None = None,
         chunk_shape: tuple[int, ...] | None = None,
+        own_inputs: bool = True,
     ) -> None:
         if op not in _COMPOSITE_OPS:
             raise ValueError(
@@ -282,6 +291,7 @@ class CompositeArraySource:
         self._label = (
             str(label) if label is not None else f"{self._a.label} {symbol} {self._b.label}"
         )
+        self._own_inputs = bool(own_inputs)
         self._closed = False
 
     @property
@@ -332,6 +342,11 @@ class CompositeArraySource:
         if self._closed:
             return
         self._closed = True
+        # When the inputs are shared with other live windows (the A - B compare
+        # case), do not propagate close: tearing A or B's source down here would
+        # break the windows that still own them.
+        if not self._own_inputs:
+            return
         self._a.close()
         self._b.close()
 

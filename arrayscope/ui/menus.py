@@ -124,6 +124,14 @@ class WindowMenuMixin:
         )
         compare_action.triggered.connect(lambda _checked=False: self.open_compare_window())
         view_menu.addAction(compare_action)
+        difference_action = QtGui.QAction("Open difference (A − B)…", self)
+        set_action_icon(difference_action, "open_in_new")
+        difference_action.setToolTip(
+            "Open a third window over A − B (a derived, region-only source), "
+            "linked into the same compare group as A and B."
+        )
+        difference_action.triggered.connect(lambda _checked=False: self.open_difference_window())
+        view_menu.addAction(difference_action)
         view_menu.addSeparator()
         panel_resize_menu = QtWidgets.QMenu("Panel Resize Behavior", self)
         view_menu.addMenu(panel_resize_menu)

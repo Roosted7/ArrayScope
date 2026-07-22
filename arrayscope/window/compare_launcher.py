@@ -40,11 +40,16 @@ def read_source_value(source, array_index):
 
     ``array_index`` is the source-array index produced by the display
     geometry, so this is a plain element read and matches ``array[index]``
-    for a NumPy array. Lazy sources answer scalar tuple-indexing the same way.
+    for a NumPy array. Lazy/derived sources (``LazySourceArray`` over a
+    ``CompositeArraySource``, memmap-backed sources) have no ``__getitem__``
+    but do expose ``read_region``; for those we read the single-element region
+    at ``idx`` (one int per axis), which is exact and — for the A - B
+    difference window — equals ``A[idx] - B[idx]`` by construction.
     """
 
     idx = tuple(int(value) for value in array_index)
-    value = source[idx]
+    reader = getattr(source, "read_region", None)
+    value = reader(idx) if callable(reader) else source[idx]
     if isinstance(value, np.ndarray):
         if value.ndim == 0:
             return value[()]
@@ -162,15 +167,83 @@ class CompareLauncherMixin:
         base_title = self.windowTitle() or "ArrayScope"
         sibling.setWindowTitle(f"{base_title} — compare")
         self.link_compare_window(sibling)
+        self._retain_and_show_compare_window(sibling)
+        show_status_message(self, "Opened linked compare window.", timeout=2500)
+        return sibling
+
+    def open_difference_window(self):
+        """Open a third window over ``A - B`` (a derived ``CompositeArraySource``),
+        linked into the *same* compare group as A and B.
+
+        A and B are the first two members of this window's compare group. The
+        derived source reads both inputs region-by-region (never materializing
+        either), so the difference window renders progressively through the
+        unchanged pipeline. Ownership is deliberately *not* propagated: the
+        composite is built with ``own_inputs=False`` so closing the difference
+        window never tears down A's or B's still-live sources.
+
+        Returns the difference ``ArrayScopeWindow`` (or ``None`` if the group is
+        not a linked pair yet, or the two inputs have mismatched shapes).
+        """
+
+        from arrayscope.core.array_source import CompositeArraySource, LazySourceArray
+        from arrayscope.window import ArrayScopeWindow
+
+        group = getattr(self, "_compare_group", None)
+        members = group.members() if group is not None else ()
+        if len(members) < 2:
+            show_status_message(
+                self,
+                "Open a linked compare window first, then take the difference.",
+                timeout=4000,
+            )
+            return None
+
+        win_a, win_b = members[0], members[1]
+        base_a = win_a.base_data
+        base_b = win_b.base_data
+        shape_a = tuple(int(size) for size in np.shape(base_a))
+        shape_b = tuple(int(size) for size in np.shape(base_b))
+        if shape_a != shape_b:
+            show_status_message(
+                self,
+                f"Cannot difference windows of different shapes: {shape_a} vs {shape_b}.",
+                timeout=5000,
+            )
+            return None
+
+        try:
+            composite = CompositeArraySource(base_a, base_b, op="subtract", own_inputs=False)
+            diff_data = LazySourceArray(composite, materialize_budget_bytes=None)
+            diff_window = ArrayScopeWindow(diff_data)
+        except Exception as exc:  # pragma: no cover - defensive
+            show_status_message(self, f"Could not open difference window: {exc}", timeout=4000)
+            return None
+
+        label_a = getattr(win_a, "compare_label", "A")
+        label_b = getattr(win_b, "compare_label", "B")
+        diff_window.setWindowTitle(f"ArrayScope — {label_a} − {label_b}")
+        # Join the SAME group so dims + camera + levels stay linked across A, B
+        # and the difference window.
+        self.link_compare_window(diff_window)
+        self._retain_and_show_compare_window(diff_window)
+        show_status_message(self, f"Opened difference window ({label_a} − {label_b}).", timeout=2500)
+        return diff_window
+
+    def _retain_and_show_compare_window(self, window) -> None:
+        """Register ``window`` in the app-global retention list and show it.
+
+        Compare/difference siblings have no ``WA_DeleteOnClose``; the app-global
+        list is what keeps them alive (and the test fixture drops that list to
+        dispose them).
+        """
 
         app = QtWidgets.QApplication.instance()
         if app is not None:
             from arrayscope.app.launch import _retain_window_reference
 
-            _retain_window_reference(app, sibling)
-        sibling.show()
-        show_status_message(self, "Opened linked compare window.", timeout=2500)
-        return sibling
+            _retain_window_reference(app, window)
+        window.show()
 
     def link_compare_window(self, other) -> CompareCursorGroup:
         """Join ``self`` and ``other`` into one compare group and enable the

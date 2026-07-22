@@ -161,6 +161,47 @@ def test_rejects_unknown_op():
         CompositeArraySource(a, a, op="frobnicate")
 
 
+# --- close ownership --------------------------------------------------------
+
+
+class ClosableSpySource(NdArraySource):
+    """Record whether ``close`` was called on this input source."""
+
+    def __init__(self, array, *, label="closable"):
+        self.closed = False
+        super().__init__(array, label=label, close=self._on_close)
+
+    def _on_close(self):
+        self.closed = True
+
+
+def test_default_owns_and_closes_both_inputs():
+    a = ClosableSpySource(np.zeros((2, 2), dtype=np.float32), label="A")
+    b = ClosableSpySource(np.zeros((2, 2), dtype=np.float32), label="B")
+    composite = CompositeArraySource(a, b)
+
+    composite.close()
+
+    assert a.closed
+    assert b.closed
+
+
+def test_own_inputs_false_does_not_close_shared_inputs():
+    # The difference-window case: A and B stay live in their own windows, so
+    # closing the derived source must NOT tear their sources down.
+    a = ClosableSpySource(np.zeros((2, 2), dtype=np.float32), label="A")
+    b = ClosableSpySource(np.zeros((2, 2), dtype=np.float32), label="B")
+    composite = CompositeArraySource(a, b, own_inputs=False)
+
+    composite.close()
+
+    assert not a.closed
+    assert not b.closed
+    # A and B remain readable after the composite is closed.
+    np.testing.assert_array_equal(a.read_region((slice(None), slice(None))), np.zeros((2, 2)))
+    np.testing.assert_array_equal(b.read_region((slice(None), slice(None))), np.zeros((2, 2)))
+
+
 # --- a progressive/lazy input streams through the composite -----------------
 
 
