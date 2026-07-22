@@ -86,14 +86,22 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   planned-but-unsubmitted level-2 steps, armed presentation gate) — 1-of-2
   on unfixed main `b0c3699b`, so pre-existing; the known tile-limbo/levels
   family. Real-Wayland rows complete; gate effect is diagnostic-only.
-- **Kernel whole-process exit remains unbounded by current-item work.** The
-  2026-07-19 shutdown change closes admission, cancels queued work/tokens and
-  bounds the GUI close callback under one five-second join deadline, but the
-  final real-Wayland matrix showed current non-daemon worker evaluations can
-  keep the process alive after `kernel_shutdown complete`. Diagnose a
-  cooperative cancellation boundary inside long slab/evidence evaluations;
-  do not daemon-abandon NumPy/FFTW work. Exit gate: a real workflow process
-  terminates in <5 s and the suite emits no leaked-thread diagnostics.
+- **Kernel whole-process exit — VERIFIED BOUNDED 2026-07-22; premise was stale.**
+  The 2026-07-19 concern was "non-daemon worker evaluations keep the process
+  alive," but the app's `ThreadWorkerBackend` workers are `daemon=True`
+  (`workers.py:60`) and `Kernel.shutdown()` is already bounded (returns after its
+  timeout with an `alive_threads` warning — confirmed: a busy 8 s non-cancellable
+  task yields `shutdown(timeout=1.5)` returning at 1.51 s). A real workflow
+  process terminates on its own: `profile_montage_workflow --backend wgpu`
+  exited with its own code (perf-bar exit 1, NOT a 124/137 timeout-kill) after
+  78.6 s, with no leaked-thread diagnostics. The "process won't exit" symptom
+  people saw was the **pyqtgraph level-relevel stall** keeping the profiler's
+  main-thread wait loop spinning (a separate item — see
+  [`redesign/pyqtgraph-level-convergence-2026-07-22.md`](redesign/pyqtgraph-level-convergence-2026-07-22.md)),
+  not a leaked worker thread. No cooperative-cancellation change is needed; the
+  eval loops already poll `_check_cancelled` and `shutdown()` cancels every
+  in-flight token (`scheduler.py:436`). Reopen only if a real non-daemon leak is
+  observed on a completing workflow.
 - **Remove the `montage_key_batch_fallbacks` runtime guard** once the
   consolidated key owner is proven in the field. 2026-07-17: derivation is
   consolidated — every layout has one owner
