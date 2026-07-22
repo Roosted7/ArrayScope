@@ -370,6 +370,33 @@ def test_vispy_manual_resize_uses_shared_viewport_transaction(qt_app):
         view.close()
 
 
+def test_vispy_uses_shared_middle_sampling_overlay(qt_app):
+    from arrayscope.display.sampling_marker import SamplingMarkerOverlay
+    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+
+    view = VisPyImageView2D()
+    try:
+        view.resize(420, 320)
+        view.show()
+        qt_app.processEvents()
+        viewport = view.graphicsView.viewport()
+        scene_pos = view.graphicsView.mapToScene(viewport.width() // 2, viewport.height() // 2)
+
+        view._set_middle_sampling_marker(scene_pos)
+
+        assert isinstance(view._sampling_marker, SamplingMarkerOverlay)
+        assert view._sampling_marker.isVisible()
+        assert view._sampling_marker.parentWidget() is view._display_overlay_parent()
+        assert view._sampling_marker.geometry().center() == view._map_scene_to_display_overlay(
+            scene_pos
+        )
+
+        view._set_middle_sampling_marker(None)
+        assert not view._sampling_marker.isVisible()
+    finally:
+        view.close()
+
+
 def test_vispy_background_pan_updates_camera_without_graphics_scene_drag(qt_app):
     from pyqtgraph.Qt import QtCore, QtGui
 

@@ -159,12 +159,17 @@ def test_two_finger_scroll_pans_without_zooming(qt_app):
     try:
         viewport = view.graphicsView.viewport()
         before = view.getView().viewRange()
+        emitted = []
+        view.getView().scene().sigMouseMoved.connect(emitted.append)
 
         local = _viewport_center(view)
+        cursor_global = viewport.mapToGlobal(local.toPoint())
+        view._global_cursor_position = lambda: cursor_global
+        gesture_local = local + QtCore.QPointF(-18.0, 31.0)
         device = _touchpad_device(qt_app, 101)
         event = QtGui.QWheelEvent(
-            local,
-            view.mapToGlobal(local.toPoint()),
+            gesture_local,
+            viewport.mapToGlobal(gesture_local.toPoint()),
             QtCore.QPoint(40, -20),  # pixelDelta -> a real touchpad scroll
             QtCore.QPoint(0, -5),  # fine-grained finger scroll, not a wheel notch
             QtCore.Qt.MouseButton.NoButton,
@@ -182,6 +187,13 @@ def test_two_finger_scroll_pans_without_zooming(qt_app):
         assert after[0][0] != pytest.approx(before[0][0])
         # ... but the span is unchanged (a scroll must not zoom).
         assert _span(after) == pytest.approx(_span(before))
+        # Gesture-local coordinates may describe a finger centroid and can be
+        # displaced from the mouse. The stationary physical cursor remains the
+        # hover owner after the camera commit.
+        assert len(emitted) == 1
+        cursor_viewport = viewport.mapFromGlobal(cursor_global)
+        expected = view.graphicsView.mapToScene(cursor_viewport)
+        assert (emitted[0].x(), emitted[0].y()) == pytest.approx((expected.x(), expected.y()))
     finally:
         view.close()
 
@@ -441,12 +453,20 @@ def test_middle_vertical_drag_zooms_without_dimension_steps(qt_app):
         before_span = _span(view.getView().viewRange())
 
         assert _send_middle_mouse(view, QtCore.QEvent.Type.MouseButtonPress, start, buttons=middle)
+        sample_scene = view.graphicsView.mapToScene(int(start.x()), int(start.y()))
+        assert view._sampling_marker.isVisible()
+        marker_geometry = view._sampling_marker.geometry()
         assert _send_middle_mouse(
             view,
             QtCore.QEvent.Type.MouseMove,
             QtCore.QPointF(start.x(), start.y() - 60.0),
             buttons=middle,
         )
+        # The shared screen overlay stays at the press-time sample rather than
+        # following either camera motion or the physical middle-drag cursor.
+        assert view._sampling_marker.geometry() == marker_geometry
+        expected_center = view._map_scene_to_display_overlay(sample_scene)
+        assert view._sampling_marker.geometry().center() == expected_center
         assert _send_middle_mouse(
             view,
             QtCore.QEvent.Type.MouseButtonRelease,
@@ -457,6 +477,7 @@ def test_middle_vertical_drag_zooms_without_dimension_steps(qt_app):
         assert _span(view.getView().viewRange())[0] < before_span[0]
         assert steps == []
         assert active == [False]
+        assert not view._sampling_marker.isVisible()
     finally:
         view.close()
 

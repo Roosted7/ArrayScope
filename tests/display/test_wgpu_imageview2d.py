@@ -42,7 +42,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_wgpu_camera_draw_publishes_presentation_ack(qt_app, monkeypatch):
-    view = _view_class("wgpu")()
+    view = _view_class("wgpu")(present_method="screen")
     requests = []
     acknowledgements = []
     try:
@@ -263,6 +263,16 @@ def _orange_overlay_mask(target):
     return (pixels[..., 0] > 150) & (pixels[..., 0] > pixels[..., 1] + 45) & (pixels[..., 2] < 120)
 
 
+def _cyan_sampling_mask(target):
+    pixels = np.asarray(target, dtype=np.int16)
+    return (
+        (pixels[..., 0] > 45)
+        & (pixels[..., 1] > 160)
+        & (pixels[..., 2] > 200)
+        & (pixels[..., 2] > pixels[..., 0] + 100)
+    )
+
+
 def _mask_center(mask):
     rows, columns = np.nonzero(mask)
     assert len(rows), "expected physical pixels for this mask"
@@ -358,6 +368,50 @@ def test_roi_and_profile_marker_are_executor_pixels_and_clear(qt_app, qtbot):
         _rerender_internal(view)
         target = view._wgpu_executor.read_target()
         assert not np.any(_orange_overlay_mask(target))
+    finally:
+        view.close()
+
+
+def test_middle_sample_marker_is_fixed_screen_executor_pixels(qt_app):
+    """wgpu screen mode composites the shared Qt marker into native frame pixels."""
+
+    view = _view_class("wgpu")()
+    view.resize(320, 260)
+    view.show()
+    try:
+        image = np.full((64, 64), 0.02, dtype=np.float32)
+        geometry = _montage_geometry(image.shape, 1, 1, loaded=1)
+        _commit(
+            view,
+            geometry,
+            {0: _payload(0, image, source_id="sampling-marker-pixel-oracle")},
+            levels=(0.0, 1.0),
+        )
+        if view.wgpuPresentMethod() != "screen":
+            # Offscreen Qt cannot create the Wayland surface. Keep this test's
+            # executor-pixel oracle useful there by exercising the same
+            # compositor after the bitmap commit established rendering state.
+            view._wgpu_canvas_update_pending = True
+            view._wgpu_present_method = "screen"
+            view._wgpu_chip_compositor.register(view._sampling_marker)
+        view.getView().setRange(xRange=(0, 64), yRange=(0, 64), padding=0)
+        viewport = view.graphicsView.viewport()
+        sample_scene = view.graphicsView.mapToScene(viewport.width() // 2, viewport.height() // 2)
+        view._set_middle_sampling_marker(sample_scene)
+        view._sync_wgpu_overlay_geometry()
+        _rerender_internal(view)
+
+        target = view._wgpu_executor.read_target()
+        marker = _cyan_sampling_mask(target)
+        assert np.count_nonzero(marker) >= 12
+        marker_center = _mask_center(marker)
+        canvas_w, canvas_h = view._wgpu_canvas.get_physical_size()
+        assert marker_center == pytest.approx((canvas_w * 0.5, canvas_h * 0.5), abs=3.0)
+
+        view._set_middle_sampling_marker(None)
+        view._sync_wgpu_overlay_geometry()
+        _rerender_internal(view)
+        assert not np.any(_cyan_sampling_mask(view._wgpu_executor.read_target()))
     finally:
         view.close()
 

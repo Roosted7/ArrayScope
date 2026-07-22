@@ -88,7 +88,12 @@ Middle-button drag is direction-locked after a small movement threshold. Vertica
 smooth focus-anchored zoom; horizontal drag steps the last manually used scrollable dimension, or
 the first non-display, non-singleton dimension when no prior choice remains valid. `DimensionStrip`
 owns that target, its canonical slice/range stepping, and the existing accent-border indication;
-the navigation driver owns only pointer trajectory and emits bounded intent through callbacks.
+the hover sample remains fixed at the press-time screen point and one shared Qt overlay draws a
+compact X there for the drag lifetime on every backend (wgpu screen presentation composites those
+same rasterized widget pixels into its native frame). Touchpad pan and pinch re-evaluate hover after
+each camera update at the physical cursor—not the gesture centroid—keeping the committed-frame value
+readout aligned with the content now beneath it. The navigation driver owns only pointer trajectory
+and emits bounded intent through callbacks.
 Sub-threshold vertical motion is shown immediately as a provisional zoom. If horizontal motion wins
 the direction lock, the driver restores the exact press-time range before emitting index intent, so
 the tentative feedback cannot alter final camera or viewport-mode state.

@@ -189,6 +189,11 @@ class QtGestureNavigationDriver:
                 focus=(float(focus[0]), float(focus[1])),
                 target_axis=self._owner._middle_drag_target_axis(),
             )
+            # Establish one canonical press-time sample even if no preceding
+            # MouseMove reached the scene (for example, after window focus).
+            # Subsequent middle moves intentionally do not update it.
+            self._owner._notify_pointer_drag_moved(event)
+            self._owner._set_middle_sampling_marker(self._owner._event_scene_position(event))
             return True
 
         gesture = self._middle_drag
@@ -263,6 +268,7 @@ class QtGestureNavigationDriver:
             else:
                 self._set_middle_range(gesture.start_range, provisional=True)
         self._owner._set_middle_drag_dimension_active(False)
+        self._owner._set_middle_sampling_marker(None)
         self._middle_drag = None
 
     def _handle_native_gesture(self, event) -> bool:
@@ -323,6 +329,7 @@ class QtGestureNavigationDriver:
         owner = self._owner
         _release_viewport_continuity(owner)
         owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        owner._notify_stationary_pointer()
 
 
 def _is_touchpad_scroll(event) -> bool:

@@ -13,7 +13,7 @@ import contextlib
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
 from pyqtgraph.graphicsItems.ViewBox import ViewBox
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget, GuiCallbackObservation
 from arrayscope.core.roi import (
@@ -63,6 +63,7 @@ from arrayscope.display.roi_items import (
     make_item_passive,
     sync_item_to_roi_geometry,
 )
+from arrayscope.display.sampling_marker import SamplingMarkerOverlay
 from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.tile_truth_overlay import TileTruthOverlayLayer
 from arrayscope.display.view_navigation_driver import QtGestureNavigationDriver
@@ -224,6 +225,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self._montage_display_mode = "none"
         self._profile_vline = None
         self._profile_hline = None
+        self._sampling_marker = None
         self._profile_handle = None
         self._profile_marker = ProfileMarkerOwner()
         self._profile_marker_callback = None
@@ -343,6 +345,9 @@ class ImageViewShell(QtWidgets.QWidget):
             self._layer_owner.add_profile_marker_items(
                 self._profile_vline, self._profile_hline, self._profile_handle
             )
+        self._sampling_marker = SamplingMarkerOverlay(self._display_overlay_parent())
+        self._sampling_marker.hide()
+        self._prepare_display_overlay_widget(self._sampling_marker)
         self.view.sigRangeChanged.connect(self._on_view_range_changed)
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -1933,16 +1938,47 @@ class ImageViewShell(QtWidgets.QWidget):
             self._hud_widget.show_text_near(text, local)
 
     def _notify_pointer_drag_moved(self, event) -> None:
-        """Keep the hover HUD following the cursor during ROI/profile drags.
+        """Refresh hover for a consumed pointer or stationary gesture event.
 
-        Drag moves are consumed by the pointer driver, so the graphics scene
-        never emits sigMouseMoved; re-emit it here with the drag position."""
+        Drag and touchpad events are consumed by navigation drivers, so the
+        graphics scene never emits ``sigMouseMoved``. Re-emit the event's
+        viewport position after the camera update to keep the HUD accurate."""
         try:
-            view_pos = event.position() if hasattr(event, "position") else event.pos()
-            scene_pos = self.graphicsView.mapToScene(int(view_pos.x()), int(view_pos.y()))
+            scene_pos = self._event_scene_position(event)
             self.view.scene().sigMouseMoved.emit(scene_pos)
         except Exception:
             pass
+
+    def _event_scene_position(self, event):
+        view_pos = event.position() if hasattr(event, "position") else event.pos()
+        return self.graphicsView.mapToScene(int(view_pos.x()), int(view_pos.y()))
+
+    def _global_cursor_position(self):
+        return QtGui.QCursor.pos()
+
+    def _notify_stationary_pointer(self) -> None:
+        """Refresh hover at the physical cursor, not a gesture centroid."""
+
+        viewport = self.graphicsView.viewport()
+        viewport_pos = viewport.mapFromGlobal(self._global_cursor_position())
+        if not viewport.rect().contains(viewport_pos):
+            return
+        scene_pos = self.graphicsView.mapToScene(viewport_pos)
+        self.view.scene().sigMouseMoved.emit(scene_pos)
+
+    def _set_middle_sampling_marker(self, scene_pos) -> None:
+        if scene_pos is None:
+            self._sampling_marker.hide()
+            return
+        center = self._map_scene_to_display_overlay(scene_pos)
+        half = self._sampling_marker.width() // 2
+        self._place_display_overlay_widget(
+            self._sampling_marker,
+            center.x() - half,
+            center.y() - half,
+        )
+        self._sampling_marker.show()
+        self._sampling_marker.raise_()
 
     def hideHud(self):
         if self._hud_widget is not None:
