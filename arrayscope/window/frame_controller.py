@@ -983,6 +983,19 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return _reject("uncommitted")
         if getattr(session, "montage_axis", None) != axis:
             return _reject("axis")
+        # An image-axis ORDER change (X/Y swap / transpose) keeps the montage
+        # axis, layout, and source indices, so the index-window remap would
+        # treat every tile as an unchanged/remappable slot and re-present the
+        # previously materialized plane in its OLD orientation.  A transpose
+        # changes what every tile's pixels mean, not which sources are shown,
+        # so it is a rebirth, not an index-window move: reject retarget and let
+        # the caller rebuild the session with freshly oriented tiles.  (Axis
+        # FLIPS never reach here -- they are a viewbox transform applied without
+        # a montage re-render.)
+        if tuple(getattr(session.view_state, "image_axes", None) or ()) != tuple(
+            getattr(view_state, "image_axes", None) or ()
+        ):
+            return _reject("image-axes-order")
         if bool(force_auto):
             return _reject("force-auto")
         if bool(skipped_tiles) or bool(getattr(session, "skipped_tiles", None)):

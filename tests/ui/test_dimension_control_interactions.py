@@ -6,6 +6,27 @@ from tests.ui.helpers import (
 from tests.ui.helpers import (
     process_events as _process_events,
 )
+from tests.ui.test_montage_interactions import _committed_tile_payload
+
+
+def _committed_montage_tile_images(win):
+    """Return {montage_index: committed tile image} for the live montage."""
+
+    session = win.renderer._frame_session
+    images = {}
+    for tile in session.plan.tiles:
+        payload = _committed_tile_payload(win, tile)
+        if payload is not None and getattr(payload, "image", None) is not None:
+            images[int(tile.montage_index)] = np.asarray(payload.image).copy()
+    return images
+
+
+def _wait_for_committed_montage_tiles(win, qtbot, count):
+    def _ready():
+        _process_events(qtbot, count=5)
+        return len(_committed_montage_tile_images(win)) >= count
+
+    qtbot.waitUntil(_ready, timeout=8000)
 
 
 def test_tiled_dimension_x_y_buttons_promote_range_to_image_crop(qtbot):
@@ -290,5 +311,67 @@ def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
         assert all(h <= before_strip for h in applied_heights), applied_heights
         assert strip_scroll.height() == before_strip
         assert viewport.height() == before_vp
+    finally:
+        win.close()
+
+
+def test_montage_x_y_swap_reorients_all_cached_tiles(qtbot):
+    """A montage X/Y swap must transpose ALL committed tiles, not just newly
+    scrolled-in ones.
+
+    Regression for the montage tile-staleness defect: an image_axes ORDER
+    change (transpose) kept the montage axis, layout, and source indices, so
+    the index-window retarget path re-presented already-materialized tiles in
+    their OLD orientation.  Only freshly materialized tiles picked up the new
+    orientation, leaving correctly-oriented tiles beside stale ones.  Existing
+    dimension tests only assert ``view_state.image_axes`` -- they never checked
+    that the displayed tiles actually transposed, which is where the bug hid.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    # A SQUARE image plane (N, N, K): a transpose keeps tile shape and slice
+    # indices identical, so an order-blind reuse key collides.  Per-plane data
+    # is asymmetric within a plane so a stale (non-transposed) tile is
+    # detectable: value = x + 10*y + 100*k.
+    n_side, n_tiles = 5, 4
+    yy, xx, kk = np.mgrid[0:n_side, 0:n_side, 0:n_tiles]
+    data = (xx + 10 * yy + 100 * kk).astype(np.float32)
+
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
+        )
+        win.render(reason="test-montage")
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+
+        before = _committed_montage_tile_images(win)
+        assert len(before) == n_tiles
+        assert win.view_state.image_axes == (0, 1)
+
+        # Swap X/Y: click Y on the axis currently acting as X.
+        x_axis = win.view_state.image_axes[1]
+        win.set_dimension_role("y", x_axis)
+        assert win.view_state.image_axes == (1, 0)
+
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        after = _committed_montage_tile_images(win)
+
+        # EVERY committed tile -- including retained/cached ones -- must now be
+        # the transpose of its pre-swap payload.  A stale tile would compare
+        # equal to its old (un-transposed) self.
+        stale = [i for i in before if i in after and np.array_equal(after[i], before[i])]
+        assert not stale, f"tiles kept their old orientation after the swap: {stale}"
+        for index, old_image in before.items():
+            assert index in after, f"tile {index} dropped after swap"
+            np.testing.assert_array_equal(
+                after[index],
+                old_image.T,
+                err_msg=f"tile {index} did not transpose on the X/Y swap",
+            )
     finally:
         win.close()
