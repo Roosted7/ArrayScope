@@ -252,3 +252,26 @@ def test_evaluator_tier_engages_live_under_auto():
     # some revisits without a fresh evaluation.
     recomputes_on_pass2 = evaluator.image_evaluations - evals_after_fill
     assert recomputes_on_pass2 < len(states)
+
+
+def test_evaluator_defaults_to_auto_tier_and_switches_live():
+    """The host-cache tier is engaged by default (AUTO) and switches live."""
+    import numpy as np
+
+    from arrayscope.operations.compressed_tier import TwoLevelArrayCache
+    from arrayscope.operations.coordinator import OperationCoordinator
+
+    coord = OperationCoordinator(np.zeros((4, 4), dtype=np.float32), chunk_transport_codec="auto")
+    ev = coord.evaluator
+    # AUTO engages the compressed tier on the display cache by default.
+    assert isinstance(ev._display_cache, TwoLevelArrayCache)
+    assert ev._display_cache.tier is not None
+
+    # Live switch to RAW rebuilds to a plain cache; back to zfp re-engages.
+    from arrayscope.operations.cache import BoundedArrayCache
+
+    assert ev.set_chunk_transport_codec("raw") is True
+    assert isinstance(ev._display_cache, BoundedArrayCache)
+    assert ev.set_chunk_transport_codec("raw") is False  # no-op when unchanged
+    assert ev.set_chunk_transport_codec("zfp") is True
+    assert isinstance(ev._display_cache, TwoLevelArrayCache)

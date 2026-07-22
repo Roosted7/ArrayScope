@@ -192,6 +192,25 @@ class OperationEvaluator:
         )
         self._stage_materializer = StageMaterializationManager(self._stage_cache)
 
+    def set_chunk_transport_codec(self, codec: str | None) -> bool:
+        """Switch the host-cache compression codec live, rebuilding the caches.
+
+        Rebuilds the display/profile/region caches with the new codec (RAW = a
+        plain cache; else a compressed backing tier). The rebuilt caches start
+        empty — the new codec applies to everything cached from here on — so this
+        lets a Performance-menu change take effect without a restart. No-op when
+        the codec is unchanged. Returns True if a rebuild happened.
+        """
+
+        normalized = (codec or "raw").strip().lower()
+        if normalized == (self.chunk_transport_codec or "raw").strip().lower():
+            return False
+        self.chunk_transport_codec = normalized
+        self._display_cache = _build_array_cache(DEFAULT_DISPLAY_CACHE_BYTES, 512, normalized)
+        self._profile_cache = _build_array_cache(DEFAULT_PROFILE_CACHE_BYTES, 256, normalized)
+        self._region_cache = _build_array_cache(DEFAULT_DISPLAY_CACHE_BYTES, 512, normalized)
+        return True
+
     def set_document(self, document: ArrayDocument):
         if (
             document.steps != self.document.steps

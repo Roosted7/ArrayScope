@@ -60,7 +60,7 @@ class WindowMenuMixin:
                     "texture_codec", TextureCodecChoice.AUTO.value
                 ),
                 "chunk_transport_codec": self._settings.value(
-                    "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
+                    "chunk_transport_codec", ChunkTransportCodecChoice.AUTO.value
                 ),
                 "memory_profile": self._settings.value(
                     "memory_profile", MemoryProfileChoice.BALANCED.value
@@ -611,6 +611,15 @@ class WindowMenuMixin:
     def _set_chunk_transport_codec_choice(self, choice):
         self.app_settings = self._updated_app_settings(chunk_transport_codec=choice)
         self._apply_performance_settings(persist=True)
+        # Apply live to this window's evaluator (rebuilds its caches with the new
+        # codec) instead of only affecting newly opened windows.
+        evaluator = getattr(self, "operation_evaluator", None)
+        setter = getattr(evaluator, "set_chunk_transport_codec", None)
+        if callable(setter) and setter(choice.value):
+            self.render(reason="host-cache-codec-changed")
+            show_status_message(
+                self, f"Host cache compression: {choice.value} (applied to this window)."
+            )
 
     def _configure_bart_toolbox(self):
         import os
