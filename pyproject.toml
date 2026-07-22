@@ -65,6 +65,17 @@ vispy = [
 accel = [
     "numba>=0.60.0",
 ]
+# Optional lossless compression codecs for the G7 host-side compressed backing
+# tier (arrayscope.gpu.cache_policy / arrayscope.operations.compressed_tier).
+# Both are optional: the policy and tier degrade to an uncompressed ``raw`` path
+# when a codec's dependency is absent (see decide_compressed_tier), so these are
+# only needed to actually engage compression -- and to exercise the codec test
+# paths, which skip when the dependency is missing.  Note ``zfpy`` is the Python
+# binding (PyPI); conda-forge's ``zfp`` package ships only the C library.
+codecs = [
+    "zfpy>=1.0.0",    # float/complex/int16 transform codec (zfp)
+    "blosc2>=2.0.0",  # byte-exact codec for every dtype, incl. uint8
+]
 installer = [
     "pyinstaller>=6.10.0",
 ]
