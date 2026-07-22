@@ -23,10 +23,14 @@ def _committed_montage_tile_images(win):
     return images
 
 
-def _wait_for_committed_montage_tiles(win, qtbot, count):
+def _wait_for_committed_montage_tiles(win, qtbot, count, *, expected_shape=None):
     def _ready():
         _process_events(qtbot, count=5)
-        return len(_committed_montage_tile_images(win)) >= count
+        images = _committed_montage_tile_images(win)
+        return len(images) >= count and (
+            expected_shape is None
+            or all(tuple(image.shape[:2]) == tuple(expected_shape) for image in images.values())
+        )
 
     qtbot.waitUntil(_ready, timeout=min(8000, INTERACTION_SETTLE_HARD_LIMIT_MS))
 
@@ -303,7 +307,9 @@ def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
         # reverted before a poll could observe it.
         applied_heights = []
         real_set_fixed = strip_scroll.setFixedHeight
-        strip_scroll.setFixedHeight = lambda h: (applied_heights.append(int(h)), real_set_fixed(h))[1]
+        strip_scroll.setFixedHeight = lambda h: (applied_heights.append(int(h)), real_set_fixed(h))[
+            1
+        ]
 
         win.request_operation("centered_fft", 1)
         _process_events(qtbot, count=40)
@@ -350,7 +356,7 @@ def test_montage_x_y_swap_is_an_instant_display_transform(qtbot):
             win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
         )
         win.render(reason="test-montage")
-        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
 
         before = _committed_montage_tile_images(win)
         assert len(before) == n_tiles
@@ -380,7 +386,7 @@ def test_montage_x_y_swap_is_an_instant_display_transform(qtbot):
         win.set_dimension_role("y", x_axis)
         assert win.view_state.image_axes == (1, 0)
 
-        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
         after = _committed_montage_tile_images(win)
 
         # 1) Tile payloads are CANONICAL and reused verbatim -- unchanged across
@@ -439,7 +445,7 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
             win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
         )
         win.render(reason="test-montage")
-        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
         before = _committed_montage_tile_images(win)
         assert len(before) == n_tiles
 
@@ -461,7 +467,7 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
         x_axis = win.view_state.image_axes[1]
         win.set_dimension_role("y", x_axis)
         assert win.view_state.image_axes == (1, 0)
-        _wait_for_committed_montage_tiles(win, qtbot, n_tiles)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
 
         # No new GPU uploads: the swap re-sampled resident textures.
         assert int(win.img_view._wgpu_executor.uploads_total) == uploads_before, (
