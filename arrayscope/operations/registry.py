@@ -130,19 +130,16 @@ _LOGGER = logging.getLogger(__name__)
 # Unlike a third-party entry-point plugin (arrayscope.operations.plugins), a
 # *pack* ships inside the ArrayScope tree and registers its
 # ``PluginOperationSpec`` objects directly here.  A pack is optional: each pack
-# module self-guards on its backend (e.g. ``import sigpy``) and contributes
-# nothing when that backend is absent -- so ``import arrayscope`` never imports
-# the backend, and import-health stays green.  Packs reuse the same
+# module self-guards on its backend (e.g. a runnable ``bart`` binary) and
+# contributes nothing when that backend is absent -- so ``import arrayscope``
+# never touches the backend, and import-health stays green.  Packs reuse the same
 # ``PluginOperation`` machinery as entry-point plugins, so a pack op flows
 # through the identical opaque materialization / Tier-2 conformance gate.
 _PACK_SPECS: dict[str, object] = {}
 _PACKS_LOADED = False
 
 # Pack modules that expose ``register()`` (each guards its own backend).
-_PACK_MODULES: tuple[str, ...] = (
-    "arrayscope.operations.packs.sigpy_pack",
-    "arrayscope.operations.packs.bart_pack",
-)
+_PACK_MODULES: tuple[str, ...] = ("arrayscope.operations.packs.bart_pack",)
 
 
 def register_pack_operation(spec) -> None:
@@ -219,9 +216,10 @@ def operation_entries():
 def all_operations() -> tuple[OperationEntry, ...]:
     """Every operation the dock can offer: built-ins + installed in-process packs.
 
-    This is the enumeration the operation dock / command palette use so sigpy (and
-    any future pack) ops are offered alongside the built-ins.  ``operation_entries``
-    stays built-ins-only for callers that assume concrete dataclass operations.
+    This is the enumeration the operation dock / command palette use so pack ops
+    (e.g. the BART pack, and any future pack) are offered alongside the built-ins.
+    ``operation_entries`` stays built-ins-only for callers that assume concrete
+    dataclass operations.
     """
 
     load_operation_packs()

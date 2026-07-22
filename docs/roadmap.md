@@ -79,10 +79,12 @@ is proven independent. Execution rows: [`queue.md`](queue.md) Next section.
    ids. Tier 1: pure `fn(ndarray)->ndarray` + shape/dtype (OPAQUE,
    whole-array — zero engine changes). Tier 2: declared capabilities +
    region algebra, honored only after a conformance harness proves
-   region-path equivalence. **sigpy** as the default in-process op pack;
-   **BART** as an optional subprocess pack (cfl handoff at the
-   stage-materialization seam, cancellation → SIGTERM, honest cost
-   hints). Registry yes; marketplace remains a non-goal.
+   region-path equivalence. **BART** as an optional subprocess pack (cfl
+   handoff at the stage-materialization seam, cancellation → SIGTERM, honest
+   cost hints). No sigpy pack: `sigpy.fft` is `numpy.fft` underneath, so it
+   duplicates the built-in centered-FFT op + the `FFTBackendChoice` setting;
+   sigpy's additive value (nufft/espirit) awaits a multi-input op contract.
+   Registry yes; marketplace remains a non-goal.
 3. **D — Ingestion breadth.** DataWrapper-style adapter behind the ADR
    0049 protocol: zarr/dask/cupy/torch/xarray without touching the
    planner; chunk-aligned request hints for the tile engine.
