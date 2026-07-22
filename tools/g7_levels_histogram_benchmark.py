@@ -367,16 +367,12 @@ def main() -> None:
         "  histogram DISTRIBUTION via Path A: "
         + ("negligible shape drift" if hist_ok else "small but visible shape drift (EMD > 0.02)")
     )
+    print("  cost above is resident-hot histogram dispatch only; it EXCLUDES page encoding/upload.")
     print(
-        "  cost: Path A ~= baseline GPU (roughly free); Path B CPU encode is a "
-        "comparable one-off per tile."
-    )
-    print(
-        "  => VERDICT: Path A (GPU-on-compressed) gives essentially exact auto-level "
-        "bounds at ~zero extra cost -- good default for the fast first-pass under "
-        "aggressive AUTO. The histogram-widget distribution drifts slightly, so the "
-        "exact owner stays the CPU full-population refinement (Path B); explicit OFF "
-        "restores the byte-identical raw path."
+        "  => VERDICT: this tool can adjudicate resident histogram drift, but cannot "
+        "justify AUTO or an end-to-end speed claim. Pair it with "
+        "arrayscope.tools.g7_live_compression_benchmark, which includes cold encode, "
+        "upload, pool allocation, and compressed-source LOD."
     )
 
 

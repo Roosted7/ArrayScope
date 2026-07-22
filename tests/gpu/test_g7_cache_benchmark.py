@@ -36,6 +36,7 @@ def test_benchmark_runs_and_reports(monkeypatch):
         # The RAM win is the invariant: the two-level tier retains at least as
         # many distinct chunks as raw under the same byte budget.
         assert row["two_level"]["fit_chunks"] >= row["raw_only"]["fit_chunks"]
+        assert row["two_level"]["fit_chunks"] <= result["working_set"]
         # Fewer or equal expensive recomputes with the tier engaged.
         assert row["two_level"]["recomputes"] <= row["raw_only"]["recomputes"]
         assert row["ratio"] >= 1.0

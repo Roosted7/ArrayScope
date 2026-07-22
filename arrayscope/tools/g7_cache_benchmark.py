@@ -197,7 +197,9 @@ def _run_config(
         cache.get_or_compute((idx,), make_compute(idx))
     workload_ms = (time.perf_counter() - t0) * 1e3
 
-    fit = len(cache.raw._cache) + (len(tier) if tier is not None else 0)
+    raw_keys = {key for key, _value in cache.raw._cache.items()}
+    tier_keys = set() if tier is None else {key for key, _value in tier._cache.items()}
+    fit = len(raw_keys | tier_keys)
     return ConfigResult(
         label=label,
         fit_chunks=fit,
@@ -321,7 +323,9 @@ def _find_crossover_missfft(
             tier=None,
             miss_plane=miss_plane,
         )
-        tier = CompressedBackingTier(max_bytes=max(0, budget_bytes - raw_slice), codec_name=codec_name)
+        tier = CompressedBackingTier(
+            max_bytes=max(0, budget_bytes - raw_slice), codec_name=codec_name
+        )
         two_level = _run_config(
             label="two-level",
             chunks=chunks,
@@ -438,15 +442,15 @@ def _format(result: dict) -> str:
         )
     lines.append("")
     lines.append(
-        "fit_raw/fit_2L = distinct chunks resident under the SAME RAM budget (the RAM win).\n"
+        "fit_raw/fit_2L = distinct keys resident under the SAME RAM budget; raw/tier\n"
+        "  overlap is counted once. This is a cache MODEL, not a live operation benchmark.\n"
         "recover_2L = raw-misses served by a cheap decode instead of an expensive recompute.\n"
         "xover_ms = recompute cost above which the tier wins on TIME (avoided recomputes >\n"
         "  codec overhead); xover_fft = smallest miss fft2 side where two-level beats raw-only.\n"
-        "Verdict: the RAM/eviction win is unconditional (~2.2x working set, fewer misses).\n"
-        "The end-to-end TIME win appears once the expensive miss (large-matrix stage FFT or\n"
-        "disk re-read) exceeds the per-op codec cost -- i.e. exactly the large-data regime\n"
-        "the owner targets.  For cheap 256^2 misses the tier still wins RAM but not wall time,\n"
-        "which is why the adaptive policy engages on RAM PRESSURE (large working sets)."
+        "Interpretation: the tier can retain more keys when the data compresses, but the\n"
+        "reported time substitutes a synthetic FFT for each miss. Production keeps the\n"
+        "expensive StageCache separate, so use g7_live_compression_benchmark plus the real\n"
+        "workflow before claiming an end-to-end win or enabling AUTO."
     )
     return "\n".join(lines)
 
