@@ -84,6 +84,47 @@ class _DimsResizeHandle(QtWidgets.QWidget):
         event.accept()
 
 
+class _SyncButtonBar(QtWidgets.QWidget):
+    """Right-aligned home for the multi-window sync button.
+
+    Lives in the narrow right column beneath the histogram rather than
+    inside the dimension-chip row, so it never eats the chips' horizontal
+    budget.  Its horizontal margin is *always at least* the chips' maximum
+    inter-chip spacing and prefers a roomier gap, shrinking back toward that
+    floor only when the column gets too narrow to grant the preferred
+    margin -- mirroring how the chips give up spacing under pressure.
+    """
+
+    #: Floor equals the chips' maximum spacing, so the sync button is never
+    #: more crowded than a fully-relaxed chip row.
+    MIN_MARGIN = DimensionStrip.PREFERRED_CHIP_SPACING
+    #: Roomier target when the column has space to spare.
+    PREFERRED_MARGIN = MIN_MARGIN + 8
+
+    def __init__(self, button, parent=None):
+        super().__init__(parent)
+        self._button = button
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        layout.addWidget(button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._layout = layout
+        self._apply_margin(self.PREFERRED_MARGIN)
+
+    def _apply_margin(self, margin):
+        margin = int(margin)
+        self._layout.setContentsMargins(margin, margin // 2, margin, margin // 2)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        button_width = self._button.sizeHint().width()
+        # Grant the preferred margin only if two of them plus the button
+        # actually fit; otherwise fall back toward the floor.
+        room_for = (self.width() - button_width) // 2
+        margin = max(self.MIN_MARGIN, min(self.PREFERRED_MARGIN, room_for))
+        self._apply_margin(margin)
+
+
 def _make_array_info_label():
     from arrayscope.ui.status_label import ElideLabel
 
@@ -425,11 +466,11 @@ class DisplayControlBuildMixin:
         self.sync_dims_button.toggled.connect(
             lambda checked: self._on_sync_facet_toggled("dims", checked)
         )
-        self.layouts["dims"].addSpacing(12)
-        self.layouts["dims"].addWidget(
-            self.sync_dims_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignVCenter
-        )
-        self.layouts["dims"].addSpacing(12)
+        # Homed in the right column beneath the histogram (see
+        # _compose_central_layout), not in the chip row, so it neither
+        # steals the chips' horizontal budget nor drifts left of the
+        # histogram column.
+        self._sync_dims_bar = _SyncButtonBar(self.sync_dims_button)
 
         def _apply_dimension_strip_state(value):
             panel_manager = getattr(self, "panel_manager", None)
@@ -753,6 +794,11 @@ class DisplayControlBuildMixin:
         scroll.setMinimumHeight(minimum)
         scroll.setMaximumHeight(full)
         scroll.setFixedHeight(target)
+        # The drag handle only means something when there is more than one row
+        # to trade height between; hide it (and reclaim its 9px) otherwise.
+        handle = getattr(self, "_dims_resize_handle", None)
+        if handle is not None:
+            handle.setVisible(rows > 1)
 
     def _adjust_dims_area_height(self, delta):
         rows, height_for = self._dims_row_heights()
@@ -772,6 +818,14 @@ class DisplayControlBuildMixin:
         )
         self.layouts["botLeft"].addWidget(handle)
         self._dims_resize_handle = handle
+
+        # The multi-window sync button lives at the top of the right column,
+        # right-aligned beneath the histogram -- keep it above any (hidden)
+        # display-controls widget already parked here.
+        self.layouts["botRight"].insertWidget(0, self._sync_dims_bar)
+        self.layouts["botRight"].setAlignment(
+            self._sync_dims_bar, Qt.QtCore.Qt.AlignmentFlag.AlignTop
+        )
         self._sync_dims_area_height()
 
         # Create container widgets for proper alignment

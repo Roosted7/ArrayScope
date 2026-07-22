@@ -443,14 +443,10 @@ class DimensionStrip(QtWidgets.QWidget):
     MIN_CHIP_SPACING = 12
     PREFERRED_CHIP_SPACING = 16
 
-    # The dims row also holds the right-aligned sync-link button; reserve its
-    # footprint (button + fixed gaps) so the last column never clips into it.
-    SIBLING_RESERVE = 56
-
     def _available_width(self):
         parent = self.parentWidget()
         if parent is not None and parent.contentsRect().width() > 0:
-            return max(1, parent.contentsRect().width() - self.SIBLING_RESERVE)
+            return max(1, parent.contentsRect().width())
         return max(1, self.contentsRect().width() or self.width())
 
     def _column_count(self):
