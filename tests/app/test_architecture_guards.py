@@ -891,6 +891,12 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
                 "UI cosmetic",
             ): 1,
             (
+                "arrayscope/ui/display_controls.py",
+                "DisplayControlBuildMixin._schedule_dims_area_height",
+                "singleShot",
+                "UI cosmetic",
+            ): 1,
+            (
                 "arrayscope/display/rendering_benchmarks.py",
                 "_measure_presented_action.PaintProbe.eventFilter",
                 "singleShot",

@@ -245,3 +245,50 @@ def test_add_operation_leaves_dimension_strip_columns_consistent(qtbot):
         assert strip._columns == strip._column_count()
     finally:
         win.close()
+
+
+def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
+    """Adding an operation while the operation dock is ALREADY open must not
+    change the render viewport size -- no layout moves, so nothing should flash.
+
+    Regression: a mid-relayout ``layoutChanged`` read a transiently-narrow
+    width, wrapped the chips to an extra row, and grew the dimension-strip
+    height for one turn; through the shared central layout that briefly shrank
+    the render viewport before it settled back.
+    """
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.random.default_rng(0).random((8, 40, 40)).astype(np.float32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(1000, 800)
+        win.show()
+        qtbot.waitExposed(win)
+        _process_events(qtbot, count=30)
+        win.layout_manager.set_operation_dock_visible_from_user(True)
+        _process_events(qtbot, count=30)
+        assert win.operation_dock.isVisible()
+
+        viewport = win.img_view.graphicsView.viewport()
+        strip_scroll = win.dims_scroll
+        before_vp = viewport.height()
+        before_strip = strip_scroll.height()
+
+        # Spy on every height the strip is actually given during the settle --
+        # a sub-turn transient (mid-relayout height grow) would otherwise be
+        # reverted before a poll could observe it.
+        applied_heights = []
+        real_set_fixed = strip_scroll.setFixedHeight
+        strip_scroll.setFixedHeight = lambda h: (applied_heights.append(int(h)), real_set_fixed(h))[1]
+
+        win.request_operation("centered_fft", 1)
+        _process_events(qtbot, count=40)
+
+        # No height applied during the op-add may exceed the pre-add height:
+        # that grow is exactly what briefly shrank the viewport.
+        assert all(h <= before_strip for h in applied_heights), applied_heights
+        assert strip_scroll.height() == before_strip
+        assert viewport.height() == before_vp
+    finally:
+        win.close()
