@@ -395,7 +395,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         bars["tile"].set_usage(
             used=snapshot.display_cache.bytes_used,
             total=snapshot.display_cache.max_bytes,
-            detail=f"{_short_bytes(snapshot.display_cache.bytes_used)} / {_short_bytes(snapshot.display_cache.max_bytes)}",
+            detail=_display_cache_detail(snapshot.display_cache),
         )
         show_gpu = str(
             getattr(snapshot, "image_rendering_backend_actual", "")
@@ -544,6 +544,33 @@ def _short_bytes(value: int | None) -> str:
 
 def _percent(used: int, total: int) -> str:
     return f"{(float(used) / max(1.0, float(total)) * 100.0):.0f}%"
+
+
+def _display_cache_detail(cache) -> str:
+    """`used / total`, plus the host-cache compressed-tier status when engaged.
+
+    The tier keeps the *same* byte budget while retaining more of the working
+    set, so the raw ``used / total`` figure barely moves when a codec is
+    selected — the visible effect is the tier suffix (codec, compression ratio,
+    retained keys, and decode recoveries). Without it a Host Cache Compression
+    menu change leaves no trace in this dialog.
+    """
+
+    base = f"{_short_bytes(cache.bytes_used)} / {_short_bytes(cache.max_bytes)}"
+    if not getattr(cache, "tier_engaged", False):
+        return base
+    codec = getattr(cache, "tier_codec", "") or "?"
+    entries = int(getattr(cache, "tier_entries", 0) or 0)
+    compressed = int(getattr(cache, "tier_compressed_bytes", 0) or 0)
+    uncompressed = int(getattr(cache, "tier_resident_uncompressed_bytes", 0) or 0)
+    recoveries = int(getattr(cache, "tier_recoveries", 0) or 0)
+    parts = [base, f"{codec} tier"]
+    if compressed > 0 and uncompressed > 0:
+        parts.append(f"×{uncompressed / compressed:.1f}")
+    parts.append(f"{entries} keys")
+    if recoveries:
+        parts.append(f"{recoveries} recov")
+    return " · ".join(parts)
 
 
 def _resource_segments(snapshot) -> tuple[tuple[str, int, str], ...]:

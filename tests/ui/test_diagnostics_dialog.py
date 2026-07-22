@@ -431,3 +431,37 @@ def test_diagnostics_jsonl_logging_stops_on_close(qtbot, tmp_path, monkeypatch):
         assert [record["event"] for record in _read_jsonl(path)] == ["start", "snapshot"]
     finally:
         win.close()
+
+
+def test_display_cache_detail_shows_tier_when_engaged():
+    """The display-cache bar detail surfaces the host-cache compressed tier.
+
+    Selecting a Host Cache Compression codec keeps the same byte budget, so the
+    raw `used / total` figure barely moves; the tier suffix is what makes the
+    change visible in the diagnostics dialog.
+    """
+    from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
+    from arrayscope.ui.diagnostics import _display_cache_detail
+
+    # Tier off (RAW): no suffix, byte-identical to the pre-tier detail.
+    raw = CacheDiagnosticsSnapshot(
+        status=CacheStatus.READY, bytes_used=1_835_008, max_bytes=536_870_912
+    )
+    assert "tier" not in _display_cache_detail(raw)
+
+    # Tier engaged: codec, compression ratio, retained keys, and recoveries show.
+    engaged = replace(
+        raw,
+        bytes_used=1_282_144,
+        tier_engaged=True,
+        tier_codec="zfp",
+        tier_entries=29,
+        tier_compressed_bytes=1_000_000,
+        tier_resident_uncompressed_bytes=2_400_000,
+        tier_recoveries=5,
+    )
+    detail = _display_cache_detail(engaged)
+    assert "zfp tier" in detail
+    assert "×2.4" in detail
+    assert "29 keys" in detail
+    assert "5 recov" in detail
