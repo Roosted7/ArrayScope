@@ -207,12 +207,6 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogramDataBounds = None
         self._displayLevels = None
         self._applying_presentation = False
-        # Set once the user zooms/pans the histogram's value axis by hand. While
-        # set, an index-driven presentation refresh must NOT snap the histogram
-        # view back to the data bounds -- only an explicit levels reset (double
-        # click / Auto button) clears it. See reset_histogram_view_range and
-        # HistogramDisplayController.install.
-        self._user_histogram_view_dirty = False
         self.displayMode = "square_pixels"  # Default to square pixels
         self.histogramSource = None
         self.histogramPlotSource = None
@@ -1370,6 +1364,9 @@ class ImageViewShell(QtWidgets.QWidget):
         """Set the semantic histogram/data bounds independently from display levels."""
         if bounds is None:
             self._histogramDataBounds = None
+            controller = self._histogram_display_controller
+            if controller is not None:
+                controller.clear_view_range_state()
             return
         low, high = bounds
         self._histogramDataBounds = (float(low), float(high))
@@ -1389,9 +1386,9 @@ class ImageViewShell(QtWidgets.QWidget):
         (see reset_histogram_view_range).
         """
 
-        if self._user_histogram_view_dirty:
-            return
-        self.histogram.setHistogramRange(float(min_val), float(max_val))
+        controller = self._histogram_display_controller
+        if controller is not None:
+            controller.apply_data_view_range(float(min_val), float(max_val))
 
     def reset_histogram_view_range(self, min_val, max_val) -> None:
         """Snap the histogram value axis back to auto and clear the manual flag.
@@ -1401,13 +1398,9 @@ class ImageViewShell(QtWidgets.QWidget):
         resulting ``sigRangeChanged`` is not misread as a fresh user edit.
         """
 
-        applying = self._applying_presentation
-        self._applying_presentation = True
-        try:
-            self._user_histogram_view_dirty = False
-            self.histogram.setHistogramRange(float(min_val), float(max_val))
-        finally:
-            self._applying_presentation = applying
+        controller = self._histogram_display_controller
+        if controller is not None:
+            controller.reset_view_range(float(min_val), float(max_val))
 
     def _histogram_levels_for_display(self, levels=None):
         if levels is not None:

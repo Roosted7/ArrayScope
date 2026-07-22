@@ -20,6 +20,7 @@ from arrayscope.display.histogram_plot import (
     finite_increasing_pair,
     sample_histogram_data,
 )
+from arrayscope.display.histogram_view_range import HistogramViewRangePolicy
 from arrayscope.ui.icons import material_icon, set_button_icon
 
 MIN_LEVEL_SPAN_FRACTION = 1e-12
@@ -129,7 +130,12 @@ class HistogramDisplayController(QtCore.QObject):
         self._last_histogram_release: tuple[float, QtCore.QPointF] | None = None
         self._last_histogram_auto_reset: tuple[float, QtCore.QPointF] | None = None
         self._manual_region_installed = False
+        self._view_range_policy = HistogramViewRangePolicy()
         self._histogram_ready.connect(self._handle_histogram_ready)
+
+    @property
+    def view_range_is_manual(self) -> bool:
+        return bool(self._view_range_policy.manual)
 
     def install(self) -> None:
         item = self._histogram_item()
@@ -139,7 +145,17 @@ class HistogramDisplayController(QtCore.QObject):
         self._install_histogram_event_filter(getattr(widget, "viewport", lambda: None)())
         vb = getattr(item, "vb", None)
         if vb is not None:
-            vb.sigRangeChanged.connect(lambda *_args: self._on_histogram_view_range_changed())
+            # HistogramLUTItem enables continuous auto-range on construction.
+            # Its value-axis auto-pan fights a level handle dragged to the edge,
+            # so ArrayScope owns that axis from the moment the widget exists.
+            value_axis = (
+                vb.YAxis if getattr(item, "orientation", "vertical") == "vertical" else vb.XAxis
+            )
+            vb.enableAutoRange(value_axis, False)
+            vb.sigRangeChanged.connect(lambda *_args: self.schedule_refresh())
+            vb.sigRangeChangedManually.connect(
+                lambda *_args: self._on_histogram_view_range_changed()
+            )
             scene = vb.scene()
             if scene is not None:
                 for view in tuple(scene.views() or ()):
@@ -147,12 +163,37 @@ class HistogramDisplayController(QtCore.QObject):
         self._install_manual_clicks()
 
     def _on_histogram_view_range_changed(self) -> None:
-        # A range change that did NOT originate from a programmatic
-        # presentation apply is the user zooming/panning the value axis; latch
-        # it so index-driven refreshes stop resetting their view.
+        # Only ViewBox's explicit manual signal reaches here.  Ordinary range
+        # changes also include automatic maintenance of the histogram-count
+        # axis and must never disable semantic data-bound following.
         if not getattr(self.owner, "_applying_presentation", False):
-            self.owner._user_histogram_view_dirty = True
+            self._view_range_policy.note_manual_navigation()
         self.schedule_refresh()
+
+    def clear_view_range_state(self) -> None:
+        self._view_range_policy.clear()
+
+    def apply_data_view_range(self, min_val: float, max_val: float) -> None:
+        self._apply_view_range_decision((float(min_val), float(max_val)), force=False)
+
+    def reset_view_range(self, min_val: float, max_val: float) -> None:
+        self._apply_view_range_decision((float(min_val), float(max_val)), force=True)
+
+    def _apply_view_range_decision(self, bounds, *, force: bool) -> None:
+        next_view = self._view_range_policy.update(bounds, force=force)
+        if next_view is None:
+            return
+        item = self._histogram_item()
+        if item is None:
+            return
+        applying = getattr(self.owner, "_applying_presentation", False)
+        self.owner._applying_presentation = True
+        try:
+            # Explicit bounds make startup and reset independent of widget size;
+            # pyqtgraph's default padding is otherwise evaluated at call time.
+            item.setHistogramRange(next_view[0], next_view[1], padding=0)
+        finally:
+            self.owner._applying_presentation = applying
 
     def eventFilter(self, obj, event):
         if obj in self._filtered_histogram_widgets and self._handle_native_histogram_double_click(

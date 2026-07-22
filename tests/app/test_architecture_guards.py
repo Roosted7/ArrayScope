@@ -1271,6 +1271,10 @@ def test_imageview2d_display_ownership_helpers_are_split_out():
         "class ProfileMarkerOwner"
         in (ROOT / "arrayscope" / "display" / "profile_marker.py").read_text()
     )
+    histogram_range = (ROOT / "arrayscope" / "display" / "histogram_view_range.py").read_text()
+    assert "class HistogramViewRangePolicy" in histogram_range
+    assert "CONTRACTION_THRESHOLD" not in text
+    assert "EXPANSION_EDGE_FRACTION" not in text
 
 
 def test_production_lod_has_no_synchronous_pyramid_entrypoints():
