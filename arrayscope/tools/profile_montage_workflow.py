@@ -4170,6 +4170,12 @@ def _run_phase(
             physical_tile_timeline,
             phase_start_s=start,
             requested_tiles=int(milestones.get("requested_tile_count", 0) or 0),
+            target_presentation_identity=tuple(
+                (int(tile), str(row.get("physical_target_identity", "")))
+                for tile, row in sorted(
+                    dict(getattr(win.img_view, "tileTruthPhysicalRows", dict)()).items()
+                )
+            ),
         )
     )
     record.update(continuity_probe.record())
@@ -4288,6 +4294,7 @@ def _physical_tile_timeline_metrics(
     *,
     phase_start_s: float,
     requested_tiles: int,
+    target_presentation_identity: tuple[tuple[int, str], ...],
 ) -> dict[str, object]:
     """Summarize physical WGPU draw edges without level/evidence settlement."""
 
@@ -4297,15 +4304,22 @@ def _physical_tile_timeline_metrics(
         row = dict(raw)
         timestamp_ns = int(row.pop("timestamp_ns", 0) or 0)
         row["elapsed_ms"] = max(0.0, (timestamp_ns - start_ns) / 1_000_000.0)
+        identity = {
+            int(tile): str(token)
+            for tile, token in tuple(row.get("presentation_identity", ()) or ())
+        }
+        row["target_tile_count"] = sum(
+            identity.get(int(tile)) == str(token) for tile, token in target_presentation_identity
+        )
         timeline.append(row)
 
-    visible = [row for row in timeline if int(row.get("tile_count", 0) or 0) > 0]
+    visible = [row for row in timeline if int(row.get("target_tile_count", 0) or 0) > 0]
     first = visible[0] if visible else None
     full = next(
         (
             row
             for row in visible
-            if requested_tiles > 0 and int(row.get("tile_count", 0) or 0) >= requested_tiles
+            if requested_tiles > 0 and int(row.get("target_tile_count", 0) or 0) >= requested_tiles
         ),
         None,
     )
@@ -4314,14 +4328,16 @@ def _physical_tile_timeline_metrics(
     rate = None
     if first is not None and full is not None and full_ms is not None and first_ms is not None:
         elapsed_s = (full_ms - first_ms) / 1000.0
-        added = int(full.get("tile_count", 0) or 0) - int(first.get("tile_count", 0) or 0)
+        added = int(full.get("target_tile_count", 0) or 0) - int(
+            first.get("target_tile_count", 0) or 0
+        )
         rate = None if elapsed_s <= 0.0 else added / elapsed_s
 
     milestone_ms: dict[str, float | None] = {}
     for percent in (25, 50, 75, 100):
         target = math.ceil(requested_tiles * percent / 100.0) if requested_tiles else 0
         match = next(
-            (row for row in visible if int(row.get("tile_count", 0) or 0) >= target),
+            (row for row in visible if int(row.get("target_tile_count", 0) or 0) >= target),
             None,
         )
         milestone_ms[str(percent)] = None if match is None else float(match["elapsed_ms"])

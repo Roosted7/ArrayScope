@@ -54,6 +54,7 @@ _ACCELERATOR_MODULES: tuple[str, ...] = (
     "arrayscope.operations._numba_reductions",
     "arrayscope.display.shader_kernels",
     "arrayscope.display._numba_pyramid",
+    "arrayscope.gpu.bc_numba",
 )
 
 # Builder: zero-arg callable that imports numba, compiles kernels, and returns

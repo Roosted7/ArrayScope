@@ -271,10 +271,10 @@ Fewer bytes therefore cross faster, but the roughly 0.03 ms/page saving is much
 smaller than current preparation. Threads already help native/NumPy work. The
 optional byte-identical Numba BC4 path releases the GIL, fuses scalar quality,
 and improves the live 16-page A2000 AUTO submit from 127.7 to 36.5 ms; raw is
-still roughly 12 ms. Its 357–403 ms prewarm runs through the speculative lane
-after the first physical draw, and AUTO stays raw until it is ready. Only that
-safe infrastructure lands: per-page artifacts and raw-to-compressed demotion
-remain experiments requiring cancellation and shared byte accounting.
+still roughly 12 ms. Its 357–403 ms prewarm is registered with the shared Numba
+runtime and runs off the visible path; AUTO stays raw until it is ready. Only
+that safe infrastructure lands: per-page artifacts and raw-to-compressed
+demotion remain experiments requiring cancellation and shared byte accounting.
 
 ### Later montage pages: the opportunity is real, but it is mostly capacity
 

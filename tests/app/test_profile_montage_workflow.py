@@ -2326,12 +2326,33 @@ def test_physical_tile_timeline_reports_draw_rate_without_settlement_gates():
 
     result = _physical_tile_timeline_metrics(
         (
-            {"timestamp_ns": 1_100_000_000, "tile_count": 1, "lod_counts": {"4": 1}},
-            {"timestamp_ns": 1_300_000_000, "tile_count": 50, "lod_counts": {"4": 50}},
-            {"timestamp_ns": 1_500_000_000, "tile_count": 100, "lod_counts": {"4": 100}},
+            {
+                "timestamp_ns": 1_050_000_000,
+                "tile_count": 100,
+                "presentation_identity": ((0, "old"),),
+            },
+            {
+                "timestamp_ns": 1_100_000_000,
+                "tile_count": 100,
+                "presentation_identity": ((0, "new"),),
+                "lod_counts": {"4": 1},
+            },
+            {
+                "timestamp_ns": 1_300_000_000,
+                "tile_count": 100,
+                "presentation_identity": tuple((tile, "new") for tile in range(50)),
+                "lod_counts": {"4": 50},
+            },
+            {
+                "timestamp_ns": 1_500_000_000,
+                "tile_count": 100,
+                "presentation_identity": tuple((tile, "new") for tile in range(100)),
+                "lod_counts": {"4": 100},
+            },
         ),
         phase_start_s=1.0,
         requested_tiles=100,
+        target_presentation_identity=tuple((tile, "new") for tile in range(100)),
     )
 
     assert result["physical_tile_first_ms"] == 100.0

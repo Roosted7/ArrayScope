@@ -34,13 +34,11 @@ GPU-side pieces (real BC textures, the WGSL BC4 compute encoder) live in
 
 from __future__ import annotations
 
-import logging
-import threading
 from dataclasses import dataclass
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from arrayscope.gpu import bc_numba
 
 __all__ = [
     "BC4_BLOCK_BYTES",
@@ -53,7 +51,6 @@ __all__ = [
     "bc4_plan",
     "bc5_decode",
     "bc5_encode",
-    "cancel_numba_encoder_prewarm",
     "complex_display_quality",
     "denormalize_channel",
     "normalize_tile",
@@ -61,68 +58,28 @@ __all__ = [
     "prewarm_numba_encoder",
     "psnr",
     "quality_of",
-    "request_numba_encoder_prewarm",
 ]
 
 BC4_BLOCK_BYTES = 8
 BC5_BLOCK_BYTES = 16
 
-_NUMBA_ENCODER = None
-_NUMBA_ENCODER_STATE = "idle"
-_NUMBA_STATE_LOCK = threading.Lock()
-
-
-def request_numba_encoder_prewarm() -> bool:
-    """Reserve one background prewarm; return true only for its owner."""
-
-    global _NUMBA_ENCODER_STATE
-    with _NUMBA_STATE_LOCK:
-        if _NUMBA_ENCODER_STATE != "idle":
-            return False
-        _NUMBA_ENCODER_STATE = "warming"
-        return True
-
-
-def cancel_numba_encoder_prewarm() -> None:
-    """Release a reservation when the scheduler declined the work."""
-
-    global _NUMBA_ENCODER_STATE
-    with _NUMBA_STATE_LOCK:
-        if _NUMBA_ENCODER_STATE == "warming":
-            _NUMBA_ENCODER_STATE = "idle"
-
 
 def prewarm_numba_encoder() -> bool:
-    """Compile and publish the optional BC encoder for subsequent calls."""
+    """Synchronously warm the shared BC group for tests and benchmarks."""
 
-    global _NUMBA_ENCODER, _NUMBA_ENCODER_STATE
-    with _NUMBA_STATE_LOCK:
-        if _NUMBA_ENCODER_STATE == "ready":
-            return True
-        if _NUMBA_ENCODER_STATE in {"idle", "unavailable"}:
-            _NUMBA_ENCODER_STATE = "warming"
-    try:
-        from arrayscope.gpu import bc_numba
-
-        bc_numba.prewarm()
-    except Exception:
-        with _NUMBA_STATE_LOCK:
-            _NUMBA_ENCODER_STATE = "unavailable"
-        logger.warning("optional Numba BC encoder prewarm failed", exc_info=True)
-        return False
-    with _NUMBA_STATE_LOCK:
-        _NUMBA_ENCODER = bc_numba
-        _NUMBA_ENCODER_STATE = "ready"
-    return True
+    bc_numba.prewarm()
+    return bc_numba.ready()
 
 
 def numba_encoder_ready() -> bool:
-    return bool(_NUMBA_ENCODER is not None and _NUMBA_ENCODER.ready())
+    if bc_numba.ready():
+        return True
+    bc_numba.ensure_prewarming()
+    return False
 
 
 def _numba_encode_if_ready(field_unit: np.ndarray):
-    encoder = _NUMBA_ENCODER
-    return None if encoder is None else encoder.encode_if_ready(field_unit)
+    return bc_numba.encode_if_ready(field_unit)
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +212,7 @@ def bc4_encode_with_quality(
 ) -> tuple[bytes, int, int, BcQuality]:
     """Encode BC4 and fuse exact error accumulation when accelerated."""
 
-    encoder = _NUMBA_ENCODER
-    accelerated = (
-        None
-        if encoder is None
-        else encoder.encode_quality_if_ready(field_unit, valid_shape=valid_shape)
-    )
+    accelerated = bc_numba.encode_quality_if_ready(field_unit, valid_shape=valid_shape)
     if accelerated is not None:
         data, height, width, squared_error, max_abs_error, sample_count = accelerated
         rmse = float(np.sqrt(squared_error / sample_count)) if sample_count else 0.0

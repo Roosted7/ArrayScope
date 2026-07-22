@@ -655,9 +655,6 @@ class ImageViewShell(QtWidgets.QWidget):
     def setBackgroundTaskSubmitter(self, submitter) -> None:
         self._background_task_submitter = submitter if callable(submitter) else None
 
-    def setBackendPreparationTaskSubmitter(self, submitter) -> None:
-        self._backend_preparation_task_submitter = submitter if callable(submitter) else None
-
     def setLevelPresentationChangeHandler(self, handler) -> None:
         self._level_presentation_change_handler = handler if callable(handler) else None
 
@@ -665,12 +662,6 @@ class ImageViewShell(QtWidgets.QWidget):
         submitter = getattr(self, "_background_task_submitter", None)
         if callable(submitter):
             return submitter(fn, on_done=on_done, key=key)
-        return None
-
-    def _submit_backend_preparation_task(self, fn, *, on_done, on_stale, key):
-        submitter = getattr(self, "_backend_preparation_task_submitter", None)
-        if callable(submitter):
-            return submitter(fn, on_done=on_done, on_stale=on_stale, key=key)
         return None
 
     def _gui_callback_budget(

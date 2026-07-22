@@ -399,7 +399,6 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_tile_presentation_draw_count = 0
         self._wgpu_physical_tile_timeline_enabled = False
         self._wgpu_physical_tile_timeline: list[dict[str, object]] = []
-        self._wgpu_bc_prewarm_requested = False
         self._wgpu_canvas_update_request_count = 0
         self._wgpu_canvas_update_pending = False
         self._wgpu_overlay_geometry: tuple[OverlayPrimitive, ...] = ()
@@ -715,7 +714,6 @@ class WgpuImageView2D(ImageViewShell):
             self._present_wgpu_frame_to_canvas()
             self._wgpu_last_draw_error = ""
             self._record_wgpu_physical_tile_draw()
-            self._schedule_wgpu_bc_prewarm_after_first_draw()
         except Exception as exc:  # keep the Qt paint loop alive; surface in diagnostics
             self._wgpu_last_draw_error = f"{type(exc).__name__}: {exc}"
         # Timer category: anti-hang fallback (same rationale as VisPy's draw
@@ -758,12 +756,17 @@ class WgpuImageView2D(ImageViewShell):
             lod_counts[lod] = lod_counts.get(lod, 0) + 1
             lossy_tiles += str(dict(row or {}).get("physical_quality", "")) != "exact"
         executor = self._wgpu_executor
+        presentation_identity = tuple(
+            (int(tile), str(row.get("physical_target_identity", "")))
+            for tile, row in sorted(rows.items())
+        )
         self._wgpu_physical_tile_timeline.append(
             {
                 "timestamp_ns": perf_counter_ns(),
                 "draw_count": int(self._wgpu_draw_count),
                 "request_count": int(self._wgpu_tile_presentation_request_count),
                 "tile_count": len(rows),
+                "presentation_identity": presentation_identity,
                 "exact_tile_count": len(rows) - lossy_tiles,
                 "lossy_tile_count": lossy_tiles,
                 "lod_counts": {str(level): count for level, count in sorted(lod_counts.items())},
@@ -776,26 +779,6 @@ class WgpuImageView2D(ImageViewShell):
                 ),
             }
         )
-
-    def _schedule_wgpu_bc_prewarm_after_first_draw(self) -> None:
-        if self._wgpu_bc_prewarm_requested:
-            return
-        executor = self._wgpu_executor
-        if executor is None or executor.codec_family != "bc":
-            return
-        self._wgpu_bc_prewarm_requested = True
-        from arrayscope.gpu import bc_codec
-
-        if not bc_codec.request_numba_encoder_prewarm():
-            return
-        started = self._submit_backend_preparation_task(
-            bc_codec.prewarm_numba_encoder,
-            on_done=lambda _enabled: None,
-            on_stale=bc_codec.cancel_numba_encoder_prewarm,
-            key="wgpu-bc-numba-prewarm",
-        )
-        if not bool(getattr(started, "scheduled", False)):
-            bc_codec.cancel_numba_encoder_prewarm()
 
     def _present_wgpu_frame_to_canvas(self) -> None:
         executor = self._wgpu_executor
@@ -2113,6 +2096,7 @@ class WgpuImageView2D(ImageViewShell):
                     float(getattr(mapping, "level_hi", 1.0)),
                 ),
                 "physical_acknowledged_identity": info.get("identity"),
+                "physical_target_identity": _physical_target_token(info.get("identity")),
                 "physical_lod_level": int(info.get("lod_level", 0) or 0),
                 "physical_quality": physical_quality,
                 "physical_draw_world_rects": (bounds,),
@@ -2381,6 +2365,27 @@ class WgpuImageView2D(ImageViewShell):
             with contextlib.suppress(Exception):
                 canvas.close()
         super().teardown_surface()
+
+
+def _physical_target_token(identity) -> str:
+    """Stable semantic tile identity, deliberately excluding LOD and payload."""
+
+    return repr(
+        tuple(
+            getattr(identity, field, None)
+            for field in (
+                "document_generation",
+                "operation_key",
+                "source_index",
+                "image_axes",
+                "axis_flips",
+                "channel",
+                "complex_mapping",
+                "texture_kind",
+                "semantic_generation",
+            )
+        )
+    )
 
 
 def _display_axes_transposed(geometry) -> bool:

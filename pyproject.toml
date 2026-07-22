@@ -56,20 +56,12 @@ arrayscope = "arrayscope.__main__:main"
 # "mypkg:reverse_rows" = "mypkg.arrayscope_ops:make_reverse_rows"
 
 [project.optional-dependencies]
-# Optional JIT accelerator for CPU display, codec, and other compute-dense
-# kernels. Every accelerated function keeps a NumPy fallback, and numba is
-# imported lazily during background prewarming.
-accel = [
-    "numba>=0.60.0",
-]
 vispy = [
     "vispy>=0.14.0",
 ]
-# Optional JIT accelerator for the CPU (pyqtgraph) display kernels and other
-# compute-dense hot paths. The app is fully functional without it: every
-# accelerated function keeps its NumPy reference as a fallback and numba is
-# imported lazily on a background thread, so it never affects startup or the
-# wgpu path.
+# Optional JIT accelerator for CPU display, codec, and other compute-dense hot
+# paths. Every accelerated function keeps its NumPy reference as a fallback;
+# numba is imported and compiled by the shared background prewarm runtime.
 accel = [
     "numba>=0.60.0",
 ]

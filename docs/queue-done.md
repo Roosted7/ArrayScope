@@ -6,9 +6,9 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
-- 2026-07-22 — **Exact semantic-evidence sparse-read stall FIXED:** point/slice
-  selectors now collapse axes before sparse image gathers; the production-shaped
-  272-source sweep fell to 0.16 s. See the
+- 2026-07-22 — **Exact semantic-evidence sparse-read hotspot FIXED:** point/slice
+  selectors now collapse axes before sparse image gathers; an isolated
+  production-shaped 272-source sweep fell to 0.16 s. See the
   [compression follow-up](reviews/2026-07-22-compression-live-benefit-review.md).
 
 - 2026-07-22 — **G7 live compression benefit CLOSED — measured NO:** the
