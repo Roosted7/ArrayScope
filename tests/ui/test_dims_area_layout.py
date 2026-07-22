@@ -14,10 +14,13 @@ Two behaviours are pinned here:
 import numpy as np
 import pytest
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from arrayscope.ui.dimension_strip import DimensionStrip
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 pytest.importorskip("pytestqt")
+
+_SETTLE_TIMEOUT_MS = min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
 @pytest.fixture
@@ -53,7 +56,7 @@ def test_resize_handle_hidden_for_single_row(qtbot, make_window):
     # A 2D array is two chips; a comfortably wide window fits them on one row.
     win = make_window(np.arange(8 * 6, dtype=float).reshape(8, 6))
     win.resize(1200, 800)
-    qtbot.waitUntil(lambda: win.dimension_strip.row_metrics()[0] == 1, timeout=4000)
+    qtbot.waitUntil(lambda: win.dimension_strip.row_metrics()[0] == 1, timeout=_SETTLE_TIMEOUT_MS)
     win._sync_dims_area_height()
     assert win.dimension_strip.row_metrics()[0] == 1
     assert not win._dims_resize_handle.isVisible()
@@ -63,7 +66,7 @@ def test_resize_handle_visible_for_multiple_rows(qtbot, make_window):
     # Six dimensions in a deliberately narrow window are forced to wrap.
     win = make_window(np.arange(2 * 2 * 2 * 2 * 2 * 3, dtype=float).reshape(2, 2, 2, 2, 2, 3))
     win.resize(420, 800)
-    qtbot.waitUntil(lambda: win.dimension_strip.row_metrics()[0] > 1, timeout=4000)
+    qtbot.waitUntil(lambda: win.dimension_strip.row_metrics()[0] > 1, timeout=_SETTLE_TIMEOUT_MS)
     win._sync_dims_area_height()
     assert win.dimension_strip.row_metrics()[0] > 1
     assert win._dims_resize_handle.isVisible()
