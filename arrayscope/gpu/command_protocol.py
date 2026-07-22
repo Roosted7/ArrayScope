@@ -76,13 +76,15 @@ class DisplayMapping:
     ``phase_color`` makes the LUT coordinate cyclic phase; for a non-phase
     component the normalized component modulates that color's intensity.
 
-    ``pixel_grid`` is a display legibility aid the backend renders on read
-    (never a data mutation, never new residency); it defaults off so the
-    default render is byte-identical. When enabled it is a zoom-gated per-texel
-    grid that only becomes visible once texels are large enough on screen to
-    warrant it (a normally-zoomed view is unaffected even with it on). It is
-    named in backend-neutral display terms (ADR 0057); the wgpu backend keys it
-    off a spare ``Mapping`` uniform word.
+    ``pixel_grid`` and ``clip_indicator`` are display legibility aids the
+    backend renders on read (never a data mutation, never new residency), both
+    default off so the default render is byte-identical. ``pixel_grid`` is a
+    zoom-gated per-texel grid that, when enabled, only becomes visible once
+    texels are large enough on screen to warrant it (a normally-zoomed view is
+    unaffected even with it on). ``clip_indicator`` marks values below
+    ``level_lo`` / above ``level_hi`` distinctly while windowing. Both are
+    named in backend-neutral display terms (ADR 0057); the wgpu backend keys
+    them off the two spare ``Mapping`` uniform words.
     """
 
     mode: str = "magnitude"
@@ -93,6 +95,7 @@ class DisplayMapping:
     symlog_constant: float = 0.0
     phase_color: bool = False
     pixel_grid: bool = False
+    clip_indicator: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
@@ -106,6 +109,7 @@ class DisplayMapping:
         object.__setattr__(self, "symlog_constant", float(self.symlog_constant))
         object.__setattr__(self, "phase_color", bool(self.phase_color))
         object.__setattr__(self, "pixel_grid", bool(self.pixel_grid))
+        object.__setattr__(self, "clip_indicator", bool(self.clip_indicator))
         if not self.level_hi > self.level_lo:
             raise ValueError(
                 f"levels window must be non-empty, got [{self.level_lo}, {self.level_hi}]"

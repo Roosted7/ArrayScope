@@ -53,6 +53,30 @@ don't fit the unary `fn(ndarray)->ndarray` contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **wgpu shader legibility — Stage A (grid / trust signals) — offscreen green,
+  ring-4 OWED** (branch `claude/wgpu-shader-stage-a`). Four fragment-shader
+  visuals in `_RENDER_WGSL` + its BC-pool twin (and the CPU mirror in
+  `arrayscope/display/shader_mapping.py`): **A1** zoom-gated per-texel pixel
+  grid (`fwidth`-based, O(1), no new instances/bandwidth; flag `pixel_grid`);
+  **A2** NaN/Inf → fixed 45° black/white hatch (reads on every colormap);
+  **A3** missing page → dim -45° hatch, so "not loaded" ≠ "actual zero";
+  **A4** clip markers (flag `clip_indicator`). Both flags default **off** →
+  default render byte-identical (33 executor oracles + ImageView2D display
+  tests pass unchanged, no rebaseline). Grid ships default-off rather than
+  default-on-gated because ImageView2D renders small images at ~20 px/texel
+  inside the gate band — default-on there would have forced a display-oracle
+  rebaseline (forbidden). Flags live in the two spare `Mapping` uniform words
+  (no uniform growth; `command_protocol.py` stays backend-neutral, ADR 0057).
+  Evidence so far: `tests/gpu/test_wgpu_command_protocol.py` (37 passed;
+  4 new paired fault-injection oracles proven red under a 4-way shader
+  mutation, 33 baseline green), `tests/render tests/presentation` (131, `-n 0`),
+  `tests/gpu tests/display` green. VisPy untouched. **Exit gate (ring 4, real
+  Wayland — Thomas drives):** on real hardware, confirm the grid fades in only
+  when zoomed past ~12–24 px/texel and never at normal zoom; NaN/Inf and
+  missing-page hatches show on injected bad/absent data and are visually
+  distinct; A4 markers appear only with `clip_indicator` on. No wgpu framebuffer
+  oracle exists (`tests/oracles/framebuffer_reference.py` is VisPy/PyQtGraph
+  only) — a wgpu path there would let Stage B–D grow on pixels, worth adding.
 - **Progressive-load publication correctness — DONE 2026-07-22** (core
   `447cbe42`, ring-4 residual `db1c5393`). Full evidence in the
   [Done ledger](queue-done.md). Two adjacent gaps surfaced while writing the

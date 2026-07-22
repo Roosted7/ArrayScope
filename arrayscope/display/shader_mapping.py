@@ -411,7 +411,7 @@ def _coerce_enum(enum_type, value):
 # --------------------------------------------------------------------------
 # wgpu Stage-A shader-legibility mirrors
 #
-# Pure NumPy mirrors of the fragment-shader legibility signals implemented in
+# Pure NumPy mirrors of the four fragment-shader trust signals implemented in
 # ``arrayscope.gpu.wgpu_executor._RENDER_WGSL.fs_main`` (and its BC-pool
 # variant).  They are the single owner of the CPU-side formulas, so the wgpu
 # executor's per-pixel oracle (``tests/gpu/test_wgpu_command_protocol.py``
@@ -429,11 +429,61 @@ PIXEL_GRID_MAX_PX_PER_TEXEL = 24.0
 #: Grid line half-width in screen pixels and its maximum darkening strength.
 PIXEL_GRID_LINE_PX = 1.0
 PIXEL_GRID_STRENGTH = 0.2
+#: Diagonal-hatch period (screen px) shared by the NaN and missing markers.
+TRUST_HATCH_PERIOD_PX = 8.0
+#: NaN/Inf marker: opaque black/white diagonal (45°) — high contrast against
+#: every colormap, so a non-finite texel can never masquerade as a LUT entry.
+NAN_HATCH_SHADES = (0.0, 1.0)
+#: Missing-page marker: dim gray hatch at the opposite angle (-45°), so a
+#: not-yet-resident page never reads as an actual zero value.
+MISSING_HATCH_SHADES = (0.12, 0.20)
+#: Clip markers (only drawn when ``clip_indicator`` is enabled): cool below
+#: the window, warm above it.
+CLIP_UNDER_RGB = (0.0, 0.2, 0.8)
+CLIP_OVER_RGB = (0.9, 0.1, 0.0)
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
     t = np.clip((np.asarray(x, dtype=np.float64) - edge0) / (edge1 - edge0), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
+
+
+def _hatch_shades(pos_x, pos_y, *, angle_sign: float, shades: tuple[float, float]) -> np.ndarray:
+    """Two-tone diagonal hatch value (normalized f32) keyed off screen pos."""
+
+    diagonal = np.asarray(pos_x, dtype=np.float64) + angle_sign * np.asarray(
+        pos_y, dtype=np.float64
+    )
+    stripe = np.mod(diagonal / TRUST_HATCH_PERIOD_PX, 1.0)
+    return np.where(stripe < 0.5, shades[0], shades[1]).astype(np.float64)
+
+
+def _shade_to_rgba8(shade: np.ndarray) -> np.ndarray:
+    rgb = np.clip(np.rint(np.asarray(shade)[..., np.newaxis] * 255.0), 0.0, 255.0)
+    rgb = np.repeat(rgb, 3, axis=-1).astype(np.uint8)
+    alpha = np.full((*rgb.shape[:-1], 1), 255, dtype=np.uint8)
+    return np.concatenate((rgb, alpha), axis=-1)
+
+
+def wgpu_nan_hatch_rgba(pos_x, pos_y) -> np.ndarray:
+    """RGBA8 mirror of the WGSL ``nan_marker`` (A2)."""
+
+    shade = _hatch_shades(pos_x, pos_y, angle_sign=1.0, shades=NAN_HATCH_SHADES)
+    return _shade_to_rgba8(shade)
+
+
+def wgpu_missing_hatch_rgba(pos_x, pos_y) -> np.ndarray:
+    """RGBA8 mirror of the WGSL ``missing_marker`` (A3)."""
+
+    shade = _hatch_shades(pos_x, pos_y, angle_sign=-1.0, shades=MISSING_HATCH_SHADES)
+    return _shade_to_rgba8(shade)
+
+
+def wgpu_clip_rgb(kind: str) -> tuple[int, int, int]:
+    """RGB8 of a clip marker (A4): ``"under"`` or ``"over"``."""
+
+    rgb = CLIP_UNDER_RGB if kind == "under" else CLIP_OVER_RGB
+    return tuple(round(c * 255.0) for c in rgb)
 
 
 def wgpu_pixel_grid_darken(rgb8, src_x, src_y, fw_x, fw_y, *, enabled: bool = True) -> np.ndarray:
@@ -484,6 +534,9 @@ __all__ = [
     "phase_lut_indices",
     "shader_component_uniform",
     "shader_mapping_with_lut",
+    "wgpu_clip_rgb",
+    "wgpu_missing_hatch_rgba",
+    "wgpu_nan_hatch_rgba",
     "wgpu_pixel_grid_darken",
     "window_intensity",
 ]

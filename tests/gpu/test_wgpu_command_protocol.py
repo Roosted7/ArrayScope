@@ -524,6 +524,19 @@ class Scene:
                     0.0,
                     255.0,
                 ).astype(np.uint8)
+            # A2: a non-finite source sample renders as the NaN hatch.
+            nonfinite = ~np.isfinite(re) | ~np.isfinite(im)
+            if nonfinite.any():
+                pos_x = (x0 + np.arange(tw) + 0.5)[np.newaxis, :]
+                pos_y = (y0 + np.arange(th) + 0.5)[:, np.newaxis]
+                hatch = shader_mapping.wgpu_nan_hatch_rgba(
+                    np.broadcast_to(pos_x, (th, tw)), np.broadcast_to(pos_y, (th, tw))
+                )
+                rgba[nonfinite] = hatch[nonfinite]
+            # A4: clip markers (only when clip_indicator is enabled).
+            if getattr(mapping, "clip_indicator", False) and not phase_path:
+                rgba[x < lo, :3] = shader_mapping.wgpu_clip_rgb("under")
+                rgba[x > hi, :3] = shader_mapping.wgpu_clip_rgb("over")
             # A1: zoom-gated pixel grid, applied once to the final colour.
             rgba = shader_mapping.wgpu_pixel_grid_darken(
                 rgba,
@@ -711,13 +724,13 @@ def test_completion_token_is_callable_and_returns(scene):
     report.wait_completed()  # must not raise; fences the submitted work
 
 
-# ---- Stage A shader-legibility oracle: zoom-gated pixel grid (A1) ------------
+# ---- Stage A shader-legibility oracles (grid / NaN / missing / clip) ---------
 #
-# Pairs a CPU-mirror match (the shader agrees with the ``shader_mapping`` grid
-# formula) with a fault-injection assertion (the grid demonstrably darkens
-# texel boundaries when zoomed), so removing the shader grid turns the test
-# red.  The default render staying byte-identical is already proven by every
-# oracle above (grid defaults off, and is zoom-gated even when on).
+# Each pairs a CPU-mirror match (the shader agrees with the ``shader_mapping``
+# formulas) with a fault-injection assertion (the visual demonstrably fires),
+# so removing a shader branch turns the test red.  The default render staying
+# byte-identical is already proven by every oracle above (grid + clip default
+# off, data finite and resident).
 
 
 def test_pixel_grid_fades_in_only_when_zoomed(scene):
@@ -739,6 +752,100 @@ def test_pixel_grid_fades_in_only_when_zoomed(scene):
     # The grid must actually darken a band of texel-boundary pixels.
     darkened = int(np.any(on.astype(np.int32) < off.astype(np.int32) - 2, axis=-1).sum())
     assert darkened > 500, darkened
+
+
+def test_clip_indicator_marks_out_of_window_values(scene):
+    """A4: markers appear only when ``clip_indicator`` is on (default off is
+    byte-identical, proven above).  Fails if the shader clip branch is gone."""
+
+    # Window from the actual data so both clip sides are non-empty.
+    mag = np.hypot(scene.plane[:512, :512, 0], scene.plane[:512, :512, 1])
+    lo, hi = (float(v) for v in np.percentile(mag, [40, 60]))
+    clip = DisplayMapping("magnitude", lo, hi, clip_indicator=True)
+    scene.render(FULL, clip, generation=52)
+    got = scene.executor.read_target()
+    ref = scene.reference(FULL, clip)
+    scene.assert_matches(got, ref)
+
+    # The chosen window clips on both sides (else the mirror match proves
+    # nothing); the exact marker colours live in the reference, and the shader
+    # reproducing them is what ``assert_matches`` above verifies.
+    under = shader_mapping.wgpu_clip_rgb("under")
+    over = shader_mapping.wgpu_clip_rgb("over")
+    assert np.any(np.all(ref[..., :3] == under, axis=-1)), "window has no under-clip"
+    assert np.any(np.all(ref[..., :3] == over, axis=-1)), "window has no over-clip"
+
+    scene.render(FULL, DisplayMapping("magnitude", lo, hi), generation=53)
+    without = scene.executor.read_target()
+    changed = int(np.any(got.astype(np.int32) != without.astype(np.int32), axis=-1).sum())
+    assert changed > 5000, changed
+
+
+def _single_page_scalar_executor(doc, data):
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE), pool_layers={SCALAR_R32F: 1}, device=_shared_device()
+    )
+    commands = [
+        BindContentPlanes(
+            (ContentPlane(doc, "op", (PAGE, PAGE), max_lod=0, representation=SCALAR_R32F),)
+        )
+    ]
+    if data is not None:
+        key = plane_chunk_key(doc, "op", 0, 0, 0, dtype="float32", representation=SCALAR_R32F)
+        commands.append(EnsureChunkResident(key, data))
+    executor.submit(FrameSubmission(0, tuple(commands)))
+    executor.submit(
+        FrameSubmission(
+            1,
+            (
+                SetDisplayMapping(DisplayMapping("magnitude", -3.0, 3.0)),
+                UpdateTileInstances(
+                    (TileInstance((0, 0, 1, 1), (0, 0), (float(PAGE), float(PAGE)), 0),)
+                ),
+                PresentGeneration(1),
+            ),
+        )
+    )
+    return executor.read_target()
+
+
+def test_nonfinite_source_renders_nan_hatch_not_lut_entry():
+    """A2: NaN/Inf texels render as the fixed diagonal hatch, not whatever LUT
+    entry clamp() happens to land on.  Fails if the finite-check is removed:
+    the block would fall through to a solid (near-black) LUT colour."""
+
+    rng = np.random.default_rng(7)
+    data = rng.standard_normal((PAGE, PAGE)).astype(np.float32)
+    data[40:60, 40:60] = np.nan
+    data[45, 45] = np.inf
+    data[55, 55] = -np.inf
+    got = _single_page_scalar_executor("nan-doc", data)
+
+    rows, cols = np.mgrid[40:60, 40:60]
+    hatch = shader_mapping.wgpu_nan_hatch_rgba(cols + 0.5, rows + 0.5)
+    _assert_matches(got[40:60, 40:60], hatch)
+    # The hatch carries both extremes (opaque black AND white) — proof it is
+    # not a flat LUT colour standing in for the non-finite values.
+    assert got[40:60, 40:60, :3].max() > 250
+    assert got[40:60, 40:60, :3].min() < 5
+    # A finite region is a normal grayscale value, not the hatch.
+    assert not np.array_equal(got[0:20, 0:20], hatch)
+
+
+def test_missing_page_renders_distinct_hatch_not_black():
+    """A3: a page resident at no LOD renders as the low-contrast missing hatch,
+    distinct from a real zero value (solid black).  Fails if the missing case
+    reverts to ``vec4(0,0,0,1)``."""
+
+    got = _single_page_scalar_executor("miss-doc", None)
+
+    ys, xs = np.mgrid[0:PAGE, 0:PAGE]
+    hatch = shader_mapping.wgpu_missing_hatch_rgba(xs + 0.5, ys + 0.5)
+    _assert_matches(got, hatch)
+    # Not solid black (which is how a genuine zero value would read)...
+    assert float(got[..., :3].mean()) > 5.0
+    # ...and a different pattern from the high-contrast NaN hatch.
+    assert not np.array_equal(got, shader_mapping.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5))
 
 
 # ---- row 3(a) growth oracles: multi-plane binding + honest pools ------------

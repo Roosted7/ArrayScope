@@ -279,7 +279,7 @@ struct Mapping {
     symlog_constant: f32,
     phase_color: u32,
     pixel_grid: u32,
-    _pad3: u32,
+    clip_indicator: u32,
 };
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
 struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
@@ -367,6 +367,28 @@ fn apply_scale(value: f32) -> f32 {
     }
 }
 
+fn finite_scalar(x: f32) -> bool {
+    // No WGSL isFinite: a NaN fails self-equality; +/-Inf exceeds f32 max.
+    return x == x && abs(x) <= 3.402823466e+38;
+}
+
+// A2: non-finite source -> high-contrast black/white diagonal hatch (45deg).
+// Alternating opaque black and white reads against every colormap, so a
+// NaN/Inf texel can never fall through clamp() into an arbitrary LUT entry.
+fn nan_marker(pos: vec2<f32>) -> vec4<f32> {
+    let stripe = fract((pos.x + pos.y) / 8.0);
+    let shade = select(1.0, 0.0, stripe < 0.5);
+    return vec4<f32>(shade, shade, shade, 1.0);
+}
+
+// A3: missing page -> dim gray hatch at the OPPOSITE angle (-45deg) and very
+// low contrast, so "not loaded yet" never reads as an actual zero value.
+fn missing_marker(pos: vec2<f32>) -> vec4<f32> {
+    let stripe = fract((pos.x - pos.y) / 8.0);
+    let shade = select(0.20, 0.12, stripe < 0.5);
+    return vec4<f32>(shade, shade, shade, 1.0);
+}
+
 // A1: zoom-gated pixel grid, applied once to the final colour.  `fw` is
 // fwidth(in.src) -- source texels per screen pixel -- computed in uniform
 // control flow at the top of fs_main (WGSL derivatives require that, and
@@ -389,50 +411,52 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // A1: derivatives require uniform control flow, so take fwidth BEFORE
     // resolve()'s data-dependent early returns.  Only consumed by the
     // zoom-gated pixel grid at the single exit below.
+    // A1: derivatives require uniform control flow, so take fwidth BEFORE
+    // resolve()'s data-dependent early returns.  Only consumed by the
+    // zoom-gated pixel grid at the single exit below.
     let fw = fwidth(in.src);
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
     var color: vec4<f32>;
-    if (p.rep == 2u) {
+    if (r.layer < 0) {
+        // A3: page not resident at any LOD -> distinct missing-page hatch.
+        color = missing_marker(in.pos.xy);
+    } else if (p.rep == 2u) {
         // Display-ready RGB: sampled as-is, levels/LUT bypassed.
-        if (r.layer < 0) {
-            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        } else {
-            let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
-            color = vec4<f32>(c.rgb, 1.0);
-        }
+        let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
+        color = vec4<f32>(c.rgb, 1.0);
     } else if (p.rep == 3u) {
         // VisPy parity: preserve the color plane and modulate it by one
         // levels-normalized scalar plane (packed in alpha), not by three
         // independent per-channel windows.
-        if (r.layer < 0) {
-            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        } else {
-            let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
-            let scalar = apply_scale(c.a);
-            let intensity = clamp(
-                (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
-                0.0,
-                1.0,
-            );
-            color = vec4<f32>(c.rgb * intensity, 1.0);
-        }
+        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+        let scalar = apply_scale(c.a);
+        let intensity = clamp(
+            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+            0.0,
+            1.0,
+        );
+        color = vec4<f32>(c.rgb * intensity, 1.0);
     } else {
         var v = vec2<f32>(0.0, 0.0);
-        if (r.layer >= 0) {
-            if (p.rep == 0u) {
-                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
-            } else {
-                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
-            }
+        if (p.rep == 0u) {
+            v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+        } else {
+            v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
         }
-        color = map_value(p, v);
+        if (!finite_scalar(v.x) || !finite_scalar(v.y)) {
+            // A2: a non-finite source texel is a bad-data signal, not a value.
+            color = nan_marker(in.pos.xy);
+        } else {
+            color = map_value(p, v);
+        }
     }
     // A1: applied once to the final colour; identity at normal zoom.
     return pixel_grid(color, in.src, fw, mapping.pixel_grid);
 }
 
-// Scalar/complex value -> displayed colour: the mode/scale/levels/LUT path.
+// Scalar/complex value -> displayed colour: the mode/scale/levels/LUT path,
+// plus the A4 clip markers.  `v` is the resident, finite source sample.
 fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     var x: f32;
     if (p.rep == 0u) {
@@ -448,7 +472,14 @@ fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     }
     x = apply_scale(x);
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
-    if (mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u) {
+    let phase_path = mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u;
+    // A4 (default off): mark values outside the levels window distinctly so
+    // clipping is visible while windowing.  Skipped for the phase-colour path.
+    if (mapping.clip_indicator != 0u && !phase_path) {
+        if (x < mapping.level_lo) { return vec4<f32>(0.0, 0.2, 0.8, 1.0); }
+        if (x > mapping.level_hi) { return vec4<f32>(0.9, 0.1, 0.0, 1.0); }
+    }
+    if (phase_path) {
         let phase = atan2(v.y, v.x);
         let phase_g = clamp(
             (phase + 3.141592653589793) / 6.283185307179586,
@@ -485,7 +516,7 @@ struct Mapping {
     symlog_constant: f32,
     phase_color: u32,
     pixel_grid: u32,
-    _pad3: u32,
+    clip_indicator: u32,
 };
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
 struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
@@ -577,6 +608,28 @@ fn apply_scale(value: f32) -> f32 {
     }
 }
 
+fn finite_scalar(x: f32) -> bool {
+    // No WGSL isFinite: a NaN fails self-equality; +/-Inf exceeds f32 max.
+    return x == x && abs(x) <= 3.402823466e+38;
+}
+
+// A2: non-finite source -> high-contrast black/white diagonal hatch (45deg).
+// Alternating opaque black and white reads against every colormap, so a
+// NaN/Inf texel can never fall through clamp() into an arbitrary LUT entry.
+fn nan_marker(pos: vec2<f32>) -> vec4<f32> {
+    let stripe = fract((pos.x + pos.y) / 8.0);
+    let shade = select(1.0, 0.0, stripe < 0.5);
+    return vec4<f32>(shade, shade, shade, 1.0);
+}
+
+// A3: missing page -> dim gray hatch at the OPPOSITE angle (-45deg) and very
+// low contrast, so "not loaded yet" never reads as an actual zero value.
+fn missing_marker(pos: vec2<f32>) -> vec4<f32> {
+    let stripe = fract((pos.x - pos.y) / 8.0);
+    let shade = select(0.20, 0.12, stripe < 0.5);
+    return vec4<f32>(shade, shade, shade, 1.0);
+}
+
 // A1: zoom-gated pixel grid, applied once to the final colour.  `fw` is
 // fwidth(in.src) -- source texels per screen pixel -- computed in uniform
 // control flow at the top of fs_main (WGSL derivatives require that, and
@@ -601,54 +654,50 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
     var color: vec4<f32>;
-    if (p.rep == 2u) {
-        if (r.layer < 0) {
-            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        } else {
-            let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
-            color = vec4<f32>(c.rgb, 1.0);
-        }
+    if (r.layer < 0) {
+        color = missing_marker(in.pos.xy);  // A3
+    } else if (p.rep == 2u) {
+        let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
+        color = vec4<f32>(c.rgb, 1.0);
     } else if (p.rep == 3u) {
-        if (r.layer < 0) {
-            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        } else {
-            let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
-            let scalar = apply_scale(c.a);
-            let intensity = clamp(
-                (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
-                0.0,
-                1.0,
-            );
-            color = vec4<f32>(c.rgb * intensity, 1.0);
-        }
+        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+        let scalar = apply_scale(c.a);
+        let intensity = clamp(
+            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+            0.0,
+            1.0,
+        );
+        color = vec4<f32>(c.rgb * intensity, 1.0);
     } else {
         var v = vec2<f32>(0.0, 0.0);
-        if (r.layer >= 0) {
-            let compressed = page_codec[r.fidx] == 1u;
-            let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
-            let nrm = page_norm[r.fidx];
-            if (p.rep == 0u) {
-                if (compressed) {
-                    let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
-                    v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
-                } else {
-                    v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
-                }
+        let compressed = page_codec[r.fidx] == 1u;
+        let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
+        let nrm = page_norm[r.fidx];
+        if (p.rep == 0u) {
+            if (compressed) {
+                let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
+                v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
             } else {
-                if (compressed) {
-                    let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
-                    v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
-                } else {
-                    v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
-                }
+                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+            }
+        } else {
+            if (compressed) {
+                let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
+                v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
+            } else {
+                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
             }
         }
-        color = map_value(p, v);
+        if (!finite_scalar(v.x) || !finite_scalar(v.y)) {
+            color = nan_marker(in.pos.xy);  // A2
+        } else {
+            color = map_value(p, v);
+        }
     }
     return pixel_grid(color, in.src, fw, mapping.pixel_grid);  // A1
 }
 
-// Scalar/complex value -> displayed colour (mode/scale/levels/LUT).
+// Scalar/complex value -> displayed colour (mode/scale/levels/LUT + A4 clip).
 fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     var x: f32;
     if (p.rep == 0u) {
@@ -663,7 +712,12 @@ fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     }
     x = apply_scale(x);
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
-    if (mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u) {
+    let phase_path = mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u;
+    if (mapping.clip_indicator != 0u && !phase_path) {
+        if (x < mapping.level_lo) { return vec4<f32>(0.0, 0.2, 0.8, 1.0); }
+        if (x > mapping.level_hi) { return vec4<f32>(0.9, 0.1, 0.0, 1.0); }
+    }
+    if (phase_path) {
         let phase = atan2(v.y, v.x);
         let phase_g = clamp(
             (phase + 3.141592653589793) / 6.283185307179586,
@@ -2092,11 +2146,11 @@ class WgpuPlaneExecutor:
                 self._mapping.level_hi,
                 self._mapping.symlog_constant,
                 int(self._mapping.phase_color),
-                # A1 zoom-gated pixel grid in the first spare Mapping word
-                # (default off, so the default render is unchanged); the last
-                # word stays reserved.
+                # Stage-A legibility flags in the two spare Mapping words:
+                # pixel_grid (zoom-gated grid) and clip_indicator (windowing
+                # aid).  Both default off, so the default render is unchanged.
                 int(self._mapping.pixel_grid),
-                0,
+                int(self._mapping.clip_indicator),
             ),
         )
 
