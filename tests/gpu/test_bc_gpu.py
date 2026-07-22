@@ -33,7 +33,9 @@ def _bc_device():
 
 
 _DEVICE = _bc_device()
-pytestmark = pytest.mark.skipif(_DEVICE is None, reason="no BC-capable wgpu adapter on this machine")
+pytestmark = pytest.mark.skipif(
+    _DEVICE is None, reason="no BC-capable wgpu adapter on this machine"
+)
 
 
 def _smooth_tile(shape=(256, 256)):

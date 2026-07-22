@@ -81,9 +81,7 @@ def test_sync_button_lives_in_right_column_not_chip_row(qtbot, make_window):
     assert not _is_descendant(button, win.dims_scroll)
     assert not _is_descendant(button, win.dimension_strip)
     # Right-aligned: its right edge sits at/after the chip strip's right edge.
-    strip_right = win.dimension_strip.mapToGlobal(
-        win.dimension_strip.rect().topRight()
-    ).x()
+    strip_right = win.dimension_strip.mapToGlobal(win.dimension_strip.rect().topRight()).x()
     button_right = button.mapToGlobal(button.rect().topRight()).x()
     assert button_right >= strip_right - 1
 

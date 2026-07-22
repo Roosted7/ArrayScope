@@ -93,9 +93,7 @@ def test_int16_widening_avoids_silent_overflow():
     # |v| > 181 => v**2 overflows int16; the widening guard must prevent NaN.
     data = np.array([[200, 300], [181, 182]], dtype=np.int16)
     got = _root_sum_squares(data, 0)
-    expected = np.sqrt(
-        np.sum(np.abs(data.astype(np.float32)) ** 2, axis=0)
-    )
+    expected = np.sqrt(np.sum(np.abs(data.astype(np.float32)) ** 2, axis=0))
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-4)
     assert np.isfinite(got).all()
     assert got.dtype == np.float32
@@ -116,9 +114,7 @@ def test_fallback_matches_reference_when_numba_disabled(monkeypatch):
 def test_rss_operation_apply_uses_helper():
     data = _sample(np.complex64, (8, 8, 4))
     op = RootSumSquares(axis=2)
-    np.testing.assert_allclose(
-        op.apply(data), _numpy_reference(data, 2), rtol=1e-4, atol=1e-4
-    )
+    np.testing.assert_allclose(op.apply(data), _numpy_reference(data, 2), rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.skipif(not _numba_reductions.NUMBA_AVAILABLE, reason="numba not installed")

@@ -179,9 +179,7 @@ class GpuBc4Encoder:
         nblocks = nbx * nby
         dims = np.array([(w, h, nbx, nby)], dtype=np.dtype("<u4"))
         args = d.create_buffer_with_data(data=dims.tobytes(), usage=wgpu.BufferUsage.UNIFORM)
-        field_buf = d.create_buffer_with_data(
-            data=field.tobytes(), usage=wgpu.BufferUsage.STORAGE
-        )
+        field_buf = d.create_buffer_with_data(data=field.tobytes(), usage=wgpu.BufferUsage.STORAGE)
         out_size = nblocks * 2 * 4
         out = d.create_buffer(
             size=out_size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC
@@ -190,7 +188,10 @@ class GpuBc4Encoder:
             layout=self._pipeline.get_bind_group_layout(0),
             entries=[
                 {"binding": 0, "resource": {"buffer": args, "offset": 0, "size": 16}},
-                {"binding": 1, "resource": {"buffer": field_buf, "offset": 0, "size": field.nbytes}},
+                {
+                    "binding": 1,
+                    "resource": {"buffer": field_buf, "offset": 0, "size": field.nbytes},
+                },
                 {"binding": 2, "resource": {"buffer": out, "offset": 0, "size": out_size}},
             ],
         )
@@ -217,10 +218,7 @@ def upload_bc4_texture(device, data: bytes, height: int, width: int):
     tex = device.create_texture(
         size=(W, H, 1),
         format="bc4-r-unorm",
-        usage=(
-            wgpu.TextureUsage.TEXTURE_BINDING
-            | wgpu.TextureUsage.COPY_DST
-        ),
+        usage=(wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST),
     )
     device.queue.write_texture(
         {"texture": tex, "mip_level": 0, "origin": (0, 0, 0)},

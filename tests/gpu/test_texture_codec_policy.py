@@ -10,8 +10,12 @@ from __future__ import annotations
 from arrayscope.gpu.cache_policy import decide_texture_codec
 from arrayscope.gpu.device_topology import DeviceTopology
 
-_DISCRETE = DeviceTopology(kind="discrete", unified_memory=False, device_name="NVIDIA", backend="Vulkan")
-_INTEGRATED = DeviceTopology(kind="integrated", unified_memory=True, device_name="Intel", backend="Vulkan")
+_DISCRETE = DeviceTopology(
+    kind="discrete", unified_memory=False, device_name="NVIDIA", backend="Vulkan"
+)
+_INTEGRATED = DeviceTopology(
+    kind="integrated", unified_memory=True, device_name="Intel", backend="Vulkan"
+)
 _UNKNOWN = DeviceTopology(kind="unknown", unified_memory=True)
 
 
@@ -35,7 +39,9 @@ def test_discrete_prefers_bc_and_sets_transfer_candidate():
 
 
 def test_integrated_prefers_astc_when_supported():
-    d = decide_texture_codec(topology=_INTEGRATED, enable=True, astc_supported=True, astc_block=(6, 6))
+    d = decide_texture_codec(
+        topology=_INTEGRATED, enable=True, astc_supported=True, astc_block=(6, 6)
+    )
     assert d.engage is True
     assert d.family == "astc"
     assert d.scalar_format == "astc-6x6-unorm"

@@ -156,9 +156,7 @@ def test_parametric_forward_inverse_round_trips_data(demo_plugin):
 def test_recipe_round_trip_reconstructs_equal_plugin_step(demo_plugin):
     steps = (
         OperationStep(registry.create_operation("demo-ops:reverse_rows")),
-        OperationStep(
-            registry.create_operation("demo-ops:roll", axis=0, parameters={"shift": 2})
-        ),
+        OperationStep(registry.create_operation("demo-ops:roll", axis=0, parameters={"shift": 2})),
     )
 
     text = recipes.dumps_recipe(steps)
@@ -196,9 +194,7 @@ def test_plugin_op_flows_through_the_opaque_region_engine(demo_plugin):
 
     plugin_image = OperationEvaluator(plugin_document).image(state)
     oracle_image = OperationEvaluator(oracle_document).image(state)
-    np.testing.assert_allclose(
-        np.asarray(plugin_image.data), np.asarray(oracle_image.data)
-    )
+    np.testing.assert_allclose(np.asarray(plugin_image.data), np.asarray(oracle_image.data))
 
 
 def test_uninstalled_plugin_recipe_raises_clear_error(demo_plugin):

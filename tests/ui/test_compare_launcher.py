@@ -93,8 +93,10 @@ def compare_windows(qtbot):
 def _settle(qtbot, *windows):
     process_events(qtbot, count=20)
     qtbot.waitUntil(
-        lambda: all(frame_session_settled(win) for win in windows)
-        and all(win.renderer.display_geometry is not None for win in windows),
+        lambda: (
+            all(frame_session_settled(win) for win in windows)
+            and all(win.renderer.display_geometry is not None for win in windows)
+        ),
         timeout=_SETTLE_TIMEOUT_MS,
     )
 
@@ -169,9 +171,7 @@ def test_compare_launcher_links_facets_and_reports_both_real_values(
     assert win_a._last_compare_values["B"] == pytest.approx(arr_b[idx3])
 
 
-def test_compare_cursor_reports_complex_magnitude_and_phase(
-    qtbot, isolated_sync, compare_windows
-):
+def test_compare_cursor_reports_complex_magnitude_and_phase(qtbot, isolated_sync, compare_windows):
     _clear_settings()
     from arrayscope.window import ArrayScopeWindow
 

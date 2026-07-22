@@ -680,9 +680,7 @@ def test_first_pixel_coverage_commit_is_not_level_only_drain():
     for index in (2, 3):
         tile = session.plan.tiles[index]
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
-        session.mark_materialized(
-            RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
-        )
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[int(index)] = ("tile", int(index))
 
     assert session.begin_level_presentation_update((2.0, 4.0)) is True

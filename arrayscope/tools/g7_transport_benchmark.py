@@ -197,9 +197,7 @@ def run_benchmark(
                     decompress_ms=decomp_s * 1e3,
                     exact=exact,
                     break_even_gbps=break_even,
-                    holds_at_memcpy=_inequality_holds(
-                        raw_bytes, comp_bytes, overhead, memcpy_gbps
-                    ),
+                    holds_at_memcpy=_inequality_holds(raw_bytes, comp_bytes, overhead, memcpy_gbps),
                     holds_at_pcie=_inequality_holds(raw_bytes, comp_bytes, overhead, pcie_gbps),
                 )
             )
@@ -213,9 +211,7 @@ def run_benchmark(
         "memcpy_gbps": memcpy_gbps,
         "pcie_gbps": pcie_gbps,
         "git_revision": _git_rev(),
-        "verdict": (
-            "flip-eligible" if any_win else "no-win: default stays raw (off)"
-        ),
+        "verdict": ("flip-eligible" if any_win else "no-win: default stays raw (off)"),
         "cells": [asdict(c) for c in cells],
     }
 

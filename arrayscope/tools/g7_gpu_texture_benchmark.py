@@ -101,7 +101,9 @@ def _load_tiles(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     c0 = max(0, (w - TILE) // 2)
     scalar = np.ascontiguousarray(vol[r0 : r0 + TILE, c0 : c0 + TILE])
     if scalar.shape != (TILE, TILE):
-        scalar = np.pad(scalar, ((0, TILE - scalar.shape[0]), (0, TILE - scalar.shape[1])), mode="edge")
+        scalar = np.pad(
+            scalar, ((0, TILE - scalar.shape[0]), (0, TILE - scalar.shape[1])), mode="edge"
+        )
     # a plausible complex tile: real = tile, imag = a smooth phase-carrying partner
     re = scalar
     im = np.ascontiguousarray(np.roll(scalar, 3, axis=1) * 0.6 - np.roll(scalar, 2, axis=0) * 0.4)
@@ -132,7 +134,9 @@ def _scalar_cells(device, scalar, bc_supported, astc_supported) -> list[FormatCe
             tex = upload_bc4_texture(device, data, h, w)
             cell.texture_created = True
             hw = sample_bc4_texture(device, tex, h, w)
-            cell.hardware_sample_psnr_db = bc_codec.quality_of(bc_codec.bc4_decode(data, h, w), hw).psnr_db
+            cell.hardware_sample_psnr_db = bc_codec.quality_of(
+                bc_codec.bc4_decode(data, h, w), hw
+            ).psnr_db
         except Exception as exc:  # pragma: no cover - driver dependent
             cell.notes = f"texture/sample failed: {exc}"
     cells.append(cell)
@@ -157,7 +161,18 @@ def _scalar_cells(device, scalar, bc_supported, astc_supported) -> list[FormatCe
                 )
             )
         except Exception as exc:  # pragma: no cover
-            cells.append(FormatCell("scalar", "bc4-r-unorm", "gpu", raw_bytes, 0, 0, 0.0, notes=f"gpu encode failed: {exc}"))
+            cells.append(
+                FormatCell(
+                    "scalar",
+                    "bc4-r-unorm",
+                    "gpu",
+                    raw_bytes,
+                    0,
+                    0,
+                    0.0,
+                    notes=f"gpu encode failed: {exc}",
+                )
+            )
 
     # ASTC block sweep (Intel)
     if astc_supported and astc_codec.astc_available():

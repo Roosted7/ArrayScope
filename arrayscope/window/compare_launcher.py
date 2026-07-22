@@ -227,7 +227,9 @@ class CompareLauncherMixin:
         # and the difference window.
         self.link_compare_window(diff_window)
         self._retain_and_show_compare_window(diff_window)
-        show_status_message(self, f"Opened difference window ({label_a} − {label_b}).", timeout=2500)
+        show_status_message(
+            self, f"Opened difference window ({label_a} − {label_b}).", timeout=2500
+        )
         return diff_window
 
     def _retain_and_show_compare_window(self, window) -> None:

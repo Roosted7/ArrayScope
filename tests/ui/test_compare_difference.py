@@ -105,8 +105,10 @@ def _is_destroyed(win):
 def _settle(qtbot, *windows):
     process_events(qtbot, count=20)
     qtbot.waitUntil(
-        lambda: all(frame_session_settled(win) for win in windows)
-        and all(win.renderer.display_geometry is not None for win in windows),
+        lambda: (
+            all(frame_session_settled(win) for win in windows)
+            and all(win.renderer.display_geometry is not None for win in windows)
+        ),
         timeout=_SETTLE_TIMEOUT_MS,
     )
 

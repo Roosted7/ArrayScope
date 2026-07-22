@@ -111,7 +111,9 @@ class RawCodec:
 # onto those losslessly: complex64 as an interleaved float32 pair, int16 as a
 # widened int32.  uint8 has no lossless zfp mapping worth the transform, so the
 # codec declines it (resolve_codec then keeps such chunks on ``raw``).
-_ZFP_NATIVE = frozenset({np.dtype(np.float32), np.dtype(np.float64), np.dtype(np.int32), np.dtype(np.int64)})
+_ZFP_NATIVE = frozenset(
+    {np.dtype(np.float32), np.dtype(np.float64), np.dtype(np.int32), np.dtype(np.int64)}
+)
 
 
 class ZfpCodec:

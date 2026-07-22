@@ -92,14 +92,27 @@ def _frame_psnr(engaged: np.ndarray, raw: np.ndarray) -> tuple[float, float]:
 
 def _render_scalar(mode: str):
     ex = WgpuPlaneExecutor(
-        (PAGE, NX * PAGE), max_lod=0, target_size=CANVAS, device=_DEVICE,
-        pool_layers={SCALAR_R32F: NX + 1}, compressed_textures=mode, astc_block=BLOCK,
+        (PAGE, NX * PAGE),
+        max_lod=0,
+        target_size=CANVAS,
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: NX + 1},
+        compressed_textures=mode,
+        astc_block=BLOCK,
     )
     doc, op = "astc-scalar", "op"
     plane = ContentPlane(doc, op, (PAGE, NX * PAGE), max_lod=0, representation=SCALAR_R32F)
     keys = [
-        plane_chunk_key(doc, op, 0, cx, 0, dtype="float32", representation=SCALAR_R32F,
-                        plane_shape=(PAGE, NX * PAGE))
+        plane_chunk_key(
+            doc,
+            op,
+            0,
+            cx,
+            0,
+            dtype="float32",
+            representation=SCALAR_R32F,
+            plane_shape=(PAGE, NX * PAGE),
+        )
         for cx in range(NX)
     ]
     ensures = [EnsureChunkResident(keys[cx], _scalar_tile(cx * 11)) for cx in range(NX)]
@@ -107,26 +120,44 @@ def _render_scalar(mode: str):
     tile = TileInstance(
         (0.0, 0.0, 1.0, 1.0), (0.0, 0.0), (float(NX * PAGE), float(PAGE)), 0, plane_index=0
     )
-    rep = ex.submit(FrameSubmission(1, (
-        SetDisplayMapping(DisplayMapping("real", -1.0, 2.0)),
-        UpdateTileInstances((tile,)),
-        DispatchHistogram(tuple(keys), bins=64),
-        PresentGeneration(1),
-    )))
+    rep = ex.submit(
+        FrameSubmission(
+            1,
+            (
+                SetDisplayMapping(DisplayMapping("real", -1.0, 2.0)),
+                UpdateTileInstances((tile,)),
+                DispatchHistogram(tuple(keys), bins=64),
+                PresentGeneration(1),
+            ),
+        )
+    )
     rep.wait_completed()
     return ex, keys, ex.read_target(), rep
 
 
 def _render_complex(mode: str):
     ex = WgpuPlaneExecutor(
-        (PAGE, NX * PAGE), max_lod=0, target_size=CANVAS, device=_DEVICE,
-        pool_layers={COMPLEX_RG32F: NX + 1}, compressed_textures=mode, astc_block=BLOCK,
+        (PAGE, NX * PAGE),
+        max_lod=0,
+        target_size=CANVAS,
+        device=_DEVICE,
+        pool_layers={COMPLEX_RG32F: NX + 1},
+        compressed_textures=mode,
+        astc_block=BLOCK,
     )
     doc, op = "astc-complex", "op"
     plane = ContentPlane(doc, op, (PAGE, NX * PAGE), max_lod=0, representation=COMPLEX_RG32F)
     keys = [
-        plane_chunk_key(doc, op, 0, cx, 0, dtype="complex64", representation=COMPLEX_RG32F,
-                        plane_shape=(PAGE, NX * PAGE))
+        plane_chunk_key(
+            doc,
+            op,
+            0,
+            cx,
+            0,
+            dtype="complex64",
+            representation=COMPLEX_RG32F,
+            plane_shape=(PAGE, NX * PAGE),
+        )
         for cx in range(NX)
     ]
     ensures = [EnsureChunkResident(keys[cx], _complex_tile(cx * 11)) for cx in range(NX)]
@@ -134,12 +165,17 @@ def _render_complex(mode: str):
     tile = TileInstance(
         (0.0, 0.0, 1.0, 1.0), (0.0, 0.0), (float(NX * PAGE), float(PAGE)), 0, plane_index=0
     )
-    rep = ex.submit(FrameSubmission(1, (
-        SetDisplayMapping(DisplayMapping("magnitude", -1.5, 1.5)),
-        UpdateTileInstances((tile,)),
-        DispatchHistogram(tuple(keys), bins=64),
-        PresentGeneration(1),
-    )))
+    rep = ex.submit(
+        FrameSubmission(
+            1,
+            (
+                SetDisplayMapping(DisplayMapping("magnitude", -1.5, 1.5)),
+                UpdateTileInstances((tile,)),
+                DispatchHistogram(tuple(keys), bins=64),
+                PresentGeneration(1),
+            ),
+        )
+    )
     rep.wait_completed()
     return ex, keys, ex.read_target(), rep
 
@@ -218,25 +254,41 @@ def test_lod_generation_from_astc_children_does_not_crash():
     y, x = np.mgrid[0 : 2 * PAGE, 0 : 2 * PAGE]
     src = (np.sin(x / 50.0) * np.cos(y / 47.0)).astype(np.float32)
     ex = WgpuPlaneExecutor(
-        src.shape, max_lod=1, target_size=(64, 64), device=_DEVICE,
-        pool_layers={SCALAR_R32F: 8}, compressed_textures="on", astc_block=BLOCK,
+        src.shape,
+        max_lod=1,
+        target_size=(64, 64),
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: 8},
+        compressed_textures="on",
+        astc_block=BLOCK,
     )
     doc, op = "astc-lod", "op"
     sources = tuple(
-        plane_chunk_key(doc, op, 0, cx, cy, dtype="float32", representation=SCALAR_R32F,
-                        plane_shape=src.shape)
+        plane_chunk_key(
+            doc, op, 0, cx, cy, dtype="float32", representation=SCALAR_R32F, plane_shape=src.shape
+        )
         for cy in range(2)
         for cx in range(2)
     )
-    dest = plane_chunk_key(doc, op, 1, 0, 0, dtype="float32", representation=SCALAR_R32F,
-                           plane_shape=src.shape)
-    ex.submit(FrameSubmission(1, (
-        BindContentPlanes((ContentPlane(doc, op, src.shape, max_lod=1, representation=SCALAR_R32F),)),
-        *(
-            EnsureChunkResident(k, src[cy * PAGE : (cy + 1) * PAGE, cx * PAGE : (cx + 1) * PAGE])
-            for k, (cy, cx) in zip(sources, ((0, 0), (0, 1), (1, 0), (1, 1)), strict=True)
-        ),
-    )))
+    dest = plane_chunk_key(
+        doc, op, 1, 0, 0, dtype="float32", representation=SCALAR_R32F, plane_shape=src.shape
+    )
+    ex.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes(
+                    (ContentPlane(doc, op, src.shape, max_lod=1, representation=SCALAR_R32F),)
+                ),
+                *(
+                    EnsureChunkResident(
+                        k, src[cy * PAGE : (cy + 1) * PAGE, cx * PAGE : (cx + 1) * PAGE]
+                    )
+                    for k, (cy, cx) in zip(sources, ((0, 0), (0, 1), (1, 0), (1, 1)), strict=True)
+                ),
+            ),
+        )
+    )
     assert ex.codec_family == "astc"
     assert all(ex.page_is_compressed(k) for k in sources)
 
