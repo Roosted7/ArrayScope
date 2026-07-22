@@ -837,6 +837,12 @@ class RenderOrchestrator(
             cancel_level_interaction()
         previous_levels = normalize_bounds(self.win.img_view.getLevels())
         auto_bounds = normalize_bounds(self.win.img_view.getHistogramDataBounds())
+        # An explicit auto-window is the one gesture that re-fits the histogram
+        # value axis: release the user's manual view and snap it to the data
+        # bounds now, independently of whether a re-render follows below.
+        reset_hist_view = getattr(self.win.img_view, "reset_histogram_view_range", None)
+        if callable(reset_hist_view) and auto_bounds is not None:
+            reset_hist_view(auto_bounds[0], auto_bounds[1])
         has_committed_target = bool(
             getattr(self.win, "_committed_display_frame", None) is not None
             or bool(getattr(getattr(self, "_frame_session", None), "display_committed", False))

@@ -206,6 +206,12 @@ class ImageViewShell(QtWidgets.QWidget):
         self._histogramDataBounds = None
         self._displayLevels = None
         self._applying_presentation = False
+        # Set once the user zooms/pans the histogram's value axis by hand. While
+        # set, an index-driven presentation refresh must NOT snap the histogram
+        # view back to the data bounds -- only an explicit levels reset (double
+        # click / Auto button) clears it. See reset_histogram_view_range and
+        # HistogramDisplayController.install.
+        self._user_histogram_view_dirty = False
         self.displayMode = "square_pixels"  # Default to square pixels
         self.histogramSource = None
         self.histogramPlotSource = None
@@ -1338,6 +1344,35 @@ class ImageViewShell(QtWidgets.QWidget):
     def setHistogramRange(self, min_val, max_val):
         """Set the range of the histogram"""
         self.histogram.setHistogramRange(min_val, max_val)
+
+    def _apply_presentation_histogram_range(self, min_val, max_val) -> None:
+        """Auto-fit the histogram value axis for a fresh presentation.
+
+        A no-op once the user has manually zoomed/panned the histogram view:
+        an index change must not yank the view they chose back to the data
+        bounds. The manual view is released only by an explicit levels reset
+        (see reset_histogram_view_range).
+        """
+
+        if self._user_histogram_view_dirty:
+            return
+        self.histogram.setHistogramRange(float(min_val), float(max_val))
+
+    def reset_histogram_view_range(self, min_val, max_val) -> None:
+        """Snap the histogram value axis back to auto and clear the manual flag.
+
+        Called from the explicit levels-reset gestures (histogram double-click,
+        Auto button). The apply runs under the presentation guard so the
+        resulting ``sigRangeChanged`` is not misread as a fresh user edit.
+        """
+
+        applying = self._applying_presentation
+        self._applying_presentation = True
+        try:
+            self._user_histogram_view_dirty = False
+            self.histogram.setHistogramRange(float(min_val), float(max_val))
+        finally:
+            self._applying_presentation = applying
 
     def _histogram_levels_for_display(self, levels=None):
         if levels is not None:
@@ -2786,7 +2821,9 @@ class ImageView2D(ImageViewShell):
                 self._sync_display_levels(
                     float(levels[0]), float(levels[1]), update_image=False, emit_user=False
                 )
-                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+                self._apply_presentation_histogram_range(
+                    float(histogramRange[0]), float(histogramRange[1])
+                )
             profile_start = perf_counter()
             self._update_profile_line_bounds()
             self._record_upload_timing(

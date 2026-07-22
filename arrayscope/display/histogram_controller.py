@@ -139,12 +139,20 @@ class HistogramDisplayController(QtCore.QObject):
         self._install_histogram_event_filter(getattr(widget, "viewport", lambda: None)())
         vb = getattr(item, "vb", None)
         if vb is not None:
-            vb.sigRangeChanged.connect(lambda *_args: self.schedule_refresh())
+            vb.sigRangeChanged.connect(lambda *_args: self._on_histogram_view_range_changed())
             scene = vb.scene()
             if scene is not None:
                 for view in tuple(scene.views() or ()):
                     self._install_histogram_event_filter(getattr(view, "viewport", lambda: None)())
         self._install_manual_clicks()
+
+    def _on_histogram_view_range_changed(self) -> None:
+        # A range change that did NOT originate from a programmatic
+        # presentation apply is the user zooming/panning the value axis; latch
+        # it so index-driven refreshes stop resetting their view.
+        if not getattr(self.owner, "_applying_presentation", False):
+            self.owner._user_histogram_view_dirty = True
+        self.schedule_refresh()
 
     def eventFilter(self, obj, event):
         if obj in self._filtered_histogram_widgets and self._handle_native_histogram_double_click(

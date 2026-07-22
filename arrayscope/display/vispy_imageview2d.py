@@ -1470,7 +1470,9 @@ class VisPyImageView2D(ImageViewShell):
         try:
             self.histogram.setLevels(float(levels[0]), float(levels[1]))
             if histogramRange is not None:
-                self.histogram.setHistogramRange(float(histogramRange[0]), float(histogramRange[1]))
+                self._apply_presentation_histogram_range(
+                    float(histogramRange[0]), float(histogramRange[1])
+                )
         finally:
             self._applying_presentation = applying
 

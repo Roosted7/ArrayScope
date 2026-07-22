@@ -1723,7 +1723,7 @@ class WgpuImageView2D(ImageViewShell):
         try:
             self.histogram.setLevels(float(levels[0]), float(levels[1]))
             if histogram_range is not None:
-                self.histogram.setHistogramRange(
+                self._apply_presentation_histogram_range(
                     float(histogram_range[0]), float(histogram_range[1])
                 )
         finally:
