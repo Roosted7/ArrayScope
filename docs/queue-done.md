@@ -6,6 +6,43 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **Compare v1b — "Compare with…" launcher + linked complex cursor
+  (queue step 6):** `CompareLauncherMixin.open_compare_window` opens an
+  in-process sibling pre-linked on dims+camera+levels (reusing the sync
+  controllers, no new transport); an in-process `CompareCursorGroup` shares the
+  source array index so every window's HUD shows A and B (magnitude+phase for
+  complex) read exactly from each window's own `base_data` — rides the existing
+  hover-refresh path, no new scheduler. Evidence: `cca17a4c` (+ test-hygiene fix
+  `7fbcfc2d`); real-Wayland `tests/ui/test_compare_launcher.py` 2/2 headless-weston,
+  values exact vs NumPy oracle (float + complex64); full parallel suite 2746
+  passed. **Integration bug caught + fixed:** the compare test leaked its sibling
+  window (app-global retention list, no `WA_DeleteOnClose`) so a later test's
+  nested event loop segfaulted in `_release_reference`; fixed test-side by fully
+  disposing windows (close→drop retention→deleteLater→wait on `destroyed`).
+  Semantics note: the cursor reports raw `base_data`, not post-operation values
+  (v1). The camera facet is coupled to the existing "Sync window/level" link.
+
+- 2026-07-22 — **Plugin ops v2 — Tier-2 conformance harness (queue step 9,
+  dependency-free half):** `PluginOperationSpec.region_capable` opt-in; a region
+  (windowable) claim is honored only after `plugin_conformance.verify_region_conformance`
+  property-tests `fn(whole)[region] == fn(whole[region])` across seeded probes,
+  else it is downgraded to OPAQUE whole-array with a loud WARNING +
+  `region_conformance_stats()` tally. Evidence: `800efe4c`;
+  `tests/operations/test_plugin_conformance.py` red-first (mis-declared roll /
+  global-mean rejected, honest `x*2+1` honored) + non-vacuity proof; 303
+  operations+import-health passed. **Remaining (dep-blocked):** the sigpy
+  operation pack — sigpy is not installed in this environment.
+
+- 2026-07-22 — **Compare v1c core — CompositeArraySource (queue step 7, core):**
+  `CompositeArraySource(A, B, op="subtract")` is a pure `ArraySource`
+  (shape/dtype/ndim/read_region), reads the same `index_spec` from both inputs,
+  applies the op region-only, and propagates the cancellation token — so A−B
+  flows through the unchanged unary pipeline/tile engine. Evidence: `39d313d8`;
+  `tests/core/test_composite_array_source.py` 25 tests (NumPy-oracle exactness,
+  region-only spy sources, token propagation, progressive-input streaming);
+  203 core tests passed. **Remaining:** opening A−B as a third linked window,
+  building on the step-6 launcher (lifecycle: must NOT close shared A/B sources).
+
 - 2026-07-22 — **Compare v1a — camera/viewport sync facet (queue step 5):**
   new `FACET_CAMERA` in `sync/messages.py` (world/data-space view range,
   JSON-plain) with symmetric `camera_state_payload`/`merged_camera_state`;
