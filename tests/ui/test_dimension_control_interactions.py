@@ -1,5 +1,6 @@
 import numpy as np
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
@@ -26,7 +27,7 @@ def _wait_for_committed_montage_tiles(win, qtbot, count):
         _process_events(qtbot, count=5)
         return len(_committed_montage_tile_images(win)) >= count
 
-    qtbot.waitUntil(_ready, timeout=8000)
+    qtbot.waitUntil(_ready, timeout=min(8000, INTERACTION_SETTLE_HARD_LIMIT_MS))
 
 
 def test_tiled_dimension_x_y_buttons_promote_range_to_image_crop(qtbot):

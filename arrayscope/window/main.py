@@ -204,6 +204,11 @@ class ArrayScopeWindow(
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
         self.data = derived_info_for(self.document)
+        # The per-dimension legacy widgets are laid out for this shape as the UI
+        # is built; seed the shape guard so the first shape-preserving operation
+        # (e.g. an FFT) does not needlessly re-run those layout mutations and
+        # flash the dimension strip. See _sync_controls_to_current_data.
+        self._last_control_sync_shape = tuple(self.data.shape)
         self.singleton = [e == 1 for e in list(self.data.shape)]
         initial_channel = (
             ChannelMode.COMPLEX

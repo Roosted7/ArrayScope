@@ -454,8 +454,7 @@ class DisplayControlBuildMixin:
         self.dims_scroll.setVerticalScrollBarPolicy(Qt.QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.dims_scroll.setWidget(strip_wrap)
         self._dims_height_override = None
-        self._dims_area_height_pending = False
-        self.dimension_strip.layoutChanged.connect(self._schedule_dims_area_height)
+        self.dimension_strip.layoutChanged.connect(self._sync_dims_area_height)
         self.layouts["dims"].addWidget(self.dims_scroll, 1)
         self.sync_dims_button = QtWidgets.QToolButton()
         self.sync_dims_button.setCheckable(True)
@@ -780,29 +779,6 @@ class DisplayControlBuildMixin:
             return height
 
         return rows, height_for
-
-    def _schedule_dims_area_height(self):
-        """Coalesce ``layoutChanged`` bursts into one settled height update.
-
-        ``layoutChanged`` can fire mid-relayout, when the strip's parent is
-        transiently narrow -- row_metrics then sees fewer columns, more rows,
-        and a taller strip. Applying that height immediately flickers the strip
-        and, through the shared central layout, briefly resizes the render
-        viewport (visible when adding an operation with the dock already open,
-        where nothing should move). Defer to the next turn so the width has
-        settled, and collapse a burst of signals into a single apply.
-        """
-        if getattr(self, "_dims_area_height_pending", False):
-            return
-        self._dims_area_height_pending = True
-
-        def apply():
-            self._dims_area_height_pending = False
-            self._sync_dims_area_height()
-
-        # Timer category: UI cosmetic. Coalesced strip-height settle; reads the
-        # current row metrics, so it is pure layout bookkeeping.
-        Qt.QtCore.QTimer.singleShot(0, self, apply)
 
     def _sync_dims_area_height(self):
         scroll = getattr(self, "dims_scroll", None)

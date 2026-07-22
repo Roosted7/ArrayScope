@@ -269,31 +269,45 @@ class StateSyncMixin:
         if self.profile_axes:
             self.line_plot_dimension = self.profile_axes[0]
 
-        for i, container in enumerate(getattr(self, "dim_containers", [])):
-            visible = i < ndim
-            container.setVisible(visible)
-            self.widgets["buttons"]["primary"][i].setVisible(visible)
-            self.widgets["buttons"]["secondary"][i].setVisible(visible)
-            self.widgets["buttons"]["profile"][i].setVisible(visible)
-            self.widgets["spins"]["slice_indices"][i].setVisible(visible)
-            if visible:
-                self.widgets["labels"]["dims"][i].setText(f"[{self.data.shape[i]}]")
-                self.widgets["spins"]["slice_indices"][i].setMaximum(self.data.shape[i] - 1)
-                self.widgets["spins"]["slice_indices"][i].setValue(
-                    min(self.widgets["spins"]["slice_indices"][i].value(), self.data.shape[i] - 1)
-                )
+        # These per-dimension widget mutations only depend on the data SHAPE,
+        # and every one of them (setVisible/setText/setMaximum) invalidates the
+        # central layout. On a shape-preserving operation (e.g. an FFT, which
+        # only flips the dtype to complex) the shape is unchanged, so re-running
+        # them is pure churn -- and that churn briefly reflows the dimension
+        # strip's width, wrapping the chips onto an extra row and flashing the
+        # viewport. Only touch them when the shape actually changed; the
+        # dtype/complex-driven state below always re-syncs.
+        shape = tuple(self.data.shape)
+        if getattr(self, "_last_control_sync_shape", None) != shape:
+            self._last_control_sync_shape = shape
+            for i, container in enumerate(getattr(self, "dim_containers", [])):
+                visible = i < ndim
+                container.setVisible(visible)
+                self.widgets["buttons"]["primary"][i].setVisible(visible)
+                self.widgets["buttons"]["secondary"][i].setVisible(visible)
+                self.widgets["buttons"]["profile"][i].setVisible(visible)
+                self.widgets["spins"]["slice_indices"][i].setVisible(visible)
+                if visible:
+                    self.widgets["labels"]["dims"][i].setText(f"[{self.data.shape[i]}]")
+                    self.widgets["spins"]["slice_indices"][i].setMaximum(self.data.shape[i] - 1)
+                    self.widgets["spins"]["slice_indices"][i].setValue(
+                        min(
+                            self.widgets["spins"]["slice_indices"][i].value(),
+                            self.data.shape[i] - 1,
+                        )
+                    )
 
-        self.tab_widget.setTabEnabled(0, ndim >= 2)
-        self.tab_widget.setVisible(ndim >= 2)
-        central = self.centralWidget()
-        if central is not None:
-            if ndim < 2:
-                # 1D shows only toolbar + dimension strip up top; cap the
-                # central area so the profile dock gets the freed height
-                # instead of a large empty canvas region.
-                central.setMaximumHeight(max(120, central.sizeHint().height()))
-            else:
-                central.setMaximumHeight(16_777_215)
+            self.tab_widget.setTabEnabled(0, ndim >= 2)
+            self.tab_widget.setVisible(ndim >= 2)
+            central = self.centralWidget()
+            if central is not None:
+                if ndim < 2:
+                    # 1D shows only toolbar + dimension strip up top; cap the
+                    # central area so the profile dock gets the freed height
+                    # instead of a large empty canvas region.
+                    central.setMaximumHeight(max(120, central.sizeHint().height()))
+                else:
+                    central.setMaximumHeight(16_777_215)
         if hasattr(self, "profile_dock"):
             self.profile_dock.set_axes(self.data.shape, self.line_plot_dimension)
             if ndim == 1:
