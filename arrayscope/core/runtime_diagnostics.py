@@ -1338,11 +1338,18 @@ def _operation_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
 
 def _cache_line(name: str, cache: CacheDiagnosticsSnapshot) -> str:
     hit_rate = "n/a" if cache.hit_rate is None else f"{cache.hit_rate:.0%}"
-    return (
+    line = (
         f"{name}: {cache.status.value}, entries={cache.entries}, "
         f"bytes={format_bytes(cache.bytes_used)} / {format_bytes(cache.max_bytes)}, "
         f"hits={cache.hits}, misses={cache.misses}, evictions={cache.evictions}, hit-rate={hit_rate}"
     )
+    if cache.tier_engaged:
+        line += (
+            f", compressed-tier={cache.tier_codec}, tier-entries={cache.tier_entries}, "
+            f"recoveries={cache.tier_recoveries}, stores={cache.tier_stores}, "
+            f"tier-evictions={cache.tier_evictions}"
+        )
+    return line
 
 
 def _stage_cache_line(name: str, cache) -> str:

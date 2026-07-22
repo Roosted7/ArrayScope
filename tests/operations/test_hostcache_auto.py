@@ -53,6 +53,65 @@ def _payload(dtype, i) -> DisplayImage:
     )
 
 
+def test_real_shader_payload_aliases_are_stripped_and_rebuilt_together():
+    """Compression must not retain an uncompressed alias of the primary image."""
+
+    image = _image(np.float32, 0)
+    payload = DisplayImage(
+        data=image,
+        semantic_data=image,
+        lod_source_data=image,
+        level_data=image,
+    )
+    primary, meta, aux_nbytes = split_payload_for_tier(payload)
+
+    assert primary is image
+    assert aux_nbytes == 0
+    assert meta.stripped.data is None
+    assert meta.stripped.semantic_data is None
+    assert meta.stripped.lod_source_data is None
+    assert meta.stripped.level_data is None
+
+    cache = _build_array_cache(image.nbytes * 4, 1, "auto")
+    cache.put((0,), payload)
+    cache.put((1,), DisplayImage(data=_image(np.float32, 1)))
+    recovered = cache.get((0,))
+
+    assert recovered.data is recovered.semantic_data
+    assert recovered.data is recovered.lod_source_data
+    assert recovered.data is recovered.level_data
+    assert np.array_equal(recovered.data, image)
+
+
+def test_two_level_cache_obeys_one_total_byte_budget():
+    total = 16 << 20
+    cache = _build_array_cache(total, 32, "auto")
+
+    assert isinstance(cache, TwoLevelArrayCache)
+    assert cache.max_bytes == total
+    assert cache.raw.max_bytes + cache.tier.max_bytes == total
+
+    cache.resize(max_bytes=8 << 20)
+    assert cache.max_bytes == 8 << 20
+    assert cache.raw.max_bytes + cache.tier.max_bytes == 8 << 20
+
+
+def test_live_codec_switch_preserves_memory_policy_budgets():
+    evaluator = OperationEvaluator(ArrayDocument(_gradient_volume(2)), chunk_transport_codec="raw")
+    evaluator.apply_memory_policy(_memory_policy(display_bytes=7 << 20, profile_bytes=3 << 20))
+
+    assert evaluator.set_chunk_transport_codec("auto") is True
+    assert evaluator._display_cache.max_bytes == 7 << 20
+    assert evaluator._region_cache.max_bytes == 7 << 20
+    assert evaluator._profile_cache.max_bytes == 3 << 20
+
+
+def test_display_and_roi_region_caches_keep_separate_eviction_owners():
+    evaluator = OperationEvaluator(ArrayDocument(np.zeros((8, 8), dtype=np.float32)))
+
+    assert evaluator._region_cache is not evaluator._display_cache
+
+
 # ---------------------------------------------------------------------------
 # 1 + 2: bit-identity through the tier + recover-by-decode, under AUTO.
 #
@@ -89,6 +148,7 @@ def test_payload_recovered_from_tier_is_bit_identical_auto(dtype):
     assert np.array_equal(recovered.histogram_data, payload.histogram_data)
     assert recovered.default_levels == (0.0, 1.0)
     assert cache.tier_recoveries >= 1
+    assert (0,) not in cache.tier
 
 
 def test_tier_recovery_does_not_recompute_auto():

@@ -57,10 +57,10 @@ class WindowMenuMixin:
                     "wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value
                 ),
                 "texture_codec": self._settings.value(
-                    "texture_codec", TextureCodecChoice.AUTO.value
+                    "texture_codec", TextureCodecChoice.OFF.value
                 ),
                 "chunk_transport_codec": self._settings.value(
-                    "chunk_transport_codec", ChunkTransportCodecChoice.AUTO.value
+                    "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
                 ),
                 "memory_profile": self._settings.value(
                     "memory_profile", MemoryProfileChoice.BALANCED.value
@@ -329,9 +329,8 @@ class WindowMenuMixin:
             self._wgpu_present_method_actions[choice] = action
 
         # GPU texture compression (wgpu): BC (NVIDIA) / ASTC (Intel) block-
-        # compressed tiles, decoded free by the hardware sampler — less VRAM and
-        # PCIe transfer for large montages. AUTO picks the best format the device
-        # supports; lossy for display only (levels/histogram stay from raw).
+        # compressed tiles, decoded by the hardware sampler. Encoding is CPU-side,
+        # lossy, and currently experimental; OFF remains the evidence-gated default.
         self._texture_codec_actions = {}
         self._texture_codec_action_group = QtGui.QActionGroup(self)
         self._texture_codec_action_group.setExclusive(True)
@@ -340,8 +339,14 @@ class WindowMenuMixin:
         performance_menu.addMenu(texture_codec_menu)
         self._texture_codec_menu = texture_codec_menu
         _texture_codec_labels = {
-            "auto": ("Auto (best per device)", "Compress tiles with the best format the GPU supports (ASTC on Intel, BC on NVIDIA)."),
-            "off": ("Off (uncompressed)", "Upload raw tiles; byte-identical to the pre-compression path."),
+            "auto": (
+                "Auto (experimental)",
+                "Try ASTC on Intel or BC on NVIDIA; may reduce active bytes but can increase cold latency and allocated pool memory.",
+            ),
+            "off": (
+                "Off (uncompressed)",
+                "Upload raw tiles; byte-identical to the pre-compression path.",
+            ),
             "bc": ("BC (force)", "Force BC block compression regardless of device."),
             "astc": ("ASTC (force)", "Force ASTC block compression (Intel/ASTC-capable devices)."),
         }
@@ -357,8 +362,8 @@ class WindowMenuMixin:
             self._texture_codec_actions[choice] = action
 
         # Host-cache chunk compression: keep more of the working set in RAM
-        # (compressed backing tier) so scroll-back hits a cheap decode instead of
-        # a recompute/re-read — a large-matrix win. Lossless.
+        # (compressed backing tier). Lossless, but synchronous codec work means it
+        # remains experimental until a live matched-budget workload proves a win.
         self._chunk_transport_codec_actions = {}
         self._chunk_transport_codec_action_group = QtGui.QActionGroup(self)
         self._chunk_transport_codec_action_group.setExclusive(True)
@@ -367,7 +372,10 @@ class WindowMenuMixin:
         performance_menu.addMenu(chunk_codec_menu)
         self._chunk_transport_codec_menu = chunk_codec_menu
         _chunk_codec_labels = {
-            "auto": ("Auto (under RAM pressure)", "Compress the host chunk cache when the working set exceeds the budget."),
+            "auto": (
+                "Auto (experimental)",
+                "Use a matched-budget compressed backing tier; may retain more keys but adds synchronous encode/decode cost.",
+            ),
             "raw": ("Off (uncompressed)", "No host-cache compression."),
             "zfp": ("ZFP (lossless)", "Lossless ZFP compression of the host chunk cache."),
             "blosc2": ("Blosc2 (lossless)", "Lossless Blosc2 compression of the host chunk cache."),
@@ -602,7 +610,6 @@ class WindowMenuMixin:
         self._apply_performance_settings(persist=True)
         show_status_message(self, "wgpu presentation changes apply to newly opened windows.")
 
-
     def _set_texture_codec_choice(self, choice):
         self.app_settings = self._updated_app_settings(texture_codec=choice)
         self._apply_performance_settings(persist=True)
@@ -640,7 +647,9 @@ class WindowMenuMixin:
         registry.load_operation_packs()
         if bart_pack.bart_available():
             show_status_message(
-                self, f"BART toolbox set: {folder}. BART operations are now available.", timeout=5000
+                self,
+                f"BART toolbox set: {folder}. BART operations are now available.",
+                timeout=5000,
             )
         else:
             show_status_message(

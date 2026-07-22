@@ -2467,7 +2467,11 @@ class FramePipelineEffects:
                 stage_backed=int(getattr(session, "tile_compute_stage_backed", 0) or 0),
                 uploads=int(getattr(report, "texture_uploads", 0) or 0),
             )
-        renderer._retained_tiled_payload_store().remember_acknowledged(accepted_payloads)
+        retained_budget = int(getattr(session, "tile_residency_budget_bytes", 0) or 0)
+        renderer._retained_tiled_payload_store().remember_acknowledged(
+            accepted_payloads,
+            max_bytes=retained_budget if retained_budget > 0 else None,
+        )
         renderer._last_montage_tile_retained_store_ms = (perf_counter() - retained_start) * 1000.0
         state_start = perf_counter()
         presented_tiles = (

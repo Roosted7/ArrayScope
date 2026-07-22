@@ -287,7 +287,9 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         assert win._settings.value("wgpu_present_method") == "screen"
 
         # Switching the backend away greys the submenu but keeps the choice.
-        _submenu_action(win, "Performance", "Image Rendering Backend", "PyQtGraph (CPU / remote)").trigger()
+        _submenu_action(
+            win, "Performance", "Image Rendering Backend", "PyQtGraph (CPU / remote)"
+        ).trigger()
         _process_events(qtbot)
         assert not win._wgpu_present_method_menu.isEnabled()
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
@@ -306,9 +308,8 @@ def test_texture_codec_menu_switches_and_persists(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        off = _submenu_action(
-            win, "Performance", "GPU Texture Compression", "Off (uncompressed)"
-        )
+        assert win.app_settings.texture_codec == TextureCodecChoice.OFF
+        off = _submenu_action(win, "Performance", "GPU Texture Compression", "Off (uncompressed)")
         off.trigger()
         _process_events(qtbot)
         assert win.app_settings.texture_codec == TextureCodecChoice.OFF
@@ -333,9 +334,8 @@ def test_host_cache_compression_menu_switches_and_persists(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        zfp = _submenu_action(
-            win, "Performance", "Host Cache Compression", "ZFP (lossless)"
-        )
+        assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.RAW
+        zfp = _submenu_action(win, "Performance", "Host Cache Compression", "ZFP (lossless)")
         zfp.trigger()
         _process_events(qtbot)
         assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.ZFP

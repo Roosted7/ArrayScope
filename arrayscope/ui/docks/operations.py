@@ -638,8 +638,15 @@ def _cache_status_tooltip(cache_status):
         ("Scheduler running", "scheduler_running"),
         ("Scheduler cancelled", "scheduler_cancelled"),
         ("Scheduler stale", "scheduler_stale"),
+        ("Compressed tier", "tier_codec"),
+        ("Tier entries", "tier_entries"),
+        ("Tier recoveries", "tier_recoveries"),
+        ("Tier stores", "tier_stores"),
+        ("Tier evictions", "tier_evictions"),
     ):
-        if hasattr(cache_status, attr):
+        if hasattr(cache_status, attr) and (
+            not attr.startswith("tier_") or getattr(cache_status, "tier_engaged", False)
+        ):
             value = getattr(cache_status, attr)
             if attr == "hit_rate" and value is not None:
                 value = f"{100.0 * float(value):.1f}%"

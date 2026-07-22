@@ -98,7 +98,13 @@ def _render_scalar(mode: str):
     plane = ContentPlane(doc, op, (PAGE, 2 * PAGE), max_lod=0, representation=SCALAR_R32F)
     keys = [
         plane_chunk_key(
-            doc, op, 0, cx, 0, dtype="float32", representation=SCALAR_R32F,
+            doc,
+            op,
+            0,
+            cx,
+            0,
+            dtype="float32",
+            representation=SCALAR_R32F,
             plane_shape=(PAGE, 2 * PAGE),
         )
         for cx in range(2)
@@ -134,7 +140,13 @@ def _render_complex(mode: str, mapmode: str):
     doc, op = "parity-complex", "op"
     plane = ContentPlane(doc, op, (PAGE, PAGE), max_lod=0, representation=COMPLEX_RG32F)
     key = plane_chunk_key(
-        doc, op, 0, 0, 0, dtype="complex64", representation=COMPLEX_RG32F,
+        doc,
+        op,
+        0,
+        0,
+        0,
+        dtype="complex64",
+        representation=COMPLEX_RG32F,
         plane_shape=(PAGE, PAGE),
     )
     executor.submit(
@@ -223,6 +235,113 @@ def test_off_mode_is_byte_identical_to_raw_executor():
     _raw, _k, frame_raw = _render_scalar("off")
     assert not off.codec_engaged
     assert np.array_equal(frame_off, frame_raw)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_nonfinite_scalar_page_declines_compression_and_preserves_value(bad):
+    executor = WgpuPlaneExecutor(
+        (PAGE, PAGE),
+        max_lod=0,
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: 2},
+        compressed_textures="on",
+    )
+    plane = ContentPlane("nonfinite", "op", (PAGE, PAGE), representation=SCALAR_R32F)
+    key = plane_chunk_key(
+        "nonfinite",
+        "op",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=(PAGE, PAGE),
+    )
+    payload = _scalar_tile()
+    payload[7, 11] = bad
+
+    executor.submit(
+        FrameSubmission(0, (BindContentPlanes((plane,)), EnsureChunkResident(key, payload)))
+    )
+
+    assert executor.compressed_uploads_total == 0
+    assert executor.compressed_fallbacks_total == 1
+    assert not executor.page_is_compressed(key)
+    resident = executor.read_resident_page(key)
+    if np.isnan(bad):
+        assert np.isnan(resident[7, 11])
+    else:
+        assert resident[7, 11] == bad
+
+
+def test_partial_edge_page_normalizes_only_valid_samples():
+    """Zero padding outside a boundary chunk must not widen its codec affine."""
+
+    side = 16
+    executor = WgpuPlaneExecutor(
+        (side, side),
+        max_lod=0,
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: 2},
+        compressed_textures="on",
+    )
+    plane = ContentPlane("edge", "op", (side, side), representation=SCALAR_R32F)
+    key = plane_chunk_key(
+        "edge",
+        "op",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=(side, side),
+    )
+    payload = np.zeros((PAGE, PAGE), np.float32)
+    payload[:side, :side] = np.linspace(100.0, 101.0, side * side, dtype=np.float32).reshape(
+        side, side
+    )
+
+    executor.submit(
+        FrameSubmission(0, (BindContentPlanes((plane,)), EnsureChunkResident(key, payload)))
+    )
+
+    assert executor.page_is_compressed(key)
+    _codec, norm = executor._page_codec[key]
+    assert norm[0] == pytest.approx(100.0)
+    assert norm[1] == pytest.approx(1.0)
+    resident = executor.read_resident_page(key)
+    assert np.max(np.abs(resident[:side, :side] - payload[:side, :side])) < 0.08
+
+
+def test_report_and_executor_account_actual_compressed_bytes():
+    executor = WgpuPlaneExecutor(
+        (PAGE, PAGE),
+        max_lod=0,
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: 2},
+        compressed_textures="on",
+    )
+    plane = ContentPlane("bytes", "op", (PAGE, PAGE), representation=SCALAR_R32F)
+    key = plane_chunk_key(
+        "bytes",
+        "op",
+        0,
+        0,
+        0,
+        dtype="float32",
+        representation=SCALAR_R32F,
+        plane_shape=(PAGE, PAGE),
+    )
+    report = executor.submit(
+        FrameSubmission(
+            0,
+            (BindContentPlanes((plane,)), EnsureChunkResident(key, _scalar_tile())),
+        )
+    )
+
+    assert report.upload_bytes == PAGE * PAGE // 2  # BC4: 0.5 byte/texel
+    assert executor.active_resident_bytes == report.upload_bytes
+    assert executor.allocated_pool_bytes > executor.active_resident_bytes
 
 
 def teardown_module(module):

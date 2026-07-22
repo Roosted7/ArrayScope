@@ -145,6 +145,8 @@ _BC_BLOCK_BYTES = {SCALAR_R32F: 8, COMPLEX_RG32F: 16}
 #: scalar 16x / complex 32x, lower quality).  6x6 does NOT divide 256 and is
 #: unavailable for the display pool even though the policy may name it.
 _ASTC_DEFAULT_BLOCK = (4, 4)
+
+
 def _adapter_info(adapter_or_none) -> dict:
     """Best-effort ``adapter.info`` dict; ``{}`` when unavailable (never raises)."""
 
@@ -1378,6 +1380,7 @@ class WgpuPlaneExecutor:
         self._page_codec: dict[DataChunkKey, tuple[int, tuple[float, float, float, float]]] = {}
         self._compressed_uploads_total = 0
         self._compressed_fallbacks_total = 0
+        self._texture_upload_bytes_total = 0
         self._lod_compressed_source_reductions_total = 0
         self._table_dirty = True
         self._tiles: tuple = ()
@@ -2118,6 +2121,7 @@ class WgpuPlaneExecutor:
                 self._table_dirty = True
             self._uploads_total += 1
             self._compressed_uploads_total += 1
+            self._texture_upload_bytes_total += len(data)
             return 1
 
         if not pool.free_layers:
@@ -2138,6 +2142,7 @@ class WgpuPlaneExecutor:
             self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
             self._table_dirty = True
         self._uploads_total += 1
+        self._texture_upload_bytes_total += int(payload.nbytes)
         return 1
 
     def _encode_compressed(
@@ -2157,32 +2162,53 @@ class WgpuPlaneExecutor:
         rep = key.representation
         if rep not in self._codec_reps:
             return None
+        factor = 1 << int(key.lod.level)
+        valid_h = max(1, min(PAGE, -(-int(key.chunk_shape[0]) // factor)))
+        valid_w = max(1, min(PAGE, -(-int(key.chunk_shape[1]) // factor)))
+        valid = payload[:valid_h, :valid_w]
+        if not bool(np.isfinite(valid).all()):
+            # Scientific non-finites have semantic meaning. Native UNORM block
+            # formats cannot represent them, so the exact raw pool is mandatory.
+            self._compressed_fallbacks_total += 1
+            return None
+
+        def _pad_valid(array: np.ndarray) -> np.ndarray:
+            if valid_h == PAGE and valid_w == PAGE:
+                return array
+            padding = ((0, PAGE - valid_h), (0, PAGE - valid_w))
+            if array.ndim > 2:
+                padding += tuple((0, 0) for _ in range(array.ndim - 2))
+            return np.pad(array, padding, mode="edge")
+
         astc = self._codec_family == "astc"
         if rep == SCALAR_R32F:
-            unit, norm = bc_codec.normalize_tile(payload)
+            unit_valid, norm = bc_codec.normalize_tile(valid)
+            unit = _pad_valid(unit_valid)
             if astc:
                 res = astc_codec.encode_scalar(unit, block=self._codec_block)
                 data, decoded = res.data, res.decoded[0]
             else:
                 data, h, w = bc_codec.bc4_encode(unit)
                 decoded = bc_codec.bc4_decode(data, h, w)
-            quality = bc_codec.quality_of(unit, decoded)
+            quality = bc_codec.quality_of(unit_valid, decoded[:valid_h, :valid_w])
             if quality.psnr_db < self._codec_min_psnr_db:
                 self._compressed_fallbacks_total += 1
                 return None
             return data, (float(norm.lo), float(norm.span), 0.0, 0.0)
         # complex_rg32f: two channels holding (real, imag) -- BC5, or ASTC R,G.
-        re, im = payload[..., 0], payload[..., 1]
-        unit_re, norm_re = bc_codec.normalize_tile(re)
-        unit_im, norm_im = bc_codec.normalize_tile(im)
+        re, im = valid[..., 0], valid[..., 1]
+        unit_re_valid, norm_re = bc_codec.normalize_tile(re)
+        unit_im_valid, norm_im = bc_codec.normalize_tile(im)
+        unit_re = _pad_valid(unit_re_valid)
+        unit_im = _pad_valid(unit_im_valid)
         if astc:
             res = astc_codec.encode_two_channel(unit_re, unit_im, block=self._codec_block)
             data, d0, d1 = res.data, res.decoded[0], res.decoded[1]
         else:
             data, h, w = bc_codec.bc5_encode(unit_re, unit_im)
             d0, d1 = bc_codec.bc5_decode(data, h, w)
-        re_dec = bc_codec.denormalize_channel(d0, norm_re)
-        im_dec = bc_codec.denormalize_channel(d1, norm_im)
+        re_dec = bc_codec.denormalize_channel(d0[:valid_h, :valid_w], norm_re)
+        im_dec = bc_codec.denormalize_channel(d1[:valid_h, :valid_w], norm_im)
         quality = bc_codec.complex_display_quality(re, im, re_dec, im_dec)
         if quality.magnitude_psnr_db < self._codec_min_psnr_db:
             self._compressed_fallbacks_total += 1
@@ -2883,6 +2909,7 @@ class WgpuPlaneExecutor:
         """
 
         report = FrameReport(generation=submission.generation)
+        upload_bytes_before = int(self._texture_upload_bytes_total)
         generated_pages = []
         # Histogram frontier shield: keys a DispatchHistogram in THIS batch
         # will sample must survive the batch's own residency churn (the view
@@ -2958,6 +2985,7 @@ class WgpuPlaneExecutor:
             self._histogram_shield_pins = set()
             self.page_table.replace_pin_set(_HISTOGRAM_SHIELD_PIN_OWNER, ())
         report.lod_pages_generated = tuple(generated_pages)
+        report.upload_bytes = int(self._texture_upload_bytes_total) - upload_bytes_before
         report.wait_completed = self.device.queue.on_submitted_work_done_sync
         return report
 
@@ -3048,6 +3076,36 @@ class WgpuPlaneExecutor:
         """Eligible tiles that declined BC (quality gate) and stayed raw."""
 
         return int(self._compressed_fallbacks_total)
+
+    @property
+    def texture_upload_bytes_total(self) -> int:
+        """Actual raw or block-compressed bytes submitted by resident ensures."""
+
+        return int(self._texture_upload_bytes_total)
+
+    @property
+    def active_resident_bytes(self) -> int:
+        """Logical bytes owned by currently bound pages (raw + compressed)."""
+
+        return int(self.page_table.resident_bytes())
+
+    @property
+    def allocated_pool_bytes(self) -> int:
+        """Configured texture-array allocation, including idle fallback pools.
+
+        This is the capacity arithmetic the standalone codec-ratio benchmark did
+        not report. Drivers may add alignment/metadata, so it is a conservative
+        payload estimate rather than process-wide VRAM telemetry.
+        """
+
+        total = 0
+        for rep, pool in self._pools.items():
+            total += max(1, int(pool.layer_count)) * PAGE * PAGE * _POOL_TEXEL_BYTES[rep]
+        bx, by = self._codec_block
+        for rep, pool in self._codec_pools.items():
+            layer_bytes = (PAGE // bx) * (PAGE // by) * self._codec_block_bytes[rep]
+            total += max(1, int(pool.layer_count)) * layer_bytes
+        return int(total)
 
     def page_is_compressed(self, key: DataChunkKey) -> bool:
         """Whether ``key``'s resident page lives in a BC pool (page-table truth)."""

@@ -4654,6 +4654,35 @@ def test_retained_payload_store_is_bounded_before_large_insert_batches():
     assert set(retained) == {("payload", 3), ("payload", 4)}
 
 
+def test_retained_payload_store_is_bounded_by_physical_bytes():
+    from arrayscope.display.model.frame import DisplayTilePayload
+
+    payloads = {
+        index: DisplayTilePayload(
+            index,
+            index,
+            np.ones((4, 4), dtype=np.float32),
+            None,
+            ("payload", index),
+        )
+        for index in range(4)
+    }
+    one_payload = next(iter(payloads.values())).nbytes
+    store = RetainedTiledPayloadStore(limit=10)
+
+    store.remember_acknowledged(payloads, max_bytes=2 * one_payload)
+
+    assert store.bytes_used <= 2 * one_payload
+    assert set(store.payloads_by_base_source()) == {("payload", 2), ("payload", 3)}
+
+
+def test_retained_payload_store_has_a_safe_default_byte_cap():
+    store = RetainedTiledPayloadStore()
+
+    assert store.max_bytes is not None
+    assert store.max_bytes > 0
+
+
 def test_retained_payload_store_reads_mapping_values_without_copying():
     from arrayscope.display.model.frame import DisplayTilePayload
 

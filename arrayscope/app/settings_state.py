@@ -58,15 +58,10 @@ class MontageQualityPolicyChoice(Enum):
 
 
 class ChunkTransportCodecChoice(Enum):
-    # G7 host-cache compression.  AUTO is the aggressive dogfood default: the
-    # live operation-evaluator caches (display/region/profile) back their small
-    # raw cache with a large *compressed* tier, choosing the best LOSSLESS codec
-    # per dtype (zfp's transform for float/complex/int16, blosc2's byte codec for
-    # the rest).  Aggressive only affects WHEN the tier engages (readily, on the
-    # big caches), never WHAT it returns -- every value recovered through the
-    # tier is bit-identical to the uncompressed path.  RAW is the byte-identical
-    # reference (tier off; the caches are plain BoundedArrayCache, exactly as
-    # before this setting existed).  ZFP/BLOSC2 force that single lossless codec.
+    # G7 host-cache experiment. RAW is the byte-identical production default.
+    # AUTO/ZFP/BLOSC2 opt into a lossless compressed backing tier under one
+    # total byte budget; they remain explicit until an off-GUI tier at the
+    # actual expensive miss owner proves a live benefit.
     AUTO = "auto"
     RAW = "raw"
     ZFP = "zfp"
@@ -74,17 +69,9 @@ class ChunkTransportCodecChoice(Enum):
 
 
 class TextureCodecChoice(Enum):
-    # G7 Phase B display path: native block-compressed (BC4/BC5) VRAM textures
-    # sampled by the render shader's hardware decoder.  AUTO engages it
-    # aggressively whenever the wgpu device advertises texture-compression-bc
-    # (the owner wants this dogfooded); OFF forces the byte-identical raw pools;
-    # BC is the explicit pin.  Resolution to a WgpuPlaneExecutor mode string is
-    # done by ``texture_codec_executor_mode`` once the device's BC support is
-    # known.  The live view engages BC under AUTO on a capable device: the GPU
-    # histogram/auto-level compute now samples the BC pools too (Path A,
-    # ``histogram_codec_mode="gpu_compressed"``), so auto-range has full coverage
-    # under aggressive AUTO; the exact settled owner stays the CPU full-
-    # population refinement.  Measured by ``tools/g7_levels_histogram_benchmark``.
+    # G7 lossy display-cache experiment. OFF is the exact production default.
+    # AUTO/BC opt into native block-compressed texture pools where supported;
+    # exact settled semantic evidence remains separate from those pixels.
     AUTO = "auto"
     OFF = "off"
     BC = "bc"
@@ -101,17 +88,10 @@ class AppSettingsState:
     # wgpu backend only; screen is an explicit experimental pin (queue row 3).
     wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
-    # G7: host-cache compression codec.  AUTO is the aggressive dogfood default
-    # -- it engages the compressed backing tier readily on the big evaluator
-    # caches, best lossless codec per dtype, values bit-identical.  Explicit RAW
-    # restores the byte-identical plain-cache path.
-    chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.AUTO
-    # G7 Phase B: native BC display-texture codec.  AUTO is the aggressive
-    # dogfood default: it engages BC wherever the device supports it, and the GPU
-    # histogram/auto-level compute samples the BC pools so auto-range stays
-    # correct under compression.  Explicit OFF restores the byte-identical raw
-    # path.
-    texture_codec: TextureCodecChoice = TextureCodecChoice.AUTO
+    # G7: explicit lossless host-cache experiment; RAW is the production path.
+    chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
+    # G7: explicit lossy display-cache experiment; OFF is the exact path.
+    texture_codec: TextureCodecChoice = TextureCodecChoice.OFF
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -237,9 +217,9 @@ def normalize_chunk_transport_codec_choice(value) -> ChunkTransportCodecChoice:
     try:
         return ChunkTransportCodecChoice(str(value))
     except Exception:
-        # Unknown/absent -> AUTO: the aggressive dogfood default that engages the
-        # compressed tier readily (best lossless codec per dtype, bit-identical).
-        return ChunkTransportCodecChoice.AUTO
+        # Unknown/absent -> RAW: live benefit is evidence-gated; explicit codec
+        # choices remain available for experiments.
+        return ChunkTransportCodecChoice.RAW
 
 
 def normalize_texture_codec_choice(value) -> TextureCodecChoice:
@@ -249,24 +229,24 @@ def normalize_texture_codec_choice(value) -> TextureCodecChoice:
     try:
         return TextureCodecChoice(str(value))
     except Exception:
-        # Unknown/absent -> AUTO: the aggressive dogfood default that engages BC
-        # wherever the device supports it and stays raw otherwise.
-        return TextureCodecChoice.AUTO
+        # Unknown/absent -> OFF: compression remains an explicit experiment until
+        # matched live evidence proves a product benefit on this device/workload.
+        return TextureCodecChoice.OFF
 
 
 def texture_codec_executor_mode(choice: TextureCodecChoice, *, bc_available: bool) -> str:
     """Resolve the display-codec setting to a WgpuPlaneExecutor mode string.
 
     Returns ``"off"``/``"on"``/``"auto"`` for the ``compressed_textures``
-    constructor argument.  AUTO engages (``"auto"``) whenever the device has BC;
-    BC is the explicit force-on; OFF (or a machine without BC) stays raw.
+    constructor argument. AUTO engages only when explicitly selected and the
+    device has BC/ASTC; BC is the explicit force-on; OFF stays raw.
     """
 
     if choice == TextureCodecChoice.OFF:
         return "off"
     if choice == TextureCodecChoice.BC:
         return "on"
-    # AUTO: aggressive when BC exists, raw fallback otherwise.
+    # Explicit AUTO: use a native codec when one exists, raw otherwise.
     return "auto" if bc_available else "off"
 
 

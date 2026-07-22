@@ -232,6 +232,18 @@ def test_wgpu_physical_rows_report_resident_draw_geometry(qt_app):
         assert rows[0]["physical_draw_bounds_match_layout"] is True
         assert rows[0]["physical_storage_mode"] == "wgpu_page_table"
         assert rows[0]["physical_acknowledged_identity"] is not None
+        bindings = rows[0]["physical_page_bindings"]
+        expected_quality = (
+            "lossy_compressed"
+            if any(view._wgpu_executor.page_is_compressed(row["actual_key"]) for row in bindings)
+            else "exact"
+        )
+        assert rows[0]["physical_quality"] == expected_quality
+        assert all(
+            row["quality"] != "exact"
+            for row in bindings
+            if view._wgpu_executor.page_is_compressed(row["actual_key"])
+        )
         assert view.wgpuPresentationDiagnostics()["physically_visible_tile_count"] == 2
     finally:
         view.close()

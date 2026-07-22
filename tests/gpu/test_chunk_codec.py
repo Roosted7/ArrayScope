@@ -126,12 +126,11 @@ def test_resolve_codec_falls_back_to_raw_for_unsupported_dtype():
 # --- default-off proof ------------------------------------------------------
 
 
-def test_default_setting_is_auto_and_raw_is_byte_identical():
-    # G7 host-cache AUTO: the default flipped to AUTO (aggressive dogfood) so the
-    # compressed tier is actually exercised in the live app.  Explicit RAW stays
-    # the byte-for-byte pass-through reference.
+def test_default_setting_is_raw_and_raw_is_byte_identical():
+    # The component codec remains available, but the live-benefit audit keeps
+    # production on the byte-for-byte RAW reference unless explicitly enabled.
     settings = settings_from_mapping({})
-    assert settings.chunk_transport_codec is ChunkTransportCodecChoice.AUTO
+    assert settings.chunk_transport_codec is ChunkTransportCodecChoice.RAW
     # The explicit RAW value is a byte-for-byte pass-through: for every dtype the
     # stored bytes equal the raw transport payload and the decoded chunk is exact.
     cache = CompressedChunkCache(ChunkTransportCodecChoice.RAW.value)

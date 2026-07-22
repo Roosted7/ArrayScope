@@ -53,6 +53,7 @@ DEFAULT_PROFILE_CACHE_BYTES = 64 * 1024 * 1024
 DEFAULT_STAGE_CACHE_BYTES = 512 * 1024 * 1024
 DEFAULT_STAGE_CACHE_ENTRIES = 64
 LARGE_MATERIALIZE_BYTES = 512 * 1024 * 1024
+COMPRESSED_TIER_RAW_FRACTION = 0.25
 
 
 def _build_array_cache(max_bytes: int, max_entries: int, codec: str | None):
@@ -60,25 +61,26 @@ def _build_array_cache(max_bytes: int, max_entries: int, codec: str | None):
 
     ``codec`` RAW (or empty/None) -> a plain ``BoundedArrayCache``, byte-for-byte
     identical to before this feature existed.  Otherwise a ``TwoLevelArrayCache``:
-    the same raw cache at its full byte budget (the hot path is unchanged -- raw
-    hits are identical and un-regressed), backed by an *additional* compressed
-    tier of equal byte budget.  Values evicted from the raw cache are compressed
-    into the tier (best lossless codec per dtype under ``auto``) and recovered by
-    a decode on a later revisit instead of an expensive recompute.  The tier only
-    ever does work on eviction (background) and on a raw miss (a decode replacing
-    a recompute -- strictly cheaper), so there is no hot-path regression; the
-    cost is the tier's extra RAM, which the memory policy resizes.
+    one total budget split between a raw hot tier and compressed backing tier.
+    Values evicted from the raw cache are compressed synchronously into the tier
+    (best lossless codec per dtype under ``auto``) and recovered by a synchronous
+    decode on a later revisit. This remains an explicit experiment: only an
+    off-thread tier at an expensive miss owner could justify AUTO. The configured
+    memory-policy budget remains the physical byte-accounting owner.
     """
 
     codec = (codec or "raw").strip().lower()
     if codec == "raw":
         return BoundedArrayCache(int(max_bytes), int(max_entries))
-    tier = CompressedBackingTier(max_bytes=int(max_bytes), codec_name=codec)
+    raw_bytes = max(0, int(max_bytes * COMPRESSED_TIER_RAW_FRACTION))
+    tier_bytes = max(0, int(max_bytes) - raw_bytes)
+    tier = CompressedBackingTier(max_bytes=tier_bytes, codec_name=codec)
     return TwoLevelArrayCache.build(
-        raw_max_bytes=int(max_bytes),
+        raw_max_bytes=raw_bytes,
         raw_max_entries=int(max_entries),
         tier=tier,
         store_adapter=split_payload_for_tier,
+        raw_budget_fraction=COMPRESSED_TIER_RAW_FRACTION,
     )
 
 
@@ -187,6 +189,9 @@ class OperationEvaluator:
         self._profile_cache = _build_array_cache(
             DEFAULT_PROFILE_CACHE_BYTES, 256, self.chunk_transport_codec
         )
+        # This is the exact demand-ROI cache used by TileDataProvider.  It is
+        # not the GPU source-grid/page store and it must not share eviction
+        # state with the display-materialization cache.
         self._region_cache = _build_array_cache(
             DEFAULT_DISPLAY_CACHE_BYTES, 512, self.chunk_transport_codec
         )
@@ -213,10 +218,14 @@ class OperationEvaluator:
         normalized = (codec or "raw").strip().lower()
         if normalized == (self.chunk_transport_codec or "raw").strip().lower():
             return False
+        display_bytes = int(self._display_cache.max_bytes)
+        profile_bytes = int(self._profile_cache.max_bytes)
+        region_bytes = int(self._region_cache.max_bytes)
         self.chunk_transport_codec = normalized
-        self._display_cache = _build_array_cache(DEFAULT_DISPLAY_CACHE_BYTES, 512, normalized)
-        self._profile_cache = _build_array_cache(DEFAULT_PROFILE_CACHE_BYTES, 256, normalized)
-        self._region_cache = _build_array_cache(DEFAULT_DISPLAY_CACHE_BYTES, 512, normalized)
+        self._display_cache = _build_array_cache(display_bytes, 512, normalized)
+        self._profile_cache = _build_array_cache(profile_bytes, 256, normalized)
+        self._region_cache = _build_array_cache(region_bytes, 512, normalized)
+        self.last_diagnostics = None
         return True
 
     def set_document(self, document: ArrayDocument):

@@ -83,17 +83,17 @@ _PRIMARY_PLACEHOLDER = None
 
 @dataclass(frozen=True)
 class _PayloadTemplate:
-    """A frozen-dataclass payload with its primary array field nulled out.
+    """A frozen-dataclass payload with every primary-array alias nulled out.
 
     Holds every non-primary field verbatim (auxiliary arrays and metadata); the
     primary array lives compressed in the tier and is restored on ``rebuild``.
     """
 
     stripped: object
-    field: str
+    fields: tuple[str, ...]
 
     def rebuild(self, array: np.ndarray) -> object:
-        return dataclasses.replace(self.stripped, **{self.field: array})
+        return dataclasses.replace(self.stripped, **dict.fromkeys(self.fields, array))
 
 
 def split_payload_for_tier(value: object):
@@ -125,15 +125,23 @@ def split_payload_for_tier(value: object):
         ]
         if not array_fields:
             return None
-        primary_name, primary = max(array_fields, key=lambda nv: int(nv[1].nbytes))
-        aux_nbytes = sum(int(arr.nbytes) for (name, arr) in array_fields if name != primary_name)
+        _primary_name, primary = max(array_fields, key=lambda nv: int(nv[1].nbytes))
+        primary_names = tuple(name for name, arr in array_fields if arr is primary)
+        # Count unique auxiliary storage once. Display payloads deliberately carry
+        # aliases (data/semantic_data/lod_source_data); retaining or double-counting
+        # one of those aliases would erase the compression win and break identity on
+        # recovery.
+        auxiliary = {id(arr): arr for _name, arr in array_fields if arr is not primary}
+        aux_nbytes = sum(int(arr.nbytes) for arr in auxiliary.values())
         try:
-            stripped = dataclasses.replace(value, **{primary_name: _PRIMARY_PLACEHOLDER})
+            stripped = dataclasses.replace(
+                value, **dict.fromkeys(primary_names, _PRIMARY_PLACEHOLDER)
+            )
         except Exception:
             # Non-init or otherwise non-replaceable field: decline rather than
             # risk a wrong reconstruction.
             return None
-        return primary, _PayloadTemplate(stripped=stripped, field=primary_name), aux_nbytes
+        return primary, _PayloadTemplate(stripped=stripped, fields=primary_names), aux_nbytes
     return None
 
 
@@ -362,6 +370,7 @@ class TwoLevelArrayCache:
         tier: CompressedBackingTier | None = None,
         *,
         promote_on_recover: bool = True,
+        raw_budget_fraction: float | None = None,
     ) -> None:
         self._raw = raw_cache
         self._tier = tier
@@ -369,6 +378,13 @@ class TwoLevelArrayCache:
         self.recomputes = 0
         self.tier_recoveries = 0
         self.raw_hits = 0
+        total = int(raw_cache.max_bytes or 0) + int(tier.max_bytes if tier is not None else 0)
+        self._total_max_bytes = total
+        self._raw_budget_fraction = (
+            float(raw_cache.max_bytes) / float(total)
+            if raw_budget_fraction is None and tier is not None and total > 0
+            else (None if raw_budget_fraction is None else float(raw_budget_fraction))
+        )
         if tier is not None:
             # Subscribe the tier to the raw cache's eviction hook so evicted
             # values are compressed instead of dropped.  Requires a raw cache
@@ -384,6 +400,7 @@ class TwoLevelArrayCache:
         tier: CompressedBackingTier | None = None,
         promote_on_recover: bool = True,
         store_adapter: Callable[[object], tuple | None] | None = None,
+        raw_budget_fraction: float | None = None,
     ) -> TwoLevelArrayCache:
         """Construct a raw ``BoundedArrayCache`` wired to ``tier``'s eviction hook.
 
@@ -408,7 +425,12 @@ class TwoLevelArrayCache:
                 _tier.store(key, array, meta=meta, meta_nbytes=meta_nbytes)
 
         raw = BoundedArrayCache(raw_max_bytes, raw_max_entries, on_evict=on_evict)
-        return cls(raw, tier, promote_on_recover=promote_on_recover)
+        return cls(
+            raw,
+            tier,
+            promote_on_recover=promote_on_recover,
+            raw_budget_fraction=raw_budget_fraction,
+        )
 
     @property
     def raw(self):
@@ -430,11 +452,12 @@ class TwoLevelArrayCache:
 
     @property
     def bytes_used(self) -> int:
-        return int(self._raw.bytes_used)
+        tier_bytes = 0 if self._tier is None else int(self._tier.compressed_bytes)
+        return int(self._raw.bytes_used) + tier_bytes
 
     @property
     def max_bytes(self) -> int:
-        return int(self._raw.max_bytes)
+        return int(self._total_max_bytes)
 
     @property
     def max_entries(self) -> int:
@@ -449,12 +472,16 @@ class TwoLevelArrayCache:
             self._tier.clear()
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
-        self._raw.resize(max_bytes=max_bytes, max_entries=max_entries)
-        # Keep the compressed tier's budget locked to the raw budget so a memory
-        # policy change scales both tiers together (the tier is additional RAM
-        # equal to the raw budget; see the evaluator's tier sizing).
-        if self._tier is not None and max_bytes is not None:
-            self._tier.resize(max_bytes=int(max_bytes))
+        raw_max = max_bytes
+        tier_max = None
+        if max_bytes is not None:
+            self._total_max_bytes = int(max_bytes)
+            if self._tier is not None and self._raw_budget_fraction is not None:
+                raw_max = max(0, int(self._total_max_bytes * self._raw_budget_fraction))
+                tier_max = max(0, self._total_max_bytes - raw_max)
+        self._raw.resize(max_bytes=raw_max, max_entries=max_entries)
+        if self._tier is not None and tier_max is not None:
+            self._tier.resize(max_bytes=tier_max)
 
     def get(self, key):
         value = self._raw.get(key)
@@ -468,8 +495,9 @@ class TwoLevelArrayCache:
             return None
         self.tier_recoveries += 1
         if self._promote:
-            # Promote back into the raw cache; a resulting eviction re-enters the
-            # tier via the hook, so no working-set truth is lost.
+            # A key has one physical state: cold OR hot. Remove the cold copy
+            # before promotion; a resulting raw eviction re-enters the tier.
+            self._tier.discard(key)
             self._raw.put(key, recovered)
         return recovered
 
@@ -502,6 +530,8 @@ class TwoLevelArrayCache:
         tier_diag = self._tier.diagnostics()
         return dataclasses.replace(
             base,
+            bytes_used=self.bytes_used,
+            max_bytes=self.max_bytes,
             tier_engaged=True,
             tier_codec=str(self._tier.codec_name),
             tier_entries=int(tier_diag.entries),

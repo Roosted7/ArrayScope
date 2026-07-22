@@ -125,12 +125,6 @@ _WGPU_REP_DTYPES = {
     RGB8: "uint8",
     RGB_WINDOWED_RGBA32F: "float32",
 }
-_WGPU_REP_TEXEL_BYTES = {
-    SCALAR_R32F: 4,
-    COMPLEX_RG32F: 8,
-    RGB8: 4,
-    RGB_WINDOWED_RGBA32F: 16,
-}
 
 
 def _wgpu_rgba(color, alpha: float = 1.0):
@@ -453,10 +447,8 @@ class WgpuImageView2D(ImageViewShell):
             )
             if budget:
                 budgets[representation] = budget
-        # Resolve the display-codec choice to an executor mode against this
-        # device's real block-compression support.  AUTO engages aggressively
-        # ("auto") wherever the device has BC/ASTC (the owner's dogfood default),
-        # OFF forces the byte-identical raw pools, BC is the explicit force-on.
+        # Resolve the explicit display-codec experiment against this device's
+        # real block-compression support. OFF is the exact production default.
         from arrayscope.app.settings_state import texture_codec_executor_mode
 
         codec_mode = texture_codec_executor_mode(
@@ -1553,7 +1545,6 @@ class WgpuImageView2D(ImageViewShell):
 
             uploads = int(report.uploads)
             resident_pages = len(executor.page_table.resident_keys())
-            texel_bytes = _WGPU_REP_TEXEL_BYTES[representation]
             updated = tuple(planned_upload_tiles) if uploads > 0 else ()
             stats = TileLayerUpdateStats(
                 visible_items=len(committed_tiles),
@@ -1567,10 +1558,10 @@ class WgpuImageView2D(ImageViewShell):
                 resident_items=len(presented),
                 storage_capacity=executor.pool_budget(representation),
                 texture_uploads=uploads,
-                texture_upload_bytes=uploads * PAGE * PAGE * texel_bytes,
+                texture_upload_bytes=int(report.upload_bytes),
                 page_count=resident_pages,
                 active_pages=sum(len(info["page_keys"]) for info in committed_tiles.values()),
-                estimated_gpu_bytes=resident_pages * PAGE * PAGE * texel_bytes,
+                estimated_gpu_bytes=int(executor.active_resident_bytes),
                 budget_bytes=int(tile_residency_budget_bytes or 0),
                 shader_uniform_updates=1,
                 upload_ms=upload_ms,
@@ -1937,6 +1928,26 @@ class WgpuImageView2D(ImageViewShell):
             x, y, width, height = tuple(info.get("world_rect", (0.0, 0.0, 0.0, 0.0)))
             bounds = (float(x), float(y), float(x + width), float(y + height))
             source_width, source_height = tuple(info.get("src_size", (0.0, 0.0)))
+            binding_rows = tuple(
+                {
+                    "target_key": key,
+                    "actual_key": key,
+                    "actual_lod": key.lod,
+                    "scale": (1.0, 1.0),
+                    "offset": (0.0, 0.0),
+                    "quality": (
+                        f"lossy_{executor.codec_family}"
+                        if executor.page_is_compressed(key)
+                        else "exact"
+                    ),
+                }
+                for key in page_keys
+            )
+            physical_quality = (
+                "exact"
+                if all(row["quality"] == "exact" for row in binding_rows)
+                else "lossy_compressed"
+            )
             rows[int(tile_number)] = {
                 "physical_texture_kind": representation,
                 "physical_storage_mode": "wgpu_page_table",
@@ -1950,23 +1961,13 @@ class WgpuImageView2D(ImageViewShell):
                 ),
                 "physical_acknowledged_identity": info.get("identity"),
                 "physical_lod_level": int(info.get("lod_level", 0) or 0),
-                "physical_quality": "exact",
+                "physical_quality": physical_quality,
                 "physical_draw_world_rects": (bounds,),
                 "physical_draw_uv_rects": ((0.0, 0.0, 1.0, 1.0),),
                 "physical_draw_world_bounds": bounds,
                 "physical_expected_world_rect": bounds,
                 "physical_draw_bounds_match_layout": True,
-                "physical_page_bindings": tuple(
-                    {
-                        "target_key": key,
-                        "actual_key": key,
-                        "actual_lod": key.lod,
-                        "scale": (1.0, 1.0),
-                        "offset": (0.0, 0.0),
-                        "quality": "exact",
-                    }
-                    for key in page_keys
-                ),
+                "physical_page_bindings": binding_rows,
             }
         return rows
 

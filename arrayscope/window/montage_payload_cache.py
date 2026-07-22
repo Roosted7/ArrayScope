@@ -10,6 +10,8 @@ from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.shader_mapping import TexturePlaneKind
 
+DEFAULT_RETAINED_PAYLOAD_BYTES = 512 * 1024 * 1024
+
 
 def previous_tiled_payloads(frame) -> dict[int, object]:
     source = None if frame is None else getattr(frame, "value_source", None)
@@ -48,25 +50,39 @@ class RetainedTiledPayloadStore:
     """
 
     limit: int = 4096
+    max_bytes: int | None = DEFAULT_RETAINED_PAYLOAD_BYTES
     _payloads: BoundedCache = field(default_factory=BoundedCache)
     last_clear_reason: str = ""
 
     def __post_init__(self) -> None:
         self.limit = max(1, int(self.limit))
-        self._payloads.resize(max_entries=self.limit)
+        self.max_bytes = None if self.max_bytes is None else max(0, int(self.max_bytes))
+        self._payloads.resize(max_entries=self.limit, max_bytes=self.max_bytes)
 
-    def remember_acknowledged(self, payloads, *, limit: int | None = None) -> None:
+    @property
+    def bytes_used(self) -> int:
+        return int(self._payloads.bytes_used)
+
+    def remember_acknowledged(
+        self,
+        payloads,
+        *,
+        limit: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
         max_items = max(1, int(self.limit if limit is None else limit))
+        if max_bytes is not None:
+            self.max_bytes = max(0, int(max_bytes))
         # Bound the store before insertion.  Large montage commits can hand us
         # thousands of acknowledged payloads; retaining all of them and only
         # then trimming creates an avoidable allocation spike.
-        self._payloads.resize(max_entries=max_items)
+        self._payloads.resize(max_entries=max_items, max_bytes=self.max_bytes)
         values = () if payloads is None else payloads.values()
         for payload in values:
             key = base_tile_source_id(getattr(payload, "source_id", None))
             if key is None or not payload_matches_texture_kind(payload):
                 continue
-            self._payloads.put(key, payload)
+            self._payloads.put(key, payload, nbytes=_payload_nbytes(payload))
 
     def resolve(self, tile_key, lod_factor: int | None, tile_state, *, shader_display: bool):
         """Return a retained payload for ``tile_key`` or None.
@@ -106,6 +122,15 @@ def payload_lod_matches(payload, factor: int) -> bool:
     lod = getattr(payload, "lod", None)
     payload_factor = int(getattr(lod, "factor", 1) or 1)
     return payload_factor == max(1, int(factor))
+
+
+def _payload_nbytes(payload) -> int:
+    value = getattr(payload, "nbytes", 0)
+    value = value() if callable(value) else value
+    try:
+        return max(0, int(value))
+    except Exception:
+        return 0
 
 
 def payload_matches_texture_kind(payload) -> bool:

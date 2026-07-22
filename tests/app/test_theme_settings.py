@@ -175,24 +175,21 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
     # ADR 0050: resident LOD is the montage default once validated on hardware.
     assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
-    # G7 host-cache AUTO: the compression codec defaults to AUTO (aggressive
-    # dogfood — the compressed tier engages readily on the big evaluator caches,
-    # best lossless codec per dtype), and any unknown value normalizes to AUTO.
-    assert defaults.chunk_transport_codec == settings_state.ChunkTransportCodecChoice.AUTO
+    # Component codecs remain available, but the product path stays raw until a
+    # matched end-to-end benchmark proves a user-visible win.
+    assert defaults.chunk_transport_codec == settings_state.ChunkTransportCodecChoice.RAW
     assert (
         settings_state.settings_from_mapping(
             {"chunk_transport_codec": "unknown"}
         ).chunk_transport_codec
-        == settings_state.ChunkTransportCodecChoice.AUTO
+        == settings_state.ChunkTransportCodecChoice.RAW
     )
-    # G7 Phase B: the native BC display codec is AUTO by default (aggressive
-    # dogfood — engages wherever the device supports BC), unknown values
-    # normalize back to AUTO, and the resolution helper maps choices to the
-    # executor's compressed_textures mode gated on device BC availability.
-    assert defaults.texture_codec == settings_state.TextureCodecChoice.AUTO
+    # Native block compression is also evidence-gated: OFF is the safe default
+    # because standalone codec ratio does not include the live CPU/pool costs.
+    assert defaults.texture_codec == settings_state.TextureCodecChoice.OFF
     assert (
         settings_state.settings_from_mapping({"texture_codec": "unknown"}).texture_codec
-        == settings_state.TextureCodecChoice.AUTO
+        == settings_state.TextureCodecChoice.OFF
     )
     assert (
         settings_state.texture_codec_executor_mode(

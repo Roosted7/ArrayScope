@@ -592,6 +592,7 @@ class FrameReport:
     generation: int
     presented: bool = False
     uploads: int = 0
+    upload_bytes: int = 0
     overlay_buffer_writes: int = 0
     glyph_atlas_uploads: int = 0
     widget_atlas_uploads: int = 0
