@@ -6,6 +6,30 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-22 — **Compare v1c — open A−B as a third linked window (queue step 7
+  complete):** `open_difference_window()` builds `CompositeArraySource(A.base_data,
+  B.base_data, op="subtract", own_inputs=False)` (wrapped in `LazySourceArray`
+  per the file-source precedent), opens it as a third window linked into the same
+  dims+camera+levels group, rendering progressively through the unchanged pipeline
+  (region-only `read_region`, no whole-array materialization). Lifecycle: the
+  `own_inputs=False` guard means closing A−B never tears down the still-live A/B
+  sources; the linked cursor now reads via `read_region` (also fixes lazy/memmap
+  compare windows). Menu: "Open difference (A − B)…". Evidence: `d4ca8cac`;
+  real-Wayland `tests/ui/test_compare_difference.py` 4/4; progressive spy proves
+  region-only reads + exact vs `A_np − B_np`; mismatched-shape refusal + lifecycle
+  tests; full parallel suite 2752 passed. **Compare v1 (steps 5+6+7) is complete.**
+
+- 2026-07-22 — **Test isolation: QSettings hermetic under serial `-n 0`
+  (standing lane):** `tests/ui/test_diagnostics_dialog.py` had 4 tests failing
+  only under `-n 0` because pytest-qt's empty `organizationName` made `QSettings`
+  merge the developer's real `~/.config/Unknown Organization.conf`
+  (`image_rendering_backend=wgpu`), which `.clear()` cannot reach, so serial runs
+  built a WgpuSurface instead of pyqtgraph. Fix: `tests/conftest.py` now redirects
+  `XDG_CONFIG_HOME` to a private empty dir for EVERY run (per-process for serial),
+  not only xdist workers. Not a production bug (the app sets a real org name).
+  Evidence: `aa597939`; serial+parallel 14/14, fail-then-pass proven, full suite
+  2752 passed.
+
 - 2026-07-22 — **Compare v1b — "Compare with…" launcher + linked complex cursor
   (queue step 6):** `CompareLauncherMixin.open_compare_window` opens an
   in-process sibling pre-linked on dims+camera+levels (reusing the sync

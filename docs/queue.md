@@ -28,13 +28,12 @@ this file says *what, in what order, and when it counts as done*.
 
 ## Next — the product turn (queued behind rows 3d/4; rationale in [roadmap.md](roadmap.md) and [reviews/2026-07-19-course-review.md](reviews/2026-07-19-course-review.md))
 
-Steps 5, 6, 8 and the Tier-2 conformance harness (half of 9) LANDED
-2026-07-22; step 7's derived-source **core** landed too. See the
-[Done ledger](queue-done.md). Remaining below.
+**Compare v1 (steps 5, 6, 7) COMPLETE 2026-07-22.** Steps 8 and the Tier-2
+conformance harness (half of 9) also landed. See the [Done ledger](queue-done.md).
+Remaining product-turn work below.
 
 | # | Step | Exit gate |
 |---|---|---|
-| 7-window | **Compare v1c — open A−B as a third linked window.** The `CompositeArraySource` core is landed; this wires it into the step-6 "Compare with…" launcher as a third linked window. **Lifecycle trap:** the composite's `close()` closes BOTH inputs — a shared-source A/B must NOT be torn down when the A−B window closes; the window must own the composite without owning A/B. | A−B window renders progressively on real data; values exact vs NumPy oracle; recipes/sessions unaffected |
 | 9-sigpy | **Plugin ops v2 — sigpy pack (Tier-2 harness DONE).** sigpy fft/nufft/espirit as an optional in-process pack declaring Tier-2 `region_capable` where valid; the conformance harness (landed) gates the claims. **Dep-blocked:** sigpy is not installed in this environment. | sigpy ops usable in the dock; each region claim passes the conformance harness (mis-declared → downgraded, already red-first tested) |
 | 10 | **Plugin ops v3 — BART subprocess pack.** cfl temp-file handoff at the stage-materialization seam; `CancellationToken` → SIGTERM; honest cost hints for admission. Requires the queue's shutdown/cancellation item closed first. **Dep-blocked:** `bart` not installed / `BART_TOOLBOX_PATH` unset here. | BART fft/pics run as ops on real data; cancel mid-op kills the child <1 s; process exit stays bounded |
 
@@ -122,17 +121,12 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   2026-07-22: reviewed — the `None` branch falls through to
   `acknowledged_identity_satisfies_target`, not an unguarded accept, and lives in
   the retiring VisPy backend; no clear defect found, left as a low-priority audit.
-- **`tests/ui/test_diagnostics_dialog.py`: 4 tests fail under serial `-n 0`,
-  pass under parallel xdist** (found 2026-07-22, pre-existing on clean `main`
-  `4c044b30`). `test_diagnostics_reports_actual_image_backend_separately_from_setting`,
-  `..._auto_text_toggle_pauses_text_but_not_bars`,
-  `..._jsonl_logging_writes_start_and_snapshots`, and one more assert a
-  stage-cache `entries=1`/backend state that leaks between serial tests but is
-  reset by process-per-worker parallelism. A test-isolation bug (shared global:
-  QSettings / stage cache / a diagnostics singleton). Exit gate: the file passes
-  under both `-n 0` and xdist, with the shared state reset per test — pinned so
-  it cannot silently regress. Low urgency (CI runs xdist), but it undermines
-  `-n 0` as a debugging tool.
+- **`tests/ui/test_diagnostics_dialog.py` serial `-n 0` failures — DONE
+  2026-07-22** (`aa597939`). Root cause was NOT a diagnostics singleton but the
+  suite reading the developer's real `~/.config` QSettings under `-n 0` (empty
+  pytest-qt org name → org-fallback merge that `.clear()` can't reach →
+  `image_rendering_backend=wgpu`). Fixed hermetically in `tests/conftest.py`.
+  See the [Done ledger](queue-done.md).
 - **Upstream rendercanvas contributions** (from gate B): a native-Wayland
   screen-presentation hook (wl_display via QNativeInterface + winId-as-
   wl_surface, Vulkan-only instance) and making the import-time
