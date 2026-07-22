@@ -57,6 +57,17 @@ class MontageQualityPolicyChoice(Enum):
     RESIDENT = "resident"
 
 
+class ChunkTransportCodecChoice(Enum):
+    # G7 codec-aware chunk transport.  RAW is the default and the reference:
+    # the host cache stores chunk bytes uncompressed and the transport path is
+    # byte-for-byte identical to a build without this setting.  ZFP/BLOSC2 are
+    # opt-in lossless host-cache compression; per the G7 gate the default only
+    # flips once a benchmark proves compress+transfer+decompress < raw transfer.
+    RAW = "raw"
+    ZFP = "zfp"
+    BLOSC2 = "blosc2"
+
+
 @dataclass(frozen=True)
 class AppSettingsState:
     theme: ThemeChoice = ThemeChoice.SYSTEM
@@ -68,6 +79,9 @@ class AppSettingsState:
     # wgpu backend only; screen is an explicit experimental pin (queue row 3).
     wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
+    # G7: host-cache chunk-transport codec.  RAW (off) keeps the transport path
+    # byte-identical; the default only flips behind a proven benchmark win.
+    chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -92,6 +106,9 @@ def settings_from_mapping(values) -> AppSettingsState:
         montage_quality_policy=normalize_montage_quality_policy_choice(
             values.get("montage_quality_policy")
         ),
+        chunk_transport_codec=normalize_chunk_transport_codec_choice(
+            values.get("chunk_transport_codec")
+        ),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(
             values.get("render_memory_budget_mb", 512)
@@ -111,6 +128,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "image_rendering_backend": settings.image_rendering_backend.value,
         "wgpu_present_method": settings.wgpu_present_method.value,
         "montage_quality_policy": settings.montage_quality_policy.value,
+        "chunk_transport_codec": settings.chunk_transport_codec.value,
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,
@@ -178,6 +196,18 @@ def normalize_montage_quality_policy_choice(value) -> MontageQualityPolicyChoice
         # explicit fallback policy (and the effective one on non-VisPy
         # backends via the frame renderer capability gate).
         return MontageQualityPolicyChoice.RESIDENT
+
+
+def normalize_chunk_transport_codec_choice(value) -> ChunkTransportCodecChoice:
+    if isinstance(value, ChunkTransportCodecChoice):
+        return value
+    value = getattr(value, "value", value)
+    try:
+        return ChunkTransportCodecChoice(str(value))
+    except Exception:
+        # Unknown/absent -> RAW: the transport codec is off by default and any
+        # unrecognized value falls back to the byte-identical raw path.
+        return ChunkTransportCodecChoice.RAW
 
 
 def normalize_render_memory_budget_mb(value) -> int:

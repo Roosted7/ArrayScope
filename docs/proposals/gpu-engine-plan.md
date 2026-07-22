@@ -408,6 +408,36 @@ they measurably beat the software page table.
 (compress + transfer + decompress < raw transfer) per dtype/scenario before
 any default flips on.
 
+*Status (2026-07-22, first ZFP-class step).* Landed the codec abstraction
+(`arrayscope/gpu/chunk_codec.py`: `raw`/`zfp`/`blosc2`, lossless-by-default,
+dtype-driven `resolve_codec` that falls back to `raw` for dtypes a codec
+cannot represent exactly), the opt-in host-cache path (`CompressedChunkCache`),
+and the `chunk_transport_codec` setting **defaulting to `raw` (off)** — the GPU
+upload path in `wgpu_executor` is intentionally untouched, so the production
+transport is byte-for-byte unchanged. Benchmark
+(`arrayscope/tools/g7_transport_benchmark.py`, 200 × 256² chunks of a real
+336×336×272 volume):
+
+| dtype     | codec  | ratio | comp ms | decomp ms | break-even GB/s | inequality @12 GB/s PCIe |
+|-----------|--------|-------|---------|-----------|-----------------|--------------------------|
+| float32   | zfp    | 1.71  | 245.7   | 294.0     | 0.04            | no |
+| float32   | blosc2 | 2.29  | 1147.5  | 161.7     | 0.02            | no |
+| complex64 | zfp    | 1.68  | 425.7   | 556.1     | 0.04            | no |
+| complex64 | blosc2 | 2.39  | 2022.0  | 207.8     | 0.03            | no |
+| int16     | zfp    | 1.88  | 299.4   | 178.3     | 0.03            | no |
+| int16     | blosc2 | 2.56  | 968.6   | 119.5     | 0.01            | no |
+
+**Verdict: the inequality does NOT hold for CPU decode on this hardware.**
+Real data compresses well (1.7–2.6×), but the break-even link bandwidth
+(~0.01–0.04 GB/s — the speed below which saved bytes outweigh codec CPU cost)
+sits three orders of magnitude below a real PCIe link (~12 GB/s) or even host
+memcpy (~26 GB/s). Every round-trip is lossless-exact. So compression's win
+here is **host RAM** (more chunks cached per byte budget), not transfer time.
+The default stays `raw` (off) — the gate's "prove before flipping" is met with
+a truthful *no win yet*. The transfer-side win requires a **GPU-side decoder**
+(nvCOMP or a wgpu compute decode) so the decompress cost leaves the CPU
+critical path; that is the G7 follow-up.
+
 ## Cleanup that accompanies the program
 
 - Fold legacy `display/colormaps.py` into `colormap_library` (3 import

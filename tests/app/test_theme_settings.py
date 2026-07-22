@@ -127,6 +127,7 @@ def test_settings_round_trip_defaults_and_values():
             "image_rendering_backend": "vispy",
             "wgpu_present_method": "screen",
             "montage_quality_policy": "resident",
+            "chunk_transport_codec": "zfp",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
             "qt_platform": "xcb",
@@ -144,6 +145,7 @@ def test_settings_round_trip_defaults_and_values():
         "image_rendering_backend": "vispy",
         "wgpu_present_method": "screen",
         "montage_quality_policy": "resident",
+        "chunk_transport_codec": "zfp",
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
         "qt_platform": "xcb",
@@ -171,6 +173,15 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
     # ADR 0050: resident LOD is the montage default once validated on hardware.
     assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
+    # G7: the chunk-transport codec is off by default (raw = byte-identical
+    # transport), and any unknown value normalizes back to raw.
+    assert defaults.chunk_transport_codec == settings_state.ChunkTransportCodecChoice.RAW
+    assert (
+        settings_state.settings_from_mapping(
+            {"chunk_transport_codec": "unknown"}
+        ).chunk_transport_codec
+        == settings_state.ChunkTransportCodecChoice.RAW
+    )
     unknown = settings_state.settings_from_mapping({"panel_resize_behavior": "unknown"})
     assert unknown.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT
     unknown_quality = settings_state.settings_from_mapping({"montage_quality_policy": "unknown"})
