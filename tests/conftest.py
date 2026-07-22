@@ -4,19 +4,28 @@ import tempfile
 
 import pytest
 
-# --- Parallel-worker filesystem isolation (pytest-xdist) ---------------------
-# xdist workers are separate processes but share one filesystem. Two shared
-# on-disk resources would otherwise race between workers:
-#   * QSettings — the test QApplication uses a fixed organization/application
-#     name, so every worker reads and writes the same on-disk store, and the
-#     autouse ``_clear_qt_settings`` fixture in one worker wipes another
-#     worker's writes mid-test.
-#   * ``tests/artifacts/`` — the Qt smoke test writes fixed filenames there.
-# Point each worker at its own config + artifact directory. This must happen at
-# import time, before Qt (and thus QSettings) resolves any path. It is a no-op
-# for serial runs (``PYTEST_XDIST_WORKER`` is unset under ``-n 0`` / no xdist),
-# so single-process runs keep their normal paths — which is what CI relies on
-# when generating artifacts into the canonical ``tests/artifacts/``.
+# --- Test filesystem isolation (QSettings + artifacts) -----------------------
+# Two shared on-disk resources leak developer/cross-process state into tests:
+#   * QSettings — the test QApplication resolves a UserScope store under
+#     ``XDG_CONFIG_HOME``. Under pytest-qt's ``qapp`` the organizationName is
+#     empty, so Qt merges in the org-level fallback ``Unknown Organization.conf``
+#     — a file the autouse ``_clear_qt_settings`` / ``clear_arrayscope_settings``
+#     helpers CANNOT wipe (``QSettings().clear()`` only touches the app-scoped
+#     file, never the org fallback). On a developer box that fallback holds real
+#     persisted keys (e.g. ``image_rendering_backend=wgpu``), so a serial
+#     ``-n 0`` run reads the developer's live config and builds the wrong image
+#     backend, while xdist workers (isolated below) silently pass — the exact
+#     pass/fail-by-parallelism signature that made ``-n 0`` unusable for
+#     debugging ``tests/ui/test_diagnostics_dialog.py``. The only reliable reset
+#     is to point QSettings at a private, empty config dir; ``.clear()`` cannot
+#     reach the fallback, so we must never let tests see it in the first place.
+#   * ``tests/artifacts/`` — the Qt smoke test writes fixed filenames there, so
+#     concurrent xdist workers would clobber each other.
+# QSettings isolation applies to EVERY run (serial and parallel): tests must
+# never read the developer's real ~/.config. Artifact isolation stays
+# xdist-only, so serial CI still generates into the canonical ``tests/artifacts/``.
+# This must happen at import time, before Qt (and thus QSettings) resolves any
+# path.
 # Default the whole suite to the offscreen Qt platform at import time (rings
 # 0-2).  Ring-3/4 real-display runs pass QT_QPA_PLATFORM explicitly, which
 # wins over this setdefault.  This also makes the Linux/Wayland display-server
@@ -25,14 +34,17 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 _XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+# Per-run private config root: one per xdist worker, one per process for serial.
+_config_tag = _XDIST_WORKER or f"serial-{os.getpid()}"
+_config_root = os.path.join(tempfile.gettempdir(), f"arrayscope-test-{_config_tag}")
+_worker_config = os.path.join(_config_root, "config")
+os.makedirs(_worker_config, exist_ok=True)
+# On Linux/Unix QSettings (UserScope) resolves under XDG_CONFIG_HOME; pointing
+# it at a private empty dir keeps every run's settings store hermetic and free
+# of the un-clearable ``Unknown Organization.conf`` org fallback.
+os.environ["XDG_CONFIG_HOME"] = _worker_config
 if _XDIST_WORKER:
-    _worker_root = os.path.join(tempfile.gettempdir(), f"arrayscope-xdist-{_XDIST_WORKER}")
-    _worker_config = os.path.join(_worker_root, "config")
-    os.makedirs(_worker_config, exist_ok=True)
-    # On Linux/Unix QSettings (UserScope) resolves under XDG_CONFIG_HOME;
-    # isolating it per worker keeps each worker's settings store private.
-    os.environ["XDG_CONFIG_HOME"] = _worker_config
-    os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_worker_root, "artifacts"))
+    os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
 
 
 def pytest_xdist_auto_num_workers(config):
