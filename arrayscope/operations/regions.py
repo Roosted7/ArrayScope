@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from arrayscope.core.array_source import read_index_spec
+
 
 class AxisRegionKind(Enum):
     POINT = "point"
@@ -243,25 +245,11 @@ def expand_region_axes(region: RegionSpec, axes: tuple[int, ...]) -> RegionSpec:
 
 
 def apply_region(data, region: RegionSpec):
-    if not any(axis_region_kind(axis.kind) == AxisRegionKind.INDICES for axis in region.axes):
-        return data[index_spec_from_region(region)]
-    result = data
-    result_axis = 0
-    for axis_region in region.axes:
-        kind = axis_region_kind(axis_region.kind)
-        if kind == AxisRegionKind.POINT:
-            result = np.take(result, int(axis_region.value), axis=result_axis)
-            continue
-        if kind == AxisRegionKind.INDICES:
-            result = np.take(
-                result, np.asarray(axis_region.value, dtype=np.int64), axis=result_axis
-            )
-        else:
-            slicer = [slice(None)] * np.ndim(result)
-            slicer[result_axis] = index_spec_from_region(RegionSpec((axis_region,)))[0]
-            result = result[tuple(slicer)]
-        result_axis += 1
-    return result
+    # Keep eager-array region evaluation identical to lazy source reads.  The
+    # shared reader applies all cheap point/slice indexing before sparse
+    # gathers, avoiding large intermediates when a point axis follows one or
+    # more INDICES axes.
+    return read_index_spec(data, index_spec_from_region(region))
 
 
 def take_axis_region(data, axis_region: AxisRegion, axis_size: int, *, axis: int):

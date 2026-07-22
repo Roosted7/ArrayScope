@@ -34,6 +34,24 @@ def test_read_index_spec_handles_index_tuples_per_axis():
     assert np.array_equal(result, expected)
 
 
+def test_read_index_spec_collapses_basic_axes_before_sparse_gathers(monkeypatch):
+    data = np.arange(12 * 14 * 16, dtype=np.float32).reshape(12, 14, 16)
+    original_take = np.take
+    input_shapes = []
+
+    def recording_take(array, indices, *, axis):
+        input_shapes.append(tuple(np.shape(array)))
+        return original_take(array, indices, axis=axis)
+
+    monkeypatch.setattr(np, "take", recording_take)
+    result = read_index_spec(data, ((1, 5, 9), (2, 8), 13))
+
+    expected = original_take(data[:, :, 13], (1, 5, 9), axis=0)
+    expected = original_take(expected, (2, 8), axis=1)
+    assert np.array_equal(result, expected)
+    assert input_shapes == [(12, 14), (3, 14)]
+
+
 def test_read_index_spec_rejects_wrong_length_and_unknown_items():
     data = np.zeros((2, 3))
     with pytest.raises(ValueError):

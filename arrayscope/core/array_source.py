@@ -455,20 +455,24 @@ def read_index_spec(array, index_spec: tuple):
             raise TypeError(f"unsupported index item: {item!r}")
     if not any(isinstance(item, (tuple, list, np.ndarray)) for item in spec):
         return array[spec]
-    result = array
+
+    # Collapse point axes and trim sliced axes before any gather.  Applying
+    # the spec strictly left-to-right with ``np.take`` can copy the untouched
+    # suffix on every step.  A sparse image-plane request such as
+    # ``(y_indices, x_indices, z_point)`` would therefore gather a large
+    # y-by-X-by-Z intermediate before finally selecting one z plane.  Basic
+    # indexing is view-like for ndarray/memmap sources, so do all points and
+    # slices in one operation and leave only the per-axis outer gathers.
+    basic_spec = tuple(
+        slice(None) if isinstance(item, (tuple, list, np.ndarray)) else item for item in spec
+    )
+    result = array[basic_spec]
     result_axis = 0
     for item in spec:
         if isinstance(item, (int, np.integer)):
-            result = np.take(result, int(item), axis=result_axis)
             continue
         if isinstance(item, (tuple, list, np.ndarray)):
             result = np.take(result, np.asarray(item, dtype=np.int64), axis=result_axis)
-        elif isinstance(item, slice):
-            slicer = [slice(None)] * int(np.ndim(result))
-            slicer[result_axis] = item
-            result = result[tuple(slicer)]
-        else:
-            raise TypeError(f"unsupported index item: {item!r}")
         result_axis += 1
     return result
 

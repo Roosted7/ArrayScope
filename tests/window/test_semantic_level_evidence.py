@@ -271,6 +271,11 @@ def test_semantic_evidence_diagnostics_are_constant_time_progress_truth():
         "blocking_reason": "worker-in-flight",
         "source_batch_limit": 16,
         "pixel_limit": 8192,
+        "completed_batches": 0,
+        "worker_elapsed_ms_total": 0.0,
+        "worker_elapsed_ms_max": 0.0,
+        "sampled_pixels_total": 0,
+        "slab_bytes_total": 0,
     }
 
     first = kernel.run_next()
@@ -279,4 +284,9 @@ def test_semantic_evidence_diagnostics_are_constant_time_progress_truth():
     assert after_first["covered_source_count"] == 16
     assert after_first["pending_batches"] == 1
     assert len(after_first["covered_sources"]) == 16
+    assert after_first["completed_batches"] == 1
+    assert after_first["worker_elapsed_ms_total"] > 0.0
+    assert after_first["worker_elapsed_ms_max"] > 0.0
+    assert after_first["sampled_pixels_total"] == 12 * 16 * 16
+    assert after_first["slab_bytes_total"] == 12 * 16 * 16 * np.dtype(np.float32).itemsize
     assert service._semantic_level_evidence_last_merged == 16

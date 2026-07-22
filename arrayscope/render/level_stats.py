@@ -819,6 +819,7 @@ class LevelStatsService:
                 release(session)
                 return
             release(current)
+            progress.record_batch(result)
             tracker = self._montage_level_tracker()
             merged = 0
             for source in tuple(result.sources):
@@ -832,6 +833,26 @@ class LevelStatsService:
                     merged += 1
             self._semantic_level_evidence_last_merged = int(merged)
             self._last_montage_level_stats_ms = float(result.elapsed_ms)
+            from arrayscope.core.trace import emit_trace
+
+            emit_trace(
+                "semantic_level_evidence_batch",
+                session_id=int(getattr(current, "session_id", 0) or 0),
+                batch_sources=len(tuple(result.sources)),
+                covered_sources=len(progress.covered_sources),
+                target_sources=int(target.target_population),
+                elapsed_ms=float(result.elapsed_ms),
+                elapsed_ms_total=float(progress.worker_elapsed_ms_total),
+                sampled_pixels=sum(
+                    int(getattr(source, "sampled_pixels", 0) or 0)
+                    for source in tuple(result.sources)
+                ),
+                sampled_pixels_total=int(progress.sampled_pixels_total),
+                slab_bytes=sum(
+                    int(getattr(source, "slab_nbytes", 0) or 0) for source in tuple(result.sources)
+                ),
+                slab_bytes_total=int(progress.slab_bytes_total),
+            )
             if len(progress.covered_sources) >= target.target_population:
                 progress.blocking_reason = "ready"
             else:

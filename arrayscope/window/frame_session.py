@@ -114,6 +114,11 @@ class SemanticLevelEvidenceProgress:
     current_batch_limit: int = 1
     inflight_generation: object | None = None
     blocking_reason: str = "waiting-semantic-sources"
+    completed_batches: int = 0
+    worker_elapsed_ms_total: float = 0.0
+    worker_elapsed_ms_max: float = 0.0
+    sampled_pixels_total: int = 0
+    slab_bytes_total: int = 0
 
     @property
     def pending_batches(self) -> int:
@@ -129,6 +134,21 @@ class SemanticLevelEvidenceProgress:
         if len(self.covered_sources_sample) < 64:
             self.covered_sources_sample.append(source_index)
         return True
+
+    def record_batch(self, result) -> None:
+        """Retain cumulative worker truth instead of only the last batch."""
+
+        elapsed_ms = float(getattr(result, "elapsed_ms", 0.0) or 0.0)
+        sources = tuple(getattr(result, "sources", ()) or ())
+        self.completed_batches += 1
+        self.worker_elapsed_ms_total += elapsed_ms
+        self.worker_elapsed_ms_max = max(self.worker_elapsed_ms_max, elapsed_ms)
+        self.sampled_pixels_total += sum(
+            int(getattr(source, "sampled_pixels", 0) or 0) for source in sources
+        )
+        self.slab_bytes_total += sum(
+            int(getattr(source, "slab_nbytes", 0) or 0) for source in sources
+        )
 
 
 def _shader_mapping_key(mapping):
@@ -1637,6 +1657,11 @@ class FrameSession:
                 "blocking_reason": "inactive",
                 "source_batch_limit": 0,
                 "pixel_limit": 0,
+                "completed_batches": 0,
+                "worker_elapsed_ms_total": 0.0,
+                "worker_elapsed_ms_max": 0.0,
+                "sampled_pixels_total": 0,
+                "slab_bytes_total": 0,
             }
         return {
             "target_population": int(target.target_population),
@@ -1647,6 +1672,11 @@ class FrameSession:
             "blocking_reason": str(progress.blocking_reason),
             "source_batch_limit": int(progress.current_batch_limit),
             "pixel_limit": int(target.pixel_limit),
+            "completed_batches": int(progress.completed_batches),
+            "worker_elapsed_ms_total": float(progress.worker_elapsed_ms_total),
+            "worker_elapsed_ms_max": float(progress.worker_elapsed_ms_max),
+            "sampled_pixels_total": int(progress.sampled_pixels_total),
+            "slab_bytes_total": int(progress.slab_bytes_total),
         }
 
     def set_level_update_pending(self, pending: bool) -> None:
