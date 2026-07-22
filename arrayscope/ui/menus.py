@@ -9,12 +9,14 @@ from arrayscope.app.free_threading import FreeThreadingChoice
 from arrayscope.app.qt_platform import QtPlatformChoice
 from arrayscope.app.settings_state import (
     AppSettingsState,
+    ChunkTransportCodecChoice,
     FFTBackendChoice,
     FFTWorkersChoice,
     ImageRenderingBackendChoice,
     MemoryProfileChoice,
     MontageQualityPolicyChoice,
     PanelResizeBehavior,
+    TextureCodecChoice,
     WgpuPresentMethodChoice,
     settings_from_mapping,
     settings_to_mapping,
@@ -31,6 +33,14 @@ from arrayscope.window.diagnostics_snapshot import collect_runtime_diagnostics_s
 
 class WindowMenuMixin:
     def _load_app_settings(self):
+        # Restore a persisted BART toolbox path into the environment before the
+        # operation packs are first enumerated, so BART ops are available across
+        # restarts without the user re-setting it (only if not already set).
+        import os
+
+        bart_path = self._settings.value("bart_toolbox_path", "")
+        if bart_path and not os.environ.get("BART_TOOLBOX_PATH"):
+            os.environ["BART_TOOLBOX_PATH"] = str(bart_path)
         return settings_from_mapping(
             {
                 "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
@@ -45,6 +55,12 @@ class WindowMenuMixin:
                 ),
                 "wgpu_present_method": self._settings.value(
                     "wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value
+                ),
+                "texture_codec": self._settings.value(
+                    "texture_codec", TextureCodecChoice.AUTO.value
+                ),
+                "chunk_transport_codec": self._settings.value(
+                    "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
                 ),
                 "memory_profile": self._settings.value(
                     "memory_profile", MemoryProfileChoice.BALANCED.value
@@ -259,12 +275,12 @@ class WindowMenuMixin:
         performance_menu.addMenu(image_backend_menu)
         self._image_rendering_backend_menu = image_backend_menu
         for choice, label in (
-            (ImageRenderingBackendChoice.AUTO, "Auto (hardware GL picks VisPy)"),
-            (ImageRenderingBackendChoice.PYQTGRAPH, "PyQtGraph stable"),
-            (ImageRenderingBackendChoice.VISPY, "VisPy experimental"),
-            # Explicit pin only — AUTO never resolves to wgpu (queue row 3d:
-            # promotion is an evidence decision, field hours count toward it).
-            (ImageRenderingBackendChoice.WGPU, "wgpu experimental (GPU compute)"),
+            (ImageRenderingBackendChoice.AUTO, "Auto (GPU picks wgpu)"),
+            (ImageRenderingBackendChoice.PYQTGRAPH, "PyQtGraph (CPU / remote)"),
+            (ImageRenderingBackendChoice.WGPU, "wgpu (GPU compute)"),
+            # VisPy is being retired via the roadmap ladder; kept as an explicit
+            # pin. AUTO now resolves to wgpu on any GPU-capable device (2026-07-22).
+            (ImageRenderingBackendChoice.VISPY, "VisPy (legacy, retiring)"),
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._image_rendering_backend_action_group.addAction(action)
@@ -311,6 +327,79 @@ class WindowMenuMixin:
             )
             wgpu_present_menu.addAction(action)
             self._wgpu_present_method_actions[choice] = action
+
+        # GPU texture compression (wgpu): BC (NVIDIA) / ASTC (Intel) block-
+        # compressed tiles, decoded free by the hardware sampler — less VRAM and
+        # PCIe transfer for large montages. AUTO picks the best format the device
+        # supports; lossy for display only (levels/histogram stay from raw).
+        self._texture_codec_actions = {}
+        self._texture_codec_action_group = QtGui.QActionGroup(self)
+        self._texture_codec_action_group.setExclusive(True)
+        texture_codec_menu = QtWidgets.QMenu("GPU Texture Compression", self)
+        texture_codec_menu.setToolTipsVisible(True)
+        performance_menu.addMenu(texture_codec_menu)
+        self._texture_codec_menu = texture_codec_menu
+        _texture_codec_labels = {
+            "auto": ("Auto (best per device)", "Compress tiles with the best format the GPU supports (ASTC on Intel, BC on NVIDIA)."),
+            "off": ("Off (uncompressed)", "Upload raw tiles; byte-identical to the pre-compression path."),
+            "bc": ("BC (force)", "Force BC block compression regardless of device."),
+            "astc": ("ASTC (force)", "Force ASTC block compression (Intel/ASTC-capable devices)."),
+        }
+        for choice in TextureCodecChoice:
+            label, tooltip = _texture_codec_labels.get(choice.value, (choice.value.upper(), ""))
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tooltip)
+            self._texture_codec_action_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_texture_codec_choice(choice)
+            )
+            texture_codec_menu.addAction(action)
+            self._texture_codec_actions[choice] = action
+
+        # Host-cache chunk compression: keep more of the working set in RAM
+        # (compressed backing tier) so scroll-back hits a cheap decode instead of
+        # a recompute/re-read — a large-matrix win. Lossless.
+        self._chunk_transport_codec_actions = {}
+        self._chunk_transport_codec_action_group = QtGui.QActionGroup(self)
+        self._chunk_transport_codec_action_group.setExclusive(True)
+        chunk_codec_menu = QtWidgets.QMenu("Host Cache Compression", self)
+        chunk_codec_menu.setToolTipsVisible(True)
+        performance_menu.addMenu(chunk_codec_menu)
+        self._chunk_transport_codec_menu = chunk_codec_menu
+        _chunk_codec_labels = {
+            "auto": ("Auto (under RAM pressure)", "Compress the host chunk cache when the working set exceeds the budget."),
+            "raw": ("Off (uncompressed)", "No host-cache compression."),
+            "zfp": ("ZFP (lossless)", "Lossless ZFP compression of the host chunk cache."),
+            "blosc2": ("Blosc2 (lossless)", "Lossless Blosc2 compression of the host chunk cache."),
+        }
+        for choice in ChunkTransportCodecChoice:
+            label, tooltip = _chunk_codec_labels.get(choice.value, (choice.value.upper(), ""))
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tooltip)
+            self._chunk_transport_codec_action_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_chunk_transport_codec_choice(choice)
+            )
+            chunk_codec_menu.addAction(action)
+            self._chunk_transport_codec_actions[choice] = action
+
+        # Operation packs / plugins: point at a BART toolbox and inspect which
+        # built-in / pack / third-party plugin operations are loaded.
+        performance_menu.addSeparator()
+        bart_action = QtGui.QAction("Set BART Toolbox Folder…", self)
+        bart_action.setToolTip(
+            "Choose your BART install folder (contains the 'bart' binary) to make "
+            "BART operations available in the operation dock."
+        )
+        bart_action.triggered.connect(self._configure_bart_toolbox)
+        performance_menu.addAction(bart_action)
+        loaded_ops_action = QtGui.QAction("Loaded Operations && Plugins…", self)
+        loaded_ops_action.setToolTip(
+            "List the built-in, pack (sigpy/BART), and third-party plugin "
+            "operations currently available, and why any are unavailable."
+        )
+        loaded_ops_action.triggered.connect(self._show_loaded_operations)
+        performance_menu.addAction(loaded_ops_action)
 
         self._montage_quality_actions = {}
         self._montage_quality_action_group = QtGui.QActionGroup(self)
@@ -429,10 +518,28 @@ class WindowMenuMixin:
             action.blockSignals(False)
         if hasattr(self, "_wgpu_present_method_menu"):
             # Presentation is a wgpu-backend concern; the submenu greys out
-            # (choice preserved) while another backend is selected.
+            # (choice preserved) only while a non-wgpu backend is EXPLICITLY
+            # pinned. AUTO now resolves to wgpu on GPU-capable devices, so it
+            # must stay enabled under AUTO too (2026-07-22 wgpu promotion).
             self._wgpu_present_method_menu.setEnabled(
-                self.app_settings.image_rendering_backend == ImageRenderingBackendChoice.WGPU
+                self.app_settings.image_rendering_backend
+                in (ImageRenderingBackendChoice.WGPU, ImageRenderingBackendChoice.AUTO)
             )
+        for choice, action in getattr(self, "_texture_codec_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.texture_codec == choice)
+            action.blockSignals(False)
+        if hasattr(self, "_texture_codec_menu"):
+            # GPU texture compression is a wgpu-backend concern; grey out on
+            # other backends (choice preserved).
+            self._texture_codec_menu.setEnabled(
+                self.app_settings.image_rendering_backend
+                in (ImageRenderingBackendChoice.WGPU, ImageRenderingBackendChoice.AUTO)
+            )
+        for choice, action in getattr(self, "_chunk_transport_codec_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.chunk_transport_codec == choice)
+            action.blockSignals(False)
         for choice, action in getattr(self, "_montage_quality_actions", {}).items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.montage_quality_policy == choice)
@@ -493,6 +600,72 @@ class WindowMenuMixin:
     def _set_wgpu_present_method_choice(self, choice):
         self.app_settings = self._updated_app_settings(wgpu_present_method=choice)
         self._apply_performance_settings(persist=True)
+        show_status_message(self, "wgpu presentation changes apply to newly opened windows.")
+
+
+    def _set_texture_codec_choice(self, choice):
+        self.app_settings = self._updated_app_settings(texture_codec=choice)
+        self._apply_performance_settings(persist=True)
+        show_status_message(self, "GPU texture compression changes apply to newly opened windows.")
+
+    def _set_chunk_transport_codec_choice(self, choice):
+        self.app_settings = self._updated_app_settings(chunk_transport_codec=choice)
+        self._apply_performance_settings(persist=True)
+
+    def _configure_bart_toolbox(self):
+        import os
+
+        from arrayscope.operations import registry
+        from arrayscope.operations.packs import bart_pack
+
+        start_dir = os.environ.get(bart_pack.BART_TOOLBOX_ENV, "")
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select BART toolbox folder (contains the 'bart' binary)", start_dir
+        )
+        if not folder:
+            return
+        os.environ[bart_pack.BART_TOOLBOX_ENV] = folder
+        self._settings.setValue("bart_toolbox_path", folder)
+        # Re-discover packs so BART's ops register now that the toolbox is set.
+        registry._reset_operation_packs()
+        registry.load_operation_packs()
+        if bart_pack.bart_available():
+            show_status_message(
+                self, f"BART toolbox set: {folder}. BART operations are now available.", timeout=5000
+            )
+        else:
+            show_status_message(
+                self,
+                f"Set {folder}, but no runnable 'bart' binary was found there or on PATH "
+                "(and it needs its runtime libraries, e.g. MKL, on the library path).",
+                timeout=8000,
+            )
+
+    def _show_loaded_operations(self):
+        from arrayscope.operations import registry
+        from arrayscope.operations.packs import bart_pack
+
+        registry.load_operation_packs()
+        lines = ["Built-in operations:"]
+        lines += [f"  • {e.id} — {e.label}" for e in registry.operation_entries()]
+        pack_ops = [e for e in registry.all_operations() if ":" in e.id]
+        lines.append("")
+        lines.append("Pack / plugin operations (namespaced):")
+        if pack_ops:
+            lines += [f"  • {e.id} — {e.label}" for e in pack_ops]
+        else:
+            lines.append("  (none loaded)")
+        lines.append("")
+        lines.append(
+            "BART: available"
+            if bart_pack.bart_available()
+            else "BART: unavailable — use 'Set BART Toolbox Folder…' to point at your install."
+        )
+        lines.append(
+            "Third-party plugins register via the 'arrayscope.operations' entry-point group "
+            "(see docs/plugin-operations.md)."
+        )
+        QtWidgets.QMessageBox.information(self, "Loaded Operations & Plugins", "\n".join(lines))
         show_status_message(self, "wgpu presentation changes apply to newly opened windows.")
 
     def _set_montage_quality_policy_choice(self, choice):

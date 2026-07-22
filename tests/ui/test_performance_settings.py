@@ -260,14 +260,16 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         assert bitmap.isChecked()
         assert not auto.isChecked()
         assert not screen.isChecked()
-        # Greyed out until the wgpu backend is selected.
-        assert not win._wgpu_present_method_menu.isEnabled()
+        # Enabled under the default AUTO backend (AUTO resolves to wgpu on
+        # GPU-capable devices) and under an explicit wgpu pin.
+        assert win.app_settings.image_rendering_backend == ImageRenderingBackendChoice.AUTO
+        assert win._wgpu_present_method_menu.isEnabled()
 
         _submenu_action(
             win,
             "Performance",
             "Image Rendering Backend",
-            "wgpu experimental (GPU compute)",
+            "wgpu (GPU compute)",
         ).trigger()
         _process_events(qtbot)
         assert win._wgpu_present_method_menu.isEnabled()
@@ -285,10 +287,59 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         assert win._settings.value("wgpu_present_method") == "screen"
 
         # Switching the backend away greys the submenu but keeps the choice.
-        _submenu_action(win, "Performance", "Image Rendering Backend", "PyQtGraph stable").trigger()
+        _submenu_action(win, "Performance", "Image Rendering Backend", "PyQtGraph (CPU / remote)").trigger()
         _process_events(qtbot)
         assert not win._wgpu_present_method_menu.isEnabled()
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
         assert win.app_settings.image_rendering_backend == ImageRenderingBackendChoice.PYQTGRAPH
+    finally:
+        win.close()
+
+
+def test_texture_codec_menu_switches_and_persists(qtbot):
+    """Performance → GPU Texture Compression: AUTO/OFF/BC radio group persists."""
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import TextureCodecChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        off = _submenu_action(
+            win, "Performance", "GPU Texture Compression", "Off (uncompressed)"
+        )
+        off.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.texture_codec == TextureCodecChoice.OFF
+        assert win._settings.value("texture_codec") == "off"
+        assert off.isChecked()
+        bc = _submenu_action(win, "Performance", "GPU Texture Compression", "BC (force)")
+        bc.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.texture_codec == TextureCodecChoice.BC
+        assert win._settings.value("texture_codec") == "bc"
+    finally:
+        win.close()
+
+
+def test_host_cache_compression_menu_switches_and_persists(qtbot):
+    """Performance → Host Cache Compression: RAW/ZFP/Blosc2 radio group persists."""
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import ChunkTransportCodecChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        zfp = _submenu_action(
+            win, "Performance", "Host Cache Compression", "ZFP (lossless)"
+        )
+        zfp.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.ZFP
+        assert win._settings.value("chunk_transport_codec") == "zfp"
+        assert zfp.isChecked()
     finally:
         win.close()
