@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import threading
 
 from arrayscope.app.settings_state import (
     ImageRenderingBackendChoice,
@@ -17,6 +18,79 @@ _SOFTWARE_RENDERER_MARKERS = ("llvmpipe", "softpipe", "swrast", "software raster
 
 # Cached AUTO probe result for this process: (resolved_choice, reason).
 _auto_resolution_cache: tuple[ImageRenderingBackendChoice, str] | None = None
+
+# Guards the one-shot startup warm-up so repeated file opens spawn a single
+# background thread (the shared device is a process global anyway).
+_warm_lock = threading.Lock()
+_warm_started = False
+
+
+def warm_image_backend_async(settings=None) -> None:
+    """Start wgpu device + shader warm-up on a background thread, if applicable.
+
+    Called at the start of a file open (before/while the loading window shows):
+    when the effective image backend will be wgpu, the ~2 s of device init and
+    ~165 ms of shader compilation run concurrently with the file read instead of
+    stalling the first image behind it.  A no-op when the backend cannot be wgpu
+    (explicit PyQtGraph/VisPy pin, non-Linux, offscreen Qt) so we never spend
+    ~2 s building a device the app will not use.  Idempotent per process.
+    """
+
+    global _warm_started
+    if not _should_warm_wgpu(settings):
+        return
+    with _warm_lock:
+        if _warm_started:
+            return
+        _warm_started = True
+    thread = threading.Thread(
+        target=_warm_wgpu_backend,
+        name="arrayscope-wgpu-warm",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _should_warm_wgpu(settings) -> bool:
+    """Whether the effective image backend is (likely) wgpu — cheap, no GPU."""
+
+    choice = _image_backend_choice_value(settings)
+    if choice == ImageRenderingBackendChoice.WGPU.value:
+        return True  # explicit pin: warm regardless of platform heuristics
+    if choice != ImageRenderingBackendChoice.AUTO.value:
+        return False  # explicit PyQtGraph / VisPy pin
+    # AUTO: mirror _probe_auto_backend_choice's wgpu preconditions so the warm
+    # matches what create_image_view will resolve.  A device that ultimately
+    # fails to build simply leaves the warm a no-op and the GL fallback runs
+    # (on the GUI thread, as today).
+    if platform.system() != "Linux":
+        return False
+    return os.environ.get("QT_QPA_PLATFORM", "") not in {"offscreen", "minimal"}
+
+
+def _image_backend_choice_value(settings) -> str:
+    """The configured image-backend choice value, from ``settings`` or QSettings."""
+
+    choice = getattr(settings, "image_rendering_backend", None)
+    if choice is not None:
+        return getattr(choice, "value", choice)
+    # No settings object at file-open time: read the persisted choice directly.
+    with contextlib.suppress(Exception):
+        from pyqtgraph.Qt import QtCore
+
+        return str(
+            QtCore.QSettings().value(
+                "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
+            )
+        )
+    return ImageRenderingBackendChoice.AUTO.value
+
+
+def _warm_wgpu_backend() -> None:
+    with contextlib.suppress(Exception):
+        from arrayscope.display.wgpu_imageview2d import warm_wgpu_backend
+
+        warm_wgpu_backend()
 
 
 def create_image_view(settings=None, *, notify=None):

@@ -44,6 +44,7 @@ prefer_pyside6()
 
 import contextlib
 import itertools
+import threading
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -146,6 +147,11 @@ _TRUTH_LABEL_STYLES = {
 # share it so the canvas context never needs reconfiguration and tests do not
 # pay per-view device creation.
 _SHARED_WGPU_DEVICE = None
+#: Serialises shared-device creation so a background warm-up (started while a
+#: file loads) and the GUI thread's first real render never race to build two
+#: devices.  Whichever thread arrives second blocks on the same creation and
+#: gets the one cached device back.
+_SHARED_WGPU_DEVICE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -196,7 +202,14 @@ _TEXTURE_CODEC_FEATURES = ("texture-compression-bc", "texture-compression-astc")
 
 def _shared_wgpu_device():
     global _SHARED_WGPU_DEVICE
-    if _SHARED_WGPU_DEVICE is None:
+    # Fast path: the device is created once per process and reused everywhere.
+    if _SHARED_WGPU_DEVICE is not None:
+        return _SHARED_WGPU_DEVICE
+    with _SHARED_WGPU_DEVICE_LOCK:
+        # Re-check under the lock: a concurrent caller (e.g. the startup
+        # warm-up thread) may have finished creating it while we waited.
+        if _SHARED_WGPU_DEVICE is not None:
+            return _SHARED_WGPU_DEVICE
         import wgpu
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
@@ -211,6 +224,35 @@ def _shared_wgpu_device():
         wanted = [f for f in _TEXTURE_CODEC_FEATURES if f in available]
         _SHARED_WGPU_DEVICE = adapter.request_device_sync(required_features=wanted)
     return _SHARED_WGPU_DEVICE
+
+
+def warm_wgpu_backend():
+    """Pre-build the shared device and warm the executor shader cache.
+
+    Runs off the GUI thread (see ``image_view_factory.warm_image_backend_async``)
+    so the ~2 s of Vulkan adapter/device init — and the ~165 ms of WGSL
+    shader/pipeline compilation behind the first executor — overlap the file
+    load instead of stalling the first image.  The throwaway executor exists
+    only to push the static shaders through the driver, whose module cache then
+    makes each live view's real executor build in a few ms; it owns no residency
+    and is discarded immediately.  Best-effort: any failure here is swallowed and
+    the normal (lazy) render path re-attempts and reports it.
+    """
+
+    device = _shared_wgpu_device()
+    with contextlib.suppress(Exception):
+        from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+        # A minimal budget on the exact production codec path (OFF): enough to
+        # compile every shader module and compute pipeline the real executor
+        # shares.  Render pipelines compile lazily per format, so the first
+        # framebuffer still pays those, but the compute/shader bulk is warm.
+        WgpuPlaneExecutor(
+            pool_layers={SCALAR_R32F: 4},
+            device=device,
+            compressed_textures="off",
+        )
+    return device
 
 
 def _device_supports_texture_compression(device) -> bool:

@@ -349,6 +349,11 @@ class FileOpenSession(QtCore.QObject):
 def open_path_async(filepath, *, title=None, mmap=False, consume=False, show_loading_window=True):
     """Open one single-dataset file (or DICOM directory) asynchronously."""
     ensure_open_app()
+    # Start the GPU backend warming now so its ~2 s device init overlaps the
+    # file read behind the loading window, not the first image after it.
+    from arrayscope.display.image_view_factory import warm_image_backend_async
+
+    warm_image_backend_async()
     session = FileOpenSession(
         filepath,
         title=title,
