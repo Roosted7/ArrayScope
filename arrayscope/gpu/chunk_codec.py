@@ -25,6 +25,15 @@ Contract:
   losslessly, so correctness never depends on codec coverage.
 * Optional deps: importing this module never requires ``zfpy`` or ``blosc2``.
   An unavailable codec reports ``available() is False``; ``raw`` always works.
+* GPU-decodability (G7 Phase B): the ``bitpack`` codec's decode is embarrassingly
+  parallel (a per-sample bit-window extract), so it *could* be decoded in a
+  compute shader off the CPU critical path.  It is retained here as the
+  **lossless** narrow-integer fallback.  The headline Phase-B transfer win uses
+  native block-compressed textures (BC4/BC5) instead -- see
+  :mod:`arrayscope.gpu.bc_codec`: those are decoded for free by the hardware
+  texture sampler (no decode pass at all) and stay compressed in VRAM, at the
+  cost of being lossy (acceptable on the display path, and measured).  A codec
+  advertises the parallel-decode property with the ``gpu_decodable`` flag.
 """
 
 from __future__ import annotations
@@ -34,6 +43,8 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 __all__ = [
+    "BitpackCodec",
+    "BitpackPlan",
     "Blosc2Codec",
     "ChunkCodec",
     "CodecError",
@@ -42,6 +53,7 @@ __all__ = [
     "ZfpCodec",
     "available_codec_names",
     "get_codec",
+    "gpu_decodable_codec_names",
     "resolve_codec",
 ]
 
@@ -56,6 +68,7 @@ class ChunkCodec(Protocol):
 
     name: str
     lossless: bool
+    gpu_decodable: bool
 
     def available(self) -> bool:
         """Whether the backing dependency is importable on this machine."""
@@ -78,6 +91,7 @@ class RawCodec:
 
     name = "raw"
     lossless = True
+    gpu_decodable = False
 
     def available(self) -> bool:
         return True
@@ -111,6 +125,7 @@ class ZfpCodec:
     """
 
     name = "zfp"
+    gpu_decodable = False
 
     def __init__(
         self,
@@ -190,6 +205,7 @@ class Blosc2Codec:
 
     name = "blosc2"
     lossless = True
+    gpu_decodable = False
 
     def __init__(self, *, clevel: int = 5) -> None:
         self.clevel = int(clevel)
@@ -217,10 +233,226 @@ class Blosc2Codec:
         return np.frombuffer(raw, dtype=np.dtype(dtype)).reshape(shape)
 
 
+# ---------------------------------------------------------------------------
+# bitpack -- the GPU-decodable narrow-integer codec (G7 Phase B)
+# ---------------------------------------------------------------------------
+#
+# Narrow-integer bit-packing: for an integer chunk whose values span a range
+# that fits in K <= 32 bits, subtract the per-chunk minimum (the "offset") and
+# store each sample in exactly K bits.  Decode subtracts nothing on the GPU side
+# beyond the offset add -- an unpack of K bits per sample -- which is
+# embarrassingly parallel: invocation ``i`` reads its own bit window and writes
+# one output sample, no cross-lane dependency -- so it could run in a WGSL compute
+# shader.  Retained as the lossless fallback; the lossy BC-texture path
+# (:mod:`arrayscope.gpu.bc_codec`) is the headline Phase-B transfer/VRAM win.
+#
+# Losslessness: exact for any integer dtype whose *actual* value range fits K
+# bits.  When a chunk needs its dtype's full width (K would not shrink it) or a
+# non-integer dtype is handed in, the codec DECLINES to pack and stores the raw
+# contiguous bytes in a ``mode=raw`` blob -- never dropping a bit.  ``plan()``
+# exposes the pack decision so the GPU path and the policy can tell a genuinely
+# GPU-unpackable (mode=packed) blob from a declined (mode=raw) one.
+#
+# Supported dtypes: signed/unsigned 8/16/32/64-bit integers.  (int64/uint64 are
+# accepted only when the chunk's value *range* still fits 32 bits -- MRI/quantized
+# data routinely does.)  Floats are out of scope here -- that is the future-work
+# float GPU codec; a float dtype is declined to ``mode=raw``.
+
+_BITPACK_VERSION = 1
+_BITPACK_MODE_PACKED = 0
+_BITPACK_MODE_RAW = 1
+_BITPACK_HEADER = np.dtype(
+    [
+        ("version", "<u1"),
+        ("mode", "<u1"),
+        ("bits", "<u1"),
+        ("reserved", "<u1"),
+        ("n_samples", "<u4"),
+        ("offset", "<i8"),
+    ]
+)
+assert _BITPACK_HEADER.itemsize == 16
+_BITPACK_MAX_BITS = 32
+_BITPACK_INT_KINDS = frozenset("iu")  # numpy integer kind codes
+
+
+class BitpackPlan:
+    """The pack decision for one chunk: bit-width ``K`` and value ``offset``.
+
+    ``bits`` is the number of bits each sample occupies; ``offset`` is the value
+    subtracted from every sample before packing (added back on decode).  A plan
+    exists only when packing is lossless AND strictly narrower than the dtype;
+    :meth:`BitpackCodec.plan` returns ``None`` otherwise (declined -> raw).
+    """
+
+    __slots__ = ("bits", "dtype", "n_samples", "offset")
+
+    def __init__(self, *, bits: int, offset: int, n_samples: int, dtype: np.dtype) -> None:
+        self.bits = int(bits)
+        self.offset = int(offset)
+        self.n_samples = int(n_samples)
+        self.dtype = np.dtype(dtype)
+
+
+def _bitpack_words(values_u32: np.ndarray, bits: int, n: int) -> np.ndarray:
+    """Pack ``n`` non-negative values (< 2**bits) LSB-first into u32 words.
+
+    The stream places sample ``i`` at bit range ``[i*bits, i*bits+bits)`` where
+    bit ``b`` is bit ``b % 32`` of little-endian word ``b // 32``.  A sample
+    spans at most two words (bits <= 32), so each value contributes a low part to
+    word ``w0`` and a high part to ``w0+1`` (which is exactly 0 when the sample
+    fits in one word).  Contributions are bit-disjoint, so integer ``add.at``
+    equals a bitwise OR.  One guard word is appended so the GPU shader may always
+    read ``words[w0+1]`` in bounds.
+    """
+
+    if n == 0:
+        return np.zeros(1, dtype=np.uint32)
+    bitpos = np.arange(n, dtype=np.uint64) * np.uint64(bits)
+    w0 = (bitpos >> np.uint64(5)).astype(np.int64)
+    s0 = (bitpos & np.uint64(31)).astype(np.uint64)
+    v64 = values_u32.astype(np.uint64)
+    n_words = int((n * bits + 31) // 32) + 1  # +1 guard word for the high write
+    words = np.zeros(n_words, dtype=np.uint32)
+    low = ((v64 << s0) & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+    # v64 < 2**bits <= 2**(32-s0) when the sample fits one word, so >> (32-s0) is
+    # naturally 0 there; np.uint64 shift-by-32 is well defined (unlike C/WGSL).
+    high = (v64 >> (np.uint64(32) - s0)).astype(np.uint32)
+    np.add.at(words, w0, low)
+    np.add.at(words, w0 + 1, high)
+    return words
+
+
+def _bitunpack_words(words: np.ndarray, bits: int, n: int) -> np.ndarray:
+    """Inverse of :func:`_bitpack_words`: extract ``n`` values of ``bits`` bits."""
+
+    if n == 0:
+        return np.zeros(0, dtype=np.uint32)
+    words = np.ascontiguousarray(words, dtype=np.uint32)
+    bitpos = np.arange(n, dtype=np.uint64) * np.uint64(bits)
+    w0 = (bitpos >> np.uint64(5)).astype(np.int64)
+    s0 = (bitpos & np.uint64(31)).astype(np.uint64)
+    lo = words[w0].astype(np.uint64) >> s0
+    hi = words[w0 + 1].astype(np.uint64) << (np.uint64(32) - s0)
+    mask = np.uint64((1 << bits) - 1)
+    return ((lo | hi) & mask).astype(np.uint32)
+
+
+class BitpackCodec:
+    """Lossless narrow-integer codec (bit-packing); the GPU-decodable fallback.
+
+    Encodes integer chunks by subtracting the per-chunk minimum and packing each
+    sample into the minimum number of bits its range needs.  Its decode is a
+    per-sample bit-window extract with no cross-lane dependency, so it *could* be
+    unpacked in a compute shader off the CPU critical path.  It is retained as the
+    **lossless** Phase-B fallback -- the headline lossy transfer/VRAM win uses
+    native BC textures (:mod:`arrayscope.gpu.bc_codec`).  Declines (stores raw
+    bytes) for floats or for integer chunks that need their dtype's full width, so
+    it never loses a bit.
+    """
+
+    name = "bitpack"
+    lossless = True
+    gpu_decodable = True
+
+    def available(self) -> bool:
+        return True
+
+    def supports(self, dtype: np.dtype) -> bool:
+        # dtype-level capability: integer dtypes.  Whether a *given chunk* is
+        # actually packable (vs declined to raw) depends on its value range and
+        # is decided per-chunk in plan()/encode(); encode() never raises and is
+        # always lossless regardless.
+        return np.dtype(dtype).kind in _BITPACK_INT_KINDS
+
+    def plan(self, array: np.ndarray) -> BitpackPlan | None:
+        """Return the pack plan for ``array``, or ``None`` if it must stay raw.
+
+        ``None`` means: not an integer dtype, empty, or the value range needs the
+        dtype's full width (>= dtype bits, or > 32) -- i.e. packing cannot both be
+        lossless and shrink it.  A returned plan is guaranteed lossless.
+        """
+
+        dtype = np.dtype(array.dtype)
+        if dtype.kind not in _BITPACK_INT_KINDS:
+            return None
+        n = int(array.size)
+        if n == 0:
+            return None
+        wide = array.astype(np.int64, copy=False)
+        lo = int(wide.min())
+        hi = int(wide.max())
+        span = hi - lo  # values map to [0, span]
+        bits = int(span).bit_length() if span > 0 else 1
+        dtype_bits = dtype.itemsize * 8
+        if bits > _BITPACK_MAX_BITS or bits >= dtype_bits:
+            # Needs full width (or unrepresentable in <=32 bits): decline, don't
+            # pack -- a pointless pack, or one that could not stay lossless.
+            return None
+        return BitpackPlan(bits=bits, offset=lo, n_samples=n, dtype=dtype)
+
+    def encode(self, array: np.ndarray) -> bytes:
+        arr = np.ascontiguousarray(array)
+        plan = self.plan(arr)
+        header = np.zeros(1, dtype=_BITPACK_HEADER)
+        header["version"] = _BITPACK_VERSION
+        if plan is None:
+            header["mode"] = _BITPACK_MODE_RAW
+            header["bits"] = 0
+            header["n_samples"] = int(arr.size)
+            header["offset"] = 0
+            return header.tobytes() + arr.tobytes()
+        values = (arr.astype(np.int64).ravel() - np.int64(plan.offset)).astype(np.uint32)
+        words = _bitpack_words(values, plan.bits, plan.n_samples)
+        header["mode"] = _BITPACK_MODE_PACKED
+        header["bits"] = plan.bits
+        header["n_samples"] = plan.n_samples
+        header["offset"] = plan.offset
+        return header.tobytes() + words.tobytes()
+
+    def decode(self, data: bytes, *, shape: tuple[int, ...], dtype) -> np.ndarray:
+        dtype = np.dtype(dtype)
+        header = np.frombuffer(data, dtype=_BITPACK_HEADER, count=1)[0]
+        payload = memoryview(data)[_BITPACK_HEADER.itemsize :]
+        n = int(header["n_samples"])
+        if int(header["mode"]) == _BITPACK_MODE_RAW:
+            return np.frombuffer(payload, dtype=dtype).reshape(shape)
+        bits = int(header["bits"])
+        offset = int(header["offset"])
+        words = np.frombuffer(payload, dtype=np.uint32)
+        values = _bitunpack_words(words, bits, n).astype(np.int64) + np.int64(offset)
+        return values.astype(dtype).reshape(shape)
+
+    # -- GPU-path helpers -----------------------------------------------------
+
+    @staticmethod
+    def is_packed(data: bytes) -> bool:
+        """Whether ``data`` is a genuinely bit-packed (GPU-unpackable) blob."""
+
+        header = np.frombuffer(data, dtype=_BITPACK_HEADER, count=1)[0]
+        return int(header["mode"]) == _BITPACK_MODE_PACKED
+
+    @staticmethod
+    def read_header(data: bytes) -> tuple[int, int, int, int]:
+        """Return ``(mode, bits, n_samples, offset)`` from a bitpack blob."""
+
+        h = np.frombuffer(data, dtype=_BITPACK_HEADER, count=1)[0]
+        return int(h["mode"]), int(h["bits"]), int(h["n_samples"]), int(h["offset"])
+
+    @staticmethod
+    def payload_words(data: bytes) -> np.ndarray:
+        """Return the packed u32 word array (the bytes uploaded to the GPU)."""
+
+        return np.frombuffer(memoryview(data)[_BITPACK_HEADER.itemsize :], dtype=np.uint32)
+
+    HEADER_BYTES = _BITPACK_HEADER.itemsize
+
+
 _BUILTIN_FACTORIES = {
     "raw": RawCodec,
     "zfp": ZfpCodec,
     "blosc2": Blosc2Codec,
+    "bitpack": BitpackCodec,
 }
 
 
@@ -239,6 +471,16 @@ def available_codec_names() -> tuple[str, ...]:
     """Codec names whose backing dependency is importable (``raw`` always is)."""
 
     return tuple(name for name, factory in _BUILTIN_FACTORIES.items() if factory().available())
+
+
+def gpu_decodable_codec_names() -> tuple[str, ...]:
+    """Codec names whose decode can run on the GPU (``bitpack``), if available."""
+
+    return tuple(
+        name
+        for name, factory in _BUILTIN_FACTORIES.items()
+        if getattr(factory(), "gpu_decodable", False) and factory().available()
+    )
 
 
 def resolve_codec(name: str, dtype, **kwargs) -> ChunkCodec:

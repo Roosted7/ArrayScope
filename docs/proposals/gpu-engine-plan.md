@@ -492,6 +492,78 @@ a different, measured axis. Default remains `raw` (off); the policy engages the
 tier per-workload. **Phase B (not this change): GPU-side decode for the discrete
 PCIe transfer win — the `discrete_transfer_candidate` seam is left for it.**
 
+*Phase B (2026-07-22, the transfer/VRAM win — native block-compressed textures).*
+The transfer-side win does **not** come from a compute decode of a byte-stream
+codec (that keeps decode near the CPU critical path and, byte-stream-in-VRAM,
+never reaches the sampler). It comes from a format the GPU decompresses **for
+free in the texture sampler**: a native **BC / ASTC** texture. There is **no
+decode pass at all** — the compressed bytes cross PCIe, stay compressed resident
+in VRAM (an 8× cut vs r32float for BC4, which matters on the A2000's 4 GB), and
+the hardware sampler returns usable values at sample time. The cost is *lossy*
+compression, acceptable on the display path (window/level is applied at sample
+time regardless) and **measured**, never assumed.
+
+What landed (all opt-in, default OFF; the wgpu render path is byte-identical):
+
+- **Our own BC4/BC5 codec** (`gpu/bc_codec.py`, pure numpy): BC4 (8 B / 4×4 block,
+  scalar tiles) and BC5 (16 B / block, two channels). A tile holds RAW values and
+  is normalized to [0,1] per channel (the shader rescales at sample time). Complex
+  tiles store **(real, imag)** — matching the existing `rg32float` complex pool —
+  *not* (magnitude, phase): re/im are smooth and signed with no ±π wrap, so a
+  small block-compression error stays small and isotropic in both derived
+  magnitude and phase, whereas storing phase would smear across the wrap.
+  A per-tile PSNR/max-abs plan (`bc4_plan`) **declines to raw** when the loss
+  exceeds threshold, so quality is never silently sacrificed.
+- **On-GPU WGSL BC4 encoder** (`gpu/bc_gpu.py`): a compute shader, one 4×4 block
+  per invocation (per-block min/max endpoints + nearest-index), quality-equivalent
+  to the CPU encoder — lets GPU-resident derived tiles (LOD/compute) be compressed
+  on-device for host spill without a CPU round-trip. Verified against the real
+  **hardware sampler** (render BC4 → r32float → readback): the sampler reproduces
+  the reference decode (57.5 dB on NVIDIA, 101.7 dB on Intel — residual is the
+  r32float target precision, not a codec disagreement).
+- **ASTC on Intel** (`gpu/astc_codec.py`, via `astc_encoder`, optional dep):
+  flexible block size = a real quality/size knob and better two-channel handling,
+  hardware-sampled on Intel (which advertises `texture-compression-astc`; NVIDIA
+  does not — BC only there).
+- **Topology-aware policy** (`gpu/cache_policy.py::decide_texture_codec`): discrete
+  (NVIDIA) → BC4 scalar / BC5 complex; integrated (Intel) → ASTC when available
+  else BC; **default OFF** (must opt in — the path is lossy).
+- **Unified layer** (`gpu/chunk_texture_codec.py`) + dual-adapter benchmark
+  (`tools/g7_gpu_texture_benchmark.py`).
+
+Dual-adapter benchmark (256² tile of a real T2 volume; raw = r32float scalar /
+rg32float complex; PSNR/max-abs are the [0,1]-field scalar quality, magPSNR /
+phase-err are complex **display-domain** magnitude PSNR and magnitude-weighted
+phase RMSE):
+
+| device | kind | format | enc | raw B | vram B | VRAM ratio | quality |
+|--------|------|--------|-----|-------|--------|-----------|---------|
+| NVIDIA A2000 (discrete) | scalar | bc4-r-unorm | CPU | 262144 | 32768 | **8.0×** | 40.7 dB, max-abs 0.070 |
+| NVIDIA A2000 | scalar | bc4-r-unorm | **GPU** | 262144 | 32768 | 8.0× | 40.7 dB (== CPU) |
+| NVIDIA A2000 | complex | bc5-rg-unorm | CPU | 524288 | 65536 | **8.0×** | magPSNR 41.5 dB, phase-RMSE 0.027 rad |
+| Intel UHD (integrated) | scalar | bc4-r-unorm | CPU | 262144 | 32768 | 8.0× | 40.7 dB |
+| Intel UHD | scalar | astc-4x4 | ASTC | 262144 | 65536 | 4.0× | **53.0 dB** |
+| Intel UHD | scalar | astc-6x6 | ASTC | 262144 | 29584 | **8.9×** | 42.0 dB (beats BC4 on *both* axes) |
+| Intel UHD | complex | astc-4x4 | ASTC | 524288 | 65536 | 8.0× | magPSNR 42.3 dB, phase-RMSE 0.034 rad |
+| Intel UHD | complex | astc-6x6 | ASTC | 524288 | 29584 | **17.7×** | magPSNR 36.1 dB, phase-RMSE 0.068 rad |
+
+**Verdict (topology-dependent, as expected).** On the **discrete A2000 (PCIe)** BC
+wins twice — the compressed bytes are what cross the bus (an 8× smaller transfer)
+*and* stay 8× smaller resident in VRAM — with a free hardware decode; BC is
+NVIDIA's only compressed-texture family. On **integrated Intel (unified memory)**
+there is no distinct PCIe transfer to shrink, but the **VRAM-residency** win still
+applies and **ASTC's block-size knob dominates BC** (astc-6x6 gives higher PSNR
+*and* a better ratio than BC4). Complex tiles use BC5/ASTC-2ch holding (re,im)
+with **no phase-wrap artifact** (magnitude-weighted phase error ≤ 0.07 rad). The
+render path stays byte-identical (default OFF); a lossless narrow-int `bitpack`
+codec is retained in `chunk_codec.py` as the documented lossless fallback (CPU
+round-trip tested). **Follow-up:** wiring the atlas/page textures in
+`wgpu_executor` to sample BC/ASTC (tile-pipeline integration — the encoders,
+policy seam, GPU encoder and measured quality land here as the demonstrator);
+BC6H (half-float, less loss for float tiles) whose encode is harder than BC4/BC5;
+and a possible lossless raw-buffer transfer on NVIDIA via CUDA↔Vulkan interop
+(out of scope — the native BC/ASTC textures are the display-path win).
+
 ## Cleanup that accompanies the program
 
 - Fold legacy `display/colormaps.py` into `colormap_library` (3 import

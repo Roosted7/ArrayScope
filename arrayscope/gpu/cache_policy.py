@@ -43,7 +43,9 @@ from arrayscope.gpu.device_topology import DeviceTopology, detect_topology
 
 __all__ = [
     "CompressedTierDecision",
+    "TextureCodecDecision",
     "decide_compressed_tier",
+    "decide_texture_codec",
     "preferred_codec_for_dtype",
 ]
 
@@ -97,6 +99,116 @@ class CompressedTierDecision:
         if self.budget_bytes <= 0:
             return float("inf")
         return float(self.working_set_bytes) / float(self.budget_bytes)
+
+
+@dataclass(frozen=True)
+class TextureCodecDecision:
+    """Which native compressed-texture format to use for the display path.
+
+    This is the Phase-B *transfer/VRAM* decision (distinct from the Phase-A RAM
+    decision above), and it is **topology-driven**:
+
+    * discrete GPU (PCIe) -- the ``discrete_transfer_candidate`` seam: compressing
+      the host->VRAM texture pays twice (fewer PCIe bytes AND less VRAM resident,
+      which matters on the A2000's 4 GB).  NVIDIA exposes only BC, so scalar tiles
+      use BC4 and two-channel complex tiles use BC5 (holding real, imag).
+    * integrated GPU (unified memory) -- there is no PCIe transfer to shrink, but
+      the *VRAM residency* win still applies, and Intel additionally advertises
+      ASTC, which has a flexible block-size/quality knob and better two-channel
+      handling.  So integrated prefers ASTC when available, else BC.
+
+    Both decode for free in the hardware sampler (no decode pass).  The format is
+    lossy, so this is **default OFF**: ``engage`` is False unless a caller opts in
+    (``enable=True``) AND a compressed-texture path is actually available.  The
+    default wgpu render path is byte-identical while ``engage`` is False.
+    """
+
+    engage: bool
+    family: str  # "bc", "astc", or "none"
+    scalar_format: str  # e.g. "bc4-r-unorm" / "astc-6x6-unorm" / "r32float"
+    complex_format: str  # e.g. "bc5-rg-unorm" / "astc-4x4-unorm" / "rg32float"
+    astc_block: tuple[int, int] | None
+    topology: DeviceTopology
+    reason: str
+
+    @property
+    def discrete_transfer_candidate(self) -> bool:
+        return self.topology.discrete_transfer_candidate
+
+
+def decide_texture_codec(
+    *,
+    topology: DeviceTopology | None = None,
+    enable: bool = False,
+    astc_supported: bool | None = None,
+    astc_block: tuple[int, int] = (6, 6),
+) -> TextureCodecDecision:
+    """Pick the display-path texture format for a topology.  Default OFF.
+
+    ``enable`` must be True to engage (the path is lossy and opt-in).
+    ``astc_supported`` overrides adapter/library ASTC detection (tests); when None
+    it is inferred from the ``astc_encoder`` dependency and the integrated adapter
+    advertising ASTC.  On a discrete GPU BC is always chosen (NVIDIA has no ASTC);
+    on integrated, ASTC is preferred when supported, else BC.
+    """
+
+    topology = topology or detect_topology()
+
+    if not enable:
+        return TextureCodecDecision(
+            engage=False,
+            family="none",
+            scalar_format="r32float",
+            complex_format="rg32float",
+            astc_block=None,
+            topology=topology,
+            reason="texture codec disabled (default): render path byte-identical",
+        )
+
+    if astc_supported is None:
+        # astc_codec imports cleanly (it guards the optional astc_encoder dep
+        # internally), so this internal import is never swallowed.
+        from arrayscope.gpu.astc_codec import astc_available
+
+        astc_supported = astc_available() and topology.is_integrated
+
+    if topology.is_discrete:
+        return TextureCodecDecision(
+            engage=True,
+            family="bc",
+            scalar_format="bc4-r-unorm",
+            complex_format="bc5-rg-unorm",
+            astc_block=None,
+            topology=topology,
+            reason=(
+                "discrete PCIe GPU: BC compresses host->VRAM transfer AND VRAM "
+                "residency (BC4 scalar, BC5 (re,im) complex); NVIDIA has no ASTC"
+            ),
+        )
+
+    if astc_supported:
+        return TextureCodecDecision(
+            engage=True,
+            family="astc",
+            scalar_format=f"astc-{astc_block[0]}x{astc_block[1]}-unorm",
+            complex_format=f"astc-{astc_block[0]}x{astc_block[1]}-unorm",
+            astc_block=astc_block,
+            topology=topology,
+            reason=(
+                "integrated GPU: no PCIe transfer to cut, but ASTC saves VRAM with "
+                f"a tunable block ({astc_block[0]}x{astc_block[1]}) and 2-channel fit"
+            ),
+        )
+
+    return TextureCodecDecision(
+        engage=True,
+        family="bc",
+        scalar_format="bc4-r-unorm",
+        complex_format="bc5-rg-unorm",
+        astc_block=None,
+        topology=topology,
+        reason="integrated GPU without ASTC: BC saves VRAM residency (free decode)",
+    )
 
 
 def _first_lossless_codec(dtype, preferences) -> str:
