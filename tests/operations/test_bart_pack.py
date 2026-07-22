@@ -28,6 +28,7 @@ from arrayscope.kernel.task import CancellationToken
 from arrayscope.operations import plugins, registry
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.packs import bart_pack
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
 
 PROBE_SHAPE = (6, 5, 4)
 
@@ -237,7 +238,9 @@ def test_cancel_mid_op_kills_child_under_one_second(tmp_path):
     thread.start()
 
     # Barrier: wait until the child has actually started (marker written).
-    deadline = time.monotonic() + 5.0
+    # The barrier deadline is owned by the one interaction-budget owner, not a
+    # local literal (architecture guard: one bounded timeout owner).
+    deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.005)
     assert marker.exists(), "fake bart never started"
