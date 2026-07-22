@@ -769,7 +769,12 @@ def test_repeated_fast_updates_do_not_rebind_same_histogram_item(qt_app, monkeyp
     view.close()
 
 
-def test_tiled_single_tile_patch_without_histogram_plot_skips_payload_histogram_aggregation(qt_app):
+def test_tiled_single_tile_patch_without_histogram_plot_aggregates_payload_histogram(qt_app):
+    # Regression (field defect 2026-07): when a tiled commit carries no
+    # aggregate ``histogramPlotData`` (it is derived from level stats and is not
+    # published on every backend/commit), the histogram must still be populated
+    # from the committed tile PAYLOADS.  The old contract skipped that
+    # aggregation, leaving the PyQtGraph histogram panel empty.
     from arrayscope.display.imageview2d import ImageView2D
     from arrayscope.display.model.frame import DisplayTilePayload
 
@@ -802,8 +807,11 @@ def test_tiled_single_tile_patch_without_histogram_plot_skips_payload_histogram_
             histogramRange=(40.0, 45.0),
         )
 
+        # ``histogramSource`` (the CPU histogramData channel) stays None, but the
+        # plot source is now aggregated from the payload histogram data.
         assert view.histogramSource is None
-        assert view.histogramPlotSource is None
+        assert view.histogramPlotSource is not None
+        np.testing.assert_array_equal(np.asarray(view.histogramPlotSource), single_hist)
     finally:
         view.close()
 

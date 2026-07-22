@@ -36,6 +36,7 @@ from arrayscope.display.imageview2d import (
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tiled_histogram_identity import (
+    histogram_data_from_tile_payloads,
     payload_histogram_source,
     tiled_histogram_key,
     tiled_semantic_histogram_identity,
@@ -1922,18 +1923,7 @@ def _overlay_vispy_colors(overlay):
     return montage_overlay_rgba(overlay)
 
 
-def _histogram_data_from_tile_payloads(payloads) -> np.ndarray | None:
-    parts = []
-    for payload in dict(payloads or {}).values():
-        source = _payload_histogram_source(payload)
-        if source is None:
-            continue
-        parts.append(np.asarray(source))
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0]
-    return np.concatenate([np.ravel(part) for part in parts])
+_histogram_data_from_tile_payloads = histogram_data_from_tile_payloads
 
 
 def _overlay_status_mark_points(overlay):

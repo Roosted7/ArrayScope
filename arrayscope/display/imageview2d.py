@@ -48,6 +48,10 @@ from arrayscope.display.layers import ViewLayerOwner
 from arrayscope.display.levels import finite_bounds
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
+from arrayscope.display.model.tiled_histogram_identity import (
+    histogram_data_from_tile_payloads,
+    tiled_semantic_histogram_identity,
+)
 from arrayscope.display.overlay_hit_test import RoiHitIndex
 from arrayscope.display.overlays import MontageTileOverlayItem
 from arrayscope.display.pointer_interaction import QtPointerInteractionDriver
@@ -205,6 +209,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.displayMode = "square_pixels"  # Default to square pixels
         self.histogramSource = None
         self.histogramPlotSource = None
+        self._payload_histogram_cache: tuple[object, object] | None = None
         self._histogram_adapter = None
         self._histogram_preview_controller = None
         self._histogram_display_controller = None
@@ -1165,6 +1170,22 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _is_rgb_image(self, img):
         return isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] in (3, 4)
+
+    def _payload_derived_histogram_plot_data(self, montage_tile_payloads):
+        """Histogram source built from tile payloads, cached by semantic identity.
+
+        Returns the same array object across commits whose semantic histogram
+        inputs are unchanged, so the id-keyed tile-layer histogram cache does
+        not needlessly recompute across a progressive stream (ADR 0050).
+        """
+
+        identity = tiled_semantic_histogram_identity(montage_tile_payloads)
+        cached = self._payload_histogram_cache
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        data = histogram_data_from_tile_payloads(montage_tile_payloads)
+        self._payload_histogram_cache = (identity, data)
+        return data
 
     def _histogram_plot_data(self, fallback):
         source = self.histogramPlotSource
@@ -2709,6 +2730,14 @@ class ImageView2D(ImageViewShell):
                 histogramData=histogramData,
                 histogramPlotData=histogramPlotData,
             )
+            if histogramPlotData is None and montage_tile_payloads:
+                # A tiled montage has no single bound ImageItem, so the
+                # histogram cannot be read off ``imageItem()``.  Derive it from
+                # the committed tile PAYLOADS — the same backend-agnostic source
+                # of truth VisPy uses — so the CPU-LUT histogram is populated
+                # instead of staying empty.  Cached by semantic identity so an
+                # unchanged montage keeps a stable array id (skip-upload works).
+                histogramPlotData = self._payload_derived_histogram_plot_data(montage_tile_payloads)
             if not loading_only:
                 self.histogramSource = histogramData
                 self.histogramPlotSource = histogramPlotData
