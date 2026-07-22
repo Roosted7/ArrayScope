@@ -139,7 +139,10 @@ _PACK_SPECS: dict[str, object] = {}
 _PACKS_LOADED = False
 
 # Pack modules that expose ``register()`` (each guards its own backend).
-_PACK_MODULES: tuple[str, ...] = ("arrayscope.operations.packs.sigpy_pack",)
+_PACK_MODULES: tuple[str, ...] = (
+    "arrayscope.operations.packs.sigpy_pack",
+    "arrayscope.operations.packs.bart_pack",
+)
 
 
 def register_pack_operation(spec) -> None:

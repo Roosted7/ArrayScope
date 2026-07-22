@@ -246,3 +246,80 @@ for v1 (documented here rather than shipped fragile):
   semantics and a compute device, and it *changes dimensionality* (produces
   sensitivity maps) in a way the scalar-param shape adapter cannot predict; it is
   an iterative app object, not a pure `fn(ndarray) -> ndarray`.
+
+### `bart_pack` — out-of-process BART ops (subprocess + cfl handoff)
+
+`arrayscope/operations/packs/bart_pack.py` ships operations that run the external
+[BART](https://mrirecon.github.io/bart/) `bart` binary **as a subprocess**, handing
+data across in BART's native **cfl** temp-file format. Unlike the sigpy pack (an
+in-process library call), the compute happens in a child process, so the pack owns
+the cfl handoff, a working child environment, and cancellation of the child.
+
+| id | label | axis | capability |
+|----|-------|------|------------|
+| `bart:fft`  | Centered FFT (BART)             | required | **OPAQUE / Tier-1** |
+| `bart:ifft` | Centered iFFT (BART, unnormalized) | required | **OPAQUE / Tier-1** |
+| `bart:cabs` | Complex magnitude (BART)        | none     | **OPAQUE / Tier-1** |
+
+**BART's FFT convention.** `bart fft <bitmask>` is **centered but unnormalized**:
+it equals `fftshift(fft(ifftshift(x, ax), ax), ax)` (verified against NumPy in the
+tests). An axis maps to a dimension bitmask (`1 << axis`); the cfl handoff preserves
+axis order, so numpy axis *a* is BART dim *a*. `bart:ifft` (`bart fft -i`) is likewise
+unnormalized, so `ifft(fft(x)) == N·x` along the axis — BART's convention, **not**
+NumPy's 1/N. `bart:cabs` is pointwise `|z|`.
+
+**Everything is complex64.** cfl is a complex64 container, so every op takes and
+returns complex64 (real/integer inputs are promoted on write). The ops declare
+`output_dtype = complex64` unconditionally.
+
+**cfl handoff.** The pack rolls its own minimal cfl reader/writer (`write_cfl` /
+`read_cfl`) rather than importing `$BART_TOOLBOX_PATH/python/cfl.py` — this keeps the
+pack self-contained (no `sys.path` mutation into the BART source tree) and cfl is
+trivially simple: a `.hdr` text file listing dimensions plus a `.cfl` blob of raw
+complex64 in column-major (Fortran) order. The format is byte-for-byte what BART
+reads/writes (proven end-to-end by the fft-correctness test). Each op writes its input
+to `in.cfl` in a `tempfile.TemporaryDirectory`, runs `bart <cmd> in out`, reads
+`out.cfl`, and the temp dir is **always** cleaned up — on success, error, or cancel.
+
+**Cancellation (SIGTERM → SIGKILL, `<1 s`).** `run_bart` starts the child in its own
+session (`start_new_session=True`) and polls the operation's `cancellation_token`
+while it runs. On cancel it `SIGTERM`s the child's process group, waits a short grace
+(0.25 s), then `SIGKILL`s, and raises `EvaluationCancelled` (the same signal the rest
+of the operations engine uses). A mid-op cancel therefore kills `bart` in well under a
+second with **no orphaned process** and the temp dir cleaned; the test proves this
+deterministically with a fake-`bart` shim and a startup barrier (the `<1 s` is the
+assertion, not a fixed sleep). This subprocess cancellation is **independent of** the
+kernel cooperative-cancellation item (queue item 10 notes item 10 "requires the
+shutdown/cancellation item closed first"): the SIGTERM machinery does not depend on the
+kernel work that threads a token into the plugin `fn` call path. Until that lands, the
+engine plugin path applies the op with no token (the sync whole-array path); the runner
+is ready to forward a token the moment the engine supplies one.
+
+**Admission cost (honest).** Every BART op is **OPAQUE** — a per-region execution would
+mean one out-of-process cfl round-trip *per tile*, which is never the right plan for an
+expensive subprocess op, so even the pointwise `bart:cabs` stays OPAQUE (here the *cost
+model*, not correctness, forbids windowing). The plugin path classifies each pack op as
+a whole-array `TRANSFORM` (blocks and expands every axis, not chunkable, not fusable, a
+cache-stage boundary) — the heaviest class the admission cost model has — and the forced
+complex64 output raises the estimated bytes for real inputs. That OPAQUE/TRANSFORM
+classification is the admission cost hint. (A dedicated per-op *out-of-process* cost
+multiplier would need a new field on the frozen `PluginOperationSpec`, i.e. a plugin
+contract change, which is out of scope here.)
+
+**Optionality.** Availability is decided by `bart_available()` — a cheap, lazy
+filesystem check that an executable `bart` exists on `PATH` or in the
+`BART_TOOLBOX_PATH` toolbox, with that env var set. It never runs `bart version`.
+When `bart` is not runnable the pack registers nothing; importing ArrayScope, building
+the registry, and enumerating operations never spawn `bart`, so import-health stays
+green.
+
+**Deferred BART op.**
+
+- `bart pics` (parallel-imaging compressed sensing) is **multi-input**: it needs a
+  k-space array *and* a coil-sensitivity map array (`bart pics kspace sens out`), which
+  does not fit the unary `fn(ndarray) -> ndarray` + scalar-parameter contract — there is
+  no honest way to bind the second ndarray through the recipe/dock parameter model. A
+  self-contained `ecalib`→`pics` variant would have to hard-code a coil axis and
+  calibration semantics and would *change dimensionality*. It is deferred (mirroring the
+  sigpy ESPIRiT deferral) rather than forced through the unary pipeline — correctness over
+  coverage. The cfl-handoff + subprocess + cancellation mechanism is proven via `bart:fft`.
