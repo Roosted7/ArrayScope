@@ -372,7 +372,11 @@ def evaluate_shared_preview(
             lod=LodInfo(
                 level=level,
                 factor=max(int(factor_xy[0]), int(factor_xy[1])),
-                source_shape=tuple(int(value) for value in session.plan.tile_shape[:2]),
+                # Canonical source extent to match the canonical preview texture
+                # (``value.data``); a transposed session keeps its source order.
+                source_shape=tuple(
+                    int(value) for value in render_lod.canonical_source_tile_shape(session)[:2]
+                ),
                 texture_shape=tuple(int(value) for value in np.shape(value.data)[:2]),
                 gutter=0,
             ),
@@ -406,7 +410,9 @@ def evaluate_shared_preview(
             shader_display=bool(shader_display),
         )
         template_plan = format_key.plans[0]
-        source_height, source_width = (int(value) for value in session.plan.tile_shape[:2])
+        source_height, source_width = (
+            int(value) for value in render_lod.canonical_source_tile_shape(session)[:2]
+        )
         plans = plan_source_grid_pages(
             # Reduced-before-operation shared values are deliberately
             # non-semantic.  Keep their value identity separate from direct

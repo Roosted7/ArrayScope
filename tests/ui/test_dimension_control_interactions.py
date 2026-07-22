@@ -476,3 +476,67 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
         )
     finally:
         win.close()
+
+
+def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
+    """A transposed NON-SQUARE montage with reduced-LOD floors must not crash.
+
+    Regression for a page-LOD orientation mismatch: the pyramid pages are
+    canonical (transpose-invariant), but the reduced-floor ``requested_lod``
+    described its source extent with the DISPLAY-oriented ``plan.tile_shape``.
+    On a transposed non-square montage the two disagreed and
+    ``PageBackedPresentation`` raised "requested page LOD source shape disagrees
+    with native source coverage" inside floor admission (async, logged not
+    raised), stalling the tiles.
+    """
+
+    import logging
+
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    settings = QtCore.QSettings()
+    settings.setValue("image_rendering_backend", "wgpu")
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+    from arrayscope.window import ArrayScopeWindow
+
+    # Many NON-SQUARE planes so each tile renders heavily reduced (floors),
+    # montaged on axis 0 -> image_axes (1, 2).
+    k, n, m = 64, 256, 192
+    data = np.random.default_rng(0).standard_normal((k, n, m)).astype(np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+
+    floor_errors: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.exc_info and "page LOD source shape disagrees" in str(record.exc_info[1]):
+                floor_errors.append(record)
+
+    handler = _Capture()
+    logging.getLogger().addHandler(handler)
+    try:
+        _process_events(qtbot)
+        if type(win.img_view).__name__ != "WgpuSurface":
+            pytest.skip("wgpu backend unavailable in this environment")
+        win._set_view_state(
+            win.view_state.with_image_axes(1, 2).with_montage_axis(
+                0, indices=tuple(range(k)), text=":"
+            )
+        )
+        win.render(reason="test-montage")
+        _process_events(qtbot, count=60)
+        # Transpose back and forth: builds floors in one orientation and reuses
+        # the canonical pages in the other.
+        for _ in range(4):
+            win._set_view_state(win.view_state.transposed_image_axes())
+            win.update_image_view()
+            _process_events(qtbot, count=40)
+        assert not floor_errors, (
+            "transposed non-square floor admission raised a page-LOD shape mismatch"
+        )
+    finally:
+        logging.getLogger().removeHandler(handler)
+        win.close()

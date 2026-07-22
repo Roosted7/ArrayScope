@@ -67,6 +67,26 @@ from arrayscope.presentation import ClaimOwner, LevelPhase
 PREVIEW_FLOOR_MIN_LEVEL = 4
 
 
+def canonical_source_tile_shape(session) -> tuple[int, ...]:
+    """The session's tile shape in CANONICAL (sorted-image-axes) source order.
+
+    Public because the reduced-preview page planner in ``render.effects`` needs
+    the same canonical source extent.
+
+    ``plan.tile_shape`` is display-oriented; on a transpose-capable backend the
+    pyramid source/pages stay canonical, so a transposed (reversed image-axes)
+    session must square the tile shape back to ascending-axis order to describe
+    its native source extent.
+    """
+
+    tile_shape = tuple(int(value) for value in session.plan.tile_shape)
+    if bool(getattr(session, "canonical_orientation", False)) and len(tile_shape) >= 2:
+        axes = tuple(int(axis) for axis in (getattr(session.view_state, "image_axes", None) or ()))
+        if len(axes) == 2 and axes[0] > axes[1]:
+            return (tile_shape[1], tile_shape[0], *tile_shape[2:])
+    return tile_shape
+
+
 def plan_lod_page_targets(
     *,
     content_key: object,
@@ -424,7 +444,10 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
             # Session tile geometry is two-dimensional.  ``uint8`` is a
             # scalar scientific value here, not evidence of RGB components.
             planned_dtype, representation = dtype.name, SCALAR_R32F
-    height, width = (int(value) for value in session.plan.tile_shape[:2])
+    # Canonical source extent: the page content is transpose-invariant, so a
+    # transposed session must plan its pages over the same canonical rect as the
+    # unswapped one (else the shared pages get inconsistent source rectangles).
+    height, width = (int(value) for value in canonical_source_tile_shape(session)[:2])
     semantic_source_id = session.tile_semantic_source_id(int(tile.source_index))
     cache_key = (
         semantic_source_id,
@@ -1446,7 +1469,14 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             )
         requested_factor_x = 1 << int(key.level_xy[0])
         requested_factor_y = 1 << int(key.level_xy[1])
-        tile_shape = tuple(int(value) for value in session.plan.tile_shape)
+        # ``plan.tile_shape`` is DISPLAY-oriented, but the pyramid pages (and
+        # thus the page coverage/stored rects this LodInfo is validated against)
+        # are CANONICAL on a transpose-capable backend -- the X/Y swap is applied
+        # at draw, not baked into the source.  Square the source extent back to
+        # canonical (sorted-axis) order so it matches the canonical page
+        # coverage; otherwise a transposed montage floor trips
+        # ``PageBackedPresentation``'s source-shape check.
+        tile_shape = canonical_source_tile_shape(session)
         requested_lod = LodInfo(
             level=key.level,
             factor=max(requested_factor_x, requested_factor_y),
