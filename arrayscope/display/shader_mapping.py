@@ -408,6 +408,62 @@ def _coerce_enum(enum_type, value):
     return enum_type(value)
 
 
+# --------------------------------------------------------------------------
+# wgpu Stage-A shader-legibility mirrors
+#
+# Pure NumPy mirrors of the fragment-shader legibility signals implemented in
+# ``arrayscope.gpu.wgpu_executor._RENDER_WGSL.fs_main`` (and its BC-pool
+# variant).  They are the single owner of the CPU-side formulas, so the wgpu
+# executor's per-pixel oracle (``tests/gpu/test_wgpu_command_protocol.py``
+# ``Scene.reference``) mirrors the WGSL without re-deriving the math.  These
+# are deliberately NOT wired into :func:`cpu_display_rgba` — that is the
+# VisPy/PyQtGraph display path, which Stage A does not touch.  Colours here
+# are the shader's normalized f32 space; callers reproduce the GPU's
+# ``rgba8unorm`` store with ``round(x * 255)``.
+# --------------------------------------------------------------------------
+
+#: Screen px-per-texel below which the zoom-gated pixel grid is fully faded
+#: out (0 contribution) and above which it is fully faded in.
+PIXEL_GRID_MIN_PX_PER_TEXEL = 12.0
+PIXEL_GRID_MAX_PX_PER_TEXEL = 24.0
+#: Grid line half-width in screen pixels and its maximum darkening strength.
+PIXEL_GRID_LINE_PX = 1.0
+PIXEL_GRID_STRENGTH = 0.2
+
+
+def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
+    t = np.clip((np.asarray(x, dtype=np.float64) - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def wgpu_pixel_grid_darken(rgb8, src_x, src_y, fw_x, fw_y, *, enabled: bool = True) -> np.ndarray:
+    """Mirror of the WGSL ``pixel_grid`` darkening (A1) on an RGBA8 image.
+
+    ``fw_x``/``fw_y`` are the source-texels-per-screen-pixel derivatives
+    (``fwidth(in.src)`` on the GPU); for an axis-aligned affine tile these are
+    the constant ratios ``src_size / dst_pixels`` per axis, which the GPU
+    computes exactly.  Faded to zero below ``PIXEL_GRID_MIN_PX_PER_TEXEL``, so
+    a normally-zoomed scene is returned byte-identical.
+    """
+
+    rgb8 = np.asarray(rgb8)
+    if not enabled:
+        return rgb8
+    fw_x = np.maximum(np.asarray(fw_x, dtype=np.float64), 1e-8)
+    fw_y = np.maximum(np.asarray(fw_y, dtype=np.float64), 1e-8)
+    px_per_texel = 1.0 / np.maximum(fw_x, fw_y)
+    fade = _smoothstep(PIXEL_GRID_MIN_PX_PER_TEXEL, PIXEL_GRID_MAX_PX_PER_TEXEL, px_per_texel)
+    frac_x = np.mod(np.asarray(src_x, dtype=np.float64), 1.0)
+    frac_y = np.mod(np.asarray(src_y, dtype=np.float64), 1.0)
+    edge_x = np.minimum(frac_x, 1.0 - frac_x) / fw_x
+    edge_y = np.minimum(frac_y, 1.0 - frac_y) / fw_y
+    line = 1.0 - _smoothstep(0.0, PIXEL_GRID_LINE_PX, np.minimum(edge_x, edge_y))
+    darken = (PIXEL_GRID_STRENGTH * line * fade)[..., np.newaxis]
+    out = rgb8.astype(np.float64).copy()
+    out[..., :3] = np.rint(out[..., :3] * (1.0 - darken))
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
 __all__ = [
     "ShaderComponent",
     "ShaderDisplayMode",
@@ -428,5 +484,6 @@ __all__ = [
     "phase_lut_indices",
     "shader_component_uniform",
     "shader_mapping_with_lut",
+    "wgpu_pixel_grid_darken",
     "window_intensity",
 ]

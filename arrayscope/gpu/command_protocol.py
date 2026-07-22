@@ -75,6 +75,14 @@ class DisplayMapping:
     nearest entry (``round(g * 255)``), matching the CPU display mirror.
     ``phase_color`` makes the LUT coordinate cyclic phase; for a non-phase
     component the normalized component modulates that color's intensity.
+
+    ``pixel_grid`` is a display legibility aid the backend renders on read
+    (never a data mutation, never new residency); it defaults off so the
+    default render is byte-identical. When enabled it is a zoom-gated per-texel
+    grid that only becomes visible once texels are large enough on screen to
+    warrant it (a normally-zoomed view is unaffected even with it on). It is
+    named in backend-neutral display terms (ADR 0057); the wgpu backend keys it
+    off a spare ``Mapping`` uniform word.
     """
 
     mode: str = "magnitude"
@@ -84,6 +92,7 @@ class DisplayMapping:
     scale: str = "linear"
     symlog_constant: float = 0.0
     phase_color: bool = False
+    pixel_grid: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in MAPPING_MODES:
@@ -96,6 +105,7 @@ class DisplayMapping:
         object.__setattr__(self, "level_hi", float(self.level_hi))
         object.__setattr__(self, "symlog_constant", float(self.symlog_constant))
         object.__setattr__(self, "phase_color", bool(self.phase_color))
+        object.__setattr__(self, "pixel_grid", bool(self.pixel_grid))
         if not self.level_hi > self.level_lo:
             raise ValueError(
                 f"levels window must be non-empty, got [{self.level_lo}, {self.level_hi}]"

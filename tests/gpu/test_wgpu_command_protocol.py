@@ -13,6 +13,7 @@ import pytest
 
 wgpu = pytest.importorskip("wgpu")
 
+from arrayscope.display import shader_mapping
 from arrayscope.gpu.chunk_summary import (
     HISTOGRAM_NORMALIZED_L1_TOLERANCE,
 )
@@ -516,12 +517,22 @@ class Scene:
                 table[:, 0] = table[:, 1] = table[:, 2] = np.arange(256)
                 table[:, 3] = 255
             rgba = table[phase_idx].copy()
-            if bool(getattr(mapping, "phase_color", False)) and mode != 1:
+            phase_path = bool(getattr(mapping, "phase_color", False)) and mode != 1
+            if phase_path:
                 rgba[..., :3] = np.clip(
                     rgba[..., :3].astype(np.float64) * g[..., np.newaxis],
                     0.0,
                     255.0,
                 ).astype(np.uint8)
+            # A1: zoom-gated pixel grid, applied once to the final colour.
+            rgba = shader_mapping.wgpu_pixel_grid_darken(
+                rgba,
+                sxg,
+                syg,
+                t.src_size[0] / tw,
+                t.src_size[1] / th,
+                enabled=getattr(mapping, "pixel_grid", True),
+            )
             out[y0 : y0 + th, x0 : x0 + tw] = rgba
         return out
 
@@ -698,6 +709,36 @@ def test_completion_token_is_callable_and_returns(scene):
     report = scene.render(FULL, MAG, generation=40)
     assert callable(report.wait_completed)
     report.wait_completed()  # must not raise; fences the submitted work
+
+
+# ---- Stage A shader-legibility oracle: zoom-gated pixel grid (A1) ------------
+#
+# Pairs a CPU-mirror match (the shader agrees with the ``shader_mapping`` grid
+# formula) with a fault-injection assertion (the grid demonstrably darkens
+# texel boundaries when zoomed), so removing the shader grid turns the test
+# red.  The default render staying byte-identical is already proven by every
+# oracle above (grid defaults off, and is zoom-gated even when on).
+
+
+def test_pixel_grid_fades_in_only_when_zoomed(scene):
+    """A1: invisible at normal zoom (all oracles above), fades in on big
+    texels.  Fails if the shader grid is dropped: the zoomed render stops
+    matching the mirror and stops darkening boundary bands vs a grid-off run."""
+
+    zoom = (TileInstance((0, 0, 1, 1), (0, 0), (16, 16)),)
+    on_map = DisplayMapping("magnitude", 0.0, 6.0, pixel_grid=True)
+    scene.render(zoom, on_map, generation=50)
+    on = scene.executor.read_target()
+    scene.assert_matches(on, scene.reference(zoom, on_map))
+
+    # MAG defaults pixel_grid off — the same zoomed view without the grid.
+    scene.render(zoom, MAG, generation=51)
+    off = scene.executor.read_target()
+    scene.assert_matches(off, scene.reference(zoom, MAG))
+
+    # The grid must actually darken a band of texel-boundary pixels.
+    darkened = int(np.any(on.astype(np.int32) < off.astype(np.int32) - 2, axis=-1).sum())
+    assert darkened > 500, darkened
 
 
 # ---- row 3(a) growth oracles: multi-plane binding + honest pools ------------

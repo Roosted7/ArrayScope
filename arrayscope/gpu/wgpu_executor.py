@@ -278,7 +278,7 @@ struct Mapping {
     level_hi: f32,
     symlog_constant: f32,
     phase_color: u32,
-    _pad2: u32,
+    pixel_grid: u32,
     _pad3: u32,
 };
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
@@ -367,38 +367,73 @@ fn apply_scale(value: f32) -> f32 {
     }
 }
 
+// A1: zoom-gated pixel grid, applied once to the final colour.  `fw` is
+// fwidth(in.src) -- source texels per screen pixel -- computed in uniform
+// control flow at the top of fs_main (WGSL derivatives require that, and
+// resolve() returns early).  `1/fw` is screen px per texel; the grid fades
+// from nothing below 12 px/texel to full above 24, so a normally-zoomed
+// scene is returned byte-identical (fade == 0 -> multiply by 1.0).
+fn pixel_grid(color: vec4<f32>, src: vec2<f32>, fw: vec2<f32>, enabled: u32) -> vec4<f32> {
+    if (enabled == 0u) { return color; }
+    let fwc = max(fw, vec2<f32>(1e-8, 1e-8));
+    let px_per_texel = 1.0 / max(fwc.x, fwc.y);
+    let fade = smoothstep(12.0, 24.0, px_per_texel);
+    let edge = min(fract(src), vec2<f32>(1.0) - fract(src)) / fwc;
+    let line = 1.0 - smoothstep(0.0, 1.0, min(edge.x, edge.y));
+    let darken = 0.2 * line * fade;
+    return vec4<f32>(color.rgb * (1.0 - darken), color.a);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    // A1: derivatives require uniform control flow, so take fwidth BEFORE
+    // resolve()'s data-dependent early returns.  Only consumed by the
+    // zoom-gated pixel grid at the single exit below.
+    let fw = fwidth(in.src);
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
+    var color: vec4<f32>;
     if (p.rep == 2u) {
         // Display-ready RGB: sampled as-is, levels/LUT bypassed.
-        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-        let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
-        return vec4<f32>(c.rgb, 1.0);
-    }
-    if (p.rep == 3u) {
+        if (r.layer < 0) {
+            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        } else {
+            let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
+            color = vec4<f32>(c.rgb, 1.0);
+        }
+    } else if (p.rep == 3u) {
         // VisPy parity: preserve the color plane and modulate it by one
         // levels-normalized scalar plane (packed in alpha), not by three
         // independent per-channel windows.
-        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
-        let scalar = apply_scale(c.a);
-        let intensity = clamp(
-            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
-            0.0,
-            1.0,
-        );
-        return vec4<f32>(c.rgb * intensity, 1.0);
-    }
-    var v = vec2<f32>(0.0, 0.0);
-    if (r.layer >= 0) {
-        if (p.rep == 0u) {
-            v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+        if (r.layer < 0) {
+            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         } else {
-            v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+            let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+            let scalar = apply_scale(c.a);
+            let intensity = clamp(
+                (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+                0.0,
+                1.0,
+            );
+            color = vec4<f32>(c.rgb * intensity, 1.0);
         }
+    } else {
+        var v = vec2<f32>(0.0, 0.0);
+        if (r.layer >= 0) {
+            if (p.rep == 0u) {
+                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+            } else {
+                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+            }
+        }
+        color = map_value(p, v);
     }
+    // A1: applied once to the final colour; identity at normal zoom.
+    return pixel_grid(color, in.src, fw, mapping.pixel_grid);
+}
+
+// Scalar/complex value -> displayed colour: the mode/scale/levels/LUT path.
+fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     var x: f32;
     if (p.rep == 0u) {
         // Scalar planes ignore complex mapping modes: the value IS the scalar.
@@ -421,8 +456,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             1.0,
         );
         let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
-        let color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
-        return vec4<f32>(color.rgb * g, color.a);
+        let lut_color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        return vec4<f32>(lut_color.rgb * g, lut_color.a);
     }
     // Nearest-entry LUT indexing, mirroring the CPU display reference.
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
@@ -449,7 +484,7 @@ struct Mapping {
     level_hi: f32,
     symlog_constant: f32,
     phase_color: u32,
-    _pad2: u32,
+    pixel_grid: u32,
     _pad3: u32,
 };
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
@@ -542,47 +577,79 @@ fn apply_scale(value: f32) -> f32 {
     }
 }
 
+// A1: zoom-gated pixel grid, applied once to the final colour.  `fw` is
+// fwidth(in.src) -- source texels per screen pixel -- computed in uniform
+// control flow at the top of fs_main (WGSL derivatives require that, and
+// resolve() returns early).  `1/fw` is screen px per texel; the grid fades
+// from nothing below 12 px/texel to full above 24, so a normally-zoomed
+// scene is returned byte-identical (fade == 0 -> multiply by 1.0).
+fn pixel_grid(color: vec4<f32>, src: vec2<f32>, fw: vec2<f32>, enabled: u32) -> vec4<f32> {
+    if (enabled == 0u) { return color; }
+    let fwc = max(fw, vec2<f32>(1e-8, 1e-8));
+    let px_per_texel = 1.0 / max(fwc.x, fwc.y);
+    let fade = smoothstep(12.0, 24.0, px_per_texel);
+    let edge = min(fract(src), vec2<f32>(1.0) - fract(src)) / fwc;
+    let line = 1.0 - smoothstep(0.0, 1.0, min(edge.x, edge.y));
+    let darken = 0.2 * line * fade;
+    return vec4<f32>(color.rgb * (1.0 - darken), color.a);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    // A1: fwidth before resolve()'s data-dependent early returns.
+    let fw = fwidth(in.src);
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
+    var color: vec4<f32>;
     if (p.rep == 2u) {
-        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-        let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
-        return vec4<f32>(c.rgb, 1.0);
-    }
-    if (p.rep == 3u) {
-        if (r.layer < 0) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-        let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
-        let scalar = apply_scale(c.a);
-        let intensity = clamp(
-            (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
-            0.0,
-            1.0,
-        );
-        return vec4<f32>(c.rgb * intensity, 1.0);
-    }
-    var v = vec2<f32>(0.0, 0.0);
-    if (r.layer >= 0) {
-        let compressed = page_codec[r.fidx] == 1u;
-        let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
-        let nrm = page_norm[r.fidx];
-        if (p.rep == 0u) {
-            if (compressed) {
-                let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
-                v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
-            } else {
-                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
-            }
+        if (r.layer < 0) {
+            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         } else {
-            if (compressed) {
-                let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
-                v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
+            let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
+            color = vec4<f32>(c.rgb, 1.0);
+        }
+    } else if (p.rep == 3u) {
+        if (r.layer < 0) {
+            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        } else {
+            let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
+            let scalar = apply_scale(c.a);
+            let intensity = clamp(
+                (scalar - mapping.level_lo) / (mapping.level_hi - mapping.level_lo),
+                0.0,
+                1.0,
+            );
+            color = vec4<f32>(c.rgb * intensity, 1.0);
+        }
+    } else {
+        var v = vec2<f32>(0.0, 0.0);
+        if (r.layer >= 0) {
+            let compressed = page_codec[r.fidx] == 1u;
+            let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
+            let nrm = page_norm[r.fidx];
+            if (p.rep == 0u) {
+                if (compressed) {
+                    let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
+                    v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
+                } else {
+                    v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+                }
             } else {
-                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+                if (compressed) {
+                    let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
+                    v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
+                } else {
+                    v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+                }
             }
         }
+        color = map_value(p, v);
     }
+    return pixel_grid(color, in.src, fw, mapping.pixel_grid);  // A1
+}
+
+// Scalar/complex value -> displayed colour (mode/scale/levels/LUT).
+fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     var x: f32;
     if (p.rep == 0u) {
         x = v.x;
@@ -604,8 +671,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             1.0,
         );
         let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
-        let color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
-        return vec4<f32>(color.rgb * g, color.a);
+        let lut_color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        return vec4<f32>(lut_color.rgb * g, lut_color.a);
     }
     let idx = clamp(i32(round(g * 255.0)), 0, 255);
     return textureLoad(lut, vec2<i32>(idx, 0), 0);
@@ -2025,7 +2092,10 @@ class WgpuPlaneExecutor:
                 self._mapping.level_hi,
                 self._mapping.symlog_constant,
                 int(self._mapping.phase_color),
-                0,
+                # A1 zoom-gated pixel grid in the first spare Mapping word
+                # (default off, so the default render is unchanged); the last
+                # word stays reserved.
+                int(self._mapping.pixel_grid),
                 0,
             ),
         )
