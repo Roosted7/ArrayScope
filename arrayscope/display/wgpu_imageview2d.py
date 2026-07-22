@@ -546,6 +546,18 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._wgpu_executor
         if executor is None:
             return None
+        # Overlay-geometry currency is a submission invariant too: the flat
+        # overlay buffer (ROI outlines/handles, profile marker, tile-truth
+        # labels, floating chips) rides along in any frame drawn while it is
+        # stale, before the present.  This is what keeps a freshly rebuilt
+        # executor (e.g. warmTiledResidency's mid-fill _ensure_wgpu_executor)
+        # from presenting with _overlay_geometry == () until an unrelated
+        # present (a dock toggle) happens to flush the dirty flag.  Appended
+        # (never prepended) so callers' command indices — the histogram report
+        # keys — stay stable; cleared only after a real submission below.
+        overlay_dirty = bool(self._wgpu_overlay_geometry_dirty)
+        if overlay_dirty:
+            commands = (*commands, UpdateOverlayGeometry(self._wgpu_overlay_geometry))
         # Atlas currency is a submission invariant: any frame drawn against a
         # glyph revision the executor has not seen uploads it in the same
         # ordered batch, before the present.  Appended (never prepended) so
@@ -579,6 +591,8 @@ class WgpuImageView2D(ImageViewShell):
             )
         self._wgpu_glyph_atlas_uploaded_version = atlas.version
         self._wgpu_widget_atlas_uploaded_version = chips.version
+        if overlay_dirty:
+            self._wgpu_overlay_geometry_dirty = False
         return report
 
     # ---- draw-ack discipline -------------------------------------------------
@@ -713,20 +727,18 @@ class WgpuImageView2D(ImageViewShell):
         texture = context.get_current_texture()
         acquire_ms = (perf_counter() - acquire_start) * 1000.0
         # Overlay geometry refreshed for THIS frame (a moved chip) rides along
-        # here rather than costing its own submission.
-        overlay_dirty = bool(self._wgpu_overlay_geometry_dirty)
-        commands = [SetDisplayMapping(self._wgpu_mapping_state)]
-        if overlay_dirty:
-            commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
-        commands.extend((camera, UpdateTileInstances(self._wgpu_tile_instances())))
+        # automatically: _submit_wgpu folds a stale overlay buffer into any
+        # frame it builds and clears the dirty flag once the submit lands.
         self._submit_wgpu(
-            tuple(commands),
+            (
+                SetDisplayMapping(self._wgpu_mapping_state),
+                camera,
+                UpdateTileInstances(self._wgpu_tile_instances()),
+            ),
             present_to=texture.create_view(),
             present_format=self._wgpu_context_format,
             present_size=size,
         )
-        if overlay_dirty:
-            self._wgpu_overlay_geometry_dirty = False
         present_start = perf_counter()
         context.present()
         presented_at = perf_counter()
@@ -928,13 +940,14 @@ class WgpuImageView2D(ImageViewShell):
             self._request_wgpu_canvas_draw()
             return
         if self._wgpu_executor is not None:
-            commands = [UpdateOverlayGeometry(primitives)]
+            # The dirty overlay buffer is a submission invariant now:
+            # _submit_wgpu folds UpdateOverlayGeometry into this frame and
+            # clears the dirty flag once the submit lands.
+            commands = []
             camera = self._wgpu_camera_command()
             if camera is not None:
                 commands.extend((camera, UpdateTileInstances(self._wgpu_tile_instances())))
-            report = self._submit_wgpu(tuple(commands))
-            if report is not None:
-                self._wgpu_overlay_geometry_dirty = False
+            self._submit_wgpu(tuple(commands))
         self._request_wgpu_canvas_draw()
 
     def _wgpu_overlay_primitives(self) -> tuple[OverlayPrimitive, ...]:
@@ -1422,14 +1435,11 @@ class WgpuImageView2D(ImageViewShell):
 
             start = perf_counter()
             camera = self._wgpu_camera_command()
-            overlay_geometry_dirty = bool(self._wgpu_overlay_geometry_dirty)
             submission_commands = [
                 BindContentPlanes(tuple(planes)),
                 *commands,
                 SetDisplayMapping(self._wgpu_mapping_state),
             ]
-            if overlay_geometry_dirty:
-                submission_commands.append(UpdateOverlayGeometry(self._wgpu_overlay_geometry))
             if camera is not None:
                 submission_commands.append(camera)
             submission_commands.append(UpdateTileInstances(self._wgpu_tile_instances()))
@@ -1454,8 +1464,6 @@ class WgpuImageView2D(ImageViewShell):
                     obligation=self._wgpu_histogram_evidence_obligation,
                 )
             report = self._submit_wgpu(tuple(submission_commands))
-            if overlay_geometry_dirty:
-                self._wgpu_overlay_geometry_dirty = False
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
             for command_index, spec in zip(histogram_indices, histogram_specs, strict=False):

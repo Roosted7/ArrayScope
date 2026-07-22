@@ -64,6 +64,14 @@ class QtViewNavigationDriver:
             position = owner._event_position(event)
             view_range = pan_view_range(self._pan, (position.x(), position.y()))
             owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+            # The pan consumes this MouseMove (accept + return True), so
+            # pyqtgraph's GraphicsScene never emits sigMouseMoved and the HUD
+            # hover readout would freeze at pan-start.  Re-emit the hover at the
+            # moved position, exactly like the ROI/profile pointer driver does
+            # via the same owner hook (QtPointerInteractionDriver).
+            notify_drag = getattr(owner, "_notify_pointer_drag_moved", None)
+            if callable(notify_drag):
+                notify_drag(event)
             event.accept()
             return True
         if event_type == QtCore.QEvent.Type.MouseButtonRelease:

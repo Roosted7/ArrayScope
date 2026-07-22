@@ -1727,6 +1727,79 @@ def test_executor_rebuild_resets_every_atlas_upload_tracker(qt_app):
         view.close()
 
 
+def test_warm_residency_executor_rebuild_uploads_overlay_geometry(qt_app):
+    """Structural twin of the atlas-tracker rebuild bug, for the overlay buffer.
+
+    warmTiledResidency's incremental page budget trips _ensure_wgpu_executor,
+    which REBUILDS the executor mid-fill (a fresh executor starts with
+    _overlay_geometry == ()) and sets _wgpu_overlay_geometry_dirty.  But
+    warmTiledResidency then submits ONLY EnsureChunkResident commands -- no
+    UpdateOverlayGeometry.  Unless overlay-geometry currency is a submission
+    invariant inside _submit_wgpu (mirroring the glyph/chip atlases), the
+    rebuilt executor keeps _overlay_geometry == () and ALL overlays vanish
+    until an unrelated present (a dock toggle resizes the swapchain) happens to
+    flush the still-True dirty flag.
+
+    This pins the invariant: after the warm submit, with NO extra present or
+    dock toggle, the freshly rebuilt executor already carries the ROI/chip/
+    label geometry and the dirty flag is clear.
+    """
+
+    from arrayscope.core.roi import RoiKind
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 2, 1, loaded=2)
+        images = {
+            tile: np.linspace(0.0, 1.0, 16 * 24, dtype=np.float32).reshape(16, 24) + tile
+            for tile in (0, 1)
+        }
+        payloads = {
+            tile: _payload(tile, image, source_id=f"warm-overlay-src-{tile}")
+            for tile, image in images.items()
+        }
+        _commit(view, geometry, {0: payloads[0]}, levels=(0.0, 2.0))
+
+        # Non-empty overlay geometry: a ROI.  createRoi syncs + submits it, so
+        # the flag lands clean and the CURRENT executor already has it.
+        view.createRoi(RoiKind.RECTANGLE, rect=(2.0, 2.0, 8.0, 8.0), color=(40, 220, 80))
+        assert view._wgpu_overlay_geometry, "precondition: overlay geometry populated"
+        assert view._wgpu_overlay_geometry_dirty is False
+
+        # Force the warm path through a REAL rebuild: a one-page pool cannot hold
+        # the two warmed tiles, so _ensure_wgpu_executor builds a fresh executor
+        # whose _overlay_geometry starts empty.  Reset the flag to False to
+        # reproduce the exact post-present clean state the bug starts from.
+        view._wgpu_executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
+        )
+        view._wgpu_overlay_geometry_dirty = False
+        assert view._wgpu_executor._overlay_geometry == ()
+        stale_executor = view._wgpu_executor
+
+        view.warmTiledResidency(
+            payloads=payloads,
+            geometry=geometry,
+            levels=(0.0, 2.0),
+        )
+
+        rebuilt = view._wgpu_executor
+        assert rebuilt is not stale_executor, "the warm path must have rebuilt the executor"
+        # The invariant carried the ROI geometry into the warm submit itself,
+        # with no extra present or dock toggle ...
+        assert len(rebuilt._overlay_geometry) > 0, (
+            "the rebuilt executor received no overlay geometry, so every overlay "
+            "is absent until an unrelated present flushes the dirty flag"
+        )
+        assert rebuilt._overlay_geometry == view._wgpu_overlay_geometry
+        # ... and the dirty flag was cleared only after that real submission.
+        assert view._wgpu_overlay_geometry_dirty is False
+    finally:
+        view.close()
+
+
 def test_camera_is_latched_when_the_paced_draw_runs_not_when_it_is_requested(qt_app, monkeypatch):
     """Input arriving inside the pacer's deferral window still makes the frame.
 
