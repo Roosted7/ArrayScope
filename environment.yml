@@ -7,6 +7,10 @@ dependencies:
   - numba>=0.66
   - pyside6>=6.4
   - pyqtgraph>=0.14
+  # <0.32: wgpu-py 0.32.0 (wgpu-native 29) breaks its own sync QueueWorkDone
+  # path on the new WGPUStringView callback ABI; 0.31.1 (wgpu-native 27) is the
+  # ABI ArrayScope targets. See pyproject.toml [project.optional-dependencies].
+  - wgpu-py<0.32
   - h5py>=3.0
   - scipy>=1.7
   - pyfftw
