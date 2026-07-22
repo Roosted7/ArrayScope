@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.gpu.chunk_codec import available_codec_names
 from arrayscope.operations.cache import BoundedArrayCache
 from arrayscope.operations.compressed_tier import (
     CompressedBackingTier,
@@ -50,9 +51,7 @@ def test_evicted_from_raw_is_recovered_by_decode_not_recompute():
     chunk_bytes = _sample(np.float32).nbytes
     tier = CompressedBackingTier(max_bytes=10 << 20, codec_name="zfp")
     # Raw cache holds only 2 chunks; the tier backs the rest.
-    cache = TwoLevelArrayCache.build(
-        raw_max_bytes=chunk_bytes * 2, raw_max_entries=100, tier=tier
-    )
+    cache = TwoLevelArrayCache.build(raw_max_bytes=chunk_bytes * 2, raw_max_entries=100, tier=tier)
 
     values = {i: _sample(np.float32) + i for i in range(6)}
     calls: list[int] = []
@@ -130,6 +129,8 @@ def _smooth(i: int, shape=(256, 256)) -> np.ndarray:
 def test_tier_ram_win_retains_more_working_set():
     """Under one byte budget the tier retains more entries than raw would."""
 
+    if "zfp" not in available_codec_names():
+        pytest.skip("zfp not installed")
     chunk_bytes = _smooth(0).nbytes
     budget = chunk_bytes * 8
     raw = BoundedArrayCache(budget, max_entries=1000)
