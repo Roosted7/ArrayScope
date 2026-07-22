@@ -293,16 +293,13 @@ def montage_manual_reflow_decision(
     columns = max(1, int(columns))
     rows = max(1, int(rows))
     count = max(1, int(count))
-    grid_h, grid_w = (max(1, int(display_shape[0])), max(1, int(display_shape[1])))
     tile_h, tile_w = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
     gap = max(0, int(gap))
-    view_w = max(0.0, x1 - x0)
-    view_h = max(0.0, y1 - y0)
 
     # Criterion 1: the grid nearly fits the viewport -> zoomed out -> re-flow.
-    fits_w = min(1.0, view_w / grid_w)
-    fits_h = min(1.0, view_h / grid_h)
-    if fits_w >= grid_fit_fraction and fits_h >= grid_fit_fraction:
+    if montage_grid_mostly_fits(
+        ((x0, x1), (y0, y1)), display_shape, grid_fit_fraction=grid_fit_fraction
+    ):
         return True
 
     # Criterion 2: zoomed so deep that every tile a re-flow would move is
@@ -446,6 +443,11 @@ def retarget_montage_viewport_plan(
         next_range = auto_range
         last_auto_view_range = next_range
     else:
+        # A zoomed-out re-flow re-packs the grid; anchor its frame centre so
+        # the montage stays put instead of chasing the tile under the focus.
+        frame_center_anchor = montage_grid_mostly_fits(
+            current_range, getattr(previous_plan, "display_shape", (1, 1))
+        )
         next_range = _manual_montage_reflow_range(
             previous_plan,
             next_plan,
@@ -453,6 +455,7 @@ def retarget_montage_viewport_plan(
             previous_viewport_shape,
             viewport_plan.viewport_shape,
             focus=focus,
+            frame_center_anchor=frame_center_anchor,
         )
         if next_range is None:
             return MontageViewportReflow(viewport_plan)
@@ -476,6 +479,7 @@ def _manual_montage_reflow_range(
     next_viewport_shape,
     *,
     focus: tuple[float, float] | None = None,
+    frame_center_anchor: bool = False,
 ) -> tuple[tuple[float, float], tuple[float, float]] | None:
     return remap_montage_view_range(
         previous_plan,
@@ -484,6 +488,7 @@ def _manual_montage_reflow_range(
         previous_viewport_shape,
         next_viewport_shape,
         focus=focus,
+        frame_center_anchor=frame_center_anchor,
     )
 
 
@@ -495,12 +500,18 @@ def remap_montage_view_range(
     next_viewport_shape,
     *,
     focus: tuple[float, float] | None = None,
+    frame_center_anchor: bool = False,
 ) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """Transfer a manual view through a montage layout change.
 
-    The same source-local point remains at the same screen fraction.  World
-    spans scale with viewport size so the screen zoom, measured as world units
-    per viewport pixel, stays constant while resize shows more or less content.
+    Screen zoom (world units per viewport pixel) is always preserved. What
+    stays put on screen depends on ``frame_center_anchor``:
+
+    * default (tile anchor) -- the source-local point under ``focus`` keeps its
+      screen fraction, right when zoomed in on a tile;
+    * ``frame_center_anchor`` -- the montage's whole frame CENTER keeps its
+      screen fraction, so a zoomed-out re-flow re-packs in place instead of
+      lurching to follow one tile that moved.
     """
 
     try:
@@ -521,10 +532,22 @@ def remap_montage_view_range(
         next_viewport_shape,
     )
 
-    focus_x, focus_y = _focus_or_center(view_range, focus)
-    if getattr(previous_plan, "geometry", None) == getattr(next_plan, "geometry", None):
+    geometry_changed = getattr(previous_plan, "geometry", None) != getattr(
+        next_plan, "geometry", None
+    )
+    if frame_center_anchor and geometry_changed:
+        # Anchor the whole frame's centre, not a tile: a zoomed-out re-flow
+        # keeps the montage centred where it was instead of chasing the tile
+        # that happened to sit under the focus.
+        prev_h, prev_w = (float(v) for v in previous_plan.display_shape[:2])
+        next_h, next_w = (float(v) for v in next_plan.display_shape[:2])
+        focus_x, focus_y = prev_w * 0.5, prev_h * 0.5
+        next_focus_x, next_focus_y = next_w * 0.5, next_h * 0.5
+    elif not geometry_changed:
+        focus_x, focus_y = _focus_or_center(view_range, focus)
         next_focus_x, next_focus_y = focus_x, focus_y
     else:
+        focus_x, focus_y = _focus_or_center(view_range, focus)
         anchor = _tile_local_anchor(
             previous_plan, view_range, (focus_x, focus_y), allow_nearest=True
         )
