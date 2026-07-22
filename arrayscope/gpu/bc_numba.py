@@ -79,7 +79,13 @@ def _build_kernel():
     return encode_u8
 
 
-_GROUP = numba_runtime.register("bc", _build_kernel)
+def _bc_compression_active() -> bool:
+    from arrayscope.display.image_view_factory import wgpu_texture_compression_likely
+
+    return wgpu_texture_compression_likely()
+
+
+_GROUP = numba_runtime.register("bc", _build_kernel, should_prewarm=_bc_compression_active)
 
 
 def prewarm() -> None:

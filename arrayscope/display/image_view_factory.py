@@ -90,6 +90,22 @@ def cpu_display_backend_likely(settings=None) -> bool:
     return not _should_warm_wgpu(settings)
 
 
+def wgpu_texture_compression_likely(settings=None) -> bool:
+    """Whether bulk BC prewarm is useful for the configured viewer session."""
+
+    if not _should_warm_wgpu(settings):
+        return False
+    choice = getattr(settings, "texture_codec", None)
+    if choice is None:
+        with contextlib.suppress(Exception):
+            from pyqtgraph.Qt import QtCore
+
+            choice = QtCore.QSettings().value("texture_codec", TextureCodecChoice.OFF.value)
+    return str(getattr(choice, "value", choice or TextureCodecChoice.OFF.value)) != str(
+        TextureCodecChoice.OFF.value
+    )
+
+
 def _image_backend_choice_value(settings) -> str:
     """The configured image-backend choice value, from ``settings`` or QSettings."""
 

@@ -13,12 +13,15 @@ import types
 
 import pytest
 
-from arrayscope.app.settings_state import ImageRenderingBackendChoice
+from arrayscope.app.settings_state import ImageRenderingBackendChoice, TextureCodecChoice
 from arrayscope.display import image_view_factory as fac
 
 
-def _settings(choice: ImageRenderingBackendChoice):
-    return types.SimpleNamespace(image_rendering_backend=choice)
+def _settings(
+    choice: ImageRenderingBackendChoice,
+    texture_codec: TextureCodecChoice = TextureCodecChoice.OFF,
+):
+    return types.SimpleNamespace(image_rendering_backend=choice, texture_codec=texture_codec)
 
 
 @pytest.mark.parametrize(
@@ -48,6 +51,18 @@ def test_should_warm_auto_on_linux_display(monkeypatch):
     monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
     assert fac._should_warm_wgpu(_settings(ImageRenderingBackendChoice.AUTO)) is True
+
+
+def test_bc_bulk_warm_requires_wgpu_and_enabled_texture_codec():
+    assert fac.wgpu_texture_compression_likely(
+        _settings(ImageRenderingBackendChoice.WGPU, TextureCodecChoice.AUTO)
+    )
+    assert not fac.wgpu_texture_compression_likely(
+        _settings(ImageRenderingBackendChoice.WGPU, TextureCodecChoice.OFF)
+    )
+    assert not fac.wgpu_texture_compression_likely(
+        _settings(ImageRenderingBackendChoice.PYQTGRAPH, TextureCodecChoice.AUTO)
+    )
 
 
 def test_warm_is_one_shot_and_non_blocking(monkeypatch):
