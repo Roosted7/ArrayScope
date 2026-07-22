@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 
@@ -20,14 +21,12 @@ _auto_resolution_cache: tuple[ImageRenderingBackendChoice, str] | None = None
 def create_image_view(settings=None, *, notify=None):
     """Create the selected image view implementation.
 
-    ``AUTO`` resolves from measured evidence (X5a, 2026-07): on Linux with a
-    real hardware GL context the VisPy backend presented first frames faster
-    in every tiled scenario benchmarked on Wayland and XWayland (Intel and
-    NVIDIA), and level-only changes are uniform updates that keep resident
-    textures instead of re-uploading CPU-windowed pixels.  PyQtGraph remains
-    the choice for software GL, headless environments, platforms without
-    reference traces, or any probe failure, and users can always pin either
-    backend explicitly.
+    ``AUTO`` resolves to **wgpu** (the promotion-candidate backend, 2026-07-22)
+    whenever a real GPU device can be created on Linux with a display; it falls
+    back to VisPy where a hardware GL context exists but wgpu cannot init, and
+    to PyQtGraph for software GL, headless/offscreen, platforms without
+    reference traces, or any probe failure. Users can always pin a backend.
+    If wgpu init fails at construction, the factory degrades to PyQtGraph.
     """
 
     choice = getattr(settings, "image_rendering_backend", ImageRenderingBackendChoice.AUTO)
@@ -81,9 +80,11 @@ def create_image_view(settings=None, *, notify=None):
 def resolve_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
     """Resolve ``AUTO`` to a concrete backend choice for this process.
 
-    The decision rule is documented in ADR 0047 and is deliberately
-    conservative: VisPy is selected only where the X5a reference traces exist
-    (Linux) and only when a live hardware GL context can be created.
+    Decision rule (ADR 0047, updated 2026-07-22 — wgpu promotion): on Linux
+    with a real display, prefer **wgpu** whenever a GPU device can be created;
+    fall back to VisPy where a hardware GL context exists but wgpu cannot init,
+    and to PyQtGraph for software GL, headless/offscreen, non-Linux, or any
+    probe failure. Users can always pin a specific backend.
     """
 
     global _auto_resolution_cache
@@ -101,16 +102,57 @@ def _probe_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
         )
     if os.environ.get("QT_QPA_PLATFORM", "") in {"offscreen", "minimal"}:
         return (ImageRenderingBackendChoice.PYQTGRAPH, "offscreen Qt platform")
+    # Prefer wgpu (the promotion-candidate backend) whenever a real GPU device
+    # can be created. The probe pins Vulkan (no EGL re-init that would SIGABRT a
+    # GL context) and caches the shared device the WgpuImageView2D reuses, so it
+    # is not wasted work. wgpu first also means we never create a GL context on
+    # the wgpu path.
+    wgpu_device = _probe_wgpu_device()
+    if wgpu_device is not None:
+        return (ImageRenderingBackendChoice.WGPU, f"wgpu device [{wgpu_device}]")
     renderer = _probe_hardware_gl_renderer()
     if renderer is None:
-        return (ImageRenderingBackendChoice.PYQTGRAPH, "no usable OpenGL context")
+        return (ImageRenderingBackendChoice.PYQTGRAPH, "no usable wgpu or OpenGL device")
     lowered = renderer.lower()
     if any(marker in lowered for marker in _SOFTWARE_RENDERER_MARKERS):
         return (
             ImageRenderingBackendChoice.PYQTGRAPH,
             f"SW OpenGL [{renderer}]",
         )
-    return (ImageRenderingBackendChoice.VISPY, f"HW OpenGL [{renderer}]")
+    return (
+        ImageRenderingBackendChoice.VISPY,
+        f"HW OpenGL, wgpu unavailable [{renderer}]",
+    )
+
+
+def _probe_wgpu_device() -> str | None:
+    """Return a short device label if a wgpu device can be created, else None.
+
+    Reuses the shared Vulkan-pinned device the WgpuImageView2D would use;
+    importing the module is side-effect-free (it does not force ``xcb`` and
+    imports rendercanvas only lazily via ``import_qrenderwidget``).
+    """
+
+    # Import outside the try: a failure to import our own module is a real
+    # error the import-health guard must see, not a "no GPU" signal. Only the
+    # wgpu runtime device creation is allowed to fail (a machine with no
+    # Vulkan adapter).
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+
+    try:
+        device = _shared_wgpu_device()
+    except Exception:
+        return None
+    if device is None:
+        return None
+    adapter = getattr(device, "adapter", None)
+    info = {}
+    if adapter is not None:
+        get_info = getattr(adapter, "request_adapter_info", None)
+        if callable(get_info):
+            with contextlib.suppress(Exception):
+                info = get_info() or {}
+    return str(info.get("device") or info.get("description") or "gpu")
 
 
 def _probe_hardware_gl_renderer() -> str | None:

@@ -192,13 +192,30 @@ def test_factory_constructs_vispy_backend(qt_app):
         view.close()
 
 
-def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
+def test_factory_auto_prefers_wgpu_then_gl(qt_app, monkeypatch):
+    # AUTO precedence (ADR 0047, 2026-07-22 wgpu promotion): wgpu device first,
+    # then hardware GL -> VisPy, then software GL / non-Linux -> PyQtGraph.
     from arrayscope.app.settings_state import AppSettingsState, ImageRenderingBackendChoice
     from arrayscope.display import image_view_factory
 
     monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
     monkeypatch.setattr(image_view_factory.platform, "system", lambda: "Linux")
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+
+    # 1. wgpu device available -> WGPU wins outright (GL never probed).
+    monkeypatch.setattr(image_view_factory, "_probe_wgpu_device", lambda: "Intel(R) UHD Graphics")
+
+    def _gl_must_not_run():
+        raise AssertionError("GL probe must not run when wgpu is available")
+
+    monkeypatch.setattr(image_view_factory, "_probe_hardware_gl_renderer", _gl_must_not_run)
+    resolved, reason = image_view_factory.resolve_auto_backend_choice()
+    assert resolved.value == ImageRenderingBackendChoice.WGPU.value
+    assert "wgpu device" in reason
+
+    # 2. wgpu unavailable + hardware GL -> VisPy.
+    monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
+    monkeypatch.setattr(image_view_factory, "_probe_wgpu_device", lambda: None)
     monkeypatch.setattr(
         image_view_factory,
         "_probe_hardware_gl_renderer",
@@ -215,6 +232,7 @@ def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
     finally:
         view.close()
 
+    # 3. wgpu unavailable + software GL -> PyQtGraph.
     monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
     monkeypatch.setattr(
         image_view_factory,
@@ -229,6 +247,7 @@ def test_factory_auto_resolves_from_gl_probe(qt_app, monkeypatch):
     finally:
         view.close()
 
+    # 4. Non-Linux -> PyQtGraph (no reference traces).
     monkeypatch.setattr(image_view_factory, "_auto_resolution_cache", None)
     monkeypatch.setattr(image_view_factory.platform, "system", lambda: "Windows")
     resolved, reason = image_view_factory.resolve_auto_backend_choice()
