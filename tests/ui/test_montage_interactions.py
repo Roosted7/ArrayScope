@@ -679,6 +679,40 @@ def test_montage_manual_resize_is_single_camera_transaction(qtbot):
         win.close()
 
 
+def test_montage_manual_resize_preserves_column_layout(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.display.viewport import ViewportMode
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((20, 20, 30), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 700)
+        win.show()
+        _process_events(qtbot, count=20)
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":")
+        )
+        win.render(reason="test-montage-resize")
+        _process_events(qtbot, count=80)
+        view = win.img_view.getView()
+        # Enter a manual pose: pan/zoom the camera off the automatic fit.
+        view.setRange(xRange=(-100.0, 300.0), yRange=(-100.0, 300.0), padding=0)
+        _process_events(qtbot, count=5)
+        win.img_view.viewport_controller.mode = ViewportMode.USER
+        before_columns = int(win.renderer._frame_session.plan.columns)
+
+        # A manual montage must keep its committed layout across a resize --
+        # the tiles reveal more/less, they do not re-flow to a new grid.
+        win.resize(500, 700)
+        _process_events(qtbot, count=30)
+
+        after_columns = int(win.renderer._frame_session.plan.columns)
+        assert after_columns == before_columns
+    finally:
+        win.close()
+
+
 def test_montage_auto_fit_skips_when_fit_mode_is_enabled(qtbot):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtWidgets
