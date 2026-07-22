@@ -6,7 +6,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.export.video import VideoExportDialog, VideoExportSettingsDialog, VideoExportWorker
-from arrayscope.operations.registry import operation_entries
+from arrayscope.operations.registry import all_operations
 from arrayscope.ui.file_dialogs import get_existing_directory, get_save_file_name
 from arrayscope.ui.icons import set_action_icon
 
@@ -31,7 +31,7 @@ class ExportWorkflowMixin:
         menu = QtWidgets.QMenu(self)
 
         operations_menu = menu.addMenu("Operations")
-        for entry in operation_entries():
+        for entry in all_operations():
             action = operations_menu.addAction(entry.label)
             set_action_icon(action, "data_array")
             action.setEnabled(self._operation_entry_enabled(entry, dim))

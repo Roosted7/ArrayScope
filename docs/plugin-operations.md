@@ -189,3 +189,60 @@ a `region_conformance_stats()` tally (`verified` / `honored` / `rejected`) is
 incremented. Downgrade-not-refuse is deliberate: the underlying `fn` is still a
 valid Tier-1 op, so we never break a user's pipeline over a performance
 annotation — we only refuse to trust the fast path.
+
+## First-party in-process packs (the sigpy pack)
+
+Third-party packages contribute ops through the entry-point group above. A
+**first-party pack** is the in-tree counterpart: a module under
+`arrayscope/operations/packs/` that ships *inside* ArrayScope and registers its
+`PluginOperationSpec`s directly (via
+`arrayscope.operations.registry.register_pack_operation`) instead of through an
+entry point. A pack reuses the exact same `PluginOperation` machinery — opaque
+materialization, the Tier-2 conformance gate, recipe round-trip — so a pack op is
+indistinguishable from an entry-point plugin op once registered.
+
+A pack is **optional and lazy**. Each pack module self-guards on its backend and
+is enumerated through `registry.all_operations()` (which the operation dock,
+command palette, and export menu use). `operation_entries()` stays built-ins-only
+for callers that assume concrete dataclass operation types.
+
+### `sigpy_pack` — centered FFT / IFFT
+
+`arrayscope/operations/packs/sigpy_pack.py` wraps `sigpy.fft` / `sigpy.ifft`:
+
+| id | label | axis | capability |
+|----|-------|------|------------|
+| `sigpy:fft`  | Centered FFT (sigpy)  | required | **OPAQUE / Tier-1** |
+| `sigpy:ifft` | Centered iFFT (sigpy) | required | **OPAQUE / Tier-1** |
+
+Both are ortho-normalised and centered, so `sigpy:ifft` after `sigpy:fft` on the
+same axis round-trips to the input (within single-precision tolerance).
+
+**Why OPAQUE (honest capability).** A centered FFT along an axis is a *global*
+transform on that axis: every output sample depends on every input sample along
+the transformed axis, so `fft(whole)[region] != fft(whole[region])` across that
+axis. The op is therefore **not** windowable, and it declares
+`region_capable=False`. Declaring otherwise would be a false Tier-2 claim that the
+conformance harness rejects and downgrades — so we declare OPAQUE up front, which
+is both honest and correct. (The op is still shape-preserving, so the standard
+OPAQUE plugin path — materialize whole, take the requested slab — serves it
+faithfully.)
+
+**Optionality.** Availability is decided with `importlib.util.find_spec("sigpy")`
+— a metadata check that does **not** import sigpy. When sigpy is absent the pack
+registers nothing; when present, the heavy `import sigpy` is deferred until an op
+is actually applied. Importing ArrayScope, building the registry, and enumerating
+operations never import sigpy, so import-health stays green whether or not sigpy
+is installed.
+
+**Deferred sigpy ops.** These do not fit the `fn(ndarray) -> ndarray` +
+scalar-parameter plugin contract without engine changes, so they are out of scope
+for v1 (documented here rather than shipped fragile):
+
+- `sigpy.nufft_adjoint(input, coord, ...)` — needs a k-space *coordinate array*
+  as a second argument; the plugin parameter model carries scalars, not a
+  companion ndarray.
+- `sigpy.mri.app.EspiritCalib(ksp, ...)` — needs coil-axis + calibration
+  semantics and a compute device, and it *changes dimensionality* (produces
+  sensitivity maps) in a way the scalar-param shape adapter cannot predict; it is
+  an iterative app object, not a pure `fn(ndarray) -> ndarray`.

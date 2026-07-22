@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -121,14 +123,120 @@ OPERATION_REGISTRY = {
 }
 
 
+_LOGGER = logging.getLogger(__name__)
+
+# First-party in-process operation packs.
+#
+# Unlike a third-party entry-point plugin (arrayscope.operations.plugins), a
+# *pack* ships inside the ArrayScope tree and registers its
+# ``PluginOperationSpec`` objects directly here.  A pack is optional: each pack
+# module self-guards on its backend (e.g. ``import sigpy``) and contributes
+# nothing when that backend is absent -- so ``import arrayscope`` never imports
+# the backend, and import-health stays green.  Packs reuse the same
+# ``PluginOperation`` machinery as entry-point plugins, so a pack op flows
+# through the identical opaque materialization / Tier-2 conformance gate.
+_PACK_SPECS: dict[str, object] = {}
+_PACKS_LOADED = False
+
+# Pack modules that expose ``register()`` (each guards its own backend).
+_PACK_MODULES: tuple[str, ...] = ("arrayscope.operations.packs.sigpy_pack",)
+
+
+def register_pack_operation(spec) -> None:
+    """Register one in-process pack operation spec (namespaced, collision-safe).
+
+    Called by a pack module's ``register()``.  The id must be namespaced (carry
+    the plugin ``:`` separator) and must not shadow a built-in id -- the same
+    rules the entry-point plugin path enforces.
+    """
+
+    from arrayscope.operations.plugins import NAMESPACE_SEPARATOR
+
+    operation_id = spec.id
+    if NAMESPACE_SEPARATOR not in operation_id:
+        raise ValueError(
+            f"pack operation id {operation_id!r} must be namespaced "
+            f"(contain {NAMESPACE_SEPARATOR!r})"
+        )
+    if operation_id in OPERATION_REGISTRY:
+        raise ValueError(f"pack operation id {operation_id!r} shadows a built-in operation")
+    _PACK_SPECS[operation_id] = spec
+
+
+def load_operation_packs() -> None:
+    """Import first-party packs and let them register (idempotent, lazy).
+
+    Importing a pack module is side-effect-free; registration is driven here by
+    calling each module's ``register()``, which no-ops when its backend is
+    absent.  This is reset-safe: after ``_reset_operation_packs`` the cached
+    modules are re-asked to register.
+    """
+
+    global _PACKS_LOADED
+    if _PACKS_LOADED:
+        return
+    _PACKS_LOADED = True
+    for module_name in _PACK_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+            register = getattr(module, "register", None)
+            if callable(register):
+                register()
+        except Exception:  # pragma: no cover - a broken pack must not break the app
+            _LOGGER.exception("failed to load operation pack %s", module_name)
+
+
+def _reset_operation_packs() -> None:
+    """Clear pack registration (test seam for re-loading with a changed backend)."""
+
+    global _PACKS_LOADED
+    _PACK_SPECS.clear()
+    _PACKS_LOADED = False
+
+
+def _pack_operation_entry(spec) -> OperationEntry:
+    from arrayscope.operations.plugins import PluginOperation
+
+    return OperationEntry(
+        id=spec.id,
+        label=spec.label,
+        operation_type=PluginOperation,
+        parameters=tuple(spec.parameters),
+        changes_shape=bool(spec.changes_shape),
+        requires_axis=bool(spec.requires_axis),
+    )
+
+
 def operation_entries():
+    """Built-in operation entries only (concrete dataclass operation types)."""
+
     return tuple(OPERATION_REGISTRY.values())
+
+
+def all_operations() -> tuple[OperationEntry, ...]:
+    """Every operation the dock can offer: built-ins + installed in-process packs.
+
+    This is the enumeration the operation dock / command palette use so sigpy (and
+    any future pack) ops are offered alongside the built-ins.  ``operation_entries``
+    stays built-ins-only for callers that assume concrete dataclass operations.
+    """
+
+    load_operation_packs()
+    return (
+        *OPERATION_REGISTRY.values(),
+        *(_pack_operation_entry(spec) for spec in _PACK_SPECS.values()),
+    )
 
 
 def get_operation_entry(operation_id: str) -> OperationEntry:
     entry = OPERATION_REGISTRY.get(operation_id)
     if entry is not None:
         return entry
+
+    load_operation_packs()
+    pack_spec = _PACK_SPECS.get(operation_id)
+    if pack_spec is not None:
+        return _pack_operation_entry(pack_spec)
 
     from arrayscope.operations import plugins
 
@@ -145,6 +253,15 @@ def get_operation_entry(operation_id: str) -> OperationEntry:
 def create_operation(operation_id: str, axis=None, parameters: Mapping[str, object] | None = None):
     if operation_id not in OPERATION_REGISTRY:
         from arrayscope.operations import plugins
+
+        load_operation_packs()
+        pack_spec = _PACK_SPECS.get(operation_id)
+        if pack_spec is not None:
+            # Prime the plugin spec cache so PluginOperation resolution (create,
+            # region-honor adjudication, recipe round-trip) works with no entry
+            # point.  Re-primed each call -> robust to ``_reset_plugin_cache``.
+            plugins._SPEC_CACHE[operation_id] = pack_spec
+            return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)
 
         if plugins.is_plugin_operation_id(operation_id):
             return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)

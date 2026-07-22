@@ -14,7 +14,11 @@ from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
-from arrayscope.operations.registry import get_operation_entry, operation_entries, operation_id_for
+from arrayscope.operations.registry import (
+    all_operations,
+    get_operation_entry,
+    operation_id_for,
+)
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import set_action_icon
@@ -94,7 +98,7 @@ class OperationActionsMixin:
             )
         )
         menu.addSeparator()
-        for entry in operation_entries():
+        for entry in all_operations():
             action = menu.addAction(entry.label)
             set_action_icon(action, _operation_icon_name(entry.id))
             action.setData(entry.id)
@@ -210,7 +214,7 @@ class OperationActionsMixin:
     def open_operation_adder(self, search=False):
         if search:
             return self.open_command_palette()
-        entries = tuple(operation_entries())
+        entries = tuple(all_operations())
         labels = [entry.label for entry in entries]
         label, ok = QtWidgets.QInputDialog.getItem(
             self, "Add Operation", "Operation", labels, 0, False
@@ -232,7 +236,7 @@ class OperationActionsMixin:
                 requires_axis=entry.requires_axis,
                 icon=_operation_icon_name(entry.id),
             )
-            for entry in operation_entries()
+            for entry in all_operations()
         ]
         commands.extend(
             [
