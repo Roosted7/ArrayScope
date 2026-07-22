@@ -438,6 +438,60 @@ a truthful *no win yet*. The transfer-side win requires a **GPU-side decoder**
 (nvCOMP or a wgpu compute decode) so the decompress cost leaves the CPU
 critical path; that is the G7 follow-up.
 
+*Phase A (2026-07-22, host-RAM win, topology-aware).* Cashes the host-RAM win
+the transport gate identified, as a **two-level cache**: a large **compressed
+backing tier** under the small raw byte-bounded cache. Seam — the raw cache's
+one shared `BoundedCache` core gained an optional `on_evict(key, value, nbytes)`
+hook (default `None` → eviction byte-identical for every existing caller);
+`operations/compressed_tier.py::TwoLevelArrayCache` wires that hook to
+`CompressedBackingTier`, so a value the raw cache *evicts* is stored compressed
+instead of dropped, and a raw-miss is served by a **decode** (µs) rather than a
+**recompute/re-read** (an FFT / a disk page, ms–s). With no tier the wrapper is
+a straight pass-through — the default path is byte-identical to today. The tier
+is value-generic (`to_array`/`from_array`) so `StageCache` can adopt the same
+tier later; wiring it *into* `StageCache` (retention scoring, in-flight-compute
+claims, lock-free resident snapshots) was judged riskier than a standalone tier
+the cache delegates to, so Phase A ships the standalone tier.
+
+Topology (`gpu/device_topology.py`): reports integrated/discrete/unknown +
+unified-memory from the wgpu adapter info, **reusing the shared device's adapter**
+(no new adapter/device) or a single cheap probe; any failure → safe `unknown`
+(treated as integrated/RAM-only). Import never touches wgpu. Both integrated
+(Intel UHD, unified) and discrete (RTX A2000, PCIe) benefit on the RAM axis, so
+topology does **not** gate engagement; the discrete device sets a
+`discrete_transfer_candidate` flag that is the **Phase B seam** (compressing
+host→VRAM transfer bytes once a GPU-side decoder exists — not Phase A).
+
+Adaptive policy (`gpu/cache_policy.py`): engages the tier **only under RAM
+pressure** (working set > cache budget — the only regime where evictions, hence
+expensive misses, actually happen), picks the best **lossless** codec per dtype
+(zfp's transform for float32/complex64/int16; blosc2's byte codec for dtypes zfp
+declines, e.g. uint8), and stays **off** when data already fits so tiny
+workloads pay nothing. It never selects a lossy codec, and `resolve_codec` is
+the final gate (degrades to `raw` rather than lose pixels).
+
+Benchmark (`arrayscope/tools/g7_cache_benchmark.py`, real 336×336×272 volume,
+256² chunks, revisit/scroll workload under a fixed RAM budget):
+
+| dtype     | zfp ratio | fit raw → 2-level (same RAM) | recomputes raw → 2-level | crossover recompute cost |
+|-----------|-----------|------------------------------|--------------------------|--------------------------|
+| float32   | 2.10×     | 40 → 91 chunks               | 520 → 387                | ~2.2 ms                  |
+| complex64 | 2.09×     | 40 → 91 chunks               | 520 → 388                | ~4.5 ms                  |
+| int16     | 2.21×     | 40 → 91 chunks               | 520 → 357                | ~5.4 ms                  |
+
+The RAM/eviction win is **unconditional** (~2.2× working set retained per byte
+budget, ~26–34 % fewer expensive misses). The **end-to-end time** win is
+miss-cost dependent: for a *cheap* 256² fft2 miss (~8 ms) the tier wins RAM but
+not wall time (encode+decode > the tiny recompute); above the crossover
+recompute cost (~2–5 ms) it wins both. In the owner's target regime — a
+**large-matrix** stage miss (1024² fft2, ~50–64 ms, or a disk re-read) — the
+measured end-to-end speedup is **2.0–2.7×** (recomputes 168 → 60, 168 misses
+served by decode). This justifies auto-enabling under RAM pressure on large data
+even though the *transfer-time* inequality did not hold: the RAM/eviction win is
+a different, measured axis. Default remains `raw` (off); the policy engages the
+tier per-workload. **Phase B (not this change): GPU-side decode for the discrete
+PCIe transfer win — the `discrete_transfer_candidate` seam is left for it.**
+
 ## Cleanup that accompanies the program
 
 - Fold legacy `display/colormaps.py` into `colormap_library` (3 import

@@ -11,8 +11,12 @@ from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 
 
 class BoundedArrayCache:
-    def __init__(self, max_bytes: int, max_entries: int):
-        self._cache = BoundedCache(max_bytes=int(max_bytes), max_entries=int(max_entries))
+    def __init__(self, max_bytes: int, max_entries: int, *, on_evict=None):
+        # ``on_evict`` (G7 two-level cache) is an optional hook the compressed
+        # backing tier subscribes to; default None keeps this cache byte-identical.
+        self._cache = BoundedCache(
+            max_bytes=int(max_bytes), max_entries=int(max_entries), on_evict=on_evict
+        )
         self.last_eval_ms = None
 
     @property

@@ -23,10 +23,15 @@ class BoundedCache:
         max_bytes: int | None = None,
         max_entries: int | None = None,
         retention_key: Callable[[object, object], object] | None = None,
+        on_evict: Callable[[object, object, int], None] | None = None,
     ) -> None:
         self.lock = RLock()
         self._items: OrderedDict[object, tuple[object, int]] = OrderedDict()
         self._retention_key = retention_key
+        # Optional eviction hook (G7 two-level cache): called with
+        # (key, value, nbytes) for each entry the budget evicts.  Default None
+        # keeps eviction byte-identical for every existing caller.
+        self._on_evict = on_evict
         self.max_bytes = None if max_bytes is None else int(max_bytes)
         self.max_entries = None if max_entries is None else int(max_entries)
         self.bytes_used = 0
@@ -134,9 +139,13 @@ class BoundedCache:
             else:
                 retention = self._retention_key
                 key = min(self._items.items(), key=lambda item: retention(item[0], item[1][0]))[0]
-            _value, nbytes = self._items.pop(key)
+            value, nbytes = self._items.pop(key)
             self.bytes_used -= nbytes
             self.evictions += 1
+            if self._on_evict is not None:
+                # Runs under the cache lock (RLock).  The hook must not re-enter
+                # this cache; the G7 tier only touches its own separate store.
+                self._on_evict(key, value, nbytes)
 
 
 __all__ = ["BoundedCache"]
