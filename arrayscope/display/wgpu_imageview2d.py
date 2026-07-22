@@ -799,6 +799,7 @@ class WgpuImageView2D(ImageViewShell):
         cached = self._wgpu_tile_instances_cache
         if cached is not None and cached[0] is committed:
             return cached[1]
+        transposed = bool(committed.get("transposed", False))
         instances = tuple(
             TileInstance(
                 tuple(float(value) for value in committed["tiles"][tile]["world_rect"]),
@@ -806,6 +807,7 @@ class WgpuImageView2D(ImageViewShell):
                 tuple(float(value) for value in committed["tiles"][tile]["src_size"]),
                 0,
                 plane_index=int(committed["tiles"][tile]["plane_index"]),
+                transposed=transposed,
             )
             for tile in sorted(committed["tiles"])
         )
@@ -1430,6 +1432,10 @@ class WgpuImageView2D(ImageViewShell):
                 "tiles": committed_tiles,
                 "representation": representation,
                 "display_shape": display_shape,
+                # Payloads are canonical (sorted image axes); an X/Y swap is a
+                # display transform the vertex shader applies via a UV axis swap
+                # (world rects stay display-oriented, source windows canonical).
+                "transposed": _display_axes_transposed(geometry),
             }
             self._montage_display_mode = "wgpu_tile_layer"
 
@@ -2200,6 +2206,19 @@ class WgpuImageView2D(ImageViewShell):
             with contextlib.suppress(Exception):
                 canvas.close()
         super().teardown_surface()
+
+
+def _display_axes_transposed(geometry) -> bool:
+    """Whether the committed display is X/Y transposed vs canonical order.
+
+    Canonical (sorted) image axes render as-is; a reversed pair
+    (``image_axes[0] > image_axes[1]``) means the swap is applied as a display
+    transform (per-tile UV axis swap in the vertex shader).
+    """
+
+    image_axes = getattr(getattr(geometry, "view_state", None), "image_axes", None) or ()
+    image_axes = tuple(int(axis) for axis in image_axes)
+    return len(image_axes) == 2 and image_axes[0] > image_axes[1]
 
 
 def _wgpu_payload_plane_identity(payload) -> object:

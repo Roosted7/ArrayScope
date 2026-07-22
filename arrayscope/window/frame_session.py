@@ -1315,6 +1315,7 @@ class FrameSession:
         (deferred-planning path). Returns remap statistics.
         """
 
+        old_image_axes = tuple(getattr(getattr(self, "view_state", None), "image_axes", None) or ())
         old_source_ids = dict(self.tile_source_ids)
         old_plan_topology = _montage_plan_topology(self.plan)
         old_rendered_tiles = dict(self.rendered_tiles)
@@ -1348,6 +1349,15 @@ class FrameSession:
         self.level_key = level_key
         self.render_generation = int(render_generation)
         self.view_state = view_state
+        new_image_axes = tuple(getattr(view_state, "image_axes", None) or ())
+        if self.canonical_orientation and old_image_axes != new_image_axes:
+            # An X/Y axis-order swap changes only the display transform: the
+            # canonical tiles are unchanged, so the layout/dirty machinery sees
+            # no work (a SQUARE swap keeps even the tile shape). Force the next
+            # commit to cross the backend so instances rebuild with the new
+            # orientation (existing textures, no re-upload) and the committed
+            # CPU frame re-derives its transposed hover/ROI mapping.
+            self.backend_refresh_pending = True
         self.plan = plan
         self.frame_plan = frame_plan
         self.level_expected_indices = tuple(int(index) for index in all_indices)

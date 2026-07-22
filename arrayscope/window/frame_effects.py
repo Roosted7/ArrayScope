@@ -88,6 +88,20 @@ class _PresentationGateReceiver(Qt.QtCore.QObject):
         return super().event(event)
 
 
+def _session_display_transposed(session) -> bool:
+    """Whether a canonical session's committed display is X/Y transposed.
+
+    Only canonical-orientation sessions store tiles in sorted-axis order, so the
+    value-readout swap applies solely there; a reversed image-axis pair marks
+    the transpose.
+    """
+
+    if not bool(getattr(session, "canonical_orientation", False)):
+        return False
+    axes = tuple(getattr(getattr(session, "view_state", None), "image_axes", None) or ())
+    return len(axes) == 2 and int(axes[0]) > int(axes[1])
+
+
 def _presentation_gate_receiver(renderer) -> _PresentationGateReceiver:
     receiver = getattr(renderer, "_montage_presentation_gate_receiver", None)
     if receiver is None:
@@ -2325,20 +2339,31 @@ class FramePipelineEffects:
         renderer._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
         renderer.display_geometry = geometry
         report = getattr(committer, "last_tile_commit_report", None)
+        # An X/Y axis-order swap on a canonical backend re-presents no tiles (the
+        # payloads are unchanged), but the display transform and geometry DID
+        # change, so the committed CPU frame -- its geometry and the value
+        # source's ``transposed`` mapping -- must be rebuilt or hover/ROI keep
+        # reading the pre-swap orientation off a stale frame.
+        new_transposed = _session_display_transposed(session)
+        orientation_changed = new_transposed != bool(
+            getattr(getattr(previous_frame, "value_source", None), "transposed", False)
+        )
         semantic_frame_commit = bool(
             semantic_commit and bool(getattr(report, "presented_tiles", ()))
         )
-        if semantic_frame_commit:
+        if semantic_frame_commit or orientation_changed:
             committed_state = getattr(committer, "last_tile_committed_state", None)
             payloads = getattr(committed_state, "payloads", None)
-            if payloads is not None:
+            if not payloads:
+                payloads = getattr(tile_state, "payloads", None)
+            if payloads:
                 frame = replace(
                     previous_frame,
                     key=context.frame_key,
                     geometry=geometry,
                     levels=decision.levels,
                     histogram_range=decision.histogram_range,
-                    value_source=TiledValueSource(payloads),
+                    value_source=TiledValueSource(payloads, transposed=new_transposed),
                     scene=None,
                 )
                 renderer._set_committed_display_frame(frame)

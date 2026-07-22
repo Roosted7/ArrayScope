@@ -66,6 +66,10 @@ WGPU_CAPABILITIES = ImageViewBackendCapabilities(
     # the executor addresses one isotropic mip span per plane, so an
     # anisotropic page has no representable identity on this backend.
     anisotropic_lod_pages=False,
+    # The vertex shader samples canonical tiles with a swapped UV walk
+    # (``Tile.transposed``), so an X/Y axis-order swap rebinds existing
+    # residency as a display transform instead of re-uploading reoriented tiles.
+    display_axis_transpose=True,
 )
 
 

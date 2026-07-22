@@ -279,7 +279,7 @@ struct Tile {
     src: vec4<f32>,
     lod: u32,
     plane: u32,
-    _pad1: u32, _pad2: u32,
+    transposed: u32, _pad2: u32,
 };
 struct TileCamera {
     scale: vec2<f32>,
@@ -319,7 +319,10 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let ndc = world * camera.scale + camera.offset;
     var out: VOut;
     out.pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
-    out.src = t.src.xy + q * t.src.zw;
+    // A transpose is a pure display swap: the source plane is stored
+    // canonically, so walk its UV axes swapped (q.yx) while the display quad
+    // (t.dst) stays in screen orientation.
+    out.src = t.src.xy + select(q, q.yx, t.transposed != 0u) * t.src.zw;
     out.lod = t.lod;
     out.plane = t.plane;
     return out;
@@ -447,7 +450,7 @@ struct Tile {
     src: vec4<f32>,
     lod: u32,
     plane: u32,
-    _pad1: u32, _pad2: u32,
+    transposed: u32, _pad2: u32,
 };
 struct TileCamera {
     scale: vec2<f32>,
@@ -490,7 +493,10 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let ndc = world * camera.scale + camera.offset;
     var out: VOut;
     out.pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
-    out.src = t.src.xy + q * t.src.zw;
+    // A transpose is a pure display swap: the source plane is stored
+    // canonically, so walk its UV axes swapped (q.yx) while the display quad
+    // (t.dst) stays in screen orientation.
+    out.src = t.src.xy + select(q, q.yx, t.transposed != 0u) * t.src.zw;
     out.lod = t.lod;
     out.plane = t.plane;
     return out;
@@ -2539,7 +2545,14 @@ class WgpuPlaneExecutor:
                 )
         blob = b"".join(
             struct.pack(
-                "8f4i", *t.dst_rect, *t.src_origin, *t.src_size, t.lod_level, t.plane_index, 0, 0
+                "8f4i",
+                *t.dst_rect,
+                *t.src_origin,
+                *t.src_size,
+                t.lod_level,
+                t.plane_index,
+                int(t.transposed),
+                0,
             )
             for t in tiles
         )

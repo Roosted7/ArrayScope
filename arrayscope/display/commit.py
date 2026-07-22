@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
+from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.backends import surface_for_view
 from arrayscope.display.model.commit import DisplayTiledPresentation
 from arrayscope.display.model.frame import (
@@ -15,6 +16,24 @@ from arrayscope.display.model.frame import (
     TiledValueSource,
 )
 from arrayscope.display.scene import DisplayScene, display_scene_for_presentation
+
+
+def _presentation_display_transposed(image_view, presentation) -> bool:
+    """Whether a committed tiled presentation stores canonical tiles that the
+    backend displays X/Y transposed.
+
+    The swap only applies on a backend that renders canonical tiles
+    (``display_axis_transpose``); a reversed image-axis pair then marks the
+    display transpose so hover/ROI index the canonical array with swapped
+    coordinates.  Legacy backends reorder pixels at materialization, so their
+    display and array coordinates already align (never transposed here).
+    """
+
+    if not bool(image_view_backend_capabilities(image_view).display_axis_transpose):
+        return False
+    axes = getattr(getattr(presentation.geometry, "view_state", None), "image_axes", None) or ()
+    axes = tuple(int(axis) for axis in axes)
+    return len(axes) == 2 and axes[0] > axes[1]
 
 
 class DisplayCommitter:
@@ -69,7 +88,10 @@ class DisplayCommitter:
         data = None
         histogram_data = None
         committed_state = tile_state or presentation.tile_state
-        value_source = TiledValueSource(committed_state.payloads)
+        value_source = TiledValueSource(
+            committed_state.payloads,
+            transposed=_presentation_display_transposed(self.image_view, presentation),
+        )
         return CommittedDisplayFrame(
             data=data,
             histogram_data=histogram_data,
