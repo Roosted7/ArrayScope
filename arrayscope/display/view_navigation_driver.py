@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
 from pyqtgraph.Qt import QtCore, QtGui
 
 from arrayscope.display.interaction import point_inside_rect
 from arrayscope.display.view_navigation import (
     PanGesture,
     begin_pan,
+    copy_view_range,
+    drag_zoom_view_range,
     pan_view_range,
     pinch_zoom_view_range,
     scroll_pan_view_range,
@@ -20,6 +25,19 @@ from arrayscope.display.view_navigation import (
 # Pixel deltas remain the fallback for sub-step and pixel-only motion.
 _ANGLE_SCROLL_PIXELS_PER_STEP = 240.0
 _PIXEL_SCROLL_GAIN_LIMIT = 2.0
+_MIDDLE_DRAG_DIRECTION_THRESHOLD_PX = 6.0
+_MIDDLE_DRAG_INDEX_STEP_PX = 10.0
+
+
+@dataclass
+class _MiddleDrag:
+    start_pixel: tuple[float, float]
+    start_range: tuple[tuple[float, float], tuple[float, float]]
+    focus: tuple[float, float]
+    target_axis: int | None
+    mode: str | None = None
+    applied_steps: int = 0
+    provisional_zoom_applied: bool = False
 
 
 class QtViewNavigationDriver:
@@ -38,10 +56,10 @@ class QtViewNavigationDriver:
             self._pan = None
             return False
         event_type = event.type()
-        if event_type == QtCore.QEvent.Type.MouseButtonPress and event.button() in {
-            QtCore.Qt.MouseButton.LeftButton,
-            QtCore.Qt.MouseButton.MiddleButton,
-        }:
+        if (
+            event_type == QtCore.QEvent.Type.MouseButtonPress
+            and event.button() == QtCore.Qt.MouseButton.LeftButton
+        ):
             point = owner._event_overlay_point(event)
             if point is None:
                 return False
@@ -65,9 +83,7 @@ class QtViewNavigationDriver:
             return True
         if event_type == QtCore.QEvent.Type.MouseMove and self._pan is not None:
             buttons = event.buttons()
-            if not bool(
-                buttons & (QtCore.Qt.MouseButton.LeftButton | QtCore.Qt.MouseButton.MiddleButton)
-            ):
+            if not bool(buttons & QtCore.Qt.MouseButton.LeftButton):
                 self._pan = None
                 return False
             position = owner._event_position(event)
@@ -125,13 +141,22 @@ class QtGestureNavigationDriver:
 
     def __init__(self, owner):
         self._owner = owner
+        self._middle_drag: _MiddleDrag | None = None
 
     def handle_event(self, event) -> bool:
         owner = self._owner
-        if getattr(owner, "image", None) is None or owner.viewport_controller.is_fit_locked():
+        if getattr(owner, "image", None) is None:
             return False
         event_type = event.type()
-        if event_type == QtCore.QEvent.Type.NativeGesture:
+        if event_type in {
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QEvent.Type.MouseButtonRelease,
+        }:
+            handled = self._handle_middle_drag(event)
+        elif owner.viewport_controller.is_fit_locked():
+            return False
+        elif event_type == QtCore.QEvent.Type.NativeGesture:
             handled = self._handle_native_gesture(event)
         elif event_type == QtCore.QEvent.Type.Wheel:
             handled = self._handle_scroll(event)
@@ -140,6 +165,105 @@ class QtGestureNavigationDriver:
         if handled:
             event.accept()
         return handled
+
+    def is_middle_drag_active(self) -> bool:
+        return self._middle_drag is not None
+
+    def cancel_middle_drag(self) -> None:
+        if self._middle_drag is not None:
+            self._finish_middle_drag(commit_provisional=False)
+
+    def _handle_middle_drag(self, event) -> bool:
+        event_type = event.type()
+        middle = QtCore.Qt.MouseButton.MiddleButton
+        if event_type == QtCore.QEvent.Type.MouseButtonPress:
+            if event.button() != middle:
+                return False
+            position = self._owner._event_position(event)
+            focus = self._owner._event_display_point(event)
+            if focus is None:
+                return False
+            self._middle_drag = _MiddleDrag(
+                start_pixel=(float(position.x()), float(position.y())),
+                start_range=copy_view_range(self._owner.view.viewRange()),
+                focus=(float(focus[0]), float(focus[1])),
+                target_axis=self._owner._middle_drag_target_axis(),
+            )
+            return True
+
+        gesture = self._middle_drag
+        if gesture is None:
+            return False
+        if event_type == QtCore.QEvent.Type.MouseButtonRelease:
+            if event.button() != middle:
+                return False
+            self._finish_middle_drag()
+            return True
+        if event_type != QtCore.QEvent.Type.MouseMove:
+            return False
+        if not bool(event.buttons() & middle):
+            self._finish_middle_drag()
+            return False
+
+        position = self._owner._event_position(event)
+        dx = float(position.x()) - gesture.start_pixel[0]
+        dy = float(position.y()) - gesture.start_pixel[1]
+        if gesture.mode is None:
+            if dy != 0.0 and not self._owner.viewport_controller.is_fit_locked():
+                provisional_range = drag_zoom_view_range(gesture.start_range, gesture.focus, dy)
+                self._set_middle_range(provisional_range, provisional=True)
+                gesture.provisional_zoom_applied = True
+            if math.hypot(dx, dy) < _MIDDLE_DRAG_DIRECTION_THRESHOLD_PX:
+                return True
+            gesture.mode = "index" if abs(dx) > abs(dy) else "zoom"
+            if gesture.mode == "index":
+                if gesture.provisional_zoom_applied:
+                    self._set_middle_range(gesture.start_range, provisional=True)
+                    gesture.provisional_zoom_applied = False
+                self._owner._set_middle_drag_dimension_active(True)
+            elif not self._owner.viewport_controller.is_fit_locked():
+                gesture.provisional_zoom_applied = False
+                _release_viewport_continuity(self._owner)
+
+        if gesture.mode == "zoom":
+            if self._owner.viewport_controller.is_fit_locked():
+                self._owner._show_fit_mode_interaction_reminder()
+                return True
+            view_range = drag_zoom_view_range(gesture.start_range, gesture.focus, dy)
+            self._set_middle_range(view_range)
+            return True
+
+        if gesture.target_axis is None:
+            return True
+        desired_steps = math.trunc(dx / _MIDDLE_DRAG_INDEX_STEP_PX)
+        step_delta = desired_steps - gesture.applied_steps
+        if step_delta:
+            gesture.applied_steps = desired_steps
+            self._owner._step_middle_drag_dimension(gesture.target_axis, step_delta)
+        return True
+
+    def _set_middle_range(self, view_range, *, provisional: bool = False) -> None:
+        owner = self._owner
+        applying = owner._viewport_applying
+        if provisional:
+            owner._viewport_applying = True
+        try:
+            owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+        finally:
+            owner._viewport_applying = applying
+
+    def _finish_middle_drag(self, *, commit_provisional: bool = True) -> None:
+        gesture = self._middle_drag
+        if gesture is not None and gesture.provisional_zoom_applied:
+            if commit_provisional:
+                _release_viewport_continuity(self._owner)
+                current_range = copy_view_range(self._owner.view.viewRange())
+                self._owner.viewport_controller.note_user_range_changed(current_range)
+                self._owner._enforce_viewport_constraints()
+            else:
+                self._set_middle_range(gesture.start_range, provisional=True)
+        self._owner._set_middle_drag_dimension_active(False)
+        self._middle_drag = None
 
     def _handle_native_gesture(self, event) -> bool:
         gesture_type = event.gestureType()

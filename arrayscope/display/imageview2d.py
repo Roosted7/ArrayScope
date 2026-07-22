@@ -244,6 +244,9 @@ class ImageViewShell(QtWidgets.QWidget):
         # Touchpad pinch-zoom / two-finger-pan is shared by every backend;
         # wgpu/vispy additionally install the plain-mouse navigation driver.
         self._gesture_navigation = QtGestureNavigationDriver(self)
+        self._middle_drag_target_provider = None
+        self._middle_drag_step_handler = None
+        self._middle_drag_active_handler = None
         self._interaction_application = None
         self._last_profile_marker_position: tuple[float, float] | None = None
         self._roi_items = {}
@@ -661,6 +664,29 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def setLevelPresentationChangeHandler(self, handler) -> None:
         self._level_presentation_change_handler = handler if callable(handler) else None
+
+    def setMiddleDragNavigationHandlers(
+        self, *, target_provider=None, step_handler=None, active_handler=None
+    ) -> None:
+        """Connect middle-drag intent to the window-owned dimension strip."""
+
+        self._middle_drag_target_provider = target_provider
+        self._middle_drag_step_handler = step_handler
+        self._middle_drag_active_handler = active_handler
+
+    def _middle_drag_target_axis(self):
+        provider = self._middle_drag_target_provider
+        return None if not callable(provider) else provider()
+
+    def _step_middle_drag_dimension(self, axis: int, steps: int) -> None:
+        handler = self._middle_drag_step_handler
+        if callable(handler):
+            handler(int(axis), int(steps))
+
+    def _set_middle_drag_dimension_active(self, active: bool) -> None:
+        handler = self._middle_drag_active_handler
+        if callable(handler):
+            handler(bool(active))
 
     def _submit_background_task(self, fn, *, on_done, key):
         submitter = getattr(self, "_background_task_submitter", None)
@@ -2603,6 +2629,7 @@ class ImageViewShell(QtWidgets.QWidget):
 
     def _cancel_interaction(self, reason: str) -> None:
         self._pointer_interaction.cancel(reason)
+        self._gesture_navigation.cancel_middle_drag()
 
     def _current_image_world_rect(self):
         if self.image is None:

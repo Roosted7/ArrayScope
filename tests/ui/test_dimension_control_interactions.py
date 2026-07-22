@@ -61,6 +61,61 @@ def test_tiled_dimension_x_y_buttons_promote_range_to_image_crop(qtbot):
         win.close()
 
 
+def test_middle_horizontal_drag_steps_highlighted_dimension(qtbot):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        win.resize(900, 700)
+        win.show()
+        _process_events(qtbot)
+        strip = win.dimension_strip
+        target = strip.scroll_target_axis()
+        assert target == 2
+        assert strip.chip(target).property("indexScrollTarget") is True
+
+        view = win.img_view
+        viewport = view.graphicsView.viewport()
+        start = QtCore.QPointF(viewport.width() / 2.0, viewport.height() / 2.0)
+        middle = QtCore.Qt.MouseButton.MiddleButton
+
+        def send(event_type, position, button, buttons):
+            event = QtGui.QMouseEvent(
+                event_type,
+                position,
+                button,
+                buttons,
+                QtCore.Qt.KeyboardModifier.NoModifier,
+            )
+            assert view.eventFilter(viewport, event) is True
+            _process_events(qtbot)
+
+        before = win.view_state.slice_indices[target]
+        send(QtCore.QEvent.Type.MouseButtonPress, start, middle, middle)
+        send(
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(start.x() + 50.0, start.y()),
+            QtCore.Qt.MouseButton.NoButton,
+            middle,
+        )
+        assert strip.chip(target).property("indexScrollActive") is True
+        send(
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QPointF(start.x() + 50.0, start.y()),
+            middle,
+            QtCore.Qt.MouseButton.NoButton,
+        )
+
+        assert win.view_state.slice_indices[target] == min(win.data.shape[target] - 1, before + 5)
+        assert strip.chip(target).property("indexScrollActive") is False
+    finally:
+        win.close()
+
+
 def test_demoting_cropped_image_axis_preserves_it_as_montage(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow

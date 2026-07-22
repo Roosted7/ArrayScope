@@ -84,6 +84,15 @@ pan/zoom updates the canonical range and camera immediately without routing thro
 drag machinery. ROI/profile hits still take priority and use the shared semantic interaction
 controller.
 
+Middle-button drag is direction-locked after a small movement threshold. Vertical drag performs a
+smooth focus-anchored zoom; horizontal drag steps the last manually used scrollable dimension, or
+the first non-display, non-singleton dimension when no prior choice remains valid. `DimensionStrip`
+owns that target, its canonical slice/range stepping, and the existing accent-border indication;
+the navigation driver owns only pointer trajectory and emits bounded intent through callbacks.
+Sub-threshold vertical motion is shown immediately as a provisional zoom. If horizontal motion wins
+the direction lock, the driver restores the exact press-time range before emitting index intent, so
+the tentative feedback cannot alter final camera or viewport-mode state.
+
 ## ROI and profiles
 
 Qt graphics items are views of Qt-free ROI/profile models. Sampling/statistics live in `core.roi`, `core.histograms`, geometry, and profile coordination.

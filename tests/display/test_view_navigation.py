@@ -7,6 +7,7 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 from arrayscope.display.view_navigation import (
     begin_pan,
+    drag_zoom_view_range,
     pan_view_range,
     pinch_zoom_view_range,
     scale_zoom_view_range,
@@ -56,6 +57,17 @@ def test_scale_zoom_view_range_keeps_focus_fixed():
 
     assert view_range[0] == pytest.approx((25.0, 75.0))
     assert view_range[1] == pytest.approx((25.0, 75.0))
+
+
+def test_drag_zoom_is_smooth_and_directional():
+    start = ((0.0, 100.0), (0.0, 100.0))
+
+    upward = drag_zoom_view_range(start, (50.0, 50.0), -20.0)
+    downward = drag_zoom_view_range(start, (50.0, 50.0), 20.0)
+
+    assert _span(upward)[0] < 100.0
+    assert _span(downward)[0] > 100.0
+    assert sum(upward[0]) / 2.0 == pytest.approx(50.0)
 
 
 def test_pinch_zoom_magnifies_content_for_positive_value():
@@ -391,6 +403,140 @@ def test_fit_locked_gesture_is_consumed_without_moving_camera(qt_app):
         after = view.getView().viewRange()
         assert after[0] == pytest.approx(before[0])
         assert after[1] == pytest.approx(before[1])
+    finally:
+        view.close()
+
+
+def _send_middle_mouse(view, event_type, pos, *, buttons):
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    middle = QtCore.Qt.MouseButton.MiddleButton
+    button = (
+        middle if event_type != QtCore.QEvent.Type.MouseMove else QtCore.Qt.MouseButton.NoButton
+    )
+    event = QtGui.QMouseEvent(
+        event_type,
+        QtCore.QPointF(pos),
+        button,
+        buttons,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    return view.eventFilter(view.graphicsView.viewport(), event)
+
+
+def test_middle_vertical_drag_zooms_without_dimension_steps(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    view = _make_seeded_view(qt_app)
+    steps = []
+    active = []
+    view.setMiddleDragNavigationHandlers(
+        target_provider=lambda: 2,
+        step_handler=lambda axis, delta: steps.append((axis, delta)),
+        active_handler=active.append,
+    )
+    try:
+        middle = QtCore.Qt.MouseButton.MiddleButton
+        start = _viewport_center(view)
+        before_span = _span(view.getView().viewRange())
+
+        assert _send_middle_mouse(view, QtCore.QEvent.Type.MouseButtonPress, start, buttons=middle)
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(start.x(), start.y() - 60.0),
+            buttons=middle,
+        )
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QPointF(start.x(), start.y() - 60.0),
+            buttons=QtCore.Qt.MouseButton.NoButton,
+        )
+
+        assert _span(view.getView().viewRange())[0] < before_span[0]
+        assert steps == []
+        assert active == [False]
+    finally:
+        view.close()
+
+
+def test_middle_horizontal_drag_steps_target_without_zooming(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    view = _make_seeded_view(qt_app)
+    steps = []
+    active = []
+    view.setMiddleDragNavigationHandlers(
+        target_provider=lambda: 2,
+        step_handler=lambda axis, delta: steps.append((axis, delta)),
+        active_handler=active.append,
+    )
+    try:
+        middle = QtCore.Qt.MouseButton.MiddleButton
+        start = _viewport_center(view)
+        before = view.getView().viewRange()
+
+        assert _send_middle_mouse(view, QtCore.QEvent.Type.MouseButtonPress, start, buttons=middle)
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(start.x() + 55.0, start.y()),
+            buttons=middle,
+        )
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QPointF(start.x() + 55.0, start.y()),
+            buttons=QtCore.Qt.MouseButton.NoButton,
+        )
+
+        assert steps == [(2, 5)]
+        assert active == [True, False]
+        assert view.getView().viewRange()[0] == pytest.approx(before[0])
+        assert view.getView().viewRange()[1] == pytest.approx(before[1])
+    finally:
+        view.close()
+
+
+def test_middle_horizontal_lock_resets_provisional_zoom(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    view = _make_seeded_view(qt_app)
+    steps = []
+    view.setMiddleDragNavigationHandlers(
+        target_provider=lambda: 2,
+        step_handler=lambda axis, delta: steps.append((axis, delta)),
+    )
+    try:
+        middle = QtCore.Qt.MouseButton.MiddleButton
+        start = _viewport_center(view)
+        before = view.getView().viewRange()
+        before_mode = view.viewport_controller.mode
+
+        assert _send_middle_mouse(view, QtCore.QEvent.Type.MouseButtonPress, start, buttons=middle)
+        # Below the 6 px direction threshold, vertical motion responds at once.
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(start.x() + 1.0, start.y() - 3.0),
+            buttons=middle,
+        )
+        provisional = view.getView().viewRange()
+        assert provisional[0] != pytest.approx(before[0])
+
+        # Horizontal motion wins, restores the exact press-time camera, then
+        # crosses one calibrated 10 px index step.
+        assert _send_middle_mouse(
+            view,
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(start.x() + 12.0, start.y() - 3.0),
+            buttons=middle,
+        )
+        assert view.getView().viewRange()[0] == pytest.approx(before[0])
+        assert view.getView().viewRange()[1] == pytest.approx(before[1])
+        assert view.viewport_controller.mode == before_mode
+        assert steps == [(2, 1)]
     finally:
         view.close()
 

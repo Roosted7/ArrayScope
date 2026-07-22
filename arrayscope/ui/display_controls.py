@@ -631,6 +631,12 @@ class DisplayControlBuildMixin:
             self.img_view.setBackgroundTaskSubmitter(self._submit_histogram_background_task)
         if hasattr(self.img_view, "setLevelPresentationChangeHandler"):
             self.img_view.setLevelPresentationChangeHandler(self._on_level_presentation_changed)
+        if hasattr(self.img_view, "setMiddleDragNavigationHandlers"):
+            self.img_view.setMiddleDragNavigationHandlers(
+                target_provider=self.dimension_strip.scroll_target_axis,
+                step_handler=self.dimension_strip.step_scroll_axis,
+                active_handler=self.dimension_strip.set_scroll_gesture_active,
+            )
         self.pixel_hud = PixelHud()
         self.img_view.setHudWidget(self.pixel_hud)
         set_hud_provider = getattr(self.img_view, "setHudContextProvider", None)

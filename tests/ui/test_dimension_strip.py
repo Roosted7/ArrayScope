@@ -27,6 +27,50 @@ def test_image_axes_show_full_range_colon(qt_app):
     strip.close()
 
 
+def test_scroll_target_defaults_to_first_non_display_axis_and_reuses_accent_state(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(4)
+    state = ViewState.from_shape((4, 5, 6, 7))
+    try:
+        strip.update_state(state.shape, state)
+
+        assert strip.scroll_target_axis() == 2
+        assert strip.chip(2).property("indexScrollTarget") is True
+        assert strip.chip(2).property("indexScrollActive") is False
+
+        strip.set_scroll_gesture_active(True)
+        assert strip.chip(2).property("indexScrollActive") is True
+        strip.set_scroll_gesture_active(False)
+        assert strip.chip(2).property("indexScrollActive") is False
+    finally:
+        strip.close()
+
+
+def test_scroll_target_remembers_last_manually_stepped_scrollable_axis(qt_app):
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(4)
+    state = ViewState.from_shape((4, 5, 6, 7))
+    try:
+        strip.update_state(state.shape, state)
+        strip.chip(3)._slice_edit_stepped(1)
+
+        assert strip.scroll_target_axis() == 3
+        assert strip.chip(2).property("indexScrollTarget") is False
+        assert strip.chip(3).property("indexScrollTarget") is True
+
+        # If the remembered axis becomes a display axis, fall back to the
+        # first remaining scrollable dimension instead of keeping stale state.
+        changed = state.with_image_axes(0, 3)
+        strip.update_state(changed.shape, changed)
+        assert strip.scroll_target_axis() == 1
+    finally:
+        strip.close()
+
+
 def test_dimension_chip_update_state_skips_unchanged_icon_work(qt_app, monkeypatch):
     import arrayscope.ui.dimension_strip as dimension_strip
     from arrayscope.core.view_state import ViewState

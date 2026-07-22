@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 ViewRange = tuple[tuple[float, float], tuple[float, float]]
@@ -62,6 +63,16 @@ def scale_zoom_view_range(view_range, focus, scale: float) -> ViewRange:
     return (
         (focus_x + (x_range[0] - focus_x) * scale, focus_x + (x_range[1] - focus_x) * scale),
         (focus_y + (y_range[0] - focus_y) * scale, focus_y + (y_range[1] - focus_y) * scale),
+    )
+
+
+def drag_zoom_view_range(
+    view_range, focus, pixel_delta: float, *, sensitivity: float = 0.005
+) -> ViewRange:
+    """Zoom smoothly from a vertical drag (<0 zooms in, >0 zooms out)."""
+
+    return scale_zoom_view_range(
+        view_range, focus, math.exp(float(pixel_delta) * float(sensitivity))
     )
 
 

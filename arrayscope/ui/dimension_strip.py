@@ -76,6 +76,7 @@ class DimensionChip(QtWidgets.QFrame):
     sliceTextChanged = Qt.QtCore.Signal(int, str)
     operationRequested = Qt.QtCore.Signal(int)
     focused = Qt.QtCore.Signal(int)
+    sliceInteracted = Qt.QtCore.Signal(int)
 
     def __init__(self, axis, parent=None):
         super().__init__(parent)
@@ -254,6 +255,7 @@ class DimensionChip(QtWidgets.QFrame):
             self.slice_edit.setText(text)
 
     def _slice_edit_finished(self):
+        self.sliceInteracted.emit(self.axis)
         text = self.slice_edit.text().strip()
         if ":" in text:
             self.sliceTextChanged.emit(self.axis, text)
@@ -264,6 +266,7 @@ class DimensionChip(QtWidgets.QFrame):
             self.sliceTextChanged.emit(self.axis, text)
 
     def _slice_edit_stepped(self, delta):
+        self.sliceInteracted.emit(self.axis)
         text = self.slice_edit.text().strip()
         try:
             shifted = _shift_slice_text(text, delta, self._axis_size)
@@ -305,6 +308,10 @@ class DimensionStrip(QtWidgets.QWidget):
         self._badge_width_count = None
         self._chip_geometry = None
         self._watched_parent = None
+        self._scrollable_axes: tuple[int, ...] = ()
+        self._last_scrolled_axis: int | None = None
+        self._scroll_target_axis: int | None = None
+        self._scroll_gesture_active = False
         layout = QtWidgets.QGridLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(4)
@@ -316,6 +323,7 @@ class DimensionStrip(QtWidgets.QWidget):
             chip.sliceTextChanged.connect(self.sliceTextChanged)
             chip.operationRequested.connect(self.operationRequested)
             chip.focused.connect(self.focusedAxisChanged)
+            chip.sliceInteracted.connect(self._remember_scrolled_axis)
             self.chips.append(chip)
         self.setLayout(layout)
         self._sync_badge_widths(tuple(range(int(ndim))))
@@ -356,12 +364,65 @@ class DimensionStrip(QtWidgets.QWidget):
         for axis, chip in enumerate(self.chips):
             if axis < len(shape):
                 chip.update_state(shape, view_state, profile_axes, axes=axes)
+        display_axes = set(view_state.display_axes())
+        self._scrollable_axes = tuple(
+            axis for axis, size in enumerate(shape) if int(size) > 1 and axis not in display_axes
+        )
+        self._refresh_scroll_target()
 
     def update_axis_state(self, axis: int, shape, view_state, profile_axes=(), axes=None) -> None:
         self.chip(axis).update_state(shape, view_state, profile_axes, axes=axes)
 
     def chip(self, axis):
         return self.chips[int(axis)]
+
+    def scroll_target_axis(self) -> int | None:
+        return self._scroll_target_axis
+
+    def step_scroll_axis(self, axis: int, steps: int) -> None:
+        axis = int(axis)
+        if axis not in self._scrollable_axes or not int(steps):
+            return
+        self.chip(axis)._slice_edit_stepped(int(steps))
+
+    def set_scroll_gesture_active(self, active: bool) -> None:
+        active = bool(active) and self._scroll_target_axis is not None
+        if self._scroll_gesture_active == active:
+            return
+        self._scroll_gesture_active = active
+        self._apply_scroll_target_style()
+
+    def _remember_scrolled_axis(self, axis: int) -> None:
+        axis = int(axis)
+        if axis not in self._scrollable_axes:
+            return
+        self._last_scrolled_axis = axis
+        self._refresh_scroll_target()
+
+    def _refresh_scroll_target(self) -> None:
+        target = (
+            self._last_scrolled_axis
+            if self._last_scrolled_axis in self._scrollable_axes
+            else (self._scrollable_axes[0] if self._scrollable_axes else None)
+        )
+        if target != self._scroll_target_axis:
+            self._scroll_target_axis = target
+            self._scroll_gesture_active = False
+        self._apply_scroll_target_style()
+
+    def _apply_scroll_target_style(self) -> None:
+        for chip in self.chips:
+            is_target = chip.axis == self._scroll_target_axis
+            is_active = is_target and self._scroll_gesture_active
+            changed = False
+            for name, value in (("indexScrollTarget", is_target), ("indexScrollActive", is_active)):
+                if chip.property(name) != value:
+                    chip.setProperty(name, value)
+                    changed = True
+            if changed:
+                style = chip.style()
+                style.unpolish(chip)
+                style.polish(chip)
 
     def row_metrics(self):
         """(row_count, row_height, vertical_spacing) for the current width.

@@ -684,6 +684,8 @@ QFrame[dimensionChip="true"] {{
 }}
 QFrame[dimensionChip="true"]:focus {{ border-color: {t.accent}; }}
 QFrame[dimensionChip="true"][montageAxis="true"] {{ border: 1px solid {t.accent}; }}
+QFrame[dimensionChip="true"][indexScrollTarget="true"] {{ border: 1px solid {t.accent}; }}
+QFrame[dimensionChip="true"][indexScrollActive="true"] {{ border: 2px solid {t.accent}; }}
 QFrame[dimensionChip="true"] QLabel {{
     font-size: 9pt;
     color: {t.text};
