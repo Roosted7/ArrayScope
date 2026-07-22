@@ -131,7 +131,7 @@ def test_cli_multi_file_opens_valid_paths_and_survives_errors(monkeypatch, tmp_p
     ]
 
 
-def test_cli_missing_file_is_reported_and_skipped(monkeypatch, tmp_path, capsys):
+def test_cli_missing_file_is_reported_and_skipped(monkeypatch, tmp_path, capfd):
     from arrayscope import __main__ as cli
 
     missing = tmp_path / "nope.npy"
@@ -143,7 +143,7 @@ def test_cli_missing_file_is_reported_and_skipped(monkeypatch, tmp_path, capsys)
     cli.main()
 
     assert events == []
-    assert "File not found" in capsys.readouterr().out
+    assert "File not found" in capfd.readouterr().out
 
 
 def test_cli_without_files_opens_launcher(monkeypatch):
