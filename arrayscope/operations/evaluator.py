@@ -84,6 +84,32 @@ def _build_array_cache(max_bytes: int, max_entries: int, codec: str | None):
     )
 
 
+def _build_stage_cache(total_bytes: int, max_entries: int, codec: str | None) -> StageCache:
+    """Build the reusable-stage cache, tier-backed unless codec is RAW.
+
+    The stage cache is the largest host byte owner and the only one whose misses
+    repeat an *expensive* recompute (an FFT/IFFT prefix), so a decode-replaces-
+    recompute tier pays here on both the RAM and the time axis (unlike the cheap
+    display materializations, where it only helps RAM).  Same matched-budget
+    split as :func:`_build_array_cache`; RAW is byte-identical to before.  The
+    tier is exact-key recovery only -- ``get_containing`` and the lock-free
+    resident snapshot stay raw-resident (see ``StageCache``).
+    """
+
+    codec = (codec or "raw").strip().lower()
+    if codec == "raw":
+        return StageCache(max_bytes=int(total_bytes), max_entries=int(max_entries))
+    raw_bytes = max(0, int(total_bytes * COMPRESSED_TIER_RAW_FRACTION))
+    tier_bytes = max(0, int(total_bytes) - raw_bytes)
+    tier = CompressedBackingTier(max_bytes=tier_bytes, codec_name=codec)
+    return StageCache(
+        max_bytes=raw_bytes,
+        max_entries=int(max_entries),
+        tier=tier,
+        total_max_bytes=int(total_bytes),
+    )
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     value: object
@@ -195,13 +221,14 @@ class OperationEvaluator:
         self._region_cache = _build_array_cache(
             DEFAULT_DISPLAY_CACHE_BYTES, 512, self.chunk_transport_codec
         )
-        # StageCache is intentionally NOT wired to the compressed tier here: its
-        # retention scoring, in-flight-compute claims and lock-free resident
-        # snapshots make it materially riskier than the BoundedArrayCache-based
-        # caches above.  It stays a plain StageCache; adopting the tier is a
-        # bounded follow-up (the tier is value-generic for exactly that).
-        self._stage_cache = StageCache(
-            max_bytes=DEFAULT_STAGE_CACHE_BYTES, max_entries=DEFAULT_STAGE_CACHE_ENTRIES
+        # StageCache adopts the same host-cache codec (default RAW = byte-
+        # identical).  It is the largest byte owner and the only cache whose
+        # misses repeat an expensive FFT/IFFT prefix, so the decode-replaces-
+        # recompute tier pays here on time as well as RAM.  The tier is exact-key
+        # recovery only: containment matching and the lock-free resident snapshot
+        # never see a compressed entry (see StageCache).
+        self._stage_cache = _build_stage_cache(
+            DEFAULT_STAGE_CACHE_BYTES, DEFAULT_STAGE_CACHE_ENTRIES, self.chunk_transport_codec
         )
         self._stage_materializer = StageMaterializationManager(self._stage_cache)
 
@@ -221,10 +248,16 @@ class OperationEvaluator:
         display_bytes = int(self._display_cache.max_bytes)
         profile_bytes = int(self._profile_cache.max_bytes)
         region_bytes = int(self._region_cache.max_bytes)
+        stage_bytes = int(self._stage_cache.max_bytes)
         self.chunk_transport_codec = normalized
         self._display_cache = _build_array_cache(display_bytes, 512, normalized)
         self._profile_cache = _build_array_cache(profile_bytes, 256, normalized)
         self._region_cache = _build_array_cache(region_bytes, 512, normalized)
+        # Rebuild the stage cache too (starts empty; the new codec applies going
+        # forward).  Any in-flight compute claim is dropped -- a waiter safely
+        # falls back to recomputing, per StageCache.wait_for_compute.
+        self._stage_cache = _build_stage_cache(stage_bytes, DEFAULT_STAGE_CACHE_ENTRIES, normalized)
+        self._stage_materializer = StageMaterializationManager(self._stage_cache)
         self.last_diagnostics = None
         return True
 

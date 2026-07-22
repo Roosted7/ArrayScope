@@ -1523,7 +1523,11 @@ def test_stage_cache_is_qt_free_and_owned_by_operation_evaluator():
     assert "StageKey" in stage_cache_text
 
     evaluator_text = (ROOT / "arrayscope" / "operations" / "evaluator.py").read_text()
-    assert "self._stage_cache = StageCache" in evaluator_text
+    # The evaluator owns stage-cache construction, directly or via its own
+    # _build_stage_cache helper (mirrors _build_array_cache for the tier-backed
+    # display/region/profile caches).
+    assert "self._stage_cache = _build_stage_cache" in evaluator_text
+    assert "return StageCache(" in evaluator_text
     assert "stage_cache_budget_bytes" in evaluator_text
 
     render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()

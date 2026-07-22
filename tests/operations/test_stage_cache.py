@@ -1,5 +1,6 @@
 import numpy as np
 
+from arrayscope.operations.compressed_tier import CompressedBackingTier
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, StageKey
 from arrayscope.operations.stage_cache import StageCache, StageValue
 
@@ -228,3 +229,73 @@ def test_stage_cache_wait_receives_published_value_and_times_out():
     assert finished is False
     assert waited is None
     cache.finish_compute(key, None)
+
+
+# --- G7 compressed backing tier (host-cache codec) --------------------------
+def _tier_cache(raw_bytes, tier_bytes, *, codec="zfp", max_entries=64):
+    tier = CompressedBackingTier(max_bytes=tier_bytes, codec_name=codec)
+    return StageCache(
+        max_bytes=raw_bytes,
+        max_entries=max_entries,
+        tier=tier,
+        total_max_bytes=raw_bytes + tier_bytes,
+    )
+
+
+def test_stage_tier_off_is_byte_identical_default():
+    cache = StageCache(max_bytes=1024, max_entries=4)
+    assert cache.tier is None
+    diag = cache.diagnostics()
+    assert diag.tier_engaged is False
+    assert diag.tier_recoveries == 0
+    assert diag.max_bytes == 1024  # no envelope split when the tier is off
+
+
+def test_stage_tier_recovers_evicted_stage_by_decode():
+    chunk = _value(np.arange(64, dtype=np.float32)).nbytes  # 256 B
+    cache = _tier_cache(raw_bytes=chunk, tier_bytes=chunk * 8)  # raw holds ~1 entry
+    keys = [_key(f"s{i}") for i in range(6)]
+    vals = [_value(np.arange(64, dtype=np.float32) + i) for i in range(6)]
+    for k, v in zip(keys, vals, strict=True):
+        assert cache.put(k, v) is True
+
+    # keys[0] was evicted from the raw hot cache long ago -> served by a tier
+    # decode, bit-identical, not a None miss.
+    recovered = cache.get(keys[0])
+    assert recovered is not None
+    assert np.array_equal(recovered.data, vals[0].data)
+
+    diag = cache.diagnostics()
+    assert diag.tier_engaged is True
+    assert diag.tier_recoveries >= 1
+    assert diag.max_bytes == chunk + chunk * 8  # raw+tier envelope
+    assert diag.bytes_used <= diag.max_bytes
+
+
+def test_stage_tier_compressed_entries_stay_out_of_containment_and_snapshot():
+    full = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.ALL)))
+    point = RegionSpec((AxisRegion(AxisRegionKind.ALL), AxisRegion(AxisRegionKind.POINT, 2)))
+    key_full = StageKey(("doc",), ("fft",), full, "float32", (8, 8))
+    key_point = StageKey(("doc",), ("fft",), point, "float32", (8, 8))
+    array = np.arange(64, dtype=np.float32).reshape(8, 8)
+    value = StageValue(array, full, 1, int(array.nbytes), "low")
+
+    cache = _tier_cache(raw_bytes=int(array.nbytes), tier_bytes=int(array.nbytes) * 4)
+    assert cache.put(key_full, value) is True
+    # Evict key_full into the tier with an unrelated-prefix filler.
+    filler_key = StageKey(("doc",), ("filler",), full, "float32", (8, 8))
+    assert (
+        cache.put(filler_key, StageValue(array.copy(), full, 1, int(array.nbytes), "low")) is True
+    )
+
+    # The containing entry now lives compressed in the tier: containment matching
+    # and the lock-free resident snapshot must NOT see it (no hidden decode).
+    assert cache.get_containing(key_point) is None
+    assert cache.peek_containing_resident(key_point) is None
+    assert all(k != key_full for k, _v in cache.resident_items())
+
+    # But an exact-key get still recovers it by decode (bit-identical).
+    recovered = cache.get(key_full)
+    assert recovered is not None
+    assert np.array_equal(recovered.data, array)
+    assert cache.diagnostics().tier_recoveries >= 1
