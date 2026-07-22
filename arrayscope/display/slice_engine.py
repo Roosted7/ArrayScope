@@ -74,14 +74,16 @@ def complex_to_rgb(data, colormap_lut=None):
         raise
 
 
-def make_image(data, state, colormap_lut=None):
+def make_image(data, state, colormap_lut=None, *, canonical_orientation: bool = False):
     state = _validated_state_for_data(data, state)
     if state.image_axes is None:
         raise ValueError("image_axes must be set to make an image")
 
     image_data, present_axes = _extract_display_axes(data, state, state.image_axes)
     image_data = _apply_display_axis_ranges(image_data, state, present_axes)
-    image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
+    image_data = _reorder_present_axes(
+        image_data, present_axes, _reorder_target_axes(state.image_axes, canonical_orientation)
+    )
     image_data = _ensure_image_rank(image_data)
 
     channel = _channel_mode(state.channel)
@@ -126,7 +128,7 @@ def make_image(data, state, colormap_lut=None):
     )
 
 
-def make_image_from_slab(slab, request, colormap_lut=None):
+def make_image_from_slab(slab, request, colormap_lut=None, *, canonical_orientation: bool = False):
     """Create a display image from an already evaluated image slab."""
     state = request.view_state
     if state.image_axes is None:
@@ -137,7 +139,9 @@ def make_image_from_slab(slab, request, colormap_lut=None):
     image_data = _apply_display_axis_ranges(
         image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ())
     )
-    image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
+    image_data = _reorder_present_axes(
+        image_data, present_axes, _reorder_target_axes(state.image_axes, canonical_orientation)
+    )
     image_data = _ensure_image_rank(image_data)
 
     channel = _channel_mode(state.channel)
@@ -180,7 +184,12 @@ def make_image_from_slab(slab, request, colormap_lut=None):
 
 
 def make_shader_image_from_slab(
-    slab, request, colormap_lut=None, *, provisional_histogram: bool = False
+    slab,
+    request,
+    colormap_lut=None,
+    *,
+    provisional_histogram: bool = False,
+    canonical_orientation: bool = False,
 ):
     """Create a shader-capable display image from an evaluated image slab."""
     state = request.view_state
@@ -192,7 +201,9 @@ def make_shader_image_from_slab(
     image_data = _apply_display_axis_ranges(
         image_data, state, present_axes, applied_axes=getattr(request, "ranged_axes", ())
     )
-    image_data = _reorder_present_axes(image_data, present_axes, state.image_axes)
+    image_data = _reorder_present_axes(
+        image_data, present_axes, _reorder_target_axes(state.image_axes, canonical_orientation)
+    )
     image_data = _ensure_image_rank(image_data)
 
     channel = _channel_mode(state.channel)
@@ -507,6 +518,22 @@ def _apply_display_axis_ranges(data, state, present_axes, *, applied_axes=()):
         if indices is not None and original_axis not in applied_axes:
             result = np.take(result, tuple(indices), axis=result_axis)
     return result
+
+
+def _reorder_target_axes(image_axes, canonical_orientation: bool):
+    """Axes to reorder the (canonically read) slab into.
+
+    ``_present_axes_for_slab`` already returns the slab axes sorted ascending
+    (canonical order).  When ``canonical_orientation`` is set the display order
+    is applied later by the backend (a per-tile UV/index swap), so the payload
+    must stay canonical -- returning the sorted axes makes ``_reorder_present_axes``
+    a no-op.  Otherwise the legacy path bakes ``image_axes`` (display) order into
+    the pixels here.
+    """
+
+    if canonical_orientation:
+        return tuple(sorted(int(axis) for axis in image_axes))
+    return image_axes
 
 
 def _reorder_present_axes(data, present_axes, display_axes):

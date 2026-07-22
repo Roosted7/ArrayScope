@@ -635,6 +635,11 @@ class FrameSession:
     loading_tiles: set[int]
     skipped_tiles: set[int]
     shader_display: bool = False
+    # When True the active backend applies an X/Y axis-order swap as a display
+    # transform, so tiles for this session are materialized and keyed in
+    # canonical (sorted-image-axes) orientation.  Mirrors the evaluator's
+    # ``canonical_orientation`` for tile-eval paths that only hold ``session``.
+    canonical_orientation: bool = False
     # ADR 0055 G3: window-invariant anchoring for non-montage sessions on
     # atlas backends (display.source_anchoring.SourceAnchoring); stamps
     # exact payloads with a PayloadSourceAnchor so backend residency can
@@ -2207,11 +2212,17 @@ class FrameSession:
             tuple(getattr(view_state, "axis_range_indices", ()) or ()),
             tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
         )
+        image_axes = tuple(int(axis) for axis in getattr(view_state, "image_axes", ()) or ())
+        if self.canonical_orientation:
+            # Canonical tiles are order-independent, so their semantic identity
+            # must be too: a transpose then reuses GPU residency (matching
+            # semantic_key) instead of re-uploading in the swapped order.
+            image_axes = tuple(sorted(image_axes))
         return TileIdentity(
             document_generation=(id(base_data), int(getattr(document, "revision", 0) or 0)),
             operation_key=tuple(getattr(document, "steps", ()) or ()),
             source_index=int(tile.source_index),
-            image_axes=tuple(int(axis) for axis in getattr(view_state, "image_axes", ()) or ()),
+            image_axes=image_axes,
             axis_flips=tuple(
                 bool(value) for value in getattr(view_state, "axis_flipped", ()) or ()
             ),

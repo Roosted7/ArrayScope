@@ -654,7 +654,12 @@ def frame_session_key(
 
 
 def montage_tile_semantic_key(
-    document_key, view_state, viewport_plan: MontageViewportPlan, colormap_lut
+    document_key,
+    view_state,
+    viewport_plan: MontageViewportPlan,
+    colormap_lut,
+    *,
+    canonical_orientation: bool = False,
 ) -> tuple[object, ...]:
     """Identity of one montage tile's TEXELS, shared across index windows.
 
@@ -665,6 +670,11 @@ def montage_tile_semantic_key(
     change rename identical texels, so previously computed tiles refilled
     cold from black (field defect 2026-07-05: missing corner tiles that
     "were there in other views").
+
+    When ``canonical_orientation`` is set the texels are materialized in
+    canonical (sorted-image-axes) order, so an X/Y swap must NOT rename them:
+    both the scope state's image-axes order and the tile shape are squared to
+    ascending-axis order so a transpose reuses the same floors/previews.
     """
 
     if viewport_plan.axis is None:
@@ -678,13 +688,21 @@ def montage_tile_semantic_key(
             text=None,
         )
         axis_key = int(viewport_plan.axis)
+    tile_shape = tuple(int(value) for value in viewport_plan.tile_shape)
+    if canonical_orientation:
+        image_axes = getattr(scope_state, "image_axes", None)
+        if image_axes is not None and len(image_axes) == 2 and image_axes[0] > image_axes[1]:
+            scope_state = scope_state.with_image_axes(*sorted(int(a) for a in image_axes))
+            # tile_shape is (size(image_axes[0]), size(image_axes[1])); a swap
+            # transposes it, so square it back to ascending-axis order.
+            tile_shape = (tile_shape[1], tile_shape[0], *tile_shape[2:])
     lut_key = None if colormap_lut is None else np.asarray(colormap_lut).tobytes()
     return (
         "montage_tile_semantics",
         document_key,
         scope_state,
         axis_key,
-        tuple(int(value) for value in viewport_plan.tile_shape),
+        tile_shape,
         lut_key,
         bool(viewport_plan.shader_display),
     )

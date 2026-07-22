@@ -135,6 +135,7 @@ def schedule_near_viewport_montage_prefetch(
     decisions = []
     scheduled = 0
     shader_display = bool(getattr(session, "shader_display", False))
+    canonical_orientation = bool(getattr(session, "canonical_orientation", False))
     direction = _montage_prefetch_direction(window)
     candidates = (
         _candidate_tiles(session, direction=direction) if direction else _candidate_tiles(session)
@@ -215,10 +216,14 @@ def schedule_near_viewport_montage_prefetch(
                         request,
                         colormap_lut=session.colormap_lut,
                         provisional_histogram=True,
+                        canonical_orientation=canonical_orientation,
                     )
                 else:
                     display_image = make_image_from_slab(
-                        slab, request, colormap_lut=session.colormap_lut
+                        slab,
+                        request,
+                        colormap_lut=session.colormap_lut,
+                        canonical_orientation=canonical_orientation,
                     )
                 result = EvaluationResult(
                     value=display_image,
@@ -237,6 +242,7 @@ def schedule_near_viewport_montage_prefetch(
                     evaluation_context=context,
                     shader_display=shader_display,
                     provisional_histogram=bool(shader_display),
+                    canonical_orientation=canonical_orientation,
                 )
             pages = _materialize_walk_preview(
                 session,

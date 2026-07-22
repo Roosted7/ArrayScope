@@ -180,6 +180,11 @@ class TileInstance:
     src_size: tuple[float, float]
     lod_level: int = 0
     plane_index: int = 0
+    # When True the source plane is sampled with SWAPPED UV axes: the content
+    # is stored canonically (sorted image axes) and an X/Y axis-order swap is
+    # applied as a pure display transform in the vertex shader, so a transpose
+    # rebinds existing residency instead of re-uploading reoriented pixels.
+    transposed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dst_rect", tuple(float(v) for v in self.dst_rect))
@@ -188,6 +193,7 @@ class TileInstance:
         if len(self.dst_rect) != 4 or len(self.src_origin) != 2 or len(self.src_size) != 2:
             raise ValueError("malformed tile instance geometry")
         object.__setattr__(self, "lod_level", max(0, int(self.lod_level)))
+        object.__setattr__(self, "transposed", bool(self.transposed))
         plane_index = int(self.plane_index)
         if plane_index < 0:
             raise ValueError(f"plane_index must be non-negative, got {plane_index}")

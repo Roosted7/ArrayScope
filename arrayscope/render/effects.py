@@ -151,18 +151,21 @@ def _evaluate_native_tile_result(
                 evaluation_context=evaluation_context,
             )
             _check_render_cancelled(cancellation_token)
+            canonical_orientation = bool(getattr(session, "canonical_orientation", False))
             if bool(getattr(session, "shader_display", False)):
                 display_image = make_shader_image_from_slab(
                     slab,
                     request,
                     colormap_lut=session.colormap_lut,
                     provisional_histogram=True,
+                    canonical_orientation=canonical_orientation,
                 )
             else:
                 display_image = make_image_from_slab(
                     slab,
                     request,
                     colormap_lut=session.colormap_lut,
+                    canonical_orientation=canonical_orientation,
                 )
             display_image = attach_montage_tile_level_stats(
                 display_image,
@@ -191,6 +194,7 @@ def _evaluate_native_tile_result(
         stage_cache=stage_cache,
         stage_document_key=stage_document_key(session.document),
         evaluation_context=evaluation_context,
+        canonical_orientation=bool(getattr(session, "canonical_orientation", False)),
     )
     _check_render_cancelled(cancellation_token)
     result = replace(
@@ -339,6 +343,7 @@ def evaluate_shared_preview(
             factor_xy=factor_xy,
             slice_remap=_shared_preview_slice_remap(session, tile, slice_remaps=slice_remaps),
         )
+        canonical_orientation = bool(getattr(session, "canonical_orientation", False))
         if shader_preview:
             result = evaluate_image_snapshot(
                 preview_document,
@@ -349,10 +354,16 @@ def evaluate_shared_preview(
                 shader_display=True,
                 provisional_histogram=True,
                 evaluation_context=evaluation_context,
+                canonical_orientation=canonical_orientation,
             )
             value = result.value
         else:
-            value = make_image(transformed, preview_state, colormap_lut=session.colormap_lut)
+            value = make_image(
+                transformed,
+                preview_state,
+                colormap_lut=session.colormap_lut,
+                canonical_orientation=canonical_orientation,
+            )
         value = replace(
             value,
             semantic_data=None,

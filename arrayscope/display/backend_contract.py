@@ -24,6 +24,13 @@ class ImageViewBackendCapabilities:
     # A backend that keys its ladder as one isotropic mip chain cannot, so
     # the LOD demand is squared off before any such page key is minted.
     anisotropic_lod_pages: bool = True
+    # Whether the backend applies an X/Y axis-order swap (transpose) as a pure
+    # DISPLAY transform -- sampling canonically materialized tiles with a
+    # swapped UV/index mapping -- instead of baking the display order into tile
+    # pixels.  When True the engine keeps every payload/identity in canonical
+    # (sorted-image-axes) orientation so a transpose costs the same as a flip;
+    # when False the legacy path reorders pixels at materialization.
+    display_axis_transpose: bool = False
 
 
 PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
@@ -86,6 +93,7 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
                 getattr(capabilities, "native_pointer_interaction", True)
             ),
             anisotropic_lod_pages=bool(getattr(capabilities, "anisotropic_lod_pages", True)),
+            display_axis_transpose=bool(getattr(capabilities, "display_axis_transpose", False)),
         )
 
     return ImageViewBackendCapabilities(name="pyqtgraph")

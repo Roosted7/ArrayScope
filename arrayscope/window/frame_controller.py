@@ -560,6 +560,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             prioritize=True,
         )
         shader_display = viewport_plan.shader_display
+        canonical_orientation = bool(
+            image_view_backend_capabilities(self.win.img_view).display_axis_transpose
+        )
+        # Single derivation point: mirror the active backend's display-transpose
+        # capability onto the evaluator so every tile key/materialization for
+        # this frame (and the prefetch/retarget paths that persist until the
+        # next build) shares one orientation policy.
+        self.win.operation_evaluator.canonical_orientation = canonical_orientation
         output_dtype = getattr(
             getattr(self.win, "data", None),
             "dtype",
@@ -715,7 +723,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             session_id=session_id,
             key=session_key,
             semantic_key=montage_tile_semantic_key(
-                _document_key(document), view_state, viewport_plan, colormap_lut
+                _document_key(document),
+                view_state,
+                viewport_plan,
+                colormap_lut,
+                canonical_orientation=canonical_orientation,
             ),
             render_generation=render_generation,
             level_key=level_key,
@@ -740,6 +752,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             loading_tiles=set(),
             skipped_tiles={int(tile.montage_index) for tile in skipped_tiles},
             shader_display=bool(shader_display),
+            canonical_orientation=canonical_orientation,
             stage_fan_in=montage_commit.stage_fan_in_state(stage_plan),
             defer_side_panels=bool(defer_side_panels),
             applied_level_source=(
@@ -986,15 +999,22 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # An image-axis ORDER change (X/Y swap / transpose) keeps the montage
         # axis, layout, and source indices, so the index-window remap would
         # treat every tile as an unchanged/remappable slot and re-present the
-        # previously materialized plane in its OLD orientation.  A transpose
-        # changes what every tile's pixels mean, not which sources are shown,
-        # so it is a rebirth, not an index-window move: reject retarget and let
-        # the caller rebuild the session with freshly oriented tiles.  (Axis
-        # FLIPS never reach here -- they are a viewbox transform applied without
-        # a montage re-render.)
-        if tuple(getattr(session.view_state, "image_axes", None) or ()) != tuple(
-            getattr(view_state, "image_axes", None) or ()
-        ):
+        # previously materialized plane in its OLD orientation.  On a legacy
+        # (non-canonical) backend a transpose changes what every tile's pixels
+        # mean, not which sources are shown, so it is a rebirth, not an
+        # index-window move: reject retarget and let the caller rebuild the
+        # session with freshly oriented tiles.  (Axis FLIPS never reach here --
+        # they are a viewbox transform applied without a montage re-render.)
+        #
+        # When the backend applies the swap as a DISPLAY transform
+        # (``canonical_orientation``), the tiles are materialized canonically
+        # and the retarget legitimately reuses them: a square-tile transpose
+        # keeps the geometry and re-commits with the new display mapping, and a
+        # non-square transpose falls through to the geometry reject below (a
+        # re-layout that still hits the canonical cache / GPU residency).
+        if not bool(getattr(session, "canonical_orientation", False)) and tuple(
+            getattr(session.view_state, "image_axes", None) or ()
+        ) != tuple(getattr(view_state, "image_axes", None) or ()):
             return _reject("image-axes-order")
         if bool(force_auto):
             return _reject("force-auto")
@@ -1090,7 +1110,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return False
         self._last_montage_retarget_source_ids_ms = (perf_counter() - source_ids_start) * 1000.0
         semantic_key = montage_tile_semantic_key(
-            _document_key(document), view_state, viewport_plan, colormap_lut
+            _document_key(document),
+            view_state,
+            viewport_plan,
+            colormap_lut,
+            canonical_orientation=bool(
+                getattr(self.win.operation_evaluator, "canonical_orientation", False)
+            ),
         )
         level_key = self._montage_level_key(document, view_state, all_indices, colormap_lut)
         frame_plan_start = perf_counter()

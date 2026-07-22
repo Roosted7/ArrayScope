@@ -815,6 +815,13 @@ class FrameValueSource:
 @dataclass(frozen=True)
 class TiledValueSource(FrameValueSource):
     payloads: dict[int, DisplayTilePayload] = field(default_factory=dict)
+    # True when the committed tiles are stored CANONICALLY (sorted-image-axes
+    # order) but the display is X/Y transposed -- the backend applied the swap
+    # as a display transform, so hover/ROI must index the canonical array with
+    # SWAPPED coordinates (display-y is the array's fast/column axis and vice
+    # versa).  False (the legacy path) means pixels were reordered into display
+    # orientation at materialization, so display and array coordinates align.
+    transposed: bool = False
 
     def __post_init__(self) -> None:
         typed = {
@@ -845,9 +852,14 @@ class TiledValueSource(FrameValueSource):
         data = np.asarray(source)
         y_i = int(getattr(mapping, "local_y", -1))
         x_i = int(getattr(mapping, "local_x", -1))
-        if y_i < 0 or x_i < 0 or y_i >= data.shape[0] or x_i >= data.shape[1]:
+        if y_i < 0 or x_i < 0:
             return None
-        return array_value_at(data, y_i, x_i)
+        # Canonical payload + transposed display: display (y, x) reads the
+        # array at [x, y].
+        row, col = (x_i, y_i) if self.transposed else (y_i, x_i)
+        if row >= data.shape[0] or col >= data.shape[1]:
+            return None
+        return array_value_at(data, row, col)
 
     def tile_region(self, tile, region: tuple[slice, slice]):
         if tile is None:
@@ -865,9 +877,17 @@ class TiledValueSource(FrameValueSource):
         if not display_tile_payload_has_semantics(payload):
             return None
         y_slice, x_slice = region
-        data = np.asarray(payload.semantic_data)[y_slice, x_slice, ...]
+        semantic = np.asarray(payload.semantic_data)
         hist_source = payload.semantic_histogram_data
-        hist = None if hist_source is None else np.asarray(hist_source)[y_slice, x_slice]
+        if self.transposed:
+            # Region is display-oriented (y_slice, x_slice); the canonical array
+            # is [array0=display-x, array1=display-y], so slice swapped then
+            # swap the first two axes back to display (y, x) orientation.
+            data = np.swapaxes(semantic[x_slice, y_slice, ...], 0, 1)
+            hist = None if hist_source is None else np.asarray(hist_source)[x_slice, y_slice].T
+        else:
+            data = semantic[y_slice, x_slice, ...]
+            hist = None if hist_source is None else np.asarray(hist_source)[y_slice, x_slice]
         return data, hist, "committed_tile_payload"
 
 

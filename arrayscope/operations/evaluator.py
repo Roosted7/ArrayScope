@@ -149,6 +149,14 @@ class OperationEvaluator:
     # tier (see ``_build_display_cache``).  Threaded from the app settings via
     # the coordinator; defaults to raw so headless/library use is unchanged.
     chunk_transport_codec: str = "raw"
+    # When True, display tiles are materialized and keyed in canonical
+    # (sorted-image-axes) orientation and an X/Y axis-order swap becomes a pure
+    # display transform applied by the backend rather than baked into pixels.
+    # Set per-frame from the active backend's ``display_axis_transpose``
+    # capability; keys sort image_axes so a canonical entry never collides with
+    # a legacy display-order entry (a flag flip degrades to a cache miss, never
+    # a wrong-orientation reuse).
+    canonical_orientation: bool = False
     _derived_key: tuple | None = None
     _derived_data: object | None = None
     _line_key: tuple | None = None
@@ -276,6 +284,7 @@ class OperationEvaluator:
                 colormap_lut=colormap_lut,
                 stage_cache=self._stage_cache,
                 stage_document_key=stage_document_key(self.document),
+                canonical_orientation=self.canonical_orientation,
             )
             return self.store_display_tile_result(view_state, colormap_lut, result)
         except Exception as exc:
@@ -377,7 +386,9 @@ class OperationEvaluator:
             None if montage_axis is None else int(montage_axis),
             None if source_index is None else int(source_index),
             None if tile_number is None else int(tile_number),
-            _request_key(request_for_image(view_state)),
+            _request_key(
+                request_for_image(view_state), canonical_orientation=self.canonical_orientation
+            ),
             _lut_key(colormap_lut),
             bool(shader_display),
         )
@@ -468,8 +479,12 @@ class OperationEvaluator:
         def key_for(tile_state):
             template = state["template"]
             if template is None:
-                base_key = _view_state_key(tile_state)
-                keep_axes = tuple(tile_state.image_axes or ())
+                base_key = _view_state_key(
+                    tile_state, canonical_orientation=self.canonical_orientation
+                )
+                keep_axes = _canonical_axis_tuple(
+                    tile_state.image_axes or (), self.canonical_orientation
+                )
                 base_slices = tuple(int(index) for index in tile_state.slice_indices)
                 state["template"] = (base_key, keep_axes, base_slices)
                 return _slow(tile_state)
@@ -646,6 +661,7 @@ class OperationEvaluator:
             stage_cache=self._stage_cache,
             stage_document_key=stage_document_key(document),
             evaluation_context=evaluation_context,
+            canonical_orientation=self.canonical_orientation,
         )
 
     def level_evidence(
@@ -816,6 +832,7 @@ class OperationEvaluator:
             stage_document_key=stage_document_key(document),
             evaluation_context=evaluation_context,
             shader_display=shader_display,
+            canonical_orientation=self.canonical_orientation,
         )
 
     def store_prefetch_display_tile_result(
@@ -1001,11 +1018,11 @@ def _display_tile_key_from_parts(
     )
 
 
-def _request_key(request):
+def _request_key(request, canonical_orientation: bool = False):
     return _request_key_from_parts(
         request.kind,
-        _view_state_key(request.view_state),
-        tuple(request.keep_axes),
+        _view_state_key(request.view_state, canonical_orientation=canonical_orientation),
+        _canonical_axis_tuple(request.keep_axes, canonical_orientation),
         tuple(request.slice_indices),
         request.frame_axis,
         request.frame_index,
@@ -1019,13 +1036,30 @@ def _request_key_from_parts(
     return (kind, view_state_key, keep_axes, slice_indices, frame_axis, frame_index)
 
 
-def _view_state_key(view_state):
+def _canonical_axis_tuple(axes, canonical_orientation: bool):
+    """Sort image/keep axes when canonical so a transpose reuses the same key.
+
+    Canonicalizing keys means an X/Y-swapped view keys to the same slot as the
+    unswapped view (its payload is materialized canonically), while a legacy
+    display-order view keeps its distinct order -- so the two key spaces never
+    collide.  The slab is read set-wise (planner treats keep_axes as a set) and
+    always emerges in ascending-axis order, so sorting here only affects the
+    key, never which pixels are read.
+    """
+
+    if axes is None:
+        return None
+    axes = tuple(int(axis) for axis in axes)
+    return tuple(sorted(axes)) if canonical_orientation else axes
+
+
+def _view_state_key(view_state, canonical_orientation: bool = False):
     if view_state is None:
         return None
     return (
         int(getattr(view_state, "ndim", 0)),
         tuple(int(size) for size in getattr(view_state, "shape", ())),
-        _optional_int_tuple(getattr(view_state, "image_axes", None)),
+        _canonical_axis_tuple(getattr(view_state, "image_axes", None), canonical_orientation),
         None if getattr(view_state, "line_axis", None) is None else int(view_state.line_axis),
         tuple(int(index) for index in getattr(view_state, "slice_indices", ())),
         getattr(
@@ -1098,6 +1132,7 @@ def evaluate_image_snapshot(
     stage_cache=None,
     stage_document_key=None,
     evaluation_context=None,
+    canonical_orientation: bool = False,
 ) -> EvaluationResult:
     request = request_for_image(view_state)
     plan = plan_slab(document, request)
@@ -1119,9 +1154,12 @@ def evaluate_image_snapshot(
             request,
             colormap_lut=colormap_lut,
             provisional_histogram=bool(provisional_histogram),
+            canonical_orientation=canonical_orientation,
         )
     else:
-        value = make_image_from_slab(slab, request, colormap_lut=colormap_lut)
+        value = make_image_from_slab(
+            slab, request, colormap_lut=colormap_lut, canonical_orientation=canonical_orientation
+        )
     _check_cancelled(cancellation_token)
     return EvaluationResult(
         value=value,
