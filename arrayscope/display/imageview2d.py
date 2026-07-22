@@ -65,6 +65,7 @@ from arrayscope.display.roi_items import (
 )
 from arrayscope.display.shader_mapping import default_gray_lut, normalize_lut_rgb
 from arrayscope.display.tile_truth_overlay import TileTruthOverlayLayer
+from arrayscope.display.view_navigation_driver import QtGestureNavigationDriver
 from arrayscope.display.viewport import (
     MIN_VIEWPORT_CONTENT_FRACTION,
     ViewportController,
@@ -240,6 +241,9 @@ class ImageViewShell(QtWidgets.QWidget):
         self._roi_info_panel = None
         self.interaction_controller = DisplayInteractionController()
         self._pointer_interaction = QtPointerInteractionDriver(self, self.interaction_controller)
+        # Touchpad pinch-zoom / two-finger-pan is shared by every backend;
+        # wgpu/vispy additionally install the plain-mouse navigation driver.
+        self._gesture_navigation = QtGestureNavigationDriver(self)
         self._interaction_application = None
         self._last_profile_marker_position: tuple[float, float] | None = None
         self._roi_items = {}
@@ -2374,40 +2378,43 @@ class ImageViewShell(QtWidgets.QWidget):
 
     # --- Qt Events -----------------------------------------------------
     def eventFilter(self, obj, event):
-        if (
-            obj is self.graphicsView.viewport()
-            and event.type() == QtCore.QEvent.Type.Wheel
-            and not self.viewport_controller.is_fit_locked()
-        ):
+        if obj is not self.graphicsView.viewport():
+            return super().eventFilter(obj, event)
+        # Wheel and native pan/pinch gestures drive the camera and must be
+        # paced and fit-locked identically. Leave rotate/swipe gestures alone.
+        is_native_camera_gesture = (
+            event.type() == QtCore.QEvent.Type.NativeGesture
+            and event.gestureType()
+            in {
+                QtCore.Qt.NativeGestureType.PanNativeGesture,
+                QtCore.Qt.NativeGestureType.ZoomNativeGesture,
+            }
+        )
+        is_camera_input = event.type() == QtCore.QEvent.Type.Wheel or is_native_camera_gesture
+        if is_camera_input and not self.viewport_controller.is_fit_locked():
             # QApplication.mouseButtons() is empty for wheel input by the time
             # sigRangeChanged runs. Carry this one synchronous input identity
             # across the ViewBox range signal so only real gesture bursts—not
             # programmatic camera replay—receive the 16 ms LOD-plan cadence.
             self._viewport_wheel_range_pending = True
             QtCore.QTimer.singleShot(0, self, self._clear_viewport_wheel_range_pending)
-        if (
-            obj is self.graphicsView.viewport()
-            and event.type() == QtCore.QEvent.Type.Wheel
-            and self.viewport_controller.is_fit_locked()
-        ):
+        if is_camera_input and self.viewport_controller.is_fit_locked():
             self._show_fit_mode_interaction_reminder()
             event.accept()
             return True
-        if obj is self.graphicsView.viewport() and self._handle_context_menu_event(event):
+        if self._handle_context_menu_event(event):
             return True
-        if obj is self.graphicsView.viewport() and self._handle_roi_drawing_event(event):
+        if self._handle_roi_drawing_event(event):
             return True
-        if obj is self.graphicsView.viewport() and self._handle_active_view_navigation_event(event):
+        if self._handle_active_view_navigation_event(event):
             return True
-        if obj is self.graphicsView.viewport() and self._handle_pointer_interaction_event(event):
+        if self._handle_gesture_navigation_event(event):
             return True
-        if obj is self.graphicsView.viewport() and self._handle_view_navigation_event(event):
+        if self._handle_pointer_interaction_event(event):
             return True
-        if (
-            obj is self.graphicsView.viewport()
-            and self.viewport_controller.is_fit_locked()
-            and self._is_fit_locked_pan_attempt(event)
-        ):
+        if self._handle_view_navigation_event(event):
+            return True
+        if self.viewport_controller.is_fit_locked() and self._is_fit_locked_pan_attempt(event):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
 
@@ -2530,6 +2537,12 @@ class ImageViewShell(QtWidgets.QWidget):
     def _handle_active_view_navigation_event(self, event) -> bool:
         driver = getattr(self, "_view_navigation", None)
         if driver is None or not bool(driver.is_active()):
+            return False
+        return bool(driver.handle_event(event))
+
+    def _handle_gesture_navigation_event(self, event) -> bool:
+        driver = getattr(self, "_gesture_navigation", None)
+        if driver is None:
             return False
         return bool(driver.handle_event(event))
 

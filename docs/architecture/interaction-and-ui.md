@@ -74,9 +74,15 @@ Background viewport navigation is separate from overlay drag semantics. `display
 owns backend-neutral pan/zoom range math, and `display.view_navigation_driver` translates backend
 events into that model for surfaces that provide native navigation. That shared math consumes the
 canonical `ViewBox` range and inversion/orientation state so flipped X/Y axes behave like the
-PyQtGraph baseline. VisPy uses that path so plain pan/zoom updates the canonical range and camera
-immediately without routing through PyQtGraph scene drag machinery. ROI/profile hits still take
-priority and use the shared semantic interaction controller.
+PyQtGraph baseline. A shared touchpad path handles native pinch zoom and two-finger pan for every
+backend, applying Qt's platform-provided incremental acceleration and momentum deltas without a
+second animation owner. A manually calibrated angle-delta mapping preserves accelerated touchpad
+motion when available, bounded against simultaneous native pixel deltas so alternate Qt encodings do
+not create a speed discontinuity; angle-only devices retain the full compatibility calibration.
+Mouse-wheel events remain with the existing backend wheel path. VisPy uses the native path so plain
+pan/zoom updates the canonical range and camera immediately without routing through PyQtGraph scene
+drag machinery. ROI/profile hits still take priority and use the shared semantic interaction
+controller.
 
 ## ROI and profiles
 
