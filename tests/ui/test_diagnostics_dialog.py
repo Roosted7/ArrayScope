@@ -441,13 +441,13 @@ def test_display_cache_detail_shows_tier_when_engaged():
     change visible in the diagnostics dialog.
     """
     from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
-    from arrayscope.ui.diagnostics import _display_cache_detail
+    from arrayscope.ui.diagnostics import _cache_tier_detail
 
     # Tier off (RAW): no suffix, byte-identical to the pre-tier detail.
     raw = CacheDiagnosticsSnapshot(
         status=CacheStatus.READY, bytes_used=1_835_008, max_bytes=536_870_912
     )
-    assert "tier" not in _display_cache_detail(raw)
+    assert "tier" not in _cache_tier_detail(raw)
 
     # Tier engaged: codec, compression ratio, retained keys, and recoveries show.
     engaged = replace(
@@ -460,7 +460,7 @@ def test_display_cache_detail_shows_tier_when_engaged():
         tier_resident_uncompressed_bytes=2_400_000,
         tier_recoveries=5,
     )
-    detail = _display_cache_detail(engaged)
+    detail = _cache_tier_detail(engaged)
     assert "zfp tier" in detail
     assert "×2.4" in detail
     assert "29 keys" in detail

@@ -384,7 +384,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         bars["stage"].set_usage(
             used=snapshot.stage_cache.bytes_used,
             total=snapshot.stage_cache.max_bytes,
-            detail=f"{_short_bytes(snapshot.stage_cache.bytes_used)} / {_short_bytes(snapshot.stage_cache.max_bytes)}",
+            detail=_cache_tier_detail(snapshot.stage_cache),
         )
         bars["workers"].set_segments(
             _worker_segments(snapshot.schedulers), summary=_active_work_summary(snapshot.schedulers)
@@ -395,7 +395,7 @@ class DiagnosticsDialog(QtWidgets.QDialog):
         bars["tile"].set_usage(
             used=snapshot.display_cache.bytes_used,
             total=snapshot.display_cache.max_bytes,
-            detail=_display_cache_detail(snapshot.display_cache),
+            detail=_cache_tier_detail(snapshot.display_cache),
         )
         show_gpu = str(
             getattr(snapshot, "image_rendering_backend_actual", "")
@@ -546,14 +546,15 @@ def _percent(used: int, total: int) -> str:
     return f"{(float(used) / max(1.0, float(total)) * 100.0):.0f}%"
 
 
-def _display_cache_detail(cache) -> str:
+def _cache_tier_detail(cache) -> str:
     """`used / total`, plus the host-cache compressed-tier status when engaged.
 
-    The tier keeps the *same* byte budget while retaining more of the working
-    set, so the raw ``used / total`` figure barely moves when a codec is
-    selected — the visible effect is the tier suffix (codec, compression ratio,
-    retained keys, and decode recoveries). Without it a Host Cache Compression
-    menu change leaves no trace in this dialog.
+    Shared by the display and stage cache bars. The tier keeps the *same* byte
+    budget while retaining more of the working set, so the raw ``used / total``
+    figure barely moves when a codec is selected — the visible effect is the
+    tier suffix (codec, compression ratio, retained keys, and decode
+    recoveries). Without it a Host Cache Compression menu change leaves no trace
+    in this dialog.
     """
 
     base = f"{_short_bytes(cache.bytes_used)} / {_short_bytes(cache.max_bytes)}"
