@@ -670,6 +670,12 @@ class TilePresentationDelta:
     atomic_handoff: bool = False
     force_refresh: bool = False
     clear_reason: str = ""
+    # This commit only re-windows already-resident, already-presented exact
+    # tiles to new levels (every upsert is a level rewindow of a resident
+    # tile; no new pixels, no coverage, no first-pixel work).  A CPU-windowing
+    # backend uses this to bound its per-commit work to the requested upsert
+    # slice instead of re-resolving/re-windowing every resident active tile.
+    level_only_drain: bool = False
 
     def __post_init__(self) -> None:
         upserts = {
@@ -725,6 +731,7 @@ class TilePresentationDelta:
         object.__setattr__(self, "atomic_handoff", bool(self.atomic_handoff))
         object.__setattr__(self, "force_refresh", bool(self.force_refresh))
         object.__setattr__(self, "clear_reason", str(self.clear_reason or ""))
+        object.__setattr__(self, "level_only_drain", bool(self.level_only_drain))
 
 
 @dataclass(frozen=True)

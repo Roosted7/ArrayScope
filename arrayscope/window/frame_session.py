@@ -3350,6 +3350,24 @@ class FrameSession:
         self._last_near_tiles = near
         self._last_viewport_identity = viewport_identity
 
+        # Level-only drain: this commit's every emitted upsert is a level
+        # rewindow of an already-resident, already-presented exact tile (all
+        # required pixels present, only per-tile levels differ).  Nothing new
+        # is uploaded, nothing is removed from the active scope, and no
+        # first-pixel coverage is owed.  A CPU-windowing backend uses this to
+        # bound its per-commit re-window work to exactly ``upserts`` instead of
+        # re-resolving every resident active tile (measured on the 272-tile FFT
+        # montage: ~1200 ms/commit resolving all 272 vs ~55 ms for the 12
+        # actually re-levelled).
+        stale_level_set = set(stale_level_tiles)
+        level_only_drain = bool(
+            stale_level_set
+            and upserts
+            and all(int(tile) in stale_level_set for tile in upserts)
+            and not any(int(tile) in active_scope for tile in removals)
+            and not coverage_upserts
+            and not unpresented_tiles
+        )
         delta = TilePresentationDelta(
             structure_revision=self.structure_revision,
             payload_revision=self.payload_revision,
@@ -3370,6 +3388,7 @@ class FrameSession:
             target_identities=self.tile_target_identities(active),
             force_refresh=force_refresh,
             clear_reason=clear_reason,
+            level_only_drain=level_only_drain,
         )
         state = previous_state.apply_delta(delta)
         return state, delta

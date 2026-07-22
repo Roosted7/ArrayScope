@@ -626,6 +626,73 @@ def test_level_snapshot_keeps_deferred_visible_upsert_pending_until_acknowledged
     assert snapshot.settled is True
 
 
+def _materialize_and_present(session, source_ids, *tile_numbers, levels=(0.0, 1.0)):
+    for index in tile_numbers:
+        tile = session.plan.tiles[int(index)]
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        source_ids[int(index)] = ("tile", int(index))
+    state, delta = session.build_tile_presentation(source_ids)
+    session.acknowledge_tile_presentation(
+        delta,
+        TileCommitReport(presented_tiles=state.active_payloads(delta)),
+        levels=levels,
+    )
+    session.mark_presented(state.active_payloads(delta))
+    return state, delta
+
+
+def test_pure_level_rewindow_commit_is_flagged_level_only_drain():
+    # A commit whose only work is re-windowing already-resident, already-
+    # presented exact tiles to new levels must be flagged ``level_only_drain``
+    # so a CPU-windowing backend can bound its per-commit re-window work to the
+    # emitted upsert slice instead of re-resolving every resident active tile.
+    session = _session()
+    source_ids = {}
+    _materialize_and_present(session, source_ids, 0, 1, 2, 3)
+
+    # Nothing dirty and no pending level target: not a level drain at all.
+    _baseline_state, baseline_delta = session.build_tile_presentation(source_ids)
+    assert baseline_delta.level_only_drain is False
+
+    # Every visible exact tile now needs a new window: a pure level drain.
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+    _state, delta = session.build_tile_presentation(source_ids, max_upserts=2)
+
+    assert delta.level_only_drain is True
+    # The upsert slice is bounded by the requested budget, and every emitted
+    # tile is one of the already-presented tiles being re-levelled (no new
+    # pixels, no coverage, no removals).
+    assert 0 < len(delta.upserts) <= 2
+    assert not delta.removals
+    assert set(delta.upserts).issubset({0, 1, 2, 3})
+
+
+def test_first_pixel_coverage_commit_is_not_level_only_drain():
+    # A commit that still owes first-pixel coverage for an unpresented tile is
+    # not a pure level drain even while a level target is pending: it uploads
+    # new pixels, so the backend must take the general (full-resolve) path.
+    session = _session()
+    source_ids = {}
+    # Present only two of the four visible tiles, then materialize (but do not
+    # present) the other two so they still owe first-pixel coverage.
+    _materialize_and_present(session, source_ids, 0, 1)
+    for index in (2, 3):
+        tile = session.plan.tiles[index]
+        image = np.full((2, 2), tile.source_index, dtype=np.float32)
+        session.mark_materialized(
+            RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
+        )
+        source_ids[int(index)] = ("tile", int(index))
+
+    assert session.begin_level_presentation_update((2.0, 4.0)) is True
+    _state, delta = session.build_tile_presentation(source_ids, max_upserts=4)
+
+    # Tiles 2 and 3 have never presented first pixels, so this commit owes
+    # coverage and must not be treated as a level-only drain.
+    assert delta.level_only_drain is False
+
+
 def test_montage_render_session_caps_upserts_without_clipping_active_scope():
     session = _session()
     source_ids = {}

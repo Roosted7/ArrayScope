@@ -580,7 +580,25 @@ class MontageTileLayer:
         drawable_payloads: dict[int, DisplayTilePayload] = {}
         page_assemblies: dict[int, _PageAssembly] = {}
         identity_rejected_tiles: list[int] = []
-        for tile, payload in tile_payloads.items():
+        # Level-only drain fast path: a commit whose every emitted upsert is a
+        # level rewindow of an already-resident, already-presented tile does not
+        # touch the other resident tiles' pixels.  Resolving (page-assembling +
+        # re-windowing) every active payload here is the whole per-commit cost
+        # on a large complex montage (measured: ~1200 ms for 272 tiles vs
+        # ~55 ms for the 12 actually re-levelled).  Restrict resolution to the
+        # requested upsert slice; the remaining resident tiles keep their drawn
+        # pixels and stay in ``active`` via the resident-visibility seed below,
+        # exactly as they would have through the general (skip) path.
+        level_only_drain = bool(getattr(tile_delta, "level_only_drain", False))
+        if level_only_drain:
+            resolve_items = tuple(
+                (int(tile), tile_payloads[int(tile)])
+                for tile in requested_upserts
+                if int(tile) in tile_payloads
+            )
+        else:
+            resolve_items = tuple(tile_payloads.items())
+        for tile, payload in resolve_items:
             if acknowledged_identity_satisfies_target(
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
@@ -628,6 +646,15 @@ class MontageTileLayer:
         level_rewindow_deadline_ms = (
             None if cold_deadline_ms is None else max(8.0, float(cold_deadline_ms))
         )
+        if level_only_drain:
+            # The session already bounded this commit to its upsert cap, and we
+            # resolved (page-assembled + re-windowed) exactly that slice above.
+            # A mid-loop rewindow deadline would then commit only the first few
+            # of the already-paid-for tiles and discard the rest, forcing the
+            # discarded tiles to be re-resolved on the next commit — pure wasted
+            # CPU that stretches the drain.  Boundedness comes from the upsert
+            # cap here, not the time deadline, so let every resolved tile land.
+            level_rewindow_deadline_ms = None
         cold_start = perf_counter()
         cold_tiles_committed = 0
         update_start = perf_counter()
@@ -848,6 +875,16 @@ class MontageTileLayer:
                 and level_update_admitted
             )
             item_deadline_ms = level_rewindow_deadline_ms if rewindow_only else cold_deadline_ms
+            if level_only_drain:
+                # PyQtGraph bakes levels into the payload source identity, so a
+                # re-level presents as a full-upload ``cold_candidate`` rather
+                # than the lightweight rewindow path.  The resolve pass above
+                # already page-assembled and re-windowed exactly the capped
+                # upsert slice; letting the cold deadline drop the tail here
+                # would discard that paid-for work and force a re-resolve next
+                # commit.  The upsert cap already bounds the work, so commit the
+                # whole resolved slice.
+                item_deadline_ms = None
             if (
                 item_deadline_ms is not None
                 and cold_candidate

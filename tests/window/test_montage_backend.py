@@ -3188,6 +3188,212 @@ def test_pyqtgraph_level_update_follows_delta_priority_order(qt_app):
     }
 
 
+def test_level_only_drain_resolves_only_the_upsert_slice(qt_app, monkeypatch):
+    # On a large complex montage the dominant per-commit cost is page-assembling
+    # and re-windowing every resident active payload.  A ``level_only_drain``
+    # commit only re-levels already-resident tiles, so the CPU-windowing backend
+    # must resolve ONLY the emitted upsert slice, not every active tile.  Before
+    # the fast path this loop ran over all active payloads (here: 4) regardless
+    # of how few were being committed (here: 2).
+    from pyqtgraph.graphicsItems.ImageItem import ImageItem
+
+    from arrayscope.display.backends.pyqtgraph import tiles as tiles_module
+    from arrayscope.display.backends.pyqtgraph.tiles import (
+        MontageTileLayer,
+        TileLayerItemState,
+        _direct_payload_source_id,
+    )
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+
+    class Owner:
+        def add_tile_item(self, *_args):
+            pass
+
+        def remove_tile_item(self, *_args):
+            pass
+
+        def move_tile_item(self, *_args):
+            pass
+
+    geometry = DisplayGeometry(
+        view_state=None,
+        display_shape=(4, 4),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=0),
+    )
+    layer = MontageTileLayer(
+        Owner(),
+        set_image_item_data=lambda *_args, **_kwargs: None,
+        record_upload_timing=lambda *_args, **_kwargs: None,
+        histogram_levels_for_display=lambda levels: levels,
+        is_rgb_image=lambda _image: False,
+    )
+    payloads = {}
+    for tile_number in range(4):
+        image = np.full((2, 2), tile_number, dtype=np.float32)
+        payload = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=tile_number,
+            image=image,
+            histogram_data=None,
+            source_id=("source", tile_number),
+            semantic_data=image,
+            source_shape=image.shape,
+        )
+        payloads[tile_number] = payload
+        item = ImageItem(axisOrder="row-major")
+        source_id = _direct_payload_source_id(payload.source_id, payload)
+        layer.states[tile_number] = TileLayerItemState(
+            tile_number=tile_number,
+            source_index=tile_number,
+            item=item,
+            local_rect=(0, 0, 2, 2),
+            world_rect=(0, 0, 2, 2),
+            source_array_id=source_id,
+            histogram_array_id=None,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+            visible=True,
+            display_cache=image,
+        )
+
+    resolved: list[int] = []
+    original_resolve = tiles_module._resolve_page_backed_payload
+
+    def counting_resolve(payload, *, levels=None):
+        resolved.append(int(payload.tile_number))
+        return original_resolve(payload, levels=levels)
+
+    monkeypatch.setattr(tiles_module, "_resolve_page_backed_payload", counting_resolve)
+
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        active_tiles=(0, 1, 2, 3),
+        upserts={3: payloads[3], 1: payloads[1]},
+        removals=(),
+        cold_deadline_ms=None,
+        level_only_drain=True,
+    )
+
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.25, 0.75),
+        rgb_already_windowed=False,
+        dirty_tiles=(),
+        tile_payloads=payloads,
+        tile_delta=delta,
+    )
+
+    # Only the two emitted upserts were resolved/re-windowed — the two
+    # untouched resident tiles never entered the page-assembly path.
+    assert sorted(resolved) == [1, 3]
+
+
+def test_level_only_drain_commits_the_whole_upsert_slice(qt_app):
+    # A level_only_drain commit must land every tile in its already-bounded
+    # upsert slice: the resolve pass paid to re-window each of them, so a
+    # mid-loop deadline must not drop the tail and force a wasteful re-resolve
+    # next commit.
+    from pyqtgraph.graphicsItems.ImageItem import ImageItem
+
+    from arrayscope.display.backends.pyqtgraph.tiles import (
+        MontageTileLayer,
+        TileLayerItemState,
+        _direct_payload_source_id,
+    )
+    from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+
+    class Owner:
+        def add_tile_item(self, *_args):
+            pass
+
+        def remove_tile_item(self, *_args):
+            pass
+
+        def move_tile_item(self, *_args):
+            pass
+
+    geometry = DisplayGeometry(
+        view_state=None,
+        display_shape=(4, 4),
+        montage=MontageGeometry(indices=(0, 1, 2, 3), tile_shape=(2, 2), columns=2, rows=2, gap=0),
+    )
+    layer = MontageTileLayer(
+        Owner(),
+        set_image_item_data=lambda *_args, **_kwargs: None,
+        record_upload_timing=lambda *_args, **_kwargs: None,
+        histogram_levels_for_display=lambda levels: levels,
+        is_rgb_image=lambda _image: False,
+    )
+    payloads = {}
+    for tile_number in range(4):
+        image = np.full((2, 2), tile_number, dtype=np.float32)
+        payload = DisplayTilePayload(
+            tile_number=tile_number,
+            source_index=tile_number,
+            image=image,
+            histogram_data=None,
+            source_id=("source", tile_number),
+            semantic_data=image,
+            source_shape=image.shape,
+        )
+        payloads[tile_number] = payload
+        item = ImageItem(axisOrder="row-major")
+        source_id = _direct_payload_source_id(payload.source_id, payload)
+        layer.states[tile_number] = TileLayerItemState(
+            tile_number=tile_number,
+            source_index=tile_number,
+            item=item,
+            local_rect=(0, 0, 2, 2),
+            world_rect=(0, 0, 2, 2),
+            source_array_id=source_id,
+            histogram_array_id=None,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+            visible=True,
+            display_cache=image,
+        )
+
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        active_tiles=(0, 1, 2, 3),
+        upserts={tile: payloads[tile] for tile in (0, 1, 2, 3)},
+        removals=(),
+        # A collapsed cold deadline that would normally stop the loop after the
+        # first committed tile — the fast path ignores it for the bounded slice.
+        cold_deadline_ms=0.0,
+        level_only_drain=True,
+    )
+
+    stats = layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.25, 0.75),
+        rgb_already_windowed=False,
+        dirty_tiles=(),
+        tile_payloads=payloads,
+        tile_delta=delta,
+    )
+
+    assert sorted(stats.committed_upserts) == [0, 1, 2, 3]
+
+
 def test_tile_presentation_admission_uses_backend_cost_function():
     from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
     from arrayscope.window.frame_session import FrameSession
