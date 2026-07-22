@@ -68,6 +68,28 @@ def _should_warm_wgpu(settings) -> bool:
     return os.environ.get("QT_QPA_PLATFORM", "") not in {"offscreen", "minimal"}
 
 
+def cpu_display_backend_likely(settings=None) -> bool:
+    """Whether the effective image backend uses the CPU display kernels.
+
+    ``cpu_display_rgba`` / ``rgb_display_for_levels`` run only on the pyqtgraph
+    backend; wgpu and vispy shade on the GPU.  Consulted at startup so their
+    optional numba kernels are not compiled for a wgpu/vispy session.  A
+    wgpu->pyqtgraph fallback (device build failure) is still covered by the lazy
+    warm on the first CPU display call, so a False here never breaks anything.
+    """
+
+    choice = _image_backend_choice_value(settings)
+    if choice == ImageRenderingBackendChoice.PYQTGRAPH.value:
+        return True
+    if choice in {
+        ImageRenderingBackendChoice.WGPU.value,
+        ImageRenderingBackendChoice.VISPY.value,
+    }:
+        return False
+    # AUTO: pyqtgraph is the CPU fallback chosen when the wgpu preconditions fail.
+    return not _should_warm_wgpu(settings)
+
+
 def _image_backend_choice_value(settings) -> str:
     """The configured image-backend choice value, from ``settings`` or QSettings."""
 

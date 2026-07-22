@@ -129,15 +129,6 @@ def _create_window(
     win.setWindowTitle(title)
     win.show()
 
-    # Compile the optional numba RSS kernels off the hot path while the window
-    # comes up, so the first root-sum-squares projection doesn't wait on the JIT.
-    try:
-        from arrayscope.operations import _numba_reductions
-
-        _numba_reductions.prewarm_async()
-    except Exception:
-        pass
-
     return app, win
 
 

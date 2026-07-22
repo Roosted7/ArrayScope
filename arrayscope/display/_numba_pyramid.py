@@ -5,16 +5,12 @@ This module fuses the two ``np.add.reduceat`` passes that dominate
 parallel kernel.  The pure-NumPy implementation there remains the source of
 truth and the always-available fallback; this accelerator is engaged only
 when numba is importable *and* the kernels have been JIT-compiled off the
-hot path via :func:`prewarm`.
+hot path.
 
-Design (mirrors the repo's other optional accelerators):
-
-* Guarded import -- absence of numba simply disables the fast path.
-* NumPy reference stays intact; callers fall back when ``*_if_ready``
-  returns ``None`` (numba missing, kernels not warmed, or an unaccelerated
-  dtype/shape).
-* Compilation runs on a background thread through :func:`prewarm`; the
-  visible render path never blocks waiting on the JIT.
+The lazy import / off-the-hot-path compile / numpy-fallback machinery lives in
+the shared :mod:`arrayscope.core.numba_runtime` (group name ``"pyramid"``), so
+importing this module (and therefore ``pyramid``) never pays numba's ~0.4-0.6 s
+import cost -- that happens on the background prewarm thread.
 
 The kernel reproduces the exact two-pass accumulation *order* of the NumPy
 code -- inner sum down the rows of each source column (axis-0 ``reduceat``),
@@ -24,22 +20,16 @@ match bit-for-bit and complex inputs match to float32 rounding.
 
 from __future__ import annotations
 
-import threading
-
 import numpy as np
 
-try:  # pragma: no cover - exercised by the availability-dependent tests
+from arrayscope.core import numba_runtime
+
+NUMBA_AVAILABLE = numba_runtime.NUMBA_AVAILABLE
+
+
+def _build_kernels() -> dict[str, object]:
+    """Import numba and construct + force-compile the reduction kernels (once)."""
     from numba import njit, prange
-
-    NUMBA_AVAILABLE = True
-except Exception:  # pragma: no cover - environments without numba
-    NUMBA_AVAILABLE = False
-
-_READY = threading.Event()
-_WARM_LOCK = threading.Lock()
-
-
-if NUMBA_AVAILABLE:
 
     @njit(cache=True, nogil=True, parallel=True, fastmath=False)
     def _reduce_bins_real(src, y_starts, y_counts, x_starts, x_counts):
@@ -87,34 +77,36 @@ if NUMBA_AVAILABLE:
                 out[k, m] = total / np.float32(yc * x_counts[m])
         return out
 
+    # Force compilation on tiny arrays, off the hot path.
+    y_starts = np.array([0, 2], dtype=np.intp)
+    x_starts = np.array([0, 2], dtype=np.intp)
+    counts = np.array([2.0, 2.0], dtype=np.float32)
+    real = np.arange(16, dtype=np.float32).reshape(4, 4)
+    cplx = (real + 1j * real[::-1]).astype(np.complex64)
+    _reduce_bins_real(real, y_starts, counts, x_starts, counts)
+    _reduce_bins_complex(np.ascontiguousarray(cplx), y_starts, counts, x_starts, counts)
+    return {"real": _reduce_bins_real, "complex": _reduce_bins_complex}
+
+
+_GROUP = numba_runtime.register("pyramid", _build_kernels)
+
 
 def prewarm() -> None:
-    """Compile the reduction kernels on tiny arrays, off the hot path.
+    """Compile the reduction kernels off the hot path (blocking).
 
-    Idempotent and safe to call from any thread.  A no-op when numba is not
-    installed.  Callers should run this on a background thread so the first
-    real reduction never pays the compilation cost.
+    Idempotent and safe to call from any thread; a no-op when numba is not
+    installed.  Callers should run this on a background thread (or use the
+    lazy warm inside :func:`reduce_accumulated_if_ready`) so the first real
+    reduction never pays the compilation cost.
     """
 
-    if not NUMBA_AVAILABLE or _READY.is_set():
-        return
-    with _WARM_LOCK:
-        if _READY.is_set():
-            return
-        y_starts = np.array([0, 2], dtype=np.intp)
-        x_starts = np.array([0, 2], dtype=np.intp)
-        counts = np.array([2.0, 2.0], dtype=np.float32)
-        real = np.arange(16, dtype=np.float32).reshape(4, 4)
-        cplx = (real + 1j * real[::-1]).astype(np.complex64)
-        _reduce_bins_real(real, y_starts, counts, x_starts, counts)
-        _reduce_bins_complex(np.ascontiguousarray(cplx), y_starts, counts, x_starts, counts)
-        _READY.set()
+    _GROUP.prewarm()
 
 
 def is_ready() -> bool:
     """Whether the accelerated path is compiled and available."""
 
-    return NUMBA_AVAILABLE and _READY.is_set()
+    return NUMBA_AVAILABLE and _GROUP.ready()
 
 
 def reduce_accumulated_if_ready(
@@ -136,15 +128,18 @@ def reduce_accumulated_if_ready(
     stays in the NumPy caller and is unaffected.
     """
 
-    if not is_ready():
+    if not NUMBA_AVAILABLE:
+        return None
+    kernels = _GROUP.get()  # kicks a background warm and returns None until ready
+    if kernels is None:
         return None
     if accumulated.ndim != 2:
         return None
     dtype = accumulated.dtype
     if dtype == np.float32:
-        kernel = _reduce_bins_real
+        kernel = kernels["real"]
     elif dtype == np.complex64:
-        kernel = _reduce_bins_complex
+        kernel = kernels["complex"]
     else:
         return None
     src = np.ascontiguousarray(accumulated)

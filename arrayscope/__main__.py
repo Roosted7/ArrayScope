@@ -145,6 +145,15 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
     if supervised_rc is not None:
         raise SystemExit(supervised_rc)
 
+    # This is the real working process (the supervisors above re-exec and exit
+    # in the short-lived parents). Warm the optional numba accelerators in the
+    # background so the first RSS projection / CPU display / LOD reduction does
+    # not wait on the JIT. One call; the runtime owns which kernels exist and
+    # each also self-warms lazily on first use. No-op without numba.
+    from arrayscope.core import numba_runtime
+
+    numba_runtime.prewarm_all_async()
+
     if args.trace:
         configure_trace(args.trace)
         atexit.register(close_trace)

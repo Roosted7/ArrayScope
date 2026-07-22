@@ -171,9 +171,48 @@ def test_existing_public_results_unchanged_without_numba(force_numpy):
     assert rgba[0, 2, 3] == 0
 
 
-def test_ready_is_false_before_prewarm(monkeypatch):
-    # ensure_prewarming must never block the caller.
-    monkeypatch.setattr(shader_kernels, "_READY", type(shader_kernels._READY)())
-    monkeypatch.setattr(shader_kernels, "_WARM_STARTED", False)
-    assert shader_kernels.ready() is False
-    shader_kernels.ensure_prewarming()  # returns immediately (spawns a thread)
+def test_ensure_prewarming_never_blocks_and_registers_group():
+    # The display kernels register with the shared runtime under "display" and
+    # ensure_prewarming must return immediately (it only spawns a daemon thread).
+    from arrayscope.core import numba_runtime
+
+    assert "display" in numba_runtime.registered_names()
+    shader_kernels.ensure_prewarming()  # returns immediately even if already warm
+
+
+def test_unregistered_group_is_never_ready():
+    from arrayscope.core import numba_runtime
+
+    assert numba_runtime.ready("does-not-exist") is False
+
+
+def test_display_prewarm_is_gated_to_the_cpu_backend():
+    # The display kernels run only on pyqtgraph; a wgpu/vispy session must not
+    # bulk-compile them. The gate is a settings-only check (no numba needed).
+    from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.image_view_factory import cpu_display_backend_likely
+
+    class _Settings:
+        def __init__(self, choice):
+            self.image_rendering_backend = choice
+
+    assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.WGPU)) is False
+    assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.VISPY)) is False
+    assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.PYQTGRAPH)) is True
+
+    # The registered display group defers to that predicate for bulk prewarm.
+    from arrayscope.core import numba_runtime
+
+    group = numba_runtime.get_group("display")
+    assert group is not None
+    monkeypatched = {"value": False}
+    import arrayscope.display.shader_kernels as sk
+
+    original = sk._cpu_display_backend_active
+    try:
+        sk._GROUP._should_prewarm = lambda: monkeypatched["value"]
+        assert group.wanted() is False
+        monkeypatched["value"] = True
+        assert group.wanted() is True
+    finally:
+        sk._GROUP._should_prewarm = original

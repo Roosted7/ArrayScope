@@ -346,34 +346,6 @@ class FileOpenSession(QtCore.QObject):
         self._finish()
 
 
-_numba_pyramid_warm_started = False
-_numba_pyramid_warm_lock = threading.Lock()
-
-
-def _prewarm_numba_pyramid_async() -> None:
-    """Compile the optional numba LOD-reduction kernels on a daemon thread.
-
-    Idempotent per process and cheap to call: a no-op when numba is not
-    installed or the kernels are already compiled.  Kept off the GUI thread
-    so a file open never blocks on JIT compilation.
-    """
-
-    global _numba_pyramid_warm_started
-    from arrayscope.display import _numba_pyramid
-
-    if not _numba_pyramid.NUMBA_AVAILABLE or _numba_pyramid.is_ready():
-        return
-    with _numba_pyramid_warm_lock:
-        if _numba_pyramid_warm_started:
-            return
-        _numba_pyramid_warm_started = True
-    threading.Thread(
-        target=_numba_pyramid.prewarm,
-        name="arrayscope-numba-pyramid-warm",
-        daemon=True,
-    ).start()
-
-
 def open_path_async(filepath, *, title=None, mmap=False, consume=False, show_loading_window=True):
     """Open one single-dataset file (or DICOM directory) asynchronously."""
     ensure_open_app()
@@ -382,10 +354,6 @@ def open_path_async(filepath, *, title=None, mmap=False, consume=False, show_loa
     from arrayscope.display.image_view_factory import warm_image_backend_async
 
     warm_image_backend_async()
-    # Compile the optional numba LOD-reduction kernels off the hot path while
-    # the file read runs, so the first page materialization does not stall on
-    # the JIT.  No-op when numba is unavailable or already warmed.
-    _prewarm_numba_pyramid_async()
     session = FileOpenSession(
         filepath,
         title=title,

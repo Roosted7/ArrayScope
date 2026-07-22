@@ -2,19 +2,11 @@
 
 This module provides a fused root-sum-squares (RSS) reduction that avoids the
 full-volume ``np.abs(data) ** 2`` temporary allocated by the numpy reference in
-``pipeline.RootSumSquares``.  It follows the repository's optional-accelerator
-pattern:
-
-* the presence of ``numba`` is detected cheaply (via ``find_spec``) and the
-  heavy ``import numba`` is deferred until :func:`prewarm` -- so importing this
-  module (and therefore ``pipeline``) never pays numba's ~0.4 s import cost,
-* the numpy reference in ``pipeline`` stays intact as the always-correct fallback,
-* the JIT is compiled off the hot path via :func:`prewarm` (kicked off in a
-  background daemon thread on first use), so the visible path never blocks on
-  either the numba import or kernel compilation,
-* :func:`rss_if_ready` returns ``None`` whenever the accelerator is unavailable,
-  not yet warm, or the input is not in the contiguous-friendly case, and the
-  caller then uses the numpy reference.
+``pipeline.RootSumSquares``.  It plugs into the shared accelerator runtime
+(:mod:`arrayscope.core.numba_runtime`) under the group name ``"reductions"``,
+which supplies the lazy numba import, off-the-hot-path compile, and selective
+prewarm; the numpy reference in ``pipeline`` stays intact as the always-correct
+fallback.
 
 Accuracy / policy notes:
 
@@ -31,26 +23,17 @@ Accuracy / policy notes:
 
 from __future__ import annotations
 
-import importlib.util
-import threading
-
 import numpy as np
 
-# Cheap availability probe: does not import numba (that costs ~0.4 s and would
-# be paid on every ``pipeline`` import). The real import happens in prewarm().
-NUMBA_AVAILABLE = importlib.util.find_spec("numba") is not None
+from arrayscope.core import numba_runtime
 
-_READY = threading.Event()
-_WARM_LOCK = threading.Lock()
-_WARM_THREAD_LOCK = threading.Lock()
-_warm_thread: threading.Thread | None = None
-
-# Populated by prewarm(): {np.dtype: compiled njit kernel}.
-_KERNELS: dict[np.dtype, object] = {}
+# Mirror the runtime's cheap probe as a module constant so tests can monkeypatch
+# it to force the numpy fallback path.
+NUMBA_AVAILABLE = numba_runtime.NUMBA_AVAILABLE
 
 
 def _build_kernels() -> dict[np.dtype, object]:
-    """Import numba and construct the compiled RSS kernels (called once)."""
+    """Import numba and construct + force-compile the RSS kernels (once)."""
     from numba import njit, prange
 
     @njit(cache=True, nogil=True, parallel=True, fastmath=False)
@@ -105,62 +88,37 @@ def _build_kernels() -> dict[np.dtype, object]:
             out[m] = np.sqrt(acc)
         return out
 
-    return {
+    kernels = {
         np.dtype(np.float32): _rss_last_axis_f32,
         np.dtype(np.float64): _rss_last_axis_f64,
         np.dtype(np.complex64): _rss_last_axis_c64,
         np.dtype(np.complex128): _rss_last_axis_c128,
     }
+    # Force compilation of every specialization off the hot path.
+    for dtype, kernel in kernels.items():
+        kernel(np.ones((2, 2), dtype=dtype))
+    return kernels
+
+
+_GROUP = numba_runtime.register("reductions", _build_kernels)
 
 
 def prewarm() -> None:
-    """Import numba and compile the RSS kernels; safe to call repeatedly.
+    """Compile the RSS kernels (blocking). Prefer :func:`prewarm_async`."""
 
-    Blocks the calling thread until compilation finishes, so callers on the
-    visible path should use :func:`prewarm_async` (or rely on the lazy trigger
-    inside :func:`rss_if_ready`) instead of calling this directly.
-    """
-    if not NUMBA_AVAILABLE or _READY.is_set():
-        return
-    with _WARM_LOCK:
-        if _READY.is_set():
-            return
-        try:
-            kernels = _build_kernels()
-        except Exception:
-            # numba present but unusable (e.g. broken LLVM); stay on numpy.
-            globals()["NUMBA_AVAILABLE"] = False
-            return
-        # Force compilation of every specialization off the hot path.
-        for dtype, kernel in kernels.items():
-            kernel(np.ones((2, 2), dtype=dtype))
-        _KERNELS.update(kernels)
-        _READY.set()
+    _GROUP.prewarm()
 
 
 def prewarm_async() -> None:
-    """Kick off :func:`prewarm` in a background daemon thread (non-blocking).
+    """Kick off compilation on a background daemon thread (non-blocking)."""
 
-    Idempotent: at most one warm-up thread runs at a time, and calls after the
-    kernels are ready are no-ops.
-    """
-    global _warm_thread
-    if not NUMBA_AVAILABLE or _READY.is_set():
-        return
-    with _WARM_THREAD_LOCK:
-        if _READY.is_set():
-            return
-        if _warm_thread is not None and _warm_thread.is_alive():
-            return
-        _warm_thread = threading.Thread(
-            target=prewarm, name="arrayscope-numba-rss-prewarm", daemon=True
-        )
-        _warm_thread.start()
+    _GROUP.prewarm_async()
 
 
 def is_ready() -> bool:
     """Return True when the numba kernels are compiled and usable."""
-    return NUMBA_AVAILABLE and _READY.is_set()
+
+    return NUMBA_AVAILABLE and _GROUP.ready()
 
 
 def rss_if_ready(data, axis: int):
@@ -175,14 +133,12 @@ def rss_if_ready(data, axis: int):
     """
     if not NUMBA_AVAILABLE:
         return None
-    if not _READY.is_set():
-        # Never block the visible path on the numba import or compilation; warm
-        # in the background and let this call fall back to numpy.
-        prewarm_async()
+    kernels = _GROUP.get()  # kicks a background warm and returns None until ready
+    if kernels is None:
         return None
 
     array = np.asarray(data)
-    kernel = _KERNELS.get(array.dtype)
+    kernel = kernels.get(array.dtype)
     if kernel is None:
         return None
 
