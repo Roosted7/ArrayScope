@@ -118,6 +118,8 @@ def run_profile_montage_workflow(
     data_path: str | Path = DEFAULT_DATA_PATH,
     backend: str = "pyqtgraph",
     wgpu_present_method: str = "bitmap",
+    wgpu_power_preference: str = "low-power",
+    texture_codec: str = "off",
     jsonl: str | Path | None = None,
     timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
     max_tiles: int | None = None,
@@ -160,6 +162,10 @@ def run_profile_montage_workflow(
     from arrayscope.window import ArrayScopeWindow
 
     backend = _normalize_backend(backend)
+    if backend == "wgpu":
+        from arrayscope.display.wgpu_imageview2d import configure_wgpu_adapter_for_profile
+
+        configure_wgpu_adapter_for_profile(wgpu_power_preference)
     data_path = Path(data_path)
     screenshot_dir = None if screenshot_dir is None else Path(screenshot_dir)
     run_id = uuid4().hex
@@ -183,6 +189,7 @@ def run_profile_montage_workflow(
     )
     wgpu_present_method = str(wgpu_present_method or "bitmap")
     settings.setValue("wgpu_present_method", wgpu_present_method)
+    settings.setValue("texture_codec", str(texture_codec or "off"))
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
 
@@ -4081,6 +4088,11 @@ def _run_phase(
     continuity_probe = _PresentationContinuityProbe(QtCore, win)
     continuity_probe.start()
     start = perf_counter()
+    begin_physical_timeline = getattr(win.img_view, "beginPhysicalTileTimeline", None)
+    end_physical_timeline = getattr(win.img_view, "endPhysicalTileTimeline", None)
+    if callable(begin_physical_timeline):
+        begin_physical_timeline()
+    physical_tile_timeline: tuple[dict[str, object], ...] = ()
     draw_start = _vispy_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
     governor = getattr(win, "resource_governor", None)
@@ -4122,6 +4134,8 @@ def _run_phase(
             predecessor_semantic_key=predecessor_semantic_key,
         )
     finally:
+        if callable(end_physical_timeline):
+            physical_tile_timeline = tuple(end_physical_timeline())
         if journey_gesture_id is not None:
             _finish_journey_gesture(win, journey_gesture_id, app=app, QtCore=QtCore)
         continuity_probe.stop()
@@ -4151,6 +4165,13 @@ def _run_phase(
         record.update(action_result)
     record["action_elapsed_ms"] = float(action_elapsed_ms)
     record.update(milestones)
+    record.update(
+        _physical_tile_timeline_metrics(
+            physical_tile_timeline,
+            phase_start_s=start,
+            requested_tiles=int(milestones.get("requested_tile_count", 0) or 0),
+        )
+    )
     record.update(continuity_probe.record())
     record.update(_levels_histogram_state(win))
     record["event_loop_ticks"] = int(probe.tick_count)
@@ -4260,6 +4281,62 @@ def _post_visible_gate_blockers(
     if not target_settled:
         blockers.append("required_target_settled")
     return tuple(blockers)
+
+
+def _physical_tile_timeline_metrics(
+    rows: tuple[dict[str, object], ...],
+    *,
+    phase_start_s: float,
+    requested_tiles: int,
+) -> dict[str, object]:
+    """Summarize physical WGPU draw edges without level/evidence settlement."""
+
+    start_ns = int(float(phase_start_s) * 1_000_000_000.0)
+    timeline = []
+    for raw in sorted(rows, key=lambda row: int(row.get("timestamp_ns", 0) or 0)):
+        row = dict(raw)
+        timestamp_ns = int(row.pop("timestamp_ns", 0) or 0)
+        row["elapsed_ms"] = max(0.0, (timestamp_ns - start_ns) / 1_000_000.0)
+        timeline.append(row)
+
+    visible = [row for row in timeline if int(row.get("tile_count", 0) or 0) > 0]
+    first = visible[0] if visible else None
+    full = next(
+        (
+            row
+            for row in visible
+            if requested_tiles > 0 and int(row.get("tile_count", 0) or 0) >= requested_tiles
+        ),
+        None,
+    )
+    first_ms = None if first is None else float(first["elapsed_ms"])
+    full_ms = None if full is None else float(full["elapsed_ms"])
+    rate = None
+    if first is not None and full is not None and full_ms is not None and first_ms is not None:
+        elapsed_s = (full_ms - first_ms) / 1000.0
+        added = int(full.get("tile_count", 0) or 0) - int(first.get("tile_count", 0) or 0)
+        rate = None if elapsed_s <= 0.0 else added / elapsed_s
+
+    milestone_ms: dict[str, float | None] = {}
+    for percent in (25, 50, 75, 100):
+        target = math.ceil(requested_tiles * percent / 100.0) if requested_tiles else 0
+        match = next(
+            (row for row in visible if int(row.get("tile_count", 0) or 0) >= target),
+            None,
+        )
+        milestone_ms[str(percent)] = None if match is None else float(match["elapsed_ms"])
+    return {
+        "physical_tile_draw_events": len(timeline),
+        "physical_tile_first_ms": first_ms,
+        "physical_tile_full_ms": full_ms,
+        "physical_tile_rate_after_first_per_s": rate,
+        "physical_tile_milestone_ms": milestone_ms,
+        "physical_tile_timeline": timeline,
+        "physical_tile_timeline_scope": (
+            "WGPU canvas draw edges and page-backed tile rows only; excludes histogram, "
+            "semantic evidence, and level-settlement gates"
+        ),
+    }
 
 
 def _wait_for_montage_complete(
@@ -5093,6 +5170,21 @@ def _phase_record(
         "wgpu_plane_lookup_candidates_total": int(
             vispy.get("wgpu_plane_lookup_candidates_total", 0) or 0
         ),
+        "wgpu_compressed_uploads_total": int(vispy.get("wgpu_compressed_uploads_total", 0) or 0),
+        "wgpu_compressed_fallbacks_total": int(
+            vispy.get("wgpu_compressed_fallbacks_total", 0) or 0
+        ),
+        "wgpu_active_resident_bytes": int(vispy.get("wgpu_active_resident_bytes", 0) or 0),
+        "wgpu_allocated_pool_bytes": int(vispy.get("wgpu_allocated_pool_bytes", 0) or 0),
+        "wgpu_pool_grows_total": int(vispy.get("wgpu_pool_grows_total", 0) or 0),
+        "wgpu_pool_growth_copy_bytes_total": int(
+            vispy.get("wgpu_pool_growth_copy_bytes_total", 0) or 0
+        ),
+        "wgpu_codec_family": str(vispy.get("wgpu_codec_family", "none") or "none"),
+        "wgpu_codec_min_psnr_db": float(vispy.get("wgpu_codec_min_psnr_db", 0.0) or 0.0),
+        "wgpu_adapter": str(vispy.get("wgpu_adapter", "") or ""),
+        "wgpu_adapter_type": str(vispy.get("wgpu_adapter_type", "") or ""),
+        "wgpu_power_preference": str(vispy.get("wgpu_power_preference", "") or ""),
         "vispy_tile_visual_visible_pages": int(vispy.get("tile_visual_visible_pages", 0)),
         "vispy_tile_visual_min_order": vispy.get("tile_visual_min_order"),
         "vispy_overlay_visual_visible_items": int(vispy.get("overlay_visual_visible_items", 0)),
@@ -7679,6 +7771,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "ignored by other backends"
         ),
     )
+    parser.add_argument(
+        "--wgpu-power-preference",
+        choices=("low-power", "high-performance"),
+        default="low-power",
+        help="adapter selection for a fresh wgpu profile process",
+    )
+    parser.add_argument(
+        "--texture-codec",
+        choices=("off", "auto"),
+        default="off",
+        help="wgpu display texture codec experiment; ignored by other backends",
+    )
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument(
@@ -7856,6 +7960,8 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     data_path=args.data,
                     backend=backend,
                     wgpu_present_method=str(args.wgpu_present_method),
+                    wgpu_power_preference=str(args.wgpu_power_preference),
+                    texture_codec=str(args.texture_codec),
                     jsonl=jsonl,
                     timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
                     max_tiles=None if args.max_tiles <= 0 else args.max_tiles,

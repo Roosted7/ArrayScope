@@ -2319,3 +2319,28 @@ def test_post_visible_gate_blockers_names_stuck_completion_gates():
         work_in_flight=False,
         dirty_payloads=False,
     )
+
+
+def test_physical_tile_timeline_reports_draw_rate_without_settlement_gates():
+    from arrayscope.tools.profile_montage_workflow import _physical_tile_timeline_metrics
+
+    result = _physical_tile_timeline_metrics(
+        (
+            {"timestamp_ns": 1_100_000_000, "tile_count": 1, "lod_counts": {"4": 1}},
+            {"timestamp_ns": 1_300_000_000, "tile_count": 50, "lod_counts": {"4": 50}},
+            {"timestamp_ns": 1_500_000_000, "tile_count": 100, "lod_counts": {"4": 100}},
+        ),
+        phase_start_s=1.0,
+        requested_tiles=100,
+    )
+
+    assert result["physical_tile_first_ms"] == 100.0
+    assert result["physical_tile_full_ms"] == 500.0
+    assert result["physical_tile_rate_after_first_per_s"] == 247.5
+    assert result["physical_tile_milestone_ms"] == {
+        "25": 300.0,
+        "50": 300.0,
+        "75": 500.0,
+        "100": 500.0,
+    }
+    assert "semantic evidence" in result["physical_tile_timeline_scope"]
