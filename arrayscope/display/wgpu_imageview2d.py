@@ -33,7 +33,7 @@ pages is actually resident in the executor page table after the submit.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import perf_counter
+from time import perf_counter, perf_counter_ns
 
 import numpy as np
 
@@ -198,6 +198,22 @@ def import_qrenderwidget():
 # device can host block-compressed pools; a device without either simply keeps
 # the raw path (AUTO degrades silently).
 _TEXTURE_CODEC_FEATURES = ("texture-compression-bc", "texture-compression-astc")
+_SHARED_WGPU_POWER_PREFERENCE = "low-power"
+# Physical framebuffer evidence rejects a lower global threshold: a deterministic
+# 39.99 dB page renders at only 39.91 dB under a valid window (see the GPU test).
+_WGPU_CODEC_MIN_PSNR_DB = 40.0
+
+
+def configure_wgpu_adapter_for_profile(power_preference: str) -> None:
+    """Select the adapter before device creation for a fresh benchmark process."""
+
+    global _SHARED_WGPU_POWER_PREFERENCE
+    value = str(power_preference)
+    if value not in {"low-power", "high-performance"}:
+        raise ValueError(f"unknown wgpu power preference {power_preference!r}")
+    if _SHARED_WGPU_DEVICE is not None and value != _SHARED_WGPU_POWER_PREFERENCE:
+        raise RuntimeError("the shared wgpu device already exists; use a fresh benchmark process")
+    _SHARED_WGPU_POWER_PREFERENCE = value
 
 
 def _shared_wgpu_device():
@@ -217,7 +233,7 @@ def _shared_wgpu_device():
             # Vulkan-only instance: the GL backend's EGL re-init is fatal under
             # Wayland (gate-B Tier 0).  Harmless if the instance already exists.
             set_instance_extras(backends=["Vulkan"])
-        adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
+        adapter = wgpu.gpu.request_adapter_sync(power_preference=_SHARED_WGPU_POWER_PREFERENCE)
         # Enable the block-compression features the adapter actually has, so the
         # G7 Phase B BC/ASTC texture pools can be created on this shared device.
         available = {str(f) for f in adapter.features}
@@ -381,6 +397,9 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_draw_count = 0
         self._wgpu_tile_presentation_request_count = 0
         self._wgpu_tile_presentation_draw_count = 0
+        self._wgpu_physical_tile_timeline_enabled = False
+        self._wgpu_physical_tile_timeline: list[dict[str, object]] = []
+        self._wgpu_bc_prewarm_requested = False
         self._wgpu_canvas_update_request_count = 0
         self._wgpu_canvas_update_pending = False
         self._wgpu_overlay_geometry: tuple[OverlayPrimitive, ...] = ()
@@ -497,10 +516,40 @@ class WgpuImageView2D(ImageViewShell):
             self._wgpu_texture_codec_choice,
             bc_available=_device_supports_texture_compression(device),
         )
+        initial_raw_layers: dict[str, int] = {}
+        initial_codec_layers: dict[str, int] = {}
+        for representation, budget in budgets.items():
+            needed = max(0, int(required_pages.get(representation, 0)))
+            # One arriving LOD commonly coexists with its never-black ancestor,
+            # so the physical working set is approximately two current rungs,
+            # not just the payloads in this commit.  The much larger preferred
+            # ladder remains a logical eviction ceiling, not eager allocation.
+            physical_target = min(budget, 2 * needed + 8 if needed else 8)
+            codec_fraction = 0.0
+            if codec_mode != "off" and executor is not None:
+                resident = [
+                    key
+                    for key in executor.page_table.resident_keys()
+                    if key.representation == representation
+                ]
+                if len(resident) >= 8:
+                    codec_fraction = sum(
+                        executor.page_is_compressed(key) for key in resident
+                    ) / len(resident)
+            expected_codec = min(physical_target, round(physical_target * codec_fraction))
+            # Keep a bounded cushion for a changing quality mix and for LOD
+            # destinations. Growth remains the correctness fallback.
+            initial_raw_layers[representation] = min(
+                budget, max(8, physical_target - expected_codec + 8)
+            )
+            initial_codec_layers[representation] = min(budget, max(8, expected_codec + 8))
         self._wgpu_executor = WgpuPlaneExecutor(
             pool_layers=budgets or {SCALAR_R32F: 8},
+            initial_pool_layers=initial_raw_layers,
+            initial_codec_pool_layers=initial_codec_layers,
             device=device,
             compressed_textures=codec_mode,
+            codec_min_psnr_db=_WGPU_CODEC_MIN_PSNR_DB,
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
@@ -665,6 +714,8 @@ class WgpuImageView2D(ImageViewShell):
         try:
             self._present_wgpu_frame_to_canvas()
             self._wgpu_last_draw_error = ""
+            self._record_wgpu_physical_tile_draw()
+            self._schedule_wgpu_bc_prewarm_after_first_draw()
         except Exception as exc:  # keep the Qt paint loop alive; surface in diagnostics
             self._wgpu_last_draw_error = f"{type(exc).__name__}: {exc}"
         # Timer category: anti-hang fallback (same rationale as VisPy's draw
@@ -685,6 +736,66 @@ class WgpuImageView2D(ImageViewShell):
         ):
             return
         self._mark_presentation_drawn()
+
+    def beginPhysicalTileTimeline(self) -> None:
+        """Enable a lightweight physical-draw timeline for profiling."""
+
+        self._wgpu_physical_tile_timeline = []
+        self._wgpu_physical_tile_timeline_enabled = True
+
+    def endPhysicalTileTimeline(self) -> tuple[dict[str, object], ...]:
+        self._wgpu_physical_tile_timeline_enabled = False
+        return tuple(dict(row) for row in self._wgpu_physical_tile_timeline)
+
+    def _record_wgpu_physical_tile_draw(self) -> None:
+        if not self._wgpu_physical_tile_timeline_enabled:
+            return
+        rows = self.tileTruthPhysicalRows()
+        lod_counts: dict[int, int] = {}
+        lossy_tiles = 0
+        for row in rows.values():
+            lod = int(dict(row or {}).get("physical_lod_level", 0) or 0)
+            lod_counts[lod] = lod_counts.get(lod, 0) + 1
+            lossy_tiles += str(dict(row or {}).get("physical_quality", "")) != "exact"
+        executor = self._wgpu_executor
+        self._wgpu_physical_tile_timeline.append(
+            {
+                "timestamp_ns": perf_counter_ns(),
+                "draw_count": int(self._wgpu_draw_count),
+                "request_count": int(self._wgpu_tile_presentation_request_count),
+                "tile_count": len(rows),
+                "exact_tile_count": len(rows) - lossy_tiles,
+                "lossy_tile_count": lossy_tiles,
+                "lod_counts": {str(level): count for level, count in sorted(lod_counts.items())},
+                "resident_page_count": (
+                    0 if executor is None else len(executor.page_table.resident_keys())
+                ),
+                "active_resident_bytes": int(getattr(executor, "active_resident_bytes", 0) or 0),
+                "compressed_uploads_total": int(
+                    getattr(executor, "compressed_uploads_total", 0) or 0
+                ),
+            }
+        )
+
+    def _schedule_wgpu_bc_prewarm_after_first_draw(self) -> None:
+        if self._wgpu_bc_prewarm_requested:
+            return
+        executor = self._wgpu_executor
+        if executor is None or executor.codec_family != "bc":
+            return
+        self._wgpu_bc_prewarm_requested = True
+        from arrayscope.gpu import bc_codec
+
+        if not bc_codec.request_numba_encoder_prewarm():
+            return
+        started = self._submit_backend_preparation_task(
+            bc_codec.prewarm_numba_encoder,
+            on_done=lambda _enabled: None,
+            on_stale=bc_codec.cancel_numba_encoder_prewarm,
+            key="wgpu-bc-numba-prewarm",
+        )
+        if not bool(getattr(started, "scheduled", False)):
+            bc_codec.cancel_numba_encoder_prewarm()
 
     def _present_wgpu_frame_to_canvas(self) -> None:
         executor = self._wgpu_executor
@@ -2168,6 +2279,8 @@ class WgpuImageView2D(ImageViewShell):
 
     def wgpuPresentationDiagnostics(self) -> dict[str, object]:
         executor = self._wgpu_executor
+        adapter = getattr(getattr(executor, "device", None), "adapter", None)
+        adapter_info = dict(getattr(adapter, "info", {}) or {})
         drawn_tiles = tuple(self.tileTruthPhysicalRows())
         committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
@@ -2189,6 +2302,25 @@ class WgpuImageView2D(ImageViewShell):
             "presented_tiles": committed_tiles,
             "page_table_resident_count": resident,
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
+            "wgpu_compressed_uploads_total": int(
+                getattr(executor, "compressed_uploads_total", 0) or 0
+            ),
+            "wgpu_compressed_fallbacks_total": int(
+                getattr(executor, "compressed_fallbacks_total", 0) or 0
+            ),
+            "wgpu_active_resident_bytes": int(getattr(executor, "active_resident_bytes", 0) or 0),
+            "wgpu_allocated_pool_bytes": int(getattr(executor, "allocated_pool_bytes", 0) or 0),
+            "wgpu_pool_grows_total": int(getattr(executor, "pool_grows_total", 0) or 0),
+            "wgpu_pool_growth_copy_bytes_total": int(
+                getattr(executor, "pool_growth_copy_bytes_total", 0) or 0
+            ),
+            "wgpu_codec_family": str(getattr(executor, "codec_family", "none") or "none"),
+            "wgpu_codec_min_psnr_db": float(
+                getattr(executor, "codec_min_psnr_db", _WGPU_CODEC_MIN_PSNR_DB)
+            ),
+            "wgpu_adapter": str(adapter_info.get("device", "") or ""),
+            "wgpu_adapter_type": str(adapter_info.get("adapter_type", "") or ""),
+            "wgpu_power_preference": _SHARED_WGPU_POWER_PREFERENCE,
             "wgpu_plane_lookup_candidates_total": int(
                 getattr(executor, "plane_lookup_candidates_total", 0) or 0
             ),

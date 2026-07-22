@@ -22,6 +22,7 @@ import contextlib
 import numpy as np
 import pytest
 
+from arrayscope.gpu import bc_codec
 from arrayscope.gpu.command_protocol import (
     BindContentPlanes,
     ContentPlane,
@@ -85,7 +86,12 @@ def _frame_quality(engaged: np.ndarray, raw: np.ndarray, *, tol: int) -> tuple[f
     return psnr, over
 
 
-def _render_scalar(mode: str):
+def _render_scalar(
+    mode: str,
+    *,
+    codec_min_psnr_db: float = 40.0,
+    payloads: list[np.ndarray] | None = None,
+):
     executor = WgpuPlaneExecutor(
         (PAGE, 2 * PAGE),
         max_lod=0,
@@ -93,6 +99,7 @@ def _render_scalar(mode: str):
         device=_DEVICE,
         pool_layers={SCALAR_R32F: 4},
         compressed_textures=mode,
+        codec_min_psnr_db=codec_min_psnr_db,
     )
     doc, op = "parity-scalar", "op"
     plane = ContentPlane(doc, op, (PAGE, 2 * PAGE), max_lod=0, representation=SCALAR_R32F)
@@ -109,7 +116,8 @@ def _render_scalar(mode: str):
         )
         for cx in range(2)
     ]
-    ensures = [EnsureChunkResident(keys[cx], _scalar_tile(cx * 7)) for cx in range(2)]
+    payloads = payloads or [_scalar_tile(cx * 7) for cx in range(2)]
+    ensures = [EnsureChunkResident(keys[cx], payloads[cx]) for cx in range(2)]
     executor.submit(FrameSubmission(0, [BindContentPlanes((plane,)), *ensures]))
     tile = TileInstance(
         (0.0, 0.0, 1.0, 1.0), (0.0, 0.0), (float(2 * PAGE), float(PAGE)), 0, plane_index=0
@@ -188,6 +196,21 @@ def test_scalar_bc4_montage_matches_raw_and_actually_used_a_bc_pool():
     assert over < 0.01, f"{over:.4f} of pixels exceed the per-channel tolerance"
 
 
+def test_40db_gate_rejects_page_that_38db_would_render_below_tolerance():
+    y, x = np.mgrid[0:PAGE, 0:PAGE]
+    borderline = (np.sin(x / 3.0) * np.cos(y / 3.6) + x / float(PAGE)).astype(np.float32)
+    payloads = [borderline, np.roll(borderline, 5, axis=1)]
+
+    conservative, _keys, _frame = _render_scalar("on", codec_min_psnr_db=40.0, payloads=payloads)
+    engaged, _keys, frame_bc = _render_scalar("on", codec_min_psnr_db=38.0, payloads=payloads)
+    _raw, _keys, frame_raw = _render_scalar("off", payloads=payloads)
+
+    assert conservative.compressed_uploads_total == 0
+    assert engaged.compressed_uploads_total == 2
+    psnr, _over = _frame_quality(frame_bc, frame_raw, tol=4)
+    assert psnr < 45.0
+
+
 def test_complex_bc5_magnitude_matches_raw_and_used_a_bc_pool():
     engaged, key, frame_bc = _render_complex("on", "magnitude")
     _raw, _key, frame_raw = _render_complex("off", "magnitude")
@@ -235,6 +258,16 @@ def test_off_mode_is_byte_identical_to_raw_executor():
     _raw, _k, frame_raw = _render_scalar("off")
     assert not off.codec_engaged
     assert np.array_equal(frame_off, frame_raw)
+
+
+def test_auto_bc_keeps_pages_raw_until_accelerator_is_ready(monkeypatch):
+    monkeypatch.setattr(bc_codec, "numba_encoder_ready", lambda: False)
+
+    executor, keys, _frame = _render_scalar("auto")
+
+    assert executor.codec_engaged
+    assert executor.compressed_uploads_total == 0
+    assert all(not executor.page_is_compressed(key) for key in keys)
 
 
 @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
@@ -342,6 +375,75 @@ def test_report_and_executor_account_actual_compressed_bytes():
     assert report.upload_bytes == PAGE * PAGE // 2  # BC4: 0.5 byte/texel
     assert executor.active_resident_bytes == report.upload_bytes
     assert executor.allocated_pool_bytes > executor.active_resident_bytes
+
+
+def test_raw_and_codec_arrays_grow_on_demand_without_losing_resident_pages():
+    """Logical budgets are maxima, not two eagerly allocated mirrors."""
+
+    page_count = 18
+    executor = WgpuPlaneExecutor(
+        (PAGE, page_count * PAGE),
+        max_lod=0,
+        device=_DEVICE,
+        pool_layers={SCALAR_R32F: 32},
+        compressed_textures="on",
+    )
+    plane = ContentPlane(
+        "demand-grown",
+        "op",
+        (PAGE, page_count * PAGE),
+        max_lod=0,
+        representation=SCALAR_R32F,
+    )
+    keys = [
+        plane_chunk_key(
+            "demand-grown",
+            "op",
+            0,
+            cx,
+            0,
+            dtype="float32",
+            representation=SCALAR_R32F,
+            plane_shape=plane.plane_shape,
+        )
+        for cx in range(page_count)
+    ]
+    executor.submit(FrameSubmission(0, (BindContentPlanes((plane,)),)))
+
+    assert executor.pool_budget(SCALAR_R32F) == 32
+    assert executor.pool_allocated_layers(SCALAR_R32F) == 8
+    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 8
+
+    compressed_payloads = [_scalar_tile(seed) for seed in range(9)]
+    for index, payload in enumerate(compressed_payloads):
+        executor.submit(FrameSubmission(index + 1, (EnsureChunkResident(keys[index], payload),)))
+
+    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 16
+    assert executor.pool_allocated_layers(SCALAR_R32F) == 8
+    assert all(executor.page_is_compressed(key) for key in keys[:9])
+    # The first layer survived the immutable-array replacement at the same slot.
+    assert np.max(np.abs(executor.read_resident_page(keys[0]) - compressed_payloads[0])) < 0.08
+
+    raw_payloads = []
+    for offset in range(9):
+        payload = _scalar_tile(50 + offset)
+        payload[0, 0] = np.nan  # native UNORM cannot preserve it: exact raw fallback
+        raw_payloads.append(payload)
+        executor.submit(
+            FrameSubmission(
+                20 + offset,
+                (EnsureChunkResident(keys[9 + offset], payload),),
+            )
+        )
+
+    assert executor.pool_allocated_layers(SCALAR_R32F) == 16
+    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 16
+    assert executor.pool_grows_total == 2
+    expected_copy_bytes = 8 * PAGE * PAGE * 4 + 8 * (PAGE * PAGE // 2)
+    assert executor.pool_growth_copy_bytes_total == expected_copy_bytes
+    assert np.isnan(executor.read_resident_page(keys[9])[0, 0])
+    # Each pool is only half its logical maximum after admitting this exact mix.
+    assert executor.allocated_pool_bytes < (32 * PAGE * PAGE * 4 + 32 * PAGE * PAGE // 2)
 
 
 def teardown_module(module):

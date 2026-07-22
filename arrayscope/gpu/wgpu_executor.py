@@ -146,6 +146,13 @@ _BC_BLOCK_BYTES = {SCALAR_R32F: 8, COMPLEX_RG32F: 16}
 #: unavailable for the display pool even though the policy may name it.
 _ASTC_DEFAULT_BLOCK = (4, 4)
 
+# Texture-array extents are immutable in WebGPU, but the raw and codec pools do
+# not need to reserve their full logical eviction budgets up front.  Start with
+# a small usable extent and grow geometrically, copying the old layers at the
+# queue boundary.  Eight pages keeps tiny/incremental commits copy-free while
+# avoiding the former full raw + full codec mirror for large montages.
+_POOL_INITIAL_LAYERS = 8
+
 
 def _adapter_info(adapter_or_none) -> dict:
     """Best-effort ``adapter.info`` dict; ``{}`` when unavailable (never raises)."""
@@ -1142,7 +1149,12 @@ class _Pool:
     texture: object
     view: object
     free_layers: list[int] = field(default_factory=list)
+    # Logical eviction budget.  This remains the public ``pool_budget`` and is
+    # the maximum extent to which this physical array may grow.
     layer_count: int = 0
+    # Current physical texture-array extent (at least one because bind groups
+    # require a valid texture even for a representation with zero budget).
+    allocated_layers: int = 1
 
 
 @dataclass
@@ -1219,6 +1231,8 @@ class WgpuPlaneExecutor:
         *,
         max_lod: int = 1,
         pool_layers: int | dict[str, int] = 64,
+        initial_pool_layers: dict[str, int] | None = None,
+        initial_codec_pool_layers: dict[str, int] | None = None,
         target_size: tuple[int, int] = (768, 768),
         device: object = None,
         compressed_textures: str | bool = "off",
@@ -1361,6 +1375,18 @@ class WgpuPlaneExecutor:
         else:
             budgets = {rep: int(pool_layers) for rep in REPRESENTATIONS}
         self._pool_budgets = {rep: max(0, budgets.get(rep, 0)) for rep in REPRESENTATIONS}
+        initial_pool_layers = {
+            str(rep): max(0, int(layers)) for rep, layers in dict(initial_pool_layers or {}).items()
+        }
+        initial_codec_pool_layers = {
+            str(rep): max(0, int(layers))
+            for rep, layers in dict(initial_codec_pool_layers or {}).items()
+        }
+        unknown_initial = (set(initial_pool_layers) | set(initial_codec_pool_layers)) - set(
+            REPRESENTATIONS
+        )
+        if unknown_initial:
+            raise ValueError(f"unknown initial pool representations {sorted(unknown_initial)}")
 
         self.page_table = PageTable()
         self._bound_planes: tuple = ()
@@ -1382,6 +1408,8 @@ class WgpuPlaneExecutor:
         self._compressed_fallbacks_total = 0
         self._texture_upload_bytes_total = 0
         self._lod_compressed_source_reductions_total = 0
+        self._pool_grows_total = 0
+        self._pool_growth_copy_bytes_total = 0
         self._table_dirty = True
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
@@ -1401,7 +1429,9 @@ class WgpuPlaneExecutor:
         d = self.device
         self._pools: dict[str, _Pool] = {}
         for rep in REPRESENTATIONS:
-            layers = max(1, self._pool_budgets[rep])
+            budget = self._pool_budgets[rep]
+            requested = initial_pool_layers.get(rep, _POOL_INITIAL_LAYERS)
+            allocated = max(1, min(max(1, requested), budget)) if budget else 1
             usage = (
                 wgpu.TextureUsage.TEXTURE_BINDING
                 | wgpu.TextureUsage.COPY_DST
@@ -1410,7 +1440,7 @@ class WgpuPlaneExecutor:
             if rep in _REDUCE_WGSL:
                 usage |= wgpu.TextureUsage.STORAGE_BINDING
             texture = d.create_texture(
-                size=(PAGE, PAGE, layers),
+                size=(PAGE, PAGE, allocated),
                 format=_POOL_FORMATS[rep],
                 usage=usage,
             )
@@ -1418,8 +1448,9 @@ class WgpuPlaneExecutor:
                 representation=rep,
                 texture=texture,
                 view=texture.create_view(dimension="2d-array"),
-                free_layers=list(range(self._pool_budgets[rep])),
-                layer_count=self._pool_budgets[rep],
+                free_layers=list(range(min(allocated, budget))),
+                layer_count=budget,
+                allocated_layers=allocated,
             )
 
         # Native block-compressed pools, parallel to the raw ones and sharing
@@ -1434,8 +1465,10 @@ class WgpuPlaneExecutor:
                 budget = self._pool_budgets[rep]
                 if budget <= 0:
                     continue
+                requested = initial_codec_pool_layers.get(rep, _POOL_INITIAL_LAYERS)
+                allocated = min(max(1, requested), budget)
                 texture = d.create_texture(
-                    size=(PAGE, PAGE, budget),
+                    size=(PAGE, PAGE, allocated),
                     format=fmt,
                     # COPY_SRC so a BC page can be read back and reference-decoded
                     # (the read_resident_page oracle and the CPU LOD-from-
@@ -1450,8 +1483,9 @@ class WgpuPlaneExecutor:
                     representation=rep,
                     texture=texture,
                     view=texture.create_view(dimension="2d-array"),
-                    free_layers=list(range(budget)),
+                    free_layers=list(range(allocated)),
                     layer_count=budget,
+                    allocated_layers=allocated,
                 )
             # Nearest + clamp: the compressed sampler must reproduce the exact
             # texel-centre decode textureLoad gives on the raw path (no filtering
@@ -1706,6 +1740,86 @@ class WgpuPlaneExecutor:
         if pool is None:
             pool = next(iter(self._codec_pools.values()))
         return pool.view
+
+    def _pool_by_id(self, pool_id: str) -> _Pool:
+        rep = _REP_BY_POOL_ID[pool_id]
+        if pool_id in _CODEC_POOL_IDS.values():
+            return self._codec_pools[rep]
+        return self._pools[rep]
+
+    def _pool_layer_bytes(self, pool_id: str) -> int:
+        rep = _REP_BY_POOL_ID[pool_id]
+        if pool_id in _CODEC_POOL_IDS.values():
+            bx, by = self._codec_block
+            return (PAGE // bx) * (PAGE // by) * self._codec_block_bytes[rep]
+        return PAGE * PAGE * _POOL_TEXEL_BYTES[rep]
+
+    def _grow_pool(self, pool_id: str) -> None:
+        """Grow one immutable texture array while preserving layer indices.
+
+        Raw and block-compressed formats must remain separate bindings, but
+        their physical extents can follow actual admission independently.  GPU
+        queue ordering makes the old->new copy precede later writes/draws; the
+        page table stays valid because every occupied layer keeps its index.
+        """
+
+        pool = self._pool_by_id(pool_id)
+        old_layers = int(pool.allocated_layers)
+        if old_layers >= int(pool.layer_count):
+            return
+        new_layers = min(
+            int(pool.layer_count),
+            max(_POOL_INITIAL_LAYERS, old_layers + 1, old_layers * 2),
+        )
+        codec = pool_id in _CODEC_POOL_IDS.values()
+        if codec:
+            texture_format = self._codec_pool_formats[pool.representation]
+            usage = (
+                self._wgpu.TextureUsage.TEXTURE_BINDING
+                | self._wgpu.TextureUsage.COPY_DST
+                | self._wgpu.TextureUsage.COPY_SRC
+            )
+        else:
+            texture_format = _POOL_FORMATS[pool.representation]
+            usage = (
+                self._wgpu.TextureUsage.TEXTURE_BINDING
+                | self._wgpu.TextureUsage.COPY_DST
+                | self._wgpu.TextureUsage.COPY_SRC
+            )
+            if pool.representation in _REDUCE_WGSL:
+                usage |= self._wgpu.TextureUsage.STORAGE_BINDING
+
+        texture = self.device.create_texture(
+            size=(PAGE, PAGE, new_layers),
+            format=texture_format,
+            usage=usage,
+        )
+        encoder = self.device.create_command_encoder()
+        encoder.copy_texture_to_texture(
+            {"texture": pool.texture},
+            {"texture": texture},
+            (PAGE, PAGE, old_layers),
+        )
+        self.device.queue.submit([encoder.finish()])
+
+        pool.texture = texture
+        pool.view = texture.create_view(dimension="2d-array")
+        pool.free_layers.extend(range(old_layers, new_layers))
+        pool.allocated_layers = new_layers
+        self._pool_grows_total += 1
+        self._pool_growth_copy_bytes_total += old_layers * self._pool_layer_bytes(pool_id)
+        # Render bind groups capture texture views. Histogram and LOD bind groups
+        # are submission-local and will naturally see the replacement view.
+        self._bind_epoch += 1
+
+    def _ensure_free_pool_layer(self, pool_id: str) -> None:
+        pool = self._pool_by_id(pool_id)
+        if pool.free_layers:
+            return
+        if pool.allocated_layers < pool.layer_count:
+            self._grow_pool(pool_id)
+            return
+        self._evict_one_unpinned(_REP_BY_POOL_ID[pool_id], pool_id=pool_id)
 
     def _overlay_pipeline(self, fmt: str):
         if fmt not in self._overlay_pipelines:
@@ -2100,8 +2214,7 @@ class WgpuPlaneExecutor:
             data, norm4 = encoded
             codec_pool = self._codec_pools[rep]
             codec_pool_id = _CODEC_POOL_IDS[rep]
-            if not codec_pool.free_layers:
-                self._evict_one_unpinned(rep, pool_id=codec_pool_id)
+            self._ensure_free_pool_layer(codec_pool_id)
             layer = codec_pool.free_layers.pop()
             bx, by = self._codec_block
             block_bytes = self._codec_block_bytes[rep]
@@ -2124,8 +2237,7 @@ class WgpuPlaneExecutor:
             self._texture_upload_bytes_total += len(data)
             return 1
 
-        if not pool.free_layers:
-            self._evict_one_unpinned(rep, pool_id=_POOL_IDS[rep])
+        self._ensure_free_pool_layer(_POOL_IDS[rep])
         layer = pool.free_layers.pop()
         self.device.queue.write_texture(
             {"texture": pool.texture, "origin": (0, 0, layer)},
@@ -2162,6 +2274,16 @@ class WgpuPlaneExecutor:
         rep = key.representation
         if rep not in self._codec_reps:
             return None
+        if (
+            self._codec_family == "bc"
+            and self._codec_mode == "auto"
+            and not bc_codec.numba_encoder_ready()
+        ):
+            # AUTO never makes a visible page pay NumPy encoding or JIT load.
+            # It stays raw until post-first-draw idle work publishes the
+            # byte-identical accelerator. Forced ON retains the reference path
+            # for deterministic codec tests and explicit experiments.
+            return None
         factor = 1 << int(key.lod.level)
         valid_h = max(1, min(PAGE, -(-int(key.chunk_shape[0]) // factor)))
         valid_w = max(1, min(PAGE, -(-int(key.chunk_shape[1]) // factor)))
@@ -2187,10 +2309,12 @@ class WgpuPlaneExecutor:
             if astc:
                 res = astc_codec.encode_scalar(unit, block=self._codec_block)
                 data, decoded = res.data, res.decoded[0]
+                quality = bc_codec.quality_of(unit_valid, decoded[:valid_h, :valid_w])
             else:
-                data, h, w = bc_codec.bc4_encode(unit)
-                decoded = bc_codec.bc4_decode(data, h, w)
-            quality = bc_codec.quality_of(unit_valid, decoded[:valid_h, :valid_w])
+                data, _h, _w, quality = bc_codec.bc4_encode_with_quality(
+                    unit,
+                    valid_shape=(valid_h, valid_w),
+                )
             if quality.psnr_db < self._codec_min_psnr_db:
                 self._compressed_fallbacks_total += 1
                 return None
@@ -2205,8 +2329,8 @@ class WgpuPlaneExecutor:
             res = astc_codec.encode_two_channel(unit_re, unit_im, block=self._codec_block)
             data, d0, d1 = res.data, res.decoded[0], res.decoded[1]
         else:
-            data, h, w = bc_codec.bc5_encode(unit_re, unit_im)
-            d0, d1 = bc_codec.bc5_decode(data, h, w)
+            data, height, width = bc_codec.bc5_encode(unit_re, unit_im)
+            d0, d1 = bc_codec.bc5_decode(data, height, width)
         re_dec = bc_codec.denormalize_channel(d0[:valid_h, :valid_w], norm_re)
         im_dec = bc_codec.denormalize_channel(d1[:valid_h, :valid_w], norm_im)
         quality = bc_codec.complex_display_quality(re, im, re_dec, im_dec)
@@ -2317,8 +2441,7 @@ class WgpuPlaneExecutor:
         )
         destination_layer = None
         try:
-            if not pool.free_layers:
-                self._evict_one_unpinned(representation)
+            self._ensure_free_pool_layer(_POOL_IDS[representation])
             destination_layer = pool.free_layers.pop()
 
             fallback = present[0]
@@ -2456,8 +2579,7 @@ class WgpuPlaneExecutor:
         )
         destination_layer = None
         try:
-            if not pool.free_layers:
-                self._evict_one_unpinned(representation, pool_id=_POOL_IDS[representation])
+            self._ensure_free_pool_layer(_POOL_IDS[representation])
             destination_layer = pool.free_layers.pop()
             payload, bytes_per_row = self._coerce_payload(destination, reduced)
             d.queue.write_texture(
@@ -3050,6 +3172,10 @@ class WgpuPlaneExecutor:
         return self._codec_family if self._codec_engaged else "none"
 
     @property
+    def codec_min_psnr_db(self) -> float:
+        return float(self._codec_min_psnr_db)
+
+    @property
     def codec_block(self) -> tuple[int, int]:
         """The block size of the live codec (BC is always 4x4; ASTC is the
         configured ``astc_block``)."""
@@ -3091,21 +3217,33 @@ class WgpuPlaneExecutor:
 
     @property
     def allocated_pool_bytes(self) -> int:
-        """Configured texture-array allocation, including idle fallback pools.
+        """Current physical texture-array extents, including idle layers.
 
-        This is the capacity arithmetic the standalone codec-ratio benchmark did
-        not report. Drivers may add alignment/metadata, so it is a conservative
-        payload estimate rather than process-wide VRAM telemetry.
+        Pools grow toward their logical eviction budgets on demand; this reports
+        the current arrays, not their maxima. Drivers may add alignment/metadata,
+        so it remains payload arithmetic rather than process-wide VRAM telemetry.
         """
 
         total = 0
         for rep, pool in self._pools.items():
-            total += max(1, int(pool.layer_count)) * PAGE * PAGE * _POOL_TEXEL_BYTES[rep]
+            total += int(pool.allocated_layers) * PAGE * PAGE * _POOL_TEXEL_BYTES[rep]
         bx, by = self._codec_block
         for rep, pool in self._codec_pools.items():
             layer_bytes = (PAGE // bx) * (PAGE // by) * self._codec_block_bytes[rep]
-            total += max(1, int(pool.layer_count)) * layer_bytes
+            total += int(pool.allocated_layers) * layer_bytes
         return int(total)
+
+    @property
+    def pool_grows_total(self) -> int:
+        """Physical texture-array replacements performed to satisfy demand."""
+
+        return int(self._pool_grows_total)
+
+    @property
+    def pool_growth_copy_bytes_total(self) -> int:
+        """Bytes copied between old/new arrays during demand growth."""
+
+        return int(self._pool_growth_copy_bytes_total)
 
     def page_is_compressed(self, key: DataChunkKey) -> bool:
         """Whether ``key``'s resident page lives in a BC pool (page-table truth)."""
@@ -3147,9 +3285,16 @@ class WgpuPlaneExecutor:
     def pool_free_layers(self, representation: str) -> int:
         return len(self._pools[representation].free_layers)
 
+    def pool_allocated_layers(self, representation: str) -> int:
+        return int(self._pools[representation].allocated_layers)
+
     def codec_pool_free_layers(self, representation: str) -> int:
         pool = self._codec_pools.get(representation)
         return 0 if pool is None else len(pool.free_layers)
+
+    def codec_pool_allocated_layers(self, representation: str) -> int:
+        pool = self._codec_pools.get(representation)
+        return 0 if pool is None else int(pool.allocated_layers)
 
     def read_target(self) -> np.ndarray:
         """Physical-truth oracle: the offscreen target as (h, w, 4) uint8."""

@@ -5,6 +5,7 @@ import contextlib
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
 
+from arrayscope.app.errors import handle_ui_exception
 from arrayscope.core.frame_targets import FrameTarget, WorkStart
 from arrayscope.display.image_view_factory import create_image_view
 from arrayscope.kernel import Lane as WorkLane
@@ -629,6 +630,8 @@ class DisplayControlBuildMixin:
             self.img_view.setGuiCallbackBudgetProvider(self._gui_callback_budget_decision)
         if hasattr(self.img_view, "setBackgroundTaskSubmitter"):
             self.img_view.setBackgroundTaskSubmitter(self._submit_histogram_background_task)
+        if hasattr(self.img_view, "setBackendPreparationTaskSubmitter"):
+            self.img_view.setBackendPreparationTaskSubmitter(self._submit_backend_preparation_task)
         if hasattr(self.img_view, "setLevelPresentationChangeHandler"):
             self.img_view.setLevelPresentationChangeHandler(self._on_level_presentation_changed)
         self.pixel_hud = PixelHud()
@@ -703,6 +706,36 @@ class DisplayControlBuildMixin:
             slow_ms=0,
         )
         return WorkStart(bool(generation), "scheduled" if generation else "admission")
+
+    def _submit_backend_preparation_task(self, fn, *, on_done, on_stale, key):
+        """Place backend-only preparation behind all visible work."""
+
+        def failed(exc):
+            on_stale()
+            handle_ui_exception("backend preparation", exc)
+
+        return self.prefetch_evaluation_controller.start_prefetch(
+            fn,
+            on_done=on_done,
+            on_stale=on_stale,
+            on_error=failed,
+            key=("backend-preparation", key),
+            work_item=WorkItem(
+                key=("backend_preparation", key),
+                lane=WorkLane.SPECULATIVE_RESIDENCY,
+                frame_target=FrameTarget(
+                    semantic_key=key,
+                    viewport_key=("backend-preparation",),
+                    presentation_key=("none",),
+                    quality="optional",
+                ),
+                supersession_key=("backend-preparation", key),
+                supersession_value=key,
+                estimated_bytes=1,
+                expected_value=0.1,
+                reusable_output=True,
+            ),
+        )
 
     def _build_header_bar(self, filepath):
         self._reload_btn = QtWidgets.QToolButton()

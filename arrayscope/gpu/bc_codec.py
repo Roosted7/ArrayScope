@@ -34,9 +34,13 @@ GPU-side pieces (real BC textures, the WGSL BC4 compute encoder) live in
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "BC4_BLOCK_BYTES",
@@ -45,18 +49,80 @@ __all__ = [
     "ComplexDisplayQuality",
     "bc4_decode",
     "bc4_encode",
+    "bc4_encode_with_quality",
     "bc4_plan",
     "bc5_decode",
     "bc5_encode",
+    "cancel_numba_encoder_prewarm",
     "complex_display_quality",
     "denormalize_channel",
     "normalize_tile",
+    "numba_encoder_ready",
+    "prewarm_numba_encoder",
     "psnr",
     "quality_of",
+    "request_numba_encoder_prewarm",
 ]
 
 BC4_BLOCK_BYTES = 8
 BC5_BLOCK_BYTES = 16
+
+_NUMBA_ENCODER = None
+_NUMBA_ENCODER_STATE = "idle"
+_NUMBA_STATE_LOCK = threading.Lock()
+
+
+def request_numba_encoder_prewarm() -> bool:
+    """Reserve one background prewarm; return true only for its owner."""
+
+    global _NUMBA_ENCODER_STATE
+    with _NUMBA_STATE_LOCK:
+        if _NUMBA_ENCODER_STATE != "idle":
+            return False
+        _NUMBA_ENCODER_STATE = "warming"
+        return True
+
+
+def cancel_numba_encoder_prewarm() -> None:
+    """Release a reservation when the scheduler declined the work."""
+
+    global _NUMBA_ENCODER_STATE
+    with _NUMBA_STATE_LOCK:
+        if _NUMBA_ENCODER_STATE == "warming":
+            _NUMBA_ENCODER_STATE = "idle"
+
+
+def prewarm_numba_encoder() -> bool:
+    """Compile and publish the optional BC encoder for subsequent calls."""
+
+    global _NUMBA_ENCODER, _NUMBA_ENCODER_STATE
+    with _NUMBA_STATE_LOCK:
+        if _NUMBA_ENCODER_STATE == "ready":
+            return True
+        if _NUMBA_ENCODER_STATE in {"idle", "unavailable"}:
+            _NUMBA_ENCODER_STATE = "warming"
+    try:
+        from arrayscope.gpu import bc_numba
+
+        bc_numba.prewarm()
+    except Exception:
+        with _NUMBA_STATE_LOCK:
+            _NUMBA_ENCODER_STATE = "unavailable"
+        logger.warning("optional Numba BC encoder prewarm failed", exc_info=True)
+        return False
+    with _NUMBA_STATE_LOCK:
+        _NUMBA_ENCODER = bc_numba
+        _NUMBA_ENCODER_STATE = "ready"
+    return True
+
+
+def numba_encoder_ready() -> bool:
+    return bool(_NUMBA_ENCODER is not None and _NUMBA_ENCODER.ready())
+
+
+def _numba_encode_if_ready(field_unit: np.ndarray):
+    encoder = _NUMBA_ENCODER
+    return None if encoder is None else encoder.encode_if_ready(field_unit)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +189,7 @@ def _bc4_palette(red0: np.ndarray, red1: np.ndarray) -> np.ndarray:
     return np.stack(levels, axis=1)  # (nblocks, 8)
 
 
-def bc4_encode(field_unit: np.ndarray) -> tuple[bytes, int, int]:
+def _bc4_encode_numpy(field_unit: np.ndarray) -> tuple[bytes, int, int]:
     """Encode a [0, 1] field to BC4 blocks.  Returns (bytes, height, width).
 
     Uses the high-precision (red0 > red1) mode with per-block min/max endpoints.
@@ -146,11 +212,20 @@ def bc4_encode(field_unit: np.ndarray) -> tuple[bytes, int, int]:
     idx = diff.argmin(axis=2).astype(np.uint64)  # (nblocks, 16)
     shifts = (3 * np.arange(16, dtype=np.uint64))[None, :]
     index48 = np.bitwise_or.reduce(idx << shifts, axis=1)  # (nblocks,) uint64
-    block_u64 = red0.astype(np.uint64) | (red1.astype(np.uint64) << np.uint64(8)) | (
-        index48 << np.uint64(16)
+    block_u64 = (
+        red0.astype(np.uint64)
+        | (red1.astype(np.uint64) << np.uint64(8))
+        | (index48 << np.uint64(16))
     )
     data = block_u64.astype("<u8").tobytes()
     return data, h, w
+
+
+def bc4_encode(field_unit: np.ndarray) -> tuple[bytes, int, int]:
+    """Encode with the prewarmed optional accelerator or NumPy reference."""
+
+    accelerated = _numba_encode_if_ready(field_unit)
+    return _bc4_encode_numpy(field_unit) if accelerated is None else accelerated
 
 
 def bc4_decode(data: bytes, height: int, width: int) -> np.ndarray:
@@ -171,6 +246,39 @@ def bc4_decode(data: bytes, height: int, width: int) -> np.ndarray:
     img = vals.reshape(nby, nbx, 4, 4).transpose(0, 2, 1, 3).reshape(H, W)
     field = (img / 255.0).astype(np.float32)
     return field[:height, :width]
+
+
+def bc4_encode_with_quality(
+    field_unit: np.ndarray,
+    *,
+    valid_shape: tuple[int, int] | None = None,
+) -> tuple[bytes, int, int, BcQuality]:
+    """Encode BC4 and fuse exact error accumulation when accelerated."""
+
+    encoder = _NUMBA_ENCODER
+    accelerated = (
+        None
+        if encoder is None
+        else encoder.encode_quality_if_ready(field_unit, valid_shape=valid_shape)
+    )
+    if accelerated is not None:
+        data, height, width, squared_error, max_abs_error, sample_count = accelerated
+        rmse = float(np.sqrt(squared_error / sample_count)) if sample_count else 0.0
+        quality = BcQuality(
+            psnr_db=float("inf") if rmse <= 0.0 else -20.0 * float(np.log10(rmse)),
+            max_abs_diff=max_abs_error,
+            rmse=rmse,
+        )
+        return data, height, width, quality
+    data, height, width = _bc4_encode_numpy(field_unit)
+    decoded = bc4_decode(data, height, width)
+    if valid_shape is None:
+        reference = np.asarray(field_unit)
+    else:
+        valid_height, valid_width = (int(valid_shape[0]), int(valid_shape[1]))
+        reference = np.asarray(field_unit)[:valid_height, :valid_width]
+        decoded = decoded[:valid_height, :valid_width]
+    return data, height, width, quality_of(reference, decoded)
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +460,8 @@ def bc4_plan(
     n = int(tile.shape[-2] * tile.shape[-1]) if tile.ndim >= 2 else int(tile.size)
     raw_bytes = n * int(raw_bytes_per_texel)
     engage = q.acceptable(min_psnr_db=min_psnr_db, max_abs=max_abs)
-    reason = (
-        f"BC4 PSNR {q.psnr_db:.1f}dB, max|err| {q.max_abs_diff:.4f}: "
-        + ("engage (within thresholds)" if engage else "decline -> raw (loss too high)")
+    reason = f"BC4 PSNR {q.psnr_db:.1f}dB, max|err| {q.max_abs_diff:.4f}: " + (
+        "engage (within thresholds)" if engage else "decline -> raw (loss too high)"
     )
     return Bc4Plan(
         engage=engage,

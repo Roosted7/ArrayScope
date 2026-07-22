@@ -51,6 +51,28 @@ def test_bc4_odd_shape_pads_and_restores_shape():
     assert bc_codec.quality_of(unit, decoded).psnr_db > 40.0
 
 
+@pytest.mark.parametrize("shape", [(4, 4), (100, 97), (256, 256)])
+def test_numba_bc4_accelerator_is_byte_identical_after_explicit_prewarm(shape):
+    pytest.importorskip("numba")
+    unit, _ = bc_codec.normalize_tile(_smooth_tile(shape))
+    expected_data, height, width = bc_codec._bc4_encode_numpy(unit)
+    expected_decoded = bc_codec.bc4_decode(expected_data, height, width)
+
+    assert bc_codec.prewarm_numba_encoder()
+    assert bc_codec.numba_encoder_ready()
+    data, actual_height, actual_width = bc_codec.bc4_encode(unit)
+    quality_data, quality_height, quality_width, quality = bc_codec.bc4_encode_with_quality(unit)
+
+    assert data == expected_data
+    assert (actual_height, actual_width) == (height, width)
+    assert quality_data == expected_data
+    assert (quality_height, quality_width) == (height, width)
+    expected_quality = bc_codec.quality_of(unit, expected_decoded)
+    assert quality.psnr_db == pytest.approx(expected_quality.psnr_db)
+    assert quality.max_abs_diff == pytest.approx(expected_quality.max_abs_diff)
+    assert quality.rmse == pytest.approx(expected_quality.rmse)
+
+
 def test_bc4_plan_engages_on_smooth_declines_on_noise():
     smooth = _smooth_tile()
     noisy = np.random.default_rng(0).standard_normal((256, 256)).astype(np.float32)
