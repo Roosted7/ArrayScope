@@ -230,6 +230,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 )
             )
         )
+        # A montage already committed on this axis carries its applied column
+        # count forward, so a manual (panned/zoomed) view holds that layout
+        # across resizes instead of re-flowing to the viewport aspect.
+        committed_columns = (
+            getattr(getattr(current_session, "plan", None), "columns", None)
+            if camera_on_montage
+            else None
+        )
         columns = self._effective_montage_columns(
             view_state,
             all_indices=all_indices,
@@ -237,6 +245,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             viewport_shape=viewport_shape,
             view_range=current_range,
             restored_columns=pending_restore_columns,
+            latched_columns=committed_columns,
         )
         plan = make_montage_plan(
             view_state,
@@ -296,6 +305,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         viewport_shape,
         view_range,
         restored_columns=None,
+        latched_columns=None,
     ) -> int | None:
         if not all_indices:
             return None
@@ -316,6 +326,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             requested_columns=requested_columns,
             fit_locked=intent.fit_locked,
             auto_active=intent.auto_active,
+            latched_columns=latched_columns,
         )
 
     def _on_image_viewport_resized(

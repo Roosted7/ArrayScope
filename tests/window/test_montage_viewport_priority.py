@@ -132,6 +132,62 @@ def test_effective_montage_columns_reflows_explicit_in_stretch_fit():
     assert columns != 2
 
 
+def test_effective_montage_columns_latches_committed_layout_when_manual():
+    from arrayscope.window.montage_viewport import (
+        effective_montage_columns,
+        optimal_montage_columns,
+    )
+
+    count, tile_shape, viewport_shape = 12, (10, 10), (40, 120)
+    automatic = optimal_montage_columns(count, tile_shape, viewport_shape)
+    # No explicit column preference, but a committed layout of 3 columns and a
+    # manual (not fit/auto) camera: the resize must hold the committed layout,
+    # not re-flow to the viewport aspect.
+    assert automatic != 3
+    columns = effective_montage_columns(
+        count,
+        tile_shape,
+        viewport_shape,
+        requested_columns=None,
+        latched_columns=3,
+    )
+    assert columns == 3
+
+
+def test_effective_montage_columns_ignores_latch_when_auto_or_fit():
+    from arrayscope.window.montage_viewport import effective_montage_columns
+
+    for kwargs in ({"auto_active": True}, {"fit_locked": True}):
+        columns = effective_montage_columns(
+            12,
+            (10, 10),
+            (40, 120),
+            requested_columns=None,
+            latched_columns=3,
+            **kwargs,
+        )
+        # Auto/Fit poses are meant to re-flow, so the latch is ignored.
+        assert columns != 3
+
+
+def test_effective_montage_columns_auto_without_latch_reflows():
+    from arrayscope.window.montage_viewport import (
+        effective_montage_columns,
+        optimal_montage_columns,
+    )
+
+    count, tile_shape, viewport_shape = 12, (10, 10), (40, 120)
+    columns = effective_montage_columns(
+        count,
+        tile_shape,
+        viewport_shape,
+        requested_columns=None,
+        latched_columns=None,
+    )
+    # First layout (nothing committed, nothing pinned) is still automatic.
+    assert columns == optimal_montage_columns(count, tile_shape, viewport_shape)
+
+
 def test_montage_viewport_intent_observes_without_promoting():
     from arrayscope.window.montage_viewport import montage_viewport_intent
 

@@ -197,13 +197,20 @@ def effective_montage_columns(
     requested_columns: int | None,
     fit_locked: bool = False,
     auto_active: bool = False,
+    latched_columns: int | None = None,
 ) -> int | None:
     """Choose applied montage columns without rewriting semantic view state.
 
-    Automatic layout is used when no column preference exists, when Fit owns
-    the camera, when the viewport is explicitly auto-owned, or when the current
-    view is still near the automatic pose.  Manual pan/zoom keeps requested
-    columns.
+    Automatic layout is recomputed from the viewport aspect whenever Fit owns
+    the camera or the viewport is explicitly auto-owned -- those poses are
+    meant to re-flow as the window changes.
+
+    A *manual* pose (the user panned/zoomed) must NOT re-flow on resize: doing
+    so visibly rearranges and rescales the tiles even though the user never
+    asked for a different layout.  It keeps an explicit ``requested_columns``
+    if one was pinned, else the ``latched_columns`` carried over from the last
+    committed layout, so a manual montage holds its column count across window
+    resizes and only reveals more/less of the same grid.
     """
 
     count = max(0, int(count))
@@ -212,11 +219,13 @@ def effective_montage_columns(
     tile_shape = (max(1, int(tile_shape[0])), max(1, int(tile_shape[1])))
     viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
     automatic = optimal_montage_columns(count, tile_shape, viewport_shape)
-    if requested_columns is None:
-        return automatic
     if bool(fit_locked) or bool(auto_active):
         return automatic
-    return max(1, min(int(requested_columns), count))
+    if requested_columns is not None:
+        return max(1, min(int(requested_columns), count))
+    if latched_columns is not None:
+        return max(1, min(int(latched_columns), count))
+    return automatic
 
 
 def square_montage_fit_view_range(
