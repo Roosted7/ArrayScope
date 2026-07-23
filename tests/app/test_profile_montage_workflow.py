@@ -1103,6 +1103,9 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
         display_axis_slice_scroll_steps=3,
         display_axis_crop_wgpu_upload_delta=0,
         display_axis_scroll_wgpu_upload_delta=0,
+        display_axis_xy_swap_settled=True,
+        display_axis_xy_swap_steps=2,
+        display_axis_xy_swap_wgpu_upload_delta=0,
         display_axis_wgpu_pool_exhaustion="",
         wgpu_page_pools=[{"representation": "scalar_r32f", "raw_resident": 100}],
         grid_kind="display_axis",
@@ -1119,6 +1122,12 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
     failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
     assert "display_axis_source_pages_reused" in failures
 
+    record["display_axis_scroll_wgpu_upload_delta"] = 0
+    record["display_axis_xy_swap_settled"] = False
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_xy_swap_settles" in failures
+
 
 def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
@@ -1134,6 +1143,9 @@ def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
         display_axis_slice_scroll_steps=3,
         display_axis_crop_wgpu_upload_delta=0,
         display_axis_scroll_wgpu_upload_delta=0,
+        display_axis_xy_swap_settled=True,
+        display_axis_xy_swap_steps=2,
+        display_axis_xy_swap_wgpu_upload_delta=0,
         display_axis_wgpu_pool_exhaustion="page pool 'scalar_r32f' exhausted",
         grid_kind="display_axis",
         grid_tile_count=50,

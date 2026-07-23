@@ -1829,15 +1829,51 @@ def test_wgpu_histogram_rearm_queues_acknowledged_evidence_before_noop_commit():
     service = LevelStatsService()
     service._frame_session = session
     queued = []
-    service._queue_wgpu_resident_histogram_evidence = lambda owner, payloads: (
-        queued.append((owner, payloads)) or 1
-    )
+
+    def queue(owner, payloads):
+        queued.append((owner, payloads))
+        owner.level_evidence_inflight = True
+        return 1
+
+    service._queue_wgpu_resident_histogram_evidence = queue
 
     service._rearm_wgpu_histogram_evidence()
 
     assert queued == [(session, acknowledged)]
     assert requested == []
     assert session.flush_pending is False
+
+
+def test_wgpu_histogram_rearm_wakes_after_synchronous_evidence_reuse():
+    """Retained evidence is progress, but it does not own a future wakeup.
+
+    Attached crop/axis-switch stall ``/tmp/arrayscope-stall-334-2`` ended
+    with 11 required preview tiles, zero work, and COVERAGE still open.
+    The final histogram completion synchronously reused two retained exact
+    rows; the integer return was mistaken for an asynchronous dispatch and
+    the parked publication commit was never requested.
+    """
+
+    from arrayscope.render.level_stats import LevelStatsService
+
+    requested = []
+    acknowledged = {0: object(), 1: object()}
+    session = SimpleNamespace(
+        level_evidence_inflight=False,
+        tile_presentation_state=SimpleNamespace(payloads=acknowledged),
+        flush_pending=False,
+        pipeline=SimpleNamespace(
+            effects=SimpleNamespace(request_presentation=lambda: requested.append(True))
+        ),
+    )
+    service = LevelStatsService()
+    service._frame_session = session
+    service._queue_wgpu_resident_histogram_evidence = lambda _owner, _payloads: 2
+
+    service._rearm_wgpu_histogram_evidence()
+
+    assert requested == [True]
+    assert session.flush_pending is True
 
 
 def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_quiet_edge():

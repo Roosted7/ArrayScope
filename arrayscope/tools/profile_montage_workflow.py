@@ -674,6 +674,36 @@ def run_profile_montage_workflow(
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
             uploads_after_scroll = _wgpu_upload_total(win)
+            # The field stall needs the combination, not an isolated crop:
+            # retain the cropped source window, swap the displayed X/Y roles,
+            # then swap back.  Both are presentation-only transforms for the
+            # canonical source pages.  This also catches a phase-1 histogram
+            # completion which synchronously reuses retained evidence but
+            # forgets to wake the exact follow-up.
+            original_image_axes = tuple(int(value) for value in win.view_state.image_axes)
+            swapped_image_axes = tuple(reversed(original_image_axes))
+            axis_swap_settled = True
+            axis_swap_steps = 0
+            uploads_before_axis_swap = _wgpu_upload_total(win)
+            for image_axes in (swapped_image_axes, original_image_axes):
+                predecessor_session = getattr(win.renderer, "_frame_session", None)
+                predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
+                win._set_view_state(win.view_state.with_image_axes(*image_axes))
+                win.render(reason=f"profile-display-{role}-axis-swap")
+                settled = _wait_for_montage_successor_settled(
+                    win=win,
+                    app=app,
+                    QtCore=QtCore,
+                    predecessor_session_id=predecessor_session_id,
+                    budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+                )
+                axis_swap_steps += 1
+                axis_swap_settled = bool(axis_swap_settled and settled)
+                if callable(physical_rows):
+                    physical_tile_counts.append(len(dict(physical_rows() or {})))
+                if not settled:
+                    break
+            uploads_after_axis_swap = _wgpu_upload_total(win)
             presentation = _vispy_presentation_diagnostics(win)
             return {
                 "display_axis_role": role,
@@ -695,6 +725,13 @@ def run_profile_montage_workflow(
                     None
                     if uploads_after_crop is None or uploads_after_scroll is None
                     else int(uploads_after_scroll - uploads_after_crop)
+                ),
+                "display_axis_xy_swap_settled": bool(axis_swap_settled),
+                "display_axis_xy_swap_steps": int(axis_swap_steps),
+                "display_axis_xy_swap_wgpu_upload_delta": (
+                    None
+                    if uploads_before_axis_swap is None or uploads_after_axis_swap is None
+                    else int(uploads_after_axis_swap - uploads_before_axis_swap)
                 ),
                 "display_axis_wgpu_pool_exhaustion": str(
                     presentation.get("wgpu_last_pool_exhaustion", "") or ""
@@ -6304,20 +6341,32 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             },
             target="every post-crop scroll sample keeps every requested tile physically visible",
         )
+        require(
+            "display_axis_xy_swap_settles",
+            bool(record.get("display_axis_xy_swap_settled", False))
+            and int(record.get("display_axis_xy_swap_steps", 0) or 0) == 2,
+            evidence={
+                "settled": record.get("display_axis_xy_swap_settled"),
+                "steps": record.get("display_axis_xy_swap_steps"),
+            },
+            target="cropped montage settles after X/Y swap and swap-back",
+        )
         if str(record.get("backend", "")) == "wgpu":
             crop_uploads = record.get("display_axis_crop_wgpu_upload_delta")
             scroll_uploads = record.get("display_axis_scroll_wgpu_upload_delta")
+            axis_swap_uploads = record.get("display_axis_xy_swap_wgpu_upload_delta")
             require(
                 "display_axis_source_pages_reused",
-                crop_uploads == 0 and scroll_uploads == 0,
+                crop_uploads == 0 and scroll_uploads == 0 and axis_swap_uploads == 0,
                 evidence={
                     "initial_crop_uploads": crop_uploads,
                     "scroll_uploads": scroll_uploads,
+                    "axis_swap_uploads": axis_swap_uploads,
                     "scroll_steps": int(record.get("display_axis_slice_scroll_steps", 0) or 0),
                 },
                 target=(
                     "the full montage prewarms reusable source pages; the "
-                    "crop and every in-page +/-1 scroll perform zero uploads"
+                    "crop, every in-page +/-1 scroll, and X/Y swaps perform zero uploads"
                 ),
                 category="performance",
             )

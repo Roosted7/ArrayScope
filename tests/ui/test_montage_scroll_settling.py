@@ -314,11 +314,30 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
         assert min(physical_tile_counts) == len(montage_indices)
         assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        uploads_before_axis_swap = (
+            int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
+            if backend == "wgpu"
+            else None
+        )
+        for image_axes in ((0, 1), (1, 0)):
+            previous_session_id = int(win.renderer._frame_session.session_id)
+            win._set_view_state(win.view_state.with_image_axes(*image_axes))
+            win.update_image_view()
+            qtbot.waitUntil(
+                lambda previous_session_id=previous_session_id: (
+                    int(win.renderer._frame_session.session_id) != previous_session_id
+                    and _window_settled(win, montage_indices)
+                ),
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+            assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
+            assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
         if backend == "wgpu":
             final = win.img_view.wgpuPresentationDiagnostics()
             assert full_global_l0 == 4 * len(montage_indices)
             assert crop_uploads == full_uploads
-            assert int(final["wgpu_uploads_total"]) == crop_uploads
+            assert uploads_before_axis_swap == crop_uploads
+            assert int(final["wgpu_uploads_total"]) == uploads_before_axis_swap
             assert final["wgpu_last_pool_exhaustion"] == ""
     finally:
         win.close()

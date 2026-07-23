@@ -1168,8 +1168,14 @@ class LevelStatsService:
             )
             or {}
         )
-        if self._queue_wgpu_resident_histogram_evidence(current, acknowledged):
+        self._queue_wgpu_resident_histogram_evidence(current, acknowledged)
+        if bool(getattr(current, "level_evidence_inflight", False)):
             return
+        # The queue seam also returns the number of rows satisfied
+        # synchronously from retained refined evidence.  Those rows are real
+        # progress, but unlike a dispatched batch they own no later completion
+        # edge.  Fall through to the parked presentation obligation so
+        # COVERAGE can publish/close instead of waiting forever.
         current.flush_pending = True
         pipeline = getattr(current, "pipeline", None)
         effects = None if pipeline is None else getattr(pipeline, "effects", None)
