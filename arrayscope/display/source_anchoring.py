@@ -28,6 +28,9 @@ class SourceAnchoring:
     ``anchored_starts`` is ``(y_start, x_start)`` in display-axis order:
     the source-coordinate start of that axis's contiguous window, or ``None``
     when the axis is not anchored (window stays part of ``content_key``).
+    ``source_starts_yx`` is the same pair in the payload's physical row/column
+    order.  They differ only when a backend keeps payloads in canonical
+    (sorted-image-axis) orientation and applies an X/Y swap at presentation.
     ``content_key`` identifies tile content independent of anchored-axis
     windows: document identity (data revision + operation steps) plus the
     view identity with anchored axes' ranges stripped.
@@ -35,6 +38,19 @@ class SourceAnchoring:
 
     anchored_starts: tuple[int | None, int | None]
     content_key: object
+    source_starts_yx: tuple[int | None, int | None] | None = None
+
+    def __post_init__(self) -> None:
+        display_starts = tuple(self.anchored_starts)
+        if len(display_starts) != 2:
+            raise ValueError("source anchoring requires two display-axis starts")
+        source_starts = (
+            display_starts if self.source_starts_yx is None else tuple(self.source_starts_yx)
+        )
+        if len(source_starts) != 2:
+            raise ValueError("source anchoring requires two payload-axis starts")
+        object.__setattr__(self, "anchored_starts", display_starts)
+        object.__setattr__(self, "source_starts_yx", source_starts)
 
     @property
     def any_anchored(self) -> bool:
@@ -53,7 +69,12 @@ def contiguous_range_start(indices) -> int | None:
     return None
 
 
-def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
+def source_anchoring_for_view(
+    document,
+    view_state,
+    *,
+    canonical_orientation: bool = False,
+) -> SourceAnchoring | None:
     """Anchoring decision for a non-montage 2D view, or ``None``.
 
     Returns ``None`` only when the view has no 2D image axes or is a montage
@@ -97,6 +118,7 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
     )
 
     anchored_starts: list[int | None] = []
+    start_by_axis: dict[int, int | None] = {}
     windowless = view_state
     for axis in image_axes:
         start: int | None = None
@@ -104,8 +126,11 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
             indices = view_state.axis_range_indices[axis]
             start = 0 if indices is None else contiguous_range_start(indices)
         anchored_starts.append(start)
+        start_by_axis[axis] = start
         if start is not None:
             windowless = windowless.with_axis_range(axis, None)
+    source_axes = tuple(sorted(image_axes)) if canonical_orientation else image_axes
+    source_starts_yx = tuple(start_by_axis[axis] for axis in source_axes)
 
     # Deferred import: evaluator pulls in the operations planner stack, and
     # this module is imported by the Qt-free display layer.
@@ -117,8 +142,12 @@ def source_anchoring_for_view(document, view_state) -> SourceAnchoring | None:
         content_key=(
             "src-anchored",
             _document_key(document),
-            _request_key(request_for_image(windowless)),
+            _request_key(
+                request_for_image(windowless),
+                canonical_orientation=canonical_orientation,
+            ),
         ),
+        source_starts_yx=source_starts_yx,
     )
 
 

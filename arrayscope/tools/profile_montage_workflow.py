@@ -72,10 +72,13 @@ ZOOMPAN_NEAR_OBSERVE_S = 0.20
 R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
 R8_WARM_INPUT_MAX_MS = 15.0
+PROFILE_DEFAULT_BACKENDS = ("wgpu", "pyqtgraph")
 PROFILE_MONTAGE_STAGES = (
     "load_data",
     "raw_full_tiled_montage",
     "fft_full_tiled_montage",
+    "display_x_axis_slice",
+    "display_y_axis_slice",
     "fft_level_refinement_preview",
     "montage_scroll_fft",
     "montage_scroll_scalar",
@@ -487,7 +490,11 @@ def run_profile_montage_workflow(
 
         def apply_fft() -> dict[str, object]:
             _set_operations(win, fft_operations)
-            fft_state = win.view_state.with_montage_axis(
+            # Every stage owns its starting view. In particular, the preceding
+            # displayed-axis slice stages leave a non-montage range window
+            # active; inheriting that state makes a selected stage differ from
+            # the same stage in the full workflow.
+            fft_state = raw_state.with_montage_axis(
                 montage_axis,
                 columns=columns_large,
                 indices=large_indices,
@@ -539,6 +546,105 @@ def run_profile_montage_workflow(
                 },
             )
 
+        def apply_display_axis_slice(role: str) -> dict[str, object]:
+            role = str(role)
+            if role not in {"x", "y"}:
+                raise ValueError(f"unsupported displayed-axis role {role!r}")
+            _set_operations(win, ())
+            slice_source_state = raw_state.with_montage_axis(
+                None,
+                columns=None,
+                indices=None,
+                text=None,
+            ).with_image_axes(1, 0)
+            win._set_view_state(slice_source_state)
+            win.render(reason=f"profile-display-{role}-axis-slice-source")
+            _wait_for_montage_complete_soft(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            fit_metrics: dict[str, float] = {}
+            fit_stretch_pulsed = _pulse_fit_stretch(
+                win,
+                app=app,
+                QtCore=QtCore,
+                metrics=fit_metrics,
+            )
+            axis_position = 1 if role == "x" else 0
+            axis = int(win.view_state.image_axes[axis_position])
+            axis_size = int(win.view_state.shape[axis])
+            slice_size = min(150, axis_size)
+            start = min(8, max(0, axis_size - slice_size))
+            stop = start + slice_size
+            win._on_slice_text_changed(axis, f"{start}:{stop}")
+            _process_events(app, QtCore, count=4)
+            view_range = _montage_view_range(win)
+            if view_range is not None:
+                zoomed_out = _maximum_zoomout_view_range(
+                    win,
+                    app,
+                    QtCore,
+                    view_range,
+                )
+                _apply_view_range(win, zoomed_out[0], zoomed_out[1])
+            target_lod_reached, target_lod_settle_ms = _wait_for_target_lod(
+                win,
+                app,
+                QtCore,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            return {
+                "display_axis_role": role,
+                "display_axis": axis,
+                "display_axis_slice_start": start,
+                "display_axis_slice_stop": stop,
+                "display_axis_slice_size": slice_size,
+                "fit_stretch_pulsed": fit_stretch_pulsed,
+                "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
+                **fit_metrics,
+                "target_lod_reached": target_lod_reached,
+                "target_lod_settle_ms": target_lod_settle_ms,
+            }
+
+        for role in ("x", "y"):
+            phase = f"display_{role}_axis_slice"
+            if phase not in stage_enabled:
+                continue
+
+            def apply_slice(role=role) -> dict[str, object]:
+                return apply_display_axis_slice(role)
+
+            slice_record = _run_phase(
+                app,
+                QtCore,
+                win,
+                probe,
+                phase=phase,
+                timeout_s=timeout_s,
+                action=apply_slice,
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _attach_phase_screenshot(
+                slice_record,
+                win,
+                phase=phase,
+                backend=backend,
+                screenshot_dir=screenshot_dir,
+            )
+            _append_record(
+                records,
+                jsonl,
+                {
+                    **base_large,
+                    **slice_record,
+                    "operation_pipeline": (),
+                    "run_temperature": "mixed",
+                },
+            )
+
         if "fft_level_refinement_preview" in stage_enabled:
 
             def apply_fft_level_preview() -> dict[str, object]:
@@ -583,6 +689,7 @@ def run_profile_montage_workflow(
 
                 def _fft_scroll_action() -> dict[str, object]:
                     _set_operations(win, fft_operations)
+                    win._set_view_state(raw_state)
                     _set_montage_indices(
                         win,
                         montage_axis=montage_axis,
@@ -639,6 +746,7 @@ def run_profile_montage_workflow(
 
                 def _scalar_scroll_action() -> dict[str, object]:
                     _set_operations(win, ())
+                    win._set_view_state(raw_state)
                     _set_montage_indices(
                         win,
                         montage_axis=montage_axis,
@@ -689,6 +797,7 @@ def run_profile_montage_workflow(
             # sequence that hammers the LOD + visibility system on FFT data.
             def _fft_zoompan_action() -> dict[str, object]:
                 _set_operations(win, ())
+                win._set_view_state(raw_state)
                 _set_montage_indices(
                     win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices
                 )
@@ -741,6 +850,7 @@ def run_profile_montage_workflow(
             # run the identical zoom/pan stress sequence over the raw scalar data.
             def _scalar_zoompan_action() -> dict[str, object]:
                 _set_operations(win, fft_operations)
+                win._set_view_state(raw_state)
                 _set_montage_indices(
                     win, montage_axis=montage_axis, columns=columns_small, indices=scroll_indices
                 )
@@ -7702,7 +7812,7 @@ def _suite_child_args(argv: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _suite_profiler_backends(argv: tuple[str, ...]) -> tuple[str, ...]:
-    backend = "pyqtgraph"
+    backend = "all"
     args = tuple(argv)
     for index, arg in enumerate(args):
         if arg == "--backend" and index + 1 < len(args):
@@ -7712,7 +7822,7 @@ def _suite_profiler_backends(argv: tuple[str, ...]) -> tuple[str, ...]:
             backend = str(arg).split("=", 1)[1]
             break
     if backend == "all":
-        return ("pyqtgraph", "vispy")
+        return PROFILE_DEFAULT_BACKENDS
     return (backend,)
 
 
@@ -7773,9 +7883,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(192, 256, 40),
         metavar="HEIGHTxWIDTHxDEPTH",
     )
-    parser.add_argument(
-        "--backend", choices=("pyqtgraph", "vispy", "wgpu", "all"), default="pyqtgraph"
-    )
+    parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "wgpu", "all"), default="all")
     parser.add_argument(
         "--wgpu-present-method",
         choices=("bitmap", "screen", "auto"),
@@ -7970,7 +8078,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         configure_trace(trace)
     all_records: list[dict[str, object]] = []
     try:
-        for backend in ("pyqtgraph", "vispy") if args.backend == "all" else (args.backend,):
+        for backend in PROFILE_DEFAULT_BACKENDS if args.backend == "all" else (args.backend,):
             all_records.extend(
                 run_profile_montage_workflow(
                     data_path=args.data,

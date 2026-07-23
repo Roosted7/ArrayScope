@@ -3,8 +3,9 @@
 Drives the user's real dataset through a seeded ~12 s human-shaped gesture mix
 — zoom glides in/out, axis-0 range-window shifts including an explicit
 full-range spelling and its ``None`` reset, and montage-axis slice pokes — on
-a full-axis FFT-chain complex montage (VisPy, resident quality policy), then
-stops interacting and requires the session to converge on its own.
+a full-axis FFT-chain complex montage (WGPU and PyQtGraph by default, resident
+quality policy), then stops interacting and requires each backend session to
+converge on its own.
 
 Before the 2026-07-16 fixes this stalled deterministically on a real display:
 retained payloads minted under the explicit-full-range spelling could never
@@ -22,6 +23,11 @@ docs/redesign/black-tiles-and-priority.md ground rules); the deterministic
 unit gates live in tests/core/test_view_state.py,
 tests/window/test_montage_lod_residency.py, and
 tests/display/test_vispy_physical_presentation.py.
+
+Set ``ARRAYSCOPE_STRESS_BACKENDS=vispy`` (or a comma-separated matrix) to run
+the legacy backend explicitly. Its private shader-uniform oracle remains an
+additional VisPy-only assertion; the full interaction choreography and common
+settlement gates run for every selected backend.
 """
 
 from __future__ import annotations
@@ -34,6 +40,15 @@ import numpy as np
 import pytest
 
 DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "_WIPDelRec-tT2_20260223150234_14.nii"
+DEFAULT_STRESS_BACKENDS = ("wgpu", "pyqtgraph")
+STRESS_BACKENDS = tuple(
+    backend.strip()
+    for backend in os.environ.get(
+        "ARRAYSCOPE_STRESS_BACKENDS",
+        ",".join(DEFAULT_STRESS_BACKENDS),
+    ).split(",")
+    if backend.strip()
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ARRAYSCOPE_STRESS") != "1"
@@ -83,7 +98,9 @@ def _assert_phase_mapping_physical_truth(win, *, context: str) -> None:
     the framebuffer consequence is pinned by test_vispy_phase_framebuffer.py.
     """
 
-    layer = win.img_view._vispy_gpu_montage_layer
+    layer = getattr(win.img_view, "_vispy_gpu_montage_layer", None)
+    if layer is None:
+        return
     rows = layer.tile_truth_physical_rows()
     drawn_rows = {
         int(tile): row
@@ -200,28 +217,47 @@ def _dump_convergence_state(win, label: str) -> None:
     )
 
 
-def _build_fft_montage_window(qtbot):
+def _build_fft_montage_window(qtbot, *, backend: str):
     # Doctrine (docs/testing/stress-and-trace-strategy.md): every harness run
     # records a complete trace. The bounded watchdog ring only covers the
     # FIRST stall; the compound churn stalls need the full stream.
     from arrayscope.core.trace import configure_trace
-    from tests.ui.helpers import make_backend_window, use_vispy_backend
+    from tests.ui.helpers import (
+        make_backend_window,
+        restore_default_backend,
+        use_pyqtgraph_backend,
+        use_vispy_backend,
+        use_wgpu_backend,
+    )
 
     trace_path = (
         Path(os.environ.get("ARRAYSCOPE_ARTIFACT_DIR", "/tmp"))
-        / f"arrayscope-churn-{os.getpid()}.trace.jsonl"
+        / f"arrayscope-churn-{backend}-{os.getpid()}.trace.jsonl"
     )
     configure_trace(trace_path)
     print(f"[harness] full trace: {trace_path}")
 
-    settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
+    backend_settings = {
+        "wgpu": use_wgpu_backend,
+        "pyqtgraph": use_pyqtgraph_backend,
+        "vispy": use_vispy_backend,
+    }
+    try:
+        configure_backend = backend_settings[str(backend)]
+    except KeyError as exc:
+        raise ValueError(f"unsupported stress backend {backend!r}") from exc
+    settings = configure_backend(extra_settings={"montage_quality_policy": "resident"})
     from arrayscope.io.file_interpreters import load_file
     from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
 
     loaded = load_file(str(DATA_PATH))
     data = np.asarray(loaded.data if hasattr(loaded, "data") else loaded)
 
-    win = make_backend_window(qtbot, data)
+    try:
+        win = make_backend_window(qtbot, data, backend=backend)
+    except BaseException:
+        restore_default_backend(settings)
+        raise
     win.resize(1200, 900)
     win.show()
     win.operation_coordinator.load_operations(
@@ -244,7 +280,8 @@ def _build_fft_montage_window(qtbot):
     return win, settings, data, n
 
 
-def test_interaction_churn_converges_on_real_data(qtbot):
+@pytest.mark.parametrize("backend", STRESS_BACKENDS)
+def test_interaction_churn_converges_on_real_data(qtbot, backend):
     """Continuous live-session net for the 2026-07-16 field defects.
 
     The initial shrink/grow catches resident complex floors presented without
@@ -259,7 +296,7 @@ def test_interaction_churn_converges_on_real_data(qtbot):
     docs/redesign/stale-empty-tiles-2026-07-16.md."""
     from tests.ui.helpers import restore_default_backend
 
-    win, settings, data, n = _build_fft_montage_window(qtbot)
+    win, settings, data, n = _build_fft_montage_window(qtbot, backend=backend)
     try:
         for indices in (tuple(range(n // 3, n // 3 + 60)), tuple(range(n))):
             win._apply_slice_state(

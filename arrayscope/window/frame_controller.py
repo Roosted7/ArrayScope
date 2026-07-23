@@ -177,7 +177,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return None
         from arrayscope.display.source_anchoring import source_anchoring_for_view
 
-        return source_anchoring_for_view(document, view_state)
+        return source_anchoring_for_view(
+            document,
+            view_state,
+            canonical_orientation=bool(getattr(capabilities, "display_axis_transpose", False)),
+        )
 
     def _montage_viewport_plan(self, view_state, *, view_range=None) -> MontageViewportPlan:
         axis = view_state.montage_axis

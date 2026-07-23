@@ -64,6 +64,34 @@ class TestAnchoringDecision:
         anchoring = source_anchoring_for_view(document, state)
         assert anchoring is not None
         assert anchoring.anchored_starts == (0, 100)
+        assert anchoring.source_starts_yx == (0, 100)
+
+    def test_canonical_payload_starts_follow_sorted_axes_not_display_order(self):
+        document = ArrayDocument(np.zeros((336, 336), dtype=np.float32))
+        state = (
+            ViewState.from_shape((336, 336)).with_image_axes(1, 0).with_axis_range(0, range(8, 158))
+        )
+
+        anchoring = source_anchoring_for_view(
+            document,
+            state,
+            canonical_orientation=True,
+        )
+
+        assert anchoring is not None
+        # Frame planning remains display-oriented: Y is axis 1, X is axis 0.
+        assert anchoring.anchored_starts == (0, 8)
+        # WGPU payloads are canonical (axis 0 rows, axis 1 columns), so the
+        # source anchor must follow that same physical texture order.
+        assert anchoring.source_starts_yx == (8, 0)
+        canonical_state = state.with_image_axes(0, 1)
+        canonical_anchoring = source_anchoring_for_view(
+            document,
+            canonical_state,
+            canonical_orientation=True,
+        )
+        assert canonical_anchoring is not None
+        assert anchoring.content_key == canonical_anchoring.content_key
 
     def test_fft_on_displayed_axis_blocks_that_axis_only(self):
         document = ArrayDocument(

@@ -19,7 +19,11 @@ import numpy as np
 
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
-from arrayscope.display.pyramid import LodPageCache, materialize_lod_page
+from arrayscope.display.pyramid import (
+    LodPageCache,
+    materialize_lod_page,
+    plan_source_grid_pages,
+)
 from arrayscope.display.source_anchoring import SourceAnchoring
 from arrayscope.window.frame_session import FrameSession
 
@@ -155,6 +159,45 @@ def test_non_montage_floor_payload_anchor_rect_is_native_plan_extent():
         x0,
         x0 + TILE,
     )
+
+
+def test_canonical_anchor_keeps_ranged_axis_on_the_payload_texture_axis():
+    """Regression for WGPU displayed-X/Y slicing with canonical transpose.
+
+    Display order ``(axis 1, axis 0)`` reports starts as ``(0, 8)``, while
+    the canonical payload is stored as ``(axis 0, axis 1)``. Applying the
+    display pair to the payload produced the field failure
+    ``source=(150, 336), factor=16, texture=(10, 22), expected=(10, 21)``.
+    """
+
+    session = _session(
+        montage_axis=None,
+        source_anchoring=SourceAnchoring(
+            anchored_starts=(0, 8),
+            source_starts_yx=(8, 0),
+            content_key=CONTENT_KEY,
+        ),
+    )
+
+    anchor = session._payload_source_anchor((150, 336))
+    assert anchor is not None
+    assert anchor.source_rect == (8, 158, 0, 336)
+    plans = plan_source_grid_pages(
+        content_key=anchor.content_key,
+        valid_source_rect_yx=anchor.source_rect,
+        reduction_yx=(4, 4),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    stored_shape = (
+        max(plan.stored_rect_yx[1] for plan in plans)
+        - min(plan.stored_rect_yx[0] for plan in plans),
+        max(plan.stored_rect_yx[3] for plan in plans)
+        - min(plan.stored_rect_yx[2] for plan in plans),
+    )
+    assert stored_shape == (10, 21)
 
 
 def test_non_montage_floor_payload_without_anchoring_stays_classic():

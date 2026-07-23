@@ -2315,7 +2315,9 @@ class FrameSession:
         anchoring = self.source_anchoring
         if anchoring is None or self.montage_axis is not None:
             return None
-        starts = getattr(anchoring, "anchored_starts", None)
+        starts = getattr(anchoring, "source_starts_yx", None)
+        if starts is None:
+            starts = getattr(anchoring, "anchored_starts", None)
         content_key = getattr(anchoring, "content_key", None)
         if starts is None or content_key is None:
             return None

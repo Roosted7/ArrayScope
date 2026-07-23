@@ -775,6 +775,8 @@ def test_profile_stage_resolve_defaults_to_all():
     )
 
     assert _resolve_profile_stages() == tuple(PROFILE_MONTAGE_STAGES)
+    assert "display_x_axis_slice" in PROFILE_MONTAGE_STAGES
+    assert "display_y_axis_slice" in PROFILE_MONTAGE_STAGES
 
 
 def test_profile_parser_unknown_stage_is_rejected():
@@ -817,13 +819,37 @@ def test_profile_parser_default_scroll_window_and_custom_value():
         ["--backend", "vispy", "--scroll-max-tiles", "84", "--verbose-tile-trace"]
     )
     wgpu_args = parser.parse_args(["--backend", "wgpu"])
+    default_backend_args = parser.parse_args([])
 
     assert default_args.scroll_max_tiles == 60
     assert custom_args.scroll_max_tiles == 84
     assert default_args.verbose_tile_trace is False
     assert custom_args.verbose_tile_trace is True
     assert wgpu_args.backend == "wgpu"
+    assert default_backend_args.backend == "all"
     assert Path(default_args.session_fixture) == DEFAULT_SESSION_FIXTURE
+
+
+def test_profile_main_default_dispatches_every_stage_to_both_backends(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    calls = []
+
+    def fake_run_profile_montage_workflow(**kwargs):
+        calls.append((kwargs["backend"], tuple(kwargs["stages"])))
+        return ()
+
+    monkeypatch.setattr(
+        workflow,
+        "run_profile_montage_workflow",
+        fake_run_profile_montage_workflow,
+    )
+    monkeypatch.setattr(workflow, "_workflow_timing_summary", lambda records: "")
+
+    assert workflow.main(("--session-fixture", "")) == 0
+    assert calls == [
+        (backend, workflow.PROFILE_MONTAGE_STAGES) for backend in workflow.PROFILE_DEFAULT_BACKENDS
+    ]
 
 
 def test_profile_session_fixture_is_a_portable_production_session():
@@ -869,7 +895,7 @@ def test_profile_suite_splits_attribution_artifacts_for_all_backends(tmp_path):
     )
 
     by_step = {item["step_id"]: item for item in commands}
-    for backend in ("pyqtgraph", "vispy"):
+    for backend in ("wgpu", "pyqtgraph"):
         assert by_step[f"cprofile:{backend}"]["backend"] == backend
         assert by_step[f"py-spy-raw-low-impact:{backend}"]["backend"] == backend
         assert by_step[f"py-spy-raw-full:{backend}"]["backend"] == backend
@@ -877,6 +903,28 @@ def test_profile_suite_splits_attribution_artifacts_for_all_backends(tmp_path):
         assert f"--backend {backend}" in by_step[f"py-spy-raw-low-impact:{backend}"]["command"]
         assert f".{backend}." in by_step[f"py-spy-raw-full:{backend}"]["jsonl"]
     assert by_step["plain"]["backend"] == "all"
+
+
+def test_profile_suite_omitted_backend_uses_default_backend_matrix(tmp_path):
+    from arrayscope.tools.profile_montage_workflow import (
+        PROFILE_DEFAULT_BACKENDS,
+        _suite_profiler_backends,
+        profiler_suite_commands,
+    )
+
+    assert (
+        _suite_profiler_backends(())
+        == PROFILE_DEFAULT_BACKENDS
+        == (
+            "wgpu",
+            "pyqtgraph",
+        )
+    )
+    commands = profiler_suite_commands(("--profile-suite", str(tmp_path)), tmp_path)
+    attribution_backends = {
+        item["backend"] for item in commands if item["profiler_type"] != "plain"
+    }
+    assert attribution_backends == set(PROFILE_DEFAULT_BACKENDS)
 
 
 def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_child(tmp_path):
@@ -2121,6 +2169,7 @@ def test_py_spy_smoke_profile_workflow_exits_cleanly(tmp_path):
 def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
     from arrayscope.tools.profile_montage_workflow import (
         DEFAULT_DATA_PATH,
+        PROFILE_MONTAGE_STAGES,
         run_profile_montage_workflow,
     )
 
@@ -2130,7 +2179,7 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
 
     backends = tuple(
         backend.strip()
-        for backend in os.environ.get("ARRAYSCOPE_PROFILE_BACKENDS", "pyqtgraph,vispy").split(",")
+        for backend in os.environ.get("ARRAYSCOPE_PROFILE_BACKENDS", "wgpu,pyqtgraph").split(",")
         if backend.strip()
     )
     if "vispy" in backends:
@@ -2156,9 +2205,8 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
 
     phases = {(record["backend"], record["phase"]) for record in all_records}
     for backend in backends:
-        assert (backend, "load_data") in phases
-        assert (backend, "raw_full_tiled_montage") in phases
-        assert (backend, "fft_full_tiled_montage") in phases
+        for phase in PROFILE_MONTAGE_STAGES:
+            assert (backend, phase) in phases
     assert jsonl.exists()
 
 

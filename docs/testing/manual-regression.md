@@ -90,8 +90,8 @@ Use a large plane, many montage tiles, complex shader mode, and at least one exp
 ## Real workflow profiling
 
 Use this when callback-budget, scheduler, or backend changes affect pacing. Run
-on a real display, not `QT_QPA_PLATFORM=offscreen`, so VisPy/OpenGL frame pacing
-and swap behavior are actually visible.
+on a real display, not `QT_QPA_PLATFORM=offscreen`, so WGPU and Qt-raster frame
+pacing and swap behavior are actually visible.
 
 ```bash
 mkdir -p tests/artifacts
@@ -100,10 +100,12 @@ PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope.tools.profile_mon
   --jsonl tests/artifacts/montage-workflow-profile.jsonl
 ```
 
-The window should visibly load the bundled NIfTI dataset, draw dims 0/1 as the
-image axes, render the full dim-2 tiled montage, apply FFT on dim 2, render the
-FFT montage, perform the `fft_level_refinement_preview` level edit, then close.
-Confirm the pacing by eye and keep the JSONL.
+By default the workflow runs every stage first on WGPU and then on PyQtGraph.
+Each backend should visibly load the bundled NIfTI dataset, draw dims 0/1 as
+the image axes, render the raw and FFT dim-2 tiled montages, slice displayed X
+and Y in a reversed-axis single-image view, perform the
+`fft_level_refinement_preview` level edit, run the scroll and zoom/pan stages,
+then close. Confirm the pacing by eye and keep the JSONL.
 
 For timing evidence, prefer the plain JSONL run above. It records
 request-to-first-content, exact-visible/full-completion timing, event-loop
