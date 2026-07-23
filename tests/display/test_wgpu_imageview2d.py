@@ -273,6 +273,7 @@ def test_wgpu_physical_rows_report_resident_draw_geometry(qt_app):
             for row in bindings
             if view._wgpu_executor.page_is_compressed(row["actual_key"])
         )
+        assert view.physicalVisibleTileCount() == 2
         assert view.wgpuPresentationDiagnostics()["physically_visible_tile_count"] == 2
     finally:
         view.close()

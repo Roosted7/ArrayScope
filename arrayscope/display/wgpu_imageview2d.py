@@ -2357,6 +2357,29 @@ class WgpuImageView2D(ImageViewShell):
     def _tiled_presentation_layer(self):
         return None
 
+    def physicalVisibleTileCount(self) -> int:
+        """Count committed tiles whose submitted page bindings still exist.
+
+        This is the allocation-light physical-truth query for high-frequency
+        continuity probes. Detailed diagnostics still use
+        :meth:`tileTruthPhysicalRows`, but a 1 ms sampler must not construct
+        row dictionaries, page-pool snapshots, and compression labels merely
+        to learn whether any submitted tile disappeared.
+        """
+
+        executor = self._wgpu_executor
+        if executor is None:
+            return 0
+        page_table = executor.page_table
+        committed = self._wgpu_committed or {}
+        tiles = committed.get("tiles", {}) or {}
+        return sum(
+            1
+            for info in tiles.values()
+            if (page_keys := tuple(info.get("page_keys", ()) or ()))
+            and all(key in page_table for key in page_keys)
+        )
+
     def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
         """Describe the page-backed tile instances submitted to the executor.
 

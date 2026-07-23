@@ -4376,6 +4376,9 @@ def _backend_visible_tile_count(win) -> int:
     if mode == "vispy_tile_layer":
         return int(_vispy_presentation_diagnostics(win).get("presented_tile_count", 0) or 0)
     if mode == "wgpu_tile_layer":
+        physical_count = getattr(image_view, "physicalVisibleTileCount", None)
+        if callable(physical_count):
+            return int(physical_count())
         return int(
             _vispy_presentation_diagnostics(win).get("physically_visible_tile_count", 0) or 0
         )

@@ -441,6 +441,20 @@ def test_preview_floor_physical_rows_preserve_page_shader_evidence():
     ]
 
 
+def test_wgpu_continuity_count_uses_allocation_light_physical_query():
+    from arrayscope.tools.profile_montage_workflow import _backend_visible_tile_count
+
+    view = SimpleNamespace(
+        montageDisplayMode=lambda: "wgpu_tile_layer",
+        physicalVisibleTileCount=lambda: 37,
+        wgpuPresentationDiagnostics=lambda: pytest.fail(
+            "continuity sampling rebuilt detailed WGPU diagnostics"
+        ),
+    )
+
+    assert _backend_visible_tile_count(SimpleNamespace(img_view=view)) == 37
+
+
 def test_verbose_physical_row_preserves_atlas_and_identity_evidence():
     from arrayscope.tools.profile_montage_workflow import _verbose_physical_row
 
