@@ -123,12 +123,12 @@ retaining the numeric fallback.
 The initial WGPU reproduction had 41 observable transitions, source coverage
 cycling 50→0 and a transient span ratio of 0.11. Prepared-summary reuse removed
 the incremental 1→3→7→…→50 build and reduced the trace to about 30 transitions.
-The final real-Wayland X/Y WGPU runs emitted zero
+The final individual real-Wayland X/Y WGPU runs emitted zero
 `wgpu_histogram_dispatch` events, were green for the continuity and
-first-visible-evidence gates, and settled in 7.51/7.51 s in the paired run
-(fresh Y rerun: 7.51 s). PyQtGraph X/Y was likewise continuity-green at
-7.22/6.72 s. Both backends remain red on the independent 50 ms GUI callback
-bar (roughly 115–120 ms observed), which this slice does not conceal.
+first-visible-evidence gates, and settled in 7.13/7.51 s. PyQtGraph X/Y was
+likewise continuity-green at 7.22/6.72 s. Both backends remain red on the
+independent 50 ms GUI callback bar (roughly 115–120 ms observed), which this
+slice does not conceal.
 
 ## Invariants
 
