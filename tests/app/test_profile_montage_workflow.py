@@ -779,6 +779,66 @@ def test_profile_stage_resolve_defaults_to_all():
     assert "display_y_axis_slice" in PROFILE_MONTAGE_STAGES
 
 
+def test_display_axis_crop_scenarios_cover_geometry_and_boundary_classes():
+    from arrayscope.tools.profile_montage_workflow import _display_axis_crop_scenarios
+
+    scenarios = _display_axis_crop_scenarios(
+        shape=(336, 336, 272),
+        image_axes=(1, 0),
+        primary_role="x",
+    )
+    by_name = {scenario.name: scenario for scenario in scenarios}
+
+    assert tuple(by_name) == (
+        "primary-only-centered",
+        "both-centered",
+        "primary-minus-one",
+        "secondary-plus-one",
+        "both-diagonal",
+        "both-return",
+        "primary-page-edge",
+        "primary-page-cross",
+        "primary-page-return",
+        "both-odd",
+        "both-odd-primary-plus-one",
+    )
+    assert by_name["primary-only-centered"].cropped_axis_count == 1
+    assert all(
+        scenario.cropped_axis_count == 2
+        for scenario in scenarios
+        if scenario.name != "primary-only-centered"
+    )
+    assert by_name["both-centered"].axis_ranges != by_name["both-diagonal"].axis_ranges
+    assert by_name["both-diagonal"].axis_ranges != by_name["both-return"].axis_ranges
+    assert by_name["primary-page-edge"].crosses_page_boundary is False
+    assert by_name["primary-page-cross"].crosses_page_boundary is True
+    assert by_name["primary-page-return"].axis_ranges == by_name["primary-page-edge"].axis_ranges
+    odd_lengths = tuple(len(indices) for _, indices, _ in by_name["both-odd"].axis_ranges)
+    assert sorted(odd_lengths) == [99, 101]
+
+
+def test_display_axis_crop_scenarios_exercise_both_roles_without_special_shapes():
+    from arrayscope.tools.profile_montage_workflow import _display_axis_crop_scenarios
+
+    x_scenarios = _display_axis_crop_scenarios(
+        shape=(336, 336, 272),
+        image_axes=(1, 0),
+        primary_role="x",
+    )
+    y_scenarios = _display_axis_crop_scenarios(
+        shape=(336, 336, 272),
+        image_axes=(1, 0),
+        primary_role="y",
+    )
+
+    assert tuple(scenario.name for scenario in x_scenarios) == tuple(
+        scenario.name for scenario in y_scenarios
+    )
+    assert x_scenarios[0].axis_ranges[0][0] == 0
+    assert y_scenarios[0].axis_ranges[0][0] == 1
+    assert x_scenarios[-1].axis_ranges != y_scenarios[-1].axis_ranges
+
+
 def test_profile_parser_unknown_stage_is_rejected():
     from arrayscope.tools.profile_montage_workflow import _resolve_profile_stages
 
@@ -1101,6 +1161,25 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
         display_axis_min_physical_tile_count=50,
         display_axis_physical_tile_sample_count=12,
         display_axis_slice_scroll_steps=3,
+        display_axis_crop_scenario_count=11,
+        display_axis_crop_scenarios_settled=True,
+        display_axis_crop_scenarios_committed_current=True,
+        display_axis_crop_scenario_names=(
+            "primary-only-centered",
+            "both-centered",
+            "primary-minus-one",
+            "secondary-plus-one",
+            "both-diagonal",
+            "both-return",
+            "primary-page-edge",
+            "primary-page-cross",
+            "primary-page-return",
+            "both-odd",
+            "both-odd-primary-plus-one",
+        ),
+        display_axis_both_crop_scenario_count=10,
+        display_axis_page_boundary_scenario_count=3,
+        display_axis_crop_matrix_wgpu_upload_delta=0,
         display_axis_crop_wgpu_upload_delta=0,
         display_axis_scroll_wgpu_upload_delta=0,
         display_axis_xy_swap_settled=True,
@@ -1134,6 +1213,12 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
     failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
     assert "display_axis_xy_swap_settles" in failures
 
+    record["display_axis_xy_swap_settled"] = True
+    record["display_axis_crop_scenario_count"] = 10
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_crop_matrix_complete" in failures
+
 
 def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
@@ -1147,6 +1232,25 @@ def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
         display_axis_min_physical_tile_count=50,
         display_axis_physical_tile_sample_count=8,
         display_axis_slice_scroll_steps=3,
+        display_axis_crop_scenario_count=11,
+        display_axis_crop_scenarios_settled=True,
+        display_axis_crop_scenarios_committed_current=True,
+        display_axis_crop_scenario_names=(
+            "primary-only-centered",
+            "both-centered",
+            "primary-minus-one",
+            "secondary-plus-one",
+            "both-diagonal",
+            "both-return",
+            "primary-page-edge",
+            "primary-page-cross",
+            "primary-page-return",
+            "both-odd",
+            "both-odd-primary-plus-one",
+        ),
+        display_axis_both_crop_scenario_count=10,
+        display_axis_page_boundary_scenario_count=3,
+        display_axis_crop_matrix_wgpu_upload_delta=0,
         display_axis_crop_wgpu_upload_delta=0,
         display_axis_scroll_wgpu_upload_delta=0,
         display_axis_xy_swap_settled=True,

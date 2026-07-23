@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from importlib import metadata
 from pathlib import Path
 from time import perf_counter
@@ -72,6 +72,20 @@ ZOOMPAN_NEAR_OBSERVE_S = 0.20
 R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
 R8_WARM_INPUT_MAX_MS = 15.0
+PROFILE_RESIDENCY_PAGE_SAMPLES = 256
+DISPLAY_AXIS_CROP_SCENARIO_NAMES = (
+    "primary-only-centered",
+    "both-centered",
+    "primary-minus-one",
+    "secondary-plus-one",
+    "both-diagonal",
+    "both-return",
+    "primary-page-edge",
+    "primary-page-cross",
+    "primary-page-return",
+    "both-odd",
+    "both-odd-primary-plus-one",
+)
 PROFILE_DEFAULT_BACKENDS = ("wgpu", "pyqtgraph")
 PROFILE_MONTAGE_STAGES = (
     "load_data",
@@ -85,6 +99,120 @@ PROFILE_MONTAGE_STAGES = (
     "montage_zoompan_fft",
     "montage_zoompan_scalar",
 )
+
+
+@dataclass(frozen=True)
+class _DisplayAxisCropScenario:
+    """One backend-independent displayed-axis crop transition."""
+
+    name: str
+    axis_ranges: tuple[tuple[int, tuple[int, ...], str], ...]
+    crosses_page_boundary: bool = False
+
+    @property
+    def cropped_axis_count(self) -> int:
+        return len(self.axis_ranges)
+
+
+def _display_axis_crop_scenarios(
+    *,
+    shape: tuple[int, ...],
+    image_axes: tuple[int, int],
+    primary_role: str,
+) -> tuple[_DisplayAxisCropScenario, ...]:
+    """Build the same crop-geometry stress matrix for every backend.
+
+    The matrix varies geometry, direction, and page fan-in. It deliberately
+    does not encode a renderer strategy: PyQtGraph and WGPU receive the same
+    semantic states, while their diagnostics report the work each backend
+    needed to present them.
+    """
+
+    shape = tuple(int(value) for value in shape)
+    image_axes = tuple(int(value) for value in image_axes)
+    role = str(primary_role)
+    if role not in {"x", "y"}:
+        raise ValueError(f"unsupported displayed-axis role {role!r}")
+    primary_position = 1 if role == "x" else 0
+    primary_axis = image_axes[primary_position]
+    secondary_axis = image_axes[1 - primary_position]
+
+    def window(axis: int, extent: int, *, offset: int = 0) -> tuple[int, int]:
+        size = shape[axis]
+        extent = max(1, min(int(extent), size))
+        start = max(0, min((size - extent) // 2 + int(offset), size - extent))
+        return start, start + extent
+
+    def shifted(bounds: tuple[int, int], delta: int, axis: int) -> tuple[int, int]:
+        start, stop = bounds
+        extent = stop - start
+        start = max(0, min(start + int(delta), shape[axis] - extent))
+        return start, start + extent
+
+    def axis_range(axis: int, bounds: tuple[int, int]) -> tuple[int, tuple[int, ...], str]:
+        start, stop = bounds
+        return axis, tuple(range(start, stop)), f"{start}:{stop}"
+
+    def scenario(
+        name: str,
+        primary: tuple[int, int],
+        secondary: tuple[int, int] | None,
+        *,
+        crosses_page_boundary: bool = False,
+    ) -> _DisplayAxisCropScenario:
+        ranges = [axis_range(primary_axis, primary)]
+        if secondary is not None:
+            ranges.append(axis_range(secondary_axis, secondary))
+        return _DisplayAxisCropScenario(
+            name=name,
+            axis_ranges=tuple(ranges),
+            crosses_page_boundary=bool(crosses_page_boundary),
+        )
+
+    primary_center = window(primary_axis, 100, offset=-21)
+    secondary_center = window(secondary_axis, 100, offset=13)
+    primary_minus_one = shifted(primary_center, -1, primary_axis)
+    secondary_plus_one = shifted(secondary_center, 1, secondary_axis)
+    primary_diagonal = shifted(primary_center, -2, primary_axis)
+    secondary_diagonal = shifted(secondary_center, 2, secondary_axis)
+
+    primary_size = shape[primary_axis]
+    boundary_extent = min(100, primary_size)
+    boundary_start = max(
+        0,
+        min(
+            PROFILE_RESIDENCY_PAGE_SAMPLES - boundary_extent,
+            primary_size - boundary_extent,
+        ),
+    )
+    primary_page_edge = (boundary_start, boundary_start + boundary_extent)
+    primary_page_cross = shifted(primary_page_edge, 1, primary_axis)
+    crosses_page_boundary = (
+        primary_page_cross[0] < PROFILE_RESIDENCY_PAGE_SAMPLES < primary_page_cross[1]
+    )
+
+    primary_odd = window(primary_axis, 99, offset=-7)
+    secondary_odd = window(secondary_axis, 101, offset=9)
+    primary_odd_plus_one = shifted(primary_odd, 1, primary_axis)
+
+    return (
+        scenario("primary-only-centered", primary_center, None),
+        scenario("both-centered", primary_center, secondary_center),
+        scenario("primary-minus-one", primary_minus_one, secondary_center),
+        scenario("secondary-plus-one", primary_minus_one, secondary_plus_one),
+        scenario("both-diagonal", primary_diagonal, secondary_diagonal),
+        scenario("both-return", primary_center, secondary_center),
+        scenario("primary-page-edge", primary_page_edge, secondary_center),
+        scenario(
+            "primary-page-cross",
+            primary_page_cross,
+            secondary_center,
+            crosses_page_boundary=crosses_page_boundary,
+        ),
+        scenario("primary-page-return", primary_page_edge, secondary_center),
+        scenario("both-odd", primary_odd, secondary_odd),
+        scenario("both-odd-primary-plus-one", primary_odd_plus_one, secondary_odd),
+    )
 
 
 def _parse_stage_flags(values: tuple[str, ...] | None) -> tuple[str, ...]:
@@ -614,51 +742,98 @@ def run_profile_montage_workflow(
                 QtCore=QtCore,
                 metrics=fit_metrics,
             )
-            axis_position = 1 if role == "x" else 0
-            axis = int(win.view_state.image_axes[axis_position])
-            axis_size = int(win.view_state.shape[axis])
-            # The dogfood failure used a narrow 100-pixel displayed-axis crop
-            # and a continuous scrollbar gesture.  Keep enough rapid
-            # successor generations in this stage to exercise the atomic
-            # residency handoff instead of measuring one isolated text edit.
-            slice_size = min(100, axis_size)
-            scroll_distance = min(3, max(0, axis_size - slice_size))
-            start = min(
-                max(0, (axis_size - slice_size) // 2 - 21),
-                max(0, axis_size - slice_size - scroll_distance),
-            )
-            stop = start + slice_size
-            uploads_before_crop = _wgpu_upload_total(win)
-            predecessor_session = getattr(win, "_frame_session", None)
-            predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
-            win._on_slice_text_changed(axis, f"{start}:{stop}")
-            initial_crop_settled = _wait_for_montage_successor_settled(
-                win=win,
-                app=app,
-                QtCore=QtCore,
-                predecessor_session_id=predecessor_session_id,
-                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
-            )
-            uploads_after_crop = _wgpu_upload_total(win)
             physical_rows = getattr(win.img_view, "tileTruthPhysicalRows", None)
-            physical_tile_counts = [
-                len(dict(physical_rows() or {})) if callable(physical_rows) else 0
-            ]
-            for offset in range(1, scroll_distance + 1):
-                win._on_slice_text_changed(
-                    axis,
-                    f"{start - offset}:{stop - offset}",
+            physical_tile_counts: list[int] = []
+            crop_scenarios = _display_axis_crop_scenarios(
+                shape=tuple(int(value) for value in win.view_state.shape),
+                image_axes=tuple(int(value) for value in win.view_state.image_axes),
+                primary_role=role,
+            )
+            crop_scenario_results: list[dict[str, object]] = []
+            uploads_before_crop_matrix = _wgpu_upload_total(win)
+            for scenario in crop_scenarios:
+                scenario_state = slice_source_state
+                for scenario_axis, indices, text in scenario.axis_ranges:
+                    scenario_state = scenario_state.with_axis_range(
+                        scenario_axis,
+                        indices=indices,
+                        text=text,
+                    )
+                before = _vispy_presentation_diagnostics(win)
+                uploads_before = _wgpu_upload_total(win)
+                step_started = perf_counter()
+                predecessor_session = getattr(win.renderer, "_frame_session", None)
+                predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
+                win._set_view_state(scenario_state)
+                win.render(reason=f"profile-display-{role}-axis-{scenario.name}")
+                settled = _wait_for_montage_successor_settled(
+                    win=win,
+                    app=app,
+                    QtCore=QtCore,
+                    predecessor_session_id=predecessor_session_id,
+                    budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
                 )
-                # Model the real scrollbar cadence from the attached trace:
-                # each one-pixel successor got far enough to begin its hidden
-                # warm before the next input superseded it.
-                cadence_stop_at = perf_counter() + 0.12
-                while perf_counter() < cadence_stop_at:
-                    _process_events(app, QtCore, count=1)
-                    if callable(physical_rows):
-                        physical_tile_counts.append(len(dict(physical_rows() or {})))
-            final_start = start - scroll_distance
-            final_stop = stop - scroll_distance
+                committed_current = _committed_display_frame_is_current(win)
+                after = _vispy_presentation_diagnostics(win)
+                uploads_after = _wgpu_upload_total(win)
+                rows = dict(physical_rows() or {}) if callable(physical_rows) else {}
+                physical_tile_counts.append(len(rows))
+                binding_counts = tuple(
+                    len(tuple(dict(row or {}).get("physical_page_bindings", ()) or ()))
+                    for row in rows.values()
+                )
+                crop_scenario_results.append(
+                    {
+                        "name": scenario.name,
+                        "axis_ranges": tuple(
+                            (scenario_axis, text)
+                            for scenario_axis, _indices, text in scenario.axis_ranges
+                        ),
+                        "cropped_axis_count": scenario.cropped_axis_count,
+                        "crosses_page_boundary": scenario.crosses_page_boundary,
+                        "settled": bool(settled),
+                        "committed_current": bool(committed_current),
+                        "settle_ms": max(0.0, (perf_counter() - step_started) * 1000.0),
+                        "wgpu_upload_delta": (
+                            None
+                            if uploads_before is None or uploads_after is None
+                            else int(uploads_after - uploads_before)
+                        ),
+                        "wgpu_binding_cache_hit_delta": (
+                            None
+                            if backend != "wgpu"
+                            else int(after.get("wgpu_residency_binding_cache_hits", 0) or 0)
+                            - int(before.get("wgpu_residency_binding_cache_hits", 0) or 0)
+                        ),
+                        "wgpu_binding_cache_miss_delta": (
+                            None
+                            if backend != "wgpu"
+                            else int(after.get("wgpu_residency_binding_cache_misses", 0) or 0)
+                            - int(before.get("wgpu_residency_binding_cache_misses", 0) or 0)
+                        ),
+                        "physical_tile_count": len(rows),
+                        "minimum_page_bindings_per_tile": min(binding_counts, default=0),
+                        "maximum_page_bindings_per_tile": max(binding_counts, default=0),
+                    }
+                )
+                if not settled or not committed_current:
+                    break
+            uploads_after_crop_matrix = _wgpu_upload_total(win)
+            primary_axis = crop_scenarios[-1].axis_ranges[0][0]
+            primary_indices = crop_scenarios[-1].axis_ranges[0][1]
+            final_start = int(primary_indices[0])
+            final_stop = int(primary_indices[-1]) + 1
+            slice_size = len(primary_indices)
+            initial_crop_settled = bool(
+                crop_scenario_results and crop_scenario_results[0]["settled"]
+            )
+            final_settled = bool(
+                len(crop_scenario_results) == len(crop_scenarios)
+                and all(
+                    bool(result["settled"]) and bool(result["committed_current"])
+                    for result in crop_scenario_results
+                )
+            )
             view_range = _montage_view_range(win)
             if view_range is not None:
                 zoomed_out = _maximum_zoomout_view_range(
@@ -674,13 +849,12 @@ def run_profile_montage_workflow(
                 QtCore,
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
-            final_settled = _wait_for_montage_complete_soft(
+            final_settled = bool(final_settled) and _wait_for_montage_complete_soft(
                 win=win,
                 app=app,
                 QtCore=QtCore,
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
-            uploads_after_scroll = _wgpu_upload_total(win)
             # The field stall needs the combination, not an isolated crop:
             # retain the cropped source window, swap the displayed X/Y roles,
             # then swap back.  Both are presentation-only transforms for the
@@ -777,24 +951,59 @@ def run_profile_montage_workflow(
             )
             return {
                 "display_axis_role": role,
-                "display_axis": axis,
+                "display_axis": primary_axis,
                 "display_axis_slice_start": final_start,
                 "display_axis_slice_stop": final_stop,
                 "display_axis_slice_size": slice_size,
-                "display_axis_slice_scroll_steps": scroll_distance,
-                "display_axis_slice_scroll_direction": "decreasing",
-                "display_axis_slice_scroll_cadence_ms": 120.0,
+                "display_axis_slice_scroll_steps": 3,
+                "display_axis_slice_scroll_direction": "both",
+                "display_axis_slice_scroll_cadence_ms": 0.0,
                 "display_axis_initial_crop_settled": bool(initial_crop_settled),
                 "display_axis_final_settled": bool(final_settled),
+                "display_axis_crop_scenario_count": len(crop_scenario_results),
+                "display_axis_crop_scenario_names": tuple(
+                    str(result["name"]) for result in crop_scenario_results
+                ),
+                "display_axis_crop_scenarios_settled": bool(
+                    len(crop_scenario_results) == len(crop_scenarios)
+                    and all(bool(result["settled"]) for result in crop_scenario_results)
+                ),
+                "display_axis_crop_scenarios_committed_current": bool(
+                    len(crop_scenario_results) == len(crop_scenarios)
+                    and all(bool(result["committed_current"]) for result in crop_scenario_results)
+                ),
+                "display_axis_both_crop_scenario_count": sum(
+                    int(scenario.cropped_axis_count == 2) for scenario in crop_scenarios
+                ),
+                "display_axis_page_boundary_scenario_count": sum(
+                    int("page-" in scenario.name) for scenario in crop_scenarios
+                ),
+                "display_axis_crop_scenario_total_settle_ms": sum(
+                    float(result["settle_ms"]) for result in crop_scenario_results
+                ),
+                "display_axis_crop_scenario_max_settle_ms": max(
+                    (float(result["settle_ms"]) for result in crop_scenario_results),
+                    default=0.0,
+                ),
+                "display_axis_crop_scenarios": tuple(crop_scenario_results),
+                "display_axis_crop_matrix_wgpu_upload_delta": (
+                    None
+                    if uploads_before_crop_matrix is None or uploads_after_crop_matrix is None
+                    else int(uploads_after_crop_matrix - uploads_before_crop_matrix)
+                ),
                 "display_axis_crop_wgpu_upload_delta": (
                     None
-                    if uploads_before_crop is None or uploads_after_crop is None
-                    else int(uploads_after_crop - uploads_before_crop)
+                    if not crop_scenario_results
+                    else crop_scenario_results[0]["wgpu_upload_delta"]
                 ),
                 "display_axis_scroll_wgpu_upload_delta": (
                     None
-                    if uploads_after_crop is None or uploads_after_scroll is None
-                    else int(uploads_after_scroll - uploads_after_crop)
+                    if uploads_before_crop_matrix is None
+                    or uploads_after_crop_matrix is None
+                    or not crop_scenario_results
+                    or crop_scenario_results[0]["wgpu_upload_delta"] is None
+                    else int(uploads_after_crop_matrix - uploads_before_crop_matrix)
+                    - int(crop_scenario_results[0]["wgpu_upload_delta"])
                 ),
                 "display_axis_xy_swap_settled": bool(axis_swap_settled),
                 "display_axis_xy_swap_steps": int(axis_swap_steps),
@@ -6430,6 +6639,35 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
     )
     if phase in {"display_x_axis_slice", "display_y_axis_slice"}:
         continuity_min = int(record.get("display_axis_min_physical_tile_count", 0) or 0)
+        crop_scenario_names = tuple(record.get("display_axis_crop_scenario_names", ()) or ())
+        require(
+            "display_axis_crop_matrix_complete",
+            int(record.get("display_axis_crop_scenario_count", 0) or 0)
+            == len(DISPLAY_AXIS_CROP_SCENARIO_NAMES)
+            and crop_scenario_names == DISPLAY_AXIS_CROP_SCENARIO_NAMES
+            and int(record.get("display_axis_both_crop_scenario_count", 0) or 0) == 10
+            and int(record.get("display_axis_page_boundary_scenario_count", 0) or 0) == 3,
+            evidence={
+                "names": crop_scenario_names,
+                "both_cropped": record.get("display_axis_both_crop_scenario_count"),
+                "page_boundary": record.get("display_axis_page_boundary_scenario_count"),
+            },
+            target=(
+                "the full one-axis, both-axis, directional, odd-extent, "
+                "and page-boundary crop matrix"
+            ),
+        )
+        require(
+            "display_axis_crop_matrix_settles",
+            bool(record.get("display_axis_crop_scenarios_settled", False))
+            and bool(record.get("display_axis_crop_scenarios_committed_current", False)),
+            evidence={
+                "settled": record.get("display_axis_crop_scenarios_settled"),
+                "committed_current": record.get("display_axis_crop_scenarios_committed_current"),
+                "maximum_ms": record.get("display_axis_crop_scenario_max_settle_ms"),
+            },
+            target="every crop-matrix successor settles with a current committed frame",
+        )
         require(
             "display_axis_physical_continuity",
             requested > 0 and continuity_min == requested,
@@ -6478,17 +6716,20 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         if str(record.get("backend", "")) == "wgpu":
             crop_uploads = record.get("display_axis_crop_wgpu_upload_delta")
             scroll_uploads = record.get("display_axis_scroll_wgpu_upload_delta")
+            crop_matrix_uploads = record.get("display_axis_crop_matrix_wgpu_upload_delta")
             axis_swap_uploads = record.get("display_axis_xy_swap_wgpu_upload_delta")
             single_slice_uploads = record.get("display_axis_single_slice_wgpu_upload_delta")
             require(
                 "display_axis_source_pages_reused",
                 crop_uploads == 0
                 and scroll_uploads == 0
+                and crop_matrix_uploads == 0
                 and axis_swap_uploads == 0
                 and single_slice_uploads == 0,
                 evidence={
                     "initial_crop_uploads": crop_uploads,
                     "scroll_uploads": scroll_uploads,
+                    "crop_matrix_uploads": crop_matrix_uploads,
                     "axis_swap_uploads": axis_swap_uploads,
                     "single_slice_uploads": single_slice_uploads,
                     "scroll_steps": int(record.get("display_axis_slice_scroll_steps", 0) or 0),

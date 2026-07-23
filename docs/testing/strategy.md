@@ -69,10 +69,16 @@ changes may affect perceived pacing. It drives a real window through the
 bundled NIfTI dataset, full dim-2 tiled montage, and FFT-over-dim-2 montage.
 Its displayed-X and displayed-Y stages each perform short crop-window scrolls,
 swap the image axes, transition through current/+1/current single-slice
-indices, and restore the montage. Those stages gate committed-frame currency
-on every successor and, on WGPU, zero-upload reuse of already-resident source
-pages across the montage/single-slice boundary. The default run executes the
-same stages on WGPU and PyQtGraph.
+indices, and restore the montage. Before those transitions, each stage runs
+the same eleven-state crop matrix: one cropped displayed axis; both cropped
+axes; independent, diagonal, and reversing one-pixel moves; an exact
+256-sample page edge; a boundary crossing and return; and odd 99x101 extents.
+Every successor must settle with a current committed frame. Per-step records
+include settlement time, upload delta, binding-cache work, physical tile
+coverage, and minimum/maximum pages sampled per tile. WGPU additionally gates
+zero-upload reuse of already-resident source pages across the entire matrix
+and the montage/single-slice boundary. The default run executes the same
+stages on WGPU and PyQtGraph.
 After the FFT montage is visible it also performs a deterministic
 `fft_level_refinement_preview` level edit so histogram/level presentation
 latency is captured on the same onscreen tiled workflow.
