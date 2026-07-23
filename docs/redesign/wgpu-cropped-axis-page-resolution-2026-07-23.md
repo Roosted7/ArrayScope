@@ -119,6 +119,30 @@ Artifacts:
 - `/tmp/arrayscope-xy-crop-matrix-batched-histogram-wgpu.jsonl`
 - `/tmp/arrayscope-xy-crop-matrix-batched-histogram-wgpu-trace.jsonl`
 
+## Final backend-parity gate
+
+The committed implementation was rerun on real Wayland with both displayed
+axis roles in one fresh process per backend. Every one of the 22 successors
+settled on a current committed frame. Neither trace contained a stall or
+hidden-warm-wait edge.
+
+| Backend | X matrix total / worst | Y matrix total / worst | WGPU uploads |
+|---|---:|---:|---:|
+| WGPU | 6.16 s / 0.87 s | 6.36 s / 0.92 s | 0 |
+| PyQtGraph | 4.76 s / 0.91 s | 5.65 s / 1.03 s | n/a |
+
+The correctness and per-interaction settlement gates are green. The complete
+R8 rows remain red only on the standing 50 ms GUI-callback bar (observed
+process maxima 463–498 ms WGPU and 380–616 ms PyQtGraph); this slice does not
+claim that pacing bar.
+
+Artifacts:
+
+- `/tmp/arrayscope-xy-crop-final-wgpu.jsonl`
+- `/tmp/arrayscope-xy-crop-final-wgpu-trace.jsonl`
+- `/tmp/arrayscope-xy-crop-final-pyqtgraph.jsonl`
+- `/tmp/arrayscope-xy-crop-final-pyqtgraph-trace.jsonl`
+
 ## Implementation direction
 
 Replace geometry-specific binding selection with one resolver:
