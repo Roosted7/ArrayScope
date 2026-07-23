@@ -5711,6 +5711,32 @@ def test_presentation_gate_does_not_treat_revision_metadata_as_backlog():
     assert renderer._montage_gate_last_backlog is None
 
 
+def test_incomplete_atomic_handoff_rearms_drained_transaction_payloads():
+    """An empty physical report cannot leave an atomic transaction ownerless."""
+
+    from dataclasses import replace
+
+    session = _session(count=2)
+    session.atomic_successor_pending = True
+    _state, ordinary = session.build_tile_presentation({0: ("src", 0), 1: ("src", 1)})
+    delta = replace(ordinary, atomic_handoff=True)
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    session.pending_removals.clear()
+    session.final_commit_pending = False
+    session.flush_pending = False
+    empty = TileCommitReport(
+        presented_tiles=frozenset(),
+        committed_upserts=frozenset(),
+    )
+    acknowledged = session.acknowledge_tile_presentation(delta, empty)
+
+    assert not session.acknowledge_atomic_successor(delta, empty, acknowledged)
+    assert set(session.pending_payload_upserts) == {0, 1}
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+
+
 def test_presentation_gate_rearms_completed_first_pass_publication():
     """Complete rough evidence is an explicit metadata commit obligation."""
 

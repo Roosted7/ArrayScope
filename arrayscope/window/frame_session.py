@@ -3573,17 +3573,39 @@ class FrameSession:
     ) -> bool:
         """Close the pending handoff after one complete backend transaction."""
 
+        def reject_incomplete(accepted=()) -> bool:
+            accepted_tiles = {int(tile) for tile in tuple(accepted or ())}
+            retry_tiles = {
+                int(tile)
+                for tile in tuple(getattr(delta, "upserts", ()) or ())
+                if int(tile) not in accepted_tiles
+            }
+            if retry_tiles:
+                # Atomic submission consumed the prepared transaction, but an
+                # empty/partial physical report acknowledged none of these
+                # slots. Re-arm the exact unaccepted payloads here, where both
+                # transaction intent and backend truth are available. Without
+                # this, note_committed() saw drained maps, cleared both wakeup
+                # flags, and stranded a black WGPU surface with every required
+                # tile unsettled and no remaining owner.
+                for tile in retry_tiles:
+                    self.pending_payload_upserts[int(tile)] = None
+                self.final_commit_pending = True
+                self.flush_pending = True
+            return False
+
         if (
             report is None
             or bool(getattr(report, "stale", False))
             or not report.acknowledges(delta)
         ):
-            return False
+            return reject_incomplete()
         required = tuple(int(tile) for tile in delta.active_tiles)
         if not required or {int(tile) for tile in delta.upserts} != set(required):
-            return False
-        if set(report.accepted_upserts_in_order(delta)) != set(required):
-            return False
+            return reject_incomplete()
+        accepted = report.accepted_upserts_in_order(delta)
+        if set(accepted) != set(required):
+            return reject_incomplete(accepted)
         acknowledged_payloads = dict(acknowledged.payloads)
         if any(
             tile not in acknowledged_payloads
@@ -3591,7 +3613,7 @@ class FrameSession:
             != tile_ack_identity(delta.upserts[tile])
             for tile in required
         ):
-            return False
+            return reject_incomplete(accepted)
         self.atomic_successor_pending = False
         return True
 

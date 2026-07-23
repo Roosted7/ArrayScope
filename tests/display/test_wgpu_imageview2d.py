@@ -1643,6 +1643,16 @@ def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
         assert view._wgpu_executor.pool_budget("scalar_r32f") >= 3
         assert all(view.tiledPayloadResident(payload) for payload in payloads.values())
         assert view._wgpu_executor.uploads_total == 3
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 4.0),
+            histogramRange=(0.0, 4.0),
+            montage_tile_payloads=payloads,
+            tile_delta=delta,
+        )
+        assert report.presented_tiles == frozenset(payloads)
     finally:
         view.close()
 
