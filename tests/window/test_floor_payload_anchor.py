@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from arrayscope.core.view_state import ViewState
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import (
@@ -25,7 +26,8 @@ from arrayscope.display.pyramid import (
     materialize_lod_page,
     plan_source_grid_pages,
 )
-from arrayscope.display.source_anchoring import SourceAnchoring
+from arrayscope.display.source_anchoring import SourceAnchoring, source_anchoring_for_view
+from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.window.frame_session import FrameSession
 
 TILE = 64
@@ -144,6 +146,40 @@ def test_montage_anchor_requires_and_keys_the_source_index():
     assert anchor is not None
     assert anchor.content_key == (CONTENT_KEY, "montage-source", 7)
     assert anchor.source_rect == (5, 5 + TILE, 12, 12 + TILE)
+
+
+def test_montage_anchor_matches_the_equivalent_single_slice_content_key():
+    data = np.zeros((336, 336, 8), dtype=np.float32)
+    document = ArrayDocument(data)
+    montage_state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_axis_range(0, range(93, 193))
+        .with_montage_axis(2, columns=4, indices=range(8), text=":")
+    )
+    normalized_state = montage_state.with_montage_axis(None).with_slice(2, 0)
+    session = _session(
+        montage_axis=2,
+        source_anchoring=source_anchoring_for_view(
+            document,
+            normalized_state,
+            canonical_orientation=True,
+        ),
+    )
+    session.document = document
+    session.view_state = montage_state
+    session.canonical_orientation = True
+
+    montage_anchor = session._payload_source_anchor((100, 336), source_index=3)
+    single_anchoring = source_anchoring_for_view(
+        document,
+        montage_state.tile_state_for_slice(2, 3),
+        canonical_orientation=True,
+    )
+
+    assert montage_anchor is not None
+    assert single_anchoring is not None
+    assert montage_anchor.content_key == single_anchoring.content_key
 
 
 def test_non_montage_floor_payload_anchor_rect_is_native_plan_extent():

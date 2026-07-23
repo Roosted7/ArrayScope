@@ -142,3 +142,28 @@ def test_aggregate_histogram_is_bounded_and_preserves_population_weight():
         )
     )
     assert published_l1 <= HISTOGRAM_NORMALIZED_L1_TOLERANCE
+
+
+def test_single_summary_aggregate_reuses_its_existing_bins(monkeypatch):
+    """One-page scrub evidence must not run the multi-page rebin kernel."""
+
+    import arrayscope.gpu.chunk_summary as chunk_summary
+
+    summary = summarize_chunk(
+        _key(origin=(0, 0), shape=(100, 336), reduction=(4, 4)),
+        np.arange(8 * 21, dtype=np.float32).reshape(8, 21),
+    )
+    monkeypatch.setattr(
+        chunk_summary,
+        "_rebin_counts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single summary was unnecessarily rebinned")
+        ),
+    )
+
+    aggregate = aggregate_chunk_summaries((summary,))
+
+    assert aggregate.bounds == summary.bounds
+    assert np.array_equal(aggregate.counts, summary.counts)
+    assert np.array_equal(aggregate.bin_edges, summary.bin_edges)
+    assert aggregate.source_weight == summary.source_weight

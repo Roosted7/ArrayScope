@@ -530,7 +530,19 @@ class FrameRuntimeMixin:
             if session.has_pending_level_update()
             else 0
         )
-        if not required_unsettled:
+        required_first_pixels_presented = getattr(
+            session,
+            "required_first_pixels_presented",
+            lambda: False,
+        )
+        frame = getattr(self.win, "_committed_display_frame", None)
+        frame_current = getattr(self, "_is_committed_display_frame_current", None)
+        committed_frame_stale = bool(
+            not required_unsettled
+            and bool(required_first_pixels_presented())
+            and (frame is None or not callable(frame_current) or not bool(frame_current(frame)))
+        )
+        if not required_unsettled and not committed_frame_stale:
             self._montage_watchdog_stop()
             return
         if planning_deferred:
@@ -556,6 +568,7 @@ class FrameRuntimeMixin:
             level_stale,
             len(session.lifecycle.presented_tiles),
             len(session.rendered_tiles),
+            int(committed_frame_stale),
             # Monotonic commit progress: a slow-but-live drain can hold every
             # queue length constant across ticks (one upsert enters as one
             # leaves, presented set already saturated) while commit batches
@@ -605,6 +618,7 @@ class FrameRuntimeMixin:
             "lod_pending": lod_pending,
             "level_evidence": level_evidence,
             "level_stale": level_stale,
+            "committed_frame_stale": committed_frame_stale,
             "flush_pending": bool(session.flush_pending),
             "final_commit_pending": bool(session.final_commit_pending),
             "stage_active": len(session.stage_fan_in.active_requests),

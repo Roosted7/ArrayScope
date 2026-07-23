@@ -45,6 +45,7 @@ prefer_pyside6()
 import contextlib
 import itertools
 import threading
+import weakref
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -402,6 +403,16 @@ class WgpuImageView2D(ImageViewShell):
         # so it is created lazily inside the draw.
         self._wgpu_executor = None
         self._wgpu_generation = 0
+        # ``tiledPayloadResident`` is a hot scheduling predicate. Binding
+        # geometry depends only on the payload, mapping, and page-table
+        # generation; rebuilding its nested DataChunkKeys on every pacing
+        # pass repeatedly hashes the full semantic identity.
+        self._wgpu_residency_binding_generation = -1
+        self._wgpu_residency_binding_cache: dict[
+            tuple[int, str, str], tuple[weakref.ReferenceType, _WgpuPayloadBinding]
+        ] = {}
+        self._wgpu_residency_binding_cache_hits = 0
+        self._wgpu_residency_binding_cache_misses = 0
         # Hidden atomic successors are warmed across bounded GUI turns. Their
         # pages need a physical owner until the presentation submit transfers
         # ownership to the executor's bound-plane pin set.
@@ -2300,15 +2311,48 @@ class WgpuImageView2D(ImageViewShell):
             source_mapping,
             bool(kind == TexturePlaneKind.RGB8 and representation == RGB8),
         )
-        return all(
-            executor.page_table.lookup(key) is not None
-            for key in _wgpu_payload_page_keys(
-                payload,
-                representation=representation,
-                mapping_mode=mapping_mode,
-                resident_keys=executor.page_table.resident_keys(),
-            )
+        binding = self._cached_wgpu_residency_binding(
+            payload,
+            representation=representation,
+            mapping_mode=mapping_mode,
         )
+        return all(key in executor.page_table for key in binding.page_keys)
+
+    def _cached_wgpu_residency_binding(
+        self,
+        payload,
+        *,
+        representation: str,
+        mapping_mode: str,
+    ) -> _WgpuPayloadBinding:
+        """Reuse immutable binding geometry until physical residency changes."""
+
+        executor = self._wgpu_executor
+        if executor is None:  # pragma: no cover - caller owns this guard
+            raise RuntimeError("wgpu residency binding requested without an executor")
+        generation = int(executor.page_table.generation)
+        if generation != self._wgpu_residency_binding_generation:
+            self._wgpu_residency_binding_cache.clear()
+            self._wgpu_residency_binding_generation = generation
+        cache_key = (id(payload), str(representation), str(mapping_mode))
+        cached = self._wgpu_residency_binding_cache.get(cache_key)
+        if cached is not None and cached[0]() is payload:
+            self._wgpu_residency_binding_cache_hits += 1
+            return cached[1]
+        self._wgpu_residency_binding_cache_misses += 1
+        # Dead weakrefs are cheap, but a long descriptor-only session must
+        # not grow this index without bound.
+        if len(self._wgpu_residency_binding_cache) >= 1024:
+            self._wgpu_residency_binding_cache.clear()
+        binding = _wgpu_payload_binding(
+            payload,
+            np.asarray(payload.texture_data if payload.texture_data is not None else payload.image),
+            representation=representation,
+            mapping_mode=mapping_mode,
+            resident_keys=executor.page_table.resident_keys(),
+        )
+        self._wgpu_residency_binding_cache[cache_key] = (weakref.ref(payload), binding)
+        return binding
 
     def _tiled_presentation_layer(self):
         return None
@@ -2612,6 +2656,8 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_active_resident_bytes": int(getattr(executor, "active_resident_bytes", 0) or 0),
             "wgpu_allocated_pool_bytes": int(getattr(executor, "allocated_pool_bytes", 0) or 0),
             "wgpu_page_pools": page_pools,
+            "wgpu_residency_binding_cache_hits": int(self._wgpu_residency_binding_cache_hits),
+            "wgpu_residency_binding_cache_misses": int(self._wgpu_residency_binding_cache_misses),
             "wgpu_atomic_warm_pinned_pages": (
                 0
                 if executor is None
@@ -2805,8 +2851,9 @@ def _wgpu_payload_binding(
             raise
         # A globally aligned reduced window can contain one extra edge bin
         # compared with ceil(window_extent/factor). Its PageBackedPresentation
-        # already validated that geometry. It is usable only by rebinding
-        # resident canonical pages below; never by uploading a crop-local page.
+        # already validated that geometry. Prefer resident canonical pages
+        # below; a cold single-page window can still preserve the global-bin
+        # offset through an explicitly padded local plane.
         geometry_error = exc
         lod_level = int(getattr(lod, "level", 0) or 0)
         local_source_shape = tuple(int(value) for value in lod.source_shape)
@@ -2839,6 +2886,71 @@ def _wgpu_payload_binding(
                     dtype=_WGPU_REP_DTYPES[representation],
                     representation=representation,
                     plane_shape=local_source_shape,
+                    reducer=lod_reducer,
+                )
+                for chunk_y, chunk_x in chunks
+            ),
+            upload_chunks=chunks,
+            source_anchored=False,
+            lod_level=lod_level,
+        )
+
+    def page_backed_local_binding() -> _WgpuPayloadBinding:
+        """Bind one cold source-grid page without pretending its bins are local.
+
+        The executor's plane ladder is uniformly power-of-two reduced.  A
+        globally aligned window fits that contract when the local plane starts
+        at the first global bin boundary and the requested window is expressed
+        as an origin inside the padded plane.  This preserves clipped edge-bin
+        geometry and keeps the page's pixels uploadable when no canonical
+        native plane is resident yet.
+        """
+
+        backing = getattr(payload, "page_backing", None)
+        plans = tuple(getattr(backing, "requested_plans", ()) or ())
+        pages = tuple(getattr(backing, "materialized_pages", ()) or ())
+        if len(plans) != 1 or len(pages) != 1:
+            raise geometry_error
+        plan = plans[0]
+        if tuple(int(value) for value in plan.reduction_yx) != (
+            int(lod_level),
+            int(lod_level),
+        ):
+            raise geometry_error
+        stored_y0, stored_y1, stored_x0, stored_x1 = (int(value) for value in plan.stored_rect_yx)
+        stored_shape = (stored_y1 - stored_y0, stored_x1 - stored_x0)
+        if stored_shape != tuple(int(value) for value in texture.shape[:2]):
+            raise geometry_error
+        coverage = tuple(int(value) for value in backing.source_coverage_yx)
+        factor = 1 << int(lod_level)
+        aligned_y0 = stored_y0 * factor
+        aligned_x0 = stored_x0 * factor
+        padded_source_shape = (stored_shape[0] * factor, stored_shape[1] * factor)
+        source_origin = (coverage[2] - aligned_x0, coverage[0] - aligned_y0)
+        if (
+            source_origin[0] < 0
+            or source_origin[1] < 0
+            or source_origin[0] + local_source_shape[1] > padded_source_shape[1]
+            or source_origin[1] + local_source_shape[0] > padded_source_shape[0]
+        ):
+            raise geometry_error
+        chunks = tuple(
+            (chunk_y, chunk_x) for chunk_y in range(local_grid_h) for chunk_x in range(local_grid_w)
+        )
+        return _WgpuPayloadBinding(
+            plane_identity=local_identity,
+            plane_shape=padded_source_shape,
+            source_origin_xy=(float(source_origin[0]), float(source_origin[1])),
+            page_keys=tuple(
+                plane_chunk_key(
+                    local_identity,
+                    "live",
+                    lod_level,
+                    chunk_x,
+                    chunk_y,
+                    dtype=_WGPU_REP_DTYPES[representation],
+                    representation=representation,
+                    plane_shape=padded_source_shape,
                     reducer=lod_reducer,
                 )
                 for chunk_y, chunk_x in chunks
@@ -2940,21 +3052,24 @@ def _wgpu_payload_binding(
     )
     if not fully_resident and not supplies_complete_pages:
         if geometry_error is not None:
-            resident_levels = tuple(
-                sorted(
-                    {
-                        int(key.lod.level)
-                        for key in resident
-                        if key.document_generation == global_identity
-                        and key.operation_key == "live"
-                        and key.representation == representation
-                    }
+            try:
+                return page_backed_local_binding()
+            except ValueError:
+                resident_levels = tuple(
+                    sorted(
+                        {
+                            int(key.lod.level)
+                            for key in resident
+                            if key.document_generation == global_identity
+                            and key.operation_key == "live"
+                            and key.representation == representation
+                        }
+                    )
                 )
-            )
-            raise ValueError(
-                f"{geometry_error}; canonical source-plane resident levels="
-                f"{resident_levels or 'none'}"
-            ) from geometry_error
+                raise ValueError(
+                    f"{geometry_error}; canonical source-plane resident levels="
+                    f"{resident_levels or 'none'}"
+                ) from geometry_error
         return local_binding()
     if geometry_error is not None and not fully_resident:
         raise geometry_error

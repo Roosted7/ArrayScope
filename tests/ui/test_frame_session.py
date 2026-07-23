@@ -2509,6 +2509,7 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
                 0,
                 0,
                 0,
+                0,
                 # Commit-progress terms: commit_batches and presentation-state
                 # revision (both absent on this stub session, so 0).
                 0,
@@ -2610,6 +2611,7 @@ def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot)
                 0,
                 0,
                 0,
+                0,
                 6,
                 3,
             )
@@ -2627,3 +2629,117 @@ def test_watchdog_commit_progress_suppresses_stall_assertion(monkeypatch, qtbot)
     # The tick re-based the progress clock on the new signature.
     assert renderer._montage_watchdog_state[-2:] == (7, 3)
     assert renderer._montage_watchdog_state_since == 12.1
+
+
+def test_settled_tiles_with_stale_committed_frame_emit_stall_probe(
+    tmp_path,
+    monkeypatch,
+    qtbot,
+    capsys,
+):
+    """An empty tile backlog must not hide stale committed-frame semantics."""
+
+    import json
+    from pathlib import Path
+
+    from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.core.trace import close_trace, configure_trace
+    from arrayscope.window import frame_runtime
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    monkeypatch.setattr(frame_runtime, "perf_counter", lambda: 12.1)
+    monkeypatch.setenv("ARRAYSCOPE_STALL_DUMP_DIR", str(tmp_path))
+
+    class Completions:
+        @staticmethod
+        def empty():
+            return True
+
+    kernel = SimpleNamespace(
+        diagnostics=lambda: SimpleNamespace(
+            queued=0,
+            running=0,
+            active=0,
+            parked_deps=0,
+            parked_quota=0,
+        ),
+        completions=Completions(),
+    )
+    session = SimpleNamespace(
+        session_id=515_151,
+        lifecycle=SimpleNamespace(
+            evaluating_tiles=frozenset(),
+            presented_tiles=frozenset({0}),
+        ),
+        active_tile_requests=frozenset(),
+        dirty_payloads={},
+        pending_payload_upserts={},
+        pending_rung_materializations=(),
+        stage_planning_deferred=False,
+        pending_level_tiles=(),
+        level_scan_remaining_tiles=0,
+        semantic_level_evidence_progress=None,
+        has_pending_level_update=lambda: False,
+        required_target_unsettled_tiles=lambda: (),
+        required_first_pixels_presented=lambda: True,
+        flush_pending=False,
+        final_commit_pending=False,
+        rendered_tiles={0: object()},
+        diagnostic_tile_identity_rows=lambda **_kwargs: (),
+        stage_fan_in=SimpleNamespace(
+            active_requests=frozenset(),
+            attached_requests=frozenset(),
+            tile_stage_keys={},
+        ),
+        loading_tiles=frozenset(),
+    )
+    window = QtWidgets.QMainWindow()
+    window.kernel = kernel
+    window._committed_display_frame = object()
+    qtbot.addWidget(window)
+
+    class Renderer(FrameRuntimeMixin):
+        def __init__(self):
+            self.win = window
+            self._frame_session = session
+            self._montage_watchdog_state = (
+                515_151,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                0,
+                0,
+            )
+            self._montage_watchdog_state_since = 10.0
+
+        @staticmethod
+        def _frame_session_is_current(_session):
+            return True
+
+        @staticmethod
+        def _is_committed_display_frame_current(_frame):
+            return False
+
+    configure_trace(tmp_path / "stale-frame.trace.jsonl")
+    renderer = Renderer()
+    try:
+        renderer._montage_watchdog_tick()
+    finally:
+        close_trace()
+
+    assert renderer._montage_stall_assertions == 1
+    assert "STALL ASSERTION PROBE FIRED" in capsys.readouterr().err
+    dump_path = Path(renderer._montage_watchdog_last_trace_path)
+    rows = [json.loads(line) for line in dump_path.read_text().splitlines()]
+    stall = next(row for row in rows if row.get("kind") == "stall")
+    assert stall["owner_chain"]["committed_frame_stale"] is True
+    dump_path.unlink(missing_ok=True)

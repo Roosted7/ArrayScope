@@ -578,6 +578,13 @@ def run_profile_montage_workflow(
             role = str(role)
             if role not in {"x", "y"}:
                 raise ValueError(f"unsupported displayed-axis role {role!r}")
+            presentation_before = _vispy_presentation_diagnostics(win)
+            binding_hits_before = int(
+                presentation_before.get("wgpu_residency_binding_cache_hits", 0) or 0
+            )
+            binding_misses_before = int(
+                presentation_before.get("wgpu_residency_binding_cache_misses", 0) or 0
+            )
             _set_operations(win, ())
             # Keep the third axis as a montage while cropping and scrolling a
             # displayed axis.  A single-image slice cannot exercise the
@@ -704,7 +711,70 @@ def run_profile_montage_workflow(
                 if not settled:
                     break
             uploads_after_axis_swap = _wgpu_upload_total(win)
+            # Preserve the cropped displayed-axis window while leaving montage
+            # mode, then advance the former montage axis by one and return.
+            # Together with the three crop-window steps above, every X/Y
+            # setting now exercises short scrolls on both relevant dimensions.
+            # This is the field trajectory that exposed a silent semantic
+            # stall: the backend had drawn and all queues were empty, but the
+            # committed frame still named the predecessor slice.
+            cropped_montage_state = win.view_state
+            center_position = len(display_axis_indices) // 2
+            center_index = int(display_axis_indices[center_position])
+            adjacent_index = int(
+                display_axis_indices[min(center_position + 1, len(display_axis_indices) - 1)]
+            )
+            single_slice_indices = (center_index, adjacent_index, center_index)
+            single_slice_settled = True
+            single_slice_committed_current = True
+            single_slice_steps = 0
+            single_slice_settle_ms: list[float] = []
+            uploads_before_single_slice = _wgpu_upload_total(win)
+            for source_index in single_slice_indices:
+                step_started = perf_counter()
+                predecessor_session = getattr(win.renderer, "_frame_session", None)
+                predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
+                win._set_view_state(
+                    cropped_montage_state.tile_state_for_slice(
+                        montage_axis,
+                        source_index,
+                    )
+                )
+                win.render(reason=f"profile-display-{role}-axis-single-slice")
+                settled = _wait_for_montage_successor_settled(
+                    win=win,
+                    app=app,
+                    QtCore=QtCore,
+                    predecessor_session_id=predecessor_session_id,
+                    budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+                )
+                current = _committed_display_frame_is_current(win)
+                single_slice_settle_ms.append(max(0.0, (perf_counter() - step_started) * 1000.0))
+                single_slice_steps += 1
+                single_slice_settled = bool(single_slice_settled and settled)
+                single_slice_committed_current = bool(single_slice_committed_current and current)
+                if not settled or not current:
+                    break
+            uploads_after_single_slice = _wgpu_upload_total(win)
+            predecessor_session = getattr(win.renderer, "_frame_session", None)
+            predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
+            win._set_view_state(cropped_montage_state)
+            win.render(reason=f"profile-display-{role}-axis-restore-montage")
+            montage_restore_settled = _wait_for_montage_successor_settled(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                predecessor_session_id=predecessor_session_id,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            montage_restore_committed_current = _committed_display_frame_is_current(win)
+            if callable(physical_rows):
+                physical_tile_counts.append(len(dict(physical_rows() or {})))
             presentation = _vispy_presentation_diagnostics(win)
+            binding_hits_after = int(presentation.get("wgpu_residency_binding_cache_hits", 0) or 0)
+            binding_misses_after = int(
+                presentation.get("wgpu_residency_binding_cache_misses", 0) or 0
+            )
             return {
                 "display_axis_role": role,
                 "display_axis": axis,
@@ -732,6 +802,29 @@ def run_profile_montage_workflow(
                     None
                     if uploads_before_axis_swap is None or uploads_after_axis_swap is None
                     else int(uploads_after_axis_swap - uploads_before_axis_swap)
+                ),
+                "display_axis_single_slice_settled": bool(single_slice_settled),
+                "display_axis_single_slice_committed_current": bool(single_slice_committed_current),
+                "display_axis_single_slice_steps": int(single_slice_steps),
+                "display_axis_single_slice_step_settle_ms": tuple(single_slice_settle_ms),
+                "display_axis_single_slice_max_settle_ms": max(
+                    single_slice_settle_ms,
+                    default=0.0,
+                ),
+                "display_axis_single_slice_wgpu_upload_delta": (
+                    None
+                    if uploads_before_single_slice is None or uploads_after_single_slice is None
+                    else int(uploads_after_single_slice - uploads_before_single_slice)
+                ),
+                "display_axis_montage_restore_settled": bool(montage_restore_settled),
+                "display_axis_montage_restore_committed_current": bool(
+                    montage_restore_committed_current
+                ),
+                "display_axis_wgpu_residency_binding_cache_hit_delta": (
+                    None if backend != "wgpu" else binding_hits_after - binding_hits_before
+                ),
+                "display_axis_wgpu_residency_binding_cache_miss_delta": (
+                    None if backend != "wgpu" else binding_misses_after - binding_misses_before
                 ),
                 "display_axis_wgpu_pool_exhaustion": str(
                     presentation.get("wgpu_last_pool_exhaustion", "") or ""
@@ -3146,6 +3239,12 @@ def _wait_for_montage_successor_settled(
             )
         time.sleep(0.001)
     return False
+
+
+def _committed_display_frame_is_current(win) -> bool:
+    frame = getattr(win, "_committed_display_frame", None)
+    checker = getattr(getattr(win, "renderer", None), "_is_committed_display_frame_current", None)
+    return bool(frame is not None and callable(checker) and checker(frame))
 
 
 def _profile_transform_operations(
@@ -6351,22 +6450,53 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             },
             target="cropped montage settles after X/Y swap and swap-back",
         )
+        require(
+            "display_axis_single_slice_scroll_settles",
+            bool(record.get("display_axis_single_slice_settled", False))
+            and bool(record.get("display_axis_single_slice_committed_current", False))
+            and int(record.get("display_axis_single_slice_steps", 0) or 0) == 3,
+            evidence={
+                "settled": record.get("display_axis_single_slice_settled"),
+                "committed_current": record.get("display_axis_single_slice_committed_current"),
+                "steps": record.get("display_axis_single_slice_steps"),
+            },
+            target=(
+                "the cropped single-slice current, +1, and return successors "
+                "settle and publish the current committed frame"
+            ),
+        )
+        require(
+            "display_axis_montage_restore_settles",
+            bool(record.get("display_axis_montage_restore_settled", False))
+            and bool(record.get("display_axis_montage_restore_committed_current", False)),
+            evidence={
+                "settled": record.get("display_axis_montage_restore_settled"),
+                "committed_current": record.get("display_axis_montage_restore_committed_current"),
+            },
+            target="the cropped montage restores with a current committed frame",
+        )
         if str(record.get("backend", "")) == "wgpu":
             crop_uploads = record.get("display_axis_crop_wgpu_upload_delta")
             scroll_uploads = record.get("display_axis_scroll_wgpu_upload_delta")
             axis_swap_uploads = record.get("display_axis_xy_swap_wgpu_upload_delta")
+            single_slice_uploads = record.get("display_axis_single_slice_wgpu_upload_delta")
             require(
                 "display_axis_source_pages_reused",
-                crop_uploads == 0 and scroll_uploads == 0 and axis_swap_uploads == 0,
+                crop_uploads == 0
+                and scroll_uploads == 0
+                and axis_swap_uploads == 0
+                and single_slice_uploads == 0,
                 evidence={
                     "initial_crop_uploads": crop_uploads,
                     "scroll_uploads": scroll_uploads,
                     "axis_swap_uploads": axis_swap_uploads,
+                    "single_slice_uploads": single_slice_uploads,
                     "scroll_steps": int(record.get("display_axis_slice_scroll_steps", 0) or 0),
                 },
                 target=(
                     "the full montage prewarms reusable source pages; the "
-                    "crop, every in-page +/-1 scroll, and X/Y swaps perform zero uploads"
+                    "crop, every in-page +/-1 scroll, X/Y swaps, and cached "
+                    "single-slice successors perform zero uploads"
                 ),
                 category="performance",
             )

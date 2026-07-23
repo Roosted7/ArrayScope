@@ -495,6 +495,26 @@ def display_tile_payload_has_semantics(payload) -> bool:
     )
 
 
+def display_tile_payload_can_commit_frame(payload) -> bool:
+    """Return whether a tiled payload can publish the current display frame.
+
+    Exact page-backed payloads deliberately omit ``semantic_data``: their
+    reduced GPU presentation cannot answer exact CPU value probes.  Complete
+    page coverage can nevertheless prove that the backend presented the
+    current request, so it may advance frame identity and geometry without
+    claiming value semantics.
+    """
+
+    if str(getattr(payload, "quality", "exact") or "exact") != "exact":
+        return False
+    if getattr(payload, "semantic_data", None) is not None:
+        return True
+    page_backing = getattr(payload, "page_backing", None)
+    return bool(
+        page_backing is not None and getattr(page_backing, "resolved_page_set", None) is not None
+    )
+
+
 def _validate_exact_rect_cover(
     coverage: tuple[int, int, int, int],
     rectangles: tuple[tuple[int, int, int, int], ...],

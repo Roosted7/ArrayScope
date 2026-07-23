@@ -237,6 +237,23 @@ def aggregate_chunk_summaries(
         )
     low = min(float(item.bounds[0]) for item in populated)
     high = max(float(item.bounds[1]) for item in populated)
+    if len(populated) == 1 and int(populated[0].counts.size) == bins:
+        # The common non-montage case is one source-grid page. Its summary
+        # already uses the requested bounded histogram shape and edge policy;
+        # rebinding those same 64 bins through a 64x64 overlap matrix adds no
+        # information and becomes visible CPU work during rapid slice scrubs.
+        summary = populated[0]
+        counts = np.asarray(summary.counts, dtype=np.float64)
+        edges = np.asarray(summary.bin_edges, dtype=np.float32)
+        source_weight = float(np.sum(counts, dtype=np.float64))
+        return ChunkHistogramAggregate(
+            bounds=(low, high),
+            counts=counts,
+            bin_edges=edges,
+            representative_sample=_representative_sample(counts, edges, limit=sample_limit),
+            source_weight=source_weight,
+            frontier_keys=tuple(item.key for item in frontier),
+        )
     edge_low, edge_high = _histogram_edge_bounds(low, high)
     edges = np.linspace(edge_low, edge_high, bins + 1, dtype=np.float32)
     counts = np.zeros(bins, dtype=np.float64)

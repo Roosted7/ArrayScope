@@ -26,6 +26,7 @@ from tests.ui.helpers import (
     plane_settled,
     restore_default_backend,
     use_vispy_backend,
+    use_wgpu_backend,
 )
 
 HEIGHT = 96
@@ -212,6 +213,76 @@ def test_scrub_step_retains_previous_plane_vispy(qtbot):
     try:
         _assert_scrub_step_never_blanks(qtbot, win, data)
         _assert_document_change_blanks(qtbot, win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_wgpu_cropped_non_montage_scroll_accepts_cold_global_lod_bins(qtbot):
+    """A new single-slice plane must render its valid global-bin window."""
+
+    pytest.importorskip("wgpu")
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
+    data = np.random.default_rng(41).normal(size=(3, 336, 336)).astype(np.float32)
+    win = make_backend_window(qtbot, data, backend="wgpu")
+    try:
+        state = win.view_state.with_image_axes(1, 2).with_axis_range(
+            1,
+            indices=tuple(range(93, 193)),
+            text="93:193",
+        )
+        win._set_view_state(state.with_slice(0, 0))
+        win.render(reason="test-wgpu-cropped-single-initial")
+        qtbot.waitUntil(lambda: plane_settled(win, 0), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+
+        session = win.renderer._frame_session
+        viewport_h, viewport_w = (max(1, int(value)) for value in session.viewport_shape)
+        view = win.img_view.getView()
+        view.setRange(
+            xRange=(-10.0 * viewport_w, 10.0 * viewport_w),
+            yRange=(-10.0 * viewport_h, 10.0 * viewport_h),
+            padding=0,
+        )
+        apply_plane(win, 1, reason="test-wgpu-cropped-single-scroll")
+
+        def reduced_window_settled() -> bool:
+            current = win.renderer._frame_session
+            payload = current.display_tile_payloads.get(0)
+            return bool(
+                plane_settled(win, 1)
+                and payload is not None
+                and str(payload.quality) == "exact"
+                and int(payload.lod.factor) == 2
+            )
+
+        try:
+            qtbot.waitUntil(
+                reduced_window_settled,
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+        except Exception:
+            current = win.renderer._frame_session
+            payload = current.display_tile_payloads.get(0)
+            frame = getattr(win, "_committed_display_frame", None)
+            pytest.fail(
+                "cropped single-slice WGPU scroll did not settle on its reduced page: "
+                f"desired={current.lod_policy_decision.demand.desired_level}, "
+                f"payload={None if payload is None else (payload.quality, payload.lod)}, "
+                f"frame_slice={None if frame is None else frame.geometry.view_state.slice_indices}, "
+                f"session_slice={current.view_state.slice_indices}, "
+                f"unsettled={current.required_target_unsettled_tiles()}, "
+                f"target_settled={current.required_target_settled()}, "
+                f"visible_complete={current.visible_plan_complete()}, "
+                f"busy={win.montage_tile_evaluation_controller.is_busy()}, "
+                f"dirty={tuple(current.dirty_payloads)}, "
+                f"pending={tuple(current.pending_payload_upserts)}, "
+                f"presentation={win.img_view.wgpuPresentationDiagnostics()}"
+            )
+        payload = win.renderer._frame_session.display_tile_payloads[0]
+        assert payload.page_backing is not None
+        assert tuple(payload.lod.source_shape) == (100, 336)
+        assert tuple(payload.lod.texture_shape) == (51, 168)
+        assert win.img_view.wgpuPresentationDiagnostics()["wgpu_last_pool_exhaustion"] == ""
     finally:
         win.close()
         restore_default_backend(settings)

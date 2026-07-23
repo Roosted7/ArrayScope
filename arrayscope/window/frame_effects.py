@@ -16,7 +16,11 @@ from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
-from arrayscope.display.model.frame import TiledValueSource, display_tile_payload_has_semantics
+from arrayscope.display.model.frame import (
+    TiledValueSource,
+    display_tile_payload_can_commit_frame,
+    display_tile_payload_has_semantics,
+)
 from arrayscope.display.model.montage_levels import (
     MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
     LevelEvidenceQuality,
@@ -1842,6 +1846,7 @@ class FramePipelineEffects:
                 perf_counter() - prepare_stats_start
             ) * 1000.0
             semantic_commit = tiled_payloads_include_semantics(active_payloads)
+            frame_commit = tiled_payloads_can_commit_frame(active_payloads)
             # Automatic windowing applies to first-pixel payloads too.  A
             # preview may intentionally omit committed value semantics, but it
             # still needs the rough semantic source used by the shader and
@@ -1904,6 +1909,7 @@ class FramePipelineEffects:
             renderer._last_montage_level_decision = {
                 "first_display_commit": bool(first_display_commit),
                 "semantic_commit": bool(semantic_commit),
+                "frame_commit": bool(frame_commit),
                 "decision_force_auto": bool(decision_force_auto),
                 "explicit_auto": bool(explicit_auto),
                 "metadata_can_advance": bool(metadata_can_advance),
@@ -2109,7 +2115,7 @@ class FramePipelineEffects:
                 first_display_commit=first_display_commit,
                 explicit_auto=explicit_auto,
                 requested_levels=requested_levels,
-                semantic_commit=semantic_commit,
+                semantic_commit=frame_commit,
                 decision_force_auto=decision_force_auto,
             )
             if not applied:
@@ -2596,7 +2602,7 @@ class FramePipelineEffects:
         geometry_start = perf_counter()
         renderer._sync_committed_montage_geometry(
             geometry,
-            semantic_commit=tiled_payloads_include_semantics(active_payloads),
+            semantic_commit=tiled_payloads_can_commit_frame(active_payloads),
         )
         renderer._last_montage_tile_geometry_sync_ms = (perf_counter() - geometry_start) * 1000.0
         if not bool(getattr(session, "display_committed", False)):
@@ -4779,6 +4785,12 @@ def tiled_payloads_include_semantics(payloads) -> bool:
     )
 
 
+def tiled_payloads_can_commit_frame(payloads) -> bool:
+    return any(
+        display_tile_payload_can_commit_frame(payload) for payload in dict(payloads or {}).values()
+    )
+
+
 def _call(target, name: str, *args, **kwargs):
     fn = getattr(target, name, None)
     if callable(fn):
@@ -4802,6 +4814,7 @@ __all__ = [
     "session_requested_levels",
     "tile_layer_commit_processed_count",
     "tile_layer_upsert_limits",
+    "tiled_payloads_can_commit_frame",
     "tiled_payloads_include_semantics",
     "viewport_interaction_active",
 ]

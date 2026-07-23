@@ -662,11 +662,10 @@ class FrameSession:
     # canonical (sorted-image-axes) orientation.  Mirrors the evaluator's
     # ``canonical_orientation`` for tile-eval paths that only hold ``session``.
     canonical_orientation: bool = False
-    # ADR 0055 G3: window-invariant anchoring for non-montage sessions on
-    # atlas backends (display.source_anchoring.SourceAnchoring); stamps
-    # exact payloads with a PayloadSourceAnchor so backend residency can
-    # survive display-window shifts. None for montage sessions and
-    # non-windowable chains.
+    # ADR 0055 G3: window-invariant anchoring on atlas backends
+    # (display.source_anchoring.SourceAnchoring); stamps exact payloads with a
+    # PayloadSourceAnchor so backend residency survives display-window shifts
+    # and montage/single-slice presentation changes.
     source_anchoring: object | None = None
     active_tile_requests: set[int] = field(default_factory=set)
     #: Viewport-invariant key (tile bounds + zoom) at which the last full
@@ -773,6 +772,7 @@ class FrameSession:
     # residency has its own cache revision; changing it must not rebuild page
     # geometry for every floor query.
     _lod_page_set_key_cache: dict[object, object] = field(default_factory=dict)
+    _source_anchor_content_key_cache: dict[int, object] = field(default_factory=dict)
     # List-like view over lifecycle-owned rung materialization claims.  Filled
     # only under the "resident" policy after a singleflight claim on the
     # pyramid cache; the lifecycle record, not this attribute, owns truth.
@@ -2404,7 +2404,37 @@ class FrameSession:
             source_axes = tuple(sorted(image_axes)) if self.canonical_orientation else image_axes
             plane_shape = tuple(shape[axis] for axis in source_axes)
         if self.montage_axis is not None:
-            content_key = (content_key, "montage-source", int(source_index))
+            source_index = int(source_index)
+            cached_content_key = self._source_anchor_content_key_cache.get(source_index)
+            if cached_content_key is None:
+                source_state = getattr(state, "tile_state_for_slice", lambda *_args: None)(
+                    int(self.montage_axis),
+                    source_index,
+                )
+                canonical_anchoring = None
+                if source_state is not None and self.document is not None:
+                    from arrayscope.display.source_anchoring import (
+                        source_anchoring_for_view,
+                    )
+
+                    canonical_anchoring = source_anchoring_for_view(
+                        self.document,
+                        source_state,
+                        canonical_orientation=bool(self.canonical_orientation),
+                    )
+                if canonical_anchoring is not None:
+                    cached_content_key = canonical_anchoring.content_key
+                else:
+                    # Lightweight test/fake sessions may not carry a document
+                    # or ViewState. Keep their identity explicit rather than
+                    # guessing a production request key.
+                    cached_content_key = (
+                        content_key,
+                        "montage-source",
+                        source_index,
+                    )
+                self._source_anchor_content_key_cache[source_index] = cached_content_key
+            content_key = cached_content_key
         return PayloadSourceAnchor(
             content_key=content_key,
             source_rect=(y_start, y_start + height, x_start, x_start + width),

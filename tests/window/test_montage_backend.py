@@ -1127,7 +1127,10 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
 
 def test_preview_payloads_do_not_count_as_semantic_commits():
     from arrayscope.display.model.frame import DisplayTilePayload
-    from arrayscope.window.frame_effects import tiled_payloads_include_semantics
+    from arrayscope.window.frame_effects import (
+        tiled_payloads_can_commit_frame,
+        tiled_payloads_include_semantics,
+    )
 
     image = np.zeros((2, 2), dtype=np.float32)
     preview = DisplayTilePayload(
@@ -1149,11 +1152,15 @@ def test_preview_payloads_do_not_count_as_semantic_commits():
     reduced_presentation_only = SimpleNamespace(
         quality="exact",
         semantic_data=None,
+        page_backing=SimpleNamespace(resolved_page_set=object()),
     )
 
     assert tiled_payloads_include_semantics({0: preview}) is False
     assert tiled_payloads_include_semantics({0: reduced_presentation_only}) is False
     assert tiled_payloads_include_semantics({0: preview, 1: exact}) is True
+    assert tiled_payloads_can_commit_frame({0: preview}) is False
+    assert tiled_payloads_can_commit_frame({0: reduced_presentation_only}) is True
+    assert tiled_payloads_can_commit_frame({0: preview, 1: exact}) is True
 
 
 def test_montage_level_metadata_publishes_when_evidence_quality_improves():

@@ -14,7 +14,7 @@ each other, without importing the display layer from here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Canonical representation labels for resident chunk values. "Raw" values
 # stay raw on the GPU; display mapping is shader work (ADR 0055 §4). These
@@ -114,6 +114,7 @@ class DataChunkKey:
     chunk_shape: tuple[int, ...]
     dtype: str
     representation: str = SCALAR_R32F
+    _cached_hash: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.lod, ChunkLod):
@@ -135,6 +136,27 @@ class DataChunkKey:
                 f"unknown chunk representation {representation!r}; expected one of {REPRESENTATIONS}"
             )
         object.__setattr__(self, "representation", representation)
+        # Page-table membership is a hot rendering predicate. The dataclass is
+        # immutable, so recursively hashing a large semantic request identity
+        # on every lookup adds cost without adding correctness.
+        object.__setattr__(
+            self,
+            "_cached_hash",
+            hash(
+                (
+                    self.document_generation,
+                    self.operation_key,
+                    self.lod,
+                    self.chunk_origin,
+                    self.chunk_shape,
+                    self.dtype,
+                    self.representation,
+                )
+            ),
+        )
+
+    def __hash__(self) -> int:
+        return self._cached_hash
 
     @property
     def rank(self) -> int:

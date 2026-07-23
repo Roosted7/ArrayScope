@@ -53,6 +53,26 @@ def test_chunk_key_rejects_unknown_representation():
     assert make_key(representation=COMPLEX_RG32F).representation == COMPLEX_RG32F
 
 
+def test_chunk_key_hashes_large_semantic_identity_only_once():
+    class CountedIdentity:
+        def __init__(self):
+            self.calls = 0
+
+        def __hash__(self):
+            self.calls += 1
+            return 41
+
+    identity = CountedIdentity()
+    key = make_key(document_generation=identity)
+    construction_calls = identity.calls
+
+    for _ in range(100):
+        hash(key)
+
+    assert construction_calls == 1
+    assert identity.calls == construction_calls
+
+
 def test_chunk_lod_clamps_like_tile_lod_identity():
     lod = ChunkLod(level=-3, factor=0, gutter=-1)
     assert (lod.level, lod.factor, lod.gutter) == (0, 1, 0)

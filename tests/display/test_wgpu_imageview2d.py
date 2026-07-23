@@ -1712,6 +1712,47 @@ def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
         view.close()
 
 
+def test_residency_predicate_reuses_binding_within_page_table_generation(
+    qt_app,
+    monkeypatch,
+):
+    """Pacing may query one payload hundreds of times without rebuilding keys."""
+
+    import arrayscope.display.wgpu_imageview2d as wgpu_view
+
+    payload = _payload(
+        0,
+        np.arange(100 * 336, dtype=np.float32).reshape(100, 336),
+        source_id=("resident-predicate", "long-semantic-identity", tuple(range(100))),
+    )
+    view = _shown_view(qt_app)
+    try:
+        _commit(
+            view,
+            _montage_geometry((100, 336), 1, 1, loaded=1),
+            {0: payload},
+            levels=(0.0, float(100 * 336)),
+        )
+        calls = 0
+        original = wgpu_view._wgpu_payload_binding
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(wgpu_view, "_wgpu_payload_binding", counted)
+        for _ in range(100):
+            assert view.tiledPayloadResident(payload)
+
+        assert calls == 1
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_residency_binding_cache_misses"] == 1
+        assert diagnostics["wgpu_residency_binding_cache_hits"] == 99
+    finally:
+        view.close()
+
+
 def test_atomic_warm_owns_successor_pages_until_the_bound_plane_swap(qt_app):
     """Unrelated residency churn must evict stale pages, not the successor."""
 
@@ -2033,6 +2074,80 @@ def test_odd_aligned_exact_reduced_crop_binds_resident_native_pages(qt_app):
         assert tile["src_size"] == (336.0, 100.0)
         assert tile["lod_level"] == 0
         assert tile["plane_identity"] == ("wgpu-source-plane", content_key)
+    finally:
+        view.close()
+
+
+def test_cold_odd_aligned_reduced_window_uploads_with_global_bin_offset(qt_app):
+    """A cold non-montage slice may start and end inside global LOD bins.
+
+    The 100-row window occupies eight factor-16 bins on the source grid,
+    although a locally reduced 100-row array would have seven rows.  With no
+    native source plane resident, WGPU must preserve that global-bin offset
+    in a padded local binding instead of rejecting valid page-backed geometry.
+    """
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        PageBackedPresentation,
+        PayloadSourceAnchor,
+    )
+    from arrayscope.display.pyramid import materialize_source_grid_pages, plan_source_grid_pages
+
+    source = np.arange(336 * 336, dtype=np.float32).reshape(336, 336)
+    content_key = ("doc", "single-slice", 1)
+    source_rect = (94, 194, 0, 336)
+    plans = plan_source_grid_pages(
+        content_key=("page-doc", "page-op", 1),
+        valid_source_rect_yx=source_rect,
+        reduction_yx=(4, 4),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    pages = materialize_source_grid_pages(
+        source[94:194],
+        source_origin_yx=(94, 0),
+        plans=plans,
+    )
+    lod = LodInfo(
+        level=4,
+        factor=16,
+        source_shape=(100, 336),
+        texture_shape=(8, 21),
+    )
+    payload = DisplayTilePayload(
+        0,
+        1,
+        pages[0].values,
+        None,
+        ("cold-odd-aligned-window", 1),
+        lod=lod,
+        quality="exact",
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            source_rect,
+            plane_shape=(336, 336),
+        ),
+        page_backing=PageBackedPresentation(plans, pages, source_rect, lod),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _commit(
+            view,
+            _montage_geometry((100, 336), 1, 1, loaded=1),
+            {0: payload},
+            levels=(0.0, float(source.max())),
+        )
+
+        assert view._wgpu_last_report_uploads == 1
+        tile = view._wgpu_committed["tiles"][0]
+        assert tile["src_origin"] == (0.0, 14.0)
+        assert tile["src_size"] == (336.0, 100.0)
+        assert tile["lod_level"] == 4
+        assert tile["plane_identity"][0] == "wgpu-content-plane"
     finally:
         view.close()
 
