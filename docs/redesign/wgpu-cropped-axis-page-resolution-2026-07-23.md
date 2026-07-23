@@ -68,6 +68,32 @@ Artifacts:
 - `/tmp/arrayscope-xy-crop-matrix-baseline-wgpu.cprofile`
 - `/tmp/arrayscope-xy-crop-matrix-baseline-wgpu-cprofile.jsonl`
 
+## Correctness root cause and owner fix
+
+The cropped payloads were physically resident. The presentation coordinator
+nevertheless required a second, session-local `(source_id, levels)` warm
+marker before it allowed the atomic successor to bind. Fifty already-resident
+tiles therefore entered 25 two-tile low-priority warm callbacks. The callbacks
+performed no uploads, but their serialized replan cycle exceeded the
+interaction deadline and left the successor planned but unpresented.
+
+Physical residency is now the sole warm owner whenever a backend exposes
+`tiledPayloadResident` or `tiledPayloadCommitSlotOwned`. The historical marker
+remains only as a fallback for backends without a physical predicate. The
+existing marked-but-evicted test remains green: a stale marker cannot override
+lost residency.
+
+The real-Wayland WGPU rerun completed all 11 X-primary and all 11 Y-primary
+crop states with current committed frames, zero uploads, and zero
+`hidden-warm-residency-wait` trace events. This closes the freeze, but not the
+performance work: resident-only cells still take up to 3.65 s and GUI
+callbacks exceed the 50 ms bar.
+
+Artifacts:
+
+- `/tmp/arrayscope-xy-crop-matrix-owner-fix-wgpu.jsonl`
+- `/tmp/arrayscope-xy-crop-matrix-owner-fix-wgpu-trace.jsonl`
+
 ## Implementation direction
 
 Replace geometry-specific binding selection with one resolver:

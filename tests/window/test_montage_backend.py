@@ -2420,6 +2420,84 @@ def test_hidden_target_warm_does_not_wait_for_visible_target_settlement(monkeypa
     assert replans == [session]
 
 
+def test_hidden_target_warm_accepts_backend_residency_without_duplicate_markers(
+    monkeypatch,
+):
+    """Physical residency is the sole warm owner when a backend exposes it."""
+
+    from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationDelta
+    from arrayscope.window import frame_effects
+
+    payloads = {
+        tile: DisplayTilePayload(
+            tile,
+            tile,
+            np.full((2, 2), tile, dtype=np.float32),
+            None,
+            ("resident-target", tile),
+        )
+        for tile in range(50)
+    }
+    warm_calls = []
+    callbacks = []
+    replans = []
+    view = SimpleNamespace(
+        warmTiledResidency=lambda **kwargs: warm_calls.append(kwargs),
+        tiledPayloadResident=lambda _payload: True,
+    )
+    session = SimpleNamespace(
+        session_id=8,
+        key=("resident-session",),
+        viewport_revision=4,
+        _atomic_warm_job=None,
+        final_commit_pending=False,
+        flush_pending=False,
+    )
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(img_view=view),
+        _frame_session_is_current=lambda candidate: candidate is session,
+        _memory_policy=lambda: SimpleNamespace(
+            visible_render_budget_bytes=1 << 20,
+            display_cache_budget_bytes=1 << 20,
+            user_render_cap_bytes=1 << 20,
+        ),
+        request_montage_replan=lambda candidate: replans.append(candidate),
+    )
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_low_priority_callback",
+        lambda _renderer, callback: callbacks.append(callback),
+    )
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=1,
+        histogram_revision=1,
+        viewport_revision=4,
+        upserts=payloads,
+        active_tiles=tuple(payloads),
+        planned_tiles=tuple(payloads),
+    )
+
+    ready = frame_effects._warm_atomic_successor_residency(
+        renderer,
+        session,
+        _geometry(),
+        delta,
+        levels=(-1.0, 1.0),
+        rgb_already_windowed=False,
+        payloads=payloads,
+        batch_size=2,
+    )
+
+    assert ready is True
+    assert callbacks == []
+    assert warm_calls == []
+    assert replans == []
+    assert session._atomic_warm_job is None
+
+
 def test_hidden_target_warm_rechecks_marked_payload_residency(monkeypatch):
     """A historical warm marker is not physical proof after pool eviction."""
 
@@ -2627,7 +2705,9 @@ def test_hidden_target_warm_accepts_visible_commit_slot_owner(monkeypatch):
     monkeypatch.setattr(
         frame_effects,
         "_post_low_priority_callback",
-        lambda _renderer, callback: callback(),
+        lambda _renderer, callback: pytest.fail(
+            f"slot-owned payload queued an unnecessary warm callback: {callback!r}"
+        ),
     )
     delta = TilePresentationDelta(
         structure_revision=1,
@@ -2651,12 +2731,12 @@ def test_hidden_target_warm_accepts_visible_commit_slot_owner(monkeypatch):
         payloads={0: payload},
     )
 
-    assert ready is False
-    assert len(warm_calls) == 1
+    assert ready is True
+    assert warm_calls == []
     assert session._atomic_warm_job is None
-    assert session.final_commit_pending is True
-    assert session.flush_pending is True
-    assert replans == [session]
+    assert session.final_commit_pending is False
+    assert session.flush_pending is False
+    assert replans == []
 
 
 def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():

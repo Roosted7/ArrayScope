@@ -4146,6 +4146,7 @@ def _warm_atomic_successor_residency(
         "tiledPayloadCommitSlotOwned",
         None,
     )
+    physical_truth_available = callable(resident) or callable(commit_slot_owned)
 
     def physically_warm(payload) -> bool:
         return bool(
@@ -4156,8 +4157,11 @@ def _warm_atomic_successor_residency(
     pending = tuple(
         int(tile)
         for tile, payload in payloads.items()
-        if (getattr(payload, "source_id", None), level_key) not in warmed_identities
-        or not physically_warm(payload)
+        if (
+            not physically_warm(payload)
+            if physical_truth_available
+            else (getattr(payload, "source_id", None), level_key) not in warmed_identities
+        )
     )
     if not pending:
         return True
