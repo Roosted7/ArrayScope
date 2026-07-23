@@ -1944,6 +1944,7 @@ class WgpuImageView2D(ImageViewShell):
         *,
         payloads,
         rgb_already_windowed: bool = False,
+        tile_delta=None,
         **_kwargs,
     ):
         """Ensure payload pages without changing the bound presentation."""
@@ -1966,11 +1967,37 @@ class WgpuImageView2D(ImageViewShell):
         lod_geometry = {
             tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile]) for tile in payloads
         }
+        # Hidden atomic warming is delivered in small GUI-budget batches, but
+        # residency capacity belongs to the whole successor.  Sizing the pool
+        # from only this batch lets later batches evict pages the coordinator
+        # has already marked warm, stranding the final atomic swap with only
+        # its last one or two tiles resident.
+        capacity_payloads = payloads
+        if bool(getattr(tile_delta, "atomic_handoff", False)):
+            transaction_payloads = dict(getattr(tile_delta, "upserts", {}) or {})
+            if transaction_payloads:
+                capacity_payloads = transaction_payloads
+        capacity_geometry = {}
+        for tile, payload in capacity_payloads.items():
+            texture = np.asarray(
+                payload.texture_data if payload.texture_data is not None else payload.image
+            )
+            capacity_geometry[int(tile)] = (
+                _wgpu_payload_lod_geometry(payload, texture),
+                tuple(int(value) for value in texture.shape[:2]),
+            )
         pages_needed = sum(
-            _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
-            for lod_level, source_shape in lod_geometry.values()
+            -(-texture_shape[0] // PAGE) * -(-texture_shape[1] // PAGE)
+            for _geometry, texture_shape in capacity_geometry.values()
         )
-        self._ensure_wgpu_executor({representation: pages_needed})
+        pages_preferred = sum(
+            _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
+            for (lod_level, source_shape), _texture_shape in capacity_geometry.values()
+        )
+        self._ensure_wgpu_executor(
+            {representation: pages_needed},
+            preferred_pages={representation: pages_preferred},
+        )
         commands = []
         for tile in sorted(payloads):
             texture = textures[tile]

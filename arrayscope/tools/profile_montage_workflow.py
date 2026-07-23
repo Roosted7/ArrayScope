@@ -551,11 +551,14 @@ def run_profile_montage_workflow(
             if role not in {"x", "y"}:
                 raise ValueError(f"unsupported displayed-axis role {role!r}")
             _set_operations(win, ())
+            # Keep the third axis as a montage while cropping and scrolling a
+            # displayed axis.  A single-image slice cannot exercise the
+            # multi-tile atomic handoff used by the real user path.
             slice_source_state = raw_state.with_montage_axis(
-                None,
-                columns=None,
-                indices=None,
-                text=None,
+                montage_axis,
+                columns=columns_large,
+                indices=large_indices,
+                text=":",
             ).with_image_axes(1, 0)
             win._set_view_state(slice_source_state)
             win.render(reason=f"profile-display-{role}-axis-slice-source")
@@ -580,6 +583,15 @@ def run_profile_montage_workflow(
             stop = start + slice_size
             win._on_slice_text_changed(axis, f"{start}:{stop}")
             _process_events(app, QtCore, count=4)
+            scroll_distance = min(8, max(0, axis_size - stop))
+            for offset in range(1, scroll_distance + 1):
+                win._on_slice_text_changed(
+                    axis,
+                    f"{start + offset}:{stop + offset}",
+                )
+                _process_events(app, QtCore, count=2)
+            final_start = start + scroll_distance
+            final_stop = stop + scroll_distance
             view_range = _montage_view_range(win)
             if view_range is not None:
                 zoomed_out = _maximum_zoomout_view_range(
@@ -598,9 +610,10 @@ def run_profile_montage_workflow(
             return {
                 "display_axis_role": role,
                 "display_axis": axis,
-                "display_axis_slice_start": start,
-                "display_axis_slice_stop": stop,
+                "display_axis_slice_start": final_start,
+                "display_axis_slice_stop": final_stop,
                 "display_axis_slice_size": slice_size,
+                "display_axis_slice_scroll_steps": scroll_distance,
                 "fit_stretch_pulsed": fit_stretch_pulsed,
                 "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
                 **fit_metrics,

@@ -4088,10 +4088,28 @@ def _warm_atomic_successor_residency(
     if warmed_identities is None:
         warmed_identities = set(warmed.values())
         session._atomic_warmed_identities = warmed_identities
+    resident = getattr(
+        getattr(renderer.win, "img_view", None),
+        "tiledPayloadResident",
+        None,
+    )
+    commit_slot_owned = getattr(
+        getattr(renderer.win, "img_view", None),
+        "tiledPayloadCommitSlotOwned",
+        None,
+    )
+
+    def physically_warm(payload) -> bool:
+        return bool(
+            (callable(resident) and bool(resident(payload)))
+            or (callable(commit_slot_owned) and bool(commit_slot_owned(payload)))
+        )
+
     pending = tuple(
         int(tile)
         for tile, payload in payloads.items()
         if (getattr(payload, "source_id", None), level_key) not in warmed_identities
+        or not physically_warm(payload)
     )
     if not pending:
         return True
@@ -4149,24 +4167,8 @@ def _warm_atomic_successor_residency(
             tile_residency_budget_bytes=tile_residency_budget_bytes(renderer._memory_policy()),
             frame_plan=getattr(session, "frame_plan", None),
         )
-        resident = getattr(
-            getattr(renderer.win, "img_view", None),
-            "tiledPayloadResident",
-            None,
-        )
-        commit_slot_owned = getattr(
-            getattr(renderer.win, "img_view", None),
-            "tiledPayloadCommitSlotOwned",
-            None,
-        )
         unresolved = tuple(
-            int(tile)
-            for tile in admitted
-            if callable(resident)
-            and not bool(resident(job["payloads"][int(tile)]))
-            and not (
-                callable(commit_slot_owned) and bool(commit_slot_owned(job["payloads"][int(tile)]))
-            )
+            int(tile) for tile in admitted if not physically_warm(job["payloads"][int(tile)])
         )
         for tile in admitted:
             if int(tile) in unresolved:

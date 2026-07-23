@@ -1598,6 +1598,55 @@ def test_warm_tiled_residency_accepts_the_commit_plan_contract(qt_app):
         view.close()
 
 
+def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
+    """A bounded warm batch must not evict an earlier successor batch."""
+
+    from arrayscope.display.model.frame import TilePresentationDelta
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 3, 1, loaded=3)
+        payloads = {
+            tile: _payload(
+                tile,
+                np.full((16, 24), float(tile + 1), dtype=np.float32),
+                source_id=("atomic-warm", tile),
+            )
+            for tile in range(3)
+        }
+        delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts=payloads,
+            active_tiles=(0, 1, 2),
+            planned_tiles=(0, 1, 2),
+            atomic_handoff=True,
+        )
+        view._wgpu_executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
+        )
+
+        for tile in range(3):
+            view.warmTiledResidency(
+                payloads={tile: payloads[tile]},
+                geometry=geometry,
+                levels=(0.0, 4.0),
+                tile_delta=delta,
+            )
+
+        assert view._wgpu_executor.pool_budget("scalar_r32f") >= 3
+        assert all(view.tiledPayloadResident(payload) for payload in payloads.values())
+        assert view._wgpu_executor.uploads_total == 3
+    finally:
+        view.close()
+
+
 def test_pan_reuses_tile_instances_and_skips_the_instance_upload(qt_app):
     """Panning must cost O(1), not O(tiles).
 

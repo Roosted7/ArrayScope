@@ -20,12 +20,14 @@ in both directions with zero watchdog stall assertions.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
     restore_default_backend,
+    use_pyqtgraph_backend,
     use_vispy_backend,
     use_wgpu_backend,
 )
@@ -161,6 +163,101 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
 
         session = win.renderer._frame_session
         assert session.required_target_unsettled_tiles() == ()
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+@pytest.mark.parametrize("backend", ["wgpu", "pyqtgraph"])
+def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
+    """Every cropped-axis successor must physically retain every montage tile."""
+
+    configure = use_wgpu_backend if backend == "wgpu" else use_pyqtgraph_backend
+    settings = configure(extra_settings={"montage_quality_policy": "resident"})
+    data = np.broadcast_to(
+        np.arange(64 * 64, dtype=np.float32).reshape(64, 64, 1),
+        (64, 64, 12),
+    )
+    win = make_backend_window(
+        qtbot,
+        data,
+        backend=backend,
+        require_gpu_atlas=backend == "wgpu",
+    )
+    win.resize(700, 500)
+    try:
+        win.show()
+        state = win.view_state.with_image_axes(1, 0).with_montage_axis(
+            2, columns=4, indices=tuple(range(12)), text=":"
+        )
+        win._set_view_state(state)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: _window_settled(win, tuple(range(12))),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        initial_indices = tuple(range(4, 36))
+        win._apply_slice_state(
+            0,
+            win.view_state.with_axis_range(
+                0,
+                indices=initial_indices,
+                text="4:36",
+            ),
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+        qtbot.waitUntil(
+            lambda: _window_settled(win, tuple(range(12))),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        final_indices = tuple(range(8, 40))
+        win._apply_slice_state(
+            0,
+            win.view_state.with_axis_range(
+                0,
+                indices=final_indices,
+                text="8:40",
+            ),
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+
+        try:
+            qtbot.waitUntil(
+                lambda: _window_settled(win, tuple(range(12))),
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+        except Exception:
+            session = win.renderer._frame_session
+            report = win.renderer._display_committer().last_tile_commit_report
+            pytest.fail(
+                "cropped-axis montage did not settle: "
+                f"backend={backend}, "
+                f"unsettled={session.required_target_unsettled_tiles()}, "
+                f"first_pixels={session.required_first_pixels_presented()}, "
+                f"busy={win.montage_tile_evaluation_controller.is_busy()}, "
+                f"physical={sorted(win.img_view.tileTruthPhysicalRows())}, "
+                f"dirty={sorted(session.dirty_payloads)}, "
+                f"pending={sorted(session.pending_payload_upserts)}, "
+                f"draw_pending={win.img_view.presentationDrawPending()}, "
+                f"mode={win.img_view.montageDisplayMode()}, "
+                f"report_presented={getattr(win.renderer, '_last_montage_report_presented', None)}, "
+                f"report_committed={getattr(win.renderer, '_last_montage_report_committed', None)}, "
+                f"report_stale={getattr(win.renderer, '_last_montage_report_stale', None)}, "
+                f"atomic_pending={session.atomic_successor_pending}, "
+                f"warmed={len(getattr(session, '_atomic_warmed_identities', ()))}, "
+                f"identity_rejected={getattr(report, 'identity_rejected_tiles', None)}, "
+                f"outcome={getattr(win.renderer, '_last_montage_commit_outcome', None)}"
+            )
+        session = win.renderer._frame_session
+        assert session.required_target_unsettled_tiles() == ()
+        assert set(win.img_view.tileTruthPhysicalRows()) == set(range(12))
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()
