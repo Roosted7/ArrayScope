@@ -202,6 +202,19 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
             lambda: _window_settled(win, montage_indices),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
+        full_uploads = (
+            int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
+            if backend == "wgpu"
+            else None
+        )
+        full_global_l0 = (
+            sum(
+                key.document_generation[0] == "wgpu-source-plane" and int(key.lod.level) == 0
+                for key in win.img_view._wgpu_executor.page_table.resident_keys()
+            )
+            if backend == "wgpu"
+            else 0
+        )
 
         initial_indices = tuple(range(97, 197))
         uncropped_session_id = int(win.renderer._frame_session.session_id)
@@ -222,6 +235,11 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
                 and _window_settled(win, montage_indices)
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        crop_uploads = (
+            int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
+            if backend == "wgpu"
+            else None
         )
         physical_tile_counts = [len(win.img_view.tileTruthPhysicalRows())]
 
@@ -296,6 +314,12 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
         assert min(physical_tile_counts) == len(montage_indices)
         assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        if backend == "wgpu":
+            final = win.img_view.wgpuPresentationDiagnostics()
+            assert full_global_l0 == 4 * len(montage_indices)
+            assert crop_uploads == full_uploads
+            assert int(final["wgpu_uploads_total"]) == crop_uploads
+            assert final["wgpu_last_pool_exhaustion"] == ""
     finally:
         win.close()
         restore_default_backend(settings)

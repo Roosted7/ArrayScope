@@ -85,6 +85,7 @@ class PreviewFloorMetadata:
     level_data: np.ndarray | None = None
     level_stats: object | None = None
     quality: str = "preview"
+    native_residency_data: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -1473,10 +1474,26 @@ class FrameSession:
                 # ``rendered_tiles[index]`` and overwrites the correct remap
                 # with the old slot source (mixed +N source window at idle).
                 self.rendered_tiles.pop(index, None)
+                resident_lod = getattr(resident_payload, "lod", None)
+                native_shape = (
+                    tuple(int(value) for value in resident_lod.source_shape)
+                    if resident_lod is not None
+                    else tuple(int(value) for value in resident_payload.source_shape)
+                )
                 payload = replace(
                     resident_payload,
                     tile_number=index,
                     source_index=int(tile.source_index),
+                    # A retained single-image payload can become one tile of a
+                    # montage without changing its source pixels. Its old
+                    # physical anchor, however, still names the single-image
+                    # session. Restamp the current session/source coordinate
+                    # so all reusable pages for this montage source share the
+                    # same canonical plane identity.
+                    source_anchor=self._payload_source_anchor(
+                        native_shape,
+                        source_index=int(tile.source_index),
+                    ),
                     tile_identity=self.tile_payload_identity(
                         tile,
                         texture_data=resident_payload.texture_data,
@@ -2002,7 +2019,8 @@ class FrameSession:
             # so a reduced texture anchors by its LOD's native source shape
             # (ADR 0056 G5: reduced planes take chunked residency too).
             source_anchor=self._payload_source_anchor(
-                lod.source_shape if lod is not None else exact_image.shape[:2]
+                lod.source_shape if lod is not None else exact_image.shape[:2],
+                source_index=int(identity_tile.source_index),
             ),
             page_backing=page_backing,
             level_data=exact_level_data,
@@ -2106,10 +2124,21 @@ class FrameSession:
                 lod=previous.lod,
                 quality=previous.quality,
             )
+            previous_lod = getattr(previous, "lod", None)
+            native_shape = (
+                tuple(int(value) for value in previous_lod.source_shape)
+                if previous_lod is not None
+                else tuple(int(value) for value in previous.source_shape)
+            )
+            current_source_anchor = self._payload_source_anchor(
+                native_shape,
+                source_index=int(identity_tile.source_index),
+            )
             if (
                 not retargeted
                 and int(previous.source_index) == int(rendered.tile.source_index)
                 and previous.tile_identity == current_identity
+                and previous.source_anchor == current_source_anchor
             ):
                 payload = previous
             else:
@@ -2117,6 +2146,11 @@ class FrameSession:
                     previous,
                     tile_number=tile_number,
                     source_index=int(identity_tile.source_index),
+                    # Retained wrappers can cross from a single-image session
+                    # into a montage (or between montage sessions). Semantic
+                    # pixels remain reusable, but physical page identity must
+                    # be restamped for the current source-plane owner.
+                    source_anchor=current_source_anchor,
                     tile_identity=current_identity,
                 )
             self.display_tile_payloads[tile_number] = payload
@@ -2335,17 +2369,21 @@ class FrameSession:
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         return render_lod.session_resident_levels(self, previous_factor)
 
-    def _payload_source_anchor(self, native_shape) -> object | None:
-        """Window-invariant anchor for a non-montage exact payload (ADR 0055 G3).
+    def _payload_source_anchor(self, native_shape, *, source_index=None) -> object | None:
+        """Window-invariant anchor for an exact payload (ADR 0055 G3).
 
         The exact plane covers the whole display window; its native source
         rect is the window start (anchored axes) plus the native extent. A
         non-anchored axis keeps start 0 — consistent, because that axis's
-        window stays folded into the anchoring content key.
+        window stays folded into the anchoring content key. Montage payloads
+        additionally key the immutable source index; calls that do not name
+        one cannot safely anchor a montage plane.
         """
 
         anchoring = self.source_anchoring
-        if anchoring is None or self.montage_axis is not None:
+        if anchoring is None:
+            return None
+        if self.montage_axis is not None and source_index is None:
             return None
         starts = getattr(anchoring, "source_starts_yx", None)
         if starts is None:
@@ -2358,9 +2396,19 @@ class FrameSession:
         y_start = int(starts[0] or 0)
         x_start = int(starts[1] or 0)
         height, width = (int(native_shape[0]), int(native_shape[1]))
+        plane_shape = None
+        state = self.view_state
+        image_axes = tuple(int(axis) for axis in (getattr(state, "image_axes", None) or ()))
+        shape = tuple(int(value) for value in (getattr(state, "shape", None) or ()))
+        if len(image_axes) == 2 and len(shape) > max(image_axes):
+            source_axes = tuple(sorted(image_axes)) if self.canonical_orientation else image_axes
+            plane_shape = tuple(shape[axis] for axis in source_axes)
+        if self.montage_axis is not None:
+            content_key = (content_key, "montage-source", int(source_index))
         return PayloadSourceAnchor(
             content_key=content_key,
             source_rect=(y_start, y_start + height, x_start, x_start + width),
+            plane_shape=plane_shape,
         )
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
@@ -2416,6 +2464,7 @@ class FrameSession:
         texture_kind=None,
         level_data=None,
         level_stats=None,
+        native_residency_data=None,
         quality: str = "preview",
     ) -> bool:
         cache = self.lod_page_cache
@@ -2447,6 +2496,9 @@ class FrameSession:
             level_data=None if level_data is None else np.asarray(level_data),
             level_stats=level_stats,
             quality=str(quality or "preview"),
+            native_residency_data=(
+                None if native_residency_data is None else np.asarray(native_residency_data)
+            ),
         )
         if (
             any(
@@ -2456,6 +2508,7 @@ class FrameSession:
                     metadata.texture_kind,
                     metadata.level_data,
                     metadata.level_stats,
+                    metadata.native_residency_data,
                 )
             )
             or metadata.quality != "preview"

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from arrayscope.window.diagnostics_snapshot import _tile_identity_probe
+from arrayscope.window.diagnostics_snapshot import _presentation_diagnostics, _tile_identity_probe
 
 
 def test_tile_identity_probe_merges_backend_draw_geometry():
@@ -25,3 +25,21 @@ def test_tile_identity_probe_merges_backend_draw_geometry():
     assert rows[0]["physical_draw_world_bounds"] == (10.0, 20.0, 30.0, 40.0)
     assert rows[0]["physical_draw_bounds_match_layout"] is True
     assert "physical_draw_world_bounds" not in rows[1]
+
+
+def test_presentation_diagnostics_uses_shared_backend_contract_for_wgpu():
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            presentation_diagnostics=lambda: {
+                "wgpu_page_pools": ({"representation": "scalar_r32f"},),
+                "wgpu_last_pool_exhaustion": "pool exhausted",
+            },
+            # The old VisPy-only lookup silently discarded the WGPU fields.
+            vispyPresentationDiagnostics=dict,
+        )
+    )
+
+    diagnostics = _presentation_diagnostics(window)
+
+    assert diagnostics["wgpu_page_pools"] == ({"representation": "scalar_r32f"},)
+    assert diagnostics["wgpu_last_pool_exhaustion"] == "pool exhausted"

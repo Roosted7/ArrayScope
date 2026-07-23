@@ -41,17 +41,24 @@ class PayloadSourceAnchor:
 
     ``content_key`` identifies the evaluated-value space the plane samples
     (document revision + operation steps + window-free view identity);
-    ``source_rect`` is the plane's ``(y0, y1, x0, x1)`` in that space at
-    native resolution. A backend may key sub-plane residency on
+    ``source_rect`` is the payload's ``(y0, y1, x0, x1)`` in that space at
+    native resolution and ``plane_shape`` is the complete source plane.
+    A backend may key sub-plane residency on
     ``(content_key, chunk rect, lod, texture kind)`` — equal keys mean equal
     texels regardless of the display window that produced the payload.
     """
 
     content_key: object
     source_rect: tuple[int, int, int, int]
+    plane_shape: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_rect", tuple(int(value) for value in self.source_rect))
+        if self.plane_shape is not None:
+            shape = tuple(int(value) for value in self.plane_shape)
+            if len(shape) != 2 or any(value <= 0 for value in shape):
+                raise ValueError(f"source plane shape must be positive (h, w), got {shape}")
+            object.__setattr__(self, "plane_shape", shape)
 
 
 @dataclass(frozen=True)
@@ -303,6 +310,10 @@ class DisplayTilePayload:
     # ADR 0056 G5: logical page targets and checked materialized values.
     # Tile/presentation identity remains separate from every page key.
     page_backing: PageBackedPresentation | None = None
+    # Optional exact native plane used only to warm reusable backend pages
+    # while a reduced page-backed presentation is drawn. It is not semantic
+    # presentation data and does not satisfy reads from this payload.
+    native_residency_data: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
@@ -317,6 +328,12 @@ class DisplayTilePayload:
         texture = image if self.texture_data is None else np.asarray(self.texture_data)
         if texture.ndim < 2:
             raise ValueError("display tile payload texture data must be at least 2D")
+        native_residency = (
+            None if self.native_residency_data is None else np.asarray(self.native_residency_data)
+        )
+        if native_residency is not None and native_residency.ndim < 2:
+            raise ValueError("native residency data must be at least 2D")
+        object.__setattr__(self, "native_residency_data", native_residency)
         if self.histogram_data is not None:
             histogram = np.asarray(self.histogram_data)
             if tuple(histogram.shape[:2]) != tuple(image.shape[:2]):

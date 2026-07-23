@@ -21,6 +21,7 @@ from arrayscope.display.lod import (
 )
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
+    PayloadSourceAnchor,
     TileCommitReport,
     TilePresentationState,
 )
@@ -4538,6 +4539,15 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     """Shared-transform payloads reuse by source even without RenderedTile rows."""
 
     session = _session(count=4)
+    session.view_state = (
+        ViewState.from_shape((4, TILE, TILE))
+        .with_image_axes(1, 2)
+        .with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    )
+    session.source_anchoring = SimpleNamespace(
+        source_starts_yx=(0, 0),
+        content_key=("current-windowless-view",),
+    )
     old_source_ids = {index: ("src", index) for index in range(4)}
     _state, delta = session.build_tile_presentation(old_source_ids)
     _acknowledge(session, delta)
@@ -4547,6 +4557,16 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     # lifecycle/display payload is still valid resident presentation input.
     session.rendered_tiles.clear()
     assert set(session.display_tile_payloads) == {0, 1, 2, 3}
+    stale = replace(
+        session.display_tile_payloads[2],
+        source_anchor=PayloadSourceAnchor(
+            ("single-image-session",),
+            (0, TILE, 0, TILE),
+            plane_shape=(TILE, TILE),
+        ),
+    )
+    session.display_tile_payloads[2] = stale
+    session.lifecycle.remember_presentable(2, stale)
 
     partial = _shifted_plan(count=2, offset=2)
     stats = _retarget(
@@ -4561,6 +4581,13 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     assert set(session.display_tile_payloads) == {0, 1}
     assert session.display_tile_payloads[0].source_index == 2
     assert session.display_tile_payloads[1].source_index == 3
+    remapped_anchor = session.display_tile_payloads[0].source_anchor
+    assert remapped_anchor.content_key == (
+        ("current-windowless-view",),
+        "montage-source",
+        2,
+    )
+    assert remapped_anchor.source_rect == (0, TILE, 0, TILE)
     assert set(session.pending_payload_upserts) == {0, 1}
     # The successor shrinks the physical slot topology. The retained values
     # remain useful inputs, but they cannot own an atomic wait for a different

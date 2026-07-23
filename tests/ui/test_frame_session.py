@@ -2209,6 +2209,10 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
         loading_tiles=set(),
         skipped_tiles=set(),
     )
+    shifted.source_anchoring = SimpleNamespace(
+        source_starts_yx=(0, 0),
+        content_key=("current-windowless-view",),
+    )
     monkeypatch.setattr(shifted, "_resident_lod_active", lambda: True)
     monkeypatch.setattr(
         shifted,
@@ -2225,6 +2229,11 @@ def test_seeded_resident_payloads_reuse_base_identity_without_texture_lookup(mon
     )
 
     assert shifted.display_tile_payloads[0].source_index == 2
+    assert shifted.display_tile_payloads[0].source_anchor.content_key == (
+        ("current-windowless-view",),
+        "montage-source",
+        2,
+    )
     assert 0 not in shifted.tile_presentation_state.payloads
     assert 0 in shifted.pending_payload_upserts
     assert 0 not in shifted.lifecycle.presented_tiles

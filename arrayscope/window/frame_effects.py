@@ -1452,6 +1452,7 @@ class FramePipelineEffects:
                 texture_kind,
                 level_data,
                 level_stats,
+                native_residency_data,
             ) = preview_row_parts(row)
             admitted = session.admit_preview_plane(
                 tile_number,
@@ -1462,6 +1463,7 @@ class FramePipelineEffects:
                 texture_kind=texture_kind,
                 level_data=level_data,
                 level_stats=level_stats,
+                native_residency_data=native_residency_data,
                 quality=quality,
             )
             if not admitted:
@@ -4497,7 +4499,7 @@ def preview_payload_parts(preview):
 def preview_row_parts(row):
     if len(row) == 4:
         tile_number, key, plane, histogram = row
-        return int(tile_number), key, plane, histogram, None, None, None, None
+        return int(tile_number), key, plane, histogram, None, None, None, None, None
     if len(row) == 8:
         (
             tile_number,
@@ -4518,7 +4520,10 @@ def preview_row_parts(row):
             texture_kind,
             level_data,
             level_stats,
+            None,
         )
+    if len(row) == 9:
+        return (int(row[0]), *row[1:])
     raise ValueError(f"unexpected shared preview payload shape: {len(row)}")
 
 
@@ -4594,9 +4599,21 @@ def vispy_payload_upload_nbytes(payload) -> int:
     return max(1, int(total))
 
 
+def wgpu_payload_upload_nbytes(payload) -> int:
+    """Physical bytes for WGPU, including hidden exact source-page warming."""
+
+    native = getattr(payload, "native_residency_data", None)
+    if native is not None and int(getattr(getattr(payload, "lod", None), "level", 0) or 0) > 0:
+        # The WGPU warm path uses the exact native pages instead of also
+        # uploading the redundant reduced payload.
+        return max(1, int(getattr(np.asarray(native), "nbytes", 0) or 0))
+    return vispy_payload_upload_nbytes(payload)
+
+
 def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     if not persistent_gpu_tile_residency_backend(window, session):
         return {}
+    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     interactive = interactive_active(window)
     decision = _commit_batch_decision(window, interactive=interactive)
     upload_decision = decision
@@ -4636,10 +4653,29 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+    wgpu_native_prefetch = bool(
+        capabilities.name == "wgpu"
+        and any(
+            getattr(payload, "native_residency_data", None) is not None
+            and int(getattr(getattr(payload, "lod", None), "level", 0) or 0) > 0
+            for payload in dict(getattr(session, "display_tile_payloads", {}) or {}).values()
+        )
+    )
+    if wgpu_native_prefetch:
+        # One 336² scalar source plane is four 256² page uploads. Keep this
+        # hidden source-page work in the same two-tile cohorts as the atomic
+        # warm owner; the generic idle backlog expansion is tuned for one
+        # reduced texture per tile and otherwise creates 20-40 MiB callbacks.
+        batch_limit = min(2, max(1, int(batch_limit)))
+        byte_cap = min(int(byte_cap), 3 * 1024 * 1024)
     limits: dict[str, object] = {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
-        "upsert_cost_fn": vispy_payload_upload_nbytes,
+        "upsert_cost_fn": (
+            wgpu_payload_upload_nbytes
+            if capabilities.name == "wgpu"
+            else vispy_payload_upload_nbytes
+        ),
         # Physical atlas/page-table residency is the only proof that a retarget
         # can bypass every cold admission cap.  The complete resident set must
         # bind atomically; streaming it through the upload cohort is what made

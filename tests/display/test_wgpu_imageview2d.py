@@ -1771,6 +1771,243 @@ def test_atomic_warm_owns_successor_pages_until_the_bound_plane_swap(qt_app):
         view.close()
 
 
+def test_atomic_warm_grows_pool_for_bound_predecessor_and_successor(qt_app):
+    """The hidden successor expands residency without re-uploading its predecessor."""
+
+    from arrayscope.display.model.frame import TilePresentationDelta
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 4, 1, loaded=4)
+
+        def generation(name):
+            return {
+                tile: _payload(
+                    tile,
+                    np.full((16, 24), float(tile + 1), dtype=np.float32),
+                    source_id=(name, tile),
+                )
+                for tile in range(4)
+            }
+
+        predecessor = generation("bound-predecessor")
+        successor = generation("atomic-successor")
+        delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts=successor,
+            active_tiles=tuple(successor),
+            planned_tiles=tuple(successor),
+            atomic_handoff=True,
+        )
+        executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 6},
+            device=_shared_wgpu_device(),
+        )
+        view._wgpu_executor = executor
+        present_kwargs = {
+            "geometry": geometry,
+            "levels": (0.0, 10.0),
+            "histogramRange": (0.0, 10.0),
+        }
+        image = np.zeros(geometry.display_shape, dtype=np.float32)
+        _present_tiled(
+            view,
+            image,
+            montage_tile_payloads=predecessor,
+            **present_kwargs,
+        )
+        _present_tiled(
+            view,
+            image,
+            montage_tile_payloads=predecessor,
+            **present_kwargs,
+        )
+        uploads_after_predecessor = executor.uploads_total
+
+        for start in range(0, 4, 2):
+            view.warmTiledResidency(
+                payloads={tile: successor[tile] for tile in range(start, start + 2)},
+                tile_delta=delta,
+            )
+
+        assert view._wgpu_executor is executor
+        assert executor.pool_budget("scalar_r32f") >= 8
+        assert all(view.tiledPayloadResident(payload) for payload in predecessor.values())
+        assert all(view.tiledPayloadResident(payload) for payload in successor.values())
+        assert executor.uploads_total == uploads_after_predecessor + 4
+    finally:
+        view.close()
+
+
+def test_display_axis_crop_rebinds_full_source_pages_without_upload(qt_app):
+    """A cropped montage tile samples the full plane uploaded by its predecessor.
+
+    This is the physical contract behind fast displayed-axis scrolling: the
+    crop changes ``TileInstance.src_origin``; it does not rename or re-upload
+    source pages already resident from the earlier full montage.
+    """
+
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+
+    source = np.arange(336 * 336, dtype=np.float32).reshape(336, 336)
+    content_key = ("doc", "windowless-view", "montage-source", 12)
+    full = DisplayTilePayload(
+        0,
+        12,
+        source,
+        None,
+        ("full-window-wrapper",),
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            (0, 336, 0, 336),
+            plane_shape=(336, 336),
+        ),
+    )
+    cropped = DisplayTilePayload(
+        0,
+        12,
+        source[:, 94:194],
+        None,
+        ("cropped-window-wrapper", 94, 194),
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            (0, 336, 94, 194),
+            plane_shape=(336, 336),
+        ),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _commit(
+            view,
+            _montage_geometry((336, 336), 1, 1, loaded=1),
+            {0: full},
+            levels=(0.0, float(source.max())),
+        )
+        assert view._wgpu_last_report_uploads == 4
+        resident_before = frozenset(view._wgpu_executor.page_table.resident_keys())
+
+        _commit(
+            view,
+            _montage_geometry((336, 100), 1, 1, loaded=1),
+            {0: cropped},
+            levels=(0.0, float(source.max())),
+        )
+
+        assert view._wgpu_last_report_uploads == 0
+        assert resident_before <= frozenset(view._wgpu_executor.page_table.resident_keys())
+        tile = view._wgpu_committed["tiles"][0]
+        assert tile["src_origin"] == (94.0, 0.0)
+        assert tile["src_size"] == (100.0, 336.0)
+        assert tile["plane_identity"] == ("wgpu-source-plane", content_key)
+    finally:
+        view.close()
+
+
+def test_odd_aligned_exact_reduced_crop_binds_resident_native_pages(qt_app):
+    """Global reduction edge bins must not force a crop-local upload.
+
+    A 100-sample crop beginning at source row 93 spans 51 global factor-2
+    bins, even though a locally reduced 100-sample plane would contain 50.
+    Once the exact native source pages are resident, the reduced successor
+    samples those pages directly and the odd alignment is only a UV change.
+    """
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        PageBackedPresentation,
+        PayloadSourceAnchor,
+    )
+    from arrayscope.display.pyramid import materialize_source_grid_pages, plan_source_grid_pages
+
+    source = np.arange(336 * 336, dtype=np.float32).reshape(336, 336)
+    content_key = ("doc", "windowless-view", "montage-source", 12)
+    full_lod = LodInfo(
+        level=2,
+        factor=4,
+        source_shape=(336, 336),
+        texture_shape=(84, 84),
+    )
+    full = DisplayTilePayload(
+        0,
+        12,
+        source.reshape(84, 4, 84, 4).mean(axis=(1, 3)),
+        None,
+        ("full-window-wrapper",),
+        lod=full_lod,
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            (0, 336, 0, 336),
+            plane_shape=(336, 336),
+        ),
+        native_residency_data=source,
+    )
+    crop_rect = (93, 193, 0, 336)
+    plans = plan_source_grid_pages(
+        content_key=("page-doc", "page-op"),
+        valid_source_rect_yx=crop_rect,
+        reduction_yx=(1, 1),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    pages = materialize_source_grid_pages(
+        source[93:193],
+        source_origin_yx=(93, 0),
+        plans=plans,
+    )
+    crop_lod = LodInfo(
+        level=1,
+        factor=2,
+        source_shape=(100, 336),
+        texture_shape=(51, 168),
+    )
+    reduced_crop = DisplayTilePayload(
+        0,
+        12,
+        pages[0].values,
+        None,
+        ("cropped-reduced-window-wrapper", 93, 193),
+        lod=crop_lod,
+        quality="exact",
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            crop_rect,
+            plane_shape=(336, 336),
+        ),
+        page_backing=PageBackedPresentation(plans, pages, crop_rect, crop_lod),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        view.warmTiledResidency(payloads={0: full})
+        uploads_before = view._wgpu_executor.uploads_total
+        assert uploads_before == 4
+
+        _commit(
+            view,
+            _montage_geometry((100, 336), 1, 1, loaded=1),
+            {0: reduced_crop},
+            levels=(0.0, float(source.max())),
+        )
+
+        assert view._wgpu_executor.uploads_total == uploads_before
+        tile = view._wgpu_committed["tiles"][0]
+        assert tile["src_origin"] == (0.0, 93.0)
+        assert tile["src_size"] == (336.0, 100.0)
+        assert tile["lod_level"] == 0
+        assert tile["plane_identity"] == ("wgpu-source-plane", content_key)
+    finally:
+        view.close()
+
+
 def test_pan_reuses_tile_instances_and_skips_the_instance_upload(qt_app):
     """Panning must cost O(1), not O(tiles).
 
@@ -1972,22 +2209,8 @@ def test_factory_auto_resolution_to_bitmap_is_not_a_warning(qt_app):
         view.close()
 
 
-def test_executor_rebuild_resets_every_atlas_upload_tracker(qt_app):
-    """Dogfood bug 2026-07-21: the floating chips vanished for the whole of a
-    tiled FFT montage fill and came back only afterwards.
-
-    A tiled montage grows its page demand band by band, so it trips an
-    executor rebuild mid-fill.  A fresh executor starts every atlas as one
-    transparent texel, but the upload-currency trackers say what still needs
-    uploading -- and the widget (chip) tracker was not being reset, so the
-    chip quads kept drawing while sampling transparency.  The geometry stays
-    perfectly healthy throughout, which is exactly why this reads as
-    "overlays vanish" rather than as a crash.
-
-    Pinned as an invariant over ALL atlas trackers, not just the widget one:
-    the same line was already missed once for glyphs (b0c3699b) and once for
-    widgets (3656e91e), so the next atlas must not be able to repeat it.
-    """
+def test_executor_pool_growth_preserves_atlas_upload_currency(qt_app):
+    """Growing page capacity must not rebuild unrelated executor resources."""
 
     from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
     from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
@@ -2010,38 +2233,17 @@ def test_executor_rebuild_resets_every_atlas_upload_tracker(qt_app):
         for name in trackers:
             setattr(view, name, 7)  # pretend every atlas is already uploaded
 
-        # Demand more pages than the pool holds -> a real rebuild.
-        rebuilt = view._ensure_wgpu_executor({"scalar_r32f": 8})
-        assert rebuilt is view._wgpu_executor
-        assert rebuilt.pool_budget("scalar_r32f") >= 8
-
-        stale = {name: getattr(view, name) for name in trackers}
-        assert stale == dict.fromkeys(trackers, None), (
-            "an atlas upload tracker survived the executor rebuild, so its "
-            f"atlas will never be re-uploaded and its primitives sample "
-            f"transparency: {stale}"
-        )
+        original = view._wgpu_executor
+        grown = view._ensure_wgpu_executor({"scalar_r32f": 8})
+        assert grown is original
+        assert grown.pool_budget("scalar_r32f") >= 8
+        assert {name: getattr(view, name) for name in trackers} == dict.fromkeys(trackers, 7)
     finally:
         view.close()
 
 
-def test_warm_residency_executor_rebuild_uploads_overlay_geometry(qt_app):
-    """Structural twin of the atlas-tracker rebuild bug, for the overlay buffer.
-
-    warmTiledResidency's incremental page budget trips _ensure_wgpu_executor,
-    which REBUILDS the executor mid-fill (a fresh executor starts with
-    _overlay_geometry == ()) and sets _wgpu_overlay_geometry_dirty.  But
-    warmTiledResidency then submits ONLY EnsureChunkResident commands -- no
-    UpdateOverlayGeometry.  Unless overlay-geometry currency is a submission
-    invariant inside _submit_wgpu (mirroring the glyph/chip atlases), the
-    rebuilt executor keeps _overlay_geometry == () and ALL overlays vanish
-    until an unrelated present (a dock toggle resizes the swapchain) happens to
-    flush the still-True dirty flag.
-
-    This pins the invariant: after the warm submit, with NO extra present or
-    dock toggle, the freshly rebuilt executor already carries the ROI/chip/
-    label geometry and the dirty flag is clear.
-    """
+def test_warm_residency_pool_growth_preserves_overlay_geometry(qt_app):
+    """A hidden warm may grow page pools without replacing overlay state."""
 
     from arrayscope.core.roi import RoiKind
     from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
@@ -2058,6 +2260,9 @@ def test_warm_residency_executor_rebuild_uploads_overlay_geometry(qt_app):
             tile: _payload(tile, image, source_id=f"warm-overlay-src-{tile}")
             for tile, image in images.items()
         }
+        view._wgpu_executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
+        )
         _commit(view, geometry, {0: payloads[0]}, levels=(0.0, 2.0))
 
         # Non-empty overlay geometry: a ROI.  createRoi syncs + submits it, so
@@ -2066,16 +2271,8 @@ def test_warm_residency_executor_rebuild_uploads_overlay_geometry(qt_app):
         assert view._wgpu_overlay_geometry, "precondition: overlay geometry populated"
         assert view._wgpu_overlay_geometry_dirty is False
 
-        # Force the warm path through a REAL rebuild: a one-page pool cannot hold
-        # the two warmed tiles, so _ensure_wgpu_executor builds a fresh executor
-        # whose _overlay_geometry starts empty.  Reset the flag to False to
-        # reproduce the exact post-present clean state the bug starts from.
-        view._wgpu_executor = WgpuPlaneExecutor(
-            pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
-        )
-        view._wgpu_overlay_geometry_dirty = False
-        assert view._wgpu_executor._overlay_geometry == ()
-        stale_executor = view._wgpu_executor
+        original = view._wgpu_executor
+        original_geometry = original._overlay_geometry
 
         view.warmTiledResidency(
             payloads=payloads,
@@ -2083,16 +2280,11 @@ def test_warm_residency_executor_rebuild_uploads_overlay_geometry(qt_app):
             levels=(0.0, 2.0),
         )
 
-        rebuilt = view._wgpu_executor
-        assert rebuilt is not stale_executor, "the warm path must have rebuilt the executor"
-        # The invariant carried the ROI geometry into the warm submit itself,
-        # with no extra present or dock toggle ...
-        assert len(rebuilt._overlay_geometry) > 0, (
-            "the rebuilt executor received no overlay geometry, so every overlay "
-            "is absent until an unrelated present flushes the dirty flag"
-        )
-        assert rebuilt._overlay_geometry == view._wgpu_overlay_geometry
-        # ... and the dirty flag was cleared only after that real submission.
+        grown = view._wgpu_executor
+        assert grown is original
+        assert grown.pool_budget("scalar_r32f") >= 2
+        assert grown._overlay_geometry == original_geometry
+        assert grown._overlay_geometry == view._wgpu_overlay_geometry
         assert view._wgpu_overlay_geometry_dirty is False
     finally:
         view.close()

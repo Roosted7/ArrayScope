@@ -169,6 +169,21 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             getattr(getattr(window.renderer, "_last_montage_backend_choice", None), "reason", "")
         ),
         backend_warning=str(getattr(window.renderer, "_last_montage_backend_warning", "") or ""),
+        wgpu_page_pools=tuple(
+            dict(row) for row in tuple(presentation.get("wgpu_page_pools", ()) or ())
+        ),
+        wgpu_page_table_resident_count=int(presentation.get("page_table_resident_count", 0) or 0),
+        wgpu_atomic_warm_pinned_pages=int(
+            presentation.get("wgpu_atomic_warm_pinned_pages", 0) or 0
+        ),
+        wgpu_uploads_total=int(presentation.get("wgpu_uploads_total", 0) or 0),
+        wgpu_active_resident_bytes=int(presentation.get("wgpu_active_resident_bytes", 0) or 0),
+        wgpu_allocated_pool_bytes=int(presentation.get("wgpu_allocated_pool_bytes", 0) or 0),
+        wgpu_pool_grows_total=int(presentation.get("wgpu_pool_grows_total", 0) or 0),
+        wgpu_pool_growth_copy_bytes_total=int(
+            presentation.get("wgpu_pool_growth_copy_bytes_total", 0) or 0
+        ),
+        wgpu_last_pool_exhaustion=str(presentation.get("wgpu_last_pool_exhaustion", "") or ""),
         show_loading_overlays=False if session is None else bool(session.show_loading_overlays),
         tile_lod_desired_factor=1
         if lod_demand is None
@@ -736,7 +751,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
 
 
 def _presentation_diagnostics(window) -> dict[str, object]:
-    getter = getattr(getattr(window, "img_view", None), "vispyPresentationDiagnostics", None)
+    getter = getattr(getattr(window, "img_view", None), "presentation_diagnostics", None)
     if callable(getter):
         try:
             return dict(getter())

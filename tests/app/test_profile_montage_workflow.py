@@ -1089,6 +1089,63 @@ def test_r8_certification_passes_complete_semantic_and_responsive_phase():
         assert result["r8_gate_failures"] == []
 
 
+def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record.update(
+        phase="display_x_axis_slice",
+        requested_tile_count=50,
+        active_planned_tile_count=50,
+        active_presented_tile_count=50,
+        display_axis_min_physical_tile_count=50,
+        display_axis_physical_tile_sample_count=12,
+        display_axis_slice_scroll_steps=3,
+        display_axis_crop_wgpu_upload_delta=0,
+        display_axis_scroll_wgpu_upload_delta=0,
+        display_axis_wgpu_pool_exhaustion="",
+        wgpu_page_pools=[{"representation": "scalar_r32f", "raw_resident": 100}],
+        grid_kind="display_axis",
+        grid_tile_count=50,
+        full_tile_count=272,
+        tile_cap_applied=True,
+    )
+
+    passed = _r8_certification(record)
+    assert passed["r8_gate_passed"] is True
+
+    record["display_axis_scroll_wgpu_upload_delta"] = 50
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_source_pages_reused" in failures
+
+
+def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record.update(
+        phase="display_y_axis_slice",
+        requested_tile_count=50,
+        active_planned_tile_count=50,
+        active_presented_tile_count=50,
+        display_axis_min_physical_tile_count=50,
+        display_axis_physical_tile_sample_count=8,
+        display_axis_slice_scroll_steps=3,
+        display_axis_crop_wgpu_upload_delta=0,
+        display_axis_scroll_wgpu_upload_delta=0,
+        display_axis_wgpu_pool_exhaustion="page pool 'scalar_r32f' exhausted",
+        grid_kind="display_axis",
+        grid_tile_count=50,
+        full_tile_count=272,
+        tile_cap_applied=True,
+    )
+
+    result = _r8_certification(record)
+    failures = {failure["gate"] for failure in result["r8_gate_failures"]}
+    assert "display_axis_page_pool_has_headroom" in failures
+
+
 def test_r8_certification_rejects_window_size_drift_from_session_fixture():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 

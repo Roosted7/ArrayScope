@@ -621,6 +621,7 @@ def run_profile_montage_workflow(
                 max(0, axis_size - slice_size - scroll_distance),
             )
             stop = start + slice_size
+            uploads_before_crop = _wgpu_upload_total(win)
             predecessor_session = getattr(win, "_frame_session", None)
             predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
             win._on_slice_text_changed(axis, f"{start}:{stop}")
@@ -631,6 +632,7 @@ def run_profile_montage_workflow(
                 predecessor_session_id=predecessor_session_id,
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
+            uploads_after_crop = _wgpu_upload_total(win)
             physical_rows = getattr(win.img_view, "tileTruthPhysicalRows", None)
             physical_tile_counts = [
                 len(dict(physical_rows() or {})) if callable(physical_rows) else 0
@@ -665,6 +667,14 @@ def run_profile_montage_workflow(
                 QtCore,
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
+            final_settled = _wait_for_montage_complete_soft(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            uploads_after_scroll = _wgpu_upload_total(win)
+            presentation = _vispy_presentation_diagnostics(win)
             return {
                 "display_axis_role": role,
                 "display_axis": axis,
@@ -675,6 +685,20 @@ def run_profile_montage_workflow(
                 "display_axis_slice_scroll_direction": "decreasing",
                 "display_axis_slice_scroll_cadence_ms": 120.0,
                 "display_axis_initial_crop_settled": bool(initial_crop_settled),
+                "display_axis_final_settled": bool(final_settled),
+                "display_axis_crop_wgpu_upload_delta": (
+                    None
+                    if uploads_before_crop is None or uploads_after_crop is None
+                    else int(uploads_after_crop - uploads_before_crop)
+                ),
+                "display_axis_scroll_wgpu_upload_delta": (
+                    None
+                    if uploads_after_crop is None or uploads_after_scroll is None
+                    else int(uploads_after_scroll - uploads_after_crop)
+                ),
+                "display_axis_wgpu_pool_exhaustion": str(
+                    presentation.get("wgpu_last_pool_exhaustion", "") or ""
+                ),
                 "display_axis_physical_tile_sample_count": len(physical_tile_counts),
                 "display_axis_min_physical_tile_count": min(
                     physical_tile_counts,
@@ -5417,6 +5441,11 @@ def _phase_record(
         "wgpu_plane_lookup_candidates_total": int(
             vispy.get("wgpu_plane_lookup_candidates_total", 0) or 0
         ),
+        "wgpu_uploads_total": int(vispy.get("wgpu_uploads_total", 0) or 0),
+        "wgpu_last_report_uploads": int(vispy.get("wgpu_last_report_uploads", 0) or 0),
+        "wgpu_page_pools": list(vispy.get("wgpu_page_pools", ()) or ()),
+        "wgpu_atomic_warm_pinned_pages": int(vispy.get("wgpu_atomic_warm_pinned_pages", 0) or 0),
+        "wgpu_last_pool_exhaustion": str(vispy.get("wgpu_last_pool_exhaustion", "") or ""),
         "wgpu_compressed_uploads_total": int(vispy.get("wgpu_compressed_uploads_total", 0) or 0),
         "wgpu_compressed_fallbacks_total": int(
             vispy.get("wgpu_compressed_fallbacks_total", 0) or 0
@@ -5754,6 +5783,13 @@ def _vispy_presentation_diagnostics(win) -> dict[str, object]:
             except Exception:
                 return {}
     return {}
+
+
+def _wgpu_upload_total(win) -> int | None:
+    diagnostics = _vispy_presentation_diagnostics(win)
+    if "wgpu_uploads_total" not in diagnostics:
+        return None
+    return int(diagnostics.get("wgpu_uploads_total", 0) or 0)
 
 
 def _vispy_draw_count(win) -> int:
@@ -6268,6 +6304,33 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             },
             target="every post-crop scroll sample keeps every requested tile physically visible",
         )
+        if str(record.get("backend", "")) == "wgpu":
+            crop_uploads = record.get("display_axis_crop_wgpu_upload_delta")
+            scroll_uploads = record.get("display_axis_scroll_wgpu_upload_delta")
+            require(
+                "display_axis_source_pages_reused",
+                crop_uploads == 0 and scroll_uploads == 0,
+                evidence={
+                    "initial_crop_uploads": crop_uploads,
+                    "scroll_uploads": scroll_uploads,
+                    "scroll_steps": int(record.get("display_axis_slice_scroll_steps", 0) or 0),
+                },
+                target=(
+                    "the full montage prewarms reusable source pages; the "
+                    "crop and every in-page +/-1 scroll perform zero uploads"
+                ),
+                category="performance",
+            )
+            exhaustion = str(record.get("display_axis_wgpu_pool_exhaustion", "") or "")
+            require(
+                "display_axis_page_pool_has_headroom",
+                not exhaustion,
+                evidence={
+                    "last_exhaustion": exhaustion,
+                    "page_pools": record.get("wgpu_page_pools", ()),
+                },
+                target="no WGPU page pool exhaustion during the atomic crop handoff",
+            )
     require(
         "presentation_levels_settled",
         bool(record.get("presentation_settled", False))

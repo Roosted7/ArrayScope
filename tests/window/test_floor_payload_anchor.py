@@ -6,7 +6,8 @@ payloads so the VisPy pool can take the chunked-residency path.  Two laws
 must hold or anchors/chunk keys corrupt (field-report hypothesis H3,
 2026-07-15):
 
-1. Montage sessions never get an anchor — montage tiles are classic.
+1. Montage anchors require an explicit source index and include it in their
+   immutable content identity.
 2. Non-montage sessions get an anchor whose rect is the anchored window
    start plus the NATIVE plan tile extent (``plan.tile_shape`` — the same
    extent the payload's ``LodInfo.source_shape`` carries), never the
@@ -133,13 +134,16 @@ def _floor_payload_for_exact_reduced_level(session):
     return payload
 
 
-def test_montage_floor_payload_never_carries_an_anchor():
+def test_montage_anchor_requires_and_keys_the_source_index():
     session = _session(
         montage_axis=0,
         source_anchoring=SourceAnchoring(anchored_starts=ANCHORED_STARTS, content_key=CONTENT_KEY),
     )
-    payload = _floor_payload_for_exact_reduced_level(session)
-    assert payload.source_anchor is None
+    assert session._payload_source_anchor((TILE, TILE)) is None
+    anchor = session._payload_source_anchor((TILE, TILE), source_index=7)
+    assert anchor is not None
+    assert anchor.content_key == (CONTENT_KEY, "montage-source", 7)
+    assert anchor.source_rect == (5, 5 + TILE, 12, 12 + TILE)
 
 
 def test_non_montage_floor_payload_anchor_rect_is_native_plan_extent():
@@ -206,8 +210,8 @@ def test_non_montage_floor_payload_without_anchoring_stays_classic():
     assert payload.source_anchor is None
 
 
-def test_preview_quality_floor_payload_never_carries_an_anchor():
-    """Degraded planes do not honor the anchor's pure-function promise."""
+def test_preview_quality_floor_anchor_is_coordinate_only():
+    """A preview may locate resident exact pages but never seeds them itself."""
 
     session = _session(
         montage_axis=None,
@@ -235,4 +239,6 @@ def test_preview_quality_floor_payload_never_carries_an_anchor():
     session._ensure_floor_payloads((1,))
     payload = session.display_tile_payloads[1]
     assert payload.quality == "preview"
-    assert payload.source_anchor is None
+    assert payload.source_anchor is not None
+    assert payload.source_anchor.content_key == CONTENT_KEY
+    assert payload.native_residency_data is None

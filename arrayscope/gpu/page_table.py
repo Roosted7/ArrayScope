@@ -251,6 +251,11 @@ class PageTable:
             if entry is not None:
                 entry.pinned = bool(self._owners_for(key))
 
+    def pin_set(self, owner: object) -> frozenset[DataChunkKey]:
+        """Return one owner's resident pins for diagnostics and capacity planning."""
+
+        return self._pin_sets.get(owner, frozenset())
+
     def _replace_owner_key(self, owner: object, key: DataChunkKey, pinned: bool) -> None:
         values = set(self._pin_sets.get(owner, frozenset()))
         if pinned:

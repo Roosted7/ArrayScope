@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -23,6 +24,34 @@ def _action(menu, text):
 
 def _read_jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_gpu_overview_bar_reports_wgpu_page_pool_usage():
+    from arrayscope.ui.diagnostics import _gpu_available, _gpu_bar_usage
+
+    snapshot = SimpleNamespace(
+        montage=SimpleNamespace(
+            wgpu_page_pools=(
+                {
+                    "raw_resident_layers": 60,
+                    "raw_pinned_layers": 50,
+                    "raw_allocated_layers": 64,
+                    "codec_resident_layers": 12,
+                    "codec_pinned_layers": 4,
+                    "codec_allocated_layers": 16,
+                },
+            ),
+            wgpu_allocated_pool_bytes=80 << 20,
+        ),
+        montage_timing=SimpleNamespace(),
+    )
+
+    used, total, detail = _gpu_bar_usage(snapshot)
+    assert _gpu_available(snapshot) is True
+    assert (used, total) == (72, 80)
+    assert "pages 72/80" in detail
+    assert "pinned 54" in detail
+    assert "alloc 80.0M" in detail
 
 
 def test_developer_menu_opens_diagnostics_dialog(qtbot):

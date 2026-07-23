@@ -114,6 +114,28 @@ _WGPU_COMPONENT_MODES = {
     ShaderComponent.COMPLEX_PHASE.value: "phase",
 }
 
+
+@dataclass(frozen=True)
+class _WgpuPayloadBinding:
+    """Physical source-plane binding selected for one payload.
+
+    Anchored payloads bind the complete source plane when every page sampled
+    by the window is already resident, or when this payload contains complete
+    globally aligned pages that can honestly establish that residency.
+    Otherwise the payload keeps its crop-local plane identity.  The latter is
+    the correctness fallback for a cold narrow crop: zero padding must never
+    masquerade as valid source texels outside the supplied window.
+    """
+
+    plane_identity: object
+    plane_shape: tuple[int, int]
+    source_origin_xy: tuple[float, float]
+    page_keys: tuple[object, ...]
+    upload_chunks: tuple[tuple[int, int], ...]
+    source_anchored: bool
+    lod_level: int
+
+
 _WGPU_REP_BY_KIND = {
     TexturePlaneKind.SCALAR_R32F: SCALAR_R32F,
     TexturePlaneKind.COMPLEX_RG32F: COMPLEX_RG32F,
@@ -499,11 +521,6 @@ class WgpuImageView2D(ImageViewShell):
         from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
 
         executor = self._wgpu_executor
-        if executor is not None and all(
-            executor.pool_budget(representation) >= needed
-            for representation, needed in required_pages.items()
-        ):
-            return executor
         device = _shared_wgpu_device()
         max_layers = int(device.limits["max-texture-array-layers"])
         preferred_pages = dict(preferred_pages or {})
@@ -524,6 +541,14 @@ class WgpuImageView2D(ImageViewShell):
             )
             if budget:
                 budgets[representation] = budget
+        if executor is not None:
+            # The executor's physical arrays already support copy-preserving
+            # growth. Raising their logical ceilings in place retains every
+            # reusable page and lets the next upload grow only the affected
+            # representation. Rebuilding here discarded all residency and
+            # forced later index changes to re-upload unchanged chunks.
+            executor.ensure_pool_budgets(budgets)
+            return executor
         # Resolve the explicit display-codec experiment against this device's
         # real block-compression support. OFF is the exact production default.
         from arrayscope.app.settings_state import texture_codec_executor_mode
@@ -948,7 +973,9 @@ class WgpuImageView2D(ImageViewShell):
         instances = tuple(
             TileInstance(
                 tuple(float(value) for value in committed["tiles"][tile]["world_rect"]),
-                (0.0, 0.0),
+                tuple(
+                    float(value) for value in committed["tiles"][tile].get("src_origin", (0.0, 0.0))
+                ),
                 tuple(float(value) for value in committed["tiles"][tile]["src_size"]),
                 0,
                 plane_index=int(committed["tiles"][tile]["plane_index"]),
@@ -1338,7 +1365,7 @@ class WgpuImageView2D(ImageViewShell):
         tile_residency_budget_bytes: int,
         frame_plan,
     ):
-        from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+        from arrayscope.gpu.wgpu_executor import PAGE
 
         self._start_upload_timing("wgpu_tile_layer")
         applying = self._applying_presentation
@@ -1383,7 +1410,7 @@ class WgpuImageView2D(ImageViewShell):
                 for tile in payloads
             }
             lod_geometry = {
-                tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile])
+                tile: _wgpu_payload_declared_lod_geometry(payloads[tile], textures[tile])
                 for tile in payloads
             }
             # Size the pool for each declared ladder, not merely the payload
@@ -1428,24 +1455,64 @@ class WgpuImageView2D(ImageViewShell):
             for tile in sorted(payloads):
                 payload = payloads[tile]
                 identity = tile_ack_identity(payload)
-                plane_identity = _wgpu_payload_plane_identity(payload)
                 texture = textures[tile]
                 lod_level, source_shape = lod_geometry[tile]
-                height, width = (int(texture.shape[0]), int(texture.shape[1]))
-                source_height, source_width = source_shape
-                grid_h, grid_w = -(-height // PAGE), -(-width // PAGE)
                 lod_reducer = _wgpu_payload_lod_reducer(
                     payload,
                     representation=representation,
                     mapping_mode=mode,
                 )
+                binding = _wgpu_payload_binding(
+                    payload,
+                    texture,
+                    representation=representation,
+                    mapping_mode=mode,
+                    resident_keys=planned_resident,
+                )
+                reusable_native = self._wgpu_reusable_native_texture(
+                    payload,
+                    binding=binding,
+                    representation=representation,
+                    selected_lod=lod_level,
+                )
+                upload_texture = texture
+                if reusable_native is not None:
+                    native_keys = _wgpu_native_prefetch_page_keys(
+                        payload,
+                        representation=representation,
+                        mapping_mode=mode,
+                        selected_lod=lod_level,
+                    )
+                    native_grid_w = -(-int(reusable_native.shape[1]) // PAGE)
+                    source_rect = tuple(int(value) for value in payload.source_anchor.source_rect)
+                    binding = _WgpuPayloadBinding(
+                        plane_identity=(
+                            "wgpu-source-plane",
+                            payload.source_anchor.content_key,
+                        ),
+                        plane_shape=tuple(
+                            int(value) for value in payload.source_anchor.plane_shape
+                        ),
+                        source_origin_xy=(float(source_rect[2]), float(source_rect[0])),
+                        page_keys=native_keys,
+                        upload_chunks=tuple(
+                            divmod(index, native_grid_w) for index in range(len(native_keys))
+                        ),
+                        source_anchored=True,
+                        lod_level=0,
+                    )
+                    upload_texture = reusable_native
+                physical_lod_level = int(binding.lod_level)
+                plane_identity = binding.plane_identity
+                source_height, source_width = binding.plane_shape
+                local_source_height, local_source_width = source_shape
                 resident_plane_keys = tuple(
                     key
                     for key in resident_by_plane.get((plane_identity, "live", representation), ())
                     if key.lod.is_native or key.lod.reducer == lod_reducer
                 )
                 resident_lods = (int(key.lod.level) for key in resident_plane_keys)
-                max_lod = max((lod_level, *resident_lods))
+                max_lod = max((physical_lod_level, *resident_lods))
                 plane_index = len(planes)
                 planes.append(
                     ContentPlane(
@@ -1459,43 +1526,35 @@ class WgpuImageView2D(ImageViewShell):
                 )
                 page_keys = []
                 will_upload = False
-                for chunk_y in range(grid_h):
-                    for chunk_x in range(grid_w):
-                        key = plane_chunk_key(
-                            plane_identity,
-                            "live",
-                            lod_level,
-                            chunk_x,
-                            chunk_y,
-                            dtype=_WGPU_REP_DTYPES[representation],
-                            representation=representation,
-                            plane_shape=source_shape,
-                            reducer=lod_reducer,
+                for key, (chunk_y, chunk_x) in zip(
+                    binding.page_keys,
+                    binding.upload_chunks,
+                    strict=True,
+                ):
+                    page_keys.append(key)
+                    if key not in planned_resident:
+                        generated = _wgpu_plan_lod_page_generation(
+                            key,
+                            plane_shape=binding.plane_shape,
+                            available=planned_resident,
+                            commands=commands,
                         )
-                        page_keys.append(key)
-                        if key not in planned_resident:
-                            generated = _wgpu_plan_lod_page_generation(
-                                key,
-                                plane_shape=source_shape,
-                                available=planned_resident,
-                                commands=commands,
-                            )
-                            if not generated:
-                                will_upload = True
-                                # CPU-produced payload remains the fallback for
-                                # cold content and non-mean reducer families.
-                                commands.append(
-                                    EnsureChunkResident(
-                                        key,
-                                        self._wgpu_page_block(
-                                            texture,
-                                            chunk_y,
-                                            chunk_x,
-                                            representation,
-                                        ),
-                                    )
+                        if not generated:
+                            will_upload = True
+                            # CPU-produced payload remains the fallback for
+                            # cold content and non-mean reducer families.
+                            commands.append(
+                                EnsureChunkResident(
+                                    key,
+                                    self._wgpu_page_block(
+                                        upload_texture,
+                                        chunk_y,
+                                        chunk_x,
+                                        representation,
+                                    ),
                                 )
-                                planned_resident.add(key)
+                            )
+                            planned_resident.add(key)
                 if will_upload:
                     planned_upload_tiles.append(tile)
                 plane_residency_key = (plane_identity, "live", representation)
@@ -1511,10 +1570,11 @@ class WgpuImageView2D(ImageViewShell):
                         float(region.width),
                         float(region.height),
                     ),
-                    "src_size": (float(source_width), float(source_height)),
+                    "src_size": (float(local_source_width), float(local_source_height)),
+                    "src_origin": tuple(binding.source_origin_xy),
                     "plane_index": plane_index,
                     "page_keys": tuple(page_keys),
-                    "lod_level": lod_level,
+                    "lod_level": physical_lod_level,
                     "plane_identity": plane_identity,
                     "lod_reducer": lod_reducer,
                     "source_index": int(getattr(payload, "source_index", tile)),
@@ -1852,6 +1912,53 @@ class WgpuImageView2D(ImageViewShell):
         }[representation]
         return pack_texture_data(texture, kind)
 
+    def _wgpu_reusable_native_texture(
+        self,
+        payload,
+        *,
+        binding: _WgpuPayloadBinding,
+        representation: str,
+        selected_lod: int,
+    ) -> np.ndarray | None:
+        """Return a complete exact native plane worth warming with a coarse draw.
+
+        A zoomed-out full montage commonly presents LOD1/2 while the payload
+        still owns its exact semantic plane.  Uploading that plane through the
+        same bounded tile commit populates the already-budgeted L0 pages once;
+        a later displayed-axis crop then becomes only a source-window rebind.
+        Narrow/cold crops never enter here because their binding is local, and
+        display-ready/windowed RGB is skipped because ``semantic_data`` alone
+        does not carry its paired luminance representation.
+        """
+
+        if int(selected_lod) <= 0:
+            return None
+        if representation not in {SCALAR_R32F, COMPLEX_RG32F}:
+            return None
+        semantic = getattr(payload, "native_residency_data", None)
+        if semantic is None:
+            semantic = getattr(payload, "semantic_data", None)
+        if semantic is None:
+            return None
+        semantic = np.asarray(semantic)
+        if tuple(int(value) for value in semantic.shape[:2]) != binding.plane_shape:
+            anchor = getattr(payload, "source_anchor", None)
+            plane_shape = tuple(getattr(anchor, "plane_shape", ()) or ())
+            source_rect = tuple(getattr(anchor, "source_rect", ()) or ())
+            if tuple(int(value) for value in semantic.shape[:2]) != plane_shape or source_rect != (
+                0,
+                plane_shape[0],
+                0,
+                plane_shape[1],
+            ):
+                return None
+        kind = (
+            TexturePlaneKind.COMPLEX_RG32F
+            if representation == COMPLEX_RG32F
+            else TexturePlaneKind.SCALAR_R32F
+        )
+        return pack_texture_data(semantic, kind)
+
     def _wgpu_page_block(self, texture, chunk_y, chunk_x, representation) -> np.ndarray:
         from arrayscope.gpu.wgpu_executor import PAGE
 
@@ -1966,7 +2073,7 @@ class WgpuImageView2D(ImageViewShell):
     ):
         """Ensure payload pages without changing the bound presentation."""
 
-        from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+        from arrayscope.gpu.wgpu_executor import PAGE
 
         payloads = {int(tile): payload for tile, payload in dict(payloads or {}).items()}
         if not payloads:
@@ -1982,7 +2089,8 @@ class WgpuImageView2D(ImageViewShell):
             for tile, payload in payloads.items()
         }
         lod_geometry = {
-            tile: _wgpu_payload_lod_geometry(payloads[tile], textures[tile]) for tile in payloads
+            tile: _wgpu_payload_declared_lod_geometry(payloads[tile], textures[tile])
+            for tile in payloads
         }
         # Hidden atomic warming is delivered in small GUI-budget batches, but
         # residency capacity belongs to the whole successor.  Sizing the pool
@@ -1991,42 +2099,82 @@ class WgpuImageView2D(ImageViewShell):
         # its last one or two tiles resident.
         atomic_handoff = bool(getattr(tile_delta, "atomic_handoff", False))
         capacity_payloads = payloads
-        if atomic_handoff:
-            transaction_payloads = dict(getattr(tile_delta, "upserts", {}) or {})
-            if transaction_payloads:
-                capacity_payloads = transaction_payloads
+        transaction_payloads = dict(getattr(tile_delta, "upserts", {}) or {})
+        if transaction_payloads:
+            # Pool capacity belongs to the complete presentation transaction,
+            # even when the coordinator delivers its warm work in small GUI
+            # batches. This is equally true for the initial montage fill and
+            # for an atomic successor.
+            capacity_payloads = transaction_payloads
         capacity_geometry = {}
         for tile, payload in capacity_payloads.items():
             texture = np.asarray(
                 payload.texture_data if payload.texture_data is not None else payload.image
             )
             capacity_geometry[int(tile)] = (
-                _wgpu_payload_lod_geometry(payload, texture),
+                _wgpu_payload_declared_lod_geometry(payload, texture),
                 tuple(int(value) for value in texture.shape[:2]),
             )
         pages_needed = sum(
-            -(-texture_shape[0] // PAGE) * -(-texture_shape[1] // PAGE)
-            for _geometry, texture_shape in capacity_geometry.values()
+            native_pages
+            if (
+                native_pages := _wgpu_native_prefetch_page_count(
+                    capacity_payloads[tile],
+                    representation=representation,
+                    selected_lod=geometry[0],
+                )
+            )
+            else -(-texture_shape[0] // PAGE) * -(-texture_shape[1] // PAGE)
+            for tile, (geometry, texture_shape) in capacity_geometry.items()
         )
         pages_preferred = sum(
             _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
             for (lod_level, source_shape), _texture_shape in capacity_geometry.values()
         )
+        transaction_page_keys = frozenset()
+        if atomic_handoff:
+            current_executor = self._wgpu_executor
+            current_resident = (
+                () if current_executor is None else current_executor.page_table.resident_keys()
+            )
+            transaction_page_keys = frozenset(
+                key
+                for tile, payload in capacity_payloads.items()
+                for key in (
+                    _wgpu_native_prefetch_page_keys(
+                        payload,
+                        representation=representation,
+                        mapping_mode=_mapping[0],
+                        selected_lod=capacity_geometry[int(tile)][0][0],
+                    )
+                    or _wgpu_payload_page_keys(
+                        payload,
+                        representation=representation,
+                        mapping_mode=_mapping[0],
+                        resident_keys=current_resident,
+                    )
+                )
+            )
+            if current_executor is not None:
+                # Replace any superseded hidden generation first, then size
+                # the physical working set from the canonical page table:
+                # bound predecessor coverage plus the complete successor.
+                current_executor.replace_resident_pin_set(
+                    self._wgpu_atomic_warm_pin_owner,
+                    transaction_page_keys,
+                )
+                protected = frozenset(
+                    key
+                    for key in current_executor.page_table.resident_keys()
+                    if key.representation == representation
+                    and current_executor.page_table.is_pinned(key)
+                )
+                pages_needed = max(pages_needed, len(protected | transaction_page_keys))
         executor = self._ensure_wgpu_executor(
             {representation: pages_needed},
             preferred_pages={representation: pages_preferred},
         )
-        transaction_page_keys = frozenset()
         if atomic_handoff:
-            transaction_page_keys = frozenset(
-                key
-                for payload in capacity_payloads.values()
-                for key in _wgpu_payload_page_keys(
-                    payload,
-                    representation=representation,
-                    mapping_mode=_mapping[0],
-                )
-            )
             # A newer atomic generation replaces the old generation's
             # ownership here. Repeated batches for one generation simply
             # refresh the resident subset already uploaded.
@@ -2035,35 +2183,67 @@ class WgpuImageView2D(ImageViewShell):
                 transaction_page_keys,
             )
         commands = []
+        planned_resident = set(executor.page_table.resident_keys())
         for tile in sorted(payloads):
             texture = textures[tile]
-            lod_level, source_shape = lod_geometry[tile]
-            lod_reducer = _wgpu_payload_lod_reducer(
+            selected_lod = int(lod_geometry[tile][0])
+            binding = _wgpu_payload_binding(
                 payloads[tile],
+                texture,
                 representation=representation,
                 mapping_mode=_mapping[0],
+                resident_keys=planned_resident,
             )
-            grid_h = -(-int(texture.shape[0]) // PAGE)
-            grid_w = -(-int(texture.shape[1]) // PAGE)
-            plane_identity = _wgpu_payload_plane_identity(payloads[tile])
-            commands.extend(
-                EnsureChunkResident(
-                    plane_chunk_key(
-                        plane_identity,
-                        "live",
-                        lod_level,
-                        chunk_x,
-                        chunk_y,
-                        dtype=_WGPU_REP_DTYPES[representation],
-                        representation=representation,
-                        plane_shape=source_shape,
-                        reducer=lod_reducer,
-                    ),
-                    self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
+            reusable_native = self._wgpu_reusable_native_texture(
+                payloads[tile],
+                binding=binding,
+                representation=representation,
+                selected_lod=selected_lod,
+            )
+            if reusable_native is not None:
+                native_keys = _wgpu_native_prefetch_page_keys(
+                    payloads[tile],
+                    representation=representation,
+                    mapping_mode=_mapping[0],
+                    selected_lod=selected_lod,
                 )
-                for chunk_y in range(grid_h)
-                for chunk_x in range(grid_w)
-            )
+                native_grid_w = -(-int(reusable_native.shape[1]) // PAGE)
+                for index, key in enumerate(native_keys):
+                    if key in planned_resident:
+                        continue
+                    chunk_y, chunk_x = divmod(index, native_grid_w)
+                    commands.append(
+                        EnsureChunkResident(
+                            key,
+                            self._wgpu_page_block(
+                                reusable_native,
+                                chunk_y,
+                                chunk_x,
+                                representation,
+                            ),
+                        )
+                    )
+                    planned_resident.add(key)
+                # Native exact pages are both higher quality and reusable
+                # across source-window shifts. Uploading this payload's
+                # reduced page as well would duplicate the successor working
+                # set and create avoidable eviction pressure during preview
+                # handoff.
+                continue
+            for key, (chunk_y, chunk_x) in zip(
+                binding.page_keys,
+                binding.upload_chunks,
+                strict=True,
+            ):
+                if key in planned_resident:
+                    continue
+                commands.append(
+                    EnsureChunkResident(
+                        key,
+                        self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
+                    )
+                )
+                planned_resident.add(key)
         report = self._submit_wgpu(tuple(commands))
         if atomic_handoff:
             executor.replace_resident_pin_set(
@@ -2113,6 +2293,7 @@ class WgpuImageView2D(ImageViewShell):
                 payload,
                 representation=representation,
                 mapping_mode=mapping_mode,
+                resident_keys=executor.page_table.resident_keys(),
             )
         )
 
@@ -2390,6 +2571,7 @@ class WgpuImageView2D(ImageViewShell):
         drawn_tiles = tuple(self.tileTruthPhysicalRows())
         committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
+        page_pools = () if executor is None else tuple(executor.pool_diagnostics_snapshot())
         diagnostics: dict[str, object] = {
             "draw_count": int(getattr(self, "_wgpu_draw_count", 0) or 0),
             "tile_presentation_request_count": int(
@@ -2416,6 +2598,13 @@ class WgpuImageView2D(ImageViewShell):
             ),
             "wgpu_active_resident_bytes": int(getattr(executor, "active_resident_bytes", 0) or 0),
             "wgpu_allocated_pool_bytes": int(getattr(executor, "allocated_pool_bytes", 0) or 0),
+            "wgpu_page_pools": page_pools,
+            "wgpu_atomic_warm_pinned_pages": (
+                0
+                if executor is None
+                else len(executor.resident_pin_set(self._wgpu_atomic_warm_pin_owner))
+            ),
+            "wgpu_last_pool_exhaustion": str(getattr(executor, "last_pool_exhaustion", "") or ""),
             "wgpu_pool_grows_total": int(getattr(executor, "pool_grows_total", 0) or 0),
             "wgpu_pool_growth_copy_bytes_total": int(
                 getattr(executor, "pool_growth_copy_bytes_total", 0) or 0
@@ -2565,37 +2754,207 @@ def _wgpu_payload_page_keys(
     *,
     representation: str,
     mapping_mode: str,
+    resident_keys=(),
 ) -> tuple[object, ...]:
     """Canonical executor keys for one payload without packing its pixels."""
-
-    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
 
     texture = np.asarray(
         payload.texture_data if payload.texture_data is not None else payload.image
     )
-    lod_level, source_shape = _wgpu_payload_lod_geometry(payload, texture)
-    grid_h = -(-int(texture.shape[0]) // PAGE)
-    grid_w = -(-int(texture.shape[1]) // PAGE)
-    plane_identity = _wgpu_payload_plane_identity(payload)
+    return _wgpu_payload_binding(
+        payload,
+        texture,
+        representation=representation,
+        mapping_mode=mapping_mode,
+        resident_keys=resident_keys,
+    ).page_keys
+
+
+def _wgpu_payload_binding(
+    payload,
+    texture: np.ndarray,
+    *,
+    representation: str,
+    mapping_mode: str,
+    resident_keys=(),
+) -> _WgpuPayloadBinding:
+    """Choose an honest crop-local or reusable source-plane binding."""
+
+    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+    geometry_error = None
+    try:
+        lod_level, local_source_shape = _wgpu_payload_lod_geometry(payload, texture)
+    except ValueError as exc:
+        anchor = getattr(payload, "source_anchor", None)
+        lod = getattr(payload, "lod", None)
+        if anchor is None or lod is None:
+            raise
+        # A globally aligned reduced window can contain one extra edge bin
+        # compared with ceil(window_extent/factor). Its PageBackedPresentation
+        # already validated that geometry. It is usable only by rebinding
+        # resident canonical pages below; never by uploading a crop-local page.
+        geometry_error = exc
+        lod_level = int(getattr(lod, "level", 0) or 0)
+        local_source_shape = tuple(int(value) for value in lod.source_shape)
     lod_reducer = _wgpu_payload_lod_reducer(
         payload,
         representation=representation,
         mapping_mode=mapping_mode,
     )
-    return tuple(
+    local_identity = _wgpu_payload_plane_identity(payload)
+    local_grid_h = -(-int(texture.shape[0]) // PAGE)
+    local_grid_w = -(-int(texture.shape[1]) // PAGE)
+
+    def local_binding() -> _WgpuPayloadBinding:
+        if geometry_error is not None:
+            raise geometry_error
+        chunks = tuple(
+            (chunk_y, chunk_x) for chunk_y in range(local_grid_h) for chunk_x in range(local_grid_w)
+        )
+        return _WgpuPayloadBinding(
+            plane_identity=local_identity,
+            plane_shape=local_source_shape,
+            source_origin_xy=(0.0, 0.0),
+            page_keys=tuple(
+                plane_chunk_key(
+                    local_identity,
+                    "live",
+                    lod_level,
+                    chunk_x,
+                    chunk_y,
+                    dtype=_WGPU_REP_DTYPES[representation],
+                    representation=representation,
+                    plane_shape=local_source_shape,
+                    reducer=lod_reducer,
+                )
+                for chunk_y, chunk_x in chunks
+            ),
+            upload_chunks=chunks,
+            source_anchored=False,
+            lod_level=lod_level,
+        )
+
+    anchor = getattr(payload, "source_anchor", None)
+    plane_shape = tuple(getattr(anchor, "plane_shape", ()) or ())
+    source_rect = tuple(getattr(anchor, "source_rect", ()) or ())
+    if len(plane_shape) != 2 or len(source_rect) != 4:
+        return local_binding()
+    plane_h, plane_w = (int(value) for value in plane_shape)
+    y0, y1, x0, x1 = (int(value) for value in source_rect)
+    if not (0 <= y0 < y1 <= plane_h and 0 <= x0 < x1 <= plane_w):
+        return local_binding()
+    if (y1 - y0, x1 - x0) != tuple(int(value) for value in local_source_shape):
+        return local_binding()
+
+    source_page = PAGE << int(lod_level)
+    chunk_y0 = y0 // source_page
+    chunk_x0 = x0 // source_page
+    chunk_y1 = -(-y1 // source_page)
+    chunk_x1 = -(-x1 // source_page)
+    global_identity = ("wgpu-source-plane", getattr(anchor, "content_key", None))
+    global_chunks = tuple(
+        (chunk_y, chunk_x)
+        for chunk_y in range(chunk_y0, chunk_y1)
+        for chunk_x in range(chunk_x0, chunk_x1)
+    )
+    global_keys = tuple(
         plane_chunk_key(
-            plane_identity,
+            global_identity,
             "live",
             lod_level,
             chunk_x,
             chunk_y,
             dtype=_WGPU_REP_DTYPES[representation],
             representation=representation,
-            plane_shape=source_shape,
+            plane_shape=plane_shape,
             reducer=lod_reducer,
         )
-        for chunk_y in range(grid_h)
-        for chunk_x in range(grid_w)
+        for chunk_y, chunk_x in global_chunks
+    )
+    resident = set(resident_keys)
+    fully_resident = all(key in resident for key in global_keys)
+    if not fully_resident and int(lod_level) > 0:
+        # A reduced payload is a presentation-quality floor, not a mandate to
+        # sample that physical rung.  If the exact native source window is
+        # already resident, both preview and exact reduced successors can bind
+        # those better pages directly.  This is the fast cropped-axis path:
+        # only source origin/extent changes, with no crop upload and no
+        # reduced edge-bin geometry to reinterpret.
+        native_chunk_y0 = y0 // PAGE
+        native_chunk_x0 = x0 // PAGE
+        native_chunk_y1 = -(-y1 // PAGE)
+        native_chunk_x1 = -(-x1 // PAGE)
+        native_chunks = tuple(
+            (chunk_y, chunk_x)
+            for chunk_y in range(native_chunk_y0, native_chunk_y1)
+            for chunk_x in range(native_chunk_x0, native_chunk_x1)
+        )
+        native_keys = tuple(
+            plane_chunk_key(
+                global_identity,
+                "live",
+                0,
+                chunk_x,
+                chunk_y,
+                dtype=_WGPU_REP_DTYPES[representation],
+                representation=representation,
+                plane_shape=plane_shape,
+                reducer=lod_reducer,
+            )
+            for chunk_y, chunk_x in native_chunks
+        )
+        if all(key in resident for key in native_keys):
+            return _WgpuPayloadBinding(
+                plane_identity=global_identity,
+                plane_shape=(plane_h, plane_w),
+                source_origin_xy=(float(x0), float(y0)),
+                page_keys=native_keys,
+                upload_chunks=tuple(
+                    (chunk_y - native_chunk_y0, chunk_x - native_chunk_x0)
+                    for chunk_y, chunk_x in native_chunks
+                ),
+                source_anchored=True,
+                lod_level=0,
+            )
+    supplies_complete_pages = (
+        str(getattr(payload, "quality", "exact") or "exact") == "exact"
+        and y0 % source_page == 0
+        and x0 % source_page == 0
+        and (y1 == plane_h or y1 % source_page == 0)
+        and (x1 == plane_w or x1 % source_page == 0)
+        and len(global_chunks) == local_grid_h * local_grid_w
+    )
+    if not fully_resident and not supplies_complete_pages:
+        if geometry_error is not None:
+            resident_levels = tuple(
+                sorted(
+                    {
+                        int(key.lod.level)
+                        for key in resident
+                        if key.document_generation == global_identity
+                        and key.operation_key == "live"
+                        and key.representation == representation
+                    }
+                )
+            )
+            raise ValueError(
+                f"{geometry_error}; canonical source-plane resident levels="
+                f"{resident_levels or 'none'}"
+            ) from geometry_error
+        return local_binding()
+    if geometry_error is not None and not fully_resident:
+        raise geometry_error
+    return _WgpuPayloadBinding(
+        plane_identity=global_identity,
+        plane_shape=(plane_h, plane_w),
+        source_origin_xy=(float(x0), float(y0)),
+        page_keys=global_keys,
+        upload_chunks=tuple(
+            (chunk_y - chunk_y0, chunk_x - chunk_x0) for chunk_y, chunk_x in global_chunks
+        ),
+        source_anchored=True,
+        lod_level=lod_level,
     )
 
 
@@ -2732,6 +3091,34 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
     return level, source_shape
 
 
+def _wgpu_payload_declared_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
+    """Capacity geometry for payloads with checked global reduction bins.
+
+    ``PageBackedPresentation`` may validly contain one extra leading/trailing
+    stored bin when its source window is not factor-aligned.  Binding still
+    decides whether those values can be used honestly; capacity planning only
+    needs the declared rung and native window extent and must not reject the
+    payload before that decision.
+    """
+
+    try:
+        return _wgpu_payload_lod_geometry(payload, texture)
+    except ValueError:
+        lod = getattr(payload, "lod", None)
+        if (
+            lod is None
+            or getattr(payload, "page_backing", None) is None
+            or getattr(payload, "source_anchor", None) is None
+            or tuple(int(value) for value in np.shape(texture)[:2])
+            != tuple(int(value) for value in lod.texture_shape)
+        ):
+            raise
+        factor = int(payload.actual_lod_factor)
+        if factor < 1 or factor & (factor - 1):
+            raise
+        return factor.bit_length() - 1, tuple(int(value) for value in lod.source_shape)
+
+
 def _wgpu_ladder_page_count(source_shape, *, max_lod: int) -> int:
     height, width = (int(value) for value in source_shape)
     from arrayscope.gpu.wgpu_executor import PAGE
@@ -2739,6 +3126,75 @@ def _wgpu_ladder_page_count(source_shape, *, max_lod: int) -> int:
     return sum(
         (-(-height // (PAGE << level))) * (-(-width // (PAGE << level)))
         for level in range(int(max_lod) + 1)
+    )
+
+
+def _wgpu_native_prefetch_page_count(
+    payload,
+    *,
+    representation: str,
+    selected_lod: int,
+) -> int:
+    """Native source pages carried alongside a reduced presentation."""
+
+    if int(selected_lod) <= 0 or representation not in {SCALAR_R32F, COMPLEX_RG32F}:
+        return 0
+    source = getattr(payload, "native_residency_data", None)
+    if source is None:
+        source = getattr(payload, "semantic_data", None)
+    anchor = getattr(payload, "source_anchor", None)
+    plane_shape = tuple(getattr(anchor, "plane_shape", ()) or ())
+    if (
+        source is None
+        or len(plane_shape) != 2
+        or tuple(int(value) for value in np.shape(source)[:2])
+        != tuple(int(value) for value in plane_shape)
+    ):
+        return 0
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    return -(-int(plane_shape[0]) // PAGE) * -(-int(plane_shape[1]) // PAGE)
+
+
+def _wgpu_native_prefetch_page_keys(
+    payload,
+    *,
+    representation: str,
+    mapping_mode: str,
+    selected_lod: int,
+) -> tuple[object, ...]:
+    """Canonical L0 keys that replace a redundant reduced warm payload."""
+
+    if not _wgpu_native_prefetch_page_count(
+        payload,
+        representation=representation,
+        selected_lod=selected_lod,
+    ):
+        return ()
+    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+    anchor = payload.source_anchor
+    plane_shape = tuple(int(value) for value in anchor.plane_shape)
+    plane_identity = ("wgpu-source-plane", anchor.content_key)
+    reducer = _wgpu_payload_lod_reducer(
+        payload,
+        representation=representation,
+        mapping_mode=mapping_mode,
+    )
+    return tuple(
+        plane_chunk_key(
+            plane_identity,
+            "live",
+            0,
+            chunk_x,
+            chunk_y,
+            dtype=_WGPU_REP_DTYPES[representation],
+            representation=representation,
+            plane_shape=plane_shape,
+            reducer=reducer,
+        )
+        for chunk_y in range(-(-plane_shape[0] // PAGE))
+        for chunk_x in range(-(-plane_shape[1] // PAGE))
     )
 
 

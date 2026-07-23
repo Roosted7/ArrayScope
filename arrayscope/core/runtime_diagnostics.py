@@ -212,6 +212,17 @@ class MontageRuntimeDiagnostics:
     slice_retention_inflight_age_ms: float = 0.0
     slice_retention_last_replacement_ms: float = 0.0
     slice_retention_max_replacement_ms: float = 0.0
+    # WGPU physical page-pool truth. Each row reports representation, logical
+    # budget, allocated arrays, resident layers, and pinned layers.
+    wgpu_page_pools: tuple[dict[str, object], ...] = ()
+    wgpu_page_table_resident_count: int = 0
+    wgpu_atomic_warm_pinned_pages: int = 0
+    wgpu_uploads_total: int = 0
+    wgpu_active_resident_bytes: int = 0
+    wgpu_allocated_pool_bytes: int = 0
+    wgpu_pool_grows_total: int = 0
+    wgpu_pool_growth_copy_bytes_total: int = 0
+    wgpu_last_pool_exhaustion: str = ""
 
 
 @dataclass(frozen=True)
@@ -909,6 +920,15 @@ _MONTAGE_COVERED = frozenset(
         "lifecycle_identity_rejections",
         "dirty_payload_tiles",
         "backend_stale_identities",
+        "wgpu_page_pools",
+        "wgpu_page_table_resident_count",
+        "wgpu_atomic_warm_pinned_pages",
+        "wgpu_uploads_total",
+        "wgpu_active_resident_bytes",
+        "wgpu_allocated_pool_bytes",
+        "wgpu_pool_grows_total",
+        "wgpu_pool_growth_copy_bytes_total",
+        "wgpu_last_pool_exhaustion",
         "pending_payload_upserts",
         "pending_removals",
         "level_scan_remaining_tiles",
@@ -1073,6 +1093,47 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         for text in (montage.backend_warning, timing.tile_layer_capacity_warning)
         if text
     )
+    wgpu_pool_lines = tuple(
+        (
+            f"  {row.get('representation', 'unknown')}: "
+            f"raw resident/pinned/allocated/free="
+            f"{int(row.get('raw_resident_layers', 0) or 0)}/"
+            f"{int(row.get('raw_pinned_layers', 0) or 0)}/"
+            f"{int(row.get('raw_allocated_layers', 0) or 0)}/"
+            f"{int(row.get('raw_free_layers', 0) or 0)} "
+            f"codec={int(row.get('codec_resident_layers', 0) or 0)}/"
+            f"{int(row.get('codec_pinned_layers', 0) or 0)}/"
+            f"{int(row.get('codec_allocated_layers', 0) or 0)}/"
+            f"{int(row.get('codec_free_layers', 0) or 0)} "
+            f"budget={int(row.get('budget_layers', 0) or 0)}"
+        )
+        for row in montage.wgpu_page_pools
+        if int(row.get("budget_layers", 0) or 0) > 0
+        or int(row.get("raw_resident_layers", 0) or 0) > 0
+        or int(row.get("codec_resident_layers", 0) or 0) > 0
+    )
+    wgpu_lines = (
+        (
+            (
+                "WGPU page pools: "
+                f"resident={montage.wgpu_page_table_resident_count} "
+                f"atomic_pins={montage.wgpu_atomic_warm_pinned_pages} "
+                f"uploads={montage.wgpu_uploads_total} "
+                f"resident_bytes={format_bytes(montage.wgpu_active_resident_bytes)} "
+                f"allocated={format_bytes(montage.wgpu_allocated_pool_bytes)} "
+                f"grows={montage.wgpu_pool_grows_total}/"
+                f"{format_bytes(montage.wgpu_pool_growth_copy_bytes_total)}"
+            ),
+            *wgpu_pool_lines,
+            *(
+                (f"WGPU POOL ERROR: {montage.wgpu_last_pool_exhaustion}",)
+                if montage.wgpu_last_pool_exhaustion
+                else ()
+            ),
+        )
+        if montage.wgpu_page_pools or montage.wgpu_last_pool_exhaustion
+        else ()
+    )
     return (
         # -- state that explains what the user sees, most important first --
         (
@@ -1145,6 +1206,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"pages={montage.tile_visual_visible_pages} overlays={montage.overlay_count} "
             f"above_tiles={_bool_text(montage.overlays_above_tiles)}"
         ),
+        *wgpu_lines,
         (
             "Compute: "
             f"cache_hit={montage.tile_compute_cache_hits} stage_backed={montage.tile_compute_stage_backed} "

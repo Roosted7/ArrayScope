@@ -1386,7 +1386,11 @@ def _evaluate_tile_native_output_preview(
     source = render_lod.canonical_value_source_for_rendered(
         rendered, shader_display=bool(shader_display)
     )
-    source_origin_yx = render_lod.source_origin_yx_for_session(session, source)
+    source_origin_yx = render_lod.source_origin_yx_for_session(
+        session,
+        source,
+        source_index=int(tile.source_index),
+    )
     pages = tuple(
         render_lod.materialize_lod_page(
             source,
@@ -1415,6 +1419,7 @@ def _evaluate_tile_native_output_preview(
         texture_kind,
         None,
         rough_level_stats,
+        source if getattr(session, "source_anchoring", None) is not None else None,
     )
 
 

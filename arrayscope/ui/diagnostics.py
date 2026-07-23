@@ -397,9 +397,10 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             total=snapshot.display_cache.max_bytes,
             detail=_cache_tier_detail(snapshot.display_cache),
         )
-        show_gpu = str(
-            getattr(snapshot, "image_rendering_backend_actual", "")
-        ) == "vispy" and _gpu_available(snapshot)
+        show_gpu = str(getattr(snapshot, "image_rendering_backend_actual", "")) in {
+            "vispy",
+            "wgpu",
+        } and _gpu_available(snapshot)
         bars["gpu"].setVisible(show_gpu)
         bars["tile"].setVisible(not show_gpu)
 
@@ -662,6 +663,29 @@ def _upload_total_bytes(snapshot) -> int:
 
 
 def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
+    pools = tuple(getattr(snapshot.montage, "wgpu_page_pools", ()) or ())
+    if pools:
+        resident = sum(
+            int(row.get("raw_resident_layers", 0) or 0)
+            + int(row.get("codec_resident_layers", 0) or 0)
+            for row in pools
+        )
+        pinned = sum(
+            int(row.get("raw_pinned_layers", 0) or 0) + int(row.get("codec_pinned_layers", 0) or 0)
+            for row in pools
+        )
+        allocated = sum(
+            int(row.get("raw_allocated_layers", 0) or 0)
+            + int(row.get("codec_allocated_layers", 0) or 0)
+            for row in pools
+        )
+        return (
+            resident,
+            max(1, allocated),
+            f"pages {resident}/{allocated} {_percent(resident, allocated or 1)} | "
+            f"pinned {pinned} | alloc "
+            f"{_short_bytes(snapshot.montage.wgpu_allocated_pool_bytes)}",
+        )
     timing = snapshot.montage_timing
     gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
     budget_bytes = int(getattr(timing, "tile_layer_budget_bytes", 0) or 0)
@@ -684,6 +708,8 @@ def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
 
 
 def _gpu_available(snapshot) -> bool:
+    if tuple(getattr(snapshot.montage, "wgpu_page_pools", ()) or ()):
+        return True
     timing = snapshot.montage_timing
     return bool(
         int(getattr(timing, "tile_layer_budget_bytes", 0) or 0) > 0

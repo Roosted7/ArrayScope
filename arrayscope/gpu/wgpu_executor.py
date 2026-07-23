@@ -1531,6 +1531,7 @@ class WgpuPlaneExecutor:
         self._lod_compressed_source_reductions_total = 0
         self._pool_grows_total = 0
         self._pool_growth_copy_bytes_total = 0
+        self._last_pool_exhaustion = ""
         self._table_dirty = True
         self._tiles: tuple = ()
         self._mapping = DisplayMapping()
@@ -2779,9 +2780,20 @@ class WgpuPlaneExecutor:
                 continue
             self._evict(EvictChunk(key))
             return
-        raise RuntimeError(
-            f"page pool {representation!r} exhausted and every resident page is pinned"
+        pool = self._pool_by_id(pool_id or _POOL_IDS[representation])
+        resident = tuple(
+            key
+            for key, slot in self.page_table.slot_items()
+            if slot.pool_id == pool_id or (pool_id is None and key.representation == representation)
         )
+        pinned = sum(self.page_table.is_pinned(key) for key in resident)
+        self._last_pool_exhaustion = (
+            f"page pool {representation!r} exhausted and every resident page is pinned: "
+            f"pool={pool_id or 'all'} budget={pool.layer_count} "
+            f"allocated={pool.allocated_layers} resident={len(resident)} "
+            f"pinned={pinned} free={len(pool.free_layers)}"
+        )
+        raise RuntimeError(self._last_pool_exhaustion)
 
     def _evict(self, cmd: EvictChunk) -> int:
         # PageTable.unbind purges the key from its stored pin sets; the
@@ -3406,6 +3418,32 @@ class WgpuPlaneExecutor:
     def pool_budget(self, representation: str) -> int:
         return int(self._pool_budgets[representation])
 
+    def ensure_pool_budgets(self, budgets: dict[str, int]) -> dict[str, int]:
+        """Grow logical pool ceilings in place while preserving resident pages."""
+
+        grown: dict[str, int] = {}
+        max_layers = int(self.device.limits["max-texture-array-layers"])
+        for representation, requested in dict(budgets or {}).items():
+            if representation not in self._pool_budgets:
+                raise ValueError(f"unknown pool representation {representation!r}")
+            requested = max(0, int(requested))
+            if requested > max_layers:
+                raise RuntimeError(
+                    "wgpu active plane pages exceed the device texture-array limit: "
+                    f"representation={representation!r}, needed={requested}, "
+                    f"max_layers={max_layers}"
+                )
+            previous = int(self._pool_budgets[representation])
+            if requested <= previous:
+                continue
+            self._pool_budgets[representation] = requested
+            self._pools[representation].layer_count = requested
+            codec_pool = self._codec_pools.get(representation)
+            if codec_pool is not None:
+                codec_pool.layer_count = requested
+            grown[representation] = requested
+        return grown
+
     def replace_resident_pin_set(self, owner: object, keys) -> frozenset[DataChunkKey]:
         """Replace one owner's pins with the resident subset of ``keys``.
 
@@ -3418,6 +3456,50 @@ class WgpuPlaneExecutor:
         resident = frozenset(key for key in keys if key in self.page_table)
         self.page_table.replace_pin_set(owner, resident)
         return resident
+
+    def resident_pin_set(self, owner: object) -> frozenset[DataChunkKey]:
+        return self.page_table.pin_set(owner)
+
+    def pool_diagnostics_snapshot(self) -> tuple[dict[str, object], ...]:
+        """Physical capacity, allocation, residency, and pins per representation."""
+
+        rows = []
+        for representation in REPRESENTATIONS:
+            raw_pool_id = _POOL_IDS[representation]
+            codec_pool_id = _CODEC_POOL_IDS.get(representation)
+            raw_keys = tuple(
+                key for key, slot in self.page_table.slot_items() if slot.pool_id == raw_pool_id
+            )
+            codec_keys = tuple(
+                key
+                for key, slot in self.page_table.slot_items()
+                if codec_pool_id is not None and slot.pool_id == codec_pool_id
+            )
+            raw_pool = self._pools[representation]
+            codec_pool = self._codec_pools.get(representation)
+            rows.append(
+                {
+                    "representation": representation,
+                    "budget_layers": int(self._pool_budgets[representation]),
+                    "raw_allocated_layers": int(raw_pool.allocated_layers),
+                    "raw_resident_layers": len(raw_keys),
+                    "raw_pinned_layers": sum(self.page_table.is_pinned(key) for key in raw_keys),
+                    "raw_free_layers": len(raw_pool.free_layers),
+                    "codec_allocated_layers": (
+                        0 if codec_pool is None else int(codec_pool.allocated_layers)
+                    ),
+                    "codec_resident_layers": len(codec_keys),
+                    "codec_pinned_layers": sum(
+                        self.page_table.is_pinned(key) for key in codec_keys
+                    ),
+                    "codec_free_layers": (0 if codec_pool is None else len(codec_pool.free_layers)),
+                }
+            )
+        return tuple(rows)
+
+    @property
+    def last_pool_exhaustion(self) -> str:
+        return str(self._last_pool_exhaustion)
 
     def pool_free_layers(self, representation: str) -> int:
         return len(self._pools[representation].free_layers)

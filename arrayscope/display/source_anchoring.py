@@ -128,7 +128,13 @@ def source_anchoring_for_view(
         anchored_starts.append(start)
         start_by_axis[axis] = start
         if start is not None:
-            windowless = windowless.with_axis_range(axis, None)
+            # The slider index of a displayed axis is UI bookkeeping (often
+            # moved to the range midpoint by slice editing); the image request
+            # keeps that axis, so this index cannot affect its texels.  Leaving
+            # it in the window-free key renamed the same source plane between
+            # an uncropped view and its first crop even though subsequent
+            # same-size shifts happened to reuse correctly.
+            windowless = windowless.with_axis_range(axis, None).with_slice(axis, 0)
     source_axes = tuple(sorted(image_axes)) if canonical_orientation else image_axes
     source_starts_yx = tuple(start_by_axis[axis] for axis in source_axes)
 

@@ -345,7 +345,9 @@ def _page_route_format(
     return REDUCER_NATIVE, dtype.name, SCALAR_R32F
 
 
-def source_origin_yx_for_session(session, source: np.ndarray) -> tuple[int, int]:
+def source_origin_yx_for_session(
+    session, source: np.ndarray, *, source_index=None
+) -> tuple[int, int]:
     """Locate a rendered source plane on the canonical native source grid.
 
     Every live producer must pair its precomputed page plans and numeric
@@ -356,7 +358,11 @@ def source_origin_yx_for_session(session, source: np.ndarray) -> tuple[int, int]
     """
 
     anchor_fn = getattr(session, "_payload_source_anchor", None)
-    anchor = anchor_fn(tuple(np.shape(source)[:2])) if callable(anchor_fn) else None
+    anchor = (
+        anchor_fn(tuple(np.shape(source)[:2]), source_index=source_index)
+        if callable(anchor_fn)
+        else None
+    )
     if anchor is None:
         return (0, 0)
     return (int(anchor.source_rect[0]), int(anchor.source_rect[2]))
@@ -384,10 +390,15 @@ def page_plans_for_rendered(
         reduction_yx=reduction_yx,
         reduced_format=(reducer, dtype, representation),
     )
-    origin_y, origin_x = source_origin_yx_for_session(session, source)
+    source_index = int(rendered.tile.source_index)
+    origin_y, origin_x = source_origin_yx_for_session(
+        session,
+        source,
+        source_index=source_index,
+    )
     height, width = (int(value) for value in source.shape[:2])
     anchor_fn = getattr(session, "_payload_source_anchor", None)
-    anchor = anchor_fn((height, width)) if callable(anchor_fn) else None
+    anchor = anchor_fn((height, width), source_index=source_index) if callable(anchor_fn) else None
     source_id = (
         session.tile_semantic_source_id(rendered.tile.source_index)
         if semantic_source_id is None
@@ -875,6 +886,7 @@ def plan_materialization(
         source_origin_yx=source_origin_yx_for_session(
             session,
             np.asarray(native_source),
+            source_index=int(rendered.tile.source_index),
         ),
         plans=plans,
         claimed_plans=claimed,
@@ -1499,15 +1511,33 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         # display window carries the window-invariant source anchor (native
         # rect = window start + native tile extent), so the VisPy pool can
         # take the chunked-residency path with uniform plane-pixel pages.
-        # Preview floors stay unanchored: the anchor promises texels that
-        # are a pure function of (content key, rect, LOD), which degraded
-        # planes do not honor.  ``_payload_source_anchor`` itself returns
-        # None for montage sessions and unanchorable chains.
+        # Preview floors carry the coordinate anchor too, but backends may
+        # use it only to consume already-resident exact source pages; degraded
+        # values are never allowed to establish canonical source residency.
         source_anchor = None
-        if presentation_quality == "exact" and resolved.exact:
-            anchor_fn = getattr(session, "_payload_source_anchor", None)
-            if callable(anchor_fn):
-                source_anchor = anchor_fn(tile_shape)
+        anchor_fn = getattr(session, "_payload_source_anchor", None)
+        if callable(anchor_fn):
+            source_anchor = anchor_fn(tile_shape, source_index=source_index)
+        native_residency_data = None
+        metadata_native = getattr(metadata, "native_residency_data", None)
+        if metadata_native is not None and tuple(np.shape(metadata_native)[:2]) == tuple(
+            getattr(source_anchor, "plane_shape", ()) or ()
+        ):
+            native_residency_data = metadata_native
+        rendered_native = session.rendered_tiles.get(int(tile_number))
+        if (
+            native_residency_data is None
+            and source_anchor is not None
+            and rendered_native is not None
+        ):
+            candidate = canonical_value_source_for_rendered(
+                rendered_native,
+                shader_display=bool(getattr(session, "shader_display", True)),
+            )
+            if tuple(np.shape(candidate)[:2]) == tuple(
+                getattr(source_anchor, "plane_shape", ()) or ()
+            ):
+                native_residency_data = candidate
         payload = DisplayTilePayload(
             tile_number=tile_number,
             source_index=source_index,
@@ -1536,6 +1566,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                 ),
                 requested_lod=requested_lod,
             ),
+            native_residency_data=native_residency_data,
             level_data=getattr(metadata, "level_data", None),
             level_stats=getattr(metadata, "level_stats", None),
             tile_identity=session.tile_payload_identity(

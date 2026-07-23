@@ -350,6 +350,43 @@ def test_every_montage_field_is_visible_in_its_tab():
     )
 
 
+def test_montage_details_show_wgpu_pool_capacity_pins_and_exhaustion():
+    snapshot = _snapshot()
+    snapshot = replace(
+        snapshot,
+        montage=replace(
+            snapshot.montage,
+            wgpu_page_pools=(
+                {
+                    "representation": "scalar_r32f",
+                    "budget_layers": 128,
+                    "raw_allocated_layers": 96,
+                    "raw_resident_layers": 90,
+                    "raw_pinned_layers": 50,
+                    "raw_free_layers": 6,
+                    "codec_allocated_layers": 32,
+                    "codec_resident_layers": 20,
+                    "codec_pinned_layers": 10,
+                    "codec_free_layers": 12,
+                },
+            ),
+            wgpu_page_table_resident_count=110,
+            wgpu_atomic_warm_pinned_pages=50,
+            wgpu_uploads_total=200,
+            wgpu_allocated_pool_bytes=128 << 20,
+            wgpu_last_pool_exhaustion=(
+                "page pool 'scalar_r32f' exhausted: resident=110 pinned=110"
+            ),
+        ),
+    )
+
+    text = format_runtime_diagnostics(snapshot)
+    assert "WGPU page pools: resident=110 atomic_pins=50 uploads=200" in text
+    assert "scalar_r32f: raw resident/pinned/allocated/free=90/50/96/6" in text
+    assert "codec=20/10/32/12 budget=128" in text
+    assert "WGPU POOL ERROR: page pool 'scalar_r32f' exhausted" in text
+
+
 def test_every_render_field_is_visible_in_its_tab():
     from arrayscope.core import runtime_diagnostics as rd
     from arrayscope.core.runtime_diagnostics import RenderCoalescerDiagnostics

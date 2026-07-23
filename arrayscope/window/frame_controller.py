@@ -164,22 +164,29 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     def _session_source_anchoring(self, document, view_state, axis):
         """ADR 0055 G3: window-invariant payload anchoring for the session.
 
-        Non-montage sessions on atlas-resident backends stamp exact payloads
-        with a window-free content identity so the backend can keep chunked
-        residency across display-window shifts. Montage sessions already
-        anchor per source index; CPU-item backends re-window anyway.
+        GPU-resident sessions stamp exact payloads with a window-free content
+        identity so the backend can keep source pages across display-window
+        shifts.  Montage planes add their source index when the payload anchor
+        is built; the shared anchoring state deliberately normalizes the
+        montage slider index here.
         """
 
-        if axis is not None:
-            return None
         capabilities = image_view_backend_capabilities(self.win.img_view)
         if getattr(capabilities, "tile_residency_kind", None) != "gpu_atlas":
             return None
         from arrayscope.display.source_anchoring import source_anchoring_for_view
 
+        anchoring_state = view_state
+        if axis is not None:
+            anchoring_state = view_state.with_montage_axis(
+                None,
+                columns=None,
+                indices=None,
+                text=None,
+            ).with_slice(int(axis), 0)
         return source_anchoring_for_view(
             document,
-            view_state,
+            anchoring_state,
             canonical_orientation=bool(getattr(capabilities, "display_axis_transpose", False)),
         )
 

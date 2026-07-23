@@ -2711,6 +2711,53 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
     assert limits["upsert_cost_fn"](payload) == texture.nbytes
 
 
+def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.window import frame_effects as montage_commit
+
+    native = np.zeros((336, 336), dtype=np.float32)
+    reduced = np.zeros((84, 84), dtype=np.float32)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        reduced,
+        None,
+        ("source", 0),
+        lod=LodInfo(2, 4, native.shape, reduced.shape),
+        native_residency_data=native,
+    )
+    session = SimpleNamespace(
+        display_committed=True,
+        dirty_payloads=dict.fromkeys(range(50)),
+        pending_payload_upserts={},
+        display_tile_payloads=dict.fromkeys(range(50), payload),
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="wgpu",
+                persistent_tile_residency=True,
+                tile_residency_kind="gpu_atlas",
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=32, byte_cap=32 * 1024 * 1024, budget_ms=8.0
+            )
+        ),
+    )
+    window.win = window
+
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 2
+    assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
+    assert limits["upsert_cost_fn"](payload) == native.nbytes
+
+
 def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
     # The tiled commit's cost is fixed-dominated (full-plan classify + delta
     # walk + acknowledgement run once per commit regardless of item count),
