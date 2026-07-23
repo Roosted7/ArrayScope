@@ -237,6 +237,11 @@ def run_profile_montage_workflow(
         tile_count = int(np.shape(data)[montage_axis])
         max_tiles = None if max_tiles is None or int(max_tiles) <= 0 else int(max_tiles)
         large_indices = _centered_indices(tile_count, max_tiles)
+        # Keep the displayed-axis regression stage bounded and invariant
+        # across datasets. The attached failures used 50 simultaneously
+        # visible montage tiles; running the whole source dimension changes
+        # both the atomic transaction and the residency pressure being tested.
+        display_axis_indices = _centered_indices(tile_count, min(50, tile_count))
         # ``None`` is the application's real default: choose a layout that
         # maximizes the montage in the current viewport.  Do not turn the
         # square-ish value used in the metrics table into a hidden semantic
@@ -296,6 +301,29 @@ def run_profile_montage_workflow(
             qt_platform=str(app.platformName()),
             grid_kind="scroll",
             source_index_count=len(scroll_source_indices),
+            screenshot_timing_perturbed=screenshot_timing_perturbed,
+        )
+        base_display_axis = _base_record(
+            run_id=run_id,
+            backend=backend,
+            data_path=data_path,
+            data=data,
+            load_mode=load_mode,
+            montage_axis=montage_axis,
+            indices=display_axis_indices,
+            full_tile_count=tile_count,
+            columns=(
+                _default_columns(len(display_axis_indices))
+                if columns_large is None
+                else columns_large
+            ),
+            max_tiles=len(display_axis_indices),
+            profiler_type=profiler_type,
+            profiler_artifact_paths=profiler_artifact_paths,
+            run_temperature=_workflow_run_temperature(),
+            qt_platform=str(app.platformName()),
+            grid_kind="display_axis",
+            source_index_count=tile_count,
             screenshot_timing_perturbed=screenshot_timing_perturbed,
         )
         base_large["synthetic_scene"] = synthetic_scene or None
@@ -557,9 +585,13 @@ def run_profile_montage_workflow(
             slice_source_state = raw_state.with_montage_axis(
                 montage_axis,
                 columns=columns_large,
-                indices=large_indices,
+                indices=display_axis_indices,
                 text=":",
             ).with_image_axes(1, 0)
+            slice_source_state = slice_source_state.with_axis_flipped(
+                int(slice_source_state.image_axes[0]),
+                True,
+            )
             win._set_view_state(slice_source_state)
             win.render(reason=f"profile-display-{role}-axis-slice-source")
             _wait_for_montage_complete_soft(
@@ -578,20 +610,46 @@ def run_profile_montage_workflow(
             axis_position = 1 if role == "x" else 0
             axis = int(win.view_state.image_axes[axis_position])
             axis_size = int(win.view_state.shape[axis])
-            slice_size = min(150, axis_size)
-            start = min(8, max(0, axis_size - slice_size))
+            # The dogfood failure used a narrow 100-pixel displayed-axis crop
+            # and a continuous scrollbar gesture.  Keep enough rapid
+            # successor generations in this stage to exercise the atomic
+            # residency handoff instead of measuring one isolated text edit.
+            slice_size = min(100, axis_size)
+            scroll_distance = min(3, max(0, axis_size - slice_size))
+            start = min(
+                max(0, (axis_size - slice_size) // 2 - 21),
+                max(0, axis_size - slice_size - scroll_distance),
+            )
             stop = start + slice_size
+            predecessor_session = getattr(win, "_frame_session", None)
+            predecessor_session_id = int(getattr(predecessor_session, "session_id", -1) or -1)
             win._on_slice_text_changed(axis, f"{start}:{stop}")
-            _process_events(app, QtCore, count=4)
-            scroll_distance = min(8, max(0, axis_size - stop))
+            initial_crop_settled = _wait_for_montage_successor_settled(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                predecessor_session_id=predecessor_session_id,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            physical_rows = getattr(win.img_view, "tileTruthPhysicalRows", None)
+            physical_tile_counts = [
+                len(dict(physical_rows() or {})) if callable(physical_rows) else 0
+            ]
             for offset in range(1, scroll_distance + 1):
                 win._on_slice_text_changed(
                     axis,
-                    f"{start + offset}:{stop + offset}",
+                    f"{start - offset}:{stop - offset}",
                 )
-                _process_events(app, QtCore, count=2)
-            final_start = start + scroll_distance
-            final_stop = stop + scroll_distance
+                # Model the real scrollbar cadence from the attached trace:
+                # each one-pixel successor got far enough to begin its hidden
+                # warm before the next input superseded it.
+                cadence_stop_at = perf_counter() + 0.12
+                while perf_counter() < cadence_stop_at:
+                    _process_events(app, QtCore, count=1)
+                    if callable(physical_rows):
+                        physical_tile_counts.append(len(dict(physical_rows() or {})))
+            final_start = start - scroll_distance
+            final_stop = stop - scroll_distance
             view_range = _montage_view_range(win)
             if view_range is not None:
                 zoomed_out = _maximum_zoomout_view_range(
@@ -614,6 +672,14 @@ def run_profile_montage_workflow(
                 "display_axis_slice_stop": final_stop,
                 "display_axis_slice_size": slice_size,
                 "display_axis_slice_scroll_steps": scroll_distance,
+                "display_axis_slice_scroll_direction": "decreasing",
+                "display_axis_slice_scroll_cadence_ms": 120.0,
+                "display_axis_initial_crop_settled": bool(initial_crop_settled),
+                "display_axis_physical_tile_sample_count": len(physical_tile_counts),
+                "display_axis_min_physical_tile_count": min(
+                    physical_tile_counts,
+                    default=0,
+                ),
                 "fit_stretch_pulsed": fit_stretch_pulsed,
                 "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
                 **fit_metrics,
@@ -651,7 +717,7 @@ def run_profile_montage_workflow(
                 records,
                 jsonl,
                 {
-                    **base_large,
+                    **base_display_axis,
                     **slice_record,
                     "operation_pipeline": (),
                     "run_temperature": "mixed",
@@ -2837,6 +2903,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
             "visible_upserts": 0,
             "visible_removals": 0,
             "visible_stage_waiters": 0,
+            "atomic_successor_pending": False,
         }
     fan = getattr(session, "stage_fan_in", None)
     target_unsettled = _tile_number_set(session.required_target_unsettled_tiles())
@@ -2854,12 +2921,14 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
     visible_removals = removals & expected
     visible_stage_waiters = stage_waiters & expected
     visible_changed = bool(visible_dirty or visible_upserts or visible_removals)
+    atomic_successor_pending = bool(getattr(session, "atomic_successor_pending", False))
     visible_has_backlog = bool(
         visible_target_unsettled
         or visible_loading
         or visible_active
         or visible_stage_waiters
         or visible_changed
+        or atomic_successor_pending
         or (visible_changed and bool(getattr(session, "final_commit_pending", False)))
         or (visible_changed and bool(getattr(session, "flush_pending", False)))
     )
@@ -2872,6 +2941,7 @@ def _visible_backlog_state(session, expected: set[int]) -> dict[str, object]:
         "visible_upserts": len(visible_upserts),
         "visible_removals": len(visible_removals),
         "visible_stage_waiters": len(visible_stage_waiters),
+        "atomic_successor_pending": atomic_successor_pending,
     }
 
 
@@ -2977,6 +3047,43 @@ def _wait_for_montage_complete_soft(
             )
             return False
         last_sig = sig
+    return False
+
+
+def _wait_for_montage_successor_settled(
+    *,
+    win,
+    app,
+    QtCore,
+    predecessor_session_id: int,
+    budget_s: float,
+) -> bool:
+    """Wait for an input's successor session, then for that target to settle.
+
+    A retained predecessor can remain fully visible between the input callback
+    and the coalesced render request.  Treating that old session as the input's
+    completion made the displayed-axis profile skip the atomic handoff it was
+    intended to exercise.
+    """
+
+    budget_s = bounded_interaction_settle_timeout_s(budget_s)
+    started = perf_counter()
+    deadline = started + budget_s
+    while perf_counter() < deadline:
+        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        session = getattr(win, "_frame_session", None)
+        if int(getattr(session, "session_id", -1) or -1) != int(predecessor_session_id):
+            remaining = max(0.0, deadline - perf_counter())
+            if remaining <= 0.0:
+                return False
+            return _wait_for_montage_complete_soft(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                budget_s=remaining,
+                stall_grace_s=min(2.5, remaining),
+            )
+        time.sleep(0.001)
     return False
 
 
@@ -4551,6 +4658,7 @@ def _wait_for_montage_complete(
             session is not None
             and callable(getattr(session, "required_target_settled", None))
             and session.required_target_settled()
+            and not bool(getattr(session, "atomic_successor_pending", False))
         )
         # Fail-fast only while the visible frame is still owed.  Warm/offscreen
         # work must not make a completed visible frame look frozen.
@@ -6148,6 +6256,18 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         evidence={"requested": requested, "planned": planned, "presented": presented},
         target="requested == planned == presented",
     )
+    if phase in {"display_x_axis_slice", "display_y_axis_slice"}:
+        continuity_min = int(record.get("display_axis_min_physical_tile_count", 0) or 0)
+        require(
+            "display_axis_physical_continuity",
+            requested > 0 and continuity_min == requested,
+            evidence={
+                "requested": requested,
+                "minimum": continuity_min,
+                "samples": int(record.get("display_axis_physical_tile_sample_count", 0) or 0),
+            },
+            target="every post-crop scroll sample keeps every requested tile physically visible",
+        )
     require(
         "presentation_levels_settled",
         bool(record.get("presentation_settled", False))

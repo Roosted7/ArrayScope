@@ -38,6 +38,18 @@ def test_cold_tile_climbs_floor_preview_desired():
     assert steps[2].lane == Lane.DISPLAY_PREPARATION
 
 
+def test_preview_disabled_goes_directly_to_desired_target():
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+
+    steps = ladder.plan_tile(
+        TileLodState(tile_number=3, allow_preview=False),
+        demand(1),
+    )
+
+    assert rungs(steps) == [(Rung.DESIRED, 1)]
+    assert steps[0].lane == Lane.DISPLAY_PREVIEW
+
+
 def test_coarse_demand_skips_redundant_preview_rung():
     ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(3))

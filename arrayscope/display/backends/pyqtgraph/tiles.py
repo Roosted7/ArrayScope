@@ -620,6 +620,37 @@ class MontageTileLayer:
                 # re-commit backoff and the trace invariant.
                 identity_rejected_tiles.append(int(tile))
         identity_rejected_tiles.sort()
+        if bool(getattr(tile_delta, "atomic_handoff", False)) and identity_rejected_tiles:
+            # An atomic handoff is all-or-nothing physical truth. A stale
+            # prepared successor must report its rejected identities without
+            # hiding or retargeting any holder from the complete predecessor.
+            # The session re-arms those exact upserts and rebuilds the
+            # transaction; mutating here would turn a recoverable rejection
+            # into a partial/black frame.
+            physically_presented = tuple(
+                sorted(
+                    int(state.tile_number)
+                    for state in self._states.values()
+                    if _state_is_physically_visible(state)
+                )
+            )
+            resident_items = self._resident_count()
+            return TileLayerUpdateStats(
+                visible_items=len(physically_presented),
+                presented_tiles=physically_presented,
+                presented_identities=_direct_presented_identities(self._states),
+                committed_upserts=(),
+                identity_rejected_items=len(identity_rejected_tiles),
+                identity_rejected_tiles=tuple(identity_rejected_tiles),
+                resident_items=int(resident_items),
+                storage_capacity=int(resident_items),
+                cpu_shadow_bytes=int(self._resident_bytes),
+                budget_bytes=int(tile_residency_budget_bytes or 0),
+                warm_resident_items=max(
+                    0,
+                    int(resident_items) - len(physically_presented),
+                ),
+            )
         active = {
             int(tile)
             for tile in requested_active

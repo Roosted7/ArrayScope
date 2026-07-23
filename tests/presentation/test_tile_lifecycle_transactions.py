@@ -24,7 +24,12 @@ def _payload(
     )
 
 
-def _typed_identity(*, level: int, quality: str = "exact") -> TileIdentity:
+def _typed_identity(
+    *,
+    level: int,
+    quality: str = "exact",
+    semantic_generation: object = "semantic",
+) -> TileIdentity:
     return TileIdentity(
         document_generation="doc",
         operation_key="operation",
@@ -34,7 +39,7 @@ def _typed_identity(*, level: int, quality: str = "exact") -> TileIdentity:
         channel="complex",
         complex_mapping=("phase_color", "abs", "mapped"),
         texture_kind="complex_rg32f",
-        semantic_generation="semantic",
+        semantic_generation=semantic_generation,
         lod=TileLodIdentity(level=level, factor=1 << level),
         quality=quality,
     )
@@ -212,6 +217,31 @@ def test_current_payload_does_not_depend_on_native_renderer_materialization_iden
 
     assert lifecycle.payload_is_current(0, reduced_shared_target)
     assert not lifecycle.payload_is_current(0, _payload(("stale", 0), source=11, level=2))
+
+
+def test_current_payload_rejects_a_presentable_wrapper_from_an_old_semantic_generation():
+    lifecycle = TileLifecycle()
+    old = _typed_payload(level=2, quality="exact")
+    lifecycle.retarget({0: _typed_target(level=2)})
+    lifecycle.target_ready(0, old)
+    assert lifecycle.payload_is_current(0, old)
+
+    lifecycle.retarget(
+        {
+            0: TileTarget(
+                0,
+                10,
+                ("semantic", 10),
+                lod_level=2,
+                identity=_typed_identity(
+                    level=2,
+                    semantic_generation="display-axis-crop-successor",
+                ),
+            )
+        }
+    )
+
+    assert not lifecycle.payload_is_current(0, old)
 
 
 def test_source_retarget_preserves_physical_truth_but_rejects_stale_pixels():

@@ -19,6 +19,8 @@ in both directions with zero watchdog stall assertions.
 
 from __future__ import annotations
 
+from time import perf_counter
+
 import numpy as np
 import pytest
 
@@ -171,13 +173,13 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
 
 @pytest.mark.parametrize("backend", ["wgpu", "pyqtgraph"])
 def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
-    """Every cropped-axis successor must physically retain every montage tile."""
+    """A rapid displayed-axis crop retarget must retain all 50 montage tiles."""
 
     configure = use_wgpu_backend if backend == "wgpu" else use_pyqtgraph_backend
     settings = configure(extra_settings={"montage_quality_policy": "resident"})
     data = np.broadcast_to(
-        np.arange(64 * 64, dtype=np.float32).reshape(64, 64, 1),
-        (64, 64, 12),
+        np.arange(336 * 336, dtype=np.float32).reshape(336, 336, 1),
+        (336, 336, 50),
     )
     win = make_backend_window(
         qtbot,
@@ -185,52 +187,84 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
         backend=backend,
         require_gpu_atlas=backend == "wgpu",
     )
-    win.resize(700, 500)
+    win.resize(1200, 900)
     try:
         win.show()
-        state = win.view_state.with_image_axes(1, 0).with_montage_axis(
-            2, columns=4, indices=tuple(range(12)), text=":"
+        montage_indices = tuple(range(50))
+        state = (
+            win.view_state.with_image_axes(1, 0)
+            .with_axis_flipped(1, True)
+            .with_montage_axis(2, columns=10, indices=montage_indices, text=":")
         )
         win._set_view_state(state)
         win.update_image_view()
         qtbot.waitUntil(
-            lambda: _window_settled(win, tuple(range(12))),
+            lambda: _window_settled(win, montage_indices),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
-        initial_indices = tuple(range(4, 36))
+        initial_indices = tuple(range(97, 197))
+        uncropped_session_id = int(win.renderer._frame_session.session_id)
         win._apply_slice_state(
             0,
             win.view_state.with_axis_range(
                 0,
                 indices=initial_indices,
-                text="4:36",
+                text="97:197",
             ),
             reason="slice-range",
             interactive=True,
             immediate_axis_only=False,
         )
         qtbot.waitUntil(
-            lambda: _window_settled(win, tuple(range(12))),
+            lambda: (
+                int(win.renderer._frame_session.session_id) != uncropped_session_id
+                and _window_settled(win, montage_indices)
+            ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
+        physical_tile_counts = [len(win.img_view.tileTruthPhysicalRows())]
 
-        final_indices = tuple(range(8, 40))
-        win._apply_slice_state(
-            0,
-            win.view_state.with_axis_range(
+        # Start three one-pixel successor generations without waiting for the
+        # preceding generation to settle. Waiting only for a new FrameSession
+        # keeps this deterministic while reproducing the attached scrollbar
+        # trace's overlapping hidden atomic handoffs.
+        for start in (96, 95, 94):
+            previous_session_id = int(win.renderer._frame_session.session_id)
+            indices = tuple(range(start, start + 100))
+            win._apply_slice_state(
                 0,
-                indices=final_indices,
-                text="8:40",
-            ),
-            reason="slice-range",
-            interactive=True,
-            immediate_axis_only=False,
-        )
-
-        try:
+                win.view_state.with_axis_range(
+                    0,
+                    indices=indices,
+                    text=f"{start}:{start + 100}",
+                ),
+                reason="slice-range",
+                interactive=True,
+                immediate_axis_only=False,
+            )
             qtbot.waitUntil(
-                lambda: _window_settled(win, tuple(range(12))),
+                lambda previous_session_id=previous_session_id: (
+                    int(win.renderer._frame_session.session_id) != previous_session_id
+                ),
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+            cadence_stop_at = perf_counter() + 0.12
+            while perf_counter() < cadence_stop_at:
+                qtbot.wait(1)
+                physical_tile_counts.append(len(win.img_view.tileTruthPhysicalRows()))
+        try:
+
+            def cropped_target_settled():
+                session = win.renderer._frame_session
+                return (
+                    _window_settled(win, montage_indices)
+                    and not session.atomic_successor_pending
+                    and set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
+                )
+
+            qtbot.waitUntil(
+                cropped_target_settled,
                 timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
         except Exception:
@@ -253,11 +287,14 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
                 f"atomic_pending={session.atomic_successor_pending}, "
                 f"warmed={len(getattr(session, '_atomic_warmed_identities', ()))}, "
                 f"identity_rejected={getattr(report, 'identity_rejected_tiles', None)}, "
+                f"atomic_fast_reject={getattr(session, '_atomic_fast_reject_reason', None)}, "
                 f"outcome={getattr(win.renderer, '_last_montage_commit_outcome', None)}"
             )
         session = win.renderer._frame_session
         assert session.required_target_unsettled_tiles() == ()
-        assert set(win.img_view.tileTruthPhysicalRows()) == set(range(12))
+        assert session.atomic_successor_pending is False
+        assert min(physical_tile_counts) == len(montage_indices)
+        assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()

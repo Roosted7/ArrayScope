@@ -906,9 +906,21 @@ class TileLifecycle:
         if rec is None or rec.target is None or payload is None:
             return False
         ref = payload_ref_from_display_payload(payload)
+        if (
+            int(ref.source_index) != int(rec.target.source_index)
+            or ref.source_id not in rec.presentable_payloads
+        ):
+            return False
+        if ref.identity is None or rec.target.identity is None:
+            # Opaque payloads remain valid inside the legacy/lower-level
+            # lifecycle contract once source and presentability match. Backend
+            # acknowledgement still requires typed identity whenever the
+            # target is typed; production montage payloads carry that identity.
+            return True
         return bool(
-            int(ref.source_index) == int(rec.target.source_index)
-            and ref.source_id in rec.presentable_payloads
+            ref.identity is not None
+            and rec.target.identity is not None
+            and ref.identity.satisfies_target(rec.target.identity)
         )
 
     def current_presentable_payload(self, tile_number: int):

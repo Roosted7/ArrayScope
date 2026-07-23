@@ -158,6 +158,17 @@ def tile_ack_identity(payload) -> object:
     return identity if identity is not None else getattr(payload, "source_id", None)
 
 
+def view_state_semantic_generation(view_state) -> tuple[object, ...]:
+    """Pixel-selection identity shared by tile targets and reuse guards."""
+
+    return (
+        tuple(int(value) for value in getattr(view_state, "shape", ())),
+        tuple(int(value) for value in getattr(view_state, "slice_indices", ())),
+        tuple(getattr(view_state, "axis_range_indices", ()) or ()),
+        tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
+    )
+
+
 def acknowledged_identity_satisfies_target(acknowledged, target) -> bool:
     """Return whether backend truth is safe to draw for a typed target.
 
@@ -271,4 +282,5 @@ __all__ = [
     "plane_identity_record",
     "tile_ack_identity",
     "tile_truth_record",
+    "view_state_semantic_generation",
 ]

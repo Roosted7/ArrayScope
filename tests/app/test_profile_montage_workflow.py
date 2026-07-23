@@ -1850,6 +1850,49 @@ def test_profile_montage_completion_waits_for_level_generation_by_default():
     assert result["active_level_value_count"] == 1
 
 
+def test_displayed_axis_profile_waits_for_the_requested_successor(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    old_session = SimpleNamespace(session_id=7)
+    new_session = SimpleNamespace(session_id=8)
+    win = SimpleNamespace(_frame_session=old_session)
+    settled_sessions = []
+
+    class FakeQtCore:
+        class QEventLoop:
+            class ProcessEventsFlag:
+                AllEvents = object()
+
+    class FakeApp:
+        def __init__(self):
+            self.calls = 0
+
+        def processEvents(self, *_args):
+            self.calls += 1
+            if self.calls == 3:
+                win._frame_session = new_session
+
+    monkeypatch.setattr(
+        workflow,
+        "_wait_for_montage_complete_soft",
+        lambda **_kwargs: settled_sessions.append(win._frame_session.session_id) or True,
+    )
+    app = FakeApp()
+
+    assert (
+        workflow._wait_for_montage_successor_settled(
+            win=win,
+            app=app,
+            QtCore=FakeQtCore,
+            predecessor_session_id=7,
+            budget_s=bounded_interaction_settle_timeout_s(0.5),
+        )
+        is True
+    )
+    assert app.calls == 3
+    assert settled_sessions == [8]
+
+
 def test_profile_montage_level_state_uses_session_snapshot():
     from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
     from arrayscope.tools.profile_montage_workflow import _montage_level_presentation_state
@@ -2039,6 +2082,13 @@ def test_profile_montage_visibility_ignores_offscreen_unsettled_targets():
 
     assert state["fully_visible"] is False
     assert state["visible_target_unsettled_tiles"] == 1
+
+    session.required_target_unsettled_tiles = lambda: (5,)
+    session.atomic_successor_pending = True
+    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+
+    assert state["fully_visible"] is False
+    assert state["atomic_successor_pending"] is True
 
 
 def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger():

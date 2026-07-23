@@ -3406,6 +3406,19 @@ class WgpuPlaneExecutor:
     def pool_budget(self, representation: str) -> int:
         return int(self._pool_budgets[representation])
 
+    def replace_resident_pin_set(self, owner: object, keys) -> frozenset[DataChunkKey]:
+        """Replace one owner's pins with the resident subset of ``keys``.
+
+        Hidden presentation transactions know their complete future page set
+        before every page has arrived.  Let that owner refresh its protection
+        after each bounded upload batch without asking :class:`PageTable` to
+        pin not-yet-resident pages.
+        """
+
+        resident = frozenset(key for key in keys if key in self.page_table)
+        self.page_table.replace_pin_set(owner, resident)
+        return resident
+
     def pool_free_layers(self, representation: str) -> int:
         return len(self._pools[representation].free_layers)
 

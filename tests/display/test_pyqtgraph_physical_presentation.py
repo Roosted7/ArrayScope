@@ -140,3 +140,94 @@ def test_identity_rejected_upserts_are_reported_not_silent(qt_app):
     )
     assert stats.identity_rejected_items == 0
     assert stats.identity_rejected_tiles == ()
+
+
+def test_atomic_identity_rejection_preserves_complete_predecessor(qt_app):
+    """A rejected successor transaction must not punch a physical hole."""
+
+    from arrayscope.display.model.tile_identity import TileIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    def identity(generation):
+        return TileIdentity(
+            document_generation=("doc", 0),
+            operation_key=(),
+            source_index=0,
+            image_axes=(0, 1),
+            axis_flips=(False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=generation,
+        )
+
+    geometry = DisplayGeometry(
+        view_state=None,
+        display_shape=(4, 4),
+        montage=MontageGeometry(indices=(0,), tile_shape=(4, 4), columns=1, rows=1, gap=0),
+    )
+    image = np.ones((4, 4), dtype=np.float32)
+    predecessor = DisplayTilePayload(
+        0,
+        0,
+        image,
+        None,
+        ("predecessor",),
+        tile_identity=identity(("crop", 97, 197)),
+    )
+    layer = _make_layer()
+    initial_delta = SimpleNamespace(
+        upserts={0: predecessor},
+        active_tiles=(0,),
+        target_identities={0: predecessor.tile_identity},
+        removals=(),
+        near_tile_source_ids={},
+        cold_deadline_ms=None,
+        atomic_handoff=False,
+    )
+    initial = layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        rgb_already_windowed=False,
+        dirty_tiles=None,
+        tile_payloads={0: predecessor},
+        tile_delta=initial_delta,
+    )
+    assert initial.presented_tiles == (0,)
+
+    stale_successor = DisplayTilePayload(
+        0,
+        0,
+        image * 2,
+        None,
+        ("stale-successor",),
+        tile_identity=identity(("crop", 96, 196)),
+    )
+    current_target = identity(("crop", 94, 194))
+    rejected_delta = SimpleNamespace(
+        upserts={0: stale_successor},
+        active_tiles=(0,),
+        target_identities={0: current_target},
+        removals=(),
+        near_tile_source_ids={},
+        cold_deadline_ms=None,
+        atomic_handoff=True,
+    )
+    rejected = layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        rgb_already_windowed=False,
+        dirty_tiles=None,
+        tile_payloads={0: stale_successor},
+        tile_delta=rejected_delta,
+    )
+
+    assert rejected.presented_tiles == (0,)
+    assert rejected.committed_upserts == ()
+    assert rejected.identity_rejected_tiles == (0,)
+    assert layer._states[0].acknowledged_identity == predecessor.tile_identity
+    assert layer._states[0].visible is True

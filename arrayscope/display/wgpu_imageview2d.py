@@ -373,6 +373,10 @@ class WgpuImageView2D(ImageViewShell):
         # so it is created lazily inside the draw.
         self._wgpu_executor = None
         self._wgpu_generation = 0
+        # Hidden atomic successors are warmed across bounded GUI turns. Their
+        # pages need a physical owner until the presentation submit transfers
+        # ownership to the executor's bound-plane pin set.
+        self._wgpu_atomic_warm_pin_owner = object()
         if self._wgpu_present_method == "screen":
             self._wgpu_context = None
         else:
@@ -1612,6 +1616,11 @@ class WgpuImageView2D(ImageViewShell):
                     evidence_rows=len(histogram_specs),
                     obligation=self._wgpu_histogram_evidence_obligation,
                 )
+            # BindContentPlanes is the first command and immediately installs
+            # the executor's bound-plane pins. Release the temporary hidden
+            # transaction owner at this synchronous submission edge: there is
+            # no event-loop interval in which successor pages are unowned.
+            executor.replace_resident_pin_set(self._wgpu_atomic_warm_pin_owner, ())
             report = self._submit_wgpu(tuple(submission_commands))
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
@@ -1655,6 +1664,12 @@ class WgpuImageView2D(ImageViewShell):
                 )
             )
             presented_identities = {tile: committed_tiles[tile]["identity"] for tile in presented}
+            delta_upserts = dict(getattr(tile_delta, "upserts", {}) or {})
+            committed_upserts = tuple(
+                tile
+                for tile, payload in delta_upserts.items()
+                if presented_identities.get(int(tile)) == tile_ack_identity(payload)
+            )
 
             # Shared shell bookkeeping (placeholder image, histogram bounds,
             # display levels) mirrors the VisPy backend's minimal set.
@@ -1700,6 +1715,7 @@ class WgpuImageView2D(ImageViewShell):
             stats = TileLayerUpdateStats(
                 visible_items=len(committed_tiles),
                 presented_tiles=presented,
+                committed_upserts=committed_upserts,
                 presented_identities=presented_identities,
                 updated_tiles=updated,
                 items_created=0,
@@ -1923,6 +1939,7 @@ class WgpuImageView2D(ImageViewShell):
     def reset_tiled_residency(self, reason: str) -> None:
         executor = self._wgpu_executor
         if executor is not None:
+            executor.replace_resident_pin_set(self._wgpu_atomic_warm_pin_owner, ())
             evictions = tuple(EvictChunk(key) for key in executor.page_table.resident_keys())
             self._submit_wgpu((*evictions, UpdateTileInstances(())))
             self._request_wgpu_canvas_draw()
@@ -1972,8 +1989,9 @@ class WgpuImageView2D(ImageViewShell):
         # from only this batch lets later batches evict pages the coordinator
         # has already marked warm, stranding the final atomic swap with only
         # its last one or two tiles resident.
+        atomic_handoff = bool(getattr(tile_delta, "atomic_handoff", False))
         capacity_payloads = payloads
-        if bool(getattr(tile_delta, "atomic_handoff", False)):
+        if atomic_handoff:
             transaction_payloads = dict(getattr(tile_delta, "upserts", {}) or {})
             if transaction_payloads:
                 capacity_payloads = transaction_payloads
@@ -1994,14 +2012,37 @@ class WgpuImageView2D(ImageViewShell):
             _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
             for (lod_level, source_shape), _texture_shape in capacity_geometry.values()
         )
-        self._ensure_wgpu_executor(
+        executor = self._ensure_wgpu_executor(
             {representation: pages_needed},
             preferred_pages={representation: pages_preferred},
         )
+        transaction_page_keys = frozenset()
+        if atomic_handoff:
+            transaction_page_keys = frozenset(
+                key
+                for payload in capacity_payloads.values()
+                for key in _wgpu_payload_page_keys(
+                    payload,
+                    representation=representation,
+                    mapping_mode=_mapping[0],
+                )
+            )
+            # A newer atomic generation replaces the old generation's
+            # ownership here. Repeated batches for one generation simply
+            # refresh the resident subset already uploaded.
+            executor.replace_resident_pin_set(
+                self._wgpu_atomic_warm_pin_owner,
+                transaction_page_keys,
+            )
         commands = []
         for tile in sorted(payloads):
             texture = textures[tile]
             lod_level, source_shape = lod_geometry[tile]
+            lod_reducer = _wgpu_payload_lod_reducer(
+                payloads[tile],
+                representation=representation,
+                mapping_mode=_mapping[0],
+            )
             grid_h = -(-int(texture.shape[0]) // PAGE)
             grid_w = -(-int(texture.shape[1]) // PAGE)
             plane_identity = _wgpu_payload_plane_identity(payloads[tile])
@@ -2016,6 +2057,7 @@ class WgpuImageView2D(ImageViewShell):
                         dtype=_WGPU_REP_DTYPES[representation],
                         representation=representation,
                         plane_shape=source_shape,
+                        reducer=lod_reducer,
                     ),
                     self._wgpu_page_block(texture, chunk_y, chunk_x, representation),
                 )
@@ -2023,6 +2065,11 @@ class WgpuImageView2D(ImageViewShell):
                 for chunk_x in range(grid_w)
             )
         report = self._submit_wgpu(tuple(commands))
+        if atomic_handoff:
+            executor.replace_resident_pin_set(
+                self._wgpu_atomic_warm_pin_owner,
+                transaction_page_keys,
+            )
         return report
 
     def warmPlaneResidency(self, payload) -> bool:
@@ -2042,8 +2089,6 @@ class WgpuImageView2D(ImageViewShell):
         return self.tiledPayloadResident(payload)
 
     def tiledPayloadResident(self, payload) -> bool:
-        from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
-
         executor = self._wgpu_executor
         if executor is None:
             return False
@@ -2056,27 +2101,19 @@ class WgpuImageView2D(ImageViewShell):
             texture_data.dtype != np.uint8 or getattr(payload, "histogram_data", None) is not None
         ):
             representation = RGB_WINDOWED_RGBA32F
-        texture = self._wgpu_payload_texture(payload, representation)
-        lod_level, source_shape = _wgpu_payload_lod_geometry(payload, texture)
-        plane_identity = _wgpu_payload_plane_identity(payload)
-        grid_h = -(-int(texture.shape[0]) // PAGE)
-        grid_w = -(-int(texture.shape[1]) // PAGE)
+        source_mapping = common_shader_mapping((getattr(payload, "shader_mapping", None),))
+        _representation, mapping_mode, *_mapping = self._wgpu_commit_plan(
+            {int(getattr(payload, "tile_number", 0)): payload},
+            source_mapping,
+            bool(kind == TexturePlaneKind.RGB8 and representation == RGB8),
+        )
         return all(
-            executor.page_table.lookup(
-                plane_chunk_key(
-                    plane_identity,
-                    "live",
-                    lod_level,
-                    chunk_x,
-                    chunk_y,
-                    dtype=_WGPU_REP_DTYPES[representation],
-                    representation=representation,
-                    plane_shape=source_shape,
-                )
+            executor.page_table.lookup(key) is not None
+            for key in _wgpu_payload_page_keys(
+                payload,
+                representation=representation,
+                mapping_mode=mapping_mode,
             )
-            is not None
-            for chunk_y in range(grid_h)
-            for chunk_x in range(grid_w)
         )
 
     def _tiled_presentation_layer(self):
@@ -2521,6 +2558,45 @@ def _wgpu_payload_lod_reducer(payload, *, representation: str, mapping_mode: str
     if representation == COMPLEX_RG32F and str(mapping_mode) == "phase":
         return REDUCER_PHASE_VECTOR
     return REDUCER_MEAN
+
+
+def _wgpu_payload_page_keys(
+    payload,
+    *,
+    representation: str,
+    mapping_mode: str,
+) -> tuple[object, ...]:
+    """Canonical executor keys for one payload without packing its pixels."""
+
+    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+    texture = np.asarray(
+        payload.texture_data if payload.texture_data is not None else payload.image
+    )
+    lod_level, source_shape = _wgpu_payload_lod_geometry(payload, texture)
+    grid_h = -(-int(texture.shape[0]) // PAGE)
+    grid_w = -(-int(texture.shape[1]) // PAGE)
+    plane_identity = _wgpu_payload_plane_identity(payload)
+    lod_reducer = _wgpu_payload_lod_reducer(
+        payload,
+        representation=representation,
+        mapping_mode=mapping_mode,
+    )
+    return tuple(
+        plane_chunk_key(
+            plane_identity,
+            "live",
+            lod_level,
+            chunk_x,
+            chunk_y,
+            dtype=_WGPU_REP_DTYPES[representation],
+            representation=representation,
+            plane_shape=source_shape,
+            reducer=lod_reducer,
+        )
+        for chunk_y in range(grid_h)
+        for chunk_x in range(grid_w)
+    )
 
 
 def _wgpu_plan_lod_page_generation(

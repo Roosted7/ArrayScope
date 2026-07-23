@@ -197,7 +197,8 @@ class LodLadder:
         # something at least as fine already exists or DESIRED covers it.
         preview_level = max(policy.preview_level, desired)
         if (
-            policy.reduced_input_available
+            cheap_pre_native
+            and policy.reduced_input_available
             and preview_level < finest_available()
             and preview_level != desired
         ):

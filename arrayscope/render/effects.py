@@ -562,9 +562,33 @@ def tile_lod_states(
                 payload_current = backend_identities.get(tile_number) == tile_ack_identity(payload)
             else:
                 payload_current = tile_number in presented_numbers
+            target_identity = (
+                None if record is None or record.target is None else record.target.identity
+            )
+            payload_current = bool(
+                payload_current
+                and acknowledged_identity_satisfies_target(
+                    tile_ack_identity(payload),
+                    target_identity,
+                )
+            )
         if not payload_current:
             payload = None
-        ready_ref = None if record is None else (record.target_payload or record.fallback_payload)
+        target_ref = None if record is None else record.target_payload
+        fallback_ref = None if record is None else record.fallback_payload
+        if (
+            fallback_ref is not None
+            and fallback_ref.identity is not None
+            and record.target is not None
+            and record.target.identity is not None
+            and fallback_ref.identity.semantic_key != record.target.identity.semantic_key
+        ):
+            # A predecessor crop is physical fallback coverage, not ready
+            # successor work. Exposing it as ``ready_level`` makes the ladder
+            # produce zero steps even though no payload can satisfy the new
+            # displayed-axis target.
+            fallback_ref = None
+        ready_ref = target_ref or fallback_ref
         ready_level = None if ready_ref is None else int(getattr(ready_ref, "lod_level", 0) or 0)
         ready_quality = "" if ready_ref is None else str(getattr(ready_ref, "quality", "") or "")
         committable_exact_payload = bool(
@@ -572,7 +596,7 @@ def tile_lod_states(
             and str(getattr(payload, "quality", "exact") or "exact") != "preview"
         )
         committable_exact_ready = bool(
-            ready_ref is not None and str(getattr(ready_ref, "quality", "") or "") != "preview"
+            target_ref is not None and str(getattr(target_ref, "quality", "") or "") != "preview"
         )
         if (
             not committable_exact_payload

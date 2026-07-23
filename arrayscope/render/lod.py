@@ -1384,7 +1384,11 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         if max_count is not None and built >= int(max_count):
             break
         existing = session.display_tile_payloads.get(tile_number)
-        if existing is not None and tile_number in session.active_tile_requests:
+        if (
+            existing is not None
+            and tile_number in session.active_tile_requests
+            and session.lifecycle.payload_is_current(tile_number, existing)
+        ):
             # An exact evaluation is in flight and SOMETHING is on screen:
             # improving the preview now would double payload/identity churn
             # for every tile of a cold fill.  A blank tile is the opposite
@@ -1416,6 +1420,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         # the 2026-07-16 same-level-preview starvation shape).
         presentation_quality = best_quality
         if existing is not None:
+            existing_is_current = session.lifecycle.payload_is_current(tile_number, existing)
             presented_actual_level = _conservative_actual_level_for_payload(existing)
             existing_backing = getattr(existing, "page_backing", None)
             existing_resolved = getattr(existing_backing, "resolved_page_set", None)
@@ -1427,12 +1432,13 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
                 == presentation_quality
                 and existing_actual_keys == tuple(resolved.actual_keys)
                 and existing_requested_keys == tuple(key.page_keys)
+                and existing_is_current
             ):
                 continue
             # An existing non-preview payload already covers this tile's
             # first pixels; a floor may replace it only as a level
             # improvement, never as a demotion — pass open or closed.
-            if str(getattr(existing, "quality", "exact")) != "preview":
+            if existing_is_current and str(getattr(existing, "quality", "exact")) != "preview":
                 desired = int(session.lod_policy_decision.demand.desired_level)
                 if (
                     presented_actual_level <= desired

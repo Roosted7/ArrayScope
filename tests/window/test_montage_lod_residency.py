@@ -4607,6 +4607,7 @@ def test_same_layout_montage_rebirth_retains_pixels_and_arms_atomic_successor():
         .with_image_axes(1, 2)
         .with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
     )
+    previous._sync_lifecycle_targets()
     _state, previous_delta = previous.build_tile_presentation({})
     _acknowledge(previous, previous_delta)
     previous.mark_presented(tuple(previous_delta.upserts))
@@ -4661,6 +4662,7 @@ def test_montage_axis_entry_retains_settled_predecessor_as_bridge():
     plane_state = ViewState.from_shape((4, TILE, TILE)).with_image_axes(1, 2)
     previous.montage_axis = None
     previous.view_state = plane_state
+    previous._sync_lifecycle_targets()
     successor.view_state = plane_state.with_montage_axis(
         0, columns=4, indices=(0, 1, 2, 3), text="0:4"
     )
@@ -4788,6 +4790,7 @@ def test_expanded_montage_rebirth_retains_pixels_without_atomic_wait():
         indices=tuple(range(8)),
         text="0:8",
     )
+    previous._sync_lifecycle_targets()
     _state, previous_delta = previous.build_tile_presentation({})
     _acknowledge(previous, previous_delta)
     previous.mark_presented(tuple(previous_delta.upserts))
@@ -4818,6 +4821,7 @@ def test_transposed_axes_cannot_retain_predecessor_mappings():
         .with_montage_axis(0, columns=4, indices=(0, 1, 2, 3), text="0:4")
     )
     successor.view_state = previous.view_state.transposed_image_axes()
+    previous._sync_lifecycle_targets()
     _state, previous_delta = previous.build_tile_presentation({})
     _acknowledge(previous, previous_delta)
     previous.mark_presented(tuple(previous_delta.upserts))
@@ -5005,6 +5009,63 @@ def test_atomic_predecessor_chain_remains_complete_across_rapid_rebirth():
     assert decision.reason == "montage-compatible"
 
 
+def test_displayed_axis_crop_rebirth_arms_and_chains_atomic_successor(monkeypatch):
+    """Displayed-axis ranges are source selections, not incompatible views."""
+
+    previous = _session(count=4)
+    successor = _session(count=4)
+    document = ArrayDocument(np.zeros((TILE, TILE, 7), dtype=np.float32))
+    previous.document = document
+    successor.document = document
+    view_state = (
+        ViewState.from_shape((TILE, TILE, 7))
+        .with_image_axes(1, 0)
+        .with_montage_axis(2, columns=4, indices=(0, 1, 2, 3), text="0:4")
+    )
+    previous.view_state = view_state.with_axis_range(
+        0,
+        indices=tuple(range(8, 24)),
+        text="8:24",
+    )
+    successor.view_state = view_state.with_axis_range(
+        0,
+        indices=tuple(range(7, 23)),
+        text="7:23",
+    )
+    monkeypatch.setattr(previous, "required_first_pixels_presented", lambda: True)
+
+    decision = plan_presentation_transition(
+        previous,
+        successor,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert decision.atomic_successor
+    assert decision.reason == "montage-compatible"
+
+    # A third scrollbar input can replace the pixel-less successor before its
+    # transaction lands. The inherited pending obligation proves that the
+    # original complete predecessor is still physically visible.
+    successor.atomic_successor_pending = True
+    chained = _session(count=4)
+    chained.document = document
+    chained.view_state = view_state.with_axis_range(
+        0,
+        indices=tuple(range(6, 22)),
+        text="6:22",
+    )
+    decision = plan_presentation_transition(
+        successor,
+        chained,
+        predecessor_visible=True,
+    )
+
+    assert decision.retain_pixels
+    assert decision.atomic_successor
+    assert decision.reason == "montage-compatible"
+
+
 def test_partial_viewport_rebirth_atomically_hands_off_required_scope():
     previous = _session(count=4)
     successor = _session(count=4)
@@ -5020,6 +5081,7 @@ def test_partial_viewport_rebirth_atomically_hands_off_required_scope():
     successor.view_state = view_state
     previous.frame_plan = SimpleNamespace(active_region_ids=(1,))
     successor.frame_plan = SimpleNamespace(active_region_ids=(1,))
+    previous._sync_lifecycle_targets()
     _state, delta = previous.build_tile_presentation({})
     _acknowledge(previous, delta)
     previous.mark_presented(tuple(delta.upserts))
@@ -6001,6 +6063,37 @@ def test_cold_desired_direct_source_produces_page_payload():
     )
 
     assert effects._step_produces_page_payload(step, tile)
+
+
+def test_completed_evaluation_keeps_claim_until_gui_delivery():
+    """A worker-complete task is still owned until its callback is drained."""
+
+    task_key = ("task", "desired")
+    kernel = _StageProducerKernel(completed=(task_key,))
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    effects = FramePipelineEffects(_RungPrepareRenderer(kernel=kernel), session)
+    del session.rendered_tiles[0]
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=0,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="native desired display level",
+    )
+    intent = _pipeline_intent_for(session)
+
+    assert effects.prepare_rung(intent, step)
+    effects.rung_admitted(intent, step, task_key)
+    assert 0 in session.active_tile_requests
+
+    assert effects._release_inactive_evaluation_claims((0,)) == 0
+    assert 0 in session.active_tile_requests
+
+    kernel.completed.clear()
+    assert effects._release_inactive_evaluation_claims((0,)) == 1
+    assert 0 not in session.active_tile_requests
 
 
 def test_cold_direct_source_page_completion_atomically_promotes_preview():

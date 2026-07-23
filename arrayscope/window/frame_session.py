@@ -42,6 +42,7 @@ from arrayscope.display.model.tile_identity import (
     complex_mapping_identity,
     tile_ack_identity,
     tile_truth_record,
+    view_state_semantic_generation,
 )
 from arrayscope.display.model.tile_priority import (
     TilePriorityContext,
@@ -1103,7 +1104,13 @@ class FrameSession:
                 identity=self.tile_target_identity(tile, lod_level=target_level),
             )
         target_signature = tuple(
-            (tile, target.source_index, target.semantic_source_id, target.lod_level)
+            (
+                tile,
+                target.source_index,
+                target.semantic_source_id,
+                target.lod_level,
+                target.identity,
+            )
             for tile, target in sorted(targets.items())
         )
         if getattr(self, "_lifecycle_target_signature", None) != target_signature:
@@ -1470,6 +1477,18 @@ class FrameSession:
                     resident_payload,
                     tile_number=index,
                     source_index=int(tile.source_index),
+                    tile_identity=self.tile_payload_identity(
+                        tile,
+                        texture_data=resident_payload.texture_data,
+                        texture_kind=getattr(
+                            resident_payload.tile_identity,
+                            "texture_kind",
+                            resident_payload.texture_kind,
+                        ),
+                        shader_mapping=resident_payload.shader_mapping,
+                        lod=resident_payload.lod,
+                        quality=resident_payload.quality,
+                    ),
                 )
                 self.lifecycle.presentation_discarded(index)
                 self.display_tile_payloads[index] = payload
@@ -1831,6 +1850,22 @@ class FrameSession:
             )
         return dict(self.display_tile_payloads)
 
+    def _current_identity_tile(self, rendered: RenderedTile):
+        """Return ``rendered.tile`` expressed in this session's target state."""
+
+        state = self.view_state
+        if state is None or rendered.tile.view_state is None:
+            return rendered.tile
+        view_state = (
+            state.with_montage_axis(None)
+            if self.montage_axis is None
+            else state.tile_state_for_slice(
+                int(self.montage_axis),
+                int(rendered.tile.source_index),
+            )
+        )
+        return replace(rendered.tile, view_state=view_state)
+
     def _ensure_display_tile_payload(
         self,
         tile_number: int,
@@ -1840,6 +1875,7 @@ class FrameSession:
         lod_factor: int,
     ) -> DisplayTilePayload:
         tile_number = int(tile_number)
+        identity_tile = self._current_identity_tile(rendered)
         base_source_id = source_ids.get(
             tile_number, ("rendered_tile", tile_number, id(rendered.image))
         )
@@ -1912,7 +1948,7 @@ class FrameSession:
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
             current_identity = self.tile_payload_identity(
-                rendered.tile,
+                identity_tile,
                 texture_data=texture_data,
                 texture_kind=(
                     TexturePlaneKind.RGB8
@@ -1950,7 +1986,7 @@ class FrameSession:
                 self.lod_stats_recomputes += 1
         payload = DisplayTilePayload(
             tile_number=tile_number,
-            source_index=int(rendered.tile.source_index),
+            source_index=int(identity_tile.source_index),
             image=display_image,
             histogram_data=display_histogram,
             source_id=source_id,
@@ -1972,7 +2008,7 @@ class FrameSession:
             level_data=exact_level_data,
             level_stats=level_stats,
             tile_identity=self.tile_payload_identity(
-                rendered.tile,
+                identity_tile,
                 texture_data=texture_data,
                 texture_kind=(
                     TexturePlaneKind.RGB8
@@ -2039,6 +2075,7 @@ class FrameSession:
             if rendered is None:
                 continue
             tile_number = int(tile_number)
+            identity_tile = self._current_identity_tile(rendered)
             base_source_id = source_ids.get(
                 tile_number,
                 ("rendered_tile", tile_number, id(rendered.image)),
@@ -2062,7 +2099,7 @@ class FrameSession:
                 continue
             retargeted = int(previous.tile_number) != tile_number
             current_identity = self.tile_payload_identity(
-                rendered.tile,
+                identity_tile,
                 texture_data=previous.texture_data,
                 texture_kind=previous.texture_kind,
                 shader_mapping=previous.shader_mapping,
@@ -2079,7 +2116,7 @@ class FrameSession:
                 payload = replace(
                     previous,
                     tile_number=tile_number,
-                    source_index=int(rendered.tile.source_index),
+                    source_index=int(identity_tile.source_index),
                     tile_identity=current_identity,
                 )
             self.display_tile_payloads[tile_number] = payload
@@ -2246,12 +2283,7 @@ class FrameSession:
         document = self.document
         base_data = getattr(document, "base_data", None)
         view_state = tile.view_state
-        semantic_generation = (
-            tuple(int(value) for value in getattr(view_state, "shape", ())),
-            tuple(int(value) for value in getattr(view_state, "slice_indices", ())),
-            tuple(getattr(view_state, "axis_range_indices", ()) or ()),
-            tuple(bool(value) for value in getattr(view_state, "axis_fftshifted", ())),
-        )
+        semantic_generation = view_state_semantic_generation(view_state)
         image_axes = tuple(int(axis) for axis in getattr(view_state, "image_axes", ()) or ())
         if self.canonical_orientation:
             # Canonical tiles are order-independent, so their semantic identity
@@ -3157,6 +3189,15 @@ class FrameSession:
         for tile_number in dirty_payload_tiles:
             payload = current_payloads.get(int(tile_number))
             if payload is None:
+                continue
+            if not self.lifecycle.payload_is_current(int(tile_number), payload):
+                # A compatible predecessor remains valid physical truth while
+                # its successor is evaluated. It is not a desired upsert for
+                # the successor: canonical materialization/source keys can
+                # span displayed-axis windows, while the payload wrapper and
+                # CPU pixels remain window-specific. Emitting that stale
+                # wrapper makes every backend reject the transaction and, for
+                # atomic handoffs, drains the only wakeup into a black stall.
                 continue
             shown_identity = backend_identities.get(int(tile_number))
             rec = self.lifecycle.peek(int(tile_number))
@@ -4367,12 +4408,13 @@ def plan_presentation_transition(
     ):
         return reject("lod-policy")
     # The surface contract permits retained pixels only for a slice/source
-    # index successor.  Normalize exactly that source-selection field, then
-    # compare the remaining semantic view state here, in the one transition
-    # owner.  In particular, image axes and flips change where source samples
-    # are drawn; keeping their old mappings visible is not a stale preview but
-    # the wrong presentation.  Auto-derived layout geometry remains outside
-    # ViewState, so harmless scrollbar/column settling does not participate.
+    # selection successor. Normalize exactly those source-selection fields,
+    # then compare the remaining semantic view state here, in the one
+    # transition owner. In particular, image axes and flips change where
+    # source samples are drawn; keeping their old mappings visible is not a
+    # stale preview but the wrong presentation. Auto-derived layout geometry
+    # remains outside ViewState, so harmless scrollbar/column settling does
+    # not participate.
     previous_state = previous_session.view_state
     state = session.view_state
     if type(previous_state) is not type(state):
@@ -4416,8 +4458,11 @@ def plan_presentation_transition(
     try:
         aligned = replace(
             state,
+            slice_indices=previous_state.slice_indices,
             montage_indices=previous_state.montage_indices,
             montage_text=previous_state.montage_text,
+            axis_range_indices=previous_state.axis_range_indices,
+            axis_range_text=previous_state.axis_range_text,
         )
     except (AttributeError, TypeError, ValueError):
         return reject("montage-state")

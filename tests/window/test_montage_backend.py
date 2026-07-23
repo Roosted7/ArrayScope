@@ -479,6 +479,60 @@ def test_prepared_atomic_transaction_uses_required_not_coverage_scope():
     assert _prepared_atomic_transaction_current(session, prepared)
 
 
+def test_prepared_atomic_transaction_expires_when_semantic_target_changes():
+    from arrayscope.display.model.tile_identity import TileIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+    from arrayscope.window.frame_effects import (
+        _prepared_atomic_transaction_current,
+        _shader_successor_transaction_payload_marker,
+    )
+
+    def identity(semantic_generation):
+        return TileIdentity(
+            document_generation=("document", 1),
+            operation_key=(),
+            source_index=0,
+            image_axes=(0, 1),
+            axis_flips=(False, False, False),
+            channel="real",
+            complex_mapping=("scalar", "real", "mapped"),
+            texture_kind=TexturePlaneKind.SCALAR_R32F,
+            semantic_generation=semantic_generation,
+        )
+
+    old_target = identity(("crop", 95, 195))
+    current_target = identity(("crop", 94, 194))
+    payload = SimpleNamespace(
+        source_id=("source", 0),
+        source_index=0,
+        tile_identity=old_target,
+    )
+    session = SimpleNamespace(
+        session_id=7,
+        level_generation=SimpleNamespace(revision=3),
+        tile_presentation_state=SimpleNamespace(revision=11),
+        visible_tile_numbers=(0,),
+        skipped_tiles=(),
+        display_tile_payloads={0: payload},
+        tile_target_identities=lambda _required: {0: current_target},
+    )
+    delta = SimpleNamespace(
+        base_revision=11,
+        active_tiles=(0,),
+        upserts={0: payload},
+        target_identities={0: old_target},
+    )
+    prepared = {
+        "session_id": 7,
+        "level_revision": 3,
+        "marker_kind": "shader-successor",
+        "tile_delta": delta,
+        "payload_markers": {0: _shader_successor_transaction_payload_marker(payload)},
+    }
+
+    assert not _prepared_atomic_transaction_current(session, prepared)
+
+
 def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
     import arrayscope.render.level_stats as level_stats
     from arrayscope.display.model.montage_levels import MontageLevelTracker
@@ -4929,6 +4983,52 @@ def test_previous_complex_shader_payload_accepts_complex_texture():
     )
 
     assert _payload_compatible_with_tile(payload, state, shader_display=True)
+
+
+def test_retained_payload_wrapper_rejects_an_old_display_axis_crop():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.tile_identity import TileIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    old_state = ViewState.from_shape((8, 8, 1)).with_axis_range(
+        0,
+        indices=(1, 2, 3, 4),
+        text="1:5",
+    )
+    new_state = old_state.with_axis_range(
+        0,
+        indices=(2, 3, 4, 5),
+        text="2:6",
+    )
+    texture = np.ones((4, 8), dtype=np.float32)
+    identity = TileIdentity(
+        document_generation="doc",
+        operation_key=(),
+        source_index=0,
+        image_axes=old_state.image_axes,
+        axis_flips=old_state.axis_flipped,
+        channel=old_state.channel,
+        complex_mapping=("scalar", "real", "mapped"),
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        semantic_generation=(
+            old_state.shape,
+            old_state.slice_indices,
+            old_state.axis_range_indices,
+            old_state.axis_fftshifted,
+        ),
+    )
+    payload = DisplayTilePayload(
+        0,
+        0,
+        texture,
+        None,
+        ("canonical-source", 0),
+        tile_identity=identity,
+    )
+
+    assert _payload_compatible_with_tile(payload, old_state, shader_display=True)
+    assert not _payload_compatible_with_tile(payload, new_state, shader_display=True)
 
 
 def test_tiled_payload_source_id_follows_semantic_materialization_identity():

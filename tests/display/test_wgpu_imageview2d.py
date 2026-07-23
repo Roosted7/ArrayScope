@@ -631,6 +631,7 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
         # Identical re-commit: content-keyed residency makes it physical no-op.
         report = _commit(view, geometry, payloads, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
+        assert set(report.committed_upserts or ()) == {0, 1}
         assert report.texture_uploads == 0
         initial_pixels = view._wgpu_executor.read_target()
 
@@ -649,6 +650,7 @@ def test_montage_commit_acks_per_tile_and_scrolls_zero_upload(qt_app):
         # Scroll back: every plane was seen before — zero upload.
         report = _commit(view, geometry, payloads, levels=(0.0, 1.0))
         assert set(report.presented_tiles) == {0, 1}
+        assert set(report.committed_upserts or ()) == {0, 1}
         assert report.texture_uploads == 0
         assert np.array_equal(view._wgpu_executor.read_target(), initial_pixels)
     finally:
@@ -1599,7 +1601,13 @@ def test_warm_tiled_residency_accepts_the_commit_plan_contract(qt_app):
 
 
 def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
-    """A bounded warm batch must not evict an earlier successor batch."""
+    """A cropped 50-tile successor must survive bounded hidden warming.
+
+    This mirrors the dogfood failure rather than using one-page toy tiles:
+    reversing the displayed axes produced 336x100 scalar tiles (two pages
+    each), and the complete predecessor remained bound while the successor
+    arrived in two-tile batches.
+    """
 
     from arrayscope.display.model.frame import TilePresentationDelta
     from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
@@ -1607,14 +1615,23 @@ def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
 
     view = _shown_view(qt_app)
     try:
-        geometry = _montage_geometry((16, 24), 3, 1, loaded=3)
+        tile_count = 50
+        geometry = _montage_geometry((336, 100), 10, 5, loaded=tile_count)
+        predecessor = {
+            tile: _payload(
+                tile,
+                np.full((336, 100), float(tile + 1), dtype=np.float32),
+                source_id=("crop-generation", 0, "source", tile),
+            )
+            for tile in range(tile_count)
+        }
         payloads = {
             tile: _payload(
                 tile,
-                np.full((16, 24), float(tile + 1), dtype=np.float32),
-                source_id=("atomic-warm", tile),
+                np.full((336, 100), float(tile + 101), dtype=np.float32),
+                source_id=("crop-generation", 1, "source", tile),
             )
-            for tile in range(3)
+            for tile in range(tile_count)
         }
         delta = TilePresentationDelta(
             structure_revision=1,
@@ -1624,35 +1641,132 @@ def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
             histogram_revision=1,
             viewport_revision=1,
             upserts=payloads,
-            active_tiles=(0, 1, 2),
-            planned_tiles=(0, 1, 2),
+            active_tiles=tuple(range(tile_count)),
+            planned_tiles=tuple(range(tile_count)),
             atomic_handoff=True,
         )
         view._wgpu_executor = WgpuPlaneExecutor(
             pool_layers={"scalar_r32f": 1}, device=_shared_wgpu_device()
         )
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 200.0),
+            histogramRange=(0.0, 200.0),
+            montage_tile_payloads=predecessor,
+        )
 
-        for tile in range(3):
+        for start in range(0, tile_count, 2):
             view.warmTiledResidency(
-                payloads={tile: payloads[tile]},
+                payloads={
+                    tile: payloads[tile] for tile in range(start, min(start + 2, tile_count))
+                },
                 geometry=geometry,
-                levels=(0.0, 4.0),
+                levels=(0.0, 200.0),
                 tile_delta=delta,
             )
 
-        assert view._wgpu_executor.pool_budget("scalar_r32f") >= 3
+        assert view._wgpu_executor.pool_budget("scalar_r32f") >= 200
         assert all(view.tiledPayloadResident(payload) for payload in payloads.values())
-        assert view._wgpu_executor.uploads_total == 3
         report = _present_tiled(
             view,
             np.zeros(geometry.display_shape, dtype=np.float32),
             geometry=geometry,
-            levels=(0.0, 4.0),
-            histogramRange=(0.0, 4.0),
+            levels=(0.0, 200.0),
+            histogramRange=(0.0, 200.0),
             montage_tile_payloads=payloads,
             tile_delta=delta,
         )
         assert report.presented_tiles == frozenset(payloads)
+    finally:
+        view.close()
+
+
+def test_atomic_warm_owns_successor_pages_until_the_bound_plane_swap(qt_app):
+    """Unrelated residency churn must evict stale pages, not the successor."""
+
+    from arrayscope.display.model.frame import TilePresentationDelta
+    from arrayscope.display.wgpu_imageview2d import _shared_wgpu_device
+    from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+
+    view = _shown_view(qt_app)
+    try:
+        geometry = _montage_geometry((16, 24), 4, 1, loaded=4)
+
+        def generation(name, count):
+            return {
+                tile: _payload(
+                    tile,
+                    np.full((16, 24), float(tile + 1), dtype=np.float32),
+                    source_id=(name, tile),
+                )
+                for tile in range(count)
+            }
+
+        predecessor = generation("bound-predecessor", 4)
+        stale = generation("stale-cache", 4)
+        successor = generation("atomic-successor", 4)
+        competitor = generation("competing-warm", 8)
+        delta = TilePresentationDelta(
+            structure_revision=1,
+            payload_revision=1,
+            visibility_revision=1,
+            level_revision=1,
+            histogram_revision=1,
+            viewport_revision=1,
+            upserts=successor,
+            active_tiles=tuple(successor),
+            planned_tiles=tuple(successor),
+            atomic_handoff=True,
+        )
+        view._wgpu_executor = WgpuPlaneExecutor(
+            pool_layers={"scalar_r32f": 16},
+            device=_shared_wgpu_device(),
+        )
+        present_kwargs = {
+            "geometry": geometry,
+            "levels": (0.0, 10.0),
+            "histogramRange": (0.0, 10.0),
+        }
+        image = np.zeros(geometry.display_shape, dtype=np.float32)
+        _present_tiled(
+            view,
+            image,
+            montage_tile_payloads=predecessor,
+            **present_kwargs,
+        )
+        # A second binding pins the already-resident predecessor pages, just
+        # like the settled frame in the dogfood trace.
+        _present_tiled(
+            view,
+            image,
+            montage_tile_payloads=predecessor,
+            **present_kwargs,
+        )
+        view.warmTiledResidency(payloads=stale)
+        for start in range(0, 4, 2):
+            view.warmTiledResidency(
+                payloads={tile: successor[tile] for tile in range(start, start + 2)},
+                tile_delta=delta,
+            )
+        # Make the unrelated cache rows newer than the successor. With no
+        # transaction owner, the following eight-page warm evicts all four
+        # successor pages and reproduces the physical-zero handoff.
+        view.warmTiledResidency(payloads=stale)
+        view.warmTiledResidency(payloads=competitor)
+
+        assert all(view.tiledPayloadResident(payload) for payload in successor.values())
+        uploads_before = view._wgpu_executor.uploads_total
+        report = _present_tiled(
+            view,
+            image,
+            montage_tile_payloads=successor,
+            tile_delta=delta,
+            **present_kwargs,
+        )
+        assert report.presented_tiles == frozenset(successor)
+        assert view._wgpu_executor.uploads_total == uploads_before
     finally:
         view.close()
 

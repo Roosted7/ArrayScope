@@ -22,7 +22,10 @@ from arrayscope.display.model.montage_levels import (
     LevelEvidenceQuality,
 )
 from arrayscope.display.model.presentation_generation import levels_match
-from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_identity import (
+    acknowledged_identity_satisfies_target,
+    tile_ack_identity,
+)
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
@@ -634,7 +637,13 @@ class FramePipelineEffects:
             kernel = getattr(win, "kernel", None)
         if kernel is None:
             return True
-        return bool(getattr(kernel, "has_live_task", lambda _key: True)(task_key))
+        if bool(getattr(kernel, "has_live_task", lambda _key: True)(task_key)):
+            return True
+        # A worker leaves the live-task table before its CompletionEvent is
+        # drained on the GUI thread. The completed-key table spans that handoff.
+        # Releasing the lifecycle claim in this interval lets a queued replan
+        # submit the identical native evaluation a second time.
+        return bool(getattr(kernel, "has_completed_task", lambda _key: False)(task_key))
 
     def _release_inactive_evaluation_claims(self, tile_numbers=()) -> int:
         active_requests = getattr(self.session, "active_tile_requests", None)
@@ -1760,9 +1769,24 @@ class FramePipelineEffects:
                 dirty_tiles = tuple(
                     int(tile) for tile in dirty_tiles if int(tile) in upserted_tiles
                 )
-            if (cpu_atomic_successor or shader_atomic_successor) and len(active_payloads) < len(
-                tuple(tile_delta.active_tiles)
-            ):
+            atomic_required_tiles = (
+                frozenset(int(tile) for tile in session.atomic_successor_required_scope())
+                if cpu_atomic_successor or shader_atomic_successor
+                else frozenset()
+            )
+            atomic_current_tiles = frozenset(
+                int(tile)
+                for tile, payload in active_payloads.items()
+                if session.lifecycle.payload_is_current(int(tile), payload)
+            )
+            if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
+                # The generic builder can legitimately return an empty active
+                # scope after rejecting stale crop wrappers. Comparing against
+                # that delta's own empty scope made the transaction look
+                # complete and submitted a zero-tile atomic handoff, hiding
+                # the complete predecessor. The transition owner already
+                # froze the physical obligation; only that required scope can
+                # authorize the backend swap.
                 session.final_commit_pending = False
                 session.flush_pending = False
                 renderer._last_montage_tile_payload_build_ms = (
@@ -1771,8 +1795,8 @@ class FramePipelineEffects:
                 self._note_commit_bail(
                     "atomic-successor-wait",
                     wakeup="replan",
-                    active_payloads=len(active_payloads),
-                    active_tiles=len(tuple(tile_delta.active_tiles)),
+                    active_payloads=len(atomic_current_tiles),
+                    active_tiles=len(atomic_required_tiles),
                 )
                 renderer.request_montage_replan(session)
                 return
@@ -4015,6 +4039,22 @@ def _prepared_atomic_transaction_current(session, prepared) -> bool:
     )
     if {int(tile) for tile in getattr(delta, "active_tiles", ()) or ()} != required:
         return False
+    target_getter = getattr(session, "tile_target_identities", None)
+    if callable(target_getter):
+        frozen_targets = dict(getattr(delta, "target_identities", {}) or {})
+        current_targets = dict(target_getter(required) or {})
+        if frozen_targets != current_targets:
+            return False
+        delta_payloads = dict(getattr(delta, "upserts", {}) or {})
+        if any(
+            tile not in delta_payloads
+            or not acknowledged_identity_satisfies_target(
+                tile_ack_identity(delta_payloads[tile]),
+                frozen_targets.get(tile),
+            )
+            for tile in required
+        ):
+            return False
     markers = dict(prepared.get("payload_markers", {}) or {})
     payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
     marker_kind = prepared.get("marker_kind")

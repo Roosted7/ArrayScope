@@ -8,6 +8,7 @@ import numpy as np
 
 from arrayscope.core.bounded_cache import BoundedCache
 from arrayscope.core.view_state import ChannelMode
+from arrayscope.display.model.tile_identity import view_state_semantic_generation
 from arrayscope.display.shader_mapping import TexturePlaneKind
 
 DEFAULT_RETAINED_PAYLOAD_BYTES = 512 * 1024 * 1024
@@ -164,6 +165,16 @@ def payload_compatible_with_tile(payload, tile_state, *, shader_display: bool) -
     """
 
     if not payload_matches_texture_kind(payload):
+        return False
+    identity = getattr(payload, "tile_identity", None)
+    if identity is not None and getattr(
+        identity, "semantic_generation", None
+    ) != view_state_semantic_generation(tile_state):
+        # Canonical source/page keys are deliberately independent of the
+        # displayed-axis crop. That makes their residency reusable, not the
+        # payload wrapper or its window-specific pixels. Let the floor/page
+        # resolver mint the current wrapper instead of binding stale crop
+        # metadata (and, on CPU backends, stale pixels) to the new tile.
         return False
     channel = getattr(tile_state, "channel", None)
     try:
