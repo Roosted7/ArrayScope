@@ -270,6 +270,14 @@ class WindowLevelController:
 
         if explicit_auto:
             if candidate_state is not None:
+                if _retain_predecessor_visuals_for_immature_successor(
+                    previous_state, candidate_state
+                ):
+                    return _retained_predecessor_visuals(
+                        previous_state,
+                        candidate_state,
+                        mode=mode,
+                    )
                 return replace(candidate_state, user_locked=False, mode=mode)
             if previous_state is not None:
                 return replace(
@@ -289,6 +297,31 @@ class WindowLevelController:
             return candidate_state
 
         same_semantic = previous_state.semantic_key == candidate_state.semantic_key
+
+        if not same_semantic and _retain_predecessor_visuals_for_immature_successor(
+            previous_state, candidate_state
+        ):
+            # A semantic successor (slice/crop/channel population) is one
+            # transaction from the user's perspective. Publishing its first
+            # one or four source summaries immediately remaps levels and the
+            # histogram through a sequence of narrow partial ranges while the
+            # predecessor was already complete. Keep that truthful incumbent
+            # until one target-quality successor population is complete, then
+            # switch once.
+            # First-ever display still accepts partial evidence because its
+            # incumbent is only the numeric fallback.
+            return _retained_predecessor_visuals(previous_state, candidate_state, mode=mode)
+
+        if (
+            same_semantic
+            and previous_state.source_rank == LevelSourceRank.PREVIOUS_COMMITTED
+            and not _mature_successor_source(candidate_state)
+        ):
+            # The semantic successor is current and its evidence is real, but
+            # its partial/preview range must not move the retained predecessor
+            # visuals. Accumulate truthful metadata until one target-quality
+            # complete source can replace the range atomically.
+            return _retained_predecessor_visuals(previous_state, candidate_state, mode=mode)
 
         if previous_state.user_locked and same_semantic:
             histogram = (
@@ -453,6 +486,43 @@ def _complete_source(state: WindowLevelState) -> bool:
     if state.source_rank >= LevelSourceRank.MONTAGE_COMPLETE:
         return True
     return bool(state.expected_count > 0 and state.source_count >= state.expected_count)
+
+
+def _retain_predecessor_visuals_for_immature_successor(
+    previous: WindowLevelState | None,
+    candidate: WindowLevelState,
+) -> bool:
+    return bool(
+        previous is not None
+        and previous.semantic_key != candidate.semantic_key
+        and previous.source_rank >= LevelSourceRank.PREVIOUS_COMMITTED
+        and not _mature_successor_source(candidate)
+    )
+
+
+def _mature_successor_source(candidate: WindowLevelState) -> bool:
+    # Core deliberately does not import the display model enum. Its stable
+    # protocol value 2 is target-quality evidence; 1 is preview evidence.
+    return bool(_complete_source(candidate) and candidate.evidence_quality >= 2)
+
+
+def _retained_predecessor_visuals(
+    previous: WindowLevelState,
+    candidate: WindowLevelState,
+    *,
+    mode: LevelMode,
+) -> WindowLevelState:
+    return WindowLevelState(
+        semantic_key=candidate.semantic_key,
+        display_levels=previous.display_levels,
+        histogram_range=previous.histogram_range,
+        source_rank=LevelSourceRank.PREVIOUS_COMMITTED,
+        source_count=candidate.source_count,
+        expected_count=candidate.expected_count,
+        user_locked=False,
+        mode=mode,
+        evidence_quality=candidate.evidence_quality,
+    )
 
 
 def _span(bounds: Levels | None) -> float:

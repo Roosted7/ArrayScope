@@ -140,6 +140,7 @@ def _payload(
     shader_mapping=None,
     texture_kind=None,
     histogram_data=None,
+    level_stats=None,
 ):
     from arrayscope.display.model.frame import DisplayTilePayload
 
@@ -151,6 +152,7 @@ def _payload(
         source_id,
         shader_mapping=shader_mapping,
         texture_kind=texture_kind,
+        level_stats=level_stats,
     )
 
 
@@ -717,6 +719,39 @@ def test_phase1_exposes_fenced_resident_page_histogram(qt_app):
         assert report.texture_uploads == 0
         (next_evidence,) = view.residentHistogramEvidence(payloads)
         assert next_evidence.evidence_key != evidence.evidence_key
+    finally:
+        view.close()
+
+
+def test_phase1_prepared_stats_skip_redundant_resident_histogram(qt_app):
+    from arrayscope.display.model.montage_levels import TileLevelStats
+
+    view = _shown_view(qt_app)
+    try:
+        image = np.linspace(-2.0, 5.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {
+            0: _payload(
+                0,
+                image,
+                source_id=("prepared-histogram", 0),
+                level_stats=TileLevelStats(
+                    source_index=0,
+                    bounds=(-2.0, 5.0),
+                    sample=image[::4, ::4].reshape(-1),
+                ),
+            )
+        }
+        view.setResidentHistogramEvidenceRequired(True)
+        dispatches_before = (
+            0 if view._wgpu_executor is None else view._wgpu_executor.histogram_dispatches_total
+        )
+
+        report = _commit(view, geometry, payloads, levels=(-2.0, 5.0))
+
+        assert report.presented_tiles == frozenset({0})
+        assert view.residentHistogramEvidence(payloads) == ()
+        assert view._wgpu_executor.histogram_dispatches_total == dispatches_before
     finally:
         view.close()
 

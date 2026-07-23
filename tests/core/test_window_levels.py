@@ -113,6 +113,125 @@ def test_controller_relative_same_source_does_not_downgrade_when_viewport_covera
     assert state.source_count == 4
 
 
+def test_controller_keeps_complete_predecessor_until_successor_population_is_complete():
+    previous = window_levels.LevelSource(
+        levels=(100.0, 300.0),
+        histogram_range=(0.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=50,
+        expected_count=50,
+        semantic_key="previous-crop",
+    )
+    partial_successor = window_levels.LevelSource(
+        levels=(200.0, 210.0),
+        histogram_range=(200.0, 210.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=50,
+        semantic_key="successor-crop",
+    )
+
+    state = window_levels.WindowLevelController().decide(
+        previous=previous,
+        candidate=partial_successor,
+        mode="relative",
+    )
+
+    assert state.semantic_key == "successor-crop"
+    assert state.display_levels == (100.0, 300.0)
+    assert state.histogram_range == (0.0, 400.0)
+    assert state.source_count == 1
+
+
+def test_controller_switches_semantics_atomically_when_successor_population_is_complete():
+    previous = window_levels.LevelSource(
+        levels=(100.0, 300.0),
+        histogram_range=(0.0, 400.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=50,
+        expected_count=50,
+        semantic_key="previous-crop",
+    )
+    complete_successor = window_levels.LevelSource(
+        levels=(200.0, 600.0),
+        histogram_range=(200.0, 600.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=50,
+        expected_count=50,
+        semantic_key="successor-crop",
+        evidence_quality=2,
+    )
+
+    state = window_levels.WindowLevelController().decide(
+        previous=previous,
+        candidate=complete_successor,
+        mode="relative",
+    )
+
+    assert state.semantic_key == "successor-crop"
+    assert state.display_levels == (300.0, 500.0)
+    assert state.histogram_range == (200.0, 600.0)
+    assert state.source_count == 50
+
+
+def test_controller_keeps_predecessor_through_complete_preview_then_switches_at_target_quality():
+    controller = window_levels.WindowLevelController()
+    previous = window_levels.LevelSource(
+        levels=(0.0, 400.0),
+        histogram_range=(0.0, 400.0),
+        rank=window_levels.LevelSourceRank.PREVIOUS_COMMITTED,
+        semantic_key="previous",
+    )
+    preview = window_levels.LevelSource(
+        levels=(100.0, 200.0),
+        histogram_range=(100.0, 200.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=50,
+        expected_count=50,
+        semantic_key="successor",
+        evidence_quality=1,
+    )
+    target = window_levels.LevelSource(
+        levels=(0.0, 500.0),
+        histogram_range=(0.0, 500.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=50,
+        expected_count=50,
+        semantic_key="successor",
+        evidence_quality=2,
+    )
+
+    preview_state = controller.decide(previous=previous, candidate=preview, mode="relative")
+    target_state = controller.decide(previous=preview_state, candidate=target, mode="relative")
+
+    assert preview_state.semantic_key == "successor"
+    assert preview_state.display_levels == (0.0, 400.0)
+    assert preview_state.evidence_quality == 1
+    assert target_state.semantic_key == "successor"
+    assert target_state.display_levels == (0.0, 500.0)
+
+
+def test_controller_accepts_partial_first_source_instead_of_retaining_fallback():
+    fallback = window_levels.WindowLevelController().decide(previous=None, candidate=None)
+    partial = window_levels.LevelSource(
+        levels=(20.0, 40.0),
+        histogram_range=(20.0, 40.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+        source_count=1,
+        expected_count=50,
+        semantic_key="first-crop",
+    )
+
+    state = window_levels.WindowLevelController().decide(
+        previous=fallback,
+        candidate=partial,
+        mode="relative",
+    )
+
+    assert state.semantic_key == "first-crop"
+    assert state.display_levels == (20.0, 40.0)
+
+
 def test_controller_absolute_partial_source_updates_histogram_without_changing_levels():
     previous = window_levels.LevelSource(
         levels=(25.0, 75.0),

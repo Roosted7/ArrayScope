@@ -711,6 +711,147 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
     assert win._tracker.summary_for(session.level_key).source_indices == frozenset(range(4))
 
 
+def test_wgpu_prepared_payload_stats_bypass_resident_histogram_dispatch(monkeypatch):
+    """CPU page summaries are the cheapest truthful evidence on every backend."""
+
+    import arrayscope.render.level_stats as level_stats
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService
+
+    resident_requests = []
+    scheduled = []
+    service = LevelStatsService()
+    service.win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=WGPU_CAPABILITIES,
+            residentHistogramEvidence=lambda payloads: resident_requests.append(payloads) or (),
+            acceptResidentHistogramEvidence=lambda _keys: None,
+        )
+    )
+    tracker = MontageLevelTracker()
+    service._montage_level_tracker = lambda: tracker
+    service._schedule_montage_cached_level_stats = lambda session: scheduled.append(session)
+    monkeypatch.setattr(
+        level_stats,
+        "sample_tile_level_stats",
+        lambda *_args, **_kwargs: pytest.fail("prepared evidence must not resample pixels"),
+    )
+    rendered = {
+        index: SimpleNamespace(
+            tile=SimpleNamespace(source_index=index),
+            quality="preview",
+            level_stats=TileLevelStats(
+                index,
+                (float(index), float(index + 1)),
+                np.asarray([float(index)], dtype=np.float32),
+                evidence_quality=1,
+            ),
+            level_data=None,
+        )
+        for index in range(12)
+    }
+    payloads = {index: object() for index in rendered}
+    session = SimpleNamespace(
+        level_key=("levels", "wgpu-prepared"),
+        level_expected_indices=tuple(rendered),
+        rendered_tiles=rendered,
+        plan=SimpleNamespace(
+            tiles=tuple(
+                SimpleNamespace(montage_index=index, source_index=index) for index in rendered
+            )
+        ),
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+        first_pass_histogram_published=False,
+        first_pass_quality="preview",
+        shader_display=True,
+        display_committed=False,
+        first_pass_accepts_quality=lambda quality: quality == "preview",
+    )
+
+    merged = service._queue_montage_level_stats_for_payloads(session, payloads)
+
+    assert merged == len(rendered)
+    assert resident_requests == []
+    assert scheduled == [session]
+    assert tracker.summary_for(session.level_key).source_indices == frozenset(rendered)
+
+
+def test_wgpu_mixed_evidence_dispatches_only_sources_without_prepared_stats():
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
+    from arrayscope.display.model.montage_levels import MontageLevelTracker, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService
+
+    resident_requests = []
+    service = LevelStatsService()
+    service.win = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=WGPU_CAPABILITIES,
+            residentHistogramEvidence=lambda payloads: (
+                resident_requests.append(dict(payloads)) or ()
+            ),
+            acceptResidentHistogramEvidence=lambda _keys: None,
+        )
+    )
+    tracker = MontageLevelTracker()
+    service._montage_level_tracker = lambda: tracker
+    service._schedule_montage_cached_level_stats = lambda _session: None
+    service._cached_montage_source_level_stats = lambda *_args: None
+    service._queue_wgpu_resident_histogram_evidence = lambda _session, payloads: (
+        resident_requests.append(dict(payloads)) or 0
+    )
+    rendered = {
+        index: SimpleNamespace(
+            tile=SimpleNamespace(source_index=index),
+            quality="preview",
+            level_stats=(
+                TileLevelStats(
+                    index,
+                    (float(index), float(index + 1)),
+                    np.asarray([float(index)], dtype=np.float32),
+                    evidence_quality=1,
+                )
+                if index != 2
+                else None
+            ),
+            level_data=None,
+        )
+        for index in range(4)
+    }
+    payloads = {index: object() for index in rendered}
+    session = SimpleNamespace(
+        level_key=("levels", "wgpu-mixed"),
+        level_expected_indices=tuple(rendered),
+        rendered_tiles=rendered,
+        plan=SimpleNamespace(
+            tiles=tuple(
+                SimpleNamespace(montage_index=index, source_index=index) for index in rendered
+            )
+        ),
+        pending_level_tiles=deque(),
+        pending_level_sources=set(),
+        pending_refined_level_tiles=deque(),
+        pending_refined_level_sources=set(),
+        level_scan_cursor=0,
+        level_scan_remaining_tiles=0,
+        first_pass_histogram_published=False,
+        first_pass_quality="preview",
+        shader_display=True,
+        display_committed=False,
+        first_pass_accepts_quality=lambda quality: quality == "preview",
+    )
+
+    merged = service._queue_montage_level_stats_for_payloads(session, payloads)
+
+    assert merged == 3
+    assert resident_requests == [{2: payloads[2]}]
+
+
 def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
     from arrayscope.core.gui_callback_budget import GuiCallbackBudget
     from arrayscope.display.model.montage_levels import MontageLevelTracker

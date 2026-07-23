@@ -216,12 +216,27 @@ def _flicker_free_transition(stats) -> bool:
             source_count=count,
             expected_count=len(stats),
             semantic_key=("successor",),
+            evidence_quality=1,
         )
         current = controller.decide(previous=previous, candidate=candidate, mode="relative")
-        if current.display_levels != predecessor.levels or current.source_count < len(stats):
+        if current.display_levels != predecessor.levels:
             return False
         previous = current
-    return True
+    complete_bounds = (
+        min(float(row.bounds[0]) for row in stats if row.bounds is not None),
+        max(float(row.bounds[1]) for row in stats if row.bounds is not None),
+    )
+    complete = LevelSource(
+        levels=complete_bounds,
+        histogram_range=complete_bounds,
+        rank=LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=len(stats),
+        expected_count=len(stats),
+        semantic_key=("successor",),
+        evidence_quality=2,
+    )
+    switched = controller.decide(previous=previous, candidate=complete, mode="relative")
+    return bool(switched.semantic_key == ("successor",))
 
 
 def measure_cpu_case(

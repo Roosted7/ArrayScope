@@ -1804,6 +1804,43 @@ def test_histogram_continuity_metrics_rejects_transient_range_dip_and_empty_stat
     assert metrics["level_source_count_regressed"] is True
 
 
+def test_histogram_continuity_metrics_allows_one_atomic_range_change_per_semantic_action():
+    from arrayscope.tools.profile_montage_workflow import _histogram_continuity_metrics
+
+    rows = (
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [0.0, 100.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 50,
+            "level_semantic_key": "crop-a",
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [40.0, 60.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 50,
+            "level_semantic_key": "crop-b",
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [-20.0, 120.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 50,
+            "level_semantic_key": "crop-c",
+        },
+    )
+
+    metrics = _histogram_continuity_metrics(rows)
+
+    assert metrics["window_level_flicker_free"] is True
+    assert metrics["level_transient_span_dip_ratio"] == 1.0
+    assert metrics["level_source_count_regressed"] is False
+
+
 def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camera_drift():
     from arrayscope.tools.profile_montage_workflow import _PresentationContinuityProbe
 

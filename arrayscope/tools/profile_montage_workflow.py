@@ -4860,6 +4860,12 @@ def _levels_histogram_state(win) -> dict[str, object]:
         "level_source_count": None
         if applied is None
         else int(getattr(applied, "source_count", 0) or 0),
+        "level_action_id": None
+        if session is None
+        else int(getattr(session, "session_id", -1) or -1),
+        "level_semantic_key": None
+        if applied is None
+        else _trace_identity(getattr(applied, "semantic_key", None), limit=500),
         "level_evidence_quality": None
         if applied is None
         else int(getattr(applied, "evidence_quality", 0) or 0),
@@ -4886,6 +4892,8 @@ def _append_histogram_timeline_state(
         "histogram_empty": bool(state.get("histogram_empty", True)),
         "level_source_rank": state.get("level_source_rank"),
         "level_source_count": state.get("level_source_count"),
+        "level_action_id": state.get("level_action_id"),
+        "level_semantic_key": state.get("level_semantic_key"),
         "level_evidence_quality": state.get("level_evidence_quality"),
     }
     signature = tuple(
@@ -4910,50 +4918,75 @@ def _histogram_continuity_metrics(rows) -> dict[str, object]:
     timeline = tuple(dict(row) for row in tuple(rows or ()))
     visible = tuple(row for row in timeline if bool(row.get("successor_visible", False)))
     considered = visible if visible else timeline[-1:]
-    bounds_rows = []
-    for row in considered:
-        bounds = row.get("histogram_data_bounds")
-        if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
-            continue
-        low, high = (float(bounds[0]), float(bounds[1]))
-        if math.isfinite(low) and math.isfinite(high) and high > low:
-            bounds_rows.append((row, low, high))
-
     transient_span_dip_ratio = 1.0
     center_excursion_fraction = 0.0
-    if len(bounds_rows) >= 2:
-        first_low, first_high = bounds_rows[0][1:]
-        final_low, final_high = bounds_rows[-1][1:]
-        first_span = first_high - first_low
-        final_span = final_high - final_low
-        endpoint_floor = min(first_span, final_span)
-        if endpoint_floor > 0.0:
-            transient_span_dip_ratio = (
-                min(high - low for _row, low, high in bounds_rows) / endpoint_floor
-            )
-        first_center = 0.5 * (first_low + first_high)
-        final_center = 0.5 * (final_low + final_high)
-        center_low = min(first_center, final_center)
-        center_high = max(first_center, final_center)
-        normalization = max(first_span, final_span, np.finfo(float).eps)
-        center_excursion_fraction = max(
-            max(
-                center_low - 0.5 * (low + high),
-                0.5 * (low + high) - center_high,
-                0.0,
-            )
-            / normalization
-            for _row, low, high in bounds_rows
+    source_count_regressed = False
+    semantic_segments: list[list[dict[str, object]]] = []
+    for row in considered:
+        semantic_key = row.get(
+            "level_action_id",
+            row.get("level_semantic_key", "__legacy_single_semantic__"),
         )
-
-    counts = tuple(
-        int(row["level_source_count"])
-        for row in considered
-        if row.get("level_source_count") is not None
-    )
-    source_count_regressed = bool(
-        len(counts) >= 3 and min(counts[1:-1], default=counts[0]) < min(counts[0], counts[-1])
-    )
+        if (
+            not semantic_segments
+            or semantic_segments[-1][-1].get(
+                "level_action_id",
+                semantic_segments[-1][-1].get("level_semantic_key", "__legacy_single_semantic__"),
+            )
+            != semantic_key
+        ):
+            semantic_segments.append([])
+        semantic_segments[-1].append(row)
+    for segment in semantic_segments:
+        bounds_rows = []
+        for row in segment:
+            bounds = row.get("histogram_data_bounds")
+            if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+                continue
+            low, high = (float(bounds[0]), float(bounds[1]))
+            if math.isfinite(low) and math.isfinite(high) and high > low:
+                bounds_rows.append((row, low, high))
+        if len(bounds_rows) >= 2:
+            first_low, first_high = bounds_rows[0][1:]
+            final_low, final_high = bounds_rows[-1][1:]
+            first_span = first_high - first_low
+            final_span = final_high - final_low
+            endpoint_floor = min(first_span, final_span)
+            if endpoint_floor > 0.0:
+                transient_span_dip_ratio = min(
+                    transient_span_dip_ratio,
+                    min(high - low for _row, low, high in bounds_rows) / endpoint_floor,
+                )
+            first_center = 0.5 * (first_low + first_high)
+            final_center = 0.5 * (final_low + final_high)
+            center_low = min(first_center, final_center)
+            center_high = max(first_center, final_center)
+            normalization = max(first_span, final_span, np.finfo(float).eps)
+            segment_excursion = max(
+                max(
+                    center_low - 0.5 * (low + high),
+                    0.5 * (low + high) - center_high,
+                    0.0,
+                )
+                / normalization
+                for _row, low, high in bounds_rows
+            )
+            center_excursion_fraction = max(
+                center_excursion_fraction,
+                segment_excursion,
+            )
+        counts = tuple(
+            int(row["level_source_count"])
+            for row in segment
+            if row.get("level_source_count") is not None
+        )
+        source_count_regressed = bool(
+            source_count_regressed
+            or (
+                len(counts) >= 3
+                and min(counts[1:-1], default=counts[0]) < min(counts[0], counts[-1])
+            )
+        )
     histogram_emptied = any(bool(row.get("histogram_empty", True)) for row in considered)
     levels_defaulted = any(bool(row.get("levels_look_default", True)) for row in considered)
     flicker_free = bool(

@@ -412,10 +412,6 @@ class LevelStatsService:
             return False
         if not session.note_first_pass_quality(quality):
             return False
-        if image_view_backend_capabilities(self.win.img_view).name == "wgpu":
-            # The wgpu surface installs DispatchHistogram evidence only after
-            # the matching ContentPlane pages are physically resident.
-            return False
         evidence_quality = (
             LevelEvidenceQuality.ROUGH_PREVIEW
             if str(quality) == "preview"
@@ -1016,20 +1012,20 @@ class LevelStatsService:
     def _queue_montage_level_stats_for_payloads(self, session, payloads) -> int:
         """Request level evidence for a presentation delta without scanning it inline."""
 
-        capabilities = image_view_backend_capabilities(self.win.img_view)
-        if str(capabilities.name) == "wgpu" and not bool(
-            getattr(session, "first_pass_histogram_published", False)
-        ):
-            return self._queue_wgpu_resident_histogram_evidence(session, payloads)
-
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
         stats_start = perf_counter()
         merged = 0
-        inspected = 0
+        fallback_inspected = 0
         pending, queued_sources = self._pending_montage_level_sources(session)
         require_refined = _montage_level_evidence_requires_refined(self, session)
+        resident_histogram_fallback = bool(
+            not bool(getattr(session, "first_pass_histogram_published", False))
+            and callable(getattr(self.win.img_view, "residentHistogramEvidence", None))
+            and callable(getattr(self.win.img_view, "acceptResidentHistogramEvidence", None))
+        )
+        resident_payloads = {}
         tiles_by_number = {
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(
@@ -1037,17 +1033,15 @@ class LevelStatsService:
             )
         }
         for tile_number in payloads or ():
-            if inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
-                self._mark_montage_level_scan_pending(session)
-                break
-            inspected += 1
             payload = payloads.get(int(tile_number)) if isinstance(payloads, dict) else None
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
             if rendered is None and payload is not None:
                 tile = tiles_by_number.get(int(tile_number))
-                if tile is not None:
+                if tile is not None and hasattr(payload, "semantic_data"):
                     rendered = _rendered_tile_from_previous_payload(tile, payload)
             if rendered is None:
+                if resident_histogram_fallback and payload is not None:
+                    resident_payloads[int(tile_number)] = payload
                 continue
             if bool(getattr(session, "shader_display", False)):
                 payload_quality = str(getattr(rendered, "quality", "exact") or "exact")
@@ -1097,16 +1091,34 @@ class LevelStatsService:
                 self._queue_montage_level_refinement(session, rendered)
                 queued_sources.discard(source_index)
                 merged += 1
+            elif resident_histogram_fallback and payload is not None:
+                resident_payloads[int(tile_number)] = payload
             elif source_index not in queued_sources:
+                if fallback_inspected >= MONTAGE_LEVEL_STATS_COMMIT_BATCH:
+                    self._mark_montage_level_scan_pending(session)
+                    break
+                fallback_inspected += 1
                 pending.append(rendered)
                 queued_sources.add(source_index)
+        resident_merged = 0
+        if resident_payloads:
+            # The page materializer already computed immutable summaries for
+            # normal CPU-sourced pages. Consume those on every backend. A
+            # resident GPU histogram is the capability fallback only for
+            # content that has no reusable prepared evidence (for example
+            # GPU-generated pages), never a mandatory WGPU-specific route.
+            resident_merged = self._queue_wgpu_resident_histogram_evidence(
+                session,
+                resident_payloads,
+            )
         self._last_montage_level_stats_ms = (perf_counter() - stats_start) * 1000.0
-        self._montage_level_sources_added_last_commit = int(merged)
+        self._montage_level_sources_added_last_commit = int(merged + resident_merged)
         self._montage_pending_level_tiles_last_session = len(
             getattr(session, "pending_level_tiles", ()) or ()
         )
-        self._schedule_montage_cached_level_stats(session)
-        return int(merged)
+        if merged or pending:
+            self._schedule_montage_cached_level_stats(session)
+        return int(merged + resident_merged)
 
     def _absorb_late_wgpu_histogram_evidence(
         self, evidence_rows, *, source_level_key, elapsed_ms

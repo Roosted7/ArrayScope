@@ -1600,6 +1600,10 @@ class WgpuImageView2D(ImageViewShell):
                     "plane_identity": plane_identity,
                     "lod_reducer": lod_reducer,
                     "source_index": int(getattr(payload, "source_index", tile)),
+                    "prepared_histogram_evidence": bool(
+                        getattr(payload, "level_stats", None) is not None
+                        or getattr(payload, "level_data", None) is not None
+                    ),
                 }
 
             histogram_capable = representation != RGB8
@@ -1630,6 +1634,7 @@ class WgpuImageView2D(ImageViewShell):
                 info["histogram_evidence_key"] = histogram_evidence_key
                 if (
                     self._wgpu_histogram_evidence_required
+                    and not info["prepared_histogram_evidence"]
                     and frontier_keys
                     and histogram_evidence_key not in self._wgpu_histogram_evidence
                     and histogram_evidence_key not in scheduled_evidence_keys

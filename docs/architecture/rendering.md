@@ -240,13 +240,14 @@ COMPUTE GOES, never about what may be shown:
    *Phase 1 (coverage):* preview/floor evaluation for every required tile,
    rough level statistics, and the single rough histogram publication.
    Canonical materialized pages retain bounded, source-area-weighted
-   summaries. Incumbent backends aggregate those summaries across the ADR 0056
-   non-overlapping coverage frontier in the existing worker task. The wgpu
-   backend instead dispatches the same frontier over the committed plane's
-   physically resident pages; a coverage-lane worker waits the submission's
-   completion token, resolves the bounded readback, and installs it through
-   the same `MontageLevelTracker`/publication machinery. No GUI callback scans
-   pixels or aggregates bins. Physical page acknowledgement remains immediate;
+   summaries. Every backend first aggregates those already-prepared summaries
+   across the ADR 0056 non-overlapping coverage frontier. If no prepared
+   evidence exists but CPU semantic values do, the existing worker sampler
+   owns the fallback. Only resident-only WGPU content dispatches the frontier
+   over the committed plane's physical pages; a coverage-lane worker waits the
+   submission's completion token, resolves the bounded readback, and installs
+   it through the same `MontageLevelTracker`/publication machinery. No GUI
+   callback scans pixels or aggregates bins. Physical page acknowledgement remains immediate;
    the scheduling-policy owner keeps phase 1 open on an explicit evidence
    barrier until the matching fenced evidence is installed through the existing
    level tracker and its rough publication commits. Display-ready RGB is exempt;

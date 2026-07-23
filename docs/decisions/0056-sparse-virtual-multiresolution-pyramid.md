@@ -72,6 +72,10 @@ zero-on-missing is indistinguishable from a genuine zero in scientific data).
    parent's contribution is removed before the children's are added, so each
    source region contributes exactly once at its best available
    representation (extends ADR 0054's evidence ordering to page granularity).
+   Producer selection is evidence-driven: reuse an attached page summary
+   first, sample accessible CPU semantic values second, and dispatch a
+   resident-page GPU histogram only for content with neither CPU evidence
+   source. A backend name never justifies recomputing an existing summary.
 
 8. **LOD generation is sourced where cheapest** (precomputed pyramid, CPU,
    GPU-from-resident-chunks, persistent cache) and never uploads L0 merely to
