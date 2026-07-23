@@ -1116,6 +1116,14 @@ def _passing_r8_phase_record(*, backend="vispy"):
         "first_visible_histogram_data_bounds": [-1.0, 7.0],
         "first_visible_histogram_empty": False,
         "first_visible_level_evidence_quality": evidence_quality,
+        "window_level_flicker_free": True,
+        "histogram_emptied_after_successor_visible": False,
+        "levels_defaulted_after_successor_visible": False,
+        "level_transient_span_dip_ratio": 1.0,
+        "level_center_excursion_fraction": 0.0,
+        "level_source_count_regressed": False,
+        "histogram_timeline_transition_count": 2,
+        "histogram_timeline_truncated": False,
         "presentation_continuity_ok": True,
         "presentation_continuity_expected": True,
         "presentation_blackout_observed": False,
@@ -1717,6 +1725,83 @@ def test_centered_indices_selects_middle_of_full_axis():
     assert _centered_indices(10, 4) == (3, 4, 5, 6)
     assert _centered_indices(10, 12) == (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
     assert _centered_indices(11, 5) == (3, 4, 5, 6, 7)
+
+
+def test_histogram_continuity_metrics_accepts_monotonic_refinement():
+    from arrayscope.tools.profile_montage_workflow import _histogram_continuity_metrics
+
+    rows = (
+        {
+            "successor_visible": False,
+            "histogram_data_bounds": [0.0, 100.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 60,
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [-2.0, 102.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 59,
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [-3.0, 104.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 60,
+        },
+    )
+
+    metrics = _histogram_continuity_metrics(rows)
+
+    assert metrics["window_level_flicker_free"] is True
+    assert metrics["level_transient_span_dip_ratio"] == 1.0
+    assert metrics["level_source_count_regressed"] is False
+
+
+def test_histogram_continuity_metrics_rejects_transient_range_dip_and_empty_state():
+    from arrayscope.tools.profile_montage_workflow import _histogram_continuity_metrics
+
+    rows = (
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [0.0, 100.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 60,
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": None,
+            "histogram_empty": True,
+            "levels_look_default": True,
+            "level_source_count": 4,
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [40.0, 60.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 16,
+        },
+        {
+            "successor_visible": True,
+            "histogram_data_bounds": [-5.0, 105.0],
+            "histogram_empty": False,
+            "levels_look_default": False,
+            "level_source_count": 60,
+        },
+    )
+
+    metrics = _histogram_continuity_metrics(rows)
+
+    assert metrics["window_level_flicker_free"] is False
+    assert metrics["histogram_emptied_after_successor_visible"] is True
+    assert metrics["levels_defaulted_after_successor_visible"] is True
+    assert metrics["level_transient_span_dip_ratio"] < 0.25
+    assert metrics["level_source_count_regressed"] is True
 
 
 def test_presentation_continuity_probe_detects_retained_frame_blackout_and_camera_drift():

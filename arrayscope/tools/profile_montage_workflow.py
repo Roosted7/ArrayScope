@@ -4250,6 +4250,7 @@ class _PresentationContinuityProbe:
         )
         self._topology_changed = False
         self._started_at = None
+        self._histogram_timeline: list[dict[str, object]] = []
 
     def start(self) -> None:
         self._started_at = perf_counter()
@@ -4278,9 +4279,18 @@ class _PresentationContinuityProbe:
         self._samples += 1
         count = _backend_visible_tile_count(self._win)
         self._minimum_count = min(self._minimum_count, count)
+        successor_visible = bool(count > 0 and current_identity != self._predecessor_identity)
+        _append_histogram_timeline_state(
+            self._histogram_timeline,
+            _levels_histogram_state(self._win),
+            elapsed_ms=(
+                0.0 if self._started_at is None else (perf_counter() - self._started_at) * 1000.0
+            ),
+            successor_visible=successor_visible,
+        )
         if count <= 0:
             self._blackout_observed = True
-        elif current_identity != self._predecessor_identity:
+        elif successor_visible:
             # The backend atomically accepted successor pixels. Camera/extent
             # changes after this point belong to that successor even when a
             # degraded preview does not yet own exact value semantics.
@@ -4344,6 +4354,7 @@ class _PresentationContinuityProbe:
             "presentation_predecessor_extent": self._predecessor_extent,
             "presentation_changed_extent": self._changed_extent,
             "presentation_continuity_ok": not violation,
+            **_histogram_continuity_metrics(self._histogram_timeline),
         }
 
 
@@ -4856,6 +4867,120 @@ def _levels_histogram_state(win) -> dict[str, object]:
     }
 
 
+def _append_histogram_timeline_state(
+    rows: list[dict[str, object]],
+    state: dict[str, object],
+    *,
+    elapsed_ms: float,
+    successor_visible: bool,
+    limit: int = 128,
+) -> None:
+    """Retain only observable histogram/window-level state transitions."""
+
+    row = {
+        "elapsed_ms": float(elapsed_ms),
+        "successor_visible": bool(successor_visible),
+        "display_levels": state.get("display_levels"),
+        "histogram_data_bounds": state.get("histogram_data_bounds"),
+        "levels_look_default": bool(state.get("levels_look_default", True)),
+        "histogram_empty": bool(state.get("histogram_empty", True)),
+        "level_source_rank": state.get("level_source_rank"),
+        "level_source_count": state.get("level_source_count"),
+        "level_evidence_quality": state.get("level_evidence_quality"),
+    }
+    signature = tuple(
+        (tuple(value) if isinstance(value, list) else value)
+        for key, value in row.items()
+        if key != "elapsed_ms"
+    )
+    if rows and rows[-1].get("_signature") == signature:
+        return
+    row["_signature"] = signature
+    if len(rows) < max(1, int(limit)):
+        rows.append(row)
+        return
+    # Preserve the first transition and the latest truth under pathological
+    # churn. The truncation flag in the summary makes the lost detail loud.
+    rows[-1] = row
+
+
+def _histogram_continuity_metrics(rows) -> dict[str, object]:
+    """Summarize visible window/level flicker from a compact state timeline."""
+
+    timeline = tuple(dict(row) for row in tuple(rows or ()))
+    visible = tuple(row for row in timeline if bool(row.get("successor_visible", False)))
+    considered = visible if visible else timeline[-1:]
+    bounds_rows = []
+    for row in considered:
+        bounds = row.get("histogram_data_bounds")
+        if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+            continue
+        low, high = (float(bounds[0]), float(bounds[1]))
+        if math.isfinite(low) and math.isfinite(high) and high > low:
+            bounds_rows.append((row, low, high))
+
+    transient_span_dip_ratio = 1.0
+    center_excursion_fraction = 0.0
+    if len(bounds_rows) >= 2:
+        first_low, first_high = bounds_rows[0][1:]
+        final_low, final_high = bounds_rows[-1][1:]
+        first_span = first_high - first_low
+        final_span = final_high - final_low
+        endpoint_floor = min(first_span, final_span)
+        if endpoint_floor > 0.0:
+            transient_span_dip_ratio = (
+                min(high - low for _row, low, high in bounds_rows) / endpoint_floor
+            )
+        first_center = 0.5 * (first_low + first_high)
+        final_center = 0.5 * (final_low + final_high)
+        center_low = min(first_center, final_center)
+        center_high = max(first_center, final_center)
+        normalization = max(first_span, final_span, np.finfo(float).eps)
+        center_excursion_fraction = max(
+            max(
+                center_low - 0.5 * (low + high),
+                0.5 * (low + high) - center_high,
+                0.0,
+            )
+            / normalization
+            for _row, low, high in bounds_rows
+        )
+
+    counts = tuple(
+        int(row["level_source_count"])
+        for row in considered
+        if row.get("level_source_count") is not None
+    )
+    source_count_regressed = bool(
+        len(counts) >= 3 and min(counts[1:-1], default=counts[0]) < min(counts[0], counts[-1])
+    )
+    histogram_emptied = any(bool(row.get("histogram_empty", True)) for row in considered)
+    levels_defaulted = any(bool(row.get("levels_look_default", True)) for row in considered)
+    flicker_free = bool(
+        not histogram_emptied
+        and not levels_defaulted
+        and transient_span_dip_ratio >= 0.75
+        and center_excursion_fraction <= 0.25
+        and not source_count_regressed
+    )
+    clean_rows = []
+    for row in timeline:
+        row.pop("_signature", None)
+        clean_rows.append(row)
+    return {
+        "histogram_timeline": clean_rows,
+        "histogram_timeline_transition_count": len(timeline),
+        "histogram_timeline_truncated": bool(len(timeline) >= 128),
+        "histogram_visible_state_count": len(considered),
+        "histogram_emptied_after_successor_visible": bool(histogram_emptied),
+        "levels_defaulted_after_successor_visible": bool(levels_defaulted),
+        "level_transient_span_dip_ratio": float(transient_span_dip_ratio),
+        "level_center_excursion_fraction": float(center_excursion_fraction),
+        "level_source_count_regressed": bool(source_count_regressed),
+        "window_level_flicker_free": flicker_free,
+    }
+
+
 def _post_visible_gate_blockers(
     *,
     fully_visible: bool,
@@ -5011,6 +5136,14 @@ def _wait_for_montage_complete(
     stalled = False
     post_visible_since = None
     post_visible_blockers: tuple[str, ...] = ()
+    histogram_timeline: list[dict[str, object]] = []
+    initial_histogram_state = _levels_histogram_state(win)
+    _append_histogram_timeline_state(
+        histogram_timeline,
+        initial_histogram_state,
+        elapsed_ms=0.0,
+        successor_visible=False,
+    )
     while time.monotonic() < deadline:
         _process_events(app, QtCore, count=2)
         session = getattr(win, "_frame_session", None)
@@ -5019,12 +5152,13 @@ def _wait_for_montage_complete(
         final_level_state = level_state
         visibility_state = _montage_visibility_state(win, mode=str(mode))
         final_visibility_state = visibility_state
+        levels_state = _levels_histogram_state(win)
+        elapsed_now_ms = (perf_counter() - start) * 1000.0
         if first_histogram_data_ms is None or first_nondefault_levels_ms is None:
-            levels_state = _levels_histogram_state(win)
             if first_histogram_data_ms is None and not bool(levels_state["histogram_empty"]):
-                first_histogram_data_ms = (perf_counter() - start) * 1000.0
+                first_histogram_data_ms = elapsed_now_ms
             if first_nondefault_levels_ms is None and not bool(levels_state["levels_look_default"]):
-                first_nondefault_levels_ms = (perf_counter() - start) * 1000.0
+                first_nondefault_levels_ms = elapsed_now_ms
         presentation_ready = bool(level_state["settled"]) or not bool(require_presentation_settled)
         target_settled = bool(
             session is not None
@@ -5087,6 +5221,15 @@ def _wait_for_montage_complete(
                 predecessor_presentation_identity is not None
                 and current_presentation_identity != predecessor_presentation_identity
             )
+        )
+        _append_histogram_timeline_state(
+            histogram_timeline,
+            levels_state,
+            elapsed_ms=elapsed_now_ms,
+            successor_visible=bool(
+                successor_pixels_observed
+                and int(visibility_state["active_presented_tile_count"]) > 0
+            ),
         )
         if (
             first_visible_tile_ms is None
@@ -5313,6 +5456,7 @@ def _wait_for_montage_complete(
                 "vispy_tile_presentation_draw_count": _vispy_tile_presentation_draw_count(win),
                 "waited_for_vispy_draw_after_complete": bool(vispy_tiled),
                 "waited_for_wgpu_draw_after_complete": bool(wgpu_tiled),
+                **_histogram_continuity_metrics(histogram_timeline),
             }
         blockers = _post_visible_gate_blockers(
             fully_visible=fully_visible,
@@ -6791,6 +6935,23 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         not bool(record.get("first_visible_histogram_empty", True)),
         evidence=record.get("first_visible_histogram_data_bounds"),
         target="first presented pixels already publish their level sample in the histogram",
+    )
+    require(
+        "window_level_flicker_free",
+        bool(record.get("window_level_flicker_free", False)),
+        evidence={
+            "histogram_emptied": record.get("histogram_emptied_after_successor_visible"),
+            "levels_defaulted": record.get("levels_defaulted_after_successor_visible"),
+            "span_dip_ratio": record.get("level_transient_span_dip_ratio"),
+            "center_excursion_fraction": record.get("level_center_excursion_fraction"),
+            "source_count_regressed": record.get("level_source_count_regressed"),
+            "transitions": record.get("histogram_timeline_transition_count"),
+            "truncated": record.get("histogram_timeline_truncated"),
+        },
+        target=(
+            "after successor pixels appear the histogram remains populated, levels never "
+            "default, and no transient span/center/source-coverage excursion occurs"
+        ),
     )
     first_quality = int(record.get("first_visible_level_evidence_quality", 0) or 0)
     compatible_predecessor = bool(record.get("first_visible_reused_compatible_predecessor", False))
