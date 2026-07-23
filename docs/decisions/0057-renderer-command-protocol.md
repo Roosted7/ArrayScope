@@ -17,7 +17,12 @@
   without eviction needs nothing) and keeps eviction honest: when pool
   pressure exceeds the shield, the executor yields the shielded page and
   reports it in `FrameReport.histogram_missing` instead of failing the
-  submission; consumers treat such evidence as unsatisfied and retry. Native flat overlay geometry is also live through
+  submission; consumers treat such evidence as unsatisfied and retry.
+  Dynamic histogram readback batching was added 2026-07-23: every
+  `DispatchHistogram` still owns an independent result and bounds, while the
+  executor packs all deferred outputs in one `FrameSubmission` into one
+  staging buffer and one queue read. This is executor-internal synchronization
+  policy, not a new protocol command. Native flat overlay geometry is also live through
   `UpdateOverlayGeometry` + the uniform-only `SetOverlayCamera`: ROIs,
   profile cursor geometry, and tile-status geometry draw after tiles in the
   same pass. Native overlay TEXT landed 2026-07-19 and closed the last
@@ -118,6 +123,9 @@ second one.
    `PageTable` bookkeeping, GPU-side ancestor-fallback lookup, one instanced
    tile draw followed by one flat instanced overlay draw in the same render
    pass, two-pass G6 histogram, and in-pool component-mean LOD generation.
+   Multiple dynamic histogram commands in one submission share one batched
+   staging-buffer readback without merging their evidence identities or
+   values.
    Reducer family is physical binding identity: recursive GPU generation is
    accepted only for `mean`; mode-specific `mean_abs`/`phase_vector` families
    remain on their honest CPU route. Default-ring tests

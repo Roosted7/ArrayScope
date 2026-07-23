@@ -1057,6 +1057,26 @@ def test_dynamic_histogram_discovers_mapped_bounds_and_fences_readback(scene):
     assert np.array_equal(bins.astype(np.int64), cpu.astype(np.int64))
 
 
+def test_dynamic_histograms_share_one_frame_readback(scene):
+    keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))
+    command = DispatchHistogram(keys, bins=64, lo=None, hi=None, mode="real")
+    dispatches_before = scene.executor.histogram_dispatches_total
+    resolves_before = scene.executor.histogram_readback_resolves_total
+    batches_before = scene.executor.histogram_batch_readbacks_total
+    report = scene.executor.submit(FrameSubmission(31, (command, command)))
+
+    report.wait_completed()
+    rows = tuple(report.histograms.values())
+    first_counts, first_bounds = rows[0].resolve()
+    second_counts, second_bounds = rows[1].resolve()
+
+    assert first_bounds == second_bounds
+    assert np.array_equal(first_counts, second_counts)
+    assert scene.executor.histogram_dispatches_total - dispatches_before == 2
+    assert scene.executor.histogram_readback_resolves_total - resolves_before == 2
+    assert scene.executor.histogram_batch_readbacks_total - batches_before == 1
+
+
 def test_refined_grade_histogram_supports_the_histogram_widget_bin_cap(scene):
     bins_requested = 500
     keys = tuple(scene.key(0, cx, cy) for cy in range(GRID0) for cx in range(GRID0))

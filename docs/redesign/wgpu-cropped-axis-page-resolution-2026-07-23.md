@@ -94,6 +94,31 @@ Artifacts:
 - `/tmp/arrayscope-xy-crop-matrix-owner-fix-wgpu.jsonl`
 - `/tmp/arrayscope-xy-crop-matrix-owner-fix-wgpu-trace.jsonl`
 
+## Performance iterations
+
+The post-correctness cProfile showed that the 1 ms continuity oracle rebuilt
+the complete WGPU physical-row and page-pool diagnostic tree on every sample.
+An allocation-light physical count now checks only the committed tiles' page
+keys. Rich diagnostics remain available on their explicit path. On the same
+real-Wayland X matrix this reduced total crop settlement from 13.89 s to
+8.59 s and the worst cell from 3.65 s to 1.83 s.
+
+The next cProfile then exposed 508 synchronous queue-buffer reads for resident
+histogram evidence: each of 254 per-tile dynamic histograms independently read
+counts and bounds. `WgpuPlaneExecutor` now preserves every histogram result
+but copies all deferred results in a `FrameSubmission` into one staging buffer.
+Resolving all tile evidence performs one queue read per frame submission.
+The X matrix fell again to 6.34 s total and 0.87 s worst-cell settlement.
+Both iterations retain complete/current physical coverage and zero crop
+uploads.
+
+Artifacts:
+
+- `/tmp/arrayscope-xy-crop-matrix-light-continuity-wgpu.jsonl`
+- `/tmp/arrayscope-xy-crop-matrix-light-continuity-wgpu.cprofile`
+- `/tmp/arrayscope-xy-crop-matrix-batched-histogram-wgpu.jsonl`
+- `/tmp/arrayscope-xy-crop-matrix-batched-histogram-wgpu-trace.jsonl`
+
 ## Implementation direction
 
 Replace geometry-specific binding selection with one resolver:

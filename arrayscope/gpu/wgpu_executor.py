@@ -1279,6 +1279,42 @@ class _Pool:
 
 
 @dataclass
+class _HistogramReadbackBatch:
+    """One staging buffer shared by every dynamic histogram in a frame."""
+
+    device: object
+    buffer: object
+    spans: tuple[tuple[int, int, int, int, int, int], ...]
+    on_resolve: object = None
+    _raw: memoryview | None = None
+
+    def resolve(self, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        if self._raw is None:
+            self._raw = memoryview(self.device.queue.read_buffer(self.buffer))
+            if callable(self.on_resolve):
+                self.on_resolve()
+                self.on_resolve = None
+        counts_offset, counts_size, bounds_offset, bounds_size, time_offset, time_size = self.spans[
+            int(index)
+        ]
+        counts = np.frombuffer(
+            self._raw[counts_offset : counts_offset + counts_size], np.uint32
+        ).copy()
+        bounds = np.frombuffer(
+            self._raw[bounds_offset : bounds_offset + bounds_size], np.uint32
+        ).copy()
+        timestamps = (
+            None
+            if time_size <= 0
+            else np.frombuffer(
+                self._raw[time_offset : time_offset + time_size],
+                np.uint64,
+            ).copy()
+        )
+        return counts, bounds, timestamps
+
+
+@dataclass
 class _DeferredHistogramReadback:
     """Small readback resolved only after the report completion token fences."""
 
@@ -1293,15 +1329,27 @@ class _DeferredHistogramReadback:
     on_resolve: object = None
     _resolved: tuple[np.ndarray, tuple[float, float] | None] | None = None
     _gpu_elapsed_ms: float | None = None
+    _batch: _HistogramReadbackBatch | None = None
+    _batch_index: int = -1
 
     def resolve(self) -> tuple[np.ndarray, tuple[float, float] | None]:
         if self._resolved is None:
-            counts = np.frombuffer(
-                self.device.queue.read_buffer(self.counts_buffer), np.uint32
-            ).copy()
-            raw_bounds = np.frombuffer(
-                self.device.queue.read_buffer(self.bounds_buffer), np.uint32
-            ).copy()
+            if self._batch is None:
+                counts = np.frombuffer(
+                    self.device.queue.read_buffer(self.counts_buffer), np.uint32
+                ).copy()
+                raw_bounds = np.frombuffer(
+                    self.device.queue.read_buffer(self.bounds_buffer), np.uint32
+                ).copy()
+                timestamps = (
+                    None
+                    if self.timestamp_buffer is None
+                    else np.frombuffer(
+                        self.device.queue.read_buffer(self.timestamp_buffer), np.uint64
+                    ).copy()
+                )
+            else:
+                counts, raw_bounds, timestamps = self._batch.resolve(self._batch_index)
             finite_bounds = (
                 None
                 if int(raw_bounds[0]) == 0xFFFFFFFF
@@ -1314,10 +1362,7 @@ class _DeferredHistogramReadback:
             if callable(self.on_resolve):
                 self.on_resolve()
                 self.on_resolve = None
-            if self.timestamp_buffer is not None:
-                timestamps = np.frombuffer(
-                    self.device.queue.read_buffer(self.timestamp_buffer), np.uint64
-                ).copy()
+            if timestamps is not None:
                 indices = tuple(int(index) for index in self.timestamp_indices)
                 elapsed_ticks = sum(
                     max(0, int(timestamps[stop]) - int(timestamps[start]))
@@ -1544,6 +1589,7 @@ class WgpuPlaneExecutor:
         self._histogram_shield_pins: set[DataChunkKey] = set()
         self._histogram_dispatches_total = 0
         self._histogram_readback_resolves_total = 0
+        self._histogram_batch_readbacks_total = 0
         self._overlay_geometry: tuple[OverlayPrimitive, ...] = ()
         self._overlay_camera = SetOverlayCamera((0.0, 0.0, 1.0, 1.0))
         self._overlay_buffer_writes_total = 0
@@ -3114,6 +3160,86 @@ class WgpuPlaneExecutor:
     def _note_histogram_readback_resolve(self) -> None:
         self._histogram_readback_resolves_total += 1
 
+    def _batch_dynamic_histogram_readbacks(self, report: FrameReport) -> None:
+        """Pack one frame's dynamic histogram outputs into one queue read."""
+
+        rows = tuple(
+            value
+            for value in report.histograms.values()
+            if isinstance(value, _DeferredHistogramReadback)
+        )
+        if len(rows) < 2:
+            return
+
+        def reserve(offset: int, size: int, *, alignment: int = 8) -> tuple[int, int]:
+            start = (int(offset) + alignment - 1) // alignment * alignment
+            return start, start + int(size)
+
+        spans = []
+        offset = 0
+        for row in rows:
+            counts_offset, offset = reserve(offset, 4 * int(row.bins))
+            bounds_offset, offset = reserve(offset, 8)
+            timestamp_size = (
+                0
+                if row.timestamp_buffer is None
+                else 8 * (max(tuple(int(i) for i in row.timestamp_indices), default=-1) + 1)
+            )
+            timestamp_offset, offset = reserve(offset, timestamp_size)
+            spans.append(
+                (
+                    counts_offset,
+                    4 * int(row.bins),
+                    bounds_offset,
+                    8,
+                    timestamp_offset,
+                    timestamp_size,
+                )
+            )
+        wgpu = self._wgpu
+        batch_buffer = self.device.create_buffer(
+            size=max(8, offset),
+            usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+        )
+        encoder = self.device.create_command_encoder()
+        for row, span in zip(rows, spans, strict=True):
+            counts_offset, counts_size, bounds_offset, bounds_size, time_offset, time_size = span
+            encoder.copy_buffer_to_buffer(
+                row.counts_buffer,
+                0,
+                batch_buffer,
+                counts_offset,
+                counts_size,
+            )
+            encoder.copy_buffer_to_buffer(
+                row.bounds_buffer,
+                0,
+                batch_buffer,
+                bounds_offset,
+                bounds_size,
+            )
+            if time_size:
+                encoder.copy_buffer_to_buffer(
+                    row.timestamp_buffer,
+                    0,
+                    batch_buffer,
+                    time_offset,
+                    time_size,
+                )
+        self.device.queue.submit([encoder.finish()])
+        batch = _HistogramReadbackBatch(
+            self.device,
+            batch_buffer,
+            tuple(spans),
+            on_resolve=self._note_histogram_batch_readback,
+        )
+        for index, row in enumerate(rows):
+            row._batch = batch
+            row._batch_index = int(index)
+
+    def _note_histogram_batch_readback(self) -> None:
+        self._histogram_batch_readbacks_total += 1
+
     def _present(
         self,
         target_view,
@@ -3242,6 +3368,7 @@ class WgpuPlaneExecutor:
             self._histogram_shield_wanted = frozenset()
             self._histogram_shield_pins = set()
             self.page_table.replace_pin_set(_HISTOGRAM_SHIELD_PIN_OWNER, ())
+        self._batch_dynamic_histogram_readbacks(report)
         report.lod_pages_generated = tuple(generated_pages)
         report.upload_bytes = int(self._texture_upload_bytes_total) - upload_bytes_before
         report.wait_completed = self.device.queue.on_submitted_work_done_sync
@@ -3276,6 +3403,10 @@ class WgpuPlaneExecutor:
     @property
     def histogram_readback_resolves_total(self) -> int:
         return int(self._histogram_readback_resolves_total)
+
+    @property
+    def histogram_batch_readbacks_total(self) -> int:
+        return int(self._histogram_batch_readbacks_total)
 
     @property
     def plane_lookup_candidates_total(self) -> int:
