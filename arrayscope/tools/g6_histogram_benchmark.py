@@ -397,7 +397,13 @@ def _summaries(rows: tuple[Measurement, ...]) -> tuple[dict[str, object], ...]:
     return tuple(summaries)
 
 
-def run_benchmark(*, data_path: Path, repetitions: int, warmups: int) -> dict[str, object]:
+def run_benchmark(
+    *,
+    data_path: Path,
+    repetitions: int,
+    warmups: int,
+    power_preference: str = "low-power",
+) -> dict[str, object]:
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
@@ -416,7 +422,7 @@ def run_benchmark(*, data_path: Path, repetitions: int, warmups: int) -> dict[st
 
     with contextlib.suppress(RuntimeError):
         set_instance_extras(backends=["Vulkan"])
-    adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
+    adapter = wgpu.gpu.request_adapter_sync(power_preference=str(power_preference))
     if "timestamp-query" not in adapter.features:
         raise RuntimeError("G6(b) benchmark requires GPU timestamp-query support")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
@@ -469,6 +475,7 @@ def run_benchmark(*, data_path: Path, repetitions: int, warmups: int) -> dict[st
         "qt_platform": str(app.platformName()),
         "qt_platform_env": os.environ.get("QT_QPA_PLATFORM"),
         "adapter": str(adapter.summary),
+        "power_preference": str(power_preference),
         "data_path": str(data_path.resolve()),
         "data_shape": [int(value) for value in data.shape],
         "data_dtype": str(data.dtype),
@@ -490,6 +497,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument(
+        "--power-preference",
+        choices=("low-power", "high-performance"),
+        default="low-power",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -500,6 +512,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         data_path=Path(args.data),
         repetitions=max(1, int(args.repetitions)),
         warmups=max(0, int(args.warmups)),
+        power_preference=str(args.power_preference),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
