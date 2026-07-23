@@ -81,6 +81,35 @@ def test_wgpu_pool_headroom_clamps_to_device_limit_but_active_pages_do_not():
         _wgpu_pool_layer_budget(previous=0, needed=2049, max_layers=2048)
 
 
+def test_wgpu_pool_retention_capacity_uses_byte_policy_per_representation():
+    from arrayscope.display.wgpu_imageview2d import _wgpu_pool_layer_budget
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    budget = 256 * 1024 * 1024
+    assert (
+        _wgpu_pool_layer_budget(
+            previous=0,
+            needed=200,
+            preferred=300,
+            max_layers=2048,
+            budget_bytes=budget,
+            bytes_per_layer=PAGE * PAGE * 4,
+        )
+        == 1024
+    )
+    assert (
+        _wgpu_pool_layer_budget(
+            previous=0,
+            needed=200,
+            preferred=300,
+            max_layers=2048,
+            budget_bytes=budget,
+            bytes_per_layer=PAGE * PAGE * 8,
+        )
+        == 512
+    )
+
+
 def _montage_geometry(tile_shape, columns, rows, *, loaded, gap=0):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry

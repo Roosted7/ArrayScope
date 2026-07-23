@@ -41,15 +41,17 @@ def test_gpu_overview_bar_reports_wgpu_page_pool_usage():
                     "codec_allocated_layers": 16,
                 },
             ),
+            wgpu_active_resident_bytes=72 << 20,
             wgpu_allocated_pool_bytes=80 << 20,
         ),
-        montage_timing=SimpleNamespace(),
+        montage_timing=SimpleNamespace(tile_layer_budget_bytes=256 << 20),
     )
 
     used, total, detail = _gpu_bar_usage(snapshot)
     assert _gpu_available(snapshot) is True
-    assert (used, total) == (72, 80)
-    assert "pages 72/80" in detail
+    assert (used, total) == (72 << 20, 256 << 20)
+    assert "72.0M / 256M" in detail
+    assert "pages 72/80 allocated" in detail
     assert "pinned 54" in detail
     assert "alloc 80.0M" in detail
 

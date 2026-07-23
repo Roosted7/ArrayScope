@@ -679,6 +679,17 @@ def _gpu_bar_usage(snapshot) -> tuple[int, int, str]:
             + int(row.get("codec_allocated_layers", 0) or 0)
             for row in pools
         )
+        budget_bytes = int(getattr(snapshot.montage_timing, "tile_layer_budget_bytes", 0) or 0)
+        resident_bytes = int(getattr(snapshot.montage, "wgpu_active_resident_bytes", 0) or 0)
+        if budget_bytes > 0:
+            return (
+                resident_bytes,
+                budget_bytes,
+                f"{_short_bytes(resident_bytes)} / {_short_bytes(budget_bytes)} "
+                f"{_percent(resident_bytes, budget_bytes)} | "
+                f"pages {resident}/{allocated} allocated | pinned {pinned} | "
+                f"alloc {_short_bytes(snapshot.montage.wgpu_allocated_pool_bytes)}",
+            )
         return (
             resident,
             max(1, allocated),

@@ -149,6 +149,13 @@ _WGPU_REP_DTYPES = {
     RGB_WINDOWED_RGBA32F: "float32",
 }
 
+_WGPU_POOL_TEXEL_BYTES = {
+    SCALAR_R32F: 4,
+    COMPLEX_RG32F: 8,
+    RGB8: 4,
+    RGB_WINDOWED_RGBA32F: 16,
+}
+
 
 def _wgpu_rgba(color, alpha: float = 1.0):
     rgb = tuple(int(value) for value in tuple(color or (255, 255, 0))[:3])
@@ -515,10 +522,11 @@ class WgpuImageView2D(ImageViewShell):
         required_pages: dict[str, int],
         *,
         preferred_pages: dict[str, int] | None = None,
+        residency_budget_bytes: int = 0,
     ):
-        """Executor with per-pool budgets covering ``required_pages`` (+headroom)."""
+        """Executor covering active pages with policy-sized retention headroom."""
 
-        from arrayscope.gpu.wgpu_executor import WgpuPlaneExecutor
+        from arrayscope.gpu.wgpu_executor import PAGE, WgpuPlaneExecutor
 
         executor = self._wgpu_executor
         device = _shared_wgpu_device()
@@ -538,6 +546,8 @@ class WgpuImageView2D(ImageViewShell):
                 needed=needed,
                 preferred=int(preferred_pages.get(representation, 0) or 0),
                 max_layers=max_layers,
+                budget_bytes=int(residency_budget_bytes or 0),
+                bytes_per_layer=PAGE * PAGE * _WGPU_POOL_TEXEL_BYTES[representation],
             )
             if budget:
                 budgets[representation] = budget
@@ -1428,6 +1438,7 @@ class WgpuImageView2D(ImageViewShell):
             executor = self._ensure_wgpu_executor(
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
+                residency_budget_bytes=int(tile_residency_budget_bytes or 0),
             )
             resident_by_plane: dict[tuple[object, object, str], list[object]] = {}
             for key in executor.page_table.resident_keys():
@@ -2069,6 +2080,7 @@ class WgpuImageView2D(ImageViewShell):
         payloads,
         rgb_already_windowed: bool = False,
         tile_delta=None,
+        tile_residency_budget_bytes: int = 0,
         **_kwargs,
     ):
         """Ensure payload pages without changing the bound presentation."""
@@ -2173,6 +2185,7 @@ class WgpuImageView2D(ImageViewShell):
         executor = self._ensure_wgpu_executor(
             {representation: pages_needed},
             preferred_pages={representation: pages_preferred},
+            residency_budget_bytes=int(tile_residency_budget_bytes or 0),
         )
         if atomic_handoff:
             # A newer atomic generation replaces the old generation's
@@ -3021,23 +3034,41 @@ def _wgpu_plan_lod_page_generation(
 
 
 def _wgpu_pool_layer_budget(
-    *, previous: int, needed: int, preferred: int = 0, max_layers: int
+    *,
+    previous: int,
+    needed: int,
+    preferred: int = 0,
+    max_layers: int,
+    budget_bytes: int = 0,
+    bytes_per_layer: int = 0,
 ) -> int:
-    """Keep warm-page headroom without exceeding the device array limit."""
+    """Size retention from the memory policy, clamped by device limits.
+
+    ``needed`` is correctness and may exceed the retention policy for one
+    visible transaction.  ``preferred`` and two-rung headroom are optional
+    retention.  A zero byte budget preserves the legacy call contract used
+    by low-level tests and explicit executor probes.
+    """
 
     previous = max(0, int(previous))
     needed = max(0, int(needed))
     preferred = max(0, int(preferred))
     max_layers = max(1, int(max_layers))
+    budget_bytes = max(0, int(budget_bytes))
+    bytes_per_layer = max(0, int(bytes_per_layer))
     if needed > max_layers:
         raise RuntimeError(
             "wgpu active plane pages exceed the device texture-array limit: "
             f"needed={needed}, max_layers={max_layers}"
         )
-    # 2x headroom keeps recently unbound planes warm for zero-upload
-    # scroll-back.  Headroom is optional; active coverage is not, so clamp
-    # the former at the physical device limit and reject only the latter.
-    desired = max(previous, preferred, 2 * needed + 8 if needed else 0)
+    working_set = max(preferred, 2 * needed + 8 if needed else 0)
+    if budget_bytes and bytes_per_layer and (needed or preferred or previous):
+        policy_layers = max(1, budget_bytes // bytes_per_layer)
+        # Policy is the retention ceiling, not an admission refusal.  The
+        # active transaction still wins when it alone is larger.
+        desired = max(previous, needed, min(working_set, policy_layers), policy_layers)
+    else:
+        desired = max(previous, working_set)
     return min(desired, max_layers)
 
 
