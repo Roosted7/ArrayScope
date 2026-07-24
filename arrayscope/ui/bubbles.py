@@ -51,14 +51,28 @@ class EditBubble(QtWidgets.QWidget):
         self.content_layout.addWidget(confirm)
         return confirm
 
-    def open_at(self, global_pos, focus_widget=None):
+    def open_at(self, global_pos, focus_widget=None, *, place="above"):
+        """Show the bubble anchored at ``global_pos``.
+
+        ``place="above"`` (the default) floats the bubble just above the anchor
+        point -- the histogram/edit-bubble convention. ``place="below"`` drops
+        it just beneath the anchor, which is what a control that lives at the
+        *top* of a dock (e.g. an "Add operation" button) wants.
+        """
+
         self.adjustSize()
         screen = QtWidgets.QApplication.screenAt(global_pos)
         geometry = None if screen is None else screen.availableGeometry()
-        x, y = int(global_pos.x()) - 12, int(global_pos.y()) - self.sizeHint().height() - 8
+        width = self.sizeHint().width()
+        height = self.sizeHint().height()
+        x = int(global_pos.x()) - 12
+        if place == "below":  # noqa: SIM108 - explicit above/below reads clearer
+            y = int(global_pos.y()) + 4
+        else:
+            y = int(global_pos.y()) - height - 8
         if geometry is not None:
-            x = max(geometry.left() + 4, min(x, geometry.right() - self.sizeHint().width() - 4))
-            y = max(geometry.top() + 4, y)
+            x = max(geometry.left() + 4, min(x, geometry.right() - width - 4))
+            y = max(geometry.top() + 4, min(y, geometry.bottom() - height - 4))
         self.move(x, y)
         self.show()
         if focus_widget is not None:
