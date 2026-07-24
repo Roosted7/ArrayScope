@@ -6,6 +6,7 @@ prefer_pyside6()
 
 import platform
 from pathlib import Path
+from time import perf_counter
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
@@ -524,6 +525,21 @@ class ArrayScopeWindow(
     def _note_kernel_completion_drain(self) -> None:
         if getattr(self, "_closing", False):
             return
+        # Quiet-edge governor reapply (2026-07-24 completion-drain freeze):
+        # the bridge notifies after EVERY drain turn, and a 100-tile montage
+        # completion stream produces hundreds of turns.  Reapplying governor
+        # decisions each turn serialized the GUI thread against the
+        # worker-contended kernel lock (set_lane_quota / kernel.diagnostics)
+        # for ~19% of main-thread time.  While a backlog is still queued,
+        # reapply at a bounded cadence; the final drain of a stream always
+        # sees an empty queue and runs the reapply, so no decision edge is
+        # lost — the quiet edge is the guaranteed reconciliation point.
+        now = perf_counter()
+        if not self.kernel.completions.empty():
+            last_applied = getattr(self, "_last_drain_governor_apply", None)
+            if last_applied is not None and (now - last_applied) < 0.25:
+                return
+        self._last_drain_governor_apply = now
         self._apply_resource_governor_decisions(refresh_telemetry=False)
 
     def _apply_resource_governor_decisions(self, *, refresh_telemetry: bool = True) -> None:
