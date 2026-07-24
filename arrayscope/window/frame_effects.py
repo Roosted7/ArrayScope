@@ -419,9 +419,28 @@ class FramePipelineEffects:
         resident crop scrub and is pixel-correct, but it reuses the predecessor
         window's auto-level evidence (the maturity contract) rather than
         re-anchoring the window; on data whose value range shifts strongly with
-        the crop that leaves a small brightness lag until the settling
-        evaluation re-anchors.  It is therefore gated until the resident
-        histogram evidence is wired into the post-first-pass level tracker.
+        the crop that leaves a brightness lag until the settling evaluation
+        re-anchors.  Measured on a row-gradient montage: the ordinary evaluation
+        settles window-exact levels ([40:240]->(119, 714), [120:320]->(358, 953)),
+        while the rebind holds the predecessor's (119, 714) across the scrub.
+
+        Enabling it by default was scoped to route the GPU-computed resident
+        histogram evidence for the new window into the post-first-pass montage
+        level tracker so the maturity contract re-anchors atomically.  That
+        route is BLOCKED, not merely unwired: the resident GPU histogram
+        (``DispatchHistogram`` over ``DataChunkKey`` blocks) is whole-page and
+        carries no source sub-rectangle, and a scrubbed crop tile re-samples the
+        SAME whole-plane canonical pages at a shifted origin (measured: the
+        [120:320, 66:266] window binds to four full-plane 256x256 pages spanning
+        rows [0:336]).  A histogram over that frontier is the whole-plane range,
+        which is window-independent and cannot reproduce the window-exact levels
+        the crop-parity physical-truth gate requires.  Window-exact evidence
+        without a display evaluation would need either a sub-rect histogram
+        dispatch (a new GPU capability) or CPU sampling of the cropped source
+        values per tile (a fresh evidence route with its own parity risk); both
+        are out of scope for wiring existing pieces.  Kept default OFF as the
+        honest escape hatch until one of those lands (docs/redesign/
+        histogram-evidence-pipeline-2026-07-23.md, 2026-07-24 addendum).
         """
 
         cached = getattr(self, "_resident_crop_rebind_flag", None)

@@ -130,6 +130,51 @@ likewise continuity-green at 7.22/6.72 s. Both backends remain red on the
 independent 50 ms GUI callback bar (roughly 115–120 ms observed), which this
 slice does not conceal.
 
+## Addendum 2026-07-24 — resident crop-rebind cannot re-anchor from the GPU histogram
+
+The resident crop-window rebind (`FramePipelineEffects._seed_resident_crop_rebinds`,
+commit 38fdfbb6) is default OFF because a rebind step reuses the predecessor
+window's auto-level evidence instead of re-anchoring. Enabling it by default was
+scoped to feed the GPU-computed resident histogram evidence for the new window
+into the post-first-pass montage level tracker. That is **blocked by a
+granularity mismatch**, not merely unwired.
+
+Measured ground truth (row-gradient 336x336x272 montage, 100 tiles, no
+operations; wgpu backend, resident policy):
+
+- The ordinary evaluation settles **window-exact** levels — window `[40:240]`
+  gives `(118.9, 713.9)`, window `[120:320]` gives `(358.1, 953.0)`. Auto-levels
+  track the cropped rows' value range.
+- With the rebind on, both windows show `(118.9, 713.9)` — the predecessor's
+  levels held across the scrub. On a gradient this is a large, visible error.
+- The rebound `[120:320, 66:266]` tile binds to **four full-plane 256x256
+  canonical pages spanning source rows `[0:336]`**. The scrub re-addresses the
+  same whole-plane pages at a shifted origin (this is precisely why they are
+  resident and the rebind is free).
+
+`DispatchHistogram` (`arrayscope/gpu/command_protocol.py`) histograms whole
+`DataChunkKey` blocks (`chunk_origin : chunk_origin + chunk_shape`) and carries
+no source sub-rectangle. A histogram over the rebound frontier is therefore the
+**whole-plane** range (~`(0, 1000)` here), window-independent, and cannot
+reproduce the window-exact levels the crop-parity physical-truth gate asserts.
+Routing it in would either fail to re-anchor (gradient gate still red) or
+re-anchor to wrong whole-plane levels (a worse regression). The resident GPU
+histogram is the correct fallback for resident-only *content*, but it is not a
+window-scoped evidence source.
+
+Window-exact evidence without a display evaluation would require one of:
+
+1. a sub-rectangle histogram dispatch — a new GPU capability (shader +
+   `DispatchHistogram` + executor change), beyond wiring existing pieces; or
+2. CPU sampling of the cropped source values per tile on the kernel (the doc's
+   route 2) — window-exact and off the `display_preparation` lane, but a fresh
+   evidence route that must match the evaluator exactly across LOD / operations
+   / complex mode / canonical orientation / scaled sources or it ships a levels
+   regression.
+
+Until one of those lands the rebind stays default OFF (opt-in via the raw
+`resident_crop_rebind` QSettings flag), keeping every crop-parity gate green.
+
 ## Invariants
 
 - Evidence quality and availability choose the producer; backend name does
