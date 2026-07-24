@@ -119,9 +119,11 @@ class OperationStackDock(StandardDockWidget):
         on_sync_toggled=None,
         on_change_axis=None,
         axis_choices_provider=None,
+        on_manage_operations=None,
     ):
         super().__init__("Operations", parent)
         self.setObjectName("OperationsDock")
+        self._on_manage_operations = on_manage_operations
         self._on_sync_toggled = on_sync_toggled
         self._on_undo = on_undo
         self._on_clear = on_clear
@@ -156,12 +158,15 @@ class OperationStackDock(StandardDockWidget):
         header = QtWidgets.QHBoxLayout()
         self.add_button = QtWidgets.QPushButton("Add operation")
         self.palette_button = QtWidgets.QToolButton()
+        self.manage_button = QtWidgets.QToolButton()
         set_button_icon(self.add_button, "add")
         set_button_icon(
             self.palette_button, "search", tooltip="Search operations and commands (Ctrl+K)"
         )
+        set_button_icon(self.manage_button, "tune", tooltip="Manage operations…")
         header.addWidget(self.add_button)
         header.addWidget(self.palette_button)
+        header.addWidget(self.manage_button)
         header.addStretch(1)
         self.sync_button = QtWidgets.QToolButton()
         self.sync_button.setCheckable(True)
@@ -279,6 +284,9 @@ class OperationStackDock(StandardDockWidget):
             lambda: (
                 self._on_add_operation(search=True) if self._on_add_operation is not None else None
             )
+        )
+        self.manage_button.clicked.connect(
+            lambda: self._on_manage_operations() if self._on_manage_operations is not None else None
         )
         self.export_button.clicked.connect(
             lambda: self._on_export_derived() if self._on_export_derived is not None else None

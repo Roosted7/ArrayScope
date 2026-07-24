@@ -128,6 +128,20 @@ class WindowMenuMixin:
                 "Inspection", self.inspection_dock, self._set_inspection_dock_visible_from_user
             )
             view_menu.addAction(inspection_action)
+        view_menu.addSeparator()
+        colormap_manager_action = QtGui.QAction("Colormap manager…", self)
+        set_action_icon(colormap_manager_action, "palette")
+        colormap_manager_action.triggered.connect(
+            lambda _checked=False: self.open_colormap_designer()
+        )
+        view_menu.addAction(colormap_manager_action)
+        operation_manager_action = QtGui.QAction("Operation manager…", self)
+        set_action_icon(operation_manager_action, "tune")
+        operation_manager_action.triggered.connect(
+            lambda _checked=False: self.open_operation_manager()
+        )
+        view_menu.addAction(operation_manager_action)
+        view_menu.addSeparator()
         command_palette_action = QtGui.QAction("Command Palette", self)
         set_action_icon(command_palette_action, "search")
         command_palette_action.setShortcut(QtGui.QKeySequence("Ctrl+K"))

@@ -592,6 +592,17 @@ class DimensionControlMixin:
         dialog.raise_()
         dialog.activateWindow()
 
+    def open_operation_manager(self):
+        from arrayscope.ui.operation_manager import OperationManagerDialog
+
+        dialog = getattr(self, "_operation_manager_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = OperationManagerDialog(self)
+            self._operation_manager_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def step_active_slice(self, delta):
         axis = getattr(self, "_focused_dimension_axis", None)
         if (

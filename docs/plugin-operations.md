@@ -503,3 +503,54 @@ the failure instead of the op silently vanishing. Because registry code never
 scans the ops directory itself (the library owns the scan and drives
 `register_user_operation`), one user's broken file can never fail an unrelated
 machine's `all_operations()` or the non-crash smoke harness.
+
+## Managing operations (the manager UI)
+
+The **operation manager** dialog (`arrayscope.ui.operation_manager`) is the
+graphical front end over the library above — the operations analogue of the
+colormap manager. Open it from **View ▸ Operation manager…**, from the **Manage
+operations** command in the command palette (`Ctrl+K`), or from the **tune**
+button at the top of the operations dock.
+
+The left column is a drag-reorderable tree of groups and operations. Dragging
+ops within/between groups or reordering the groups persists through
+`apply_library_layout`, so the arrangement drives every surface that lists ops
+(the dock add popup, the axis context menu, the command palette). Hidden ops are
+shown greyed with a `(hidden)` marker so they can be restored; user ops carry a
+`(user)` marker; a wrapper that failed to load appears under a virtual
+**Problems** group with the loader's message as its tooltip.
+
+- **Hide vs. remove** — a **system** op (built-in or pack) can only be *hidden*
+  (`set_operation_hidden`), which removes it from the listings but keeps it
+  restorable; its definition is read-only. A **user** op is *removed* outright
+  (`remove_user_operation`), deleting its wrapper and — for import-mode — its
+  copied code file, after a confirmation.
+- **Restore** un-hides the selected hidden op; **Reset layout and unhide all**
+  discards the persisted arrangement (`reset_layout`) and clears every hidden
+  flag.
+
+The right column edits the selected op. System ops expose only their group
+(moving them writes a layout override) and a **Common** toggle that pins them to
+the top section. User ops are fully editable — label, description, group, icon
+(with a live preview), *requires axis*, and a parameters table — with every
+change auto-saved through `update_user_operation` (no explicit Save).
+
+### Connecting up a custom function (import vs. link)
+
+The **Add** (`+`) button walks the import flow: pick a `.py` file, and the
+manager introspects its top-level functions (`introspect_python_source`, pure
+`ast`, never executing your code) and opens a panel with everything auto-filled
+and still editable — the function to wrap, label, description, group, icon, the
+detected parameters, and the *requires axis* flag. The key choice is how the
+code is stored:
+
+- **Import a copy (recommended)** copies the file into the operations directory,
+  so the op keeps working if you move or edit the original.
+- **Link to the file** keeps a live link to the original path; edits you make to
+  it are picked up automatically (mtime-keyed re-import).
+
+Confirming registers the op (`import_custom_operation`) and selects it in the
+tree; any edits you made to the detected parameters or *requires axis* beyond
+the auto-fill are followed with an `update_user_operation`. The **Open the code
+file** button opens a user op's `.py` in your default editor, and **Open the
+operations folder** opens the directory itself.

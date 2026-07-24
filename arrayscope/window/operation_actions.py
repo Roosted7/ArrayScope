@@ -247,6 +247,7 @@ class OperationActionsMixin:
                 PaletteCommand("save_view_recipe", "Save view recipe", icon="view_quilt"),
                 PaletteCommand("load_view_recipe", "Load view recipe", icon="folder_open"),
                 PaletteCommand("edit_colormaps", "Edit colormaps", icon="palette"),
+                PaletteCommand("manage_operations", "Manage operations", icon="tune"),
             ]
         )
         default_axis = self._default_operation_axis()
@@ -265,6 +266,7 @@ class OperationActionsMixin:
     def _run_palette_command(self, command_id):
         actions = {
             "edit_colormaps": self.open_colormap_designer,
+            "manage_operations": self.open_operation_manager,
             "fit": self.fit_image_to_view,
             "one_to_one": self.one_to_one_image,
             "auto_window": self.auto_window_levels,

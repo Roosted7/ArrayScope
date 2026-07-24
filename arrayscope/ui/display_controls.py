@@ -924,6 +924,7 @@ class DisplayControlBuildMixin:
             on_sync_toggled=lambda checked: self._on_sync_facet_toggled("operations", checked),
             on_change_axis=self.change_operation_axis,
             axis_choices_provider=self._axis_choices,
+            on_manage_operations=self.open_operation_manager,
         )
         self.addDockWidget(Qt.QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.operation_dock)
         self.panel_manager.register_panel(
