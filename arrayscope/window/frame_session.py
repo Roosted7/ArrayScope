@@ -1896,18 +1896,23 @@ class FrameSession:
     def _current_identity_tile(self, rendered: RenderedTile):
         """Return ``rendered.tile`` expressed in this session's target state."""
 
+        return self._identity_tile_for(rendered.tile)
+
+    def _identity_tile_for(self, tile: MontageTile):
+        """Return ``tile`` expressed in this session's current target state."""
+
         state = self.view_state
-        if state is None or rendered.tile.view_state is None:
-            return rendered.tile
+        if state is None or tile.view_state is None:
+            return tile
         view_state = (
             state.with_montage_axis(None)
             if self.montage_axis is None
             else state.tile_state_for_slice(
                 int(self.montage_axis),
-                int(rendered.tile.source_index),
+                int(tile.source_index),
             )
         )
-        return replace(rendered.tile, view_state=view_state)
+        return replace(tile, view_state=view_state)
 
     def _ensure_display_tile_payload(
         self,
@@ -2207,6 +2212,131 @@ class FrameSession:
             self.lifecycle.presentation_confirmed(confirmed_tiles)
         if changed_state or confirmed_tiles:
             self.invalidate_tile_states()
+
+    def rebind_resident_crop_tiles(
+        self,
+        *,
+        physical_resident_fn,
+        tile_numbers,
+        previous_by_tile=None,
+    ) -> tuple[int, ...]:
+        """Short-circuit a crop-window scrub to a pure rebind (ADR 0055 G3).
+
+        Scrubbing the displayed-axis crop window shifts only the sampled source
+        rectangle; the canonical source plane keeps its window-invariant content
+        key, so a backend that already holds those pages can re-present the new
+        window by shifting ``source_origin`` alone — no upload, and no kernel
+        evaluation.  The demand/planning layer otherwise never consults physical
+        residency: every shifted window is a fresh typed target, so each tile is
+        re-evaluated (one display-cache miss and one producer per tile per step)
+        even though the pixels it would compute are already resident.
+
+        For each named tile with a current predecessor wrapper this clones that
+        wrapper with the new window's ``source_anchor`` and typed identity, then
+        keeps it ONLY when a backend residency seam proves every page the new
+        window samples is physically resident.  A proven rebind is recorded as
+        presentable target coverage, so the ladder plans no producer for it and
+        the ordinary commit rebinds the resident pages with zero uploads.
+
+        Correctness: residency is never reused across a content-identity change.
+        ``_payload_source_anchor`` carries the WINDOW-varying ``source_rect`` but
+        a content key that folds document generation, operation, slice index,
+        complex mode and fftshift; any of those changing makes the new content
+        key differ from the predecessor's and the tile falls through to a normal
+        evaluation.  The wrapper is cloned, never re-anchored, so level and
+        histogram evidence (``level_data``/``level_stats``/
+        ``presentation_identity``) is reused unchanged.  Where residency is only
+        partial — a preview-quality predecessor, or a level below the demanded
+        one — the clone rebinds what is resident while the ladder still schedules
+        the missing exact/finer rung.
+        """
+
+        if not callable(physical_resident_fn):
+            return ()
+        plan_tiles = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(getattr(self, "plan", None), "tiles", ()) or ())
+        }
+        if not plan_tiles:
+            return ()
+        previous_by_tile = dict(previous_by_tile or {})
+        rebound: list[int] = []
+        for raw_number in tuple(tile_numbers or ()):
+            tile_number = int(raw_number)
+            # Prefer the last committed wrapper (the predecessor window): a new
+            # session's ``display_tile_payloads`` is empty at plan time, and a
+            # continued session may already hold the new-window wrapper (no
+            # shift to rebind).  The committed frame is the pre-scrub truth.
+            previous = previous_by_tile.get(tile_number)
+            if previous is None or getattr(previous, "source_anchor", None) is None:
+                previous = self.display_tile_payloads.get(tile_number)
+            if previous is None or getattr(previous, "source_anchor", None) is None:
+                continue
+            # The predecessor wrapper is the reuse source; the plan tile carries
+            # this tile's CURRENT-window view state (the native tile cache is
+            # cleared by the window change, so it cannot be the identity source).
+            base_tile = plan_tiles.get(tile_number)
+            if base_tile is None:
+                continue
+            # A crop-window shift keeps the tile's immutable source index; a
+            # montage retarget or slice change that moves it is not our case.
+            if int(previous.source_index) != int(base_tile.source_index):
+                continue
+            identity_tile = self._identity_tile_for(base_tile)
+            previous_lod = getattr(previous, "lod", None)
+            native_shape = (
+                tuple(int(value) for value in previous_lod.source_shape)
+                if previous_lod is not None
+                else tuple(int(value) for value in previous.source_shape)
+            )
+            new_anchor = self._payload_source_anchor(
+                native_shape,
+                source_index=int(identity_tile.source_index),
+            )
+            if new_anchor is None:
+                continue
+            # The content key is the whole pixel-affecting identity minus the
+            # window.  Equal keys prove this is a pure window shift; the plane
+            # shape must also match so the resident pages address the same grid.
+            if new_anchor.content_key != previous.source_anchor.content_key:
+                continue
+            if new_anchor.plane_shape != previous.source_anchor.plane_shape:
+                continue
+            if new_anchor == previous.source_anchor:
+                # Nothing shifted (or this tile is already rebound to the new
+                # window): leave the existing state untouched.
+                continue
+            new_identity = self.tile_payload_identity(
+                identity_tile,
+                texture_data=previous.texture_data,
+                texture_kind=previous.texture_kind,
+                shader_mapping=previous.shader_mapping,
+                lod=previous.lod,
+                quality=previous.quality,
+            )
+            candidate = replace(
+                previous,
+                source_anchor=new_anchor,
+                tile_identity=new_identity,
+            )
+            # The residency seam returns True only when the binding is
+            # source-anchored over resident pages (or the native fast path);
+            # in that binding the wrapper's own pixels are never uploaded, so
+            # reusing the predecessor's array is safe.  A window whose pages are
+            # cold binds crop-local and reports False, so it falls through to a
+            # normal evaluation that produces the missing pixels.
+            if not bool(physical_resident_fn(candidate)):
+                continue
+            self.display_tile_payloads[tile_number] = candidate
+            self.record_tile_payload(candidate)
+            self.acknowledged_source_ids.add(candidate.source_id)
+            self.pending_payload_upserts[tile_number] = None
+            self.dirty_payloads[tile_number] = None
+            self.lifecycle.remember_presentable(tile_number, candidate)
+            rebound.append(tile_number)
+        if rebound:
+            self.invalidate_tile_states()
+        return tuple(rebound)
 
     def _payload_source_id(
         self, base_source_id, *, texture_kind, lod: LodInfo

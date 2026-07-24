@@ -57,6 +57,7 @@ from arrayscope.window.display_presenter import tile_residency_budget_bytes
 from arrayscope.window.frame_session import _base_source_id
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches,
+    previous_tiled_payloads,
     previous_tiled_payloads_by_base_source,
 )
 
@@ -372,6 +373,7 @@ class FramePipelineEffects:
         if not self._session_is_current(intent):
             return ()
         self._release_inactive_evaluation_claims(getattr(scope, "visible_tile_numbers", ()))
+        self._seed_resident_crop_rebinds(scope)
         states = render_effects.tile_lod_states(self.session, demand, scope=scope)
         plan_tiles = {
             int(tile.montage_index): tile
@@ -409,6 +411,72 @@ class FramePipelineEffects:
             # canonical priority order instead.
             return tuple(replace(state, allow_preview=False) for state in states)
         return states
+
+    def _resident_crop_rebind_enabled(self) -> bool:
+        """Read the opt-in resident-crop-rebind capability once per session.
+
+        Default OFF.  The rebind eliminates the per-tile evaluation storm of a
+        resident crop scrub and is pixel-correct, but it reuses the predecessor
+        window's auto-level evidence (the maturity contract) rather than
+        re-anchoring the window; on data whose value range shifts strongly with
+        the crop that leaves a small brightness lag until the settling
+        evaluation re-anchors.  It is therefore gated until the resident
+        histogram evidence is wired into the post-first-pass level tracker.
+        """
+
+        cached = getattr(self, "_resident_crop_rebind_flag", None)
+        if cached is not None:
+            return bool(cached)
+        enabled = False
+        win = getattr(self.renderer, "win", None)
+        settings = getattr(win, "_settings", None)
+        if settings is not None:
+            try:
+                enabled = bool(settings.value("resident_crop_rebind", False, type=bool))
+            except Exception:
+                enabled = False
+        self._resident_crop_rebind_flag = bool(enabled)
+        return bool(enabled)
+
+    def _seed_resident_crop_rebinds(self, scope) -> None:
+        """Rebind a resident crop-window scrub before the ladder plans it.
+
+        A displayed-axis crop retarget whose new source window is already
+        physically resident under the current content identity short-circuits
+        to a pure rebind: no kernel evaluation, no display-cache miss, just a
+        resident-page rebind committed with no upload.  Running here — before
+        ``tile_lod_states`` snapshots the ladder inputs — means a rebound tile is
+        already recorded as target coverage, so it never enters ``missing_tiles``
+        and no producer is scheduled.  The residency seam is backend-owned
+        physical truth (``tiledPayloadResident``); backends without it keep the
+        ordinary per-tile evaluation.
+        """
+
+        if not self._resident_crop_rebind_enabled():
+            return
+        # Restricted to genuine montage presentations, where a physically
+        # resident crop rebind is verified pixel-correct against the CPU oracle.
+        # The single-tile (non-montage) path composes the source-anchored plane
+        # differently and is left on its ordinary (already cheap) evaluation.
+        if getattr(self.session, "montage_axis", None) is None:
+            return
+        win = getattr(self.renderer, "win", None)
+        img_view = getattr(win, "img_view", None)
+        resident_fn = getattr(img_view, "tiledPayloadResident", None)
+        if not callable(resident_fn):
+            return
+        tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
+        if not tile_numbers:
+            return
+        # The last committed frame is the pre-scrub (predecessor-window) truth:
+        # a new session's live payload map is empty at plan time, so the
+        # committed wrappers are what a resident rebind clones from.
+        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        self.session.rebind_resident_crop_tiles(
+            physical_resident_fn=resident_fn,
+            tile_numbers=tile_numbers,
+            previous_by_tile=previous_by_tile,
+        )
 
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
