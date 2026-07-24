@@ -2653,7 +2653,7 @@ def test_hidden_target_warm_does_not_wait_for_visible_target_settlement(monkeypa
     )
     monkeypatch.setattr(
         frame_effects,
-        "_post_low_priority_callback",
+        "_post_visible_path_callback",
         lambda _renderer, callback: callback(),
     )
     delta = TilePresentationDelta(
@@ -2734,7 +2734,7 @@ def test_hidden_target_warm_accepts_backend_residency_without_duplicate_markers(
     )
     monkeypatch.setattr(
         frame_effects,
-        "_post_low_priority_callback",
+        "_post_visible_path_callback",
         lambda _renderer, callback: callbacks.append(callback),
     )
     delta = TilePresentationDelta(
@@ -2808,7 +2808,7 @@ def test_hidden_target_warm_rechecks_marked_payload_residency(monkeypatch):
     )
     monkeypatch.setattr(
         frame_effects,
-        "_post_low_priority_callback",
+        "_post_visible_path_callback",
         lambda _renderer, callback: callbacks.append(callback),
     )
     delta = TilePresentationDelta(
@@ -2903,7 +2903,7 @@ def test_hidden_target_warm_zero_progress_rearms_visible_owner(monkeypatch):
     )
     monkeypatch.setattr(
         frame_effects,
-        "_post_low_priority_callback",
+        "_post_visible_path_callback",
         lambda _renderer, callback: callback(),
     )
     delta = TilePresentationDelta(
@@ -2973,7 +2973,7 @@ def test_hidden_target_warm_accepts_visible_commit_slot_owner(monkeypatch):
     )
     monkeypatch.setattr(
         frame_effects,
-        "_post_low_priority_callback",
+        "_post_visible_path_callback",
         lambda _renderer, callback: pytest.fail(
             f"slot-owned payload queued an unnecessary warm callback: {callback!r}"
         ),
