@@ -23,6 +23,7 @@ from time import perf_counter
 
 import numpy as np
 import pytest
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.tools.framebuffer_reference import (
     assert_qt_raster_matches_cpu_reference,
@@ -555,6 +556,104 @@ def test_wgpu_cold_both_axes_crop_churn_keeps_every_tile_physically_current(qtbo
 
         diagnostics = win.img_view.wgpuPresentationDiagnostics()
         assert str(diagnostics["wgpu_last_pool_exhaustion"]) == ""
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_wgpu_cropped_scrub_bounds_preview_producer_work(qtbot):
+    """A cropped-axis scrub must not replan producers for admitted wrappers.
+
+    Regression net for the 2026-07-24 completion-drain freeze (field
+    diagnostics ``arrayscope-diagnostics-20260724-145640.jsonl`` seq 172-181,
+    stall traces ``arrayscope-stall-445-6/7``): during an atomic successor
+    handoff no tile can be backend-acknowledged until the whole transaction
+    swaps, and the d7923dda residency guard cleared ladder-visible residency
+    for every admitted-but-unacknowledged wrapper.  Every replan gate then
+    re-planned FLOOR for every tile (~27 redundant rounds per scrub step on a
+    100-tile montage), saturating workers and the completion bridge and
+    starving the hidden-warm continuation the swap was gated on - one
+    sliced-dim index change froze the UI for 5-25 s.  The fix keeps admitted
+    current-source wrappers visible to the ladder as coverage in flight; this
+    gate bounds preview-lane producer completions for one scrub step.
+    """
+
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
+    rng = np.random.default_rng(20260724)
+    # Field scale matters: the loop only bites while the atomic successor's
+    # hidden warming stays pending long enough for replan gates to lap it,
+    # which needs the full 100-tile, 101x101-crop scenario.
+    data = rng.standard_normal((336, 336, 272), dtype=np.float32)
+
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        montage_indices = tuple(range(30, 230, 2))
+
+        def crop_state(start: int):
+            state = win.view_state
+            state = state.with_axis_range(
+                0,
+                indices=tuple(range(start, start + 202, 2)),
+                text=f"{start}:2:{start + 200}",
+            )
+            state = state.with_axis_range(1, indices=tuple(range(66, 268, 2)), text="66:2:266")
+            return state.with_montage_axis(2, columns=10, indices=montage_indices, text="30:2:230")
+
+        def crop_settled(start: int) -> bool:
+            session = getattr(win.renderer, "_frame_session", None)
+            if session is None or session.plan is None:
+                return False
+            ranges = tuple(getattr(session.view_state, "axis_range_indices", None) or ())
+            indices = tuple(ranges[0] or ()) if ranges else ()
+            if not indices or int(indices[0]) != int(start):
+                return False
+            return frame_session_settled(win)
+
+        def busy_pump_until(predicate, budget_s: float, label: str) -> None:
+            # A BUSY pump, not qtbot.waitUntil: a real session's event loop
+            # never idles (paints, input, control sync), so low-priority
+            # continuations only run against sustained queue pressure.  The
+            # idle qtbot loop dispatches them instantly and hides the field
+            # starvation entirely — this polling loop is the deterministic
+            # stand-in for a busy GUI.
+            app = QtWidgets.QApplication.instance()
+            deadline = perf_counter() + budget_s
+            while not predicate():
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
+                assert perf_counter() < deadline, f"{label} failed to settle within {budget_s:.1f}s"
+
+        win._set_view_state(crop_state(94))
+        win.update_image_view()
+        # The cold 100-tile first fill is not the gate; give it headroom.
+        busy_pump_until(
+            lambda: crop_settled(94),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "cold cropped montage fill",
+        )
+
+        def preview_completed() -> int:
+            lanes = win.kernel.diagnostics().lanes
+            return int((lanes.get("display_preview") or {}).get("completed", 0) or 0)
+
+        before = preview_completed()
+        # The real user entry: the range-text scrub marks dimension-scrub
+        # interaction and rides the coalesced render path, which is where the
+        # field freeze lived (reason="slice-range" render requests).
+        win._on_slice_text_changed(0, "96:2:296")
+        # The scrub step IS the gate: the broken loop needed ~20 s to settle.
+        busy_pump_until(
+            lambda: crop_settled(96),
+            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+            "cropped scrub step",
+        )
+
+        # One scrub step re-evaluates each tile a bounded number of times
+        # (floor plus coverage rungs).  The broken loop completed well over
+        # five preview rounds per tile before the swap unblocked.
+        assert preview_completed() - before <= len(montage_indices) * 4 + 10
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()

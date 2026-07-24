@@ -8127,3 +8127,60 @@ def test_identical_identity_rejected_delta_recommit_is_bounded(monkeypatch):
     assert session.flush_pending
     run_commit(dead_payload, rejected_report)
     assert session.flush_pending
+
+
+def test_admitted_wrapper_keeps_ladder_residency_during_atomic_wait():
+    """2026-07-24 completion-drain freeze pin (field diagnostics
+    ``arrayscope-diagnostics-20260724-145640.jsonl`` seq 172-181).
+
+    During an atomic successor handoff no tile can be backend-acknowledged
+    until the whole transaction swaps.  The d7923dda residency guard keyed
+    only on ack-gated predicates, so it cleared ladder-visible residency for
+    every admitted-but-unacknowledged wrapper and the ladder re-planned FLOOR
+    for every tile on every replan gate - a self-sustaining evaluation loop
+    that froze a 100-tile cropped scrub for 5-25 s.  An admitted
+    current-source wrapper the shader backend can commit must keep physical
+    residency visible so no duplicate FLOOR producer is planned.
+    """
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    # The field shape is the wgpu shader backend, where preview planes are
+    # first-class presentation currency for the coverage pass.
+    session.shader_display = True
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[1]
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=2,
+        semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+    )
+    _admit_page_set(pyramid, key, np.asarray(rendered.image))
+    _claim_preview_resident(session, 1, key)
+    del session.rendered_tiles[1]
+    session.dirty_payloads.pop(1, None)
+
+    _state, _delta = session.build_tile_presentation({})
+    # NO acknowledgement: the atomic successor holds the whole transaction,
+    # exactly the field state (pending upserts held, nothing presented).
+    session.atomic_successor_pending = True
+    assert session.display_tile_payloads[1].quality == "preview"
+
+    states = render_effects.tile_lod_states(session, demand)
+    state = next(item for item in states if int(item.tile_number) == 1)
+    assert state.resident_levels, (
+        "an admitted current-source wrapper awaiting the atomic swap must keep "
+        "physical residency visible to the ladder"
+    )
+
+    policy = LadderPolicy(
+        mode=session.lod_policy_mode,
+        floor_level=4,
+        preview_level=2,
+        reduced_input_available=True,
+    )
+    steps = LodLadder(policy).plan(states, demand)
+    assert not any(int(step.tile_number) == 1 and step.rung == Rung.FLOOR for step in steps), (
+        "no duplicate FLOOR producer may be planned while the wrapper awaits the swap"
+    )
