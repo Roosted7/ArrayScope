@@ -401,8 +401,20 @@ class WindowLevelController:
             rank = max(previous_state.source_rank, candidate_state.source_rank)
             count = max(previous_state.source_count, candidate_state.source_count)
             expected = max(previous_state.expected_count, candidate_state.expected_count)
-            if _complete_source(candidate_state) and _span(histogram) < _span(
-                previous_state.display_levels
+            # The anti-shrink hysteresis below holds only between sources of
+            # equal maturity (coverage jitter, degenerate ranges).  A mature
+            # successor that is strictly more mature than the incumbent must
+            # re-anchor even when its true range is narrower, or settled
+            # levels depend on the navigation path that produced the
+            # incumbent (an immature cold-load anchor, or a retained wider
+            # predecessor window on scroll).
+            mature_re_anchor = _mature_successor_source(candidate_state) and (
+                candidate_state.evidence_quality > previous_state.evidence_quality
+            )
+            if (
+                not mature_re_anchor
+                and _complete_source(candidate_state)
+                and _span(histogram) < _span(previous_state.display_levels)
             ):
                 return replace(
                     previous_state,

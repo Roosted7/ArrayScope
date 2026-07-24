@@ -3950,9 +3950,18 @@ def shader_commit_level_source(renderer, session):
 
     Before the first-pass histogram publishes, bounded partial evidence is the
     honest provisional source.  Afterwards a candidate may move the applied
-    window only when the tracked summary is refined; anything less falls back
-    to the already accepted source so partial ranges never disturb a published
-    window.
+    window only when the tracked summary is mature under the retention
+    contract — complete coverage at target quality (``ROUGH_TARGET``) or
+    better; anything less falls back to the already accepted source so
+    partial/preview ranges never disturb a published window.
+
+    Gating on full refinement here froze the applied window at whatever
+    anchored it first: on a cold load that anchor is preview/reduced-LOD
+    evidence whose averaged extremes clip, and on wgpu the refined pass is
+    owned by the semantic evidence producer which may never arm, so the
+    mature target-quality evidence could never re-anchor the window while a
+    scroll to the same slice settled on it (path-dependent levels,
+    2026-07-24).
     """
 
     published = bool(getattr(session, "first_pass_histogram_published", False))
@@ -3962,10 +3971,12 @@ def shader_commit_level_source(renderer, session):
     )
     if published:
         current_summary = renderer._montage_level_tracker().summary_for(session.level_key)
-        if not bool(getattr(current_summary, "refined", False)):
+        if int(getattr(current_summary, "evidence_quality", 0) or 0) < int(
+            LevelEvidenceQuality.ROUGH_TARGET
+        ):
             current_level_source = None
     if current_level_source is None:
-        # Withhold an unrefined *candidate*, not the already accepted source.
+        # Withhold an immature *candidate*, not the already accepted source.
         # The histogram callback can advance the generation just before the
         # controller retains a broader applied window. Re-target convergence
         # to that accepted source or refinement remains blocked behind six

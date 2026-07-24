@@ -1377,6 +1377,134 @@ def test_vispy_first_pass_level_metadata_publishes_on_rough_coverage_growth():
     assert Window()._should_publish_montage_level_metadata(session, stats) is False
 
 
+def _shader_level_session(level_key, *, applied_level_source=None):
+    return SimpleNamespace(
+        level_key=level_key,
+        level_expected_indices=(7,),
+        first_pass_histogram_published=False,
+        applied_level_source=applied_level_source,
+    )
+
+
+def _settled_shader_levels(window, session, evidence_batches):
+    """Replay commits the way _commit_tile_layer decides shader levels."""
+
+    from arrayscope.core.window_levels import WindowLevelController
+    from arrayscope.window.frame_effects import shader_commit_level_source
+
+    tracker = window._montage_level_tracker()
+    for published, stats in evidence_batches:
+        session.first_pass_histogram_published = bool(published)
+        if stats is not None:
+            tracker.update_from_stats(session.level_key, stats, aggregate=False)
+        candidate = shader_commit_level_source(window, session)
+        if candidate is None:
+            continue
+        state = WindowLevelController().decide(
+            previous=getattr(session, "applied_level_source", None),
+            candidate=candidate,
+            explicit_auto=False,
+            mode="relative",
+        )
+        session.applied_level_source = state.as_level_source()
+    return getattr(session.applied_level_source, "levels", None)
+
+
+def test_shader_commit_gate_offers_mature_target_quality_after_publication():
+    # The retention contract settles a window on the first COMPLETE population
+    # at target quality (evidence_quality >= ROUGH_TARGET); full refinement
+    # only improves it later (and on wgpu may never run at all). After the
+    # first-pass histogram publishes, the commit gate must therefore offer a
+    # mature target-quality summary instead of withholding everything short of
+    # REFINED — withholding froze whatever anchored first.
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService
+    from arrayscope.window.frame_effects import shader_commit_level_source
+
+    window = LevelStatsService()
+    window.win = window
+    level_key = ("montage_levels", "doc", "slice-7", 0)
+    session = _shader_level_session(level_key)
+    session.first_pass_histogram_published = True
+    window._montage_level_tracker().ensure_expected(level_key, (7,))
+    window._montage_level_tracker().update_from_stats(
+        level_key,
+        TileLevelStats(
+            7,
+            (0.0, 100.0),
+            np.linspace(0.0, 100.0, 64, dtype=np.float32),
+            refined=False,
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        ),
+        aggregate=False,
+    )
+
+    candidate = shader_commit_level_source(window, session)
+
+    assert candidate is not None
+    assert candidate.levels == (0.0, 100.0)
+    assert candidate.evidence_quality == int(LevelEvidenceQuality.ROUGH_TARGET)
+
+
+def test_shader_settled_levels_are_navigation_path_independent():
+    # Field defect 2026-07-24: reloading directly at a slice anchored the
+    # window on preview/reduced-LOD evidence (averaging narrows the extremes)
+    # and never re-anchored when the mature exact evidence arrived, while
+    # scrolling to the same slice settled on the mature evidence — visibly
+    # more clipping on the reload path. Settled levels must not depend on how
+    # the user navigated to the data.
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService
+
+    level_key = ("montage_levels", "doc", "slice-7", 0)
+
+    def evidence_batches():
+        preview = TileLevelStats(
+            7,
+            (45.0, 55.0),
+            np.linspace(45.0, 55.0, 64, dtype=np.float32),
+            refined=False,
+            evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+        )
+        exact = TileLevelStats(
+            7,
+            (0.0, 100.0),
+            np.linspace(0.0, 100.0, 64, dtype=np.float32),
+            refined=False,
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        )
+        # The preview commit anchors before the first-pass histogram
+        # publishes; the exact evidence lands only afterwards (the trace-
+        # confirmed cold-load ordering on wgpu).
+        return ((False, preview), (True, exact))
+
+    def fresh_window():
+        window = LevelStatsService()
+        window.win = window
+        window._montage_level_tracker().ensure_expected(level_key, (7,))
+        return window
+
+    direct_session = _shader_level_session(level_key)
+    direct = _settled_shader_levels(fresh_window(), direct_session, evidence_batches())
+
+    predecessor = LevelSource(
+        levels=(-20.0, 140.0),
+        histogram_range=(-20.0, 140.0),
+        rank=LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key=("montage_levels", "doc", "slice-6", 0),
+        evidence_quality=int(LevelEvidenceQuality.ROUGH_TARGET),
+    )
+    scroll_session = _shader_level_session(level_key, applied_level_source=predecessor)
+    scroll = _settled_shader_levels(fresh_window(), scroll_session, evidence_batches())
+
+    assert direct == (0.0, 100.0)
+    assert scroll == (0.0, 100.0)
+    assert direct == scroll
+
+
 def test_first_pass_rough_evidence_completion_uses_required_scope():
     from arrayscope.render.level_stats import LevelStatsService
 

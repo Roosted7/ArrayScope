@@ -211,6 +211,86 @@ def test_controller_keeps_predecessor_through_complete_preview_then_switches_at_
     assert target_state.display_levels == (0.0, 500.0)
 
 
+def test_controller_mature_successor_reanchors_immature_same_content_anchor():
+    # A cold load has no incumbent, so the first (immature, reduced-LOD)
+    # evidence may anchor provisionally. The mature target-quality evidence
+    # for the SAME content must then re-anchor that window — the provisional
+    # anchor's averaged extremes are narrower than the data and clip.
+    controller = window_levels.WindowLevelController()
+    preview = window_levels.LevelSource(
+        levels=(45.0, 55.0),
+        histogram_range=(45.0, 55.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="slice-7",
+        evidence_quality=1,
+    )
+    mature = window_levels.LevelSource(
+        levels=(0.0, 100.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="slice-7",
+        evidence_quality=2,
+    )
+
+    anchored = controller.decide(previous=None, candidate=preview, mode="relative")
+    settled = controller.decide(previous=anchored, candidate=mature, mode="relative")
+
+    assert anchored.display_levels == (45.0, 55.0)
+    assert settled.display_levels == (0.0, 100.0)
+    assert settled.histogram_range == (0.0, 100.0)
+
+
+def test_controller_settled_levels_are_path_independent_for_mature_evidence():
+    # Direct load (no incumbent) and scroll (retained mature predecessor,
+    # wider OR narrower than the successor's true range) must settle on the
+    # same levels once mature evidence for the same content arrives. The
+    # anti-shrink hysteresis may only hold between sources of equal maturity;
+    # a strictly more mature successor always re-anchors.
+    controller = window_levels.WindowLevelController()
+    preview = window_levels.LevelSource(
+        levels=(45.0, 55.0),
+        histogram_range=(45.0, 55.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="slice-7",
+        evidence_quality=1,
+    )
+    mature = window_levels.LevelSource(
+        levels=(0.0, 100.0),
+        histogram_range=(0.0, 100.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="slice-7",
+        evidence_quality=2,
+    )
+
+    direct_anchor = controller.decide(previous=None, candidate=preview, mode="relative")
+    direct = controller.decide(previous=direct_anchor, candidate=mature, mode="relative")
+
+    wide_predecessor = window_levels.LevelSource(
+        levels=(-20.0, 140.0),
+        histogram_range=(-20.0, 140.0),
+        rank=window_levels.LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=1,
+        expected_count=1,
+        semantic_key="slice-6",
+        evidence_quality=2,
+    )
+    retained = controller.decide(previous=wide_predecessor, candidate=preview, mode="relative")
+    scroll = controller.decide(previous=retained, candidate=mature, mode="relative")
+
+    assert retained.display_levels == (-20.0, 140.0)
+    assert direct.display_levels == (0.0, 100.0)
+    assert scroll.display_levels == (0.0, 100.0)
+    assert scroll.display_levels == direct.display_levels
+
+
 def test_controller_accepts_partial_first_source_instead_of_retaining_fallback():
     fallback = window_levels.WindowLevelController().decide(previous=None, candidate=None)
     partial = window_levels.LevelSource(
