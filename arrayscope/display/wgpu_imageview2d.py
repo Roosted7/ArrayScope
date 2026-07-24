@@ -1802,10 +1802,15 @@ class WgpuImageView2D(ImageViewShell):
             # display levels) mirrors the VisPy backend's minimal set.
             self.image = img
             self.histogramSource = None
-            if not callable(histogramPlotData):
+            # ``None`` means that this commit carries no histogram metadata;
+            # it is not a command to erase the last accepted semantic
+            # histogram. Refined aggregation and tiled acknowledgement are
+            # independently paced, so a later metadata-free commit commonly
+            # follows the one that publishes the aggregate.
+            if histogramPlotData is not None and not callable(histogramPlotData):
                 previous_histogram = self.histogramPlotSource
                 self.histogramPlotSource = histogramPlotData
-                if histogramPlotData is not None and (
+                if (
                     previous_histogram is not histogramPlotData
                     or getattr(self.histogramImageItem, "image", None) is None
                 ):

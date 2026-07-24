@@ -90,7 +90,12 @@ class PreviewFloorMetadata:
 
 @dataclass(frozen=True)
 class SemanticLevelEvidenceTarget:
-    """Immutable full-population statistics obligation for one frame."""
+    """Immutable full-population statistics obligation for one semantic frame.
+
+    A montage owns one source per selected index. A normal image frame uses
+    the same owner with the canonical one-source population ``(0,)``; its
+    ``ViewState`` already carries the actual non-display slice coordinates.
+    """
 
     generation: object
     level_key: object
@@ -698,6 +703,12 @@ class FrameSession:
     level_evidence_generation: object | None = None
     histogram_aggregate_inflight: bool = False
     histogram_aggregate_generation: object | None = None
+    # A generation-checked histogram aggregate has been installed in the
+    # tracker but has not yet crossed the presentation boundary. This is
+    # separate from level-source maturity: the source may already have been
+    # applied while the bounded histogram aggregation worker was still
+    # running.
+    histogram_metadata_pending: bool = False
     semantic_level_evidence_target: SemanticLevelEvidenceTarget | None = None
     semantic_level_evidence_progress: SemanticLevelEvidenceProgress | None = None
     first_pass_quality: str | None = None
@@ -1412,6 +1423,7 @@ class FrameSession:
         self.level_evidence_generation = None
         self.histogram_aggregate_inflight = False
         self.histogram_aggregate_generation = None
+        self.histogram_metadata_pending = False
         self.invalidate_semantic_level_evidence()
         self.first_pass_quality = None
         self.first_pass_histogram_published = False
@@ -1687,6 +1699,14 @@ class FrameSession:
         self.semantic_level_evidence_progress = None
 
     def semantic_level_evidence_diagnostics(self) -> dict[str, object]:
+        """Return constant-time owner progress for traces and diagnostics.
+
+        ``blocking_reason == "inactive"`` means that no target has been
+        constructed yet; it is not a kernel-admission or scheduling-policy
+        rejection. Once a live image session arms the owner, the reason moves
+        through waiting/in-flight/ready (or an explicit error state).
+        """
+
         target = self.semantic_level_evidence_target
         progress = self.semantic_level_evidence_progress
         if target is None or progress is None:

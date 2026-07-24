@@ -914,6 +914,21 @@ def test_tiled_commit_publishes_histogram_to_shared_widget(qt_app):
             montage_tile_payloads=payloads,
         )
         assert view.lastImageUploadTiming().histogram_bytes == 0
+
+        # ``None`` means this presentation carries no histogram update. A
+        # later tile/level acknowledgement must not erase the most recently
+        # published semantic histogram while its source remains current.
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=None,
+            montage_tile_payloads=payloads,
+        )
+        assert view.histogramPlotSource is histogram
+        assert np.array_equal(view.histogramImageItem.image, histogram)
     finally:
         view.close()
 

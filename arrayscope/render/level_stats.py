@@ -597,7 +597,14 @@ class LevelStatsService:
             ):
                 self._schedule_montage_histogram_aggregate(current)
                 return
-            self._publish_first_cpu_histogram(current)
+            # Installing the aggregate and applying its histogram metadata are
+            # separate lifecycle transitions. In particular, refined semantic
+            # evidence can apply its quality-3 level source before this worker
+            # completes; the replay commit must still publish the newly ready
+            # histogram even though the level source no longer improves.
+            current.histogram_metadata_pending = True
+            if self._publish_first_cpu_histogram(current):
+                current.histogram_metadata_pending = False
             # Aggregate readiness is a new presentation progress dimension.
             # The preceding evidence callback may have deliberately withheld
             # its wake while this worker owned the histogram, so replay the
@@ -677,7 +684,7 @@ class LevelStatsService:
     def _ensure_semantic_level_evidence_target(self, session):
         document = getattr(session, "document", None)
         view_state = getattr(session, "view_state", None)
-        if document is None or view_state is None or getattr(session, "montage_axis", None) is None:
+        if document is None or view_state is None:
             return None
         expected = self._montage_level_expected_indices(session)
         generation = (
@@ -766,10 +773,14 @@ class LevelStatsService:
         )
         if len(progress.covered_sources) >= target.target_population:
             progress.blocking_reason = "ready"
+            if self._montage_level_tracker().cached_histogram_data(target.level_key) is None:
+                self._schedule_montage_histogram_aggregate(session)
             return
         sources = self._take_semantic_level_evidence_sources(session)
         if not sources and progress.cursor >= target.target_population:
             progress.blocking_reason = "ready"
+            if self._montage_level_tracker().cached_histogram_data(target.level_key) is None:
+                self._schedule_montage_histogram_aggregate(session)
             self._maybe_publish_after_level_evidence(session, processed=1)
             return
 
@@ -851,6 +862,8 @@ class LevelStatsService:
             )
             if len(progress.covered_sources) >= target.target_population:
                 progress.blocking_reason = "ready"
+                if tracker.cached_histogram_data(current.level_key) is None:
+                    self._schedule_montage_histogram_aggregate(current)
             else:
                 progress.blocking_reason = "waiting-semantic-sources"
             self._maybe_publish_after_level_evidence(current, processed=int(merged))

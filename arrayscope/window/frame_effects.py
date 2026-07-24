@@ -1894,7 +1894,12 @@ class FramePipelineEffects:
             publish_refined_histogram = bool(
                 level_metadata_improved and bool(getattr(level_stats, "refined", False))
             )
-            publish_histogram_plot = bool(publish_first_pass_histogram or publish_refined_histogram)
+            histogram_metadata_pending = bool(getattr(session, "histogram_metadata_pending", False))
+            publish_histogram_plot = bool(
+                publish_first_pass_histogram
+                or publish_refined_histogram
+                or histogram_metadata_pending
+            )
             publish_metadata = (
                 publish_auto_metadata or publish_histogram_plot or level_metadata_improved
             )
@@ -1910,6 +1915,8 @@ class FramePipelineEffects:
                 "metadata_can_advance": bool(metadata_can_advance),
                 "semantic_level_supersession": bool(semantic_level_supersession),
                 "level_metadata_improved": bool(level_metadata_improved),
+                "histogram_metadata_pending": bool(histogram_metadata_pending),
+                "publish_histogram_plot": bool(publish_histogram_plot),
                 "publish_metadata": bool(publish_metadata),
                 "level_stats_rank": None
                 if level_stats is None
@@ -2116,6 +2123,8 @@ class FramePipelineEffects:
             if not applied:
                 self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
                 return
+            if histogram_metadata_pending and histogram_plot_data is not None:
+                session.histogram_metadata_pending = False
             session.backend_refresh_pending = False
             renderer._last_montage_commit_outcome = "backend-applied"
             session._atomic_prepared_transaction = None

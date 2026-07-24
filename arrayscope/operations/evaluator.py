@@ -1233,15 +1233,21 @@ def evaluate_level_evidence_snapshot(
     """
 
     montage_axis = getattr(view_state, "montage_axis", None)
-    if montage_axis is None:
-        raise ValueError("montage_axis must be set for semantic level evidence")
     pixel_limit = max(1, int(pixel_limit))
     sources = tuple(int(source) for source in source_indices)
+    if montage_axis is None and sources != (0,):
+        raise ValueError(
+            "single-slice semantic level evidence requires the canonical one-source population (0,)"
+        )
     start = perf_counter()
     results = []
     for source_index in sources:
         _check_cancelled(cancellation_token)
-        tile_state = view_state.tile_state_for_slice(int(montage_axis), int(source_index))
+        tile_state = (
+            view_state
+            if montage_axis is None
+            else view_state.tile_state_for_slice(int(montage_axis), int(source_index))
+        )
         sample_state = _bounded_level_evidence_state(tile_state, pixel_limit=pixel_limit)
         request = request_for_image(sample_state)
         plan = plan_slab(document, request)

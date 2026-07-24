@@ -4,7 +4,11 @@ import numpy as np
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.core.window_levels import LevelSourceRank
-from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES, VISPY_CAPABILITIES
+from arrayscope.display.backend_contract import (
+    PYQTGRAPH_CAPABILITIES,
+    VISPY_CAPABILITIES,
+    WGPU_CAPABILITIES,
+)
 from arrayscope.display.montage import make_montage_plan
 from arrayscope.kernel import Lane, Priority
 from arrayscope.operations.evaluator import OperationEvaluator
@@ -51,31 +55,42 @@ class _CapturingKernel:
 _DEFAULT_SELECTED = tuple(range(20))
 
 
-def _session(data, *, session_id=1, selected=_DEFAULT_SELECTED, level_key=None):
+def _session(
+    data,
+    *,
+    session_id=1,
+    selected=_DEFAULT_SELECTED,
+    level_key=None,
+    montage=True,
+):
     document = ArrayDocument(np.asarray(data))
-    state = ViewState.from_shape(document.current_shape).with_montage_axis(
-        2,
-        columns=5,
-        indices=selected,
-        text=":",
-    )
+    state = ViewState.from_shape(document.current_shape)
+    montage_axis = 2 if montage else None
+    expected = tuple(int(index) for index in selected) if montage else (0,)
+    if montage:
+        state = state.with_montage_axis(
+            2,
+            columns=5,
+            indices=selected,
+            text=":",
+        )
     plan = make_montage_plan(
         state,
-        axis=2,
-        indices=selected,
+        axis=montage_axis,
+        indices=expected,
         tile_shape=document.current_shape[:2],
-        columns=5,
+        columns=5 if montage else 1,
     )
     session = FrameSession(
         session_id=int(session_id),
         key=("frame", int(session_id)),
         render_generation=int(session_id),
         level_key=level_key or ("levels", int(session_id)),
-        level_expected_indices=tuple(int(index) for index in selected),
+        level_expected_indices=expected,
         plan=plan,
         view_state=state,
         document=document,
-        montage_axis=2,
+        montage_axis=montage_axis,
         colormap_lut=None,
         viewport_shape=(640, 384),
         view_range=(
@@ -143,17 +158,52 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     assert progress.pending_batches == 0
     assert progress.inflight_generation is None
     assert progress.blocking_reason == "ready"
-    assert all(task["lane"] == Lane.DISPLAY_PREVIEW for task in submitted)
+    semantic_tasks = [
+        task for task in submitted if task["scope"] == "montage:semantic-level-evidence"
+    ]
+    assert all(task["lane"] == Lane.DISPLAY_PREVIEW for task in semantic_tasks)
     # The visible-lane sweep is the complement producer for the first-pixel
     # wait; it carries the same INTERACTIVE priority as the tile evaluations
     # it gates (montage-entry blackout, 2026-07-18 dossier).
-    assert all(task["priority"] == Priority.INTERACTIVE for task in submitted)
-    assert all(task["pass_token"] is True for task in submitted)
-    assert max(task["max_items"] for task in submitted) <= 16
+    assert all(task["priority"] == Priority.INTERACTIVE for task in semantic_tasks)
+    assert all(task["pass_token"] is True for task in semantic_tasks)
+    assert max(task["max_items"] for task in semantic_tasks) <= 16
     assert service.win.operation_evaluator.image_evaluations == 0
     assert session.rendered_tiles == {}
     assert session.display_tile_payloads == {}
     assert session.lifecycle.presented_tiles == frozenset()
+
+
+def test_single_slice_wgpu_arms_refined_semantic_evidence_owner():
+    """A one-source shader frame must not remain permanently rough."""
+
+    data = np.arange(32 * 48 * 3, dtype=np.float32).reshape(32, 48, 3)
+    session = _session(data, selected=(0,), montage=False)
+    session.shader_display = True
+    session.display_committed = True
+    session.first_pass_histogram_published = True
+    session.required_target_settled = lambda: True
+    _close_coverage_phase(session)
+    service, kernel = _service(session, capabilities=WGPU_CAPABILITIES)
+
+    service._schedule_semantic_level_evidence(session)
+
+    assert session.semantic_level_evidence_target is not None
+    assert session.semantic_level_evidence_target.target_population == 1
+    assert len(kernel.tasks) == 1
+    kernel.run_next()
+
+    summary = service._montage_level_tracker().summary_for(session.level_key)
+    assert summary.evidence_quality == 3
+    assert summary.refined is True
+    assert summary.source_indices == frozenset({0})
+    assert session.semantic_level_evidence_progress.blocking_reason == "ready"
+    assert len(kernel.tasks) == 1
+    assert kernel.tasks[0]["scope"] == f"montage:{session.key!r}:histogram"
+    kernel.run_next()
+    histogram = service._montage_level_tracker().cached_histogram_data(session.level_key)
+    assert np.asarray(histogram).size > 512
+    assert session.histogram_metadata_pending is True
 
 
 def test_semantic_owner_rejects_superseded_generation_results():
