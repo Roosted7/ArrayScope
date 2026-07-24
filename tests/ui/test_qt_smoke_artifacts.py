@@ -293,15 +293,16 @@ def test_dimension_strip_wraps_for_many_dimensions(qt_app):
                 min_height=28,
             )
 
-        win._enable_live_profile_for_axis(2)
+        # The dimension badge's "p" role toggle is the profile entry point now.
+        win.set_dimension_role("p", 2)
         _process_events(qt_app, count=12)
-        assert win.widgets["buttons"]["display"]["live_profile"].isChecked()
+        assert 2 in win.profile_axes
         assert win.profile_dock.isVisible()
 
-        win.profile_dock.hide()
+        # Toggling another axis adds it alongside the first.
+        win.set_dimension_role("p", 3)
         _process_events(qt_app)
-        win.set_profile_axis_from_menu(3)
-        _process_events(qt_app)
+        assert 3 in win.profile_axes
         assert win.profile_dock.isVisible()
     finally:
         win.close()

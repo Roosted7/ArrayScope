@@ -277,7 +277,9 @@ def test_raw_index_list_montage_renders_each_selected_source(qtbot):
         win.close()
 
 
-def test_live_profile_from_axis_sets_exactly_one_profile_axis(qtbot):
+def test_profile_badge_toggle_adds_axis_and_shows_dock(qtbot):
+    # The chip's profile "+" menu entry is gone; the dimension badge's "p" role
+    # toggle (set_dimension_role) is the real path now.
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -285,12 +287,15 @@ def test_live_profile_from_axis_sets_exactly_one_profile_axis(qtbot):
     qtbot.addWidget(win)
     try:
         _process_events(qtbot)
-        win.profile_axes = (0, 1)
-        win._enable_live_profile_for_axis(2)
+        win.set_profile_axes_exactly((0,))
         _process_events(qtbot)
 
-        assert win.profile_axes == (2,)
-        assert win.view_state.line_axis == 2
+        # Toggling the "p" role on axis 2 adds it to the profile set, points the
+        # line axis at the first profile axis, and keeps the dock visible.
+        win.set_dimension_role("p", 2)
+        _process_events(qtbot)
+        assert 2 in win.profile_axes
+        assert win.view_state.line_axis == win.profile_axes[0]
         assert win.profile_dock.isVisible()
     finally:
         win.close()

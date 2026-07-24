@@ -114,24 +114,6 @@ class OperationActionsMixin:
                 )
             )
 
-    def _enable_live_profile_for_axis(self, dim):
-        self.set_profile_axes_exactly((dim,))
-        self.widgets["buttons"]["display"]["live_profile"].setChecked(True)
-
-    def _set_live_profile_for_axis_from_menu(self, dim, enabled):
-        if enabled:
-            self._enable_live_profile_for_axis(dim)
-        else:
-            self.widgets["buttons"]["display"]["live_profile"].setChecked(False)
-
-    def set_profile_axis_from_menu(self, dim):
-        self.set_profile_axes_exactly((dim,))
-        self._profile_dock_user_visible = True
-        self.layout_manager.set_managed_dock_visible(
-            self.profile_dock, True, reason="profile-axis-menu"
-        )
-        self._schedule_view_geometry_refresh()
-
     def _show_operation_context_menu_for_axis(self, dim):
         if dim >= self.data.ndim:
             return
