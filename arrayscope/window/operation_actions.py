@@ -80,13 +80,15 @@ class OperationActionsMixin:
         """Apply inverse FFT along specified dimension."""
         self._append_operation("centered_ifft", dim)
 
-    def _show_operation_context_menu(self, pos, widget, dim):
-        if dim >= self.data.ndim:
-            return
+    def _build_operation_context_menu(self, dim, anchor) -> QtWidgets.QMenu:
+        """Construct (but do not show) the sectioned chip "+" menu.
 
-        # The axis is fixed by the chip, so a parameterized op anchors its
-        # stage-2 popup just above the chip's "+" button (this global point).
-        anchor = widget.mapToGlobal(pos)
+        Split out from :meth:`_show_operation_context_menu` so the same menu can
+        be grabbed for screenshots (or otherwise driven) without the blocking
+        ``exec``. ``anchor`` is the global point a parameterized op's stage-2
+        popup opens at.
+        """
+
         menu = QtWidgets.QMenu(self)
         sections = build_operation_listing()
         main_sections = [section for section in sections if not section.is_more]
@@ -99,8 +101,17 @@ class OperationActionsMixin:
             for section in more_sections:
                 more_menu.addSection(section.title)
                 self._add_operation_menu_actions(more_menu, section.entries, dim, anchor)
+        return menu
 
-        menu.exec(widget.mapToGlobal(pos))
+    def _show_operation_context_menu(self, pos, widget, dim):
+        if dim >= self.data.ndim:
+            return
+
+        # The axis is fixed by the chip, so a parameterized op anchors its
+        # stage-2 popup just above the chip's "+" button (this global point).
+        anchor = widget.mapToGlobal(pos)
+        menu = self._build_operation_context_menu(dim, anchor)
+        menu.exec(anchor)
 
     def _add_operation_menu_actions(self, menu, entries, dim, anchor):
         for entry in entries:

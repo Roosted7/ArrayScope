@@ -439,6 +439,150 @@ def s_palette(ctx: Ctx):
         raise RuntimeError("palette capture failed")
 
 
+def _shot_menu(ctx: Ctx, menu, label):
+    """Grab a (possibly popped-up) QMenu, guarding against a blank/unsized grab.
+
+    ``QMenu.popup`` offscreen usually gives the menu a real geometry, but a lost
+    wakeup can leave it unsized; force ``sizeHint`` and retry before trusting the
+    pixmap, then assert a plausible height so a blank artifact never ships.
+    """
+
+    menu.ensurePolished()
+    menu.adjustSize()
+    menu.resize(menu.sizeHint())
+    pixmap = menu.grab()
+    if pixmap.isNull() or pixmap.height() < 40:
+        raise RuntimeError(
+            f"chip menu {label!r} grabbed blank ({pixmap.width()}x{pixmap.height()})"
+        )
+    path = ctx.out_dir / f"{ctx.theme}__{label}.png"
+    if not pixmap.save(str(path), "PNG"):
+        raise RuntimeError(f"failed to save {path}")
+    return path
+
+
+@scenario("operation_add_popup")
+def s_operation_add_popup(ctx: Ctx):
+    win = ctx.window(_volume3d(), size=(1100, 760))
+    # Anchor the stage-1 adder just beneath the ops dock's "Add operation"
+    # button, exactly like the production open path.
+    button = win.operation_dock.add_button
+    anchor = button.mapToGlobal(button.rect().bottomLeft())
+    win.open_operation_adder(anchor=anchor)
+    popup = win._operation_add_popup
+    popup.adjustSize()
+    ctx.pump(4)
+    ctx.shot(popup, "add_popup_collapsed")
+    # Unfold the optional backend groups via the popup's public toggle. The list
+    # is a fixed-height scroll area, so bring a revealed backend op into view
+    # (selecting it auto-scrolls) to actually show the expanded state.
+    popup.set_expanded(True)
+    for op_id in ("sigpy:soft_thresh", "sigpy:hard_thresh", "bart:pics"):
+        if popup.select_operation(op_id):
+            break
+    popup.adjustSize()
+    ctx.pump(4)
+    ctx.shot(popup, "add_popup_more")
+    # Highlight an axis-requiring op so the inline axis combo row appears.
+    if not popup.select_operation("crop"):
+        raise RuntimeError("crop row not selectable in add popup")
+    popup.adjustSize()
+    ctx.pump(4)
+    ctx.shot(popup, "add_popup_axis_row")
+
+
+@scenario("operation_params_popup")
+def s_operation_params_popup(ctx: Ctx):
+    win = ctx.window(_volume3d(), size=(1000, 720))
+    anchor = win.mapToGlobal(win.rect().center())
+    win.request_operation("crop", 0, anchor=anchor)
+    popup = win._operation_params_popup
+    if popup is None:
+        raise RuntimeError("crop params popup was not opened")
+    popup.adjustSize()
+    ctx.pump(4)
+    ctx.shot(popup, "params_crop")
+
+    from arrayscope.operations.packs.sigpy_pack import sigpy_available
+
+    if sigpy_available():
+        # soft_thresh has requires_axis=False -> pass dim=None.
+        win.request_operation("sigpy:soft_thresh", None, anchor=anchor)
+        sig_popup = win._operation_params_popup
+        if sig_popup is None:
+            raise RuntimeError("sigpy params popup was not opened")
+        sig_popup.adjustSize()
+        ctx.pump(4)
+        ctx.shot(sig_popup, "params_sigpy")
+
+
+@scenario("operation_manager")
+def s_operation_manager(ctx: Ctx):
+    import tempfile
+    from pathlib import Path
+
+    from arrayscope.app import user_dirs
+    from arrayscope.operations import library
+    from arrayscope.ui.operation_manager import OperationManagerDialog
+
+    # Isolation: the gallery's private QSettings name already nests the user
+    # config (and thus the ops dir) under a per-scenario application name, but
+    # to remove ANY doubt about touching the real user's config we monkeypatch
+    # both resolvers to a scenario-temp dir BEFORE the window is built.
+    ops_dir = Path(tempfile.mkdtemp(prefix="ui-gallery-ops-"))
+    user_dirs.user_operations_directory = lambda: ops_dir
+    library.user_operations_directory = lambda: str(ops_dir)
+
+    # A broken wrapper JSON so the Problems group renders.
+    (ops_dir / "broken.json").write_text('{"format": "arrayscope-operation", "version":')
+    # A tiny valid user op imported from a source outside the ops dir.
+    src_dir = Path(tempfile.mkdtemp(prefix="ui-gallery-src-"))
+    (src_dir / "smooth.py").write_text(
+        "def smooth(data, axis, width: int = 3):\n"
+        '    """Moving-average smooth along an axis."""\n'
+        "    return data\n"
+    )
+    user_op_id = library.import_custom_operation(str(src_dir / "smooth.py"), "smooth")
+    library.set_operation_hidden("fftshift", True)
+    library.refresh_user_operations()
+
+    win = ctx.window(_volume3d(), size=(900, 700))
+    dialog = OperationManagerDialog(win)
+    dialog.show()
+    ctx.pump(8)
+    if not dialog.select_operation("centered_fft"):
+        raise RuntimeError("centered_fft not present in operation manager tree")
+    ctx.pump(6)
+    ctx.shot(dialog, "manager_tree")
+    if not dialog.select_operation(user_op_id):
+        raise RuntimeError(f"user op {user_op_id!r} not present in operation manager tree")
+    ctx.pump(6)
+    ctx.shot(dialog, "manager_user_editor")
+    dialog.close()
+
+
+@scenario("operation_chip_menu")
+def s_operation_chip_menu(ctx: Ctx):
+    from pyqtgraph.Qt import QtWidgets
+
+    win = ctx.window(_volume3d(), size=(1000, 720))
+    dim = 0
+    chip = win.dimension_strip.chip(dim)
+    button = getattr(chip, "ops_button", chip)
+    anchor = button.mapToGlobal(button.rect().bottomLeft())
+    menu = win._build_operation_context_menu(dim, anchor)
+    # A Qt.Popup menu auto-dismisses the instant it is shown over the active
+    # offscreen window, so grab the built menu directly rather than popping it
+    # up -- the grab drives the same paint path and _shot_menu sizes it from its
+    # sizeHint. The "More…" submenu is reached via findChildren: PySide6's
+    # QAction.menu() hands back a throwaway wrapper that is GC-reaped, while
+    # findChildren returns the live child object.
+    submenu = next(iter(menu.findChildren(QtWidgets.QMenu)), None)
+    if submenu is not None:
+        _shot_menu(ctx, submenu, "chip_menu_more")
+    _shot_menu(ctx, menu, "chip_menu")
+
+
 # --------------------------------------------------------------------------
 # Child runner
 # --------------------------------------------------------------------------
