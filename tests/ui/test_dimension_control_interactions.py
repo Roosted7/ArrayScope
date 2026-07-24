@@ -601,3 +601,149 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
     finally:
         logging.getLogger().removeHandler(handler)
         win.close()
+
+
+def _assert_committed_frame_not_stale(win, qtbot, *, label):
+    """Assert the watchdog's ``committed_frame_stale`` predicate stays clear.
+
+    Mirrors the exact terminal condition the ADR-0051 stall watchdog checks
+    (``frame_runtime.py``): with the required target fully settled and its
+    first pixels presented, the committed display frame must satisfy
+    ``_is_committed_display_frame_current``.  A lagging render-generation stamp
+    fails only that predicate while every pixel is current -- the field defect.
+
+    Uses a bare ``processEvents`` pump rather than a timed wait: the session is
+    already settled by the caller, and a timed wait would let an incidental
+    single-plane viewport-update timer re-commit and mask the persistent stall
+    the field captured (montage sessions have no such timer, so they never
+    self-heal).
+    """
+
+    from pyqtgraph.Qt import QtWidgets
+
+    app = QtWidgets.QApplication.instance()
+    renderer = win.renderer
+    session = renderer._frame_session
+    assert session is not None, f"{label}: no live frame session"
+    for _ in range(10):
+        app.processEvents()
+    assert session.required_target_unsettled_tiles() == (), (
+        f"{label}: target not settled -- reproduction precondition unmet"
+    )
+    assert bool(session.required_first_pixels_presented()), (
+        f"{label}: first pixels not presented -- reproduction precondition unmet"
+    )
+    frame = getattr(win, "_committed_display_frame", None)
+    assert frame is not None, f"{label}: no committed display frame"
+    committed_frame_stale = not renderer._is_committed_display_frame_current(frame)
+    assert not committed_frame_stale, (
+        f"{label}: committed_frame_stale fired -- committed frame stamped at "
+        f"generation {int(frame.key.render_generation)} but live generation is "
+        f"{renderer._render_generation.current} while every pixel-affecting "
+        f"identity component matches (the watchdog would assert an idle stall)"
+    )
+    assert int(getattr(renderer, "_montage_stall_assertions", 0) or 0) == 0, (
+        f"{label}: a stall assertion fired"
+    )
+
+
+def _issue_settle_tail_renders(win, qtbot, *, count=3):
+    """Replay the redundant renders an interaction issues as it settles.
+
+    An interactive scroll/swap fires many ``request_render`` calls; the last
+    ones land on an already-settled presentation and produce no fresh commit.
+    Each still advances the global render generation, so the committed frame's
+    generation stamp is left behind -- the exact tail seen in the field traces
+    (``arrayscope-stall-78-1`` slice tail, ``arrayscope-stall-445-7`` gens
+    1053-1061 at a fixed view state).
+    """
+
+    for _ in range(count):
+        win.renderer.request_render(reason="settle-tail", interactive=True)
+        _process_events(qtbot, count=10)
+
+
+def test_x_y_swap_settle_leaves_committed_frame_current(qtbot):
+    """Scenario A: an X/Y swap that settles must not strand a stale committed frame.
+
+    Field repro ``arrayscope-stall-78-1`` (signature session 78,
+    ``committed_frame_stale=1``, kernel idle): the user changed X/Y and the
+    view settled, then the interaction's redundant settle-tail renders landed
+    on the session-reuse path -- which refreshes ``session.render_generation``
+    but commits nothing when the presentation is already complete.  The
+    committed display frame kept the pre-tail generation stamp while every
+    pixel-affecting identity component (document, geometry, request key)
+    matched, so the currency predicate rejected the frame and the watchdog
+    declared an idle stall with nothing armed to recommit.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    n_side, n_tiles = 5, 4
+    yy, xx, kk = np.mgrid[0:n_side, 0:n_side, 0:n_tiles]
+    data = (xx + 10 * yy + 100 * kk).astype(np.float32)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
+        )
+        win.render(reason="test-montage")
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
+        assert win.view_state.image_axes == (0, 1)
+
+        # Swap X/Y and let the transposed display settle.
+        win.set_dimension_role("y", win.view_state.image_axes[1])
+        assert win.view_state.image_axes == (1, 0)
+        _wait_for_committed_montage_tiles(win, qtbot, n_tiles, expected_shape=(n_side, n_side))
+
+        _issue_settle_tail_renders(win, qtbot)
+        _assert_committed_frame_not_stale(win, qtbot, label="x/y swap settle")
+    finally:
+        win.close()
+
+
+def test_indexed_dim_scroll_settle_leaves_committed_frame_current(qtbot):
+    """Scenario B: a cropped indexed-dim montage scroll must settle clean.
+
+    Field repro ``arrayscope-stall-445-6/7`` (signature session 445,
+    ``committed_frame_stale=1``, 20 presented tiles, kernel idle, revision 60):
+    a cropped montage (range crops on both image axes, swapped + flipped axes)
+    scrolled a slice-range.  The maintainer confirmed the pixels render
+    correctly -- the watchdog fired purely because the committed frame's
+    render-generation stamp lagged the settle-tail renders while every
+    pixel-affecting identity component matched.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    depth = 12
+    data = np.arange(40 * 44 * depth, dtype=np.float32).reshape(40, 44, depth)
+    win = ArrayScopeWindow(data)
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        montage_indices = tuple(range(0, depth, 2))
+        state = (
+            win.view_state.with_image_axes(1, 0)
+            .with_montage_axis(2, indices=montage_indices, text="0::2")
+            .with_axis_range(0, indices=tuple(range(4, 34, 2)), text="4:2:34")
+            .with_axis_range(1, indices=tuple(range(2, 40, 2)), text="2:2:40")
+        )
+        win._set_view_state(state)
+        win.render(reason="test-cropped-montage")
+        _wait_for_committed_montage_tiles(win, qtbot, len(montage_indices))
+
+        # Scroll the crop window on the first image axis (a slice-range scroll).
+        scrolled = win.view_state.with_axis_range(0, indices=tuple(range(6, 36, 2)), text="6:2:36")
+        win._set_view_state(scrolled)
+        win.render(reason="slice-range")
+        _wait_for_committed_montage_tiles(win, qtbot, len(montage_indices))
+
+        _issue_settle_tail_renders(win, qtbot)
+        _assert_committed_frame_not_stale(win, qtbot, label="indexed-dim scroll settle")
+    finally:
+        win.close()

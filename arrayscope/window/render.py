@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from time import perf_counter
 
 import numpy as np
@@ -179,8 +180,20 @@ class RenderOrchestrator(
             return None
         return value_source.value_at(mapping)
 
-    def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
-        if not self._is_current_render_generation(int(frame.key.render_generation)):
+    def _committed_display_frame_identity_current(self, frame: CommittedDisplayFrame) -> bool:
+        """Every currency check EXCEPT the render-generation ordering stamp.
+
+        Splits the pixel-affecting identity (document, geometry, request key,
+        data/histogram shape) from ``render_generation``.  The generation is an
+        ordering token — it advances on every render request, including ones
+        that land on an already-settled presentation and commit nothing.  When
+        that happens the committed frame's stamp lags the live counter while
+        its pixels remain the current output; separating the two lets the
+        reuse path tell "this frame is current, only its stamp lagged" from
+        "this frame is genuinely superseded" and re-stamp the former.
+        """
+
+        if getattr(self.win, "_closing", False):
             return False
         if frame.key.document_key != _document_key(self.win.document):
             return False
@@ -200,6 +213,40 @@ class RenderOrchestrator(
         ):
             return False
         return frame.key.request_key == getattr(self, "_committed_display_request_key", None)
+
+    def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
+        return self._is_current_render_generation(
+            int(frame.key.render_generation)
+        ) and self._committed_display_frame_identity_current(frame)
+
+    def _refresh_committed_display_frame_generation(self, render_generation: int) -> None:
+        """Realign the committed frame's ordering stamp with a superseding but
+        pixel-identical render generation.
+
+        The montage session-reuse path
+        (``FrameControllerMixin._maybe_retarget_frame_session``) bumps
+        ``session.render_generation`` when a render lands on an already-settled
+        presentation with the same identity and no dirt to commit.  Nothing
+        re-commits, so the committed display frame keeps the older generation
+        stamp and ``_is_committed_display_frame_current`` — which compares that
+        stamp against the live counter — reports a stale frame that is in fact
+        the current output, with nothing armed to recommit it (the idle
+        ``committed_frame_stale`` stall in the field traces).  Re-stamp the
+        identity only, and only when the frame matches current state in every
+        pixel-affecting respect so a genuinely superseded frame is never
+        laundered into currency.
+        """
+
+        frame = getattr(self.win, "_committed_display_frame", None)
+        if frame is None:
+            return
+        if int(frame.key.render_generation) == int(render_generation):
+            return
+        if not self._committed_display_frame_identity_current(frame):
+            return
+        self.win._committed_display_frame = replace(
+            frame, key=replace(frame.key, render_generation=int(render_generation))
+        )
 
     def _request_pixel_value(self, index, x_i, y_i, context, pos):
         view_state = self.win.view_state

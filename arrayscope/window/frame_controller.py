@@ -1097,6 +1097,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 self._last_montage_initial_commit_ms = (
                     perf_counter() - reuse_commit_start
                 ) * 1000.0
+            # A settled reuse commits nothing, so the committed display frame is
+            # never re-stamped with the generation just captured above.  Realign
+            # its ordering stamp here or the currency predicate reports an idle
+            # ``committed_frame_stale`` stall on a frame whose pixels are current.
+            self._refresh_committed_display_frame_generation(session.render_generation)
             self._last_montage_stage_plan_ms = 0.0
             self._last_frame_session_setup_ms = 0.0
             if session.defer_side_panels or _viewport_interaction_active(self):
