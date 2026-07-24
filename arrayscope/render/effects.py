@@ -554,6 +554,21 @@ def tile_lod_states(
             )
         )
         payload = payloads.get(tile_number)
+        # An admitted wrapper for the CURRENT source, regardless of backend
+        # acknowledgement.  During an atomic successor handoff nothing can be
+        # acknowledged (and nothing reaches ``tile_presentation_state``) until
+        # the whole transaction swaps, so ack-gated predicates must not be the
+        # only evidence that presentable work is in flight —
+        # ``display_tile_payloads`` holds the admitted-but-unemitted wrappers.
+        pending_wrapper = payload
+        if pending_wrapper is None:
+            pending_wrapper = (getattr(session, "display_tile_payloads", None) or {}).get(
+                tile_number
+            )
+        if pending_wrapper is not None and int(getattr(pending_wrapper, "source_index", -1)) != int(
+            tile.source_index
+        ):
+            pending_wrapper = None
         payload_current = False
         if payload is not None and int(getattr(payload, "source_index", -1)) == int(
             tile.source_index
@@ -598,9 +613,14 @@ def tile_lod_states(
         committable_exact_ready = bool(
             target_ref is not None and str(getattr(target_ref, "quality", "") or "") != "preview"
         )
+        committable_pending_wrapper = pending_wrapper is not None and (
+            str(getattr(pending_wrapper, "quality", "exact") or "exact") != "preview"
+            or bool(getattr(session, "shader_display", False))
+        )
         if (
             not committable_exact_payload
             and not committable_exact_ready
+            and not committable_pending_wrapper
             and getattr(session, "rendered_tiles", None) is not None
             and tile_number not in session.rendered_tiles
         ):
@@ -610,7 +630,24 @@ def tile_lod_states(
             # nor a presentable wrapper. Letting that level satisfy the ladder
             # produces zero steps and strands either an atomic CPU successor
             # or a shader frame at fallback quality forever. A preview wrapper
-            # does not make a physically resident target rung committable.
+            # does not make a physically resident target rung committable on a
+            # CPU backend.
+            #
+            # ``committable_pending_wrapper`` guards the guard (2026-07-24
+            # completion-drain freeze): during an atomic successor handoff no
+            # tile can be acknowledged until the whole transaction swaps, so
+            # the ack-gated predicates above are False for EVERY admitted
+            # wrapper.  Clearing residency then made the ladder re-plan FLOOR
+            # for all N tiles on every replan gate — an O(N * replans)
+            # self-sustaining evaluation loop (100-tile cropped montage:
+            # ~27 redundant floor rounds, 5-20 s frozen UI) whose queue
+            # pressure also starved the hidden-warm continuation the swap was
+            # waiting on.  An admitted current-source wrapper the backend can
+            # commit (exact anywhere; preview too on shader backends, where
+            # preview planes are first-class presentation currency) is
+            # presentable coverage in flight: residency stays visible, the
+            # ladder plans no duplicate producer, and the presentation owner
+            # delivers the wrapper.
             resident_levels.clear()
         lod = None if payload is None else getattr(payload, "lod", None)
         presented_level = None if lod is None else int(getattr(lod, "level", 0) or 0)
