@@ -108,9 +108,14 @@ def test_settled_montage_matches_cpu_reference_and_fails_on_wrong_levels(qtbot):
         win.img_view.graphicsView.viewport().update()
         win.img_view.graphicsView.viewport().repaint()
 
-        report = assert_qt_raster_matches_cpu_reference(win)
+        report = assert_qt_raster_matches_cpu_reference(
+            win,
+            max_samples_per_tile=64,
+            sample_seed=17,
+        )
         assert {tile.tile_number for tile in report.tiles} == required
         assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles)
+        assert all(tile.samples <= 64 for tile in report.tiles)
         with pytest.raises(AssertionError, match="requires an exact tile set"):
             assert_qt_raster_matches_cpu_reference(win, tiles=())
         with pytest.raises(AssertionError, match="min_samples=1000000000"):

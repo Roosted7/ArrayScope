@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
 
@@ -853,6 +855,37 @@ def test_display_axis_crop_scenarios_exercise_both_roles_without_special_shapes(
     assert x_scenarios[-1].axis_ranges != y_scenarios[-1].axis_ranges
 
 
+def test_physical_pixel_sampling_is_bounded_replayable_and_seeded():
+    import numpy as np
+
+    from arrayscope.tools.framebuffer_reference import _bounded_sample_positions
+
+    select = np.ones(4096, dtype=bool)
+    first = _bounded_sample_positions(
+        select,
+        max_samples=64,
+        sample_seed=17,
+        tile_number=3,
+    )
+    replay = _bounded_sample_positions(
+        select,
+        max_samples=64,
+        sample_seed=17,
+        tile_number=3,
+    )
+    varied = _bounded_sample_positions(
+        select,
+        max_samples=64,
+        sample_seed=18,
+        tile_number=3,
+    )
+
+    assert first.size == 64
+    assert np.array_equal(first, replay)
+    assert not np.array_equal(first, varied)
+    assert np.all(select[first])
+
+
 def test_profile_axis_window_shift_covers_display_montage_and_slice_dimensions():
     from arrayscope.core.view_state import ViewState
     from arrayscope.tools.profile_montage_workflow import _shift_profile_axis_window
@@ -877,6 +910,102 @@ def test_profile_axis_window_shift_covers_display_montage_and_slice_dimensions()
     assert shifted_slice.slice_indices[3] == 21
     assert shifted_y.axis_range_indices[1] == state.axis_range_indices[1]
     assert shifted_montage.axis_range_indices == state.axis_range_indices
+
+
+@given(
+    role=st.sampled_from(("display-y", "display-x", "montage", "slice")),
+    sign=st.sampled_from((-1, 1)),
+    cropped=st.booleans(),
+    base_size=st.integers(min_value=8, max_value=64),
+    extent_seed=st.integers(min_value=0, max_value=255),
+    start_seed=st.integers(min_value=0, max_value=255),
+    index_seed=st.integers(min_value=0, max_value=255),
+    magnitude=st.integers(min_value=1, max_value=96),
+)
+@settings(max_examples=96, deadline=None)
+def test_profile_axis_window_shift_preserves_canonical_axis_ownership(
+    role,
+    sign,
+    cropped,
+    base_size,
+    extent_seed,
+    start_seed,
+    index_seed,
+    magnitude,
+):
+    """Display roles must shift their canonical axis and no neighbouring one."""
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.tools.profile_montage_workflow import _shift_profile_axis_window
+
+    shape = (base_size, base_size + 7, base_size + 13, base_size + 19)
+    axis_by_role = {
+        "display-y": 1,
+        "display-x": 0,
+        "montage": 2,
+        "slice": 3,
+    }
+    axis = axis_by_role[role]
+    axis_size = shape[axis]
+    extent = 1 + extent_seed % max(1, axis_size - 1)
+    start = start_seed % (axis_size - extent + 1)
+    indices = tuple(range(start, start + extent))
+    index = index_seed % axis_size
+
+    # Reversed image axes make display role deliberately differ from
+    # canonical axis order, the distinction this property protects.
+    state = ViewState.from_shape(shape).with_image_axes(1, 0)
+    montage_size = shape[2]
+    montage_indices = (
+        indices
+        if role == "montage" and cropped
+        else (None if role == "montage" else tuple(range(2, montage_size - 2)))
+    )
+    state = state.with_montage_axis(
+        2,
+        columns=4,
+        indices=montage_indices,
+        text=None if montage_indices is None else "selection",
+    )
+    if role != "montage":
+        if cropped:
+            state = state.with_axis_range(axis, indices=indices, text="selection")
+        else:
+            state = state.with_slice(axis, index)
+
+    delta = int(sign) * int(magnitude)
+    shifted = _shift_profile_axis_window(state, axis, delta)
+
+    if role == "montage":
+        original = (
+            tuple(range(axis_size))
+            if state.montage_indices is None
+            else tuple(state.montage_indices)
+        )
+        expected_start = max(0, min(original[0] + delta, axis_size - len(original)))
+        expected = tuple(range(expected_start, expected_start + len(original)))
+        assert shifted.montage_indices == (None if len(expected) == axis_size else expected)
+        assert shifted.axis_range_indices == state.axis_range_indices
+        assert shifted.slice_indices == state.slice_indices
+    elif cropped:
+        expected_start = max(0, min(start + delta, axis_size - extent))
+        assert shifted.axis_range_indices[axis] == tuple(
+            range(expected_start, expected_start + extent)
+        )
+        assert shifted.slice_indices == state.slice_indices
+        assert shifted.montage_indices == state.montage_indices
+    else:
+        assert shifted.slice_indices[axis] == max(0, min(index + delta, axis_size - 1))
+        assert shifted.axis_range_indices == state.axis_range_indices
+        assert shifted.montage_indices == state.montage_indices
+
+    for other_axis in range(state.ndim):
+        if other_axis == axis:
+            continue
+        assert shifted.axis_range_indices[other_axis] == state.axis_range_indices[other_axis]
+        assert shifted.slice_indices[other_axis] == state.slice_indices[other_axis]
+    assert shifted.image_axes == (1, 0)
+    assert shifted.shape == shape
 
 
 def test_profile_parser_unknown_stage_is_rejected():
@@ -925,6 +1054,7 @@ def test_profile_parser_default_scroll_window_and_custom_value():
     assert custom_args.scroll_max_tiles == 84
     assert default_args.verbose_tile_trace is False
     assert custom_args.verbose_tile_trace is True
+    assert default_args.physical_sample_seed is None
     assert wgpu_args.backend == "wgpu"
     assert default_backend_args.backend == "all"
     assert Path(default_args.session_fixture) == DEFAULT_SESSION_FIXTURE

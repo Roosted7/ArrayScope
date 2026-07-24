@@ -42,6 +42,7 @@ Front page for test policy. Deep dives:
 | Ring | What | Trigger | Command |
 |---|---|---|---|
 | 0 — fast Qt-free loop | kernel/render/presentation semantics (~0.5 s) | while editing | `pytest tests/kernel tests/render tests/presentation -q -n 0` |
+| presentation contract — fast offscreen | committed-frame continuity, maturity-gated level reuse, and live shift/commit ownership (a few seconds) | every `frame_session.py` or `frame_effects.py` change, and any presentation-contract change | `QT_QPA_PLATFORM=offscreen pytest -q -n 0 tests/window/test_presentation.py tests/window/test_display_commit.py tests/ui/test_window_shift_live_path.py` |
 | 1 — default offscreen suite | everything except stress/gpu_interaction; ~2300 tests, xdist (workers capped at half cores — GL segfault guard) | every `pytest`; **CI on every push/PR** (`.github/workflows/ci.yml`, incl. 3.10–3.14 compat, coverage, strict-UI, 3-OS wheel validation) | `QT_QPA_PLATFORM=offscreen pytest tests -q` |
 | 2 — serial artifact ring | canonical screenshot/JSONL artifacts | CI (`-n 0` steps); before UI-visual claims | `pytest tests/ui/test_qt_smoke_artifacts.py -n 0` |
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence on WGPU and PyQtGraph by default; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`; override with `ARRAYSCOPE_STRESS_BACKENDS`) |
@@ -56,13 +57,16 @@ values above the limit are clamped, and the architecture guard rejects local
 settlement-timeout owners.
 
 The profiler's displayed-X and displayed-Y stages keep both view axes cropped
-while they apply fast and slow scrolls to every dimension. Their settled
-checkpoints are physical-pixel gates: WGPU's executor target and PyQtGraph's
-raster must match the CPU semantic reference, and WGPU's source origin must
-match the immutable crop anchor. `--screenshot-dir` preserves those
-checkpoints for human comparison. The WGPU upload verdict distinguishes
-display-axis rebinds (zero upload required) from montage-axis motion (cold
-demand reported independently).
+while they apply fast and slow scrolls to every dimension. Each stage retains
+exactly four settled physical checks per dimension (12 for the realistic
+3-D dataset), rather than growing a checkpoint matrix. Each check compares a
+bounded sample of physical pixels against the CPU semantic reference: WGPU's
+executor target and PyQtGraph's raster must match, and WGPU's source origin
+must match the immutable crop anchor. The default sample seed varies per run
+and is recorded; `--physical-sample-seed N` replays it. `--screenshot-dir`
+preserves those checkpoints for human comparison. The WGPU upload verdict
+distinguishes display-axis rebinds (zero upload required) from montage-axis
+motion (cold demand reported independently).
 
 **Enforcement gap, stated honestly:** rings 3–4 need a real compositor and
 real GL, and CI is entirely offscreen software-GL. The rule is therefore

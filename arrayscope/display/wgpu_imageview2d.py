@@ -1470,7 +1470,6 @@ class WgpuImageView2D(ImageViewShell):
                 )
                 for tile in payloads
             }
-            pages_needed = sum(capacity_pages_by_tile.values())
             # Progressive commits expose only the payloads materialized so
             # far, while the immutable frame plan already declares the whole
             # same-shaped montage transaction. Reserve that measured visible
@@ -1482,11 +1481,11 @@ class WgpuImageView2D(ImageViewShell):
                 frame_plan=frame_plan,
                 minimum=len(payloads),
             )
-            if capacity_pages_by_tile and planned_count > len(capacity_pages_by_tile):
-                pages_needed = max(
-                    pages_needed,
-                    int(planned_count) * max(capacity_pages_by_tile.values()),
-                )
+            pages_needed = _wgpu_pre_reservation_page_count(
+                capacity_pages_by_tile,
+                planned_count=planned_count,
+                max_layers=int(_shared_wgpu_device().limits["max-texture-array-layers"]),
+            )
             executor = self._ensure_wgpu_executor(
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
@@ -3522,6 +3521,36 @@ def _wgpu_payload_capacity_page_count(
 
     height, width = (int(value) for value in texture_shape)
     return -(-height // PAGE) * -(-width // PAGE)
+
+
+def _wgpu_pre_reservation_page_count(
+    capacity_pages_by_tile: dict[int, int],
+    *,
+    planned_count: int,
+    max_layers: int,
+) -> int:
+    """Bound a progressive frame's one-time capacity forecast.
+
+    The submitted payloads are correctness-critical active admission. The
+    remaining planned tiles are only a retention forecast used to avoid
+    repeated texture-array growth, so that forecast may be capped at the
+    device's texture-array-layer limit. The active batch itself must still
+    fail loudly if it cannot fit.
+    """
+
+    capacities = tuple(max(0, int(value)) for value in capacity_pages_by_tile.values())
+    if not capacities:
+        return 0
+    max_layers = max(1, int(max_layers))
+    active_pages = sum(capacities)
+    if active_pages > max_layers:
+        raise RuntimeError(
+            "wgpu active plane pages exceed the device texture-array limit: "
+            f"needed={active_pages}, max_layers={max_layers}"
+        )
+    planned_count = max(len(capacities), int(planned_count))
+    planned_pages = planned_count * max(capacities)
+    return max(active_pages, min(planned_pages, max_layers))
 
 
 def _wgpu_native_prefetch_page_keys(

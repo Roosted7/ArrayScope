@@ -108,6 +108,34 @@ class FrameReferenceReport:
         )
 
 
+def _bounded_sample_positions(
+    select: np.ndarray,
+    *,
+    max_samples: int | None,
+    sample_seed: int | None,
+    tile_number: int,
+) -> np.ndarray:
+    """Return a deterministic bounded subset of selected flat positions."""
+
+    positions = np.flatnonzero(np.asarray(select, dtype=bool))
+    if max_samples is None or positions.size <= int(max_samples):
+        return positions
+    max_samples = int(max_samples)
+    if max_samples <= 0:
+        raise ValueError("max_samples_per_tile must be positive")
+    seed = int(sample_seed or 0) & ((1 << 64) - 1)
+    rng = np.random.default_rng(
+        np.random.SeedSequence(
+            (
+                seed & 0xFFFFFFFF,
+                seed >> 32,
+                int(tile_number) & 0xFFFFFFFF,
+            )
+        )
+    )
+    return np.sort(rng.choice(positions, size=max_samples, replace=False))
+
+
 def payload_display_kind(payload) -> str:
     """Semantic display-mode classification from payload facts alone.
 
@@ -365,6 +393,8 @@ def qt_raster_matches_cpu_reference(
     min_samples_per_tile: int = DEFAULT_MIN_SAMPLES_PER_TILE,
     texel_guard: float = DEFAULT_TEXEL_GUARD,
     edge_inset_px: float = DEFAULT_EDGE_INSET_PX,
+    max_samples_per_tile: int | None = None,
+    sample_seed: int | None = None,
 ) -> FrameReferenceReport:
     """Compare the live PyQtGraph Qt-raster viewport with the CPU mirror.
 
@@ -498,7 +528,13 @@ def qt_raster_matches_cpu_reference(
             & (frac_ty <= 1.0 - texel_guard)
         )
         select = inside & guarded
-        if not np.any(select):
+        sample = _bounded_sample_positions(
+            select,
+            max_samples=max_samples_per_tile,
+            sample_seed=sample_seed,
+            tile_number=tile_number,
+        )
+        if not sample.size:
             reports.append(
                 TileComparison(
                     tile_number=tile_number,
@@ -510,22 +546,22 @@ def qt_raster_matches_cpu_reference(
                 )
             )
             continue
-        index_x = np.clip(np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1)
-        index_y = np.clip(np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1)
+        index_x = np.clip(np.floor(texel_x[sample]).astype(np.int64), 0, tex_w - 1)
+        index_y = np.clip(np.floor(texel_y[sample]).astype(np.int64), 0, tex_h - 1)
         expected = expected_rgb[index_y, index_x]
         is_background = background_mask[index_y, index_x]
         if np.any(is_background):
             expected = expected.copy()
             expected[is_background] = background
-        actual = frame_rgb[grid_y[select], grid_x[select]]
+        actual = frame_rgb[grid_y[sample], grid_x[sample]]
         diff = np.abs(actual - expected).max(axis=-1)
         mismatched = diff > tolerance
         worst_index = int(np.argmax(diff))
         detail = ""
         if np.any(mismatched):
             detail = (
-                f"worst at viewport ({int(grid_x[select][worst_index])}, "
-                f"{int(grid_y[select][worst_index])}) texel "
+                f"worst at viewport ({int(grid_x[sample][worst_index])}, "
+                f"{int(grid_y[sample][worst_index])}) texel "
                 f"({int(index_x[worst_index])}, {int(index_y[worst_index])}): "
                 f"actual={tuple(int(v) for v in actual[worst_index])} "
                 f"expected={tuple(int(v) for v in expected[worst_index])}"
@@ -727,6 +763,8 @@ def wgpu_frame_matches_cpu_reference(
     min_samples_per_tile: int = DEFAULT_MIN_SAMPLES_PER_TILE,
     texel_guard: float = DEFAULT_TEXEL_GUARD,
     edge_inset_px: float = DEFAULT_EDGE_INSET_PX,
+    max_samples_per_tile: int | None = None,
+    sample_seed: int | None = None,
 ) -> FrameReferenceReport:
     """Compare WGPU's physical render target with current semantic payloads.
 
@@ -875,7 +913,13 @@ def wgpu_frame_matches_cpu_reference(
             & (frac_ty <= 1.0 - texel_guard)
         )
         select = inside & guarded
-        if not np.any(select):
+        sample = _bounded_sample_positions(
+            select,
+            max_samples=max_samples_per_tile,
+            sample_seed=sample_seed,
+            tile_number=tile_number,
+        )
+        if not sample.size:
             reports.append(
                 TileComparison(
                     tile_number=tile_number,
@@ -888,22 +932,22 @@ def wgpu_frame_matches_cpu_reference(
             )
             continue
 
-        index_x = np.clip(np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1)
-        index_y = np.clip(np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1)
+        index_x = np.clip(np.floor(texel_x[sample]).astype(np.int64), 0, tex_w - 1)
+        index_y = np.clip(np.floor(texel_y[sample]).astype(np.int64), 0, tex_h - 1)
         expected = expected_rgb[index_y, index_x]
         is_background = background_mask[index_y, index_x]
         if np.any(is_background):
             expected = expected.copy()
             expected[is_background] = 0
-        actual = frame_rgb[grid_y[select], grid_x[select]]
+        actual = frame_rgb[grid_y[sample], grid_x[sample]]
         diff = np.abs(actual - expected).max(axis=-1)
         mismatched = diff > tolerance
         worst_index = int(np.argmax(diff))
         detail = ""
         if np.any(mismatched):
             detail = (
-                f"worst at target ({int(grid_x[select][worst_index])}, "
-                f"{int(grid_y[select][worst_index])}) texel "
+                f"worst at target ({int(grid_x[sample][worst_index])}, "
+                f"{int(grid_y[sample][worst_index])}) texel "
                 f"({int(index_x[worst_index])}, {int(index_y[worst_index])}): "
                 f"actual={tuple(int(v) for v in actual[worst_index])} "
                 f"expected={tuple(int(v) for v in expected[worst_index])}"

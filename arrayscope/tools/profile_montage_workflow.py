@@ -73,6 +73,7 @@ R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
 R8_WARM_INPUT_MAX_MS = 15.0
 PROFILE_RESIDENCY_PAGE_SAMPLES = 256
+PROFILE_PHYSICAL_SAMPLES_PER_TILE = 64
 DISPLAY_AXIS_CROP_SCENARIO_NAMES = (
     "primary-only-centered",
     "both-centered",
@@ -429,7 +430,12 @@ def _wgpu_source_window_truth(win) -> dict[str, object]:
     }
 
 
-def _physical_frame_reference_truth(win, *, backend: str) -> dict[str, object]:
+def _physical_frame_reference_truth(
+    win,
+    *,
+    backend: str,
+    sample_seed: int,
+) -> dict[str, object]:
     """Render/read the maintained backend and compare its pixels with CPU truth."""
 
     from arrayscope.tools.framebuffer_reference import (
@@ -439,9 +445,17 @@ def _physical_frame_reference_truth(win, *, backend: str) -> dict[str, object]:
 
     try:
         if backend == "wgpu":
-            report = wgpu_frame_matches_cpu_reference(win)
+            report = wgpu_frame_matches_cpu_reference(
+                win,
+                max_samples_per_tile=PROFILE_PHYSICAL_SAMPLES_PER_TILE,
+                sample_seed=sample_seed,
+            )
         elif backend == "pyqtgraph":
-            report = qt_raster_matches_cpu_reference(win)
+            report = qt_raster_matches_cpu_reference(
+                win,
+                max_samples_per_tile=PROFILE_PHYSICAL_SAMPLES_PER_TILE,
+                sample_seed=sample_seed,
+            )
         else:
             return {"applicable": False, "passed": True}
     except Exception as exc:
@@ -468,6 +482,7 @@ def _apply_all_dimension_scroll_stress(
     app,
     QtCore,
     backend: str,
+    physical_sample_seed: int,
 ) -> dict[str, object]:
     """Exercise coalesced fast and fully settled slow scrolls on every axis."""
 
@@ -513,7 +528,13 @@ def _apply_all_dimension_scroll_stress(
             physical_counts.append(len(dict(physical_rows_fn() or {})))
         if backend == "wgpu":
             source_truth_checks.append(_wgpu_source_window_truth(win))
-        physical_reference_checks.append(_physical_frame_reference_truth(win, backend=backend))
+        physical_reference_checks.append(
+            _physical_frame_reference_truth(
+                win,
+                backend=backend,
+                sample_seed=int(physical_sample_seed) + len(physical_reference_checks),
+            )
+        )
         visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
         capture = getattr(visual_probe, "capture", None)
         if callable(capture):
@@ -663,6 +684,8 @@ def _apply_all_dimension_scroll_stress(
         "physical_reference_failures": tuple(
             check for check in physical_reference_checks if not bool(check.get("passed", False))
         ),
+        "physical_sample_seed": int(physical_sample_seed),
+        "physical_samples_per_tile": int(PROFILE_PHYSICAL_SAMPLES_PER_TILE),
         "visual_checkpoint_count": int(visual_checkpoint_count),
     }
 
@@ -718,6 +741,7 @@ def run_profile_montage_workflow(
     verbose_tile_trace: bool = False,
     synthetic_scene: str | None = None,
     synthetic_shape: tuple[int, int, int] = (192, 256, 40),
+    physical_sample_seed: int | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -752,6 +776,9 @@ def run_profile_montage_workflow(
     data_path = Path(data_path)
     screenshot_dir = None if screenshot_dir is None else Path(screenshot_dir)
     run_id = uuid4().hex
+    physical_sample_seed = (
+        int(run_id[:16], 16) if physical_sample_seed is None else int(physical_sample_seed)
+    )
     records: list[dict[str, object]] = []
 
     app = pg.mkQApp()
@@ -1318,6 +1345,7 @@ def run_profile_montage_workflow(
                 app=app,
                 QtCore=QtCore,
                 backend=backend,
+                physical_sample_seed=physical_sample_seed,
             )
             if int(all_dimension_scroll["physical_sample_count"]) > 0:
                 physical_tile_counts.append(
@@ -1529,6 +1557,12 @@ def run_profile_montage_workflow(
                 ),
                 "display_axis_physical_reference_failures": tuple(
                     all_dimension_scroll["physical_reference_failures"]
+                ),
+                "display_axis_physical_sample_seed": int(
+                    all_dimension_scroll["physical_sample_seed"]
+                ),
+                "display_axis_physical_samples_per_tile": int(
+                    all_dimension_scroll["physical_samples_per_tile"]
                 ),
                 "display_axis_visual_checkpoint_count": int(
                     all_dimension_scroll["visual_checkpoint_count"]
@@ -9394,6 +9428,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Periodic framebuffer/physical-truth sampling interval; requires --screenshot-dir",
     )
     parser.add_argument(
+        "--physical-sample-seed",
+        type=int,
+        default=None,
+        help=(
+            "Replay the bounded CPU-reference pixel samples; the default varies "
+            "per run and is recorded in JSONL"
+        ),
+    )
+    parser.add_argument(
         "--verbose-tile-trace",
         action="store_true",
         help=(
@@ -9578,6 +9621,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     verbose_tile_trace=bool(args.verbose_tile_trace),
                     synthetic_scene=args.synthetic_scene,
                     synthetic_shape=tuple(args.synthetic_shape),
+                    physical_sample_seed=args.physical_sample_seed,
                 )
             )
     finally:

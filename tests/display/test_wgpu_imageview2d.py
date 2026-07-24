@@ -204,6 +204,38 @@ def test_wgpu_pool_capacity_counts_reusable_native_pages_not_preview_textures():
     )
 
 
+def test_wgpu_progressive_pre_reservation_is_bounded_by_plan_and_device():
+    from arrayscope.display.wgpu_imageview2d import _wgpu_pre_reservation_page_count
+
+    sparse_capacity = {0: 4, 1: 2}
+    planned_count = 272
+    per_tile_max = max(sparse_capacity.values())
+
+    reserved = _wgpu_pre_reservation_page_count(
+        sparse_capacity,
+        planned_count=planned_count,
+        max_layers=2048,
+    )
+    assert reserved == planned_count * per_tile_max
+    assert reserved <= planned_count * per_tile_max
+    assert reserved <= 2048
+
+    device_capped = _wgpu_pre_reservation_page_count(
+        sparse_capacity,
+        planned_count=1024,
+        max_layers=2048,
+    )
+    assert device_capped == 2048
+    assert device_capped <= 1024 * per_tile_max
+
+    with pytest.raises(RuntimeError, match=r"needed=2049, max_layers=2048"):
+        _wgpu_pre_reservation_page_count(
+            {0: 2049},
+            planned_count=1,
+            max_layers=2048,
+        )
+
+
 def _montage_geometry(tile_shape, columns, rows, *, loaded, gap=0):
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -2280,6 +2312,50 @@ def test_cold_odd_aligned_reduced_window_uploads_with_global_bin_offset(qt_app):
         assert tile["plane_identity"][0] == "wgpu-content-plane"
     finally:
         view.close()
+
+
+def test_misaligned_reduced_crop_without_page_backing_fails_loudly():
+    """A cold crop with neither backing nor residency has no honest fallback."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+    from arrayscope.display.wgpu_imageview2d import _wgpu_payload_binding
+    from arrayscope.gpu.wgpu_executor import SCALAR_R32F
+
+    source_rect = (94, 194, 0, 336)
+    lod = LodInfo(
+        level=4,
+        factor=16,
+        source_shape=(100, 336),
+        texture_shape=(8, 21),
+    )
+    payload = DisplayTilePayload(
+        0,
+        1,
+        np.zeros((8, 21), dtype=np.float32),
+        None,
+        ("cold-unbacked-misaligned-window", 1),
+        lod=lod,
+        quality="exact",
+        source_anchor=PayloadSourceAnchor(
+            ("doc", "unbacked-single-slice", 1),
+            source_rect,
+            plane_shape=(336, 336),
+        ),
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        _wgpu_payload_binding(
+            payload,
+            np.asarray(payload.texture_data),
+            representation=SCALAR_R32F,
+            mapping_mode="real",
+            resident_keys=(),
+        )
+
+    message = str(excinfo.value)
+    assert "does not match its native LOD ladder" in message
+    assert "canonical source-plane resident levels=none" in message
 
 
 def test_cold_wide_odd_aligned_reduced_window_uploads_all_local_pages(qt_app):
