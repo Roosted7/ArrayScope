@@ -249,6 +249,22 @@ def test_broken_code_file_is_skipped_and_recorded(tmp_path):
     assert "user:double" in {entry.id for entry in registry.all_operations()}
 
 
+def test_create_operation_lazily_scans_user_ops(tmp_path):
+    # A recipe / CLI can reference a user op before any surface triggered the
+    # disk scan. create_operation must lazily drive the scan and still resolve.
+    src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
+    op_id = library.import_custom_operation(src, "double")
+    # Drop all user-op registration to model a fresh process that never scanned.
+    registry._reset_user_operations()
+    library._user_loaded = False
+    assert op_id not in registry._USER_SPECS
+
+    operation = registry.create_operation(op_id)  # triggers the lazy scan
+    assert np.allclose(operation.apply(np.ones((2, 2), dtype=np.float32)), 2.0)
+    # get_operation_entry resolves lazily too.
+    assert registry.get_operation_entry(op_id).id == op_id
+
+
 def test_reserved_runtime_is_skipped_with_problem(tmp_path):
     ops_dir = tmp_path / "operations"
     ops_dir.mkdir(parents=True, exist_ok=True)

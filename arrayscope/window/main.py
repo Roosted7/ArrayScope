@@ -97,6 +97,12 @@ class ArrayScopeWindow(
         self._apply_performance_settings(persist=False)
         self.compute_policy = compute_policy_from_settings(self.app_settings)
 
+        # Register user-defined operations before anything resolves an op id (a
+        # restored recipe, the add surfaces). One cheap dir scan; never raises.
+        from arrayscope.operations import library as operation_library
+
+        operation_library.refresh_user_operations()
+
         self.operation_coordinator = OperationCoordinator(
             data,
             axes=axes,

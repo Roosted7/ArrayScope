@@ -295,6 +295,23 @@ def register_user_operation(spec) -> None:
     _USER_SPECS[operation_id] = spec
 
 
+def _ensure_user_operations_for(operation_id: str) -> None:
+    """Lazily scan the user ops dir when a ``user:`` id is not yet registered.
+
+    A recipe / CLI can reference a ``user:`` op before any UI surface has
+    triggered the library's disk scan (e.g. ``create_operation`` from a loaded
+    recipe on a fresh process). Drive the scan on demand so the id resolves.
+    The import is function-local: the library imports the registry, not the
+    other way round, so this avoids an import cycle. The scan never raises.
+    """
+
+    if not operation_id.startswith(_USER_NAMESPACE_PREFIX) or operation_id in _USER_SPECS:
+        return
+    from arrayscope.operations import library
+
+    library._ensure_user_operations()
+
+
 def unregister_user_operation(operation_id: str) -> None:
     """Drop a single user-op registration (used when a wrapper is removed)."""
 
@@ -387,6 +404,7 @@ def get_operation_entry(operation_id: str) -> OperationEntry:
     if pack_spec is not None:
         return _pack_operation_entry(pack_spec)
 
+    _ensure_user_operations_for(operation_id)
     user_spec = _USER_SPECS.get(operation_id)
     if user_spec is not None:
         return _pack_operation_entry(user_spec)
@@ -408,6 +426,7 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
         from arrayscope.operations import plugins
 
         load_operation_packs()
+        _ensure_user_operations_for(operation_id)
         spec = _PACK_SPECS.get(operation_id) or _USER_SPECS.get(operation_id)
         if spec is not None:
             # Prime the plugin spec cache so PluginOperation resolution (create,
