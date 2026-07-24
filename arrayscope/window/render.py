@@ -1283,12 +1283,19 @@ class RenderOrchestrator(
         self._last_side_panel_sync_ms = (perf_counter() - side_panel_start) * 1000.0
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
 
+    # Interactive scrub reasons whose per-step control sync is satisfied by the
+    # immediate single-axis sync in ``_apply_slice_state`` (scalar slice-index
+    # and continuation crop/montage index-window scrubs).  The synced-state
+    # guard below still forces a full resync whenever the mirrored view_state
+    # drifts, so a reason that changed more than the scrubbed axis re-syncs.
+    _INTERACTIVE_SLICE_SCRUB_REASONS = frozenset({"slice", "slice-range"})
+
     def _interactive_slice_controls_are_current(
         self, *, reason: str, defer_side_panels: bool
     ) -> bool:
         if not bool(defer_side_panels):
             return False
-        if str(reason) != "slice":
+        if str(reason) not in self._INTERACTIVE_SLICE_SCRUB_REASONS:
             return False
         synced_state = getattr(self.win, "_interactive_slice_controls_synced_state", None)
         return synced_state == self.win.view_state

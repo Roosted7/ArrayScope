@@ -170,12 +170,28 @@ class StateSyncMixin:
                 axis, state, reason="slice", interactive=True, immediate_axis_only=True
             )
             return
-        if self.view_state.image_axes is not None and axis in self.view_state.image_axes:
-            state = self.view_state.with_axis_range(axis, indices=indices, text=text)
+        previous = self.view_state
+        if previous.image_axes is not None and axis in previous.image_axes:
+            state = previous.with_axis_range(axis, indices=indices, text=text)
+            # A continuation crop-window scrub (the axis was already cropped)
+            # moves the window on one axis and nothing else: the scrubbed
+            # chip is synced immediately (``strip-axis-{axis}``), so the full
+            # control/indicator resync can defer to the settle edge exactly as
+            # the scalar slice-index fast path does.  The first crop of a full
+            # axis promotes its role, so it keeps the full synchronous sync.
+            continuation = previous.axis_range_indices[axis] is not None
         else:
-            state = self.view_state.with_montage_axis(axis, indices=indices, text=text)
+            state = previous.with_montage_axis(axis, indices=indices, text=text)
+            # Likewise, an index-window scrub of an already-active montage on
+            # this axis is a pure window move; the initial promotion to a
+            # montage rebuilds the layout and stays on the full-sync path.
+            continuation = previous.montage_axis == axis
         self._apply_slice_state(
-            axis, state, reason="slice-range", interactive=True, immediate_axis_only=False
+            axis,
+            state,
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=continuation,
         )
 
     def _on_channel_clicked(self, name):
