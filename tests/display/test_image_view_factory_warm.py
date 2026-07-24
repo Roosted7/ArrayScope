@@ -89,6 +89,48 @@ def test_warm_is_one_shot_and_non_blocking(monkeypatch):
     assert calls == [1]
 
 
+def test_signatureless_and_settingsless_paths_never_enable_lossy_codec(monkeypatch):
+    """No settings-less / attribute-less path may silently enable lossy BC pools.
+
+    The G7 verdict (commit 16b5d890) restored lossy texture compression to OFF
+    by default. Two fallback sites must honour that even on a wgpu-capable
+    machine (``bc_available=True``): the ``WgpuImageView2D.__init__`` signature
+    default and the ``create_image_view`` construction default when ``settings``
+    lacks a ``texture_codec`` attribute. Both must resolve to the raw "off"
+    executor mode, never lossy "on"/"auto".
+    """
+    import inspect
+
+    from arrayscope.app.settings_state import (
+        normalize_texture_codec_choice,
+        texture_codec_executor_mode,
+    )
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    # (1) WgpuImageView2D.__init__ signature default.
+    sig_default = inspect.signature(WgpuImageView2D.__init__).parameters["texture_codec"].default
+    sig_choice = normalize_texture_codec_choice(sig_default)
+    assert texture_codec_executor_mode(sig_choice, bc_available=True) == "off"
+
+    # (2) create_image_view construction default: an explicit wgpu pin on a
+    # settings object that has no ``texture_codec`` attribute at all. Stub the
+    # surface so no GPU is touched; capture the codec value it is handed.
+    captured = {}
+
+    class _StubSurface:
+        def __init__(self, *, texture_codec, **_kwargs):
+            captured["texture_codec"] = texture_codec
+
+    import arrayscope.display.backends.wgpu as wgpu_backend
+
+    monkeypatch.setattr(wgpu_backend, "WgpuSurface", _StubSurface)
+
+    settings = types.SimpleNamespace(image_rendering_backend=ImageRenderingBackendChoice.WGPU)
+    fac.create_image_view(settings)
+    factory_choice = normalize_texture_codec_choice(captured["texture_codec"])
+    assert texture_codec_executor_mode(factory_choice, bc_available=True) == "off"
+
+
 def test_warm_skips_when_backend_not_wgpu(monkeypatch):
     called = []
     import arrayscope.display.wgpu_imageview2d as ivm

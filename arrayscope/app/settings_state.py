@@ -36,7 +36,8 @@ class ImageRenderingBackendChoice(Enum):
     AUTO = "auto"
     PYQTGRAPH = "pyqtgraph"
     VISPY = "vispy"
-    # Experimental explicit pin only: AUTO never resolves to wgpu.
+    # Experimental backend; AUTO prefers wgpu first on Linux with a real GPU
+    # device (see resolve_auto_backend_choice). This value is the explicit pin.
     WGPU = "wgpu"
 
 

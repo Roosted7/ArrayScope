@@ -152,7 +152,7 @@ def create_image_view(settings=None, *, notify=None):
     if choice_value == ImageRenderingBackendChoice.WGPU.value:
         present_method = getattr(settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP)
         present_method_value = getattr(present_method, "value", present_method)
-        texture_codec = getattr(settings, "texture_codec", TextureCodecChoice.AUTO)
+        texture_codec = getattr(settings, "texture_codec", TextureCodecChoice.OFF)
         texture_codec_value = getattr(texture_codec, "value", texture_codec)
         pixel_grid = bool(getattr(settings, "wgpu_pixel_grid", False))
         clip_indicator = bool(getattr(settings, "wgpu_clip_indicator", False))

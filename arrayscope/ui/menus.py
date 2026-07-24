@@ -435,7 +435,7 @@ class WindowMenuMixin:
         performance_menu.addAction(bart_action)
         loaded_ops_action = QtGui.QAction("Loaded Operations && Plugins…", self)
         loaded_ops_action.setToolTip(
-            "List the built-in, pack (sigpy/BART), and third-party plugin "
+            "List the built-in, pack (BART), and third-party plugin "
             "operations currently available, and why any are unavailable."
         )
         loaded_ops_action.triggered.connect(self._show_loaded_operations)

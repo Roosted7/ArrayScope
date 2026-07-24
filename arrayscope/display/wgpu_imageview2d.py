@@ -484,7 +484,7 @@ class WgpuImageView2D(ImageViewShell):
         view=None,
         imageItem=None,
         present_method="bitmap",
-        texture_codec="auto",
+        texture_codec="off",
         pixel_grid=False,
         clip_indicator=False,
     ):
