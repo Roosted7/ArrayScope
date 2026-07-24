@@ -2817,6 +2817,31 @@ def _wgpu_payload_plane_identity(payload) -> object:
     return ("wgpu-content-plane", source_id)
 
 
+def _wgpu_payload_local_plane_identity(payload) -> object:
+    """Identity for texels whose (0, 0) is local to one source window.
+
+    ``payload.source_id`` deliberately stays invariant across displayed-axis
+    crops so canonical source pages can be rebound without transfer.  A
+    crop-local fallback cannot use that identity: shifting the source window
+    changes which source sample lives at local texel (0, 0).  Keep the
+    window-invariant identity as the family prefix, but add the physical
+    source rectangle that defines this local coordinate system.
+    """
+
+    identity = _wgpu_payload_plane_identity(payload)
+    anchor = getattr(payload, "source_anchor", None)
+    source_rect = tuple(int(value) for value in tuple(getattr(anchor, "source_rect", ()) or ()))
+    plane_shape = tuple(int(value) for value in tuple(getattr(anchor, "plane_shape", ()) or ()))
+    if len(source_rect) != 4:
+        return identity
+    return (
+        *identity,
+        "local-source-window",
+        source_rect,
+        plane_shape,
+    )
+
+
 def _wgpu_payload_lod_reducer(payload, *, representation: str, mapping_mode: str) -> str:
     """Canonical derived-value family for one live executor plane."""
 
@@ -2890,7 +2915,7 @@ def _wgpu_payload_binding(
         representation=representation,
         mapping_mode=mapping_mode,
     )
-    local_identity = _wgpu_payload_plane_identity(payload)
+    local_identity = _wgpu_payload_local_plane_identity(payload)
     local_grid_h = -(-int(texture.shape[0]) // PAGE)
     local_grid_w = -(-int(texture.shape[1]) // PAGE)
 

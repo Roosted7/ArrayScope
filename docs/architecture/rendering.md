@@ -72,6 +72,16 @@ compatible physical representation, not levels/LUT. Level/window/LUT changes are
 updates, preferably shader/uniform updates where the backend supports them, and do not imply new
 source pixels.
 
+WGPU has two physical coordinate systems and their identities must remain
+distinct. Canonical source-plane pages use source-global coordinates, so a
+displayed-axis crop or one-index scroll can rebind them with only a changed
+origin and no upload. A cold crop-local fallback instead defines texel
+`(0, 0)` at that crop's source window; its physical plane identity therefore
+includes the source rectangle. Reusing a window-invariant identity for such a
+local page would relabel predecessor texels as current. Residency and
+acknowledgement may never make that substitution: uncertain or absent content
+is non-drawable, not a license to show another window's pixels.
+
 Presentation command order is semantic data, not a backend preference. The
 canonical flow is `montage_priority_focus` → `TilePriorityContext` /
 `tile_priority_key` → ordered materialized rows → ordered

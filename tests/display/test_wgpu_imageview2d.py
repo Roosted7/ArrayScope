@@ -2188,6 +2188,62 @@ def test_cold_odd_aligned_reduced_window_uploads_with_global_bin_offset(qt_app):
         view.close()
 
 
+def test_cold_crop_local_pages_do_not_alias_across_source_windows(qt_app):
+    """A window-invariant source identity must not alias crop-local texels.
+
+    Canonical source pages are allowed to survive a displayed-axis scroll,
+    because their coordinates remain source-global.  A cold fallback page is
+    different: its texel (0, 0) belongs to the current crop.  Reusing that
+    page for a shifted crop silently presents the predecessor pixels while
+    every semantic/backend identity claims the successor is current.
+    """
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+
+    content_key = ("doc", "windowless-source", 7)
+    source_id = ("montage-tile", content_key, 7)
+    lod = LodInfo(level=0, factor=1, source_shape=(32, 48), texture_shape=(32, 48))
+
+    def payload(start: int, value: float):
+        return DisplayTilePayload(
+            0,
+            7,
+            np.full((32, 48), value, dtype=np.float32),
+            None,
+            source_id,
+            lod=lod,
+            quality="exact",
+            source_anchor=PayloadSourceAnchor(
+                content_key,
+                (start, start + 32, 20, 68),
+                plane_shape=(128, 128),
+            ),
+        )
+
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        geometry = _montage_geometry((32, 48), 1, 1, loaded=1)
+        first = payload(10, 0.2)
+        second = payload(11, 0.8)
+
+        first_report = _commit(view, geometry, {0: first}, levels=(0.0, 1.0))
+        first_plane = view._wgpu_committed["tiles"][0]["plane_identity"]
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view), (51, 51, 51, 255), atol=2)
+
+        second_report = _commit(view, geometry, {0: second}, levels=(0.0, 1.0))
+        second_plane = view._wgpu_committed["tiles"][0]["plane_identity"]
+        _rerender_internal(view)
+
+        assert first_report.texture_uploads == 1
+        assert second_report.texture_uploads == 1
+        assert second_plane != first_plane
+        assert np.allclose(_center_pixel(view), (204, 204, 204, 255), atol=2)
+    finally:
+        view.close()
+
+
 def test_pan_reuses_tile_instances_and_skips_the_instance_upload(qt_app):
     """Panning must cost O(1), not O(tiles).
 
