@@ -189,7 +189,12 @@ def _input(
     )
 
 
-def _frame_level_source(bounds=(200.0, 300.0)):
+def _frame_level_source(bounds=(200.0, 300.0), *, evidence_quality=0):
+    # evidence_quality>=2 marks a target-quality (mature) successor. Per the
+    # histogram-evidence contract, only a complete + target-quality successor
+    # re-anchors the retained window; preview evidence (the default 0) leaves
+    # the committed predecessor's visuals untouched.
+    # See docs/redesign/histogram-evidence-pipeline-2026-07-23.md.
     return LevelSource(
         bounds,
         bounds,
@@ -197,15 +202,21 @@ def _frame_level_source(bounds=(200.0, 300.0)):
         source_count=1,
         expected_count=1,
         semantic_key="levels",
+        evidence_quality=evidence_quality,
     )
 
 
 def test_frame_relative_level_reuse_uses_committed_frame():
+    # A target-quality (mature) successor re-anchors the reused relative window
+    # onto the committed frame's histogram range: (25, 75) sits at fractions
+    # (0.25, 0.75) of (0, 100), remapped onto (200, 300) -> (225, 275). A
+    # preview successor would instead retain the predecessor visuals; see
+    # test_progressive_frame_patch_retains_committed_frame_through_partial_source.
     decision = decide_presentation(
         _input(
             _payload([[200, 300], [200, 300]]),
             previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
-            semantic_source=_frame_level_source(),
+            semantic_source=_frame_level_source(evidence_quality=2),
         )
     )
 
@@ -251,12 +262,14 @@ def test_frame_presentation_preserves_frame_plan_semantics():
 
 
 def test_frame_absolute_level_reuse_uses_committed_frame():
+    # Absolute mode keeps the numeric levels literally while a target-quality
+    # successor advances the histogram range to the committed frame's bounds.
     decision = decide_presentation(
         _input(
             _payload([[200, 300], [200, 300]]),
             previous_frame=_frame(levels=(25, 75), histogram_range=(0, 100)),
             window_mode="absolute",
-            semantic_source=_frame_level_source(),
+            semantic_source=_frame_level_source(evidence_quality=2),
         )
     )
 
@@ -315,7 +328,14 @@ def test_explicit_auto_window_accepts_partial_montage_source():
     assert decision.level_source_rank == int(LevelSourceRank.MONTAGE_VISIBLE_SUBSET)
 
 
-def test_progressive_frame_patch_accepts_partial_implicit_source_monotonically():
+def test_progressive_frame_patch_retains_committed_frame_through_partial_source():
+    # Partial evidence must not replace a complete incumbent. Under the
+    # histogram-evidence continuity contract the committed predecessor's
+    # visuals are held verbatim while a partial (1/4) successor population only
+    # advances metadata; the range switches once, later, at target quality.
+    # See docs/redesign/histogram-evidence-pipeline-2026-07-23.md.
+    # (Previously this asserted immediate monotonic acceptance -> (40, 160) /
+    # (0, 200), the superseded pre-continuity contract.)
     source = LevelSource(
         (100.0, 200.0),
         (100.0, 200.0),
@@ -333,11 +353,20 @@ def test_progressive_frame_patch_accepts_partial_implicit_source_monotonically()
         )
     )
 
-    assert decision.levels == (40.0, 160.0)
-    assert decision.histogram_range == (0.0, 200.0)
+    assert decision.levels == (2.0, 8.0)
+    assert decision.histogram_range == (0.0, 10.0)
+    # Metadata still progresses under the retained visuals.
+    assert decision.level_source_count == 1
+    assert decision.expected_source_count == 4
+    assert decision.level_source_rank == int(LevelSourceRank.PREVIOUS_COMMITTED)
 
 
 def test_progressive_frame_patch_accepts_complete_source():
+    # A complete population at target quality (evidence_quality=2) is the
+    # single atomic switch: the retained relative window (2, 8) at fractions
+    # (0.2, 0.8) of (0, 10) re-anchors onto the successor range (0, 300) ->
+    # (60, 240). A complete-but-preview source (evidence_quality<2) would still
+    # be retained; the target-quality flag is what releases the switch.
     source = LevelSource(
         (0.0, 300.0),
         (0.0, 300.0),
@@ -345,6 +374,7 @@ def test_progressive_frame_patch_accepts_complete_source():
         source_count=4,
         expected_count=4,
         semantic_key="levels",
+        evidence_quality=2,
     )
     decision = decide_presentation(
         _input(
@@ -357,6 +387,33 @@ def test_progressive_frame_patch_accepts_complete_source():
 
     assert decision.levels == (60.0, 240.0)
     assert decision.histogram_range == (0.0, 300.0)
+
+
+def test_progressive_frame_patch_retains_committed_frame_through_complete_preview():
+    # Completeness alone is not enough to switch: a fully populated but
+    # preview-quality (evidence_quality=1) source is still held behind the
+    # committed incumbent until target quality (>=2) arrives. This is the exact
+    # gate the accept/retain presentation tests pivot on.
+    source = LevelSource(
+        (0.0, 300.0),
+        (0.0, 300.0),
+        LevelSourceRank.MONTAGE_COMPLETE,
+        source_count=4,
+        expected_count=4,
+        semantic_key="levels",
+        evidence_quality=1,
+    )
+    decision = decide_presentation(
+        _input(
+            _payload(np.full((2, 2), 1000.0)),
+            previous_frame=_frame(levels=(2.0, 8.0), histogram_range=(0.0, 10.0)),
+            kind=CommitKind.PROGRESSIVE_FRAME_PATCH,
+            semantic_source=source,
+        )
+    )
+
+    assert decision.levels == (2.0, 8.0)
+    assert decision.histogram_range == (0.0, 10.0)
 
 
 def test_degenerate_complete_source_does_not_shrink_previous_levels():
