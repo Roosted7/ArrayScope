@@ -1213,6 +1213,9 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
         display_axis_single_slice_wgpu_upload_delta=0,
         display_axis_montage_restore_settled=True,
         display_axis_montage_restore_committed_current=True,
+        display_axis_wgpu_cold_binding_multiwindow_tiles=50,
+        display_axis_wgpu_cold_binding_aliases=(),
+        display_axis_wgpu_cold_binding_identity_unique=True,
         display_axis_wgpu_pool_exhaustion="",
         wgpu_page_pools=[{"representation": "scalar_r32f", "raw_resident": 100}],
         grid_kind="display_axis",
@@ -1240,6 +1243,15 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
     failed = _r8_certification(record)
     failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
     assert "display_axis_crop_matrix_complete" in failures
+
+    record["display_axis_crop_scenario_count"] = 11
+    record["display_axis_wgpu_cold_binding_identity_unique"] = False
+    record["display_axis_wgpu_cold_binding_aliases"] = (
+        {"tile": 7, "source_windows": 2, "plane_identities": 1},
+    )
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_cold_crop_bindings_do_not_alias" in failures
 
 
 def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
@@ -1284,6 +1296,9 @@ def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
         display_axis_single_slice_wgpu_upload_delta=0,
         display_axis_montage_restore_settled=True,
         display_axis_montage_restore_committed_current=True,
+        display_axis_wgpu_cold_binding_multiwindow_tiles=50,
+        display_axis_wgpu_cold_binding_aliases=(),
+        display_axis_wgpu_cold_binding_identity_unique=True,
         display_axis_wgpu_pool_exhaustion="page pool 'scalar_r32f' exhausted",
         grid_kind="display_axis",
         grid_tile_count=50,

@@ -246,6 +246,11 @@ empty.
   `tests/oracles/framebuffer_reference.py`; default-ring smokes are
   `tests/ui/test_framebuffer_cpu_reference.py` and
   `tests/ui/test_pyqtgraph_raster_cpu_reference.py`.
+- The shared framebuffer oracle also reads WGPU's physical executor target.
+  `test_cropped_display_axis_scroll_keeps_complete_montage` applies it after
+  rapid displayed-axis crop churn and X/Y swaps, so current lifecycle labels
+  cannot hide stale page texels. The profile crop matrix separately gates the
+  cold crop-local identity that becomes relevant under page pressure.
 - Shared fakes: `tests/display/vispy_test_utils.py`; live-window harness:
   `tests/ui/helpers.py` — use these, don't re-roll.
 

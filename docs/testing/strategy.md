@@ -77,8 +77,12 @@ Every successor must settle with a current committed frame. Per-step records
 include settlement time, upload delta, binding-cache work, physical tile
 coverage, and minimum/maximum pages sampled per tile. WGPU additionally gates
 zero-upload reuse of already-resident source pages across the entire matrix
-and the montage/single-slice boundary. The default run executes the same
-stages on WGPU and PyQtGraph.
+and the montage/single-slice boundary. It also projects every live payload
+through the cold binding selector: distinct displayed-axis source windows must
+produce distinct crop-local physical identities, even though their canonical
+source-page identity is intentionally reusable. This catches the failure mode
+where page-table metadata is current but the page still contains a predecessor
+crop. The default run executes the same stages on WGPU and PyQtGraph.
 After the FFT montage is visible it also performs a deterministic
 `fft_level_refinement_preview` level edit so histogram/level presentation
 latency is captured on the same onscreen tiled workflow.

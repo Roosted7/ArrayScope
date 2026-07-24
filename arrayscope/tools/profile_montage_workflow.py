@@ -215,6 +215,56 @@ def _display_axis_crop_scenarios(
     )
 
 
+def _wgpu_cold_payload_binding_rows(win) -> tuple[dict[str, object], ...]:
+    """Project current payloads through the real cold binding selector.
+
+    The live crop workflow deliberately prewarms canonical source pages, so a
+    successful zero-upload run does not necessarily exercise the crop-local
+    fallback.  This read-only projection uses an empty resident set to expose
+    the fallback identity selected for every real montage payload.  Different
+    source windows must never alias one crop-local physical plane.
+    """
+
+    from arrayscope.display.shader_mapping import common_shader_mapping
+    from arrayscope.display.wgpu_imageview2d import _wgpu_payload_binding
+
+    view = getattr(win, "img_view", None)
+    session = getattr(getattr(win, "renderer", None), "_frame_session", None)
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    if view is None or not payloads:
+        return ()
+    source_mapping = common_shader_mapping(
+        getattr(payload, "shader_mapping", None) for payload in payloads.values()
+    )
+    representation, mapping_mode, *_rest = view._wgpu_commit_plan(
+        payloads,
+        source_mapping,
+        False,
+    )
+    rows = []
+    for tile, payload in sorted(payloads.items()):
+        texture = view._wgpu_payload_texture(payload, representation)
+        binding = _wgpu_payload_binding(
+            payload,
+            texture,
+            representation=representation,
+            mapping_mode=mapping_mode,
+            resident_keys=(),
+        )
+        anchor = getattr(payload, "source_anchor", None)
+        rows.append(
+            {
+                "tile": int(tile),
+                "source_rect": tuple(
+                    int(value) for value in tuple(getattr(anchor, "source_rect", ()) or ())
+                ),
+                "plane_identity": repr(binding.plane_identity),
+                "source_anchored": bool(binding.source_anchored),
+            }
+        )
+    return tuple(rows)
+
+
 def _parse_stage_flags(values: tuple[str, ...] | None) -> tuple[str, ...]:
     parsed: list[str] = []
     for value in tuple(values or ()):
@@ -750,6 +800,8 @@ def run_profile_montage_workflow(
                 primary_role=role,
             )
             crop_scenario_results: list[dict[str, object]] = []
+            cold_binding_windows: dict[int, dict[tuple[int, ...], str]] = {}
+            cold_binding_probe_ms = 0.0
             uploads_before_crop_matrix = _wgpu_upload_total(win)
             for scenario in crop_scenarios:
                 scenario_state = slice_source_state
@@ -782,6 +834,22 @@ def run_profile_montage_workflow(
                     len(tuple(dict(row or {}).get("physical_page_bindings", ()) or ()))
                     for row in rows.values()
                 )
+                step_settle_ms = max(0.0, (perf_counter() - step_started) * 1000.0)
+                cold_probe_started = perf_counter()
+                cold_binding_rows = (
+                    _wgpu_cold_payload_binding_rows(win) if backend == "wgpu" else ()
+                )
+                cold_binding_probe_ms += max(
+                    0.0,
+                    (perf_counter() - cold_probe_started) * 1000.0,
+                )
+                for binding_row in cold_binding_rows:
+                    source_rect = tuple(binding_row["source_rect"])
+                    if len(source_rect) != 4 or bool(binding_row["source_anchored"]):
+                        continue
+                    cold_binding_windows.setdefault(int(binding_row["tile"]), {})[source_rect] = (
+                        str(binding_row["plane_identity"])
+                    )
                 crop_scenario_results.append(
                     {
                         "name": scenario.name,
@@ -793,7 +861,7 @@ def run_profile_montage_workflow(
                         "crosses_page_boundary": scenario.crosses_page_boundary,
                         "settled": bool(settled),
                         "committed_current": bool(committed_current),
-                        "settle_ms": max(0.0, (perf_counter() - step_started) * 1000.0),
+                        "settle_ms": step_settle_ms,
                         "wgpu_upload_delta": (
                             None
                             if uploads_before is None or uploads_after is None
@@ -814,6 +882,9 @@ def run_profile_montage_workflow(
                         "physical_tile_count": len(rows),
                         "minimum_page_bindings_per_tile": min(binding_counts, default=0),
                         "maximum_page_bindings_per_tile": max(binding_counts, default=0),
+                        "wgpu_cold_local_binding_count": sum(
+                            int(not bool(row["source_anchored"])) for row in cold_binding_rows
+                        ),
                     }
                 )
                 if not settled or not committed_current:
@@ -945,6 +1016,18 @@ def run_profile_montage_workflow(
             if callable(physical_rows):
                 physical_tile_counts.append(len(dict(physical_rows() or {})))
             presentation = _vispy_presentation_diagnostics(win)
+            cold_binding_aliases = tuple(
+                {
+                    "tile": int(tile),
+                    "source_windows": len(windows),
+                    "plane_identities": len(set(windows.values())),
+                }
+                for tile, windows in sorted(cold_binding_windows.items())
+                if len(windows) > 1 and len(set(windows.values())) != len(windows)
+            )
+            cold_binding_multiwindow_tiles = sum(
+                int(len(windows) > 1) for windows in cold_binding_windows.values()
+            )
             binding_hits_after = int(presentation.get("wgpu_residency_binding_cache_hits", 0) or 0)
             binding_misses_after = int(
                 presentation.get("wgpu_residency_binding_cache_misses", 0) or 0
@@ -1038,6 +1121,16 @@ def run_profile_montage_workflow(
                 "display_axis_wgpu_pool_exhaustion": str(
                     presentation.get("wgpu_last_pool_exhaustion", "") or ""
                 ),
+                "display_axis_wgpu_cold_binding_multiwindow_tiles": int(
+                    cold_binding_multiwindow_tiles
+                ),
+                "display_axis_wgpu_cold_binding_aliases": cold_binding_aliases,
+                "display_axis_wgpu_cold_binding_identity_unique": (
+                    None
+                    if backend != "wgpu"
+                    else bool(cold_binding_multiwindow_tiles > 0 and not cold_binding_aliases)
+                ),
+                "display_axis_wgpu_cold_binding_probe_ms": float(cold_binding_probe_ms),
                 "display_axis_physical_tile_sample_count": len(physical_tile_counts),
                 "display_axis_min_physical_tile_count": min(
                     physical_tile_counts,
@@ -6899,6 +6992,20 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             crop_matrix_uploads = record.get("display_axis_crop_matrix_wgpu_upload_delta")
             axis_swap_uploads = record.get("display_axis_xy_swap_wgpu_upload_delta")
             single_slice_uploads = record.get("display_axis_single_slice_wgpu_upload_delta")
+            require(
+                "display_axis_cold_crop_bindings_do_not_alias",
+                bool(record.get("display_axis_wgpu_cold_binding_identity_unique", False)),
+                evidence={
+                    "multiwindow_tiles": record.get(
+                        "display_axis_wgpu_cold_binding_multiwindow_tiles"
+                    ),
+                    "aliases": record.get("display_axis_wgpu_cold_binding_aliases"),
+                },
+                target=(
+                    "the cold fallback gives every distinct displayed-axis "
+                    "source window a distinct physical plane identity"
+                ),
+            )
             require(
                 "display_axis_source_pages_reused",
                 crop_uploads == 0

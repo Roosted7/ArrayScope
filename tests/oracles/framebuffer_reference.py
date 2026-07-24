@@ -343,7 +343,6 @@ def qt_raster_matches_cpu_reference(
             "Qt-raster CPU-reference oracle needs the PyQtGraph montage tile layer"
         )
     required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
-
     viewport = img_view.graphicsView.viewport()
     pixmap = viewport.grab()
     if pixmap.isNull():
@@ -663,6 +662,207 @@ def frame_matches_cpu_reference(
     )
 
 
+def wgpu_frame_matches_cpu_reference(
+    win,
+    *,
+    tiles=None,
+    tolerance: int = DEFAULT_TOLERANCE,
+    max_mismatch_fraction: float = DEFAULT_MAX_MISMATCH_FRACTION,
+    min_samples_per_tile: int = DEFAULT_MIN_SAMPLES_PER_TILE,
+    texel_guard: float = DEFAULT_TEXEL_GUARD,
+    edge_inset_px: float = DEFAULT_EDGE_INSET_PX,
+) -> FrameReferenceReport:
+    """Compare WGPU's physical render target with current semantic payloads.
+
+    This deliberately reads the executor target, not ``tileTruthPhysicalRows``:
+    a page-table key can be current while its texels still belong to an older
+    crop window.  The expected image is derived from the frame session's
+    payloads and montage plan; only the public camera state is shared with the
+    renderer.
+    """
+
+    from arrayscope.gpu.command_protocol import SetDisplayMapping, UpdateTileInstances
+
+    img_view = win.img_view
+    executor = getattr(img_view, "_wgpu_executor", None)
+    if executor is None:
+        raise AssertionError("WGPU CPU-reference oracle needs a live WGPU executor")
+    required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
+    camera = img_view._wgpu_camera_command()
+    if camera is None:
+        raise AssertionError("WGPU CPU-reference oracle needs a non-degenerate camera")
+
+    # Render the current committed instances into the readback target.  Normal
+    # screen/bitmap presentation may target a swapchain texture instead; this
+    # zero-upload submit makes the oracle independent of present method.
+    img_view._submit_wgpu(
+        (
+            SetDisplayMapping(img_view._wgpu_mapping_state),
+            camera,
+            UpdateTileInstances(img_view._wgpu_tile_instances()),
+        )
+    )
+    frame = executor.read_target()
+    if frame.ndim != 3 or frame.shape[-1] != 4:
+        raise AssertionError(f"unexpected WGPU target shape: {frame.shape}")
+    frame_rgb = frame[..., :3].astype(np.int16)
+    frame_h, frame_w = frame.shape[:2]
+    x0, y0, x1, y1 = (float(value) for value in camera.world_rect)
+    span_x = x1 - x0
+    span_y = y1 - y0
+    if not (span_x > 0.0 and span_y > 0.0):
+        raise AssertionError(f"degenerate WGPU camera: {camera!r}")
+
+    transposed = bool(getattr(img_view, "_wgpu_committed", {}).get("transposed", False))
+    reports: list[TileComparison] = []
+    for tile_number in sorted(required):
+        tile = plan_tiles[tile_number]
+        payload = payloads[tile_number]
+        mapping = resolve_reference_mapping(win, payload)
+        expected_rgb, background_mask = cpu_reference_tile_image(payload, mapping)
+        expected_rgb = expected_rgb.astype(np.int16)
+        tex_h, tex_w = expected_rgb.shape[:2]
+        gutter = int(payload.lod.gutter) if payload.lod is not None else 0
+        inner_w = max(1e-9, float(tex_w - 2 * gutter))
+        inner_h = max(1e-9, float(tex_h - 2 * gutter))
+
+        tile_x0 = float(tile.x0)
+        tile_y0 = float(tile.y0)
+        tile_x1 = tile_x0 + float(tile.width)
+        tile_y1 = tile_y0 + float(tile.height)
+
+        def world_to_frame_x(value: float) -> float:
+            fraction = (value - x0) / span_x
+            if camera.x_inverted:
+                fraction = 1.0 - fraction
+            return fraction * frame_w
+
+        def world_to_frame_y(value: float) -> float:
+            fraction = (value - y0) / span_y
+            if not camera.y_inverted:
+                fraction = 1.0 - fraction
+            return fraction * frame_h
+
+        xs_fb = np.sort((world_to_frame_x(tile_x0), world_to_frame_x(tile_x1)))
+        ys_fb = np.sort((world_to_frame_y(tile_y0), world_to_frame_y(tile_y1)))
+        x_first = max(0, int(np.ceil(xs_fb[0] + edge_inset_px - 0.5)))
+        x_last = min(frame_w - 1, int(np.floor(xs_fb[1] - edge_inset_px - 0.5)))
+        y_first = max(0, int(np.ceil(ys_fb[0] + edge_inset_px - 0.5)))
+        y_last = min(frame_h - 1, int(np.floor(ys_fb[1] - edge_inset_px - 0.5)))
+        if x_last < x_first or y_last < y_first:
+            reports.append(
+                TileComparison(
+                    tile_number=tile_number,
+                    samples=0,
+                    mismatched=0,
+                    worst_diff=0,
+                    mean_diff=0.0,
+                    detail="tile rect is off-target or degenerate",
+                )
+            )
+            continue
+
+        px = np.arange(x_first, x_last + 1, dtype=np.int64)
+        py = np.arange(y_first, y_last + 1, dtype=np.int64)
+        grid_x, grid_y = np.meshgrid(px, py)
+        grid_x = grid_x.ravel()
+        grid_y = grid_y.ravel()
+        frac_frame_x = (grid_x + 0.5) / frame_w
+        frac_frame_y = (grid_y + 0.5) / frame_h
+        world_x = x1 - frac_frame_x * span_x if camera.x_inverted else x0 + frac_frame_x * span_x
+        world_y = y0 + frac_frame_y * span_y if camera.y_inverted else y1 - frac_frame_y * span_y
+        frac_x = (world_x - tile_x0) / float(tile.width)
+        frac_y = (world_y - tile_y0) / float(tile.height)
+        inside = (frac_x > 0.0) & (frac_x < 1.0) & (frac_y > 0.0) & (frac_y < 1.0)
+        if transposed:
+            frac_x, frac_y = frac_y, frac_x
+        texel_x = gutter + frac_x * inner_w
+        texel_y = gutter + frac_y * inner_h
+        frac_tx = texel_x - np.floor(texel_x)
+        frac_ty = texel_y - np.floor(texel_y)
+        guarded = (
+            (frac_tx >= texel_guard)
+            & (frac_tx <= 1.0 - texel_guard)
+            & (frac_ty >= texel_guard)
+            & (frac_ty <= 1.0 - texel_guard)
+        )
+        select = inside & guarded
+        if not np.any(select):
+            reports.append(
+                TileComparison(
+                    tile_number=tile_number,
+                    samples=0,
+                    mismatched=0,
+                    worst_diff=0,
+                    mean_diff=0.0,
+                    detail="no pixel centers survive the interior/texel guards",
+                )
+            )
+            continue
+
+        index_x = np.clip(np.floor(texel_x[select]).astype(np.int64), 0, tex_w - 1)
+        index_y = np.clip(np.floor(texel_y[select]).astype(np.int64), 0, tex_h - 1)
+        expected = expected_rgb[index_y, index_x]
+        is_background = background_mask[index_y, index_x]
+        if np.any(is_background):
+            expected = expected.copy()
+            expected[is_background] = 0
+        actual = frame_rgb[grid_y[select], grid_x[select]]
+        diff = np.abs(actual - expected).max(axis=-1)
+        mismatched = diff > tolerance
+        worst_index = int(np.argmax(diff))
+        detail = ""
+        if np.any(mismatched):
+            detail = (
+                f"worst at target ({int(grid_x[select][worst_index])}, "
+                f"{int(grid_y[select][worst_index])}) texel "
+                f"({int(index_x[worst_index])}, {int(index_y[worst_index])}): "
+                f"actual={tuple(int(v) for v in actual[worst_index])} "
+                f"expected={tuple(int(v) for v in expected[worst_index])}"
+            )
+        reports.append(
+            TileComparison(
+                tile_number=tile_number,
+                samples=int(diff.size),
+                mismatched=int(np.count_nonzero(mismatched)),
+                worst_diff=int(diff[worst_index]),
+                mean_diff=float(diff.mean()),
+                detail=detail,
+            )
+        )
+
+    _assert_exact_tile_coverage(required, reports)
+    return FrameReferenceReport(
+        tiles=tuple(reports),
+        frame_shape=(int(frame_h), int(frame_w)),
+        tolerance=int(tolerance),
+        max_mismatch_fraction=float(max_mismatch_fraction),
+        min_samples_per_tile=int(min_samples_per_tile),
+    )
+
+
+def _assert_report(report: FrameReferenceReport, *, label: str) -> FrameReferenceReport:
+    failures = report.failures()
+    if not failures:
+        return report
+    lines = [
+        f"{label} diverges from the CPU semantic reference "
+        f"(tolerance={report.tolerance}/255, "
+        f"max_mismatch_fraction={report.max_mismatch_fraction}, "
+        f"min_samples={report.min_samples_per_tile}):"
+    ]
+    lines.extend(
+        f"  tile {tile.tile_number}: samples={tile.samples} "
+        f"mismatched={tile.mismatched} "
+        f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
+        f"mean={tile.mean_diff:.2f}" + (f" [{tile.detail}]" if tile.detail else "")
+        for tile in failures
+    )
+    healthy = len(report.tiles) - len(failures)
+    lines.append(f"  ({healthy}/{len(report.tiles)} required tiles within tolerance)")
+    raise AssertionError("\n".join(lines))
+
+
 def assert_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
     """Asserting form of :func:`frame_matches_cpu_reference`.
 
@@ -671,48 +871,25 @@ def assert_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
     contributes too few samples for the comparison to be evidence.
     """
 
-    report = frame_matches_cpu_reference(win, **kwargs)
-    failures = report.failures()
-    if failures:
-        lines = [
-            "framebuffer diverges from the CPU semantic reference "
-            f"(tolerance={report.tolerance}/255, "
-            f"max_mismatch_fraction={report.max_mismatch_fraction}, "
-            f"min_samples={report.min_samples_per_tile}):"
-        ]
-        lines.extend(
-            f"  tile {tile.tile_number}: samples={tile.samples} "
-            f"mismatched={tile.mismatched} "
-            f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
-            f"mean={tile.mean_diff:.2f}" + (f" [{tile.detail}]" if tile.detail else "")
-            for tile in failures
-        )
-        healthy = len(report.tiles) - len(failures)
-        lines.append(f"  ({healthy}/{len(report.tiles)} required tiles within tolerance)")
-        raise AssertionError("\n".join(lines))
-    return report
+    return _assert_report(
+        frame_matches_cpu_reference(win, **kwargs),
+        label="framebuffer",
+    )
+
+
+def assert_wgpu_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
+    """Asserting form of :func:`wgpu_frame_matches_cpu_reference`."""
+
+    return _assert_report(
+        wgpu_frame_matches_cpu_reference(win, **kwargs),
+        label="WGPU target",
+    )
 
 
 def assert_qt_raster_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
     """Asserting form of :func:`qt_raster_matches_cpu_reference`."""
 
-    report = qt_raster_matches_cpu_reference(win, **kwargs)
-    failures = report.failures()
-    if failures:
-        lines = [
-            "Qt raster diverges from the CPU semantic reference "
-            f"(tolerance={report.tolerance}/255, "
-            f"max_mismatch_fraction={report.max_mismatch_fraction}, "
-            f"min_samples={report.min_samples_per_tile}):"
-        ]
-        lines.extend(
-            f"  tile {tile.tile_number}: samples={tile.samples} "
-            f"mismatched={tile.mismatched} "
-            f"({tile.mismatch_fraction:.1%}) worst={tile.worst_diff} "
-            f"mean={tile.mean_diff:.2f}" + (f" [{tile.detail}]" if tile.detail else "")
-            for tile in failures
-        )
-        healthy = len(report.tiles) - len(failures)
-        lines.append(f"  ({healthy}/{len(report.tiles)} required tiles within tolerance)")
-        raise AssertionError("\n".join(lines))
-    return report
+    return _assert_report(
+        qt_raster_matches_cpu_reference(win, **kwargs),
+        label="Qt raster",
+    )

@@ -25,6 +25,9 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.oracles.framebuffer_reference import (
+    assert_wgpu_frame_matches_cpu_reference,
+)
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -314,6 +317,8 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
         assert min(physical_tile_counts) == len(montage_indices)
         assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        if backend == "wgpu":
+            assert_wgpu_frame_matches_cpu_reference(win)
         uploads_before_axis_swap = (
             int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
             if backend == "wgpu"
@@ -332,6 +337,8 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
             )
             assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
             assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+            if backend == "wgpu":
+                assert_wgpu_frame_matches_cpu_reference(win)
         if backend == "wgpu":
             final = win.img_view.wgpuPresentationDiagnostics()
             assert full_global_l0 == 4 * len(montage_indices)
