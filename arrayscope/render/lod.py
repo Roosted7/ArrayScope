@@ -368,6 +368,36 @@ def source_origin_yx_for_session(
     return (int(anchor.source_rect[0]), int(anchor.source_rect[2]))
 
 
+def source_anchor_for_rendered(session, rendered, source: np.ndarray):
+    """Return the anchor owned by an immutable rendered-tile snapshot."""
+
+    source_shape = tuple(np.shape(source)[:2])
+    anchor_fn = getattr(session, "payload_source_anchor_for_rendered", None)
+    if callable(anchor_fn):
+        return anchor_fn(rendered, source_shape)
+    fallback = getattr(session, "_payload_source_anchor", None)
+    if not callable(fallback):
+        return None
+    try:
+        return fallback(source_shape, source_index=int(rendered.tile.source_index))
+    except TypeError:
+        # Lightweight render-layer fakes predate montage source indexing.
+        return fallback(source_shape)
+
+
+def source_origin_yx_for_rendered(
+    session,
+    rendered,
+    source: np.ndarray,
+) -> tuple[int, int]:
+    """Locate worker output using the view snapshot that produced its values."""
+
+    anchor = source_anchor_for_rendered(session, rendered, source)
+    if anchor is None:
+        return (0, 0)
+    return (int(anchor.source_rect[0]), int(anchor.source_rect[2]))
+
+
 def page_plans_for_rendered(
     session,
     rendered,
@@ -390,15 +420,9 @@ def page_plans_for_rendered(
         reduction_yx=reduction_yx,
         reduced_format=(reducer, dtype, representation),
     )
-    source_index = int(rendered.tile.source_index)
-    origin_y, origin_x = source_origin_yx_for_session(
-        session,
-        source,
-        source_index=source_index,
-    )
+    origin_y, origin_x = source_origin_yx_for_rendered(session, rendered, source)
     height, width = (int(value) for value in source.shape[:2])
-    anchor_fn = getattr(session, "_payload_source_anchor", None)
-    anchor = anchor_fn((height, width), source_index=source_index) if callable(anchor_fn) else None
+    anchor = source_anchor_for_rendered(session, rendered, source)
     source_id = (
         session.tile_semantic_source_id(rendered.tile.source_index)
         if semantic_source_id is None
@@ -883,10 +907,10 @@ def plan_materialization(
         tile_number=tile_number,
         key=key,
         source=native_source,
-        source_origin_yx=source_origin_yx_for_session(
+        source_origin_yx=source_origin_yx_for_rendered(
             session,
+            rendered,
             np.asarray(native_source),
-            source_index=int(rendered.tile.source_index),
         ),
         plans=plans,
         claimed_plans=claimed,

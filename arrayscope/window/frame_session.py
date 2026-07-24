@@ -1312,6 +1312,7 @@ class FrameSession:
         level_key,
         render_generation: int,
         view_state,
+        source_anchoring,
         plan: MontagePlan,
         frame_plan,
         all_indices,
@@ -1376,6 +1377,11 @@ class FrameSession:
         self.semantic_key = semantic_key
         self.level_key = level_key
         self.render_generation = int(render_generation)
+        previous_anchor_key = getattr(self.source_anchoring, "content_key", None)
+        next_anchor_key = getattr(source_anchoring, "content_key", None)
+        self.source_anchoring = source_anchoring
+        if previous_anchor_key != next_anchor_key:
+            self._source_anchor_content_key_cache.clear()
         self.view_state = view_state
         new_image_axes = tuple(getattr(view_state, "image_axes", None) or ())
         if self.canonical_orientation and old_image_axes != new_image_axes:
@@ -2369,7 +2375,13 @@ class FrameSession:
     def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
         return render_lod.session_resident_levels(self, previous_factor)
 
-    def _payload_source_anchor(self, native_shape, *, source_index=None) -> object | None:
+    def _payload_source_anchor(
+        self,
+        native_shape,
+        *,
+        source_index=None,
+        view_state=None,
+    ) -> object | None:
         """Window-invariant anchor for an exact payload (ADR 0055 G3).
 
         The exact plane covers the whole display window; its native source
@@ -2393,11 +2405,40 @@ class FrameSession:
             return None
         from arrayscope.display.model.frame import PayloadSourceAnchor
 
+        state = self.view_state if view_state is None else view_state
+        if view_state is not None:
+            # A retained session is mutable on the Qt thread, but background
+            # rung work carries an immutable MontageTile/ViewState snapshot.
+            # Derive the numeric source origin from that snapshot: reading the
+            # live session anchor after evaluation can otherwise pair an old
+            # crop-local slab with a newer crop origin during rapid churn.
+            image_axes = tuple(int(axis) for axis in (getattr(state, "image_axes", None) or ()))
+            source_axes = tuple(sorted(image_axes)) if self.canonical_orientation else image_axes
+            range_indices = tuple(getattr(state, "axis_range_indices", ()) or ())
+            anchored_mask = tuple(value is not None for value in tuple(starts))
+            snapshot_starts: list[int | None] = []
+            if len(source_axes) == len(anchored_mask):
+                from arrayscope.display.source_anchoring import contiguous_range_start
+
+                for source_axis, is_anchored in zip(
+                    source_axes,
+                    anchored_mask,
+                    strict=True,
+                ):
+                    if not is_anchored:
+                        snapshot_starts.append(None)
+                        continue
+                    indices = (
+                        range_indices[source_axis] if source_axis < len(range_indices) else None
+                    )
+                    snapshot_starts.append(
+                        0 if indices is None else contiguous_range_start(indices)
+                    )
+                starts = tuple(snapshot_starts)
         y_start = int(starts[0] or 0)
         x_start = int(starts[1] or 0)
         height, width = (int(native_shape[0]), int(native_shape[1]))
         plane_shape = None
-        state = self.view_state
         image_axes = tuple(int(axis) for axis in (getattr(state, "image_axes", None) or ()))
         shape = tuple(int(value) for value in (getattr(state, "shape", None) or ()))
         if len(image_axes) == 2 and len(shape) > max(image_axes):
@@ -2439,6 +2480,16 @@ class FrameSession:
             content_key=content_key,
             source_rect=(y_start, y_start + height, x_start, x_start + width),
             plane_shape=plane_shape,
+        )
+
+    def payload_source_anchor_for_rendered(self, rendered, native_shape) -> object | None:
+        """Anchor worker output to its immutable tile view, not live session state."""
+
+        tile = rendered.tile
+        return self._payload_source_anchor(
+            native_shape,
+            source_index=int(tile.source_index),
+            view_state=tile.view_state,
         )
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:

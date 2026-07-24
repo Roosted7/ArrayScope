@@ -285,7 +285,16 @@ def test_evaluate_target_tile_non_native_returns_display_payload_not_native_resu
     )
 
     assert not hasattr(payload, "value")
-    key, pages, _histogram, _mapping, _kind, _level_data, _level_stats = payload
+    (
+        key,
+        pages,
+        _histogram,
+        _mapping,
+        _kind,
+        _level_data,
+        _level_stats,
+        _native_source,
+    ) = payload
     assert key.level_xy == (1, 1)
     assert len(pages) == 1
     assert pages[0].values.shape == (2, 3)
@@ -308,7 +317,16 @@ def test_evaluate_preview_tile_returns_display_only_payload():
     )
 
     assert preview is not None
-    key, pages, histogram, shader_mapping, texture_kind, level_data, level_stats = preview
+    (
+        key,
+        pages,
+        histogram,
+        shader_mapping,
+        texture_kind,
+        level_data,
+        level_stats,
+        native_source,
+    ) = preview
     assert key.source_id == source_id
     assert key.tile_id == tile.source_index
     assert key.level_xy == (1, 1)
@@ -322,6 +340,7 @@ def test_evaluate_preview_tile_returns_display_only_payload():
     assert level_data is None
     assert level_stats is not None
     assert not level_stats.refined
+    assert native_source is None
 
 
 def test_evaluate_preview_tile_uses_requested_rung_level():

@@ -1376,6 +1376,9 @@ def _evaluate_tile_native_output_preview(
     _check_render_cancelled(cancellation_token)
     value = result.value
     rendered = rendered_tile_from_evaluation_result(tile, result)
+    source = render_lod.canonical_value_source_for_rendered(
+        rendered, shader_display=bool(shader_display)
+    )
     key = render_lod.page_set_key_for(
         session,
         rendered,
@@ -1383,14 +1386,7 @@ def _evaluate_tile_native_output_preview(
         level=level,
         semantic_source_id=semantic_source_id,
     )
-    source = render_lod.canonical_value_source_for_rendered(
-        rendered, shader_display=bool(shader_display)
-    )
-    source_origin_yx = render_lod.source_origin_yx_for_session(
-        session,
-        source,
-        source_index=int(tile.source_index),
-    )
+    source_origin_yx = render_lod.source_origin_yx_for_rendered(session, rendered, source)
     pages = tuple(
         render_lod.materialize_lod_page(
             source,

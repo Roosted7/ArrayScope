@@ -1169,6 +1169,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             level_key=level_key,
             render_generation=render_generation,
             view_state=view_state,
+            source_anchoring=self._session_source_anchoring(document, view_state, axis),
             plan=plan,
             frame_plan=frame_plan,
             all_indices=all_indices,

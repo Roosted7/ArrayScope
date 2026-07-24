@@ -71,9 +71,10 @@ _LOW_PRIORITY_CALLBACK_EVENT_TYPE = Qt.QtCore.QEvent.Type(Qt.QtCore.QEvent.regis
 
 
 class _PresentationGateEvent(Qt.QtCore.QEvent):
-    def __init__(self, effects) -> None:
+    def __init__(self, effects, owner) -> None:
         super().__init__(_PRESENTATION_GATE_EVENT_TYPE)
         self.effects = effects
+        self.owner = owner
 
 
 class _LowPriorityCallbackEvent(Qt.QtCore.QEvent):
@@ -87,7 +88,7 @@ class _PresentationGateReceiver(Qt.QtCore.QObject):
 
     def event(self, event) -> bool:
         if event.type() == _PRESENTATION_GATE_EVENT_TYPE:
-            event.effects._on_presentation_gate()
+            event.effects._on_presentation_gate(event.owner)
             return True
         if event.type() == _LOW_PRIORITY_CALLBACK_EVENT_TYPE:
             event.callback()
@@ -862,7 +863,7 @@ class FramePipelineEffects:
             Qt.QtCore.QTimer.singleShot(
                 4,
                 receiver,
-                lambda effects=self: effects._on_presentation_gate(),
+                lambda effects=self, owner=owner: effects._on_presentation_gate(owner),
             )
             return
         emit_trace("presentation_gate", action="armed-post", owner_session=owner[0])
@@ -872,17 +873,32 @@ class FramePipelineEffects:
         # and `_on_presentation_gate` rechecks the session generation.
         Qt.QtCore.QCoreApplication.postEvent(
             receiver,
-            _PresentationGateEvent(self),
+            _PresentationGateEvent(self, owner),
             int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
         )
 
-    def _on_presentation_gate(self) -> None:
-        owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+    def _on_presentation_gate(self, owner=None) -> None:
+        live_owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        owner = live_owner if owner is None else owner
         if getattr(self.renderer, "_montage_presentation_gate_owner", None) != owner:
             # A successor session armed its own continuation while this stale
             # callback was queued. It owns the shared gate now; this callback
             # must neither clear nor consume that wakeup.
             emit_trace("presentation_gate", action="fired-stale", owner_session=owner[0])
+            return
+        if live_owner != owner:
+            # Index-window retargeting deliberately keeps the FrameSession and
+            # effects object alive while advancing its generation. A callback
+            # queued for the predecessor must not impersonate the successor by
+            # reading the mutable session id only when it fires.
+            self.renderer._montage_presentation_gate_owner = None
+            self.renderer._montage_presentation_gate_armed = False
+            emit_trace(
+                "presentation_gate",
+                action="fired-generation-stale",
+                owner_session=owner[0],
+                live_session=live_owner[0],
+            )
             return
         self.renderer._montage_presentation_gate_owner = None
         self.renderer._montage_presentation_gate_armed = False

@@ -36,6 +36,7 @@ from arrayscope.display.pyramid import (
 )
 from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.slice_engine import make_shader_image_from_slab
+from arrayscope.display.source_anchoring import SourceAnchoring
 from arrayscope.kernel import Lane, Priority
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.presentation import ClaimOwner, Presentation
@@ -4384,6 +4385,7 @@ def _retarget(
     cached_tiles=None,
     *,
     semantic_key=("semantic", "retargeted"),
+    source_anchoring=None,
 ):
     return session.retarget_index_window(
         session_id=session.session_id + 1,
@@ -4392,6 +4394,9 @@ def _retarget(
         level_key=("level", "retargeted"),
         render_generation=session.render_generation + 1,
         view_state=None,
+        source_anchoring=(
+            session.source_anchoring if source_anchoring is None else source_anchoring
+        ),
         plan=plan,
         frame_plan=session.frame_plan,
         all_indices=tuple(int(t.source_index) for t in plan.tiles),
@@ -4399,6 +4404,57 @@ def _retarget(
         cached_tiles=dict(cached_tiles or {}),
         visible_tiles=tuple(plan.tiles),
     )
+
+
+def test_rendered_anchor_uses_worker_view_snapshot_after_live_session_retarget():
+    """Rapid crop churn must not pair an old slab with the newest crop origin."""
+
+    old_state = (
+        ViewState.from_shape((336, 336, 80))
+        .with_image_axes(0, 1)
+        .with_axis_range(0, indices=tuple(range(80, 230)), text="80:230")
+        .with_axis_range(1, indices=tuple(range(55, 155)), text="55:155")
+        .with_montage_axis(2, columns=6, indices=tuple(range(15, 65)), text="15:65")
+    )
+    new_state = old_state.with_axis_range(
+        0, indices=tuple(range(92, 242)), text="92:242"
+    ).with_axis_range(1, indices=tuple(range(67, 167)), text="67:167")
+    tile = MontageTile(
+        montage_index=0,
+        source_index=42,
+        row=0,
+        col=0,
+        x0=0,
+        y0=0,
+        width=100,
+        height=150,
+        view_state=old_state.tile_state_for_slice(2, 42),
+    )
+    source = np.zeros((150, 100), dtype=np.float32)
+    rendered = RenderedTile(
+        tile=tile,
+        image=source,
+        histogram_data=source,
+        eval_ms=0.0,
+        slab_shape=source.shape,
+        slab_nbytes=source.nbytes,
+    )
+    session = _session(count=1)
+    session.view_state = new_state
+    session.montage_axis = 2
+    session.canonical_orientation = True
+    session.source_anchoring = SourceAnchoring(
+        anchored_starts=(92, 67),
+        source_starts_yx=(92, 67),
+        content_key=("window-free",),
+    )
+
+    anchor = session.payload_source_anchor_for_rendered(rendered, source.shape)
+    origin = render_lod.source_origin_yx_for_rendered(session, rendered, source)
+
+    assert anchor.source_rect == (80, 230, 55, 155)
+    assert origin == (80, 55)
+    assert tuple(session.source_anchoring.source_starts_yx) == (92, 67)
 
 
 def test_retarget_index_window_remaps_hits_misses_and_unchanged():
@@ -4569,11 +4625,16 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
     session.lifecycle.remember_presentable(2, stale)
 
     partial = _shifted_plan(count=2, offset=2)
+    shifted_anchoring = SimpleNamespace(
+        source_starts_yx=(5, 7),
+        content_key=("current-windowless-view",),
+    )
     stats = _retarget(
         session,
         partial,
         new_source_ids={0: ("src", 2), 1: ("src", 3)},
         cached_tiles={},
+        source_anchoring=shifted_anchoring,
     )
 
     assert stats["misses"] == 0
@@ -4587,7 +4648,8 @@ def test_partial_index_window_remaps_lifecycle_payloads_without_rendered_tiles()
         "montage-source",
         2,
     )
-    assert remapped_anchor.source_rect == (0, TILE, 0, TILE)
+    assert session.source_anchoring is shifted_anchoring
+    assert remapped_anchor.source_rect == (5, 5 + TILE, 7, 7 + TILE)
     assert set(session.pending_payload_upserts) == {0, 1}
     # The successor shrinks the physical slot topology. The retained values
     # remain useful inputs, but they cannot own an atomic wait for a different
@@ -5662,6 +5724,33 @@ def test_stale_presentation_gate_cannot_clear_successor_wakeup():
     assert renderer._montage_presentation_gate_armed is False
     assert renderer._montage_presentation_gate_owner is None
     assert commits == ["current"]
+
+
+def test_retargeted_session_gate_event_keeps_its_immutable_owner_generation():
+    session = SimpleNamespace(session_id=7)
+    predecessor_owner = (7, id(session))
+    renderer = SimpleNamespace(
+        _montage_presentation_gate_armed=True,
+        _montage_presentation_gate_owner=predecessor_owner,
+    )
+    effects = FramePipelineEffects(renderer, session)
+    commits = []
+    effects.commit_pending_session = lambda: commits.append("commit")
+    effects._session_is_current = lambda: True
+
+    session.session_id = 8
+    successor_owner = (8, id(session))
+    renderer._montage_presentation_gate_owner = successor_owner
+    effects._on_presentation_gate(predecessor_owner)
+
+    assert renderer._montage_presentation_gate_armed is True
+    assert renderer._montage_presentation_gate_owner == successor_owner
+    assert commits == []
+
+    effects._on_presentation_gate(successor_owner)
+    assert renderer._montage_presentation_gate_armed is False
+    assert renderer._montage_presentation_gate_owner is None
+    assert commits == ["commit"]
 
 
 def test_rebuilt_payload_wrapper_with_same_source_identity_is_not_reemitted():
