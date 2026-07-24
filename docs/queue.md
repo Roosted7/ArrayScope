@@ -79,9 +79,10 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   Wayland — Thomas drives):** on real hardware, confirm the grid fades in only
   when zoomed past ~12–24 px/texel and never at normal zoom; NaN/Inf and
   missing-page hatches show on injected bad/absent data and are visually
-  distinct; A4 markers appear only with `clip_indicator` on. No wgpu framebuffer
-  oracle exists (`tests/oracles/framebuffer_reference.py` is VisPy/PyQtGraph
-  only) — a wgpu path there would let Stage B–D grow on pixels, worth adding.
+  distinct; A4 markers appear only with `clip_indicator` on. The wgpu
+  framebuffer-oracle gap is closed (`arrayscope/tools/framebuffer_reference.py`
+  gained `wgpu_frame_matches_cpu_reference`, 2026-07-24) — Stage B–D can grow
+  on pixels.
 - **Progressive-load publication correctness — DONE 2026-07-22** (core
   `447cbe42`, ring-4 residual `db1c5393`). Full evidence in the
   [Done ledger](queue-done.md). Two adjacent gaps surfaced while writing the

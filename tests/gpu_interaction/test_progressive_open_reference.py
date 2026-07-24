@@ -11,7 +11,7 @@ pinned by the ring that can SEE it -- real GL/Qt raster, this ring.
 
 Two oracles, deliberately layered:
 
-* the physical-pixel oracle (tests/oracles/framebuffer_reference.py) proves
+* the physical-pixel oracle (arrayscope/tools/framebuffer_reference.py) proves
   the framebuffer/Qt-raster faithfully shows the *committed payloads*;
 * a truth-anchored full-coverage gate proves every committed payload equals
   the KNOWN final data for its source frame -- i.e. no region is still

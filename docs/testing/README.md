@@ -252,7 +252,7 @@ empty.
   first-class backends: VisPy framebuffer
   (`test_framebuffer_cpu_reference.py`) and PyQtGraph Qt raster
   (`test_pyqtgraph_raster_cpu_reference.py`). Their shared oracle is
-  `tests/oracles/framebuffer_reference.py`; default-ring smokes are
+  `arrayscope/tools/framebuffer_reference.py`; default-ring smokes are
   `tests/ui/test_framebuffer_cpu_reference.py` and
   `tests/ui/test_pyqtgraph_raster_cpu_reference.py`.
 - The shared framebuffer oracle also reads WGPU's physical executor target.

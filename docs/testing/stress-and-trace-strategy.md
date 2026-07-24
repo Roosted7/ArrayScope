@@ -132,7 +132,7 @@ Three failure laws that session proved, now binding for oracle design:
    injected fault is unproven.
 
    **[Landed 2026-07-17]** The general oracle exists:
-   `tests/oracles/framebuffer_reference.py`
+   `arrayscope/tools/framebuffer_reference.py`
    (`assert_frame_matches_cpu_reference`, surfaced on the GPU harness as
    `Harness.assert_tile_matches_cpu_reference`). It reads the live VisPy
    canvas framebuffer and compares every `required_tile_numbers()` tile
