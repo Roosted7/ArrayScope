@@ -109,6 +109,25 @@ def test_normalize_theme_choice_accepts_enum_values():
     assert theme.normalize_theme_choice(theme.ThemeChoice.DARK) == theme.ThemeChoice.DARK
 
 
+def test_hover_token_is_distinct_from_alt_and_base_in_builtin_themes():
+    # Regression: hover used to reuse surface_alt, so hovered list rows were
+    # invisible on alternate (even) rows. Hover must be its own shade, and the
+    # alternate-row shade must stay distinct from the base background.
+    for tokens in (theme.DARK_TOKENS, theme.LIGHT_TOKENS):
+        assert tokens.surface_hover != tokens.surface_alt
+        assert tokens.surface_hover != tokens.base
+        assert tokens.surface_alt != tokens.base
+
+
+def test_native_palette_hover_token_is_distinct_from_alt_and_base():
+    # The system-derived path must also compute a hover shade that never
+    # collapses into the alternate-row or base backgrounds.
+    tokens = theme._tokens_from_native_palette(None)
+    assert tokens.surface_hover != tokens.surface_alt
+    assert tokens.surface_hover != tokens.base
+    assert tokens.surface_alt != tokens.base
+
+
 def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_available():
     result = theme.choose_theme_backend("light", available_backends=("qdarktheme",))
 

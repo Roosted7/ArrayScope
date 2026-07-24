@@ -41,7 +41,8 @@ class ThemeTokens:
     # Chrome surfaces
     window: str  # main window / toolbar background
     surface: str  # docks, cards, chips
-    surface_alt: str  # hover / alternate rows
+    surface_alt: str  # subtle alternate rows / passive raised badges
+    surface_hover: str  # interactive hover + selected fill (stronger than surface_alt)
     base: str  # inputs, lists, tables
     # Text tiers
     text: str
@@ -73,7 +74,8 @@ DARK_TOKENS = ThemeTokens(
     is_dark=True,
     window="#202327",
     surface="#282c31",
-    surface_alt="#31363c",
+    surface_alt="#23262b",
+    surface_hover="#363c43",
     base="#1a1d20",
     text="#e8eaed",
     text_muted="#9aa0a6",
@@ -99,7 +101,8 @@ LIGHT_TOKENS = ThemeTokens(
     is_dark=False,
     window="#f2f3f5",
     surface="#fafbfc",
-    surface_alt="#e9ebee",
+    surface_alt="#f4f5f7",
+    surface_hover="#e2e6ea",
     base="#ffffff",
     text="#1f2328",
     text_muted="#59626b",
@@ -192,7 +195,23 @@ def _tokens_from_native_palette(app) -> ThemeTokens:
             return palette.color(color_role).name()
 
         window = palette.color(role.Window)
-        surface_alt = window.lighter(115) if is_dark else window.darker(105)
+        text = palette.color(role.WindowText)
+
+        def blend(a, b, t):
+            """Linear mix of two QColors, t in [0, 1] toward ``b``."""
+            return QtGui.QColor(
+                round(a.red() + (b.red() - a.red()) * t),
+                round(a.green() + (b.green() - a.green()) * t),
+                round(a.blue() + (b.blue() - a.blue()) * t),
+            )
+
+        # Alternate rows stay a subtle nudge of Window toward the foreground;
+        # hover is a clearly stronger nudge, so the two never collapse into one
+        # another. Blending toward WindowText (rather than lighter()/darker())
+        # keeps them distinct even for saturated palettes -- pure black/white
+        # windows, where lighter()/darker() would clamp both to the same shade.
+        surface_alt = blend(window, text, 0.06)
+        surface_hover = blend(window, text, 0.17)
         border = window.lighter(140) if is_dark else window.darker(120)
         border_strong = window.lighter(170) if is_dark else window.darker(135)
         overlay = QtGui.QColor(window)
@@ -203,6 +222,7 @@ def _tokens_from_native_palette(app) -> ThemeTokens:
             window=name(role.Window),
             surface=name(role.Button),
             surface_alt=surface_alt.name(),
+            surface_hover=surface_hover.name(),
             base=name(role.Base),
             text=name(role.WindowText),
             text_muted=palette.color(QtGui.QPalette.ColorGroup.Disabled, role.WindowText).name(),
@@ -376,7 +396,7 @@ QAbstractSpinBox::down-button {{
     border-bottom-right-radius: 3px;
 }}
 QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
-    background: {tokens.surface_alt};
+    background: {tokens.surface_hover};
 }}
 QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{
     background: {tokens.border};
@@ -431,7 +451,7 @@ QMenuBar::item {{
     border-radius: 4px;
     background: transparent;
 }}
-QMenuBar::item:selected {{ background: {t.surface_alt}; }}
+QMenuBar::item:selected {{ background: {t.surface_hover}; }}
 QMenuBar::item:pressed {{ background: {t.accent}; color: {t.accent_text}; }}
 QMenu {{
     background: {t.surface};
@@ -481,7 +501,7 @@ QToolButton {{
     padding: 3px 6px;
     font-size: 9pt;
 }}
-QToolButton:hover {{ background: {t.surface_alt}; border-color: {t.border}; }}
+QToolButton:hover {{ background: {t.surface_hover}; border-color: {t.border}; }}
 QToolButton:pressed {{ background: {t.border}; }}
 QToolButton:checked {{
     background: {t.accent};
@@ -497,7 +517,7 @@ QPushButton {{
     padding: 4px 12px;
     font-size: 9pt;
 }}
-QPushButton:hover {{ background: {t.surface_alt}; }}
+QPushButton:hover {{ background: {t.surface_hover}; }}
 QPushButton:pressed {{ background: {t.border}; }}
 QPushButton:checked {{
     background: {t.accent};
@@ -570,6 +590,9 @@ QTableView, QTreeView {{
     font-size: 9pt;
     outline: 0;
 }}
+QTableView::item:hover:!selected, QTreeView::item:hover:!selected {{
+    background: {t.surface_hover};
+}}
 QListView, QListWidget {{
     background: {t.base};
     color: {t.text};
@@ -580,14 +603,15 @@ QListView, QListWidget {{
     outline: 0;
 }}
 /* Selected list rows keep readable text (row widgets carry their own
-   colors); the accent lives in an edge marker instead of a full fill. */
+   colors); the accent lives in an edge marker plus a solid hover-strength
+   fill, kept deliberately distinct from the subtler alternate-row shade. */
 QListView::item:selected, QListWidget::item:selected {{
-    background: {t.surface_alt};
+    background: {t.surface_hover};
     border-left: 3px solid {t.accent};
     color: {t.text};
 }}
 QListView::item:hover:!selected, QListWidget::item:hover:!selected {{
-    background: {t.surface_alt};
+    background: {t.surface_hover};
 }}
 QHeaderView::section {{
     background: {t.surface};
@@ -803,7 +827,7 @@ QToolButton#OperationAxisButton {{
 }}
 QToolButton#OperationAxisButton:hover {{
     border-color: {t.accent};
-    background: {t.surface_alt};
+    background: {t.surface_hover};
 }}
 
 /* ---------- splitters ---------- */
