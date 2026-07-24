@@ -1660,28 +1660,7 @@ class FramePipelineEffects:
                 # same acknowledged generation. Register the provisional
                 # source before building the delta, then rebind the current
                 # wrappers without rebuilding or re-uploading pixels.
-                current_level_source = renderer._montage_level_source_for_session(
-                    session,
-                    allow_partial=not bool(
-                        getattr(session, "first_pass_histogram_published", False)
-                    ),
-                )
-                if bool(getattr(session, "first_pass_histogram_published", False)):
-                    current_summary = renderer._montage_level_tracker().summary_for(
-                        session.level_key
-                    )
-                    if not bool(getattr(current_summary, "refined", False)):
-                        current_level_source = None
-                if current_level_source is None:
-                    # Withhold an unrefined *candidate*, not the already
-                    # accepted source. The histogram callback can advance the
-                    # generation just before the controller retains a broader
-                    # applied window. Re-target convergence to that accepted
-                    # source or refinement remains blocked behind six stale
-                    # uniforms with no external work left to wake them.
-                    applied_source = getattr(session, "applied_level_source", None)
-                    if getattr(applied_source, "semantic_key", None) == session.level_key:
-                        current_level_source = applied_source
+                current_level_source = shader_commit_level_source(renderer, session)
                 if current_level_source is not None:
                     current_level_source = (
                         WindowLevelController()
@@ -3964,6 +3943,37 @@ def session_requested_levels(session) -> tuple[float, float] | None:
     """
 
     return normalize_bounds(getattr(session, "user_levels_override", None))
+
+
+def shader_commit_level_source(renderer, session):
+    """Select the level source a shader commit may offer the controller.
+
+    Before the first-pass histogram publishes, bounded partial evidence is the
+    honest provisional source.  Afterwards a candidate may move the applied
+    window only when the tracked summary is refined; anything less falls back
+    to the already accepted source so partial ranges never disturb a published
+    window.
+    """
+
+    published = bool(getattr(session, "first_pass_histogram_published", False))
+    current_level_source = renderer._montage_level_source_for_session(
+        session,
+        allow_partial=not published,
+    )
+    if published:
+        current_summary = renderer._montage_level_tracker().summary_for(session.level_key)
+        if not bool(getattr(current_summary, "refined", False)):
+            current_level_source = None
+    if current_level_source is None:
+        # Withhold an unrefined *candidate*, not the already accepted source.
+        # The histogram callback can advance the generation just before the
+        # controller retains a broader applied window. Re-target convergence
+        # to that accepted source or refinement remains blocked behind six
+        # stale uniforms with no external work left to wake them.
+        applied_source = getattr(session, "applied_level_source", None)
+        if getattr(applied_source, "semantic_key", None) == session.level_key:
+            current_level_source = applied_source
+    return current_level_source
 
 
 def _compatible_successor_payload_count(session) -> int:
