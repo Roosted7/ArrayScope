@@ -454,7 +454,7 @@ class Harness:
         :class:`FrameReferenceReport`.
         """
 
-        from tests.oracles.framebuffer_reference import (
+        from arrayscope.tools.framebuffer_reference import (
             assert_frame_matches_cpu_reference,
             assert_qt_raster_matches_cpu_reference,
         )

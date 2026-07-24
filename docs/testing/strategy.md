@@ -83,6 +83,26 @@ produce distinct crop-local physical identities, even though their canonical
 source-page identity is intentionally reusable. This catches the failure mode
 where page-table metadata is current but the page still contains a predecessor
 crop. The default run executes the same stages on WGPU and PyQtGraph.
+While both displayed axes remain cropped, each displayed-axis stage also
+scrolls every dimension: a three-input coalesced burst, settled restore,
+settled +1 step, and settled return. Every one of those four checkpoints per
+dimension is compared against a CPU semantic framebuffer oracle on WGPU and
+the PyQtGraph raster. WGPU additionally compares the committed global source
+origin with the immutable payload/session anchor. Upload accounting is
+role-specific: displayed-axis scrolls must rebind with zero upload, while a
+montage-axis move may report genuinely cold/prefetched pages separately.
+Supplying `--screenshot-dir` captures each settled checkpoint for visual
+review; periodic screenshot timing remains diagnostic because capture can
+perturb draw acknowledgement.
+
+WGPU page-pool byte policy is retention headroom, not visible admission.
+Capacity tests count the physical pages the command path actually submits
+(including a native source plane carried by a reduced preview), grow to the
+complete immutable frame-plan working set within the device limit, and assert
+that a valid full montage cannot fail merely because it crosses a policy-sized
+page count. The byte preference is shared across all representation pools,
+and a cold factor-misaligned crop spanning multiple stored pages must take the
+bounded packed-upload fallback rather than fail geometry validation.
 After the FFT montage is visible it also performs a deterministic
 `fft_level_refinement_preview` level edit so histogram/level presentation
 latency is captured on the same onscreen tiled workflow.

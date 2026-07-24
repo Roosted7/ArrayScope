@@ -853,6 +853,32 @@ def test_display_axis_crop_scenarios_exercise_both_roles_without_special_shapes(
     assert x_scenarios[-1].axis_ranges != y_scenarios[-1].axis_ranges
 
 
+def test_profile_axis_window_shift_covers_display_montage_and_slice_dimensions():
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.tools.profile_montage_workflow import _shift_profile_axis_window
+
+    state = (
+        ViewState.from_shape((20, 30, 40, 50))
+        .with_image_axes(0, 1)
+        .with_axis_range(0, indices=tuple(range(3, 13)), text="3:13")
+        .with_axis_range(1, indices=tuple(range(7, 19)), text="7:19")
+        .with_slice(3, 25)
+        .with_montage_axis(2, columns=4, indices=tuple(range(10, 22)), text="10:22")
+    )
+
+    shifted_y = _shift_profile_axis_window(state, 0, 2)
+    shifted_x = _shift_profile_axis_window(state, 1, -3)
+    shifted_montage = _shift_profile_axis_window(state, 2, 3)
+    shifted_slice = _shift_profile_axis_window(state, 3, -4)
+
+    assert shifted_y.axis_range_indices[0] == tuple(range(5, 15))
+    assert shifted_x.axis_range_indices[1] == tuple(range(4, 16))
+    assert shifted_montage.montage_indices == tuple(range(13, 25))
+    assert shifted_slice.slice_indices[3] == 21
+    assert shifted_y.axis_range_indices[1] == state.axis_range_indices[1]
+    assert shifted_montage.axis_range_indices == state.axis_range_indices
+
+
 def test_profile_parser_unknown_stage_is_rejected():
     from arrayscope.tools.profile_montage_workflow import _resolve_profile_stages
 
@@ -1186,6 +1212,43 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
         display_axis_crop_scenario_count=11,
         display_axis_crop_scenarios_settled=True,
         display_axis_crop_scenarios_committed_current=True,
+        display_axis_all_dimension_scroll_axis_count=3,
+        display_axis_all_dimension_scroll_expected_axis_count=3,
+        display_axis_all_dimension_scrolls_settled=True,
+        display_axis_all_dimension_scrolls_committed_current=True,
+        display_axis_all_dimension_scroll_results=(
+            {
+                "axis": 0,
+                "role": "display",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 0,
+            },
+            {
+                "axis": 1,
+                "role": "display",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 0,
+            },
+            {
+                "axis": 2,
+                "role": "montage",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 6,
+            },
+        ),
+        display_axis_all_dimension_scroll_wgpu_upload_delta=6,
+        display_axis_all_dimension_display_roles_wgpu_upload_delta=0,
+        display_axis_all_dimension_montage_role_wgpu_upload_delta=6,
+        display_axis_all_dimension_slice_roles_wgpu_upload_delta=None,
+        display_axis_physical_reference_check_count=12,
+        display_axis_physical_reference_passed=True,
+        display_axis_physical_reference_failures=(),
+        display_axis_wgpu_source_truth_check_count=12,
+        display_axis_wgpu_source_truth_passed=True,
+        display_axis_wgpu_source_truth_failures=(),
         display_axis_crop_scenario_names=(
             "primary-only-centered",
             "both-centered",
@@ -1233,6 +1296,32 @@ def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
     assert "display_axis_source_pages_reused" in failures
 
     record["display_axis_scroll_wgpu_upload_delta"] = 0
+    record["display_axis_all_dimension_display_roles_wgpu_upload_delta"] = 1
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_source_pages_reused" in failures
+
+    record["display_axis_all_dimension_display_roles_wgpu_upload_delta"] = 0
+    record["display_axis_wgpu_source_truth_passed"] = False
+    record["display_axis_wgpu_source_truth_failures"] = (
+        {"actual_start_yx": (100, 100), "expected_start_yx": (101, 100)},
+    )
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_wgpu_source_window_truth" in failures
+
+    record["display_axis_wgpu_source_truth_passed"] = True
+    record["display_axis_wgpu_source_truth_failures"] = ()
+    record["display_axis_physical_reference_passed"] = False
+    record["display_axis_physical_reference_failures"] = (
+        {"tile_number": 17, "mismatched": 40, "samples": 40},
+    )
+    failed = _r8_certification(record)
+    failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
+    assert "display_axis_all_dimension_pixels_match_cpu_reference" in failures
+
+    record["display_axis_physical_reference_passed"] = True
+    record["display_axis_physical_reference_failures"] = ()
     record["display_axis_xy_swap_settled"] = False
     failed = _r8_certification(record)
     failures = {failure["gate"] for failure in failed["r8_gate_failures"]}
@@ -1269,6 +1358,43 @@ def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
         display_axis_crop_scenario_count=11,
         display_axis_crop_scenarios_settled=True,
         display_axis_crop_scenarios_committed_current=True,
+        display_axis_all_dimension_scroll_axis_count=3,
+        display_axis_all_dimension_scroll_expected_axis_count=3,
+        display_axis_all_dimension_scrolls_settled=True,
+        display_axis_all_dimension_scrolls_committed_current=True,
+        display_axis_all_dimension_scroll_results=(
+            {
+                "axis": 0,
+                "role": "display",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 0,
+            },
+            {
+                "axis": 1,
+                "role": "display",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 0,
+            },
+            {
+                "axis": 2,
+                "role": "montage",
+                "fast_input_steps": 3,
+                "slow_input_steps": 2,
+                "wgpu_upload_delta": 0,
+            },
+        ),
+        display_axis_all_dimension_scroll_wgpu_upload_delta=0,
+        display_axis_all_dimension_display_roles_wgpu_upload_delta=0,
+        display_axis_all_dimension_montage_role_wgpu_upload_delta=0,
+        display_axis_all_dimension_slice_roles_wgpu_upload_delta=None,
+        display_axis_physical_reference_check_count=12,
+        display_axis_physical_reference_passed=True,
+        display_axis_physical_reference_failures=(),
+        display_axis_wgpu_source_truth_check_count=12,
+        display_axis_wgpu_source_truth_passed=True,
+        display_axis_wgpu_source_truth_failures=(),
         display_axis_crop_scenario_names=(
             "primary-only-centered",
             "both-centered",

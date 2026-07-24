@@ -265,6 +265,408 @@ def _wgpu_cold_payload_binding_rows(win) -> tuple[dict[str, object], ...]:
     return tuple(rows)
 
 
+def _shift_profile_axis_window(state, axis: int, delta: int):
+    """Shift one dimension without changing its current selection geometry."""
+
+    axis = int(axis)
+    delta = int(delta)
+    axis_size = int(state.shape[axis])
+    if getattr(state, "montage_axis", None) == axis:
+        values = tuple(
+            int(value)
+            for value in (
+                state.montage_indices
+                if state.montage_indices is not None
+                else tuple(range(axis_size))
+            )
+        )
+        if not values:
+            return state
+        start = max(0, min(int(values[0]) + delta, axis_size - len(values)))
+        stop = start + len(values)
+        return state.with_montage_axis(
+            axis,
+            columns=state.montage_columns,
+            indices=tuple(range(start, stop)),
+            text=f"{start}:{stop}",
+        )
+
+    values = state.axis_range_indices[axis]
+    if values is not None:
+        values = tuple(int(value) for value in values)
+        if not values:
+            return state
+        start = max(0, min(int(values[0]) + delta, axis_size - len(values)))
+        stop = start + len(values)
+        return state.with_axis_range(
+            axis,
+            indices=tuple(range(start, stop)),
+            text=f"{start}:{stop}",
+        )
+
+    index = max(0, min(int(state.slice_indices[axis]) + delta, axis_size - 1))
+    return state.with_slice(axis, index)
+
+
+def _profile_axis_shift_direction(state, axis: int) -> int:
+    """Choose a non-clamping scroll direction for the current dimension."""
+
+    axis = int(axis)
+    axis_size = int(state.shape[axis])
+    if getattr(state, "montage_axis", None) == axis:
+        values = tuple(
+            state.montage_indices if state.montage_indices is not None else tuple(range(axis_size))
+        )
+    else:
+        values = tuple(state.axis_range_indices[axis] or ())
+    if values:
+        return 1 if int(values[-1]) < axis_size - 3 else -1
+    return 1 if int(state.slice_indices[axis]) < axis_size - 3 else -1
+
+
+def _wgpu_source_window_truth(win) -> dict[str, object]:
+    """Compare semantic crop coordinates with payload and shader sampling truth."""
+
+    renderer = getattr(win, "renderer", None)
+    session = getattr(renderer, "_frame_session", None)
+    if session is None:
+        return {
+            "applicable": False,
+            "passed": True,
+            "payload_count": 0,
+            "physical_tile_count": 0,
+            "session_anchor_matches": True,
+            "payload_anchor_mismatches": (),
+            "global_origin_mismatches": (),
+        }
+    expected = renderer._session_source_anchoring(
+        session.document,
+        session.view_state,
+        session.montage_axis,
+    )
+    if expected is None:
+        return {
+            "applicable": False,
+            "passed": True,
+            "payload_count": 0,
+            "physical_tile_count": 0,
+            "session_anchor_matches": True,
+            "payload_anchor_mismatches": (),
+            "global_origin_mismatches": (),
+        }
+
+    expected_starts = tuple(int(value or 0) for value in tuple(expected.source_starts_yx))
+    actual = getattr(session, "source_anchoring", None)
+    actual_starts = tuple(
+        int(value or 0) for value in tuple(getattr(actual, "source_starts_yx", ()) or ())
+    )
+    session_anchor_matches = bool(
+        actual_starts == expected_starts
+        and getattr(actual, "content_key", None) == expected.content_key
+    )
+
+    payload_mismatches: list[dict[str, object]] = []
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    for tile, payload in sorted(payloads.items()):
+        anchor = getattr(payload, "source_anchor", None)
+        source_rect = tuple(int(value) for value in tuple(getattr(anchor, "source_rect", ()) or ()))
+        if (
+            len(source_rect) != 4
+            or source_rect[0] != expected_starts[0]
+            or source_rect[2] != expected_starts[1]
+        ):
+            payload_mismatches.append(
+                {
+                    "tile": int(tile),
+                    "expected_start_yx": expected_starts,
+                    "source_rect": source_rect,
+                }
+            )
+
+    physical_rows_fn = getattr(getattr(win, "img_view", None), "tileTruthPhysicalRows", None)
+    physical_rows = dict(physical_rows_fn() or {}) if callable(physical_rows_fn) else {}
+    expected_origin = (float(expected_starts[1]), float(expected_starts[0]))
+    origin_mismatches: list[dict[str, object]] = []
+    for tile, row in sorted(physical_rows.items()):
+        row = dict(row or {})
+        bindings = tuple(row.get("physical_page_bindings", ()) or ())
+        global_binding = False
+        for binding in bindings:
+            key = dict(binding or {}).get("actual_key")
+            generation = getattr(key, "document_generation", None)
+            if (
+                isinstance(generation, tuple)
+                and generation
+                and generation[0] == "wgpu-source-plane"
+            ):
+                global_binding = True
+                break
+        if not global_binding:
+            continue
+        actual_origin = tuple(
+            float(value) for value in tuple(row.get("physical_source_origin_xy", ()) or ())
+        )
+        if actual_origin != expected_origin:
+            origin_mismatches.append(
+                {
+                    "tile": int(tile),
+                    "expected_origin_xy": expected_origin,
+                    "actual_origin_xy": actual_origin,
+                }
+            )
+
+    passed = bool(session_anchor_matches and not payload_mismatches and not origin_mismatches)
+    return {
+        "applicable": True,
+        "passed": passed,
+        "payload_count": len(payloads),
+        "physical_tile_count": len(physical_rows),
+        "expected_start_yx": expected_starts,
+        "actual_start_yx": actual_starts,
+        "session_anchor_matches": session_anchor_matches,
+        "payload_anchor_mismatches": tuple(payload_mismatches),
+        "global_origin_mismatches": tuple(origin_mismatches),
+    }
+
+
+def _physical_frame_reference_truth(win, *, backend: str) -> dict[str, object]:
+    """Render/read the maintained backend and compare its pixels with CPU truth."""
+
+    from arrayscope.tools.framebuffer_reference import (
+        qt_raster_matches_cpu_reference,
+        wgpu_frame_matches_cpu_reference,
+    )
+
+    try:
+        if backend == "wgpu":
+            report = wgpu_frame_matches_cpu_reference(win)
+        elif backend == "pyqtgraph":
+            report = qt_raster_matches_cpu_reference(win)
+        else:
+            return {"applicable": False, "passed": True}
+    except Exception as exc:
+        return {
+            "applicable": True,
+            "passed": False,
+            "error": repr(exc),
+            "failures": (),
+        }
+    failures = tuple(report.failures())
+    return {
+        "applicable": True,
+        "passed": not failures,
+        "frame_shape": tuple(int(value) for value in report.frame_shape),
+        "tile_count": len(report.tiles),
+        "total_samples": int(report.total_samples),
+        "failures": tuple(asdict(failure) for failure in failures),
+    }
+
+
+def _apply_all_dimension_scroll_stress(
+    win,
+    *,
+    app,
+    QtCore,
+    backend: str,
+) -> dict[str, object]:
+    """Exercise coalesced fast and fully settled slow scrolls on every axis."""
+
+    base_state = win.view_state
+    physical_rows_fn = getattr(getattr(win, "img_view", None), "tileTruthPhysicalRows", None)
+    results: list[dict[str, object]] = []
+    physical_counts: list[int] = []
+    source_truth_checks: list[dict[str, object]] = []
+    physical_reference_checks: list[dict[str, object]] = []
+    visual_checkpoint_count = 0
+    uploads_before = _wgpu_upload_total(win)
+
+    def apply_state(axis: int, state, *, reason: str) -> None:
+        apply_slice_state = getattr(win, "_apply_slice_state", None)
+        if callable(apply_slice_state):
+            apply_slice_state(
+                int(axis),
+                state,
+                reason=reason,
+                interactive=True,
+                immediate_axis_only=False,
+            )
+        else:
+            win._set_view_state(state)
+            win.render(reason=reason)
+
+    def settle(
+        predecessor_session_id: int,
+        *,
+        checkpoint: str,
+    ) -> tuple[bool, bool, float]:
+        nonlocal visual_checkpoint_count
+        started = perf_counter()
+        settled = _wait_for_montage_successor_settled(
+            win=win,
+            app=app,
+            QtCore=QtCore,
+            predecessor_session_id=predecessor_session_id,
+            budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+        )
+        current = _committed_display_frame_is_current(win)
+        if callable(physical_rows_fn):
+            physical_counts.append(len(dict(physical_rows_fn() or {})))
+        if backend == "wgpu":
+            source_truth_checks.append(_wgpu_source_window_truth(win))
+        physical_reference_checks.append(_physical_frame_reference_truth(win, backend=backend))
+        visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
+        capture = getattr(visual_probe, "capture", None)
+        if callable(capture):
+            capture(f"all-dimension-{checkpoint}")
+            visual_checkpoint_count += 1
+        return bool(settled), bool(current), max(0.0, (perf_counter() - started) * 1000.0)
+
+    for axis in range(int(base_state.ndim)):
+        axis_uploads_before = _wgpu_upload_total(win)
+        direction = _profile_axis_shift_direction(base_state, axis)
+        if axis == base_state.montage_axis:
+            role = "montage"
+        elif axis in tuple(base_state.image_axes or ()):
+            role = "display"
+        else:
+            role = "slice"
+
+        predecessor = getattr(win.renderer, "_frame_session", None)
+        predecessor_id = int(getattr(predecessor, "session_id", -1) or -1)
+        for step in (1, 2, 3):
+            apply_state(
+                axis,
+                _shift_profile_axis_window(base_state, axis, direction * step),
+                reason=f"profile-all-dims-axis-{axis}-fast",
+            )
+        fast_settled, fast_current, fast_settle_ms = settle(
+            predecessor_id,
+            checkpoint=f"axis-{axis}-fast",
+        )
+
+        predecessor = getattr(win.renderer, "_frame_session", None)
+        predecessor_id = int(getattr(predecessor, "session_id", -1) or -1)
+        apply_state(axis, base_state, reason=f"profile-all-dims-axis-{axis}-fast-restore")
+        fast_restore_settled, fast_restore_current, fast_restore_ms = settle(
+            predecessor_id,
+            checkpoint=f"axis-{axis}-fast-restore",
+        )
+
+        predecessor = getattr(win.renderer, "_frame_session", None)
+        predecessor_id = int(getattr(predecessor, "session_id", -1) or -1)
+        apply_state(
+            axis,
+            _shift_profile_axis_window(base_state, axis, direction),
+            reason=f"profile-all-dims-axis-{axis}-slow",
+        )
+        slow_forward_settled, slow_forward_current, slow_forward_ms = settle(
+            predecessor_id,
+            checkpoint=f"axis-{axis}-slow",
+        )
+
+        predecessor = getattr(win.renderer, "_frame_session", None)
+        predecessor_id = int(getattr(predecessor, "session_id", -1) or -1)
+        apply_state(axis, base_state, reason=f"profile-all-dims-axis-{axis}-slow-return")
+        slow_return_settled, slow_return_current, slow_return_ms = settle(
+            predecessor_id,
+            checkpoint=f"axis-{axis}-slow-return",
+        )
+        axis_uploads_after = _wgpu_upload_total(win)
+
+        results.append(
+            {
+                "axis": int(axis),
+                "role": role,
+                "direction": int(direction),
+                "fast_input_steps": 3,
+                "fast_settled": bool(fast_settled),
+                "fast_committed_current": bool(fast_current),
+                "fast_settle_ms": float(fast_settle_ms),
+                "fast_restore_settled": bool(fast_restore_settled),
+                "fast_restore_committed_current": bool(fast_restore_current),
+                "fast_restore_settle_ms": float(fast_restore_ms),
+                "slow_input_steps": 2,
+                "slow_forward_settled": bool(slow_forward_settled),
+                "slow_forward_committed_current": bool(slow_forward_current),
+                "slow_forward_settle_ms": float(slow_forward_ms),
+                "slow_return_settled": bool(slow_return_settled),
+                "slow_return_committed_current": bool(slow_return_current),
+                "slow_return_settle_ms": float(slow_return_ms),
+                "wgpu_upload_delta": (
+                    None
+                    if axis_uploads_before is None or axis_uploads_after is None
+                    else int(axis_uploads_after - axis_uploads_before)
+                ),
+            }
+        )
+
+    uploads_after = _wgpu_upload_total(win)
+    all_settled = bool(
+        len(results) == int(base_state.ndim)
+        and all(
+            bool(result["fast_settled"])
+            and bool(result["fast_restore_settled"])
+            and bool(result["slow_forward_settled"])
+            and bool(result["slow_return_settled"])
+            for result in results
+        )
+    )
+    all_current = bool(
+        len(results) == int(base_state.ndim)
+        and all(
+            bool(result["fast_committed_current"])
+            and bool(result["fast_restore_committed_current"])
+            and bool(result["slow_forward_committed_current"])
+            and bool(result["slow_return_committed_current"])
+            for result in results
+        )
+    )
+
+    def role_upload_delta(role: str) -> int | None:
+        values = [result["wgpu_upload_delta"] for result in results if result["role"] == role]
+        if not values or any(value is None for value in values):
+            return None
+        return sum(int(value) for value in values)
+
+    return {
+        "axis_count": len(results),
+        "expected_axis_count": int(base_state.ndim),
+        "all_settled": all_settled,
+        "all_committed_current": all_current,
+        "results": tuple(results),
+        "physical_sample_count": len(physical_counts),
+        "minimum_physical_tile_count": min(physical_counts, default=0),
+        "wgpu_upload_delta": (
+            None
+            if uploads_before is None or uploads_after is None
+            else int(uploads_after - uploads_before)
+        ),
+        "display_role_wgpu_upload_delta": role_upload_delta("display"),
+        "montage_role_wgpu_upload_delta": role_upload_delta("montage"),
+        "slice_role_wgpu_upload_delta": role_upload_delta("slice"),
+        "wgpu_source_truth_check_count": len(source_truth_checks),
+        "wgpu_source_truth_passed": bool(
+            backend != "wgpu"
+            or (
+                source_truth_checks
+                and all(bool(check.get("passed", False)) for check in source_truth_checks)
+            )
+        ),
+        "wgpu_source_truth_failures": tuple(
+            check for check in source_truth_checks if not bool(check.get("passed", False))
+        ),
+        "physical_reference_check_count": len(physical_reference_checks),
+        "physical_reference_passed": bool(
+            physical_reference_checks
+            and all(bool(check.get("passed", False)) for check in physical_reference_checks)
+        ),
+        "physical_reference_failures": tuple(
+            check for check in physical_reference_checks if not bool(check.get("passed", False))
+        ),
+        "visual_checkpoint_count": int(visual_checkpoint_count),
+    }
+
+
 def _parse_stage_flags(values: tuple[str, ...] | None) -> tuple[str, ...]:
     parsed: list[str] = []
     for value in tuple(values or ()):
@@ -905,6 +1307,22 @@ def run_profile_montage_workflow(
                     for result in crop_scenario_results
                 )
             )
+            final_settled = bool(final_settled) and _wait_for_montage_complete_soft(
+                win=win,
+                app=app,
+                QtCore=QtCore,
+                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
+            )
+            all_dimension_scroll = _apply_all_dimension_scroll_stress(
+                win,
+                app=app,
+                QtCore=QtCore,
+                backend=backend,
+            )
+            if int(all_dimension_scroll["physical_sample_count"]) > 0:
+                physical_tile_counts.append(
+                    int(all_dimension_scroll["minimum_physical_tile_count"])
+                )
             view_range = _montage_view_range(win)
             if view_range is not None:
                 zoomed_out = _maximum_zoomout_view_range(
@@ -918,12 +1336,6 @@ def run_profile_montage_workflow(
                 win,
                 app,
                 QtCore,
-                budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
-            )
-            final_settled = bool(final_settled) and _wait_for_montage_complete_soft(
-                win=win,
-                app=app,
-                QtCore=QtCore,
                 budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
             )
             # The field stall needs the combination, not an isolated crop:
@@ -1069,6 +1481,58 @@ def run_profile_montage_workflow(
                     default=0.0,
                 ),
                 "display_axis_crop_scenarios": tuple(crop_scenario_results),
+                "display_axis_all_dimension_scroll_axis_count": int(
+                    all_dimension_scroll["axis_count"]
+                ),
+                "display_axis_all_dimension_scroll_expected_axis_count": int(
+                    all_dimension_scroll["expected_axis_count"]
+                ),
+                "display_axis_all_dimension_scrolls_settled": bool(
+                    all_dimension_scroll["all_settled"]
+                ),
+                "display_axis_all_dimension_scrolls_committed_current": bool(
+                    all_dimension_scroll["all_committed_current"]
+                ),
+                "display_axis_all_dimension_scroll_results": tuple(all_dimension_scroll["results"]),
+                "display_axis_all_dimension_scroll_physical_sample_count": int(
+                    all_dimension_scroll["physical_sample_count"]
+                ),
+                "display_axis_all_dimension_scroll_min_physical_tile_count": int(
+                    all_dimension_scroll["minimum_physical_tile_count"]
+                ),
+                "display_axis_all_dimension_scroll_wgpu_upload_delta": (
+                    all_dimension_scroll["wgpu_upload_delta"]
+                ),
+                "display_axis_all_dimension_display_roles_wgpu_upload_delta": (
+                    all_dimension_scroll["display_role_wgpu_upload_delta"]
+                ),
+                "display_axis_all_dimension_montage_role_wgpu_upload_delta": (
+                    all_dimension_scroll["montage_role_wgpu_upload_delta"]
+                ),
+                "display_axis_all_dimension_slice_roles_wgpu_upload_delta": (
+                    all_dimension_scroll["slice_role_wgpu_upload_delta"]
+                ),
+                "display_axis_wgpu_source_truth_check_count": int(
+                    all_dimension_scroll["wgpu_source_truth_check_count"]
+                ),
+                "display_axis_wgpu_source_truth_passed": bool(
+                    all_dimension_scroll["wgpu_source_truth_passed"]
+                ),
+                "display_axis_wgpu_source_truth_failures": tuple(
+                    all_dimension_scroll["wgpu_source_truth_failures"]
+                ),
+                "display_axis_physical_reference_check_count": int(
+                    all_dimension_scroll["physical_reference_check_count"]
+                ),
+                "display_axis_physical_reference_passed": bool(
+                    all_dimension_scroll["physical_reference_passed"]
+                ),
+                "display_axis_physical_reference_failures": tuple(
+                    all_dimension_scroll["physical_reference_failures"]
+                ),
+                "display_axis_visual_checkpoint_count": int(
+                    all_dimension_scroll["visual_checkpoint_count"]
+                ),
                 "display_axis_crop_matrix_wgpu_upload_delta": (
                     None
                     if uploads_before_crop_matrix is None or uploads_after_crop_matrix is None
@@ -6941,6 +7405,66 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             },
             target="every crop-matrix successor settles with a current committed frame",
         )
+        all_dimension_results = tuple(
+            record.get("display_axis_all_dimension_scroll_results", ()) or ()
+        )
+        expected_axis_count = int(
+            record.get("display_axis_all_dimension_scroll_expected_axis_count", 0) or 0
+        )
+        require(
+            "display_axis_all_dimensions_scrolled_fast_and_slow",
+            expected_axis_count > 0
+            and int(record.get("display_axis_all_dimension_scroll_axis_count", 0) or 0)
+            == expected_axis_count
+            and len(all_dimension_results) == expected_axis_count
+            and all(
+                int(result.get("fast_input_steps", 0) or 0) == 3
+                and int(result.get("slow_input_steps", 0) or 0) == 2
+                for result in all_dimension_results
+            ),
+            evidence={
+                "expected_axes": expected_axis_count,
+                "axis_count": record.get("display_axis_all_dimension_scroll_axis_count"),
+                "results": all_dimension_results,
+            },
+            target=(
+                "every dimension receives a three-input coalesced fast burst "
+                "and a settled forward/return slow scroll"
+            ),
+        )
+        require(
+            "display_axis_all_dimension_scrolls_settle_current",
+            bool(record.get("display_axis_all_dimension_scrolls_settled", False))
+            and bool(
+                record.get(
+                    "display_axis_all_dimension_scrolls_committed_current",
+                    False,
+                )
+            ),
+            evidence={
+                "settled": record.get("display_axis_all_dimension_scrolls_settled"),
+                "committed_current": record.get(
+                    "display_axis_all_dimension_scrolls_committed_current"
+                ),
+                "results": all_dimension_results,
+            },
+            target="every fast and slow all-dimension checkpoint settles to the current frame",
+        )
+        require(
+            "display_axis_all_dimension_pixels_match_cpu_reference",
+            int(record.get("display_axis_physical_reference_check_count", 0) or 0)
+            == expected_axis_count * 4
+            and bool(record.get("display_axis_physical_reference_passed", False)),
+            evidence={
+                "checks": record.get("display_axis_physical_reference_check_count"),
+                "failures": record.get("display_axis_physical_reference_failures"),
+                "visual_checkpoints": record.get("display_axis_visual_checkpoint_count"),
+            },
+            target=(
+                "the rendered WGPU target or PyQtGraph raster matches CPU semantic "
+                "pixels after every fast, restore, slow-forward, and slow-return checkpoint"
+            ),
+        )
         require(
             "display_axis_physical_continuity",
             requested > 0 and continuity_min == requested,
@@ -6990,8 +7514,33 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             crop_uploads = record.get("display_axis_crop_wgpu_upload_delta")
             scroll_uploads = record.get("display_axis_scroll_wgpu_upload_delta")
             crop_matrix_uploads = record.get("display_axis_crop_matrix_wgpu_upload_delta")
+            all_dimension_uploads = record.get(
+                "display_axis_all_dimension_scroll_wgpu_upload_delta"
+            )
+            all_dimension_display_uploads = record.get(
+                "display_axis_all_dimension_display_roles_wgpu_upload_delta"
+            )
+            all_dimension_montage_uploads = record.get(
+                "display_axis_all_dimension_montage_role_wgpu_upload_delta"
+            )
+            all_dimension_slice_uploads = record.get(
+                "display_axis_all_dimension_slice_roles_wgpu_upload_delta"
+            )
             axis_swap_uploads = record.get("display_axis_xy_swap_wgpu_upload_delta")
             single_slice_uploads = record.get("display_axis_single_slice_wgpu_upload_delta")
+            require(
+                "display_axis_wgpu_source_window_truth",
+                int(record.get("display_axis_wgpu_source_truth_check_count", 0) or 0) > 0
+                and bool(record.get("display_axis_wgpu_source_truth_passed", False)),
+                evidence={
+                    "checks": record.get("display_axis_wgpu_source_truth_check_count"),
+                    "failures": record.get("display_axis_wgpu_source_truth_failures"),
+                },
+                target=(
+                    "every all-dimension checkpoint keeps the session anchor, "
+                    "payload source rect, and committed global sampler origin current"
+                ),
+            )
             require(
                 "display_axis_cold_crop_bindings_do_not_alias",
                 bool(record.get("display_axis_wgpu_cold_binding_identity_unique", False)),
@@ -7011,20 +7560,26 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
                 crop_uploads == 0
                 and scroll_uploads == 0
                 and crop_matrix_uploads == 0
+                and all_dimension_display_uploads == 0
                 and axis_swap_uploads == 0
                 and single_slice_uploads == 0,
                 evidence={
                     "initial_crop_uploads": crop_uploads,
                     "scroll_uploads": scroll_uploads,
                     "crop_matrix_uploads": crop_matrix_uploads,
+                    "all_dimension_scroll_uploads": all_dimension_uploads,
+                    "all_dimension_display_role_uploads": all_dimension_display_uploads,
+                    "all_dimension_montage_role_uploads": all_dimension_montage_uploads,
+                    "all_dimension_slice_role_uploads": all_dimension_slice_uploads,
                     "axis_swap_uploads": axis_swap_uploads,
                     "single_slice_uploads": single_slice_uploads,
                     "scroll_steps": int(record.get("display_axis_slice_scroll_steps", 0) or 0),
                 },
                 target=(
                     "the full montage prewarms reusable source pages; the "
-                    "crop, every in-page +/-1 scroll, X/Y swaps, and cached "
-                    "single-slice successors perform zero uploads"
+                    "crop, every displayed-axis in-page +/-1 scroll, X/Y "
+                    "swaps, and cached single-slice successors perform zero "
+                    "uploads; montage-axis demand is reported separately"
                 ),
                 category="performance",
             )

@@ -160,3 +160,68 @@ thread.
 
 This dossier will be updated with each bounded optimization and its before /
 after evidence.
+
+## 2026-07-24 stale-crop and full-pool follow-up
+
+The expanded all-dimension journey reproduced a worse failure than slow
+settlement: after shifting both displayed-axis windows and then scrolling
+other dimensions, the lifecycle could report a fully current 50/50 frame
+while physical tiles sampled several predecessor crop origins.
+
+Three mutable-owner leaks formed the stale-pixel chain:
+
+1. an in-place `FrameSession` retarget updated `view_state` but retained the
+   session's original `source_anchoring`;
+2. asynchronous preview completion derived its page/source anchor from that
+   mutable live session instead of the immutable rendered tile snapshot; and
+3. a queued presentation-gate event derived its owner generation when it ran,
+   so an event posted by a predecessor could act for its successor.
+
+The session retarget now replaces source anchoring before payload restamping,
+preview work derives anchoring from its immutable tile state, and every queued
+presentation gate carries the owner generation captured at post time.
+Physical WGPU diagnostics expose the committed source origin and extent.
+
+The regression no longer stops at lifecycle identities. In both maintained
+backends it keeps both displayed axes cropped, applies fast/slow scrolls over
+all dimensions, and compares every settled checkpoint with CPU semantic
+pixels. WGPU also checks session/payload/physical source-origin agreement;
+deterministic screenshots are retained when requested.
+
+The full 272-plane `(336, 336, 272)` run exposed a related capacity-accounting
+bug. A reduced preview texture occupies one page, but the commit deliberately
+replaces it with four reusable 256-square native pages. Pool admission counted
+the preview (272 pages), then tried to install `272 × 4 = 1088` native pages
+under a 1024-page retention preference and failed once every resident page
+was bound. Admission now counts the physical replacement, treats byte policy
+as retention rather than correctness, and reserves the immutable frame-plan
+working set in one copy-preserving growth. The offscreen Vulkan full-file
+repro completed 272/272 with 1088 resident/pinned pages and no exhaustion;
+pool growth fell from 15 resizes / 2.88 GB copied to one resize / 6 MB copied.
+This is diagnostic GPU evidence; the real-Wayland ring remains the acceptance
+gate for presentation timing and compositor pixels.
+
+Two adjacent capacity/fallback defects were fixed in the same owner:
+
+- the byte policy is one cross-representation retention budget, apportioned
+  across scalar, complex, RGB, and windowable-RGBA pools; it is no longer
+  interpreted as a target to fill independently in every representation;
+- a cold, factor-misaligned crop wider than one stored page now assembles its
+  already-materialized logical pages into one bounded local upload. Failure to
+  use canonical resident pages is therefore not a fatal geometry error.
+
+The all-stage real-data run on 50 tiles kept every X/Y all-dimension physical
+checkpoint green on WGPU and PyQtGraph (12 checks per stage, no pixel or source
+origin failures). It remains honestly red on standing performance and
+window/level-continuity bars in unrelated FFT/zoom/scroll stages; the one
+recorded stall was a committed-frame-stale diagnostic with no required tile
+unsettled, not a page-pool exhaustion. Those bars are not claimed by this
+correctness slice.
+
+Artifacts:
+
+- `/tmp/arrayscope-full272-noscreens.SzQoXT/result.jsonl`
+- `/tmp/arrayscope-full272-planned.DmR2Vl/result.jsonl`
+- `/tmp/arrayscope-physical-visual-fixed.I2rsbq/`
+- `/tmp/arrayscope-profile-final.L4Mxmx/result.jsonl`
+- `/tmp/arrayscope-profile-final.L4Mxmx/trace.jsonl`

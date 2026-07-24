@@ -55,6 +55,15 @@ to the cumulative duration of a scenario with several steps. Profile CLI
 values above the limit are clamped, and the architecture guard rejects local
 settlement-timeout owners.
 
+The profiler's displayed-X and displayed-Y stages keep both view axes cropped
+while they apply fast and slow scrolls to every dimension. Their settled
+checkpoints are physical-pixel gates: WGPU's executor target and PyQtGraph's
+raster must match the CPU semantic reference, and WGPU's source origin must
+match the immutable crop anchor. `--screenshot-dir` preserves those
+checkpoints for human comparison. The WGPU upload verdict distinguishes
+display-axis rebinds (zero upload required) from montage-axis motion (cold
+demand reported independently).
+
 **Enforcement gap, stated honestly:** rings 3–4 need a real compositor and
 real GL, and CI is entirely offscreen software-GL. The rule is therefore
 personal, not scheduled: **whoever (human or agent) changes a

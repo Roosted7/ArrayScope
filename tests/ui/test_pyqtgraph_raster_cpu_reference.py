@@ -17,10 +17,10 @@ import numpy as np
 import pyqtgraph as pg
 import pytest
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.oracles.framebuffer_reference import (
+from arrayscope.tools.framebuffer_reference import (
     assert_qt_raster_matches_cpu_reference,
 )
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,

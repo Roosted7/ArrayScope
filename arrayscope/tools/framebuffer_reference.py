@@ -1,4 +1,4 @@
-"""General physical-pixels-to-CPU reference oracle.
+"""General physical-pixels-to-CPU reference oracle for tools and tests.
 
 Closes the "visibly wrong but every label truthful" gap named in
 docs/testing/stress-and-trace-strategy.md (addendum law 2: *intent is not
@@ -177,10 +177,20 @@ def resolve_reference_mapping(win, payload) -> ShaderMapping:
     return replace(mapping, levels=levels, lut_data=lut_data)
 
 
-def cpu_reference_tile_image(payload, mapping) -> tuple[np.ndarray, np.ndarray]:
+def cpu_reference_tile_image(payload, mapping, *, values=None) -> tuple[np.ndarray, np.ndarray]:
     """(expected RGB uint8 (th, tw, 3), background mask) for one payload."""
 
-    values = payload_semantic_values(payload)
+    if values is None:
+        values = payload_semantic_values(payload)
+    else:
+        values = np.asarray(values)
+        if payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F and not np.iscomplexobj(values):
+            if values.ndim < 3 or values.shape[-1] != 2:
+                raise AssertionError(
+                    f"tile {payload.tile_number}: complex reference values have "
+                    f"shape {values.shape}, expected trailing real/imag planes"
+                )
+            values = values[..., 0] + 1j * values[..., 1]
     kind = payload_display_kind(payload)
     if kind == "phase_vector":
         # Mode 5: reduced circular-mean pages — hue from phase, intensity is
@@ -254,6 +264,42 @@ def _required_payloads_and_plan(win, tiles=None):
     if missing_plan:
         raise AssertionError(f"required tiles missing from the montage plan: {missing_plan}")
     return required, payloads, plan_tiles
+
+
+def _native_reference_values(win, session, tile, payload) -> np.ndarray:
+    """Return independent CPU values for a native page-backed WGPU draw."""
+
+    native = getattr(payload, "native_residency_data", None)
+    if native is None:
+        native = payload.semantic_data
+    if native is not None:
+        return np.asarray(native)
+
+    # A resident native source plane can outlive the exact RenderedTile that
+    # populated it.  A later reduced page-backed payload may therefore draw
+    # that better plane without retaining a native array in its wrapper.  For
+    # a physical-truth check, recompute the immutable tile snapshot on CPU
+    # rather than reading the GPU page back and using the backend as its own
+    # oracle.
+    from arrayscope.operations.evaluator import (
+        evaluate_image_snapshot,
+        stage_document_key,
+    )
+
+    evaluator = win.operation_evaluator
+    result = evaluate_image_snapshot(
+        session.document,
+        tile.view_state,
+        colormap_lut=session.colormap_lut,
+        shader_display=bool(getattr(session, "shader_display", False)),
+        provisional_histogram=False,
+        stage_cache=getattr(evaluator, "_stage_cache", None),
+        stage_document_key=stage_document_key(session.document),
+        canonical_orientation=bool(getattr(session, "canonical_orientation", False)),
+    )
+    value = result.value
+    semantic = getattr(value, "semantic_data", None)
+    return np.asarray(value.data if semantic is None else semantic)
 
 
 def _assert_exact_tile_coverage(required, reports) -> None:
@@ -343,6 +389,13 @@ def qt_raster_matches_cpu_reference(
             "Qt-raster CPU-reference oracle needs the PyQtGraph montage tile layer"
         )
     required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
+    session = win.renderer._frame_session
+    image_axes = tuple(int(axis) for axis in (session.view_state.image_axes or ()))
+    transposed = bool(
+        getattr(session, "canonical_orientation", False)
+        and len(image_axes) == 2
+        and image_axes[0] > image_axes[1]
+    )
     viewport = img_view.graphicsView.viewport()
     pixmap = viewport.grab()
     if pixmap.isNull():
@@ -376,6 +429,9 @@ def qt_raster_matches_cpu_reference(
             )
         mapping = resolve_reference_mapping(win, payload)
         expected_rgb, background_mask, gutter = qt_scalar_reference_tile_image(payload, mapping)
+        if transposed:
+            expected_rgb = np.swapaxes(expected_rgb, 0, 1)
+            background_mask = np.swapaxes(background_mask, 0, 1)
         expected_rgb = expected_rgb.astype(np.int16)
         tex_h, tex_w = expected_rgb.shape[:2]
         inner_w = max(1e-9, float(tex_w - 2 * gutter))
@@ -688,6 +744,19 @@ def wgpu_frame_matches_cpu_reference(
     if executor is None:
         raise AssertionError("WGPU CPU-reference oracle needs a live WGPU executor")
     required, payloads, plan_tiles = _required_payloads_and_plan(win, tiles)
+    ui_levels = tuple(float(value) for value in img_view.getLevels())
+    physical_levels = (
+        float(img_view._wgpu_mapping_state.level_lo),
+        float(img_view._wgpu_mapping_state.level_hi),
+    )
+    if not np.allclose(ui_levels, physical_levels, rtol=0.0, atol=1e-6):
+        session = win.renderer._frame_session
+        level_snapshot = session.level_presentation_snapshot()
+        raise AssertionError(
+            "WGPU display mapping is stale relative to the semantic level "
+            f"owner: ui_levels={ui_levels}, physical_levels={physical_levels}, "
+            f"level_snapshot={level_snapshot!r}"
+        )
     camera = img_view._wgpu_camera_command()
     if camera is None:
         raise AssertionError("WGPU CPU-reference oracle needs a non-degenerate camera")
@@ -714,12 +783,31 @@ def wgpu_frame_matches_cpu_reference(
         raise AssertionError(f"degenerate WGPU camera: {camera!r}")
 
     transposed = bool(getattr(img_view, "_wgpu_committed", {}).get("transposed", False))
+    committed_tiles = dict(getattr(img_view, "_wgpu_committed", {}).get("tiles", {}) or {})
     reports: list[TileComparison] = []
     for tile_number in sorted(required):
         tile = plan_tiles[tile_number]
         payload = payloads[tile_number]
         mapping = resolve_reference_mapping(win, payload)
-        expected_rgb, background_mask = cpu_reference_tile_image(payload, mapping)
+        committed_info = dict(committed_tiles.get(tile_number, {}) or {})
+        physical_lod = int(committed_info.get("lod_level", 0) or 0)
+        payload_lod = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
+        # A reduced candidate is allowed to bind already-resident native
+        # source pages.  In that case the GPU samples the payload's exact
+        # semantic plane, not its coarser presentation texture.  Comparing
+        # against the latter makes a sharper frame look wrong and, worse,
+        # cannot detect a stale native crop.  The semantic plane is immutable
+        # worker output and therefore remains independent of backend storage.
+        reference_values = (
+            _native_reference_values(win, win.renderer._frame_session, tile, payload)
+            if physical_lod == 0 and payload_lod > 0
+            else None
+        )
+        expected_rgb, background_mask = cpu_reference_tile_image(
+            payload,
+            mapping,
+            values=reference_values,
+        )
         expected_rgb = expected_rgb.astype(np.int16)
         tex_h, tex_w = expected_rgb.shape[:2]
         gutter = int(payload.lod.gutter) if payload.lod is not None else 0
@@ -880,10 +968,56 @@ def assert_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
 def assert_wgpu_frame_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
     """Asserting form of :func:`wgpu_frame_matches_cpu_reference`."""
 
-    return _assert_report(
-        wgpu_frame_matches_cpu_reference(win, **kwargs),
-        label="WGPU target",
-    )
+    report = wgpu_frame_matches_cpu_reference(win, **kwargs)
+    try:
+        return _assert_report(report, label="WGPU target")
+    except AssertionError as exc:
+        rows = dict(win.img_view.tileTruthPhysicalRows() or {})
+        physical_lods: dict[int, int] = {}
+        for row in rows.values():
+            level = int(row.get("physical_lod_level", 0) or 0)
+            physical_lods[level] = physical_lods.get(level, 0) + 1
+        session = win.renderer._frame_session
+        committed = dict(getattr(win.img_view, "_wgpu_committed", {}) or {})
+        committed_tiles = dict(committed.get("tiles", {}) or {})
+        sample_tile = min(committed_tiles, default=None)
+        sample_info = (
+            {} if sample_tile is None else dict(committed_tiles.get(sample_tile, {}) or {})
+        )
+        sample_payload = (
+            None
+            if sample_tile is None
+            else dict(session.display_tile_payloads).get(int(sample_tile))
+        )
+        sample_anchor = getattr(sample_payload, "source_anchor", None)
+        sample_rendered = (
+            None if sample_tile is None else dict(session.rendered_tiles).get(int(sample_tile))
+        )
+        sample_plan_tile = next(
+            (
+                tile
+                for tile in tuple(session.plan.tiles)
+                if int(tile.montage_index) == int(sample_tile)
+            ),
+            None,
+        )
+        raise AssertionError(
+            f"{exc}\n"
+            f"  physical_lods={physical_lods}, "
+            f"desired_lod={getattr(session, 'desired_lod_level', None)}, "
+            f"target_settled={session.required_target_settled()}, "
+            f"levels={tuple(float(value) for value in win.img_view.getLevels())}, "
+            f"sample_committed_world={sample_info.get('world_rect')}, "
+            f"sample_plan_world={None if sample_plan_tile is None else (sample_plan_tile.x0, sample_plan_tile.y0, sample_plan_tile.width, sample_plan_tile.height)}, "
+            f"sample_src_origin={sample_info.get('src_origin')}, "
+            f"sample_src_size={sample_info.get('src_size')}, "
+            f"sample_texture_shape={None if sample_payload is None else np.asarray(sample_payload.texture_data).shape}, "
+            f"sample_rendered_shape={None if sample_rendered is None else np.asarray(sample_rendered.image).shape}, "
+            f"sample_rendered_semantic_shape={None if sample_rendered is None or sample_rendered.semantic_data is None else np.asarray(sample_rendered.semantic_data).shape}, "
+            f"sample_native_residency_shape={None if sample_payload is None or sample_payload.native_residency_data is None else np.asarray(sample_payload.native_residency_data).shape}, "
+            f"sample_anchor={sample_anchor!r}, "
+            f"bound_plane_shapes={tuple(plane.plane_shape for plane in win.img_view._wgpu_executor._bound_planes)}"
+        ) from exc
 
 
 def assert_qt_raster_matches_cpu_reference(win, **kwargs) -> FrameReferenceReport:
