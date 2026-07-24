@@ -202,12 +202,25 @@ def soft_thresh_spec() -> PluginOperationSpec:
         label="Soft threshold (sigpy)",
         build=_build_thresh("soft"),
         output_dtype=_thresh_output_dtype,
-        parameters=(OperationParameter("lamda", "Threshold λ", kind="float"),),
+        parameters=(
+            OperationParameter(
+                "lamda",
+                "Threshold λ",
+                kind="float",
+                default=0.0,
+                minimum=0.0,
+                step=0.01,
+                description="Magnitude shrinkage: sign(x)·max(|x|-λ, 0).",
+            ),
+        ),
         requires_axis=False,
         changes_shape=False,
         # Strictly pointwise (magnitude shrinkage) -> a genuine Tier-2 windowable
         # claim, honored only after the conformance harness proves it.
         region_capable=True,
+        group="SigPy",
+        description="L1 soft-threshold (magnitude shrinkage) every sample.",
+        icon="filter_alt",
     )
 
 
@@ -217,11 +230,24 @@ def hard_thresh_spec() -> PluginOperationSpec:
         label="Hard threshold (sigpy)",
         build=_build_thresh("hard"),
         output_dtype=_thresh_output_dtype,
-        parameters=(OperationParameter("lamda", "Threshold λ", kind="float"),),
+        parameters=(
+            OperationParameter(
+                "lamda",
+                "Threshold λ",
+                kind="float",
+                default=0.0,
+                minimum=0.0,
+                step=0.01,
+                description="Keep samples with |x| > λ, zero the rest.",
+            ),
+        ),
         requires_axis=False,
         changes_shape=False,
         # Strictly pointwise (keep-or-kill by magnitude) -> Tier-2 windowable.
         region_capable=True,
+        group="SigPy",
+        description="Keep samples above magnitude λ, zero the rest.",
+        icon="filter_alt",
     )
 
 
@@ -232,11 +258,22 @@ def resize_spec() -> PluginOperationSpec:
         build=_build_resize,
         output_shape=_resize_output_shape,
         # sigpy.resize allocates in the input dtype -> identity dtype adapter.
-        parameters=(OperationParameter("size", "Target size", kind="int"),),
+        parameters=(
+            OperationParameter(
+                "size",
+                "Target size",
+                kind="int",
+                minimum=1,
+                description="Centered zero-pad (grow) or center-crop (shrink) to this length.",
+            ),
+        ),
         requires_axis=True,
         changes_shape=True,
         # Centered resize re-indexes the whole axis and changes shape -> OPAQUE.
         region_capable=False,
+        group="SigPy",
+        description="Centered zero-pad / center-crop one axis to a target length.",
+        icon="aspect_ratio",
     )
 
 

@@ -795,15 +795,10 @@ class OperationActionsMixin:
 
 
 def _operation_icon_name(operation_id):
-    return {
-        "crop": "crop",
-        "mean": "functions",
-        "sum": "functions",
-        "max": "vertical_align_top",
-        "min": "vertical_align_bottom",
-        "rss": "analytics",
-        "centered_fft": "waves",
-        "centered_ifft": "waves",
-        "combine_real_imag": "join_inner",
-        "split_complex": "call_split",
-    }.get(operation_id, "data_array")
+    # Icon knowledge now lives on the registry entry (``entry.icon``); this stays
+    # a thin lookup so existing callers are unchanged. Falls back to the generic
+    # icon for an unknown/uninstalled id rather than raising.
+    try:
+        return get_operation_entry(operation_id).icon
+    except ValueError:
+        return "data_array"

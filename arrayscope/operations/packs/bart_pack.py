@@ -467,6 +467,9 @@ def fft_spec() -> PluginOperationSpec:
         changes_shape=False,
         # Global transform along the axis, run out-of-process -> OPAQUE / Tier-1.
         region_capable=False,
+        group="BART",
+        description="Centered forward FFT along one axis (via the BART binary).",
+        icon="waves",
     )
 
 
@@ -479,6 +482,9 @@ def ifft_spec() -> PluginOperationSpec:
         requires_axis=True,
         changes_shape=False,
         region_capable=False,
+        group="BART",
+        description="Centered inverse FFT (unnormalized) along one axis (via BART).",
+        icon="waves",
     )
 
 
@@ -493,6 +499,9 @@ def cabs_spec() -> PluginOperationSpec:
         # Pointwise, but kept OPAQUE: a per-region subprocess round-trip is never
         # the right execution for an expensive out-of-process op.
         region_capable=False,
+        group="BART",
+        description="Elementwise complex magnitude |x| (via the BART binary).",
+        icon="filter_alt",
     )
 
 

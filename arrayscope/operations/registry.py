@@ -29,6 +29,48 @@ class OperationParameter:
     name: str
     label: str
     kind: str = "int"
+    # Richer metadata for form rendering / value coercion. All optional so
+    # existing constructions (positional name/label/kind) keep working and older
+    # recipes/packs that never set these fields behave exactly as before.
+    default: int | float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    step: int | float | None = None
+    description: str = ""
+
+
+# Group taxonomy for presenting operations in menus / palettes. Entries keep
+# their real ``group``; "Common" is a *presentation* concern surfaced via
+# ``COMMON_OPERATION_IDS`` / :func:`is_common`, not a group value an op carries.
+DEFAULT_GROUP_ORDER: tuple[str, ...] = (
+    "Common",
+    "Reduce",
+    "Transform",
+    "Reshape",
+    "Complex",
+    "SigPy",
+    "BART",
+    "User",
+    "Other",
+)
+
+# The handful of most-used ops a UI surface pins to the top. This is a
+# presentation ordering, not a group membership -- each op keeps its real group.
+COMMON_OPERATION_IDS: tuple[str, ...] = (
+    "mean",
+    "sum",
+    "max",
+    "min",
+    "crop",
+    "centered_fft",
+    "centered_ifft",
+)
+
+
+def is_common(operation_id: str) -> bool:
+    """Whether ``operation_id`` is one a UI surface pins to the top."""
+
+    return operation_id in COMMON_OPERATION_IDS
 
 
 @dataclass(frozen=True)
@@ -39,6 +81,13 @@ class OperationEntry:
     parameters: tuple[OperationParameter, ...] = ()
     changes_shape: bool = False
     requires_axis: bool = True
+    # Presentation metadata (all defaulted so pack/plugin entries built without
+    # these fields keep working). ``group`` places the op in the taxonomy above,
+    # ``icon`` is the Material icon name the UI renders, ``description`` is a
+    # one-line summary shown in tooltips / the operation manager.
+    group: str = "Other"
+    description: str = ""
+    icon: str = "data_array"
 
 
 OPERATION_REGISTRY = {
@@ -47,78 +96,121 @@ OPERATION_REGISTRY = {
         label="Crop axis...",
         operation_type=Crop,
         parameters=(
-            OperationParameter("start", "Start"),
-            OperationParameter("stop", "Stop"),
+            OperationParameter(
+                "start", "Start", minimum=0, description="First index kept (inclusive)."
+            ),
+            OperationParameter(
+                "stop", "Stop", minimum=1, description="Index one past the last kept (exclusive)."
+            ),
         ),
         changes_shape=True,
+        group="Transform",
+        description="Keep a [start:stop] slice of one axis.",
+        icon="crop",
     ),
     "reverse": OperationEntry(
         id="reverse",
         label="Reverse / flip axis",
         operation_type=ReverseAxis,
+        group="Transform",
+        description="Reverse the sample order along one axis.",
+        icon="swap_horiz",
     ),
     "conjugate": OperationEntry(
         id="conjugate",
         label="Conjugate",
         operation_type=Conjugate,
         requires_axis=False,
+        group="Complex",
+        description="Complex-conjugate every sample.",
+        icon="flip",
     ),
     "mean": OperationEntry(
         id="mean",
         label="Mean over axis",
         operation_type=Mean,
         changes_shape=True,
+        group="Reduce",
+        description="Average all samples along one axis.",
+        icon="functions",
     ),
     "rss": OperationEntry(
         id="rss",
         label="Root-sum-squares over axis",
         operation_type=RootSumSquares,
         changes_shape=True,
+        group="Reduce",
+        description="Root-sum-of-squares combine along one axis (coil combine).",
+        icon="analytics",
     ),
     "sum": OperationEntry(
         id="sum",
         label="Sum over axis",
         operation_type=Sum,
         changes_shape=True,
+        group="Reduce",
+        description="Sum all samples along one axis.",
+        icon="functions",
     ),
     "max": OperationEntry(
         id="max",
         label="Maximum over axis",
         operation_type=Maximum,
         changes_shape=True,
+        group="Reduce",
+        description="Maximum-intensity projection along one axis.",
+        icon="vertical_align_top",
     ),
     "min": OperationEntry(
         id="min",
         label="Minimum over axis",
         operation_type=Minimum,
         changes_shape=True,
+        group="Reduce",
+        description="Minimum-intensity projection along one axis.",
+        icon="vertical_align_bottom",
     ),
     "centered_fft": OperationEntry(
         id="centered_fft",
         label="Centered FFT",
         operation_type=CenteredFFT,
+        group="Transform",
+        description="Centered forward FFT along one axis (image to k-space).",
+        icon="waves",
     ),
     "centered_ifft": OperationEntry(
         id="centered_ifft",
         label="Centered iFFT",
         operation_type=CenteredIFFT,
+        group="Transform",
+        description="Centered inverse FFT along one axis (k-space to image).",
+        icon="waves",
     ),
     "fftshift": OperationEntry(
         id="fftshift",
         label="FFT shift",
         operation_type=FFTShift,
+        group="Transform",
+        description="Swap the halves of one axis (DC to center).",
+        icon="sync_alt",
     ),
     "combine_real_imag": OperationEntry(
         id="combine_real_imag",
         label="Combine real/imag axis",
         operation_type=CombineRealImagAxis,
         changes_shape=True,
+        group="Complex",
+        description="Fold a size-2 axis of real/imag parts into one complex axis.",
+        icon="join_inner",
     ),
     "split_complex": OperationEntry(
         id="split_complex",
         label="Split complex axis",
         operation_type=SplitComplexAxis,
         changes_shape=True,
+        group="Complex",
+        description="Split a size-1 complex axis into a size-2 real/imag axis.",
+        icon="call_split",
     ),
 }
 
@@ -207,6 +299,9 @@ def _pack_operation_entry(spec) -> OperationEntry:
         parameters=tuple(spec.parameters),
         changes_shape=bool(spec.changes_shape),
         requires_axis=bool(spec.requires_axis),
+        group=getattr(spec, "group", "Other"),
+        description=getattr(spec, "description", ""),
+        icon=getattr(spec, "icon", "data_array"),
     )
 
 
@@ -281,7 +376,12 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
 
     for parameter in entry.parameters:
         if parameter.name not in parameters:
-            raise ValueError(f"operation {operation_id} requires parameter {parameter.name}")
+            # A declared default fills a missing value; a defaultless parameter
+            # still raises -- recipes/CLI must not silently drop a required value.
+            if parameter.default is not None:
+                parameters[parameter.name] = parameter.default
+            else:
+                raise ValueError(f"operation {operation_id} requires parameter {parameter.name}")
         value = parameters[parameter.name]
         if parameter.kind == "int":
             value = int(value)

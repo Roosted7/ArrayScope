@@ -106,6 +106,12 @@ class PluginOperationSpec:
     parameters: tuple[OperationParameter, ...] = ()
     requires_axis: bool = False
     changes_shape: bool = False
+    # Presentation metadata mirrored onto the synthesized OperationEntry so pack
+    # / entry-point ops carry the same group / description / icon the built-ins
+    # do. All defaulted -> older specs keep working unchanged.
+    group: str = "Other"
+    description: str = ""
+    icon: str = "data_array"
     # Tier-2 opt-in (default False keeps the op OPAQUE / Tier-1).  When True the
     # author *claims* the op is windowable: it commutes with sub-region reads,
     # i.e. ``fn(whole)[region] == fn(whole[region])`` on every axis, so the
@@ -346,6 +352,9 @@ def plugin_operation_entry(operation_id: str) -> OperationEntry:
         parameters=tuple(spec.parameters),
         changes_shape=bool(spec.changes_shape),
         requires_axis=bool(spec.requires_axis),
+        group=spec.group,
+        description=spec.description,
+        icon=spec.icon,
     )
 
 
@@ -366,7 +375,14 @@ def create_plugin_operation(
     bound_params: list[tuple[str, object]] = []
     for parameter in spec.parameters:
         if parameter.name not in parameters:
-            raise ValueError(f"plugin operation {operation_id} requires parameter {parameter.name}")
+            # A declared default fills a missing value; a defaultless parameter
+            # still raises (recipes/CLI must not silently drop a required value).
+            if parameter.default is not None:
+                parameters[parameter.name] = parameter.default
+            else:
+                raise ValueError(
+                    f"plugin operation {operation_id} requires parameter {parameter.name}"
+                )
         value = parameters[parameter.name]
         if parameter.kind == "int":
             value = int(value)
